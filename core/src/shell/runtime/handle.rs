@@ -176,9 +176,7 @@ impl HandleInner {
             started: Stamp::now(),
             cancel,
         };
-        let permit = CompletionPermit {
-            handle: handle.clone(),
-        };
+        let permit = CompletionPermit(Some(handle.clone()));
         (handle, permit)
     }
 
@@ -221,34 +219,7 @@ impl HandleInner {
     }
 
     pub fn sample(&self) -> Sample<()> {
-        self.observe(|_| ())
-    }
-
-    /// Observe without claiming.  `f` runs under the handle's lock and must
-    /// not touch the handle.
-    pub(crate) fn observe<R>(&self, f: impl FnOnce(&CompletedHandle) -> R) -> Sample<R> {
-        self.snapshot(f).state
-    }
-
-    /// A live worker's age so far, an ended worker's frozen run time.
-    pub fn elapsed(&self) -> Duration {
-        self.snapshot(|_| ()).elapsed
-    }
-
-    /// When the worker published its terminal state, on the wall clock.
-    pub fn settled_at(&self) -> Option<SystemTime> {
-        self.snapshot(|_| ()).ended.map(|e| e.wall)
-    }
-
-    /// Whether the worker has published its terminal state (`Ready` or `Consumed`).
-    pub(crate) fn has_ended(&self) -> bool {
-        self.sample().has_ended()
-    }
-
-    /// Whether the handle's result has been claimed (`Stopping` or `Consumed`).
-    #[cfg(test)]
-    pub(crate) fn is_claimed(&self) -> bool {
-        self.sample().is_claimed()
+        self.snapshot(|_| ()).state
     }
 
     /// Coherent snapshot for `poll`: locks state first, peeks stdout/stderr
@@ -275,46 +246,33 @@ impl HandleInner {
 
     /// Claim whatever the handle holds: if `Running`, signals `Cancelled`
     /// before unlocking and transitions to `Stopping`; if `Ready`, moves the
-    /// completion out to `Consumed` and drops it outside the lock; if already
-    /// `Stopping` or `Consumed`, returns `false`.
-    pub(crate) fn claim_and_stop(&self) -> bool {
+    /// completion out to `Consumed` and drops it outside the lock; otherwise
+    /// nothing.
+    pub(crate) fn claim_and_stop(&self) {
         let mut state = self.state.lock_ignore_poison();
         let discarded = match &mut *state {
             HandleState::Running => {
                 self.cancel.cancel(CancelCause::Cancelled);
                 *state = HandleState::Stopping;
-                return true;
+                return;
             }
-            HandleState::Stopping => return false,
-            HandleState::Ended { result, .. } => match result.take() {
-                Some(completed) => completed,
-                None => return false,
-            },
+            HandleState::Stopping => return,
+            HandleState::Ended { result, .. } => result.take(),
         };
         drop(state);
         drop(discarded);
-        true
     }
 
-    /// Publish the worker's terminal outcome once.
+    /// Publish the worker's terminal outcome; only the sole permit reaches it.
     fn publish(&self, end: End) -> Stamp {
-        let state = self.state.lock_ignore_poison();
-        if let Some(ended) = state.ended() {
-            drop(state);
-            drop(end);
-            return ended;
-        }
-        self.install_terminal(state, end)
+        self.install_terminal(self.state.lock_ignore_poison(), end)
     }
 
-    /// Fallback for an unfinished [`CompletionPermit`] dropped during unwind.
-    fn publish_abandoned_if_unfinished(&self) {
-        let state = self.state.lock_ignore_poison();
-        if state.ended().is_some() {
-            return;
-        }
+    /// An unfinished [`CompletionPermit`] dropped, so the worker never
+    /// reported: its end is a panic.
+    fn publish_abandoned(&self) {
         let end = End::Panic(format!("{}: spawned thread panicked", self.title));
-        self.install_terminal(state, end);
+        self.install_terminal(self.state.lock_ignore_poison(), end);
     }
 
     fn install_terminal(&self, mut state: MutexGuard<'_, HandleState>, end: End) -> Stamp {
@@ -340,19 +298,23 @@ impl HandleInner {
 /// Consuming it with [`Self::finish`] publishes the worker's [`End`] and
 /// returns the terminal [`Stamp`].  Dropping it unfinished publishes an
 /// abandoned-thread panic without invoking any host sink.
-pub(crate) struct CompletionPermit {
-    handle: HandleInner,
-}
+pub(crate) struct CompletionPermit(Option<HandleInner>);
 
 impl CompletionPermit {
-    pub(crate) fn finish(self, end: End) -> Stamp {
-        self.handle.publish(end)
+    pub(crate) fn finish(mut self, end: End) -> Stamp {
+        let handle = self
+            .0
+            .take()
+            .expect("a permit holds its handle until finished");
+        handle.publish(end)
     }
 }
 
 impl Drop for CompletionPermit {
     fn drop(&mut self) {
-        self.handle.publish_abandoned_if_unfinished();
+        if let Some(handle) = self.0.take() {
+            handle.publish_abandoned();
+        }
     }
 }
 
@@ -396,7 +358,7 @@ mod tests {
         assert!(handle.sample().is_live());
         assert!(!handle.sample().has_ended());
         assert!(!handle.sample().is_claimed());
-        assert_eq!(handle.settled_at(), None);
+        assert_eq!(handle.snapshot(|_| ()).ended, None);
         assert!(matches!(handle.claim_ready(), Sample::Running(())));
 
         // While Running, snapshot_io peeks buffers without draining them.
@@ -411,7 +373,7 @@ mod tests {
         assert!(!handle.sample().is_live());
         assert!(handle.sample().has_ended());
         assert!(!handle.sample().is_claimed());
-        assert_eq!(handle.settled_at(), Some(published_stamp.wall));
+        assert_eq!(handle.snapshot(|_| ()).ended, Some(published_stamp));
         assert!(
             out.take().bytes.is_empty(),
             "stdout buffer drained on publish"
@@ -437,7 +399,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            handle.elapsed(),
+            handle.snapshot(|_| ()).elapsed,
             ready_elapsed,
             "elapsed is frozen at the terminal stamp"
         );
@@ -454,9 +416,11 @@ mod tests {
         assert!(handle.sample().has_ended());
         assert!(handle.sample().is_claimed());
         assert!(matches!(handle.claim_ready(), Sample::Consumed));
-        assert!(!handle.claim_and_stop());
-        assert_eq!(handle.settled_at(), Some(published_stamp.wall));
-        assert_eq!(handle.elapsed(), ready_elapsed);
+        handle.claim_and_stop();
+        assert_eq!(handle.sample(), Sample::Consumed);
+        let after = handle.snapshot(|_| ());
+        assert_eq!(after.ended, Some(published_stamp));
+        assert_eq!(after.elapsed, ready_elapsed);
         let snap = handle.snapshot_io();
         assert!(matches!(snap.state, Sample::Consumed));
         assert_eq!(snap.elapsed, ready_elapsed);
@@ -467,7 +431,7 @@ mod tests {
         let (handle, permit, out, err) = make_handle();
         out.append(b"before-cancel");
 
-        assert!(handle.claim_and_stop());
+        handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Stopping);
         assert!(handle.cancel.is_cancelled());
         assert!(handle.sample().is_live());
@@ -475,7 +439,8 @@ mod tests {
         assert!(handle.sample().is_claimed());
         assert!(matches!(handle.claim_ready(), Sample::Stopping));
         // Second cancel in Stopping is a no-op.
-        assert!(!handle.claim_and_stop());
+        handle.claim_and_stop();
+        assert_eq!(handle.sample(), Sample::Stopping);
 
         // Bytes written during cancellation cleanup while Stopping:
         out.append(b"-after-cancel");
@@ -485,9 +450,9 @@ mod tests {
 
         let stamp = permit.finish(End::Ok(Value::Unit));
         assert_eq!(handle.sample(), Sample::Consumed);
-        assert!(handle.has_ended());
+        assert!(handle.sample().has_ended());
         assert!(handle.sample().is_claimed());
-        assert_eq!(handle.settled_at(), Some(stamp.wall));
+        assert_eq!(handle.snapshot(|_| ()).ended, Some(stamp));
         assert!(
             out.take().bytes.is_empty(),
             "Stopping -> Consumed must drain the stdout buffer"
@@ -496,7 +461,8 @@ mod tests {
             err.take().bytes.is_empty(),
             "Stopping -> Consumed must drain the stderr buffer"
         );
-        assert!(!handle.claim_and_stop());
+        handle.claim_and_stop();
+        assert_eq!(handle.sample(), Sample::Consumed);
         assert!(matches!(handle.claim_ready(), Sample::Consumed));
     }
 
@@ -505,13 +471,15 @@ mod tests {
         let (handle, permit, out, _err) = make_handle();
         out.append(b"discard-me");
         let stamp = permit.finish(End::Ok(Value::Int(1)));
-        let frozen_elapsed = handle.elapsed();
+        let frozen_elapsed = handle.snapshot(|_| ()).elapsed;
 
-        assert!(handle.claim_and_stop());
+        handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Consumed);
-        assert_eq!(handle.settled_at(), Some(stamp.wall));
-        assert_eq!(handle.elapsed(), frozen_elapsed);
-        assert!(!handle.claim_and_stop());
+        let after = handle.snapshot(|_| ());
+        assert_eq!(after.ended, Some(stamp));
+        assert_eq!(after.elapsed, frozen_elapsed);
+        handle.claim_and_stop();
+        assert_eq!(handle.sample(), Sample::Consumed);
         assert!(matches!(handle.claim_ready(), Sample::Consumed));
     }
 
@@ -547,7 +515,7 @@ mod tests {
         let canceller_barrier = barrier.clone();
         let canceller = std::thread::spawn(move || {
             canceller_barrier.wait();
-            assert!(canceller_handle.claim_and_stop());
+            canceller_handle.claim_and_stop();
         });
 
         barrier.wait();
@@ -589,7 +557,7 @@ mod tests {
         let (stopping, stopping_permit, out2, err2) = make_handle();
         out2.append(b"stopping-out");
         err2.append(b"stopping-err");
-        assert!(stopping.claim_and_stop());
+        stopping.claim_and_stop();
         drop(stopping_permit);
         assert_eq!(stopping.sample(), Sample::Consumed);
         assert_eq!(out2.take().bytes, b"");

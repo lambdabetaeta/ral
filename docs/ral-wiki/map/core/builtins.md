@@ -171,8 +171,7 @@ Bodies are grouped by concern, one submodule each:
   than spinning. Observers read a `Sample`, paired with the elapsed time in one
   consistent `Snapshot` (`HandleInner::snapshot`, `snapshot_io` for `poll`'s
   byte peeks), which also feeds `workers`/probe rows, and the transitions are `complete` (via
-  `CompletionPermit::finish`), `observe` (a read that lends the state to a
-  closure under the lock), `claim_ready` (moves a `Ready` result out and leaves
+  `CompletionPermit::finish`), `claim_ready` (moves a `Ready` result out and leaves
   `Consumed`, in one step) and `claim_and_stop` (`Running` → `Stopping` firing
   the worker's node, or `Ready` → `Consumed` discarding the settled result;
   idempotent on `Stopping` and `Consumed`). So a result is *claimed* at most
@@ -247,8 +246,8 @@ Bodies are grouped by concern, one submodule each:
   `WorkerId` first and builds the handle around it: `HandleInner` carries the
   `id`, the `title`, and the worker's clock, a birth `Stamp` and an end
   `Stamp` that its `CompletionPermit` sets on every exit path of the worker
-  thread before flushing its deferred surface, from which `elapsed` and
-  `settled_at` are derived, each in one place. The
+  thread before flushing its deferred surface, from which a `Snapshot`
+  derives `elapsed` and the end stamp, in one place. The
   registry entry adds only the `Owner`. A birth's `title` — the name every
   eliminator's error, the trail, and the completion event use — comes from the
   birth itself: a `spawn`'s title (non-empty and one line, `legible_title`),

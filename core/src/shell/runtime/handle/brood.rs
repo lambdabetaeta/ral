@@ -204,7 +204,7 @@ pub(crate) fn stop_and_drain<'a>(
 /// polls: the waiter's own scope may be the thing that was cancelled.
 fn wait_ended<H: Borrow<HandleInner>>(handles: &[H], grace: Duration) {
     let deadline = Instant::now() + grace;
-    while handles.iter().any(|h| !h.borrow().has_ended()) && Instant::now() < deadline {
+    while handles.iter().any(|h| !h.borrow().sample().has_ended()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn stop_and_drain_waits_for_already_stopping_handles_too() {
         let (already_stopping, stopping_permit) = fresh_handle();
-        assert!(already_stopping.claim_and_stop());
+        already_stopping.claim_and_stop();
         assert_eq!(already_stopping.sample(), Sample::Stopping);
 
         let (running, running_permit) = fresh_handle();

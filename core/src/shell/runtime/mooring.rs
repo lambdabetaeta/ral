@@ -177,8 +177,9 @@ pub enum TitlePolicy {
 /// outer run's is restored by the unwinding rather than by a guard.
 /// Deliberately *not* a [`Shell`](crate::Shell) field — `&shell.mooring` would borrow the
 /// whole shell while every callee wants `&mut Shell`, whereas `&Mooring` and
-/// `&mut Shell` are disjoint.  Not [`Clone`]: [`Self::lend_terminal`] is the
-/// one lawful derivation, so raise-never-mint lives in a single place.
+/// `&mut Shell` are disjoint.  A clone carries the authority the original has;
+/// [`Self::lend_terminal`] is the one place it is raised, never minted.
+#[derive(Clone)]
 pub struct Mooring {
     /// `None` outside a host, which makes [`Self::surface`] the identity.
     pub(crate) surface: Option<SurfaceSink>,
@@ -283,15 +284,8 @@ impl Mooring {
     /// `ExplicitLoan` one has already lent it.  The parent is untouched.
     pub fn lend_terminal(&self) -> Option<Self> {
         matches!(self.terminal_access, TerminalAccess::Leased).then(|| Self {
-            surface: self.surface.clone(),
-            deferred: self.deferred.clone(),
-            desk: self.desk.clone(),
-            fork: self.fork.clone(),
-            home: self.home.clone(),
-            cleanup_grace: self.cleanup_grace,
-            worker_cap: self.worker_cap,
-            worker_title: self.worker_title,
             terminal_access: TerminalAccess::ExplicitLoan,
+            ..self.clone()
         })
     }
 }

@@ -348,7 +348,7 @@ mod tests {
 
         // 2. Stopping: settled is None, retention_left is None even if settled_epoch is Some.
         let (stopping_h, stopping_permit) = make(2, "stopping");
-        assert!(stopping_h.claim_and_stop());
+        stopping_h.claim_and_stop();
         let stopping_entry = WorkerEntry {
             handle: stopping_h,
             owner: Owner::Session,

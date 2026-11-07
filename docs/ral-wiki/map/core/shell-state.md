@@ -324,9 +324,9 @@ applying a function under the mooring it is handed) from State (`Io` under a
 loan). **Borrow when you can, loan when you must.**
 
 `&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
-an event while holding the shell mutably. `Mooring` is not `Clone`:
-`lend_terminal` is the one lawful derivation, so the raise-never-mint rule on
-`TerminalAccess` lives in one function rather than in every bulk copy. Outside
+an event while holding the shell mutably. A `Mooring` clone carries
+the authority the original has; `lend_terminal` is the one place
+`TerminalAccess` is raised, so the raise-never-mint rule lives in one function. Outside
 core only `home`, `Mooring::surface`, `Mooring::lend_terminal`,
 `Mooring::fork`, and `Mooring::adrift` are reachable —
 `adrift()` being the mooring a host builds to call a builtin body outside any

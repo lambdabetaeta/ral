@@ -16,7 +16,7 @@ use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
 use crate::fact::FailureCode as _;
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
-use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode};
+use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
     Break, DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
@@ -132,15 +132,6 @@ impl RunReport {
     }
 }
 
-/// Bind the host's requested `wall` to this run's foreground scope, so the
-/// deadline reaches every frame nested under it.
-fn arm_wall(
-    wall: std::time::Duration,
-    foreground: &crate::process::ScopeNode,
-) -> crate::process::Deadline {
-    crate::process::arm_lifetime(foreground.clone(), wall)
-}
-
 impl Shell {
     /// Run one whole [`Run`] synchronously and report it — the run entry for a
     /// host with no run in hand and nothing to cancel it with but the session.
@@ -213,7 +204,7 @@ impl Shell {
         // Nested under the frame it displaces, so the tree *is* the runs'
         // dynamic extent: an outer run's cancel or wall reaches into the nest.
         let foreground = under.child();
-        let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
+        let wall = req.run.wall.map(|d| arm_lifetime(foreground.clone(), d));
 
         match req.run.program {
             Program::Source(ref src) => {

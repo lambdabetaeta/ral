@@ -304,16 +304,14 @@ impl std::fmt::Display for CapReached {
 /// [`WorkerRegistry::register`] filing the entry, across the thread spawn and
 /// handle construction in between. Consuming one is `register`'s only way to
 /// accept a [`WorkerEntry`]; dropping one unconsumed releases its seat, and
-/// `armed` is the defusal that makes the release happen exactly once.
-pub(crate) struct Reservation {
-    registry: WorkerRegistry,
-    armed: bool,
-}
+/// taking the registry out is the defusal that makes the release happen
+/// exactly once.
+pub(crate) struct Reservation(Option<WorkerRegistry>);
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if self.armed {
-            let mut inner = self.registry.0.lock_ignore_poison();
+        if let Some(registry) = self.0.take() {
+            let mut inner = registry.0.lock_ignore_poison();
             inner.reserved = inner.reserved.saturating_sub(1);
         }
     }
@@ -339,17 +337,14 @@ impl WorkerRegistry {
         }
         inner.reserved += 1;
         drop(inner);
-        Ok(Reservation {
-            registry: self.clone(),
-            armed: true,
-        })
+        Ok(Reservation(Some(self.clone())))
     }
 
     /// File a freshly-spawned worker, consuming its [`Reservation`]. One
     /// locked step, so nothing ever observes an entry whose seat is still
     /// counted reserved, or a reservation whose entry has already appeared.
     pub(crate) fn register(&self, mut reservation: Reservation, entry: WorkerEntry) {
-        reservation.armed = false;
+        reservation.0.take();
         let mut inner = self.0.lock_ignore_poison();
         inner.reserved = inner.reserved.saturating_sub(1);
         if !matches!(entry.handle.sample(), Sample::Consumed) {
@@ -675,7 +670,7 @@ mod tests {
         let registry = WorkerRegistry::default();
         let (running_h, running_permit) = test_handle(1, "running");
         let (stopping_h, stopping_permit) = test_handle(2, "stopping");
-        assert!(stopping_h.claim_and_stop());
+        stopping_h.claim_and_stop();
         let ready_h = ready_handle(3, "ready");
         let consumed_1 = consumed_handle(4, "consumed-1");
         let consumed_2 = consumed_handle(5, "consumed-2");
@@ -742,7 +737,7 @@ mod tests {
 
         let (running_h, running_permit) = test_handle(1, "running");
         let (stopping_parent_h, stopping_parent_permit) = test_handle(2, "stopping-parent");
-        assert!(stopping_parent_h.claim_and_stop());
+        stopping_parent_h.claim_and_stop();
         let child_of_stopping = ready_handle(3, "child-of-stopping");
         let gather_child = ready_handle(4, "gather-child");
         let ready_session = ready_handle(5, "ready-session");

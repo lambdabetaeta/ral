@@ -810,7 +810,7 @@ mod chokepoint_tests {
             DurableRoot::default().worker(),
             Streams::default(),
         );
-        assert!(handle.claim_and_stop());
+        handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Stopping);
 
         shell.set_var("h_stopping".into(), Value::Handle(Box::new(handle.clone())));

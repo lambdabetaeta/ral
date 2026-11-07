@@ -4,10 +4,11 @@
 //! by a single lazily started daemon, so a session holding thousands of
 //! in-flight ceilings costs one thread rather than one watchdog apiece.
 //!
-//! An entry either cancels a [`ScopeNode`] with [`CancelCause::TimedOut`] or
-//! runs an opaque host closure — opaque so that no host notion of prompts,
-//! cron, or sessions leaks into core.  Entries are one-shot; recurrence is a
-//! producer re-arming the next occurrence from inside its own closure.
+//! An entry runs a closure: [`arm_lifetime`] cancels a [`ScopeNode`] with
+//! [`CancelCause::TimedOut`], [`arm_callback`] runs an opaque host closure —
+//! opaque so that no host notion of prompts, cron, or sessions leaks into
+//! core.  Entries are one-shot; recurrence is a producer re-arming the next
+//! occurrence from inside its own closure.
 //!
 //! Dropping the returned [`Deadline`] disarms the entry, so work that finishes
 //! before its ceiling is never fired by a late pop.  [`Deadline::keep`] leaves
@@ -23,31 +24,24 @@ use std::time::{Duration, Instant};
 use super::{CancelCause, ScopeNode};
 use crate::sync::{CondvarExt as _, LockExt as _};
 
-enum Action {
-    Cancel(ScopeNode),
-    Run(Box<dyn FnOnce() + Send>),
-}
-
-impl Action {
-    fn fire(self) {
-        match self {
-            Self::Cancel(node) => node.cancel(CancelCause::TimedOut),
-            Self::Run(run) => run(),
-        }
-    }
+/// The state a [`Deadline`] and its [`Scheduled`] entry share: `armed` is
+/// cleared by a disarm, `fired` signalled once a claimed action has landed.
+#[derive(Clone)]
+struct Entry {
+    armed: Arc<AtomicBool>,
+    fired: Landed,
 }
 
 /// A scheduled action, skipped when it comes due if a disarmed [`Deadline`]
-/// has cleared `armed`; `fired` is signalled once a claimed action has landed.
+/// has cleared `entry.armed`.
 ///
 /// [`BinaryHeap`] is a max-heap, so the ordering below is inverted: the
 /// earliest `when` compares greatest and sits at the root.  Entries sharing an
 /// `Instant` are interchangeable, so `when` alone decides.
 struct Scheduled {
     when: Instant,
-    action: Action,
-    armed: Arc<AtomicBool>,
-    fired: Landed,
+    run: Box<dyn FnOnce() + Send>,
+    entry: Entry,
 }
 
 /// Set and notified by the daemon once a claimed action has run.
@@ -88,7 +82,7 @@ static DAEMON: LazyLock<Arc<Daemon>> = LazyLock::new(start_daemon);
 /// Cancel `node` with [`CancelCause::TimedOut`] once `after` has elapsed from
 /// now.  A run's wall clock arms one of these over its foreground scope.
 pub fn arm_lifetime(node: ScopeNode, after: Duration) -> Deadline {
-    arm(Action::Cancel(node), after)
+    arm_callback(after, move || node.cancel(CancelCause::TimedOut))
 }
 
 /// Invoke `run` once `after` has elapsed from now.
@@ -97,29 +91,19 @@ pub fn arm_lifetime(node: ScopeNode, after: Duration) -> Deadline {
 /// re-arm itself — how a lease and a scheduled wakeup get their recurrence.
 /// It must not block: a slow closure stalls every later entry.
 pub fn arm_callback(after: Duration, run: impl FnOnce() + Send + 'static) -> Deadline {
-    arm(Action::Run(Box::new(run)), after)
-}
-
-/// The shared body of [`arm_lifetime`] and [`arm_callback`]; the first call
-/// starts the daemon.
-fn arm(action: Action, after: Duration) -> Deadline {
     let daemon = &*DAEMON;
-    let when = Instant::now() + after;
-    let armed = Arc::new(AtomicBool::new(true));
-    let fired = Landed::default();
+    let entry = Entry {
+        armed: Arc::new(AtomicBool::new(true)),
+        fired: Landed::default(),
+    };
     daemon.heap.lock_ignore_poison().push(Scheduled {
-        when,
-        action,
-        armed: armed.clone(),
-        fired: fired.clone(),
+        when: Instant::now() + after,
+        run: Box::new(run),
+        entry: entry.clone(),
     });
     // This entry may beat the deadline the daemon is sleeping toward.
     daemon.wake.notify_one();
-    Deadline {
-        armed,
-        fired,
-        keep: false,
-    }
+    Deadline(Some(entry))
 }
 
 /// A handle to an armed deadline.
@@ -128,24 +112,21 @@ fn arm(action: Action, after: Duration) -> Deadline {
 /// is never cancelled; call [`Deadline::keep`] when the effect must outlive
 /// the call that armed it.
 #[must_use]
-pub struct Deadline {
-    armed: Arc<AtomicBool>,
-    fired: Landed,
-    keep: bool,
-}
+pub struct Deadline(Option<Entry>);
 
 impl Deadline {
     /// Leave the entry armed for good, so it fires at its ceiling whatever
     /// becomes of this handle.
     pub fn keep(mut self) {
-        self.keep = true;
+        self.0.take();
     }
 
     /// `None` if this call disarmed the entry, so it never fires; `Some` if
     /// the daemon claimed it first, its action landing momentarily.
-    pub fn disarm(self) -> Option<Claimed> {
-        let disarmed = self.armed.swap(false, Ordering::AcqRel);
-        (!disarmed).then(|| Claimed(self.fired.clone()))
+    pub fn disarm(mut self) -> Option<Claimed> {
+        let Entry { armed, fired } = self.0.take()?;
+        let disarmed = armed.swap(false, Ordering::AcqRel);
+        (!disarmed).then_some(Claimed(fired))
     }
 }
 
@@ -163,8 +144,8 @@ impl Claimed {
 
 impl Drop for Deadline {
     fn drop(&mut self) {
-        if !self.keep {
-            self.armed.store(false, Ordering::Release);
+        if let Some(entry) = self.0.take() {
+            entry.armed.store(false, Ordering::Release);
         }
     }
 }
@@ -201,9 +182,9 @@ fn daemon_loop(daemon: &Daemon) {
                     // Never run an entry's effect while holding the schedule:
                     // a `Run` closure may re-arm, which locks this same heap.
                     drop(heap);
-                    if due.armed.swap(false, Ordering::AcqRel) {
-                        due.action.fire();
-                        let (landed, cv) = &*due.fired;
+                    if due.entry.armed.swap(false, Ordering::AcqRel) {
+                        (due.run)();
+                        let (landed, cv) = &*due.entry.fired;
                         *landed.lock_ignore_poison() = true;
                         cv.notify_all();
                     }

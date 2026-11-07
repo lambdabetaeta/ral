@@ -109,7 +109,7 @@ fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
 #[test]
 fn a_dropped_settler_settles_as_panicked() {
     let handle = handle_with_panicked_worker(b"", b"");
-    match handle.observe(|completed| completed.end.clone()) {
+    match handle.snapshot(|completed| completed.end.clone()).state {
         Sample::Ready(End::Panic(text)) => {
             assert!(text.contains("spawned thread panicked"));
         }
@@ -256,7 +256,7 @@ fn worker_scope_cancel_stops_the_worker() {
     assert_eq!(observed, 143);
 }
 
-/// A [`RootAbort`](crate::process::CancelCause::Aborted) reaches the
+/// A root [`Aborted`](crate::process::CancelCause::Aborted) reaches the
 /// worker: its scope descends from the root, so its next poll sees the flag.
 #[test]
 fn root_cancel_reaches_the_worker() {
@@ -267,7 +267,7 @@ fn root_cancel_reaches_the_worker() {
     });
     assert!(
         worker_scope.is_cancelled(),
-        "a RootAbort on the durable root must cancel the worker's scope"
+        "an Aborted root must cancel the worker's scope"
     );
     assert_eq!(observed, 131);
 }
@@ -361,10 +361,10 @@ fn first_ready_reraises_mid_wait_cancel_without_claiming_the_worker() {
     assert_eq!(stop.cause, CancelCause::Interrupted);
     assert_eq!(stop.owner, Some(m.home.id()));
     assert_eq!(handle.sample(), Sample::Running(()));
-    assert!(!handle.is_claimed());
+    assert!(!handle.sample().is_claimed());
     assert!(!worker_scope.is_cancelled());
-    assert!(handle.claim_and_stop());
-    assert!(handle.is_claimed());
+    handle.claim_and_stop();
+    assert!(handle.sample().is_claimed());
     assert_eq!(worker_scope.cause(), Some(CancelCause::Cancelled));
 }
 
@@ -892,7 +892,7 @@ fn poll_reports_elapsed_on_both_arms() {
     gate_tx.send(()).unwrap();
     wait_settled(&handle);
     let ready = builtin_poll(&args, &shell).expect("poll is total");
-    let ran = handle.elapsed().as_secs_f64();
+    let ran = handle.snapshot(|_| ()).elapsed.as_secs_f64();
     assert!(
         (elapsed(&ready, "ready") - ran).abs() < 0.05,
         "a ready poll reports the handle's run time, {ran}s"
@@ -1082,7 +1082,10 @@ fn first_settled_is_cancel_aware() {
     let err =
         builtin_first_settled(&args, &shell).expect_err("a cancelled foreground cuts the wait");
     assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
-    assert!(!running.is_claimed(), "first-settled claims nothing");
+    assert!(
+        !running.sample().is_claimed(),
+        "first-settled claims nothing"
+    );
     running.claim_and_stop();
 }
 
@@ -1470,7 +1473,7 @@ fn deferred_batch_carries_body_surface_before_done() {
     );
     assert_eq!(done_outcome_label(&batch[1]), "panic");
 
-    match handle.observe(|completed| completed.end.clone()) {
+    match handle.snapshot(|completed| completed.end.clone()).state {
         Sample::Ready(End::Panic(_)) => {}
         other => panic!("expected a panicked end, got {other:?}"),
     }
@@ -1593,7 +1596,7 @@ fn race_removes_winner_and_cancelled_losers() {
         Value::Handle(Box::new(loser2.clone())),
     ])];
     builtin_race(&args, &m, &mut shell).expect("race must succeed");
-    assert!(loser1.has_ended() && loser2.has_ended());
+    assert!(loser1.sample().has_ended() && loser2.sample().has_ended());
     assert_eq!(
         shell.local.workers.count(),
         0,
@@ -2275,8 +2278,8 @@ fn cancelling_a_worker_cancels_its_children() {
     builtin_cancel(&[Value::Handle(Box::new(outer.clone()))]).unwrap();
     assert!(within(2, || inner.cancel.cause()
         == Some(CancelCause::Cancelled)
-        && outer.has_ended()
-        && inner.has_ended()
+        && outer.sample().has_ended()
+        && inner.sample().has_ended()
         && shell.local.workers.count() == 0));
 }
 
@@ -2460,7 +2463,7 @@ fn race_drains_its_losers() {
     handles.extend(losers.iter().map(|h| Value::Handle(Box::new(h.clone()))));
     builtin_race(&[Value::list(handles)], &m, &mut shell).expect("race must succeed");
     assert!(
-        losers.iter().all(HandleInner::has_ended),
+        losers.iter().all(|h| h.sample().has_ended()),
         "drained before race returns"
     );
 }
@@ -2484,7 +2487,7 @@ fn a_cut_race_ends_what_it_was_given() {
         .expect_err("a cancelled foreground cuts the wait");
     assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(
-        given.iter().all(HandleInner::has_ended),
+        given.iter().all(|h| h.sample().has_ended()),
         "drained before race returns"
     );
     assert_eq!(shell.local.workers.count(), 0);
@@ -2607,7 +2610,7 @@ fn retention_spares_a_gathers_settled_child() {
         &mut shell,
     )
     .expect("the gather joins its child");
-    assert!(child.is_claimed());
+    assert!(child.sample().is_claimed());
     assert_eq!(shell.local.workers.count(), 0);
 }
 
@@ -2703,7 +2706,7 @@ fn a_gather_cancels_its_children_on_an_interrupt() {
         child.cancel.is_cancelled(),
         "the run's stop reaches the child"
     );
-    assert!(within(6, || child.has_ended()));
+    assert!(within(6, || child.sample().has_ended()));
     owner.end(std::time::Duration::ZERO);
     assert_eq!(shell.local.workers.count(), 0);
 }
@@ -2738,7 +2741,10 @@ fn a_cancelled_child_is_drained_at_the_gathers_exit() {
         &mut shell,
     )
     .expect("the gather returns");
-    assert!(child.has_ended(), "the exit waited for the cancelled child");
+    assert!(
+        child.sample().has_ended(),
+        "the exit waited for the cancelled child"
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(6));
 }
 
@@ -2915,7 +2921,7 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
         gate.release();
         wait_ended(&sibling);
         assert_eq!(sibling.sample(), Sample::Consumed);
-        match outer.observe(|c| c.end.clone()) {
+        match outer.snapshot(|c| c.end.clone()).state {
             Sample::Ready(End::Panic(msg)) => {
                 assert!(msg.contains("nested child boom"), "{msg}");
             }
@@ -3192,7 +3198,7 @@ fn watch_flush_panic_isolation_and_precedence_and_no_duplicate_flush() {
 
         assert!(within(5, || !sink.dones.lock().unwrap().is_empty()));
         wait_settled(&handle);
-        let end = match handle.observe(|c| c.end.clone()) {
+        let end = match handle.snapshot(|c| c.end.clone()).state {
             Sample::Ready(end) => end,
             other => panic!("expected Ready handle, got {other:?}"),
         };
@@ -3366,7 +3372,7 @@ fn exit_brood_and_race_wait_for_already_stopping_children() {
         .expect_err("halt propagates");
         assert_eq!(status(err), 1);
         assert!(
-            child.has_ended(),
+            child.sample().has_ended(),
             "exit_brood on halt must drain an already-stopping child"
         );
     }
@@ -3391,7 +3397,7 @@ fn exit_brood_and_race_wait_for_already_stopping_children() {
             Value::Int(5)
         );
         assert!(
-            slow.has_ended(),
+            slow.sample().has_ended(),
             "race must drain an already-stopping handle before returning"
         );
     }
