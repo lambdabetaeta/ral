@@ -580,13 +580,9 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         pumps: command::Pumps::default(),
         sent: None,
     };
-    let group = Group::Joins(Membership::new(
-        Pgid::from_raw(1).expect("1 is positive"),
-        Scope::clone(&DurableRoot::default().worker()),
-    ));
     let settled = |scope: &Scope| {
         end()
-            .settle(&shell, Instant::now(), scope, &group)
+            .settle(&shell, Instant::now(), scope, None)
             .end
             .into_settled()
     };
@@ -1375,4 +1371,585 @@ fn drive_settles_a_stage_whose_producer_unwound() {
         other => panic!("expected the panic to fold in as an Error, got {other:?}"),
     }
     drop(group);
+}
+
+// ── A lone external: `command::run`'s one child ───────────────────────────
+//
+// The collector waits on it as on the one stage of the group it landed in:
+// one it leads (`NewLeader`), a stage's it joined, or ral's own (`Inherit`).
+
+/// A shell whose current scope is `scope`, its externals joining `stage`.
+#[cfg(unix)]
+fn lone_shell(scope: &Scope, stage: Option<Membership>) -> Shell {
+    let mut shell = crate::test_helper::core_shell();
+    shell.scope = scope.clone();
+    shell.io.stage = stage;
+    shell
+}
+
+/// `cmd` spawned under `policy`, and where it landed.
+#[cfg(unix)]
+fn spawned(cmd: &mut std::process::Command, policy: crate::process::PgidPolicy) -> Spawned {
+    let (child, pgid) = crate::process::spawn_with_pgid(cmd, policy).expect("spawn");
+    Spawned {
+        child: crate::process::ChildHandle::from_std(child),
+        landing: crate::process::Landing::of(policy, pgid),
+        jail: None,
+    }
+}
+
+/// The lines a trapper appended to `hits`, one per signal it heard.
+#[cfg(unix)]
+fn heard(hits: &std::path::Path) -> usize {
+    std::fs::read_to_string(hits)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// The pid a process wrote to `ready`, once it has.
+#[cfg(unix)]
+fn ready_pid(ready: &std::path::Path) -> i32 {
+    crate::test_helper::eventually(Duration::from_secs(5), || {
+        let read = std::fs::read_to_string(ready).unwrap_or_default();
+        read.strip_suffix('\n').and_then(|pid| pid.parse().ok())
+    })
+    .expect("the process never wrote its pid")
+}
+
+/// A wall that expires mid-command is reported as the time limit it was,
+/// not as the SIGTERM we happened to send.
+#[cfg(unix)]
+#[test]
+fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
+    let mut cmd = std::process::Command::new("/bin/sleep");
+    cmd.arg("30");
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
+
+    let striker = DurableRoot::default().worker();
+    let shell = lone_shell(&striker, None);
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        striker.cancel(CancelCause::TimedOut);
+    });
+
+    let (outcome, cause) = lone_end(lone, &shell);
+    let cancelled = outcome.cancelled_by(cause);
+    canceller.join().expect("canceller thread");
+
+    assert_eq!(cancelled, Some(CancelCause::TimedOut));
+}
+
+/// Run `sh` under a scope struck with `cause` — before the dispatch when
+/// `early`, else once the child has proved itself running — and return the
+/// cause the run stopped with.
+#[cfg(unix)]
+fn struck(cause: CancelCause, early: bool) -> CancelCause {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let marker = dir.path().join("running");
+    let mut shell = crate::test_helper::core_shell();
+    let scope = shell.run_cancel_handle();
+    if early {
+        scope.cancel(cause);
+    }
+    let canceller = (!early).then(|| {
+        let (scope, marker) = (scope.clone(), marker.clone());
+        std::thread::spawn(move || {
+            crate::test_helper::eventually(Duration::from_secs(5), || {
+                marker.exists().then_some(())
+            })
+            .expect("the child never touched its marker");
+            scope.cancel(cause);
+        })
+    });
+    let src = format!("sh -c 'touch {}; exec sleep 30'", marker.display());
+    let report = shell.run_under(
+        &scope,
+        crate::shell::run::RunRequest::from(crate::protocol::Run::captured(
+            src.as_str(),
+            crate::source::SourceOrigin::named("<test>"),
+        )),
+    );
+    if let Some(canceller) = canceller {
+        canceller.join().expect("canceller thread");
+    }
+    match report {
+        crate::shell::run::RunReport::Ran {
+            ending: End::Stopped(Stop { cause, .. }),
+            ..
+        } => cause,
+        _ => panic!("a struck run must stop"),
+    }
+}
+
+/// A run's stop is a function of its cause, never of where the cancel
+/// landed: before the dispatch, a poll point reports it; during it, the
+/// child's teardown does — and the two must agree.
+#[cfg(unix)]
+#[test]
+fn a_cancellation_reports_alike_before_and_during_a_command() {
+    for cause in [
+        CancelCause::Interrupted,
+        CancelCause::Cancelled,
+        CancelCause::TimedOut,
+        CancelCause::Terminated,
+        CancelCause::Aborted,
+    ] {
+        let (before, during) = (struck(cause, true), struck(cause, false));
+        assert_eq!(before, during, "{cause:?}: cause");
+        assert_eq!(before, cause, "{cause:?}: reported cause");
+    }
+}
+
+/// A descendant the leader left holding the pump's pipe does not hold the
+/// run past its wall: the join reads the scope and kills the group.
+#[cfg(unix)]
+#[test]
+fn a_descendant_holding_the_pipe_does_not_hold_the_run() {
+    assert_walled_within_2s("/bin/sh -c 'sleep 30 & exit 0'");
+}
+
+/// Its pipeline sibling: the external settlement's `join_under` reads the
+/// scope, and the kill closes the survivor's pipe.
+#[cfg(unix)]
+#[test]
+fn a_pipelines_pump_survivor_does_not_hold_the_run() {
+    assert_walled_within_2s("^true | /bin/sh -c 'sleep 30 & exit 0'");
+}
+
+#[cfg(unix)]
+fn assert_walled_within_2s(src: &str) {
+    let mut shell = crate::test_helper::core_shell();
+    let scope = shell.run_cancel_handle();
+    let run = crate::protocol::Run {
+        wall: Some(Duration::from_millis(300)),
+        ..crate::protocol::Run::captured(src, crate::source::SourceOrigin::named("<test>"))
+    };
+    let t0 = Instant::now();
+    let report = shell.run_under(&scope, crate::shell::run::RunRequest::from(run));
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "held for {:?}",
+        t0.elapsed()
+    );
+    let crate::shell::run::RunReport::Ran { ending, .. } = report else {
+        panic!("the run must reach evaluation");
+    };
+    assert!(
+        matches!(
+            ending,
+            End::Stopped(Stop {
+                cause: CancelCause::TimedOut,
+                ..
+            })
+        ),
+        "{ending:?}"
+    );
+}
+
+/// An interrupt's SIGINT grace must not become a wait on the child's own
+/// 30 s sleep, and the follow-up group SIGKILL must reap a grandchild the
+/// SIGINT never reached.
+#[cfg(unix)]
+#[test]
+fn interrupt_tears_down_external_subprocess_tree() {
+    use crate::process::PgidPolicy;
+
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 30 & echo $!; wait"])
+        .stdout(std::process::Stdio::piped());
+
+    let (mut child, pgid) = crate::process::spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
+        .expect("spawn /bin/sh under new pgid");
+    assert!(pgid.is_some(), "NewLeader yields a tracked pgid");
+
+    // Take stdout before handing the child over: with no stdout sink planned
+    // the collector would drop it.  `echo $!` flushes at startup, so the
+    // reader thread returns long before teardown.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(stdout).read_line(&mut line).ok();
+        line
+    });
+    let lone = Spawned {
+        child: crate::process::ChildHandle::from_std(child),
+        landing: crate::process::Landing::of(PgidPolicy::NewLeader, pgid),
+        jail: None,
+    };
+
+    let striker = DurableRoot::default().worker();
+    let shell = lone_shell(&striker, None);
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        striker.cancel(CancelCause::Interrupted);
+    });
+
+    let t0 = Instant::now();
+    let _ = lone_end(lone, &shell);
+    let elapsed = t0.elapsed();
+    canceller.join().expect("canceller thread");
+
+    // Property 1: grace is 500 ms then group SIGKILL, so real time is well
+    // under a second; 10 s is a ceiling far below the 30 s sleep.
+    assert!(
+        elapsed.as_secs() < 10,
+        "interrupt teardown must not block on the child's own sleep: returned after {elapsed:?}"
+    );
+
+    // Property 2: `kill(pid, 0)` returns ESRCH once the grandchild is gone;
+    // poll to absorb the window between the SIGKILL and the kernel reaping.
+    let line = reader.join().expect("reader thread");
+    let gc_pid: i32 = line
+        .trim()
+        .parse()
+        .expect("the grandchild printed its pid on stdout");
+    let mut alive = true;
+    for _ in 0..50 {
+        if rustix::process::test_kill_process(rustix::process::Pid::from_raw(gc_pid).unwrap())
+            .is_err()
+        {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !alive,
+        "the forked grandchild (pid {gc_pid}) survived the interrupt teardown"
+    );
+}
+
+/// A stop is answered with `SIGCONT` at once by the reaper — the one
+/// rule, with no owner above it and nothing tracking the stop.
+#[cfg(unix)]
+#[test]
+fn wait_revives_an_ownerless_sigstopped_child() {
+    let mut cmd = std::process::Command::new("/bin/sleep");
+    cmd.arg("0.2");
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
+    let crate::process::Landing::Owns(pgid) = lone.landing else {
+        panic!("NewLeader yields a tracked pgid");
+    };
+    rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
+        .expect("SIGSTOP the sleep");
+
+    let scope = DurableRoot::default().worker();
+    let shell = lone_shell(&scope, None);
+    let t0 = Instant::now();
+    let _ = lone_end(lone, &shell);
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 5,
+        "a SIGSTOP'd child must be revived rather than hung: took {elapsed:?}"
+    );
+}
+
+/// A pipeline member's waiter opens only with a cause struck beneath its
+/// stage: what the stage holds is the owner's to deliver, so striking the
+/// stage leaves the member to the final kill.
+#[cfg(unix)]
+#[test]
+fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
+    for (strike_stage, expected) in [(false, 1), (true, 0)] {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (hits, ready) = (dir.path().join("hits"), dir.path().join("ready"));
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            &format!(
+                "trap 'echo x >> {}' INT TERM; : > {}; while :; do sleep 0.05; done",
+                hits.display(),
+                ready.display()
+            ),
+        ]);
+        // Its own group stands in for the pipeline's it joined.
+        let (child, pgid) =
+            crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::NewLeader)
+                .expect("spawn the trapper");
+        let lone = Spawned {
+            child: crate::process::ChildHandle::from_std(child),
+            landing: crate::process::Landing::Joins,
+            jail: None,
+        };
+
+        let stage = DurableRoot::default().worker();
+        let own = stage.child();
+        let membership = Membership::new(
+            pgid.expect("NewLeader yields a tracked pgid"),
+            Scope::clone(&stage),
+        );
+        let shell = lone_shell(&own, Some(membership));
+        let striker = std::thread::spawn(move || {
+            crate::test_helper::eventually(Duration::from_secs(5), || ready.exists().then_some(()))
+                .expect("the trapper never set its trap");
+            let struck = if strike_stage { stage } else { own };
+            struck.cancel(CancelCause::TimedOut);
+        });
+
+        let (outcome, _) = lone_end(lone, &shell);
+        striker.join().expect("striker thread");
+
+        assert_eq!(heard(&hits), expected, "strike_stage={strike_stage}");
+        assert_eq!(
+            outcome,
+            WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGKILL)),
+            "strike_stage={strike_stage}: the trapper outlives its grace"
+        );
+    }
+}
+
+/// A child in ral's own group heard the tty's Ctrl-C with ral, so its
+/// teardown sends no second interrupt by pid; any other cause it is sent.
+#[cfg(unix)]
+#[test]
+fn a_child_sharing_rals_group_is_sent_no_second_interrupt() {
+    for (cause, expected) in [(CancelCause::Interrupted, 0), (CancelCause::TimedOut, 1)] {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (hits, ready) = (dir.path().join("hits"), dir.path().join("ready"));
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            &format!(
+                "trap 'echo x >> {}' INT TERM; : > {}; while :; do sleep 0.05; done",
+                hits.display(),
+                ready.display()
+            ),
+        ]);
+        let lone = spawned(&mut cmd, crate::process::PgidPolicy::Inherit);
+
+        let scope = DurableRoot::default().worker();
+        let shell = lone_shell(&scope, None);
+        let striker = std::thread::spawn(move || {
+            crate::test_helper::eventually(Duration::from_secs(5), || ready.exists().then_some(()))
+                .expect("the trapper never set its trap");
+            scope.cancel(cause);
+        });
+
+        let (outcome, _) = lone_end(lone, &shell);
+        striker.join().expect("striker thread");
+
+        assert_eq!(heard(&hits), expected, "{cause:?}");
+        assert_eq!(
+            outcome,
+            WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGKILL)),
+            "{cause:?}: the trapper outlives its grace"
+        );
+    }
+}
+
+/// A lone external's own group is resumed after its grace signal, so a
+/// member stopped by a hand other than the reaper's still hears it before
+/// the kill.
+#[cfg(unix)]
+#[test]
+fn a_stopped_member_of_a_lone_group_hears_its_grace_signal() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (hits, ready, member) = (
+        dir.path().join("hits"),
+        dir.path().join("ready"),
+        dir.path().join("member.sh"),
+    );
+    std::fs::write(
+        &member,
+        format!(
+            "trap 'echo x >> {}' TERM; echo $$ > {}; while :; do sleep 0.05; done\n",
+            hits.display(),
+            ready.display()
+        ),
+    )
+    .expect("write the member's script");
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        &format!(
+            "trap : TERM; /bin/sh {} & while :; do sleep 0.05; done",
+            member.display()
+        ),
+    ]);
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
+
+    let scope = DurableRoot::default().worker();
+    let shell = lone_shell(&scope, None);
+    let striker = std::thread::spawn(move || {
+        let pid = ready_pid(&ready);
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        scope.cancel(CancelCause::TimedOut);
+    });
+
+    let _ = lone_end(lone, &shell);
+    striker.join().expect("striker thread");
+
+    assert_eq!(heard(&hits), 1, "the stopped member never ran its trap");
+}
+
+/// A lone collector dropped short of observation kills its child and
+/// detaches its pumps: a descendant the pid-addressed kill missed holds the
+/// pipe, and the drop must not wait on it.
+#[cfg(unix)]
+#[test]
+fn a_dropped_lone_collector_never_joins_its_pumps() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let pidfile = dir.path().join("survivor");
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        &format!("sleep 30 & echo $! > {}; exec sleep 30", pidfile.display()),
+    ])
+    .stdout(std::process::Stdio::piped());
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::Inherit);
+
+    let scope = DurableRoot::default().worker();
+    let shell = lone_shell(&scope, None);
+    let (sink, _bytes) = crate::io::new_buffer();
+    let pumps = command::Pumps::new(Some(sink), None);
+    let collect = CollectState::lone(
+        lone,
+        pumps,
+        None,
+        "sh".into(),
+        Vec::new(),
+        Instant::now(),
+        &shell,
+    );
+    let survivor = ready_pid(&pidfile);
+
+    let t0 = Instant::now();
+    drop(collect);
+    let elapsed = t0.elapsed();
+    unsafe { libc::kill(survivor, libc::SIGKILL) };
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the drop joined: {elapsed:?}"
+    );
+}
+
+/// With no anchor, a lone leader's zombie holds its group's id through every
+/// kill its settlement may make; settled, it is reaped.
+#[cfg(unix)]
+#[test]
+fn a_lone_leader_is_reaped_only_once_settled() {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "exit 3"]);
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
+    let pid = lone.child.id();
+    let alive = || unsafe { libc::kill(pid.cast_signed(), 0) } == 0;
+
+    let scope = DurableRoot::default().worker();
+    let shell = lone_shell(&scope, None);
+    let pumps = command::Pumps::default();
+    let mut collect = CollectState::lone(
+        lone,
+        pumps,
+        None,
+        "sh".into(),
+        Vec::new(),
+        Instant::now(),
+        &shell,
+    );
+    collect.drive();
+    assert!(alive(), "the filed leader must still be a zombie");
+
+    let settled = collect.settle_lone(pid, &shell);
+    assert!(matches!(settled, Err(Break::Error(_))), "{settled:?}");
+    assert!(!alive(), "a settled leader must be reaped");
+}
+
+/// A lone tenant's death by a key is heard as the terminal comes back,
+/// before its pumps are joined: the strike is what lets the join kill the
+/// survivor holding the pipe, rather than wait it out.
+#[cfg(unix)]
+#[test]
+fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
+    let frame = DurableRoot::default().worker();
+    let shell = lone_shell(&frame, None);
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 5 & kill -INT $$"])
+        .stdout(std::process::Stdio::piped());
+    let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
+    let (sink, _bytes) = crate::io::new_buffer();
+    let pumps = command::Pumps::new(Some(sink), None);
+    let loan = crate::process::TerminalLoan::for_test(&frame);
+
+    let t0 = Instant::now();
+    let settled = super::super::join_lone(
+        lone,
+        pumps,
+        Some(loan),
+        "sh".into(),
+        Vec::new(),
+        Instant::now(),
+        &shell,
+    );
+
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert_eq!(frame.cause(), Some(CancelCause::Interrupted));
+    assert!(
+        matches!(
+            settled,
+            Err(Break::Escape(Escape::Stopped(Stop {
+                cause: CancelCause::Interrupted,
+                ..
+            })))
+        ),
+        "{settled:?}"
+    );
+}
+
+/// No console event reaches a pid, so a teardown owed to one opens with the
+/// kill rather than waiting out a grace nothing can end.
+#[cfg(windows)]
+#[test]
+fn a_pid_no_event_reaches_is_killed_without_a_grace() {
+    let (mut state, tx) = CollectState::for_step_test();
+    let child = std::process::Command::new("ping.exe")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ping.exe");
+    state.push(StageHandle::for_test(
+        Slot { ix: 0, tx },
+        crate::process::ChildHandle::from_std(child),
+    ));
+
+    let t0 = Instant::now();
+    state.cancel_all(CancelCause::TimedOut);
+
+    assert!(
+        t0.elapsed() < crate::process::TEARDOWN_GRACE,
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+/// A lone external's group is released with its job once it is empty.
+#[cfg(windows)]
+#[test]
+fn a_lone_externals_windows_job_is_released() {
+    let shell = crate::test_helper::core_shell();
+    let mut launch = crate::process::Launch::new("cmd.exe");
+    launch.args(["/c", "exit 0"]);
+    let lone = launch
+        .spawn(crate::process::PgidPolicy::NewLeader)
+        .expect("spawn cmd.exe");
+    let crate::process::Landing::Owns(leader) = lone.landing else {
+        panic!("NewLeader registers a group");
+    };
+    assert!(crate::process::group::is_known_group(leader.as_raw()));
+
+    let settled = super::super::join_lone(
+        lone,
+        command::Pumps::default(),
+        None,
+        "cmd".into(),
+        Vec::new(),
+        Instant::now(),
+        &shell,
+    );
+
+    assert!(settled.is_ok(), "{settled:?}");
+    assert!(!crate::process::group::is_known_group(leader.as_raw()));
 }

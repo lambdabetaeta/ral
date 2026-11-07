@@ -1,6 +1,8 @@
 //! Pipeline execution engine.  `resolve` freezes the terminal handoff and each
 //! stage's launch decision, `launch` places every stage in one process group,
-//! `join` folds their observations into one value.
+//! `join` folds their observations into one value.  Its collector is every
+//! external's one waiter: [`join_lone`] waits on a lone command's child as on
+//! the one stage of the group it landed in.
 
 pub(crate) mod anchor;
 mod collect;
@@ -12,12 +14,16 @@ mod sentinel;
 mod stage;
 mod thread;
 
+use crate::io::Sink;
 use crate::ir::{Argv, Comp};
+use crate::process::{Spawned, TerminalLoan};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use collect::lone_end;
 use collect::{CollectState, Event, Slot};
 use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
@@ -36,9 +42,9 @@ pub(crate) struct StageEval {
 /// A multi-stage pipeline from its launch to its join, its stages running in
 /// their own process group.
 ///
-/// Field order is teardown order: a collector an unwind drops mid-flight kills
-/// the pgid, which must still be the anchor's — a reaped leader's pid may be
-/// reused once its group is empty.
+/// Field order is teardown order: every kill the collector makes, an unwind's
+/// included, addresses a pgid its group's anchor still pins — a reaped
+/// leader's pid may be reused once its group is empty.
 pub(crate) struct PipeNode {
     collect: CollectState,
     group: PipelineGroup,
@@ -111,7 +117,8 @@ impl PipeNode {
 
     /// Wait on every stage and fold their observations into one value.  The
     /// anchor ends before the fold, so every key it heard is on the channel;
-    /// safe, `drive` returning only with no stage left to address the pgid.
+    /// its zombie pins the pgid until the group drops, after the fold's last
+    /// kill.
     fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let Self {
             mut collect,
@@ -123,6 +130,35 @@ impl PipeNode {
         drop(group);
         value
     }
+}
+
+/// Wait on the one child [`command::run`](super::command::run) spawned, in
+/// the group it landed in, and settle it as a command ends.  The terminal
+/// comes back the instant it is dead, before its pumps are joined; on
+/// Windows only once its job is empty, its descendants included.
+pub(crate) fn join_lone(
+    spawned: Spawned,
+    pumps: super::command::Pumps<Sink>,
+    loan: Option<TerminalLoan>,
+    name: String,
+    args: Vec<String>,
+    started: Instant,
+    shell: &Shell,
+) -> Settled<()> {
+    let pid = spawned.child.id();
+    // Declared first, so an unwind kills before it releases.
+    #[cfg(windows)]
+    let job = match spawned.landing {
+        crate::process::Landing::Owns(leader) => Some(group::Job::owning(leader)),
+        crate::process::Landing::Joins | crate::process::Landing::Shares => None,
+    };
+    let mut collect = CollectState::lone(spawned, pumps, loan, name, args, started, shell);
+    collect.drive();
+    #[cfg(windows)]
+    if let Some(job) = job {
+        job.drain(&shell.scope);
+    }
+    collect.settle_lone(pid, shell)
 }
 
 /// Spawn each stage in turn onto `collect`, stopping at the first that fails.

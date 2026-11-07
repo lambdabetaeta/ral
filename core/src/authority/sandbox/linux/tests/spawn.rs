@@ -1,18 +1,20 @@
 use super::*;
 
 /// `sh -c script` confined under `unrestricted()` through the path a
-/// real command takes, `Launch::spawn` then `RunningChild`, and the
-/// group the spawn named.  Callers skip first where no envelope builds.
+/// real command takes, `Launch::spawn` and then the collector, the group
+/// the spawn named, and a shell whose current scope is `scope`, for the
+/// collector to read.  Callers skip first where no envelope builds.
 fn spawn_confined(
     script: &str,
     scope: &crate::process::Scope,
 ) -> (
-    crate::shell::exec::command::RunningChild,
+    crate::process::Spawned,
     crate::process::Pgid,
+    crate::shell::runtime::Shell,
 ) {
-    use crate::process::{Group, Landing, PgidPolicy, Spawned};
-    use crate::shell::exec::command::{Pumps, RunningChild};
-    let shell = crate::test_helper::core_shell();
+    use crate::process::{Landing, PgidPolicy};
+    let mut shell = crate::test_helper::core_shell();
+    shell.scope = scope.clone();
     let mut launch = crate::authority::sandbox::sandboxed_command(
         &unrestricted(),
         &Baseline::default(),
@@ -23,25 +25,13 @@ fn spawn_confined(
         scope,
     )
     .expect("build confined launch");
-    let Spawned {
-        child,
-        landing: Landing::Owns(pgid),
-        jail,
-    } = launch
+    let spawned = launch
         .spawn(PgidPolicy::NewLeader)
-        .expect("spawn confined sh")
-    else {
+        .expect("spawn confined sh");
+    let Landing::Owns(pgid) = spawned.landing else {
         panic!("a kept launch names its payload's group");
     };
-    let running = RunningChild::assemble_with_owner(
-        child,
-        "sh".to_string(),
-        Pumps::default(),
-        Some(Group::Owns(pgid)),
-        scope.clone(),
-        jail,
-    );
-    (running, pgid)
+    (spawned, pgid, shell)
 }
 
 /// The whole regression: `xdg:config` readable, `xdg:config/gcloud`
@@ -471,7 +461,7 @@ fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
 
 /// T3 (design doc §6): the grace signal must reach the confined payload's
 /// own session, not bwrap's mortal monitor.  Spawns through the same
-/// `Launch` + `RunningChild` path a real command takes, so the `--info-fd`
+/// `Launch` + collector path a real command takes, so the `--info-fd`
 /// leader in `Launch::spawn` is exercised end to end, then cancels with
 /// `Explicit` and checks the trap ran well inside `TEARDOWN_GRACE`.
 ///
@@ -495,10 +485,9 @@ fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
         ready.display()
     );
 
-    let scope = DurableRoot::default().worker();
-    let (running, _) = spawn_confined(&script, &scope);
+    let striker = DurableRoot::default().worker();
+    let (spawned, _, shell) = spawn_confined(&script, &striker);
 
-    let striker = scope.clone();
     let canceller = std::thread::spawn(move || {
         // The marker follows the trap's installation; a miss fails the asserts.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -509,10 +498,8 @@ fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
     });
 
     let t0 = std::time::Instant::now();
-    let waited = running.wait();
+    let (outcome, cause) = crate::shell::exec::pipeline::lone_end(spawned, &shell);
     let elapsed = t0.elapsed();
-    let (outcome, cause) = (waited.outcome, waited.cause);
-    waited.settle(&scope);
     canceller.join().expect("canceller thread");
 
     assert!(
@@ -551,7 +538,7 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
         return;
     }
     let scope = DurableRoot::default().worker();
-    let (running, pgid) = spawn_confined("sleep 30", &scope);
+    let (spawned, pgid, shell) = spawn_confined("sleep 30", &scope);
     assert!(
         rustix::process::test_kill_process_group(pgid.as_pid()).is_ok(),
         "the payload's group {pgid} must exist once its spawn returns"
@@ -559,10 +546,8 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
 
     scope.cancel(CancelCause::Aborted);
     let t0 = std::time::Instant::now();
-    let waited = running.wait();
+    let (outcome, _) = crate::shell::exec::pipeline::lone_end(spawned, &shell);
     let elapsed = t0.elapsed();
-    let outcome = waited.outcome;
-    waited.settle(&scope);
     assert!(
         elapsed.as_secs() < 5,
         "an abort's one kill must end the payload, not wait out its sleep: took {elapsed:?}"

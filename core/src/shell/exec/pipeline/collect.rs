@@ -2,18 +2,22 @@
 //! channel.  [`step`] is pure over them — effects are returned, not performed,
 //! bar the heard key's strike of the run's node — an abandoned edge is armed
 //! from state before each wait, and however the stages ended, the verdict
-//! folds in launch order.
+//! folds in launch order.  A lone external is collected as the one stage of
+//! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
 use super::super::command;
-use super::stage::StageHandle;
+use super::stage::{ExternalStage, StageHandle, StageKind};
 use crate::fact::{AuditIo, Command, ExitCode};
+use crate::io::Sink;
+use crate::process::jail::JailCgroup;
 use crate::process::{
-    CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, TerminalLoan, WaitOutcome, Watch,
+    CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
     AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Prov, Settled,
     Shell, Stop, Value,
 };
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -91,23 +95,22 @@ pub(super) enum StageEnd {
         name: String,
         args: Vec<String>,
         outcome: WaitOutcome,
-        jail: Option<crate::process::jail::JailCgroup>,
+        jail: Option<JailCgroup>,
         pumps: command::Pumps,
         sent: Option<CancelCause>,
     },
 }
 
 impl StageEnd {
-    /// An external is settled under the cause sent to it or the one in force
-    /// on the current `scope`, whichever is stronger; a key the tty delivered
-    /// is attributed through the scope or not at all (ADR 261016_a-cleanup-is-shielded-within-its-grace).  A reader-gone
-    /// stop this collector did not send attributes nothing.
+    /// An external is settled under the cause [`drained`] reads; a key the
+    /// tty delivered is attributed through the scope or not at all (ADR
+    /// 261016_a-cleanup-is-shielded-within-its-grace).
     fn settle(
         self,
         shell: &Shell,
         started: Instant,
         scope: &Scope,
-        group: &Group,
+        owned: Option<Pgid>,
     ) -> StageObservation {
         match self {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
@@ -121,22 +124,34 @@ impl StageEnd {
                 pumps,
                 sent,
             } => {
-                // Before the join: the finish kills a straggler holding a pump's pipe.
-                drop(jail);
-                if sent != Some(CancelCause::ReaderGone) {
-                    pumps.join_under(scope, || {
-                        if let Group::Owns(g) = group {
-                            g.kill();
-                        }
-                    });
-                }
-                let cause = sent.max(scope.cause().filter(|c| *c != CancelCause::ReaderGone));
+                let cause = drained(jail, pumps, sent, scope, owned);
                 finish_external_settlement(
                     &prov, &name, args, outcome, cause, sent, scope, shell, started,
                 )
             }
         }
     }
+}
+
+/// Finish a filed external's `jail`, join its `pumps` under `scope`, and read
+/// the cause it ended under.  The jail goes first, its finish killing a
+/// straggler that holds a pump's pipe; a cause ending the join kills an
+/// `owned` group once; a cut for a dead write detaches the pumps.  The cause
+/// is the one `sent` or the one in force once the pumps are done, whichever
+/// is stronger: a reader-gone stop this collector did not send attributes
+/// nothing.
+fn drained(
+    jail: Option<JailCgroup>,
+    pumps: command::Pumps,
+    sent: Option<CancelCause>,
+    scope: &Scope,
+    owned: Option<Pgid>,
+) -> Option<CancelCause> {
+    drop(jail);
+    if sent != Some(CancelCause::ReaderGone) {
+        pumps.join_under(scope, || owned.into_iter().for_each(Pgid::kill));
+    }
+    sent.max(scope.cause().filter(|c| *c != CancelCause::ReaderGone))
 }
 
 /// One thing a teardown signals or kills: a whole process group, or a lone
@@ -159,11 +174,13 @@ impl Address<'_> {
         }
     }
 
-    /// Only a console group takes Ctrl-Break: a pid gets the kill alone.
+    /// Only a console group takes Ctrl-Break: a pid, which no event reaches,
+    /// gets the kill as its opening.
     #[cfg(windows)]
     fn signal(&self, _: crate::process::Signal) {
-        if let Self::Group(pgid) = self {
-            crate::process::break_pipeline_group(*pgid);
+        match self {
+            Self::Group(pgid) => crate::process::break_pipeline_group(*pgid),
+            Self::Pid(watch) => watch.kill(),
         }
     }
 
@@ -214,10 +231,11 @@ impl Slot {
     }
 
     /// Hand `child` to the reaper, whose posting closure files this stage's own
-    /// [`Event::Ended`]: no dedicated waiter thread anywhere.
-    pub(super) fn watch(&self, child: crate::process::ChildHandle) -> Watch {
+    /// [`Event::Ended`]: no dedicated waiter thread anywhere.  Shared, so a
+    /// group's pin may hold the zombie past the stage's own end.
+    pub(super) fn watch(&self, child: crate::process::ChildHandle) -> Arc<Watch> {
         let ix = self.ix;
-        child.into_watch(self.tx.clone(), move |o| Event::Ended(ix, o))
+        Arc::new(child.into_watch(self.tx.clone(), move |o| Event::Ended(ix, o)))
     }
 }
 
@@ -347,8 +365,14 @@ pub(super) struct CollectState {
     /// Window start for the sandbox-denial reader.
     started: Instant,
     /// An owned pgid is signalled and killed whole; a joined one is its
-    /// owner's, so this collector addresses its own externals by pid.
+    /// owner's, and ral's own is never signalled whole, so in either this
+    /// collector addresses its own externals by pid.
     group: Group,
+    /// The process whose pid is a lone leader's group id, held, alive and
+    /// then a zombie past its stage's end, until this collector's last kill
+    /// of the group.  A pipeline's anchor pins its own group; an envelope's
+    /// payload group, nothing once its monitor has ended.
+    pin: Option<Arc<Watch>>,
     /// The terminal lent to the group, if any: the one ear for a key, which
     /// strikes it on the run's node as it hears.
     loan: Option<TerminalLoan>,
@@ -376,12 +400,64 @@ impl CollectState {
             observed: Vec::new(),
             started,
             group,
+            pin: None,
             loan,
             rx,
             scope,
             cleanup_grace,
             teardown: None,
         }
+    }
+
+    /// A collector over the one external [`command::run`] spawned, in the
+    /// group it landed in: one it leads, with no anchor; its enclosing
+    /// stage's; or ral's own.  It has no thread stage to grant a grace.
+    pub(super) fn lone(
+        spawned: Spawned,
+        pumps: command::Pumps<Sink>,
+        loan: Option<TerminalLoan>,
+        name: String,
+        args: Vec<String>,
+        started: Instant,
+        shell: &Shell,
+    ) -> Self {
+        let Spawned {
+            mut child,
+            landing,
+            jail,
+        } = spawned;
+        let pid = child.id();
+        let pumps = pumps.start(&mut child, &shell.scope);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slot = Slot { ix: 0, tx };
+        let watch = slot.watch(child);
+        let group = landing.group(shell.io.stage.as_ref());
+        // Not behind an envelope, whose payload leads the group.
+        let leads = group
+            .owned()
+            .is_some_and(|owned| owned.as_raw() == pid.cast_signed());
+        let pin = leads.then(|| Arc::clone(&watch));
+        let stage = ExternalStage {
+            watch,
+            prov: shell.local.audit.call_site().clone(),
+            name,
+            args,
+            jail,
+            pumps,
+            // In its collector's group, which is where it landed.
+            landing: crate::process::Landing::Joins,
+        };
+        let mut state = Self::new(
+            rx,
+            group,
+            loan,
+            shell.scope.clone(),
+            Duration::ZERO,
+            started,
+        );
+        state.pin = pin;
+        state.push(StageHandle::new(StageKind::External(stage), None, slot));
+        state
     }
 
     /// Whether the group holds the terminal — the loan actually made, never
@@ -430,6 +506,7 @@ impl CollectState {
                 Pgid::from_raw(1).expect("1 is positive"),
                 anchor.clone(),
             )),
+            pin: None,
             loan: None,
             rx,
             scope: anchor,
@@ -582,18 +659,16 @@ impl CollectState {
         self.drain_while(None, Self::live);
     }
 
-    /// Everything a teardown addresses: the pipeline's group when this
-    /// collector owns it, else each external by pid — a thread stage has
-    /// neither, its cancel being all teardown owes it — and every
-    /// envelope, whose payload leads a session of its own that no
-    /// signal to the pipeline's group reaches.  `pipeline: false` leaves the
-    /// pipeline's own out: the kernel, or a joined group's owner, delivers it.
-    fn addresses(&self, pipeline: bool) -> impl Iterator<Item = Address<'_>> {
-        let (group, pids) = match &self.group {
-            Group::Owns(g) => (pipeline.then_some(Address::Group(*g)), false),
-            Group::Joins(_) => (None, pipeline),
-        };
-        let pids = pids.then(|| {
+    /// Everything a teardown addresses: the group this collector owns, else
+    /// each external by pid — a thread stage has neither, its cancel being
+    /// all teardown owes it — and every envelope, whose payload leads a
+    /// session of its own that no signal to the collector's group reaches.
+    /// `own: false` leaves the collector's own out: the kernel, a joined
+    /// group's owner, or the tty to ral's own group, delivers it.
+    fn addresses(&self, own: bool) -> impl Iterator<Item = Address<'_>> {
+        let owned = self.group.owned();
+        let group = owned.filter(|_| own).map(Address::Group);
+        let pids = (own && owned.is_none()).then(|| {
             self.stages
                 .iter()
                 .flatten()
@@ -635,8 +710,8 @@ impl CollectState {
             return;
         }
         if let Some(signal) = crate::process::grace_signal(cause) {
-            let pipeline = self.pressed() < Some(cause) && self.group.owes(cause);
-            for address in self.addresses(pipeline) {
+            let own = self.pressed() < Some(cause) && self.group.owes(cause);
+            for address in self.addresses(own) {
                 address.signal(signal);
             }
             self.drain_until(Instant::now() + crate::process::TEARDOWN_GRACE);
@@ -676,7 +751,7 @@ impl CollectState {
             let surface = matches!(&end, Some(StageEnd::External { .. })).then_some(mooring);
             // A stage nobody reported is a failure, not an absence.
             let StageObservation { end, audit } = match end {
-                Some(end) => end.settle(shell, self.started, &self.scope, &self.group),
+                Some(end) => end.settle(shell, self.started, &self.scope, self.group.owned()),
                 None => StageObservation::failure(Error::new(
                     "ral pipeline stage vanished without reporting".to_string(),
                 )),
@@ -715,6 +790,66 @@ impl CollectState {
             verdict = verdict.or_else(|| Some(Break::stopped(cause, owner)));
         }
         verdict.map_or(Ok(last), Err)
+    }
+
+    /// Settle the one external a lone collector observed, as a command ends:
+    /// the terminal back the instant its tenant is dead, hearing the key it
+    /// died of, as no anchor reported one; then its pumps, after which no
+    /// kill addresses its group and the pin goes; then its own ending, whose
+    /// stop is the run's.
+    pub(super) fn settle_lone(mut self, pid: u32, shell: &Shell) -> Settled<()> {
+        let Some(Some(StageEnd::External {
+            name,
+            outcome,
+            jail,
+            pumps,
+            sent,
+            ..
+        })) = self.observed.pop()
+        else {
+            return Err(Error::new("ral external vanished without reporting".to_string()).into());
+        };
+        if let Some(loan) = self.loan.take() {
+            loan.reclaim(outcome.death());
+        }
+        let cause = drained(jail, pumps, sent, &self.scope, self.group.owned());
+        drop(self.pin.take());
+        // Only this child and its descendants may claim a kernel deny line.
+        let pids = || {
+            let mut pids = crate::process::sample_descendants(pid);
+            pids.insert(pid);
+            pids
+        };
+        command::ending(
+            &name,
+            outcome,
+            cause,
+            &self.scope,
+            shell,
+            pids,
+            self.started,
+        )
+    }
+}
+
+/// What the collector waits a lone external out to before it settles it: its
+/// raw end, and the cause it sent.
+#[cfg(all(test, unix))]
+pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<CancelCause>) {
+    let pumps = command::Pumps::default();
+    let mut lone = CollectState::lone(
+        spawned,
+        pumps,
+        None,
+        "test".into(),
+        Vec::new(),
+        Instant::now(),
+        shell,
+    );
+    lone.drive();
+    match lone.observed.pop().flatten() {
+        Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),
+        _ => panic!("a lone collector files its one external"),
     }
 }
 

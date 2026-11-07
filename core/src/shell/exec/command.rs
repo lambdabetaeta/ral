@@ -1,17 +1,18 @@
 //! The external arm of command dispatch — `dispatch` picks it over
 //! env and handler: prepare the admitted head, wire the shell's streams
-//! into child stdio, start it under the canonical pgid and sandbox, reap.
+//! into child stdio, start it under the canonical pgid and sandbox, and hand
+//! it to the pipeline collector, every external's one waiter.
 //!
 //! Pipeline stages never reach [`run`] — they take
 //! [`super::pipeline::PipeNode::run`] — but a direct stage shares
-//! [`prepare`], [`start`] and [`ending`] with it, so both paths resolve,
-//! confine, start and end a call the same way.
+//! [`prepare`], [`start`], the collector and [`ending`] with it, so both
+//! paths resolve, confine, start, wait on and end a call the same way.
 
 use crate::authority::sandbox::Ownership;
-use crate::process::Spawned;
+use crate::io::Sink;
+use crate::process::{POLL_SLICE, Scope};
 use crate::shell::runtime::{Mooring, Settled, Shell, Value};
 
-mod child;
 #[cfg(unix)]
 mod detach;
 mod foreground;
@@ -20,7 +21,6 @@ pub(crate) mod process;
 mod stdio;
 mod vet;
 
-pub(crate) use child::{Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use head::{Admission, Head};
@@ -65,55 +65,86 @@ pub(crate) fn run(
     // whatever error reaches it, so a start failure needs no emission of
     // its own here.
     let prepared_loan = fg.prepare(shell, mooring);
-    let Spawned {
-        child,
-        landing,
-        jail,
-    } = start(&mut prepared, fg.pgid_policy())?;
-    let Prepared { shown, .. } = prepared;
+    let spawned = start(&mut prepared, fg.pgid_policy())?;
+    // Its `Drop` restores ral's pgid on every path out of here, sparing the
+    // next REPL tty read an EIO from a background pgroup.
+    let loan = prepared_loan.and_then(|loan| loan.lend(spawned.child.id().cast_signed()));
+    let Prepared { shown, args, .. } = prepared;
 
-    let child_pid = child.id();
-    // Held until `reclaim`: its `Drop` restores ral's pgid on every path out
-    // of here, sparing the next REPL tty read an EIO from a background
-    // pgroup.
-    let loan = prepared_loan.and_then(|loan| loan.lend(child_pid.cast_signed()));
+    // Nothing fallible may run between `start` and here: until the collector
+    // holds it the bare child leaks on an early return.
+    super::pipeline::join_lone(spawned, pumps, loan, shown, args, started, shell)
+        .map(|()| Value::Unit)
+}
 
-    // Nothing fallible may run between `start` and this assembly: until
-    // `RunningChild` owns it the bare child leaks on an early return,
-    // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
-    let running = RunningChild::assemble_with_owner(
-        child,
-        shown.clone(),
-        pumps,
-        landing.group(shell.io.stage.as_ref()),
-        shell.scope.clone(),
-        jail,
-    );
+/// A child's stdout/stderr pumps: planned as the [`Sink`] each drains into,
+/// `None` where that fd is inherited or wired straight to an OS pipe, then
+/// started as the drainer threads over the child's pipes.  A reader-gone kill's
+/// remaining bytes are owed to nobody, and a descendant it missed could hold the
+/// pipe for ever, so that ending detaches, as does every forced end; every
+/// other joins, after the kill that frees the pipe.
+pub(crate) struct Pumps<T = std::thread::JoinHandle<()>> {
+    stdout: Option<T>,
+    stderr: Option<T>,
+}
 
-    let waited = running.wait();
-    let outcome = waited.outcome;
-    // The terminal returns the instant its tenant is dead; a key it heard is
-    // struck on the node, which the current scope reads or a shield masks.
-    if let Some(loan) = loan {
-        loan.reclaim(outcome.death());
+impl<T> Default for Pumps<T> {
+    fn default() -> Self {
+        Self {
+            stdout: None,
+            stderr: None,
+        }
     }
-    // The current scope, read once after the strike: under a shield a key
-    // the tenant heard is not the child's cause, and its death is a failure.
-    let cause = waited.cause.max(shell.scope.cause());
+}
 
-    // Only joins the pump threads: under audit the bytes are already
-    // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
-    waited.settle(&shell.scope);
-    // A command inside a pipeline stage cannot take SIGPIPE from an interior
-    // edge — the parent holds that edge's read end — so any SIGPIPE it
-    // suffers is from a pipe of its own making and is its own failure.
-    // Only this child and its descendants may claim a kernel deny line.
-    let pids = || {
-        let mut pids = crate::process::sample_descendants(child_pid);
-        pids.insert(child_pid);
-        pids
-    };
-    ending(&shown, outcome, cause, &shell.scope, shell, pids, started).map(|()| Value::Unit)
+impl Pumps<Sink> {
+    pub(crate) const fn new(stdout: Option<Sink>, stderr: Option<Sink>) -> Self {
+        Self { stdout, stderr }
+    }
+
+    pub(crate) const fn pumps_stdout(&self) -> bool {
+        self.stdout.is_some()
+    }
+
+    /// Start the planned drainers over `child`'s piped stdout/stderr, each
+    /// reading `scope`, the launching computation's current scope.
+    pub(crate) fn start(self, child: &mut crate::process::ChildHandle, scope: &Scope) -> Pumps {
+        Pumps {
+            stdout: self
+                .stdout
+                .and_then(|sink| child.take_stdout().map(|s| sink.pump(s, scope.clone()))),
+            stderr: self
+                .stderr
+                .and_then(|sink| child.take_stderr().map(|s| sink.pump(s, scope.clone()))),
+        }
+    }
+}
+
+impl Pumps {
+    /// Join both drainers a slice at a time; dropping `self` instead detaches
+    /// them.  On a cause in force on `scope`, `kill` once: a pump a leader's
+    /// survivor holds open ends only when the survivor's pipe closes.  On
+    /// Windows, where a pipe write cannot be polled, the pumps are interrupted
+    /// every slice too: one blocked on an edge a teardown left undrained would
+    /// otherwise wait for a read end the collector holds until this very stage
+    /// files.
+    pub(crate) fn join_under(self, scope: &Scope, kill: impl FnOnce()) {
+        let handles: Vec<_> = [self.stdout, self.stderr].into_iter().flatten().collect();
+        let mut kill = Some(kill);
+        while !handles.iter().all(std::thread::JoinHandle::is_finished) {
+            if scope.is_cancelled() {
+                if let Some(kill) = kill.take() {
+                    kill();
+                }
+                #[cfg(windows)]
+                handles.iter().for_each(crate::io::interrupt);
+            }
+            std::thread::sleep(POLL_SLICE);
+        }
+        for jh in handles {
+            let _ = jh.join();
+        }
+    }
 }
 
 /// Announce the running command via the terminal title (OSC 0).

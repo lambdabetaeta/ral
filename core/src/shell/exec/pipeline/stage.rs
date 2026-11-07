@@ -26,7 +26,7 @@ pub(super) struct StageHandle {
 /// A direct external stage: no dedicated waiter thread — the reaper's
 /// [`Watch`] holds the wait and posts the outcome.
 pub(super) struct ExternalStage {
-    pub(super) watch: Watch,
+    pub(super) watch: Arc<Watch>,
     pub(super) prov: Prov,
     /// The shown name, and its arguments as vetted for exec: the stage's
     /// observation spells the same argv a standalone dispatch would.
@@ -35,7 +35,8 @@ pub(super) struct ExternalStage {
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
-    /// The pipeline's group, or behind a confining envelope its payload's own.
+    /// Where it sits against its collector's group: in it (`Joins`), or
+    /// apart, behind a confining envelope, in its payload's own (`Owns`).
     pub(super) landing: Landing,
 }
 
@@ -82,13 +83,13 @@ impl StageHandle {
     /// `None` for a thread stage, which has no pid of its own to address.
     pub(super) fn watch(&self) -> Option<&Watch> {
         match &self.kind {
-            StageKind::External(e) => Some(&e.watch),
+            StageKind::External(e) => Some(e.watch.as_ref()),
             StageKind::Thread(_) => None,
         }
     }
 
-    /// The group this stage leads apart from the pipeline's: an envelope's
-    /// payload's, which no signal to the pipeline's group reaches.
+    /// The group this stage leads apart from its collector's: an envelope's
+    /// payload's, which no signal to the collector's group reaches.
     pub(super) fn own_group(&self) -> Option<Pgid> {
         match &self.kind {
             StageKind::External(ExternalStage {
@@ -120,8 +121,9 @@ impl StageHandle {
         }
     }
 
-    /// Reaping here is safe only because this stage has already left the
-    /// collector's `stages`, so no kill can name a reaped pid.
+    /// Letting go of the watch here reaps the zombie, unless its group's pin
+    /// still holds it: safe only because this stage has already left the
+    /// collector's `stages`, so no kill can name its pid.
     pub(super) fn file_external_end(self, outcome: WaitOutcome) -> StageEnd {
         let Self {
             held, kind, sent, ..
@@ -129,7 +131,9 @@ impl StageHandle {
         let StageKind::External(e) = kind else {
             panic!("Event::Ended named a stage that was not spawned as an external");
         };
-        let _ = e.watch.reap();
+        if let Ok(watch) = Arc::try_unwrap(e.watch) {
+            let _ = watch.reap();
+        }
         drop(held);
         StageEnd::External {
             prov: e.prov,
@@ -181,8 +185,9 @@ impl StageHandle {
         // A throwaway channel: this pid's real exit must not reach the
         // collector, whose own `Ended` the test synthesizes by hand.
         let (tx, _rx) = std::sync::mpsc::channel();
-        let watch =
-            crate::process::ChildHandle::from_std(child).into_watch(tx, std::convert::identity);
+        let watch = Arc::new(
+            crate::process::ChildHandle::from_std(child).into_watch(tx, std::convert::identity),
+        );
         Self::new(
             StageKind::External(ExternalStage {
                 watch,

@@ -14,8 +14,8 @@
 //! its owner says otherwise.
 //!
 //! [`crate::process::ChildHandle::into_watch`] is the one door from a spawned
-//! child to a watch: `RunningChild::wait`, the pipeline collector, and
-//! `spawn_detached`'s intermediate all watch through it.
+//! child to a watch: the pipeline collector, every external's one waiter,
+//! and `spawn_detached`'s intermediate both watch through it.
 
 #[cfg(unix)]
 mod unix;

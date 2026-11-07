@@ -146,8 +146,8 @@ fn exhausted() -> io::Error {
 
 /// The transient cgroup a jailed exec was placed in, owned: dropping it kills
 /// whatever is left inside and removes it.  Deliberately free of `cfg`, so
-/// `RunningChild` carries an `Option<JailCgroup>` on every platform — `None`
-/// anywhere but a real Linux guest.
+/// an external stage carries an `Option<JailCgroup>` on every platform —
+/// `None` anywhere but a real Linux guest.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct JailCgroup {
     path: PathBuf,

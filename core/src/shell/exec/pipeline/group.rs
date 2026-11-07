@@ -6,19 +6,29 @@
 //! signal the tty delivers to the group reaches it only as the anchor's
 //! `Event::Heard` — the kernel having already given that signal to every
 //! other member — which only the pipeline's
-//! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.
+//! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.  On
+//! Windows a group a pipeline or a lone external owns is a [`Job`].
 
 use super::collect::Event;
 use crate::process::{Group, Landing, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
 use crate::shell::runtime::{Break, Error, Settled, sig};
 use std::sync::mpsc::Sender;
 
-/// Pgid lifecycle for one pipeline: the anchor, finished before the fold or on
-/// drop.
-pub(super) struct PipelineGroup {
-    group: Group,
-    /// `Some` exactly for an owning group until [`Self::end_anchor`].
-    anchor: Option<AnchorProcess>,
+/// Pgid lifecycle for one pipeline.  It drops after every stage handle has
+/// gone, `PipeNode`'s field order guaranteeing it.
+pub(super) enum PipelineGroup {
+    /// Its own, led by its anchor, whose process pins the pgid until this
+    /// drops: alive, then a zombie once ended, through every kill the fold
+    /// makes.  Field order is teardown order: the job outlives the anchor.
+    Owns {
+        anchor: AnchorProcess,
+        #[cfg(windows)]
+        #[expect(dead_code, reason = "held for its drop alone")]
+        job: Job,
+    },
+    /// An enclosing stage's, which a pipeline launched inside its thread
+    /// joins rather than owning one.
+    Joins(Membership),
 }
 
 impl PipelineGroup {
@@ -26,72 +36,101 @@ impl PipelineGroup {
     /// signal it swallows can land before someone is reading for it.
     pub(super) fn prepare(tx: Sender<Event>) -> Settled<Self> {
         let anchor = AnchorProcess::spawn(tx)?;
-        Ok(Self {
-            group: Group::Owns(anchor.pgid),
-            anchor: Some(anchor),
+        Ok(Self::Owns {
+            #[cfg(windows)]
+            job: Job::owning(anchor.pgid),
+            anchor,
         })
     }
 
-    /// A pipeline launched inside a stage thread joins the enclosing
-    /// pipeline's group rather than owning one.
-    pub(super) fn joining(membership: Membership) -> Self {
-        Self {
-            group: Group::Joins(membership),
-            anchor: None,
-        }
+    pub(super) const fn joining(membership: Membership) -> Self {
+        Self::Joins(membership)
     }
 
     /// What a stage running under `stage` joins: an owner's leader paired
     /// with that scope, or a joiner's own membership, so a nested stage
     /// answers to the outermost owner's stage scope.
     pub(super) fn membership(&self, stage: &Scope) -> Membership {
-        match &self.group {
-            Group::Owns(leader) => Membership::new(*leader, stage.clone()),
-            Group::Joins(membership) => membership.clone(),
+        match self {
+            Self::Owns { anchor, .. } => Membership::new(anchor.pgid, stage.clone()),
+            Self::Joins(membership) => membership.clone(),
         }
     }
 
     pub(super) fn group(&self) -> Group {
-        self.group.clone()
+        match self {
+            Self::Owns { anchor, .. } => Group::Owns(anchor.pgid),
+            Self::Joins(membership) => Group::Joins(membership.clone()),
+        }
     }
 
     pub(super) fn leader_pgid(&self) -> Pgid {
-        self.group.leader()
+        match self {
+            Self::Owns { anchor, .. } => anchor.pgid,
+            Self::Joins(membership) => membership.group(),
+        }
     }
 
-    /// Finish the anchor, after which every report it made is on the channel.
+    /// End the anchor, after which every report it made is on the channel.
     pub(super) fn end_anchor(&mut self) {
-        if let Some(anchor) = self.anchor.take() {
-            anchor.finish();
+        if let Self::Owns { anchor, .. } = self {
+            anchor.end();
         }
     }
 }
 
-impl Drop for PipelineGroup {
-    /// The anchor last, after every stage handle has gone — `PipeNode`'s field
-    /// order guarantees it.
+/// The Job Object and `GROUPS` entry of a Windows group, owned: dropping it
+/// releases both, killing whatever member is left.
+#[cfg(windows)]
+pub(super) struct Job(Pgid);
+
+#[cfg(windows)]
+impl Job {
+    /// The job of `group`, which its leader's spawn registered.
+    pub(super) const fn owning(group: Pgid) -> Self {
+        Self(group)
+    }
+
+    /// Wait for every member to leave the job, its leader's descendants
+    /// included, a slice at a time, killing the job once under a cause in
+    /// force on `scope`.
+    pub(super) fn drain(&self, scope: &Scope) {
+        let mut kill = Some(|| self.0.kill());
+        while matches!(
+            crate::process::try_reap_leader(self.0),
+            crate::process::ReapStatus::Running
+        ) {
+            if scope.is_cancelled()
+                && let Some(kill) = kill.take()
+            {
+                kill();
+            }
+            std::thread::sleep(crate::process::POLL_SLICE);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
     fn drop(&mut self) {
-        self.end_anchor();
-        #[cfg(windows)]
-        if let Group::Owns(leader) = &self.group {
-            crate::process::release_win_group(leader.as_raw());
-        }
+        crate::process::release_win_group(self.0.as_raw());
     }
 }
 
-struct AnchorProcess {
-    /// Held for its `Drop` alone, which reaps: nothing reads it back.
+pub(super) struct AnchorProcess {
+    /// The anchor, then its zombie once ended, reaped as this drops.
     #[cfg(unix)]
+    #[expect(dead_code, reason = "held for its drop alone")]
     child: crate::process::Watch,
     #[cfg(windows)]
     child: crate::process::ChildHandle,
     pgid: Pgid,
-    /// The anchor reads this to EOF; closing it is how `finish` ends it.
-    release: os_pipe::PipeWriter,
+    /// The anchor reads this to EOF; closing it is how `end` ends it.
+    release: Option<os_pipe::PipeWriter>,
     /// Blocks reading the anchor's stdout — one byte per swallowed signal —
     /// to EOF.
     #[cfg(unix)]
-    reporter: std::thread::JoinHandle<()>,
+    reporter: Option<std::thread::JoinHandle<()>>,
 }
 
 /// The anchor's own death, on its own, ends the pipeline: nothing else in the
@@ -179,34 +218,35 @@ impl AnchorProcess {
         Ok(Self {
             child,
             pgid,
-            release,
+            release: Some(release),
             #[cfg(unix)]
-            reporter,
+            reporter: Some(reporter),
         })
     }
 
     /// The reader leaves only on EOF, the anchor's own exit closing the write
-    /// end, so the anchor can never `SIGPIPE` on a report.
+    /// end, so the anchor can never `SIGPIPE` on a report.  Idempotent.
     #[cfg(unix)]
-    fn finish(self) {
-        let Self {
-            release,
-            reporter,
-            child,
-            ..
-        } = self;
-        drop(release);
-        let _ = reporter.join();
-        drop(child);
+    fn end(&mut self) {
+        drop(self.release.take());
+        if let Some(reporter) = self.reporter.take() {
+            let _ = reporter.join();
+        }
     }
 
     #[cfg(windows)]
-    fn finish(self) {
-        let Self {
-            mut child, release, ..
-        } = self;
-        drop(release);
-        let _ = child.reap();
+    fn end(&mut self) {
+        if let Some(release) = self.release.take() {
+            drop(release);
+            let _ = self.child.reap();
+        }
+    }
+}
+
+impl Drop for AnchorProcess {
+    /// Ended first: reaping waits for an anchor that only `end` ends.
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -271,6 +311,27 @@ mod tests {
                 "the inner scope must not stand in for the outer one"
             );
         }
+    }
+
+    /// An ended anchor's zombie pins the pgid through every kill the fold
+    /// makes; the group's drop reaps it.
+    #[cfg(unix)]
+    #[test]
+    fn an_ended_anchor_pins_its_group_until_the_group_drops() {
+        let mut group = prepared();
+        let leader = group.leader_pgid().as_raw();
+        group.end_anchor();
+        assert_eq!(
+            unsafe { libc::kill(leader, 0) },
+            0,
+            "the ended anchor must still be a zombie"
+        );
+        drop(group);
+        assert_ne!(
+            unsafe { libc::kill(leader, 0) },
+            0,
+            "the group's drop must reap its anchor"
+        );
     }
 
     #[cfg(windows)]

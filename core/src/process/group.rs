@@ -145,12 +145,13 @@ impl Landing {
     }
 
     /// Who signals the child: the group it owns, the `stage`'s it joined, or
-    /// nobody but its own pid.
-    pub(crate) fn group(self, stage: Option<&Membership>) -> Option<Group> {
-        match self {
-            Self::Owns(group) => Some(Group::Owns(group)),
-            Self::Joins => stage.cloned().map(Group::Joins),
-            Self::Shares => None,
+    /// ral's own, where only its pid addresses it.
+    pub(crate) fn group(self, stage: Option<&Membership>) -> Group {
+        match (self, stage) {
+            (Self::Owns(group), _) => Group::Owns(group),
+            (Self::Joins, Some(stage)) => Group::Joins(stage.clone()),
+            (Self::Shares, _) => Group::Shares,
+            (Self::Joins, None) => unreachable!("a child joins a group only from a stage"),
         }
     }
 }
@@ -185,21 +186,27 @@ pub(crate) enum Group {
     Owns(Pgid),
     /// A pipeline's, whose owner delivers what the stage holds.
     Joins(Membership),
+    /// ral's own: never signalled whole, so its children go by pid.
+    Shares,
 }
 
 impl Group {
-    pub(crate) const fn leader(&self) -> Pgid {
+    /// The group signalled and killed whole, an owner's alone.
+    pub(crate) const fn owned(&self) -> Option<Pgid> {
         match self {
-            Self::Owns(g) => *g,
-            Self::Joins(m) => m.group,
+            Self::Owns(group) => Some(*group),
+            Self::Joins(_) | Self::Shares => None,
         }
     }
 
-    /// Whether this holder's own teardown must open: always for an owner.
+    /// Whether this holder's own teardown must open: always for an owner; for
+    /// a member, what its stage does not hold; in ral's own group, all but the
+    /// interrupt, the tty's Ctrl-C having reached that group whole.
     pub(crate) fn owes(&self, cause: CancelCause) -> bool {
         match self {
             Self::Owns(_) => true,
             Self::Joins(m) => m.owes(cause),
+            Self::Shares => cause != CancelCause::Interrupted,
         }
     }
 }
@@ -277,18 +284,31 @@ mod tests {
         assert_eq!(Landing::of(PgidPolicy::Inherit, None), Landing::Shares);
         assert!(matches!(
             Landing::Owns(nine).group(Some(&stage)),
-            Some(Group::Owns(g)) if g == nine
+            Group::Owns(g) if g == nine
         ));
         assert!(matches!(
             Landing::Joins.group(Some(&stage)),
-            Some(Group::Joins(m)) if m.group() == seven
+            Group::Joins(m) if m.group() == seven
         ));
-        assert!(Landing::Shares.group(None).is_none());
+        assert!(matches!(Landing::Shares.group(None), Group::Shares));
     }
 
     #[test]
     fn an_owner_owes_every_cause() {
         let group = Group::Owns(Pgid::from_raw(1).expect("1 is positive"));
         assert!(CancelCause::VARIANTS.iter().all(|&c| group.owes(c)));
+    }
+
+    /// The tty's Ctrl-C reached ral's own group whole; every other cause is
+    /// its teardown's to deliver.
+    #[test]
+    fn rals_own_group_owes_all_but_the_interrupt() {
+        for &cause in CancelCause::VARIANTS {
+            assert_eq!(
+                Group::Shares.owes(cause),
+                cause != CancelCause::Interrupted,
+                "{cause:?}"
+            );
+        }
     }
 }

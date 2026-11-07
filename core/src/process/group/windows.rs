@@ -8,8 +8,9 @@
 //! one `TerminateJobObject` reaches descendants too.  A console group cannot be
 //! joined after spawn: hence a fan-out over the pid list, not one call.
 //!
-//! Releasing a group falls to the caller: `RunningChild` owns a standalone
-//! external's, while pipeline stages borrow one owned by `PipelineGroup`.
+//! Releasing a group falls to its one owned `Job`
+//! (`shell::exec::pipeline::group`), a pipeline's or a lone external's;
+//! pipeline stages borrow the pipeline's.
 
 use super::{Pgid, PgidPolicy};
 use windows_sys::Win32::Foundation::HANDLE;
@@ -555,10 +556,8 @@ mod win_groups {
     }
 }
 
-/// Release the Job Object backing the group led by `leader`.
-///
-/// Surviving members die with it.  Idempotent, and needs to be —
-/// `PipelineGroup::Drop` and a standalone `RunningChild` both reach for it.
+/// Release the Job Object backing the group led by `leader`: surviving
+/// members die with it.  Idempotent; its one caller is `Job`'s drop.
 pub(crate) fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
