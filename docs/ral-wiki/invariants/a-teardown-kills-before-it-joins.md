@@ -19,7 +19,7 @@ order is that of `CollectState::cancel_all` (`core/src/shell/exec/pipeline/colle
 
 - **Why the kill is first.** A descendant that outlives its stage holds a
   pump's pipe open, and no join returns while it does. Filing a stage's end
-  therefore joins nothing; the fold joins, after the kill.
+  therefore joins no pump; the fold joins, after the kill.
 - **A drop kills and joins no pump.** `CollectState::drop` writes `Terminated`
   on every live stage in one sweep and kills; a pump a dropped stage holds is
   detached, as is one whose stage was cut for a dead write. The one join a drop

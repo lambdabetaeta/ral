@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 ---
 
 # Authority is a table of scoped rules
@@ -408,9 +408,7 @@ reads the resolved one.**
 
 - The `exec` record of a grant value, `allow` and `deny` lists of targets:
   the grant *as written*. Targets carry no polarity: membership in both lists
-  supplies Both. No grant spells every program; `Any` is what extending an
-  omitted exec axis makes (`join_top`), and it has no negative form, so "every
-  program" can never be excluded
+  supplies Both. No grant spells every program
   ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
   (`ExecKey`/`ExecGrant` are a test builder that spells such a record; a host
   spells one only by encoding `ExecTable`.)

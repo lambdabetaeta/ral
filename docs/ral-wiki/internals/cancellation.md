@@ -1,5 +1,5 @@
 ---
-verified_at_commit: f1b0a4a4
+verified_at_commit: 3e3fbc84
 verified_at_date: 2026-11-07
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
@@ -150,8 +150,8 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
   for both: on return it closes membership and claims and awaits each unclaimed
   child in birth order, the first failure being the gather's; on a halt
   (`BroodGuard::end`) it closes membership and claims and cancels every such
-  child; on an unwinding panic or frame drop (`BroodGuard::stop`, also called
-  by `Frame::Gather`'s `Drop`) it closes membership and cancels every remaining
+  child; on an unwinding panic or frame drop (`BroodGuard::stop`, run by the guard's
+  own `Drop`) it closes membership and cancels every remaining
   child without waiting. On every normal or halting exit it then waits, up to
   one shared cleanup grace and without polling, for **every** child accepted
   into the gather to reach a terminal state (`Ready` or `Consumed`)
@@ -311,7 +311,7 @@ latency to a stop is the slice plus the step in progress plus the scheduler.
 **Teardown waits** read no scope, since the waiter's own may be what was
 cancelled: `cancel::wait_ended(deadline, ended)` re-reads its witness each
 `POLL_SLICE`. Two witnesses, both needed. A brood's drain, its halt
-(`BroodGuard::end`, `close` then `stop_and_drain`) and `race`'s losers wait on
+(`BroodGuard::end`: `stop`, then `drain`) and `race`'s losers (`stop_and_drain`) wait on
 *published handles* (`Ready` or `Consumed`): what a gather owes is its
 children's endings in hand. The registry's `cancel_all`, the session's end,
 waits on *live-thread tickets*: one per thread `spawn_thread` starts, worker

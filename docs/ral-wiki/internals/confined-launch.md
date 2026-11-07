@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
+verified_at_commit: 3e3fbc84
 verified_at_date: 2026-11-07
 anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
@@ -117,10 +117,8 @@ trampoline's. Its code is `core/src/authority/sandbox/warrant/trampoline.rs`;
 handed down), and the warrant carries the `Image` verbatim.
 
 - **The records** and what each may say are
-  [[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]'s. `refused` is the
-  warrant's failure to be received or its confinement to be entered; `unstarted`
-  is the program's own spawn or `execve` failing once the confinement was
-  entered; `started` and `ended` are Linux's.
+  [[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]'s;
+  `started` and `ended` are Linux's.
 - **On macOS the trampoline becomes the program**: a host file is `execve`d in
   place, and the report's close-on-exec writer closing is the start; a bundled
   tool runs here, after the report is dropped. The program keeps the child's

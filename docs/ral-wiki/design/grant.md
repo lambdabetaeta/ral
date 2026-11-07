@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 ---
 
 # Capabilities and `grant`
@@ -185,10 +185,9 @@ layer (restrict files, credential layers, spawned children, `--capabilities`,
   *extension fragment*. `GrantLayer` is a policy; the loader returns a
   `Fragment`, consumed only by `GrantLayer::extend` and never pushable onto a
   stack. Reading an omission in the wrong role is a type error.
-- **No grant spells every program.** `Any`, the table that runs everything, arises
-  only by extending an omitted exec axis (`t ⊕ fragment`), as `--extend` and
-  exarch's carve-outs do; an `exec` record has `allow` and `deny` and no third
-  key ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
+- **No grant spells every program.** `Any` arises only by extending an omitted
+  exec axis, as `--extend` and exarch's carve-outs do
+  ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
 - **In the extension an allowance never removes authority; only an exclusion
   does.** The extension invariant states it of policy denotations: where `F` has no negative
   evidence at `s`, `B` permitting `s` implies `B ◁ F` permitting it; where `F`

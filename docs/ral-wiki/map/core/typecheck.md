@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b1ba0713
+generated_at_commit: 3e3fbc84
 generated_at_date: 2026-11-03
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -202,7 +202,7 @@ must still spread a list, and every element crosses rendered
 
 It carries *which* boundary it is at — `ArgvBoundary::InShell` or
 `Exec(shown)` — and that is the whole of the difference between them. `Exec`
-sends each written element through `gate_exec_arg`, which reads
+sends each written element through `gate_arg`, which reads
 `RefusedArg::of_ty` (`core/src/ty/exec_arg.rs`) — the same declaration
 `shell::exec::command::validate_argv` reads at the spawn — and raises
 `TypeErrorKind::ExecArgNotText` (T0057) where the resolved shape is refused,
@@ -226,7 +226,7 @@ hint says to apply it rather than pipe into it.
 
 One further premise, about a stage's redirects rather than its type: past the
 first position, `stage_root_stdin_feed` reads the stage's root — an `Exec`'s
-fused redirects, a `ScopeOp::Redirect` frame, or the same past the binders
+fused redirects, a `CompKind::Redirect` frame, or the same past the binders
 elaboration hoists out of a redirect target — and a `< f` or `<< w` on fd 0
 there is `TypeErrorKind::DeadPipeEdge` (T0070), whose `StdinFeed` names which
 of the two the message spells. Nothing else about a stage is checked, and

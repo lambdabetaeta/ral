@@ -101,7 +101,7 @@ new variant defaults to "surface it," never to a silent retry on a guess —
 and since `exarch/Cargo.toml` names one exact genai prerelease, a new transient
 shape arrives only with a deliberate bump and a deliberate edit to `Fault::of`,
 never caught by luck from a string heuristic. (The walk replaced an earlier
-`status_of` + `Display`-substring fallback
+status-code-plus-`Display`-substring fallback
 that both over-matched — the word "body" appears in a non-JSON error's own
 `Display` — and under-matched. The string never decides recovery now.)
 

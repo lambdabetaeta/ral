@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 69c49a2f50f38693bb3057d7825a5daa88df3512
+generated_at_commit: 3e3fbc84
 generated_at_date: 2026-11-05
 covers_paths: [core/src/syntax/, editors/]
 ---
@@ -119,8 +119,8 @@ sees raw bytes and bare words.
   merely happens to f64-parse, is text
   ([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]]).
   `Pattern`, `BinaryOp` and `Redirects` are not here: the [[map/core/ir|IR]]
-  owns them, and the parser builds them (`redirect_word`/`redirect_dup`
-  translate a redirect token).
+  owns them, and the parser builds them (`redirect_word`
+  translates a redirect token).
 - `numeral.rs` — the single home of the numeral grammar (`prefix`, `shape`);
   the lexer's numeral scanning, `WordLiteral::classify` and the parser's
   `signed_numeral` read it.

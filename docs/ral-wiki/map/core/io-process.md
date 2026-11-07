@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 generated_at_date: 2026-11-07
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -237,12 +237,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   sets `SA_RESTART`, so a blocked call a handler cuts returns `EINTR` and ral
   retries it; the first install snapshots the inherited ignored
   dispositions. `grace_signal(cause)` is the one
-  cause→signal table the one teardown reads (the collector's `cancel_all`):
-  `Interrupted` → SIGINT,
-  `Cancelled`/`TimedOut`/`Terminated` → SIGTERM (on Windows all four →
-  Ctrl-Break, named by its `STATUS_CONTROL_C_EXIT`), `ReaderGone`/`Aborted`
-  → `None`, straight to the kill
-  ([[decisions/260905_one-delivery-path|one-delivery-path]]).
+  cause→signal table the one teardown reads, and its rows are
+  [[internals/cancellation|cancellation]]'s ([[decisions/260905_one-delivery-path|one-delivery-path]]).
   Platform handlers live in `signal/unix.rs` and `signal/windows.rs`; the
   Windows side carries the console-control ladder in the Unix shape (two
   `request_interrupt()`s, then `ExitProcess`), which signals no process.

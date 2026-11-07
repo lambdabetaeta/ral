@@ -529,7 +529,7 @@ it and where it stays: `manufacture` takes `&[ChatMessage]` inside
 
 **The system prompt is a record, not a field.** `Transcript::System { text }` sets
 `Context::system`; it is sequencing-neutral (`advance` leaves the state alone
-and `admissible` answers `true`), and `into_chat_messages` never renders it, since
+and `admissible` answers `true`), and `chat_messages` never renders it, since
 the prompt travels in `Request.system`. A round-trip reads the prompt off the
 fold, so the log holds every input of every request. A log opens in one fixed
 order — `SessionStarted`, then `Inherited` when there is one, then `System` —

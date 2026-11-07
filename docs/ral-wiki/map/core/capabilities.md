@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 generated_at_date: 2026-11-07
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -51,7 +51,7 @@ Submodules:
   `Capabilities`, `ExecGrant` (two `BTreeSet<ExecKey>`s, `ExecGrant::of(allow,
   deny)`), `ExecKey::{Name, Path, Dir}` and `FsPolicy`: `Capabilities::value`
   spells a `GrantValue` and `test_helper::decoded` decodes it, so a test grant
-  meets the decoder's refusals. No grant spells every program; `Any` is what `join_top` makes
+  meets the decoder's refusals. No grant spells every program
   ([[invariants/no-grant-spells-every-program|no-grant-spells-every-program]]).
   `GrantLayer::value` is what shows a layer: its `LayerValue`, decode's inverse,
   built from `GrantLayer::axes` through the typed encoder
@@ -956,7 +956,7 @@ type, and every operand it holds is an `Inert`: C0, C1 and DEL become visible
 escapes, at most 512 Unicode scalar values are taken, and truncation is marked.
 Raw log lines never enter the rendered hint. A service name cannot arrive where
 a path is expected; withheld services
-carrying a reason (`macos.rs::withheld_services`, the `.sbpl`'s prose as data) are
+carrying a reason (`macos.rs::withheld_service`, the `.sbpl`'s prose as data) are
 quoted with it and lead the hint, since they are the one class the reader
 cannot act on — the securityd denial that broke `cargo fetch` was once ranked
 below a `.GlobalPreferences.plist` probe and answered with a grant that would

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
+verified_at_commit: 3e3fbc84
 verified_at_date: 2026-11-07
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read]
 ---
@@ -112,10 +112,8 @@ spelling is only the destination at which the opened object is bound.
   deny outside ral's subtree needs no mask, and one inside follows the re-root.
 - **Each deny is read once, at planning**
   ([[invariants/a-deny-is-read-once|a-deny-is-read-once]]). `Shown::of` reads
-  what stands at every deny with `Deny::read` into its mask (`DenyMask::of` its
-  kind) and the position it led to, sorted by name; `bwrap_argv` renders those
-  planned masks and `landlock::build` takes the same `Shown`, keeping its exec
-  ruleset out of the scratch masks, the positions planned as `EmptyDir`.
+  them; `bwrap_argv` renders the planned masks and `landlock::build` takes the
+  same `Shown`.
 - **An unusable bwrap refuses in its own words.** A bwrap that builds no
   envelope refuses every confined launch. A failed `--ro-bind-fd` probe keeps
   bwrap's own error; only an unknown-option error adds the version question.

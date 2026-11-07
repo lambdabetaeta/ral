@@ -41,7 +41,7 @@ that failure and ends the owner's life; the owner's terminus announces it
 once and makes it the outcome. Other sessions remain independent.
 `Agent::deliberate` commits a prompt (or a tool-result batch) before the
 round-trip it drives, so a failure between that commit and the next assistant
-reply leaves the machine in an `AwaitingAssistant*` phase with no reply
+reply leaves the machine in one of the intermediate phases with no reply
 recorded. That phase is a legal resting place. `replied`/`halted` call
 `AgentLog::quiesce` with `QuiesceReason::Replied`/`Cancelled`.
 `deliberate` repairs on every return with `quiesce(QuiesceReason::Aborted)`

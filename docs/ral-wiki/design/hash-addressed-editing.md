@@ -172,9 +172,8 @@ location into an edit handle is a deliberate second step — `view-hash-around` 
 
 **The witness layer is ral over small atoms.** `line_hash` and `window_hashes`
 are private Rust — the witness is never something the model constructs, only one
-it copies out of a read — and `_search-files` (the ignore-aware ripgrep walk) is
-`_`-prefixed so `help` hides it. `view-text`, `view-hash`, `grep-files`, and
-`edit-hash` are the host builtins; `view-hash-around` is its thin ral helper. This
+it copies out of a read. `view-text`, `view-hash`, `grep-files` (the
+ignore-aware ripgrep walk), and `edit-hash` are the host builtins; `view-hash-around` is its thin ral helper. This
 keeps exarch's [[design/exarch-architecture|thin architecture]]: editing is a few
 host atoms reading whole files below the ral line, not a separate edit protocol.
 

@@ -4,6 +4,10 @@ status: fixed
 
 # A held terminal lease, not an inferred predicate, gates the foreground handoff
 
+> *Amended (261107)*: the lease is lent to one group at a time as a `TerminalLoan`, which hears the key back
+> ([[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]]); `ForegroundGuard`,
+> `ForegroundDecision`, `JobControl`, `resolve_terminal_plan` and `LaunchRole` are gone, and historical names below are retained.
+
 **The authority to hand the controlling terminal to a child should be an
 unforgeable value a turn is *given* — a `TerminalLease` — not a predicate every
 launch path re-derives from process-global startup state.** Before this, three

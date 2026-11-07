@@ -4,6 +4,9 @@ status: accepted
 
 # One seam, one log
 
+> *Amended (261107)*: the channel carries `Signal { Commit, Synced, Born, Transient }`; `Fact`, `Event`, `Kind` and
+> `Signal::into_event` are gone, and every frontend folds the commits. Historical names below are retained.
+
 > *Amended 2026-10-30*: `Protocol` is named `Transcript`, and the context module is `record::context`; historical names below are retained.
 
 > Superseded in part: a `Display` commit is no longer the twin of a protocol fact, and `user.log` and `record.log` are no longer written; a transcript is rendered from `record.jsonl` on demand. See [[internals/session-record|session-record]].

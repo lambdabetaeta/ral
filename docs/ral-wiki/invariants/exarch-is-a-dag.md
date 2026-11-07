@@ -2,20 +2,21 @@
 
 **Exarch's top-level modules form a directed acyclic graph: a `crate::` reference from a module to one that already reaches it, outside tests and comments, is a build break.**
 
-The layers, leaves first (see [[design/exarch-architecture|exarch-architecture]] and [[map/exarch|exarch]]):
+The layers, leaves first: a module sits one above its deepest dependency, so
+modules on one line are unordered (see
+[[design/exarch-architecture|exarch-architecture]] and [[map/exarch|exarch]]):
 
-- `clock`, `latch`, `card`, `app`, `skill`, `library`
+- `app`, `card`, `clock`, `latch`, `library`, `site`, `skill`
 - `provider`
-- `record`
-- `bus`
+- `config`, `policy`, `record`
+- `bus`, `net_policy`, `prompt`, `wallet`
 - `schedule`
 - `enquiry`
 - `shell_eval`
 - `agent`
-- `boot`
-- `port`
-- `host`
-- `tui`, `headless`
+- `port`, `signals`
+- `boot`, `host`, `tui`
+- `headless`
 - `cli`, `lib`
 
 Each boundary says what the lower layer is spared:
@@ -36,5 +37,11 @@ Each boundary says what the lower layer is spared:
 - `prompt` and `enquiry` know no `agent`: both are read by the agent, never the converse.
 
 Pinned by `exarch/tests/layering.rs::{exarch_modules_form_a_dag,
-frontends_reach_agents_through_the_port}`. Its ordered pairs include
-`agent < port`, `bus < port`, `port < host`, `port < tui` and `port < headless`.
+frontends_reach_agents_through_the_port}`. The graph is every production
+`crate::` reference between top-level modules, `main.rs` counting as `lib`; the
+first test rejects a cycle and each ordered pair of `LAYERED`
+(`provider < record`, `record < bus`, `bus < agent`, `agent < port`,
+`port < host`, `port < tui` and the rest), and the layers above are the graph as
+it stands, not an order the test fixes beyond those pairs.
+`control_commits_belong_to_record_and_bus` keeps control commits in `record/`
+and `bus/`.

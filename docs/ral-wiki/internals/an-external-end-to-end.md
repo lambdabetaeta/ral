@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
+verified_at_commit: 3e3fbc84
 verified_at_date: 2026-11-07
 anchors: [prepare, start, start_detached, started, ending, with_denials, Started, Born, Claim, payload_pids, Unstarted, Spawned, Group, Placement, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
@@ -76,9 +76,9 @@ Which of the three cases a failure is, and so whom it blames, is
   `Prepared`), never what the file says by the time the kernel refused. A bundled tool, or a file gone
   from its real path, is `not-found`.
 - **Only a permission refusal is `permission-denied`.** `EACCES` at the spawn,
-  or a path head's walk that fails by a refusal. Any other walk error at a path
-  head reads as itself, `io` with the OS's words; absence and a non-directory
-  component are `not-found`. At a `PATH` candidate every walk failure is absence.
+  or a walk, a path head's or a `PATH` candidate's, that fails by a refusal.
+  Any other walk error reads as itself, `io` with the OS's words; absence and
+  a non-directory component are `not-found`.
 - **A confined `EACCES` or `ENOENT` whose interpreter the launch's own
   projection hides is `permission-denied` plus the interpreter hint**, on both
   platforms: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
@@ -157,14 +157,12 @@ a `Claim` the moment the spawn returns, and `ending` hands `with_denials` the
 
 ## Where the child landed
 
-**A child's `Group` is computed once, at its birth, and carried.** `Owns`
-names a group of its own, signalled and killed whole; `Enveloped` its
-envelope's payload's; `Joins` a pipeline's, addressed by its owner and
-carrying the `Membership` it was placed by; `Shares` ral's own, where only its
-pid addresses it. `placement` decides the policy once, `spawn_with_pgid`
-returns the group with the child, an envelope's payload group becomes
-`Enveloped`, and nothing downstream recomputes it
-([[invariants/a-child-lands-once|a-child-lands-once]]). The process limit is a
+**A child's `Group` is computed once, at its birth, and carried.**
+`placement` decides the policy once, `spawn_with_pgid` returns the group with
+the child, an envelope's payload group becomes `Enveloped`, and nothing
+downstream recomputes it ([[invariants/a-child-lands-once|a-child-lands-once]]);
+what each landing lets a collector signal is
+[[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]'s. The process limit is a
 property of the launch, applied where the child is born (a macOS fork limit set
 in `pre_exec`; on Windows the Job Object's, before the child resumes; Linux
 sets none), so a child never runs without the budget its grant states

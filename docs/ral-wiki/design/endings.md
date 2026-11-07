@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 ---
 
 # Endings
@@ -146,7 +146,7 @@ special case.
   `{"tag":"ok"}` for Unit. `audit B` still hands over only ok/err.
 
 No reader decodes one ending encoding as the other. Old wire and
-`DoneOutcome` session-record shapes need not decode; no compatibility is owed.
+session-record shapes need not decode; no compatibility is owed.
 
 ## Three lifetimes
 
@@ -211,7 +211,7 @@ retract an announcement already made at an earlier prompt or admission.
 - Batch `exit ↦ ok ()`, or treating panic as no ending: the report lies.
 - Replay every completion card but gate only the wake: a claimed result is
   still spuriously announced.
-- A second `_outlive` dispatch: its report would need merging; the wait and
+- A second dispatch for work that outlives its run: its report would need merging; the wait and
   its bytes, cancellation and trail belong inside the last run.
 - A status newtype for the entire family: success is in range for an ending
   and out of range for a failure, so `u8` and `NonZeroU8` behind two traits,

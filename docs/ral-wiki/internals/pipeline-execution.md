@@ -1,5 +1,5 @@
 ---
-verified_at_commit: f1b0a4a4
+verified_at_commit: 3e3fbc84
 verified_at_date: 2026-11-07
 anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, member_policy, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, join_lone, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
@@ -261,9 +261,8 @@ The code facts behind each landing:
   `PgidPolicy::Join(membership)`. Its collector opens with a grace signal only
   for a cause `Membership::owes`, one stronger than the stage scope holds, struck
   beneath the stage.
-- A `Shares` child sits in ral's own group (`PgidPolicy::Inherit`). `Group::owes`
-  is total over the four arms, and for `Shares` it owes every cause but
-  `Interrupted`, whose Ctrl-C the terminal delivered to ral's group whole.
+- A `Shares` child sits in ral's own group (`PgidPolicy::Inherit`); `Group::owes`
+  is total over the four arms.
 
 A `spawn` worker is outside that evaluation: its session `stage` is
 `None`, so the externals it launches lead groups of their

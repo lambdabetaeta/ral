@@ -141,7 +141,7 @@ refused desk verb also draws an error chrome row. It does not. Every
 agent-cancel / message / schedule / unschedule / reply refusal path. A refusal
 *raises*; the raise leaves through `ExarchDesk::handle` as an `Error`, crossing as a `WireError` (message and hints),
 fails the builtin body, aborts the ral program, and is written by
-`report_runtime_error` as an ariadne report into the **captured stderr**, which
+`End::render` as an ariadne report into the **captured stderr**, which
 `digest::render` folds into the model-facing `STDERR:` / `EXIT: 1` sections. That
 channel is wholly disjoint from the bus kinds the rail draws.
 

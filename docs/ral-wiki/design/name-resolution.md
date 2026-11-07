@@ -32,7 +32,7 @@ under that spelling. From most reserved to most peripheral:
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]],
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].
-- **Underscore primitives** — `_ansi-ok` and the host `_ed-*` / `_plugin`:
+- **Underscore primitives** — `_ansi-ok` and the host `_ed-*`:
   internals the prelude wraps, never called directly by user scripts. The
   prefix is the convention, not the layer: a prelude `_` binding is internal
   the same way, and every index that lists names — `help`, completion,

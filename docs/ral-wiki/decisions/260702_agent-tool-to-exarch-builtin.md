@@ -15,7 +15,7 @@ that the move is possible and states what it would take.
 
 > **Amended 2026-07-06.** The seam this ADR left open is decided: it is the
 > **enquiry channel** of the [[design/engine-protocol|engine protocol]]
-> (`Enquiry → Answer`, an `EnquiryDesk` on `TurnRequest`), not a turn-local
+> (`Enquiry → Answer`, a `Host::enquire` on the carrier), not a turn-local
 > spawn context — and the scope widens from the spawn family to every
 > remaining stateful tool except `reply`. The full migration plan lives in
 > the amendment at the end of this ADR. The move itself remains deferred: the
@@ -283,7 +283,7 @@ engine to the front-end process. Under `WireTransport` the shell lives in the
 constructed — the engine's vocabulary would silently depend on which
 transport booted it. The enquiry desk is the same capture, named once, on the
 rail turn-local state already rides: the builtin's body validates its
-arguments and calls `shell.enquire(…)`; exarch answers at an `EnquiryDesk` it
+arguments and calls `shell.enquire(…)`; exarch answers at a `Host::enquire` it
 installs per turn (`transport.set_desk(…)`, beside `set_boundary`) — a direct
 trait object under the identity transport, `Event::Enquiry`/`Frame::Answer`
 frames under the wire. This also settles the open question "where the seam
@@ -389,7 +389,7 @@ pub struct HostServices {          // the parent-snapshot step, named:
     generation: u64,               // registry generation at install
 }
 pub struct ExarchDesk(HostServices);
-impl EnquiryDesk for ExarchDesk { /* match class label → handler */ }
+impl Host for ExarchDesk { /* match class label → handler */ }
 ```
 
 Installed per turn in `Agent::run_shell` beside `set_boundary`, so the
@@ -456,7 +456,7 @@ configuration exists to answer.
 ## See also
 
 [[design/engine-protocol|engine-protocol]] (the rail this plan
-rides: the `EnquiryDesk` seam, `FOValue` payloads, and the wire encoding),
+rides: the `Host::enquire` seam, `FOValue` payloads, and the wire encoding),
 [[decisions/260617_async-agent-tool|async-agent-tool]] (the affordance this
 relocates, and the "No ral surface" position it revisits),
 [[map/exarch/tools|tools]] (the `Tool` trait, `registry`, and the
