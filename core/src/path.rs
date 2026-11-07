@@ -6,10 +6,11 @@
 //! unfolded, and the `.`/`..` fold a [`FrozenPath`] shows.  `walk` is the one
 //! resolver: a spelling walked from the root through directory handles to the
 //! object it names, with the [`Trace`] of every object opened, which the grant
-//! judges and the handle then acts on.  `identity` holds the containment and
-//! matching kernel over positions and traces; `canon` and `render` give the
-//! names a kernel sandbox rule may mention; `tree` enumerates a directory
-//! tree, judging each entry as it goes.
+//! judges and the handle then acts on; `which` searches `PATH` by walking
+//! each candidate.  `identity` holds the containment and matching kernel over
+//! positions and traces; `canon` and `render` give the names a kernel sandbox
+//! rule may mention; `tree` enumerates a directory tree, judging each entry as
+//! it goes.
 //!
 //! `walk` imports `Verdict` (`capability/fs.rs`) and `InstallToken`
 //! (`sandbox.rs`): two inverted edges, each a token whose field only its own
@@ -76,13 +77,13 @@ pub use walk::{
     kind_of, walk, walk_dir, walk_lenient,
 };
 pub(crate) use walk::{StagedWrite, Streamed, Streaming, open_discard};
-pub(crate) use which::command_candidates;
+#[cfg(windows)]
+pub(crate) use which::is_batch_image;
 #[cfg(target_os = "linux")]
 pub(crate) use which::locate_in;
+pub(crate) use which::{Candidate, search};
 pub(crate) use which::{WINDOWS_EXEC_EXTENSIONS, command_name_key, names_a_path, names_a_path_for};
 pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
-#[cfg(windows)]
-pub(crate) use which::{is_batch_image, is_executable_file};
 
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;

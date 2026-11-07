@@ -211,17 +211,20 @@ mod tests {
     }
 
     /// A base profile is walked once, by the loader that makes its layer:
-    /// `resolve_base` takes no step the loader did not.
+    /// `resolve_base` takes no step the loader did not.  Each starts from a
+    /// cold `PATH` memo, whose search walks too; no bare name repeats.
     #[cfg(unix)]
     #[test]
     fn a_base_is_walked_once() {
         let ctx = ctx_at(&host_home(), "/");
         for (name, text) in [("reasonable", REASONABLE_RAL), ("confined", CONFINED_RAL)] {
             let steps = ral_core::test_access::walk_steps;
+            ral_core::path::forget_located_commands();
             let before = steps();
             let loaded = load(name, text, &ctx);
             let loader = steps() - before;
             assert!(loader > 0, "{name}: the loader walks its places");
+            ral_core::path::forget_located_commands();
             let before = steps();
             let resolved = resolve_base(name, &ctx).expect("a bake-in resolves");
             assert_eq!(steps() - before, loader, "{name}: walked again");

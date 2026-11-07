@@ -2,7 +2,7 @@
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 verified_at_date: 2026-11-03
-anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, command_candidates, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
+anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge_file, check_exec, check_exec_name, Admitted, for_kernel, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -31,8 +31,22 @@ launch for a direct pipeline stage and `detach`.
   separate fact.
 - **A bare name folds its `PATH` candidates in order**, running the first
   admitted candidate that holds a program and passing over refusals.
-  `which::locate`'s memo hit is tried first: admitted and runnable, it is the
-  fold's answer; otherwise `command_candidates` supplies the whole fold.
+  `which::search` walks each candidate at most once and hands the walk, a
+  `Candidate`, to the judgment, so what is judged is what runs. The
+  candidate the memo remembers as the first program is walked first; its
+  verdict keeps its place in `PATH` order.
+  - **Why the hit may go first.** The memo holds the first candidate whose
+    walk found a program (`Located::holds_program`, the one executable
+    predicate, read unjudged inside `path` alone and disclosed nowhere).
+    Every earlier candidate is then no program, so no admitted one: an
+    admitted hit is what the in-order fold runs. Otherwise the rest are tried
+    in order and the verdicts read in `PATH` order, so the first failure is
+    the in-order fold's. A program put earlier on `PATH` mid-run is passed
+    over until the run ends, as a remembered positive always was.
+  - **What the memo learns.** After a search, the first program its walks
+    saw, where every candidate before it was walked; with none and every
+    candidate walked, absence, trusted for `NEGATIVE_TTL`. A search that ran
+    its hit alone teaches nothing, and keeps what it was taught.
 - **Each candidate's walk supplies what is judged**: the object or absent
   leaf it reached, or, where it failed, the name at `failure_trace`.
   `check_exec` judges a `Program`; `check_exec_name` judges a failed walk's

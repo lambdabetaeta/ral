@@ -7,9 +7,10 @@ use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::fact::{Failure, Unrunnable};
 use crate::ir::CommandName;
 use crate::path::walk::failure_trace;
-use crate::path::{self, CwdPath, Kind, LeafMode, LexicalPath, walk};
+use crate::path::{self, Candidate, CwdPath, Kind};
 use crate::shell::runtime::{Break, Context, Error, Mooring, Settled, Shell};
 use std::io::ErrorKind;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -109,21 +110,25 @@ impl Head {
                     admission => Ok(admission),
                 }
             }
-            Target::Search { path, cwd } => {
-                if let Some(hit) = path::locate(&shown, path.as_deref(), Some(&cwd))
-                    && let Ok(Ok(admitted)) =
-                        probe(hit, CandidateKind::Search, &shown, grants, baseline)
-                {
-                    Ok(Ok(admitted))
-                } else {
-                    select_candidates(
-                        path::command_candidates(&shown, path.as_deref(), Some(&cwd)),
+            Target::Search { path, cwd } => settle(
+                path::search(
+                    &shown,
+                    path.as_deref(),
+                    Some(&cwd),
+                    |candidate| match judge(
+                        candidate,
+                        CandidateKind::Search,
                         &shown,
                         grants,
                         baseline,
-                    )
-                }
-            }
+                    ) {
+                        Ok(Ok(admitted)) => ControlFlow::Break(admitted),
+                        Ok(Err(error)) => ControlFlow::Continue(Ok(error)),
+                        Err(denied) => ControlFlow::Continue(Err(denied)),
+                    },
+                ),
+                &shown,
+            ),
             Target::Path(None) => Ok(Err(not_found(&shown))),
         }?;
         Ok(Head { shown, program })
@@ -145,23 +150,20 @@ impl Head {
     }
 }
 
-fn select_candidates(
-    candidates: impl IntoIterator<Item = PathBuf>,
+/// The searched program; failing every candidate, the first failure other
+/// than absence, in `PATH` order.
+fn settle(
+    searched: Result<Admitted, Vec<Result<Error, Denied>>>,
     shown: &str,
-    grants: &GrantStack,
-    baseline: &Baseline,
 ) -> Result<Admission, Denied> {
-    let mut first = None;
-    for candidate in candidates {
-        let failure = match probe(candidate, CandidateKind::Search, shown, grants, baseline) {
-            Ok(Ok(admitted)) => return Ok(Ok(admitted)),
-            Ok(Err(error)) if is_absent(&error) => continue,
-            Ok(Err(error)) => Ok(error),
-            Err(denied) => Err(denied),
-        };
-        first.get_or_insert(failure);
+    match searched {
+        Ok(admitted) => Ok(Ok(admitted)),
+        Err(failures) => failures
+            .into_iter()
+            .find(|failure| !failure.as_ref().is_ok_and(is_absent))
+            .unwrap_or_else(|| Ok(not_found(shown)))
+            .map(Err),
     }
-    first.unwrap_or_else(|| Ok(not_found(shown))).map(Err)
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +172,7 @@ enum CandidateKind {
     Search,
 }
 
+/// `arg0` walked, then judged.
 fn probe(
     arg0: PathBuf,
     candidate_kind: CandidateKind,
@@ -177,10 +180,26 @@ fn probe(
     grants: &GrantStack,
     baseline: &Baseline,
 ) -> Result<Admission, Denied> {
-    let Some(spelled) = LexicalPath::absolute(&arg0) else {
-        return Ok(Err(not_found(shown)));
-    };
-    let located = match walk(&spelled, LeafMode::Follow) {
+    Candidate::walk(arg0).map_or_else(
+        || Ok(Err(not_found(shown))),
+        |candidate| judge(candidate, candidate_kind, shown, grants, baseline),
+    )
+}
+
+/// A walked candidate judged before its kind or error is looked at.
+fn judge(
+    candidate: Candidate,
+    candidate_kind: CandidateKind,
+    shown: &str,
+    grants: &GrantStack,
+    baseline: &Baseline,
+) -> Result<Admission, Denied> {
+    let Candidate {
+        arg0,
+        spelled,
+        walked,
+    } = candidate;
+    let located = match walked {
         Ok(located) => located,
         Err(error) => {
             if let Ok(trace) = failure_trace(&spelled, &error) {
@@ -237,11 +256,11 @@ fn probe(
 impl Program {
     /// The present file `path` names, walked but unjudged.
     pub(crate) fn file(path: PathBuf) -> Option<Self> {
-        let spelled = LexicalPath::absolute(&path)?;
-        let located = walk(&spelled, LeafMode::Follow).ok()?;
+        let Candidate { arg0, walked, .. } = Candidate::walk(path)?;
+        let located = walked.ok()?;
         located.trace().kind()?;
         Some(Self::File {
-            arg0: path,
+            arg0,
             located: Box::new(located),
         })
     }
@@ -519,26 +538,56 @@ mod tests {
         let plain = admitted.join("zzplain");
         std::fs::write(&plain, "").unwrap();
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let ctx = under(ExecGrant::of([dir_key(&admitted)], []));
-        let absent = admitted.join("absent/zzplain");
-        let refused = denied.join("zzplain");
-        let baseline = Baseline::default();
-        let first = select_candidates(
-            [absent.clone(), refused.clone(), plain.clone()],
-            "zzplain",
-            &ctx.grants,
-            &baseline,
-        )
-        .expect_err("the first non-absence is a refusal");
-        assert_eq!(first.at, path::shown(&refused));
-        let first = select_candidates(
-            [absent, plain.clone(), refused],
-            "zzplain",
-            &ctx.grants,
-            &baseline,
-        )
-        .unwrap_or_else(|_| panic!("the non-executable file precedes the refusal"));
-        assert!(matches!(first, Err(error) if is_not_runnable_at(&error, &path::shown(&plain))));
+        let absent = admitted.join("absent");
+        let select = |dirs: [&Path; 3]| {
+            let mut ctx = under(ExecGrant::of([dir_key(&admitted)], []));
+            let path = std::env::join_paths(dirs).unwrap().into_string().unwrap();
+            ctx.set_env_var("PATH", path);
+            Head::resolve(&CommandName::Bare("zzplain".into()), &ctx)
+                .select(&ctx.grants, &Baseline::default())
+        };
+        let first = select([absent.as_path(), denied.as_path(), admitted.as_path()])
+            .expect_err("the first non-absence is a refusal");
+        assert_eq!(first.at, path::shown(denied.join("zzplain")));
+        let first = select([absent.as_path(), admitted.as_path(), denied.as_path()])
+            .unwrap_or_else(|_| panic!("the non-executable file precedes the refusal"));
+        assert!(
+            matches!(first.program, Err(error) if is_not_runnable_at(&error, &path::shown(&plain)))
+        );
+    }
+
+    /// Each `PATH` candidate is walked once, the remembered hit included
+    /// where the grant refuses it and the search goes on.
+    #[cfg(unix)]
+    #[test]
+    fn each_path_candidate_is_walked_once() {
+        let dirs = [(); 3].map(|()| tempfile::tempdir().unwrap());
+        let name = plant(dirs[1].path(), "zzonce");
+        plant(dirs[2].path(), "zzonce");
+        let path = std::env::join_paths(dirs.iter().map(tempfile::TempDir::path))
+            .unwrap()
+            .into_string()
+            .unwrap();
+        let mut ctx = under(ExecGrant::of([dir_key(dirs[2].path())], []));
+        ctx.set_env_var("PATH", path.clone());
+        assert_eq!(
+            path::locate(&name, Some(&path), Some(ctx.cwd())),
+            Some(dirs[1].path().join(&name)),
+        );
+        let steps = crate::test_access::walk_steps;
+        let walk_of = |dir: &tempfile::TempDir| {
+            let before = steps();
+            drop(Candidate::walk(dir.path().join(&name)));
+            steps() - before
+        };
+        let once: usize = dirs.iter().map(walk_of).sum();
+
+        let before = steps();
+        let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &ctx)
+            .select(&ctx.grants, &Baseline::default())
+            .unwrap_or_else(|_| panic!("the third PATH candidate is admitted"));
+        assert_eq!(steps() - before, once);
+        assert_eq!(file_of(&head).0, dirs[2].path().join(&name));
     }
 
     /// A bare name runs what the walk found, never a same-named file in the

@@ -2,7 +2,7 @@
 verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
 verified_at_date: 2026-11-03
-anchors: [walk, walk_excluded, failure_trace, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
+anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, GrantStack::judge, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -215,8 +215,8 @@ function of its layers.**
 
 **A program is judged as a `Located`, its `#!` line read through that handle,
 and it is started by its real name on every platform.** The `Located` has one
-owner at a time: `Head::admit` walks a candidate and moves its `Located` into
-the `Admitted`; `launch` takes the `Admitted` and drops the `Located`, so no
+owner at a time: `Head::admit` walks a candidate (a `PATH` search walks each
+once, `which::search`) and moves its `Located` into the `Admitted`; `launch` takes the `Admitted` and drops the `Located`, so no
 judged program or directory handle survives into the run. Landlock rules only allow and cannot
 require the judged object, and a handle kept through the run would hold the
 program's directory on Windows ([[internals/exec-judgment|exec-judgment]]).
@@ -345,8 +345,11 @@ position; the kernel judges current ancestry. The residuals:
   reported as not entered, never shown as a plain link with its subtree
   dropped.
 - **Probes by name**: `may_write` (the `is-writable` builtin, and a staged
-  write's check of the file it replaces), the `PATH` ordering memo's `+x` test,
-  and git's session-start reading of `.git` answer by name and grant nothing.
+  write's check of the file it replaces) and git's session-start reading of
+  `.git` answer by name and grant nothing. The `PATH` memo answers by walk:
+  it orders candidates by the unjudged stat of each walk
+  (`Located::holds_program`, visible inside `path` alone), discloses it to
+  nothing, and grants nothing.
   A casefolded Linux directory stores one spelling the walk cannot ask for.
 - **Win32 propagates inheritable ACEs by name** inside `SetSecurityInfo`.
 

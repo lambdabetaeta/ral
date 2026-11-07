@@ -1,32 +1,62 @@
-//! `PATH` search: locate a bare command name on disk.
+//! `PATH` search: a bare command name's candidates, each walked.
 //!
-//! Sibling to the grant pipeline, but `$PATH` is only a list of
-//! directories walked in turn, so the sigil/lex/canon stages do not apply.
+//! `$PATH` is a list of directories tried in turn, so a candidate is a
+//! directory joined with the name (on Windows, with each `%PATHEXT%` suffix),
+//! reached by [`walk`] as any other spelling is.  That is a walk per `PATH`
+//! entry, so where the walks find the first program is remembered for the
+//! extent of a run; [`LOCATED`] argues what that costs in freshness.
 //! Dispatch arrives via `shell::exec::command::head`.
-//!
-//! The walk costs one stat per `PATH` entry, and on Windows one per
-//! `%PATHEXT%` suffix per entry, so [`locate`] memoises it for the extent of a
-//! run; [`LOCATED`] argues what that costs in freshness.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::ops::ControlFlow;
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use super::site::Silent;
-use super::{CwdPath, PathRules};
+use super::{CwdPath, LeafMode, LexicalPath, Located, PathRules, walk};
 use crate::host::EnvVars;
+#[cfg(windows)]
 use crate::site::site;
 
-/// Resolve a command head to its executable on disk: a separator-bearing
-/// name is a path anchored against `cwd`, a bare name is walked against
-/// `path_value`.
+/// A command's file as a launch reaches it: its spelling, and the walk of it.
+pub(crate) struct Candidate {
+    /// What the program sees as `argv[0]`.
+    pub(crate) arg0: PathBuf,
+    pub(crate) spelled: LexicalPath,
+    /// Links followed, as `execve` follows them.
+    pub(crate) walked: io::Result<Located>,
+}
+
+impl Candidate {
+    /// `arg0` walked; `None` where it is not absolute, so names nothing.
+    pub(crate) fn walk(arg0: PathBuf) -> Option<Self> {
+        let spelled = LexicalPath::absolute(&arg0)?;
+        let walked = walk(&spelled, LeafMode::Follow);
+        Some(Self {
+            arg0,
+            spelled,
+            walked,
+        })
+    }
+
+    /// For ordering alone: no judgment has read it.
+    fn holds_program(&self) -> bool {
+        self.walked.as_ref().is_ok_and(Located::holds_program)
+    }
+}
+
+/// The first program on `path_value` for the bare `name`: what a launch
+/// under no grant runs.
 ///
-/// `Some` only for a regular file carrying the executable bit — the check
-/// the OS would apply at spawn.  A bare name's answer is memoised for the
-/// current run ([`LOCATED`]).
+/// Relative entries are read against `cwd`.  Remembered for the current run
+/// ([`LOCATED`]), and a remembered answer is not walked.
 pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&CwdPath>) -> Option<PathBuf> {
     locate_at(name, path_value, cwd, Instant::now())
 }
@@ -39,16 +69,96 @@ fn locate_at(
     cwd: Option<&CwdPath>,
     now: Instant,
 ) -> Option<PathBuf> {
-    // Answered before the memo is touched: one join and one stat is no
-    // amplification to amortise, and a caller naming a file usually means
-    // "is it there *now*": a binary this very run built.
-    if names_a_path(name) {
-        let candidate = anchor_to_cwd(PathBuf::from(name), cwd)?;
-        return is_executable_file(&candidate).then_some(candidate);
+    let (key, candidates) = query(name, path_value?, cwd);
+    match recall(&key, now) {
+        Recalled::Remembered(answer) => answer,
+        Recalled::Cold => fold(key, &candidates, None, now, |candidate| {
+            if candidate.holds_program() {
+                ControlFlow::Break(candidate.arg0)
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .ok(),
     }
-    let path_value = path_value?;
+}
+
+/// The first of bare `name`'s `PATH` candidates `judge` takes, each walked
+/// at most once; else what `judge` made of each candidate it passed over,
+/// in `PATH` order.  `judge` takes only a program
+/// ([`Located::is_executable`]): the remembered one is tried first, on the
+/// strength of no earlier candidate being one.
+pub(crate) fn search<T, C>(
+    name: &str,
+    path_value: Option<&str>,
+    cwd: Option<&CwdPath>,
+    judge: impl FnMut(Candidate) -> ControlFlow<T, C>,
+) -> Result<T, Vec<C>> {
+    let Some(path_value) = path_value else {
+        return Err(Vec::new());
+    };
+    let now = Instant::now();
+    let (key, candidates) = query(name, path_value, cwd);
+    let first = match recall(&key, now) {
+        Recalled::Remembered(Some(hit)) => candidates.iter().position(|c| *c == hit),
+        Recalled::Remembered(None) | Recalled::Cold => None,
+    };
+    fold(key, &candidates, first, now, judge)
+}
+
+/// `candidates` walked and judged, `first` before the rest, each verdict
+/// kept at its place in `PATH` order.  The memo then learns the first
+/// program, where the walks decide it: every candidate before it walked.
+fn fold<T, C>(
+    key: LocateKey,
+    candidates: &[PathBuf],
+    first: Option<usize>,
+    now: Instant,
+    mut judge: impl FnMut(Candidate) -> ControlFlow<T, C>,
+) -> Result<T, Vec<C>> {
+    // Per candidate: unwalked, or whether its walk found a program.
+    let mut programs = vec![None; candidates.len()];
+    let mut passed: Vec<Option<C>> = candidates.iter().map(|_| None).collect();
+    let rest = (0..candidates.len()).filter(|at| Some(*at) != first);
+    let mut taken = None;
+    for at in first.into_iter().chain(rest) {
+        let candidate = Candidate::walk(candidates[at].clone());
+        programs[at] = Some(candidate.as_ref().is_some_and(Candidate::holds_program));
+        match candidate.map(&mut judge) {
+            Some(ControlFlow::Break(it)) => {
+                taken = Some(it);
+                break;
+            }
+            Some(ControlFlow::Continue(verdict)) => passed[at] = Some(verdict),
+            None => {}
+        }
+    }
+    match programs
+        .iter()
+        .zip(candidates)
+        .find(|(walked, _)| **walked != Some(false))
+    {
+        None => remember(key, None, now),
+        Some((Some(true), hit)) => remember(key, Some(hit.clone()), now),
+        Some(_) => {}
+    }
+    taken.ok_or_else(|| passed.into_iter().flatten().collect())
+}
+
+/// The memo's key for bare `name` on `path_value` read against `cwd`, and
+/// the files the name may be, in `PATH` order: each [`path_dirs`] entry
+/// joined with it, on Windows with each `%PATHEXT%` suffix.
+fn query(name: &str, path_value: &str, cwd: Option<&CwdPath>) -> (LocateKey, Vec<PathBuf>) {
+    let dirs = path_dirs(path_value, cwd);
     #[cfg(windows)]
     let suffixes = windows_pathext_suffixes();
+    #[cfg(windows)]
+    let candidates = dirs
+        .iter()
+        .flat_map(|dir| windows_command_candidates(&dir.join(name), &suffixes))
+        .collect();
+    #[cfg(not(windows))]
+    let candidates = dirs.iter().map(|dir| dir.join(name)).collect();
     let key = LocateKey {
         name: name.to_owned(),
         path_value: path_value.to_owned(),
@@ -56,59 +166,17 @@ fn locate_at(
         #[cfg(windows)]
         pathext: suffixes.join(";"),
     };
-    if let Recalled::Remembered(answer) = recall(&key, now) {
-        return answer;
-    }
-    #[cfg(windows)]
-    let candidates = candidates_with_suffixes(name, path_value, cwd, &suffixes);
-    #[cfg(not(windows))]
-    let candidates = command_candidates(name, Some(path_value), cwd);
-    let found = candidates.into_iter().find(|c| is_executable_file(c));
-    remember(key, found.clone(), now);
-    found
+    (key, candidates)
 }
 
-/// The files a bare `name` may be, in `PATH` order: each `path_dirs` entry
-/// joined with `name` (on Windows, with each `%PATHEXT%` suffix). Empty with no `PATH`.
-pub(crate) fn command_candidates(
-    name: &str,
-    path_value: Option<&str>,
-    cwd: Option<&CwdPath>,
-) -> Vec<PathBuf> {
-    let Some(path_value) = path_value else {
-        return Vec::new();
-    };
-    #[cfg(windows)]
-    {
-        candidates_with_suffixes(name, path_value, cwd, &windows_pathext_suffixes())
-    }
-    #[cfg(not(windows))]
-    path_dirs(path_value, cwd)
-        .into_iter()
-        .map(|dir| dir.join(name))
-        .collect()
-}
-
-#[cfg(windows)]
-fn candidates_with_suffixes(
-    name: &str,
-    path_value: &str,
-    cwd: Option<&CwdPath>,
-    suffixes: &[String],
-) -> Vec<PathBuf> {
-    path_dirs(path_value, cwd)
-        .into_iter()
-        .flat_map(|dir| windows_command_candidates(&dir.join(name), suffixes))
-        .collect()
-}
-
-/// The first executable file named `name` in `dirs`, in order and
-/// unmemoised, for a caller holding directories rather than a `PATH` string.
+/// The first program named `name` in `dirs`, in order and unmemoised, for a
+/// caller holding directories rather than a `PATH` string.
 #[cfg(target_os = "linux")]
 pub(crate) fn locate_in(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     dirs.into_iter()
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_file(candidate))
+        .filter_map(|dir| Candidate::walk(dir.join(name)))
+        .find(Candidate::holds_program)
+        .map(|found| found.arg0)
 }
 
 /// How long a *negative* answer is trusted, inside the run that took it:
@@ -121,7 +189,7 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(1);
 /// remembered nothing loses nothing by clearing.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-struct Located {
+struct Answer {
     hit: Option<PathBuf>,
     probed: Instant,
 }
@@ -148,25 +216,26 @@ struct LocateKey {
 
 struct LocateCache {
     generation: u64,
-    entries: HashMap<LocateKey, Located>,
+    entries: HashMap<LocateKey, Answer>,
 }
 
 thread_local! {
-    /// A `PATH` walk paid once per run rather than once per name.
+    /// Where the walks found a name's first program, paid once per run
+    /// rather than once per name.
     ///
     /// Thread-local and lock-free, because a run's evaluation is
     /// single-threaded on the calling thread.  It hangs off no `Shell` and no
-    /// `Context` on purpose: the hottest callers, `shell::exec::command::head`'s
-    /// resolution and `authority::policy::exec`'s compile, hold no `Shell`.
+    /// `Context` on purpose: its callers, `shell::exec::command::head`'s
+    /// resolution and `authority::grant`'s decode of a bare key, hold no `Shell`.
     ///
     /// A newly installed or newly deleted executable is therefore invisible
     /// for at most the remainder of the current top-level run — one submitted
     /// line in the REPL, one script in batch, one dispatch in the engine — and
     /// nothing survives a run boundary, which is fresher than bash's `hash`
-    /// table.  Within a run a `None` older than [`NEGATIVE_TTL`] is re-probed
-    /// while positives ride the generation alone, because a stale miss is a
-    /// wrong answer where a stale hit is probed like any candidate, fails,
-    /// and the judged fold walks every candidate.
+    /// table.  Within a run a `None` older than [`NEGATIVE_TTL`] is walked
+    /// again while positives ride the generation alone, because a stale miss
+    /// is a wrong answer where a stale hit costs [`search`] one walk: it is no
+    /// program there, and the search goes on in `PATH` order.
     static LOCATED: RefCell<LocateCache> = RefCell::new(LocateCache {
         generation: GENERATION.load(Ordering::Relaxed),
         entries: HashMap::new(),
@@ -209,12 +278,12 @@ fn recall(key: &LocateKey, now: Instant) -> Recalled {
 /// Remember `hit` for `key`, stamped `now`.
 fn remember(key: LocateKey, hit: Option<PathBuf>, now: Instant) {
     LOCATED.with_borrow_mut(|cache| {
-        cache.entries.insert(key, Located { hit, probed: now });
+        cache.entries.insert(key, Answer { hit, probed: now });
     });
 }
 
-/// Forget every memoised `PATH` answer, on every thread: the next [`locate`]
-/// walks the disk again.
+/// Forget every remembered `PATH` answer, on every thread: the next
+/// [`locate`] or [`search`] walks every candidate again.
 ///
 /// The top-level run calls this, so a caller needs it only to admit a
 /// *mid-run* change to the filesystem — planting a binary and resolving it in
@@ -251,7 +320,7 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&CwdPath>) -> Option<PathBuf> {
     Some(super::lex::fold_dots(&anchored))
 }
 
-/// The one directory list behind [`locate`] and [`command_candidates`]; relative
+/// The one directory list behind [`locate`] and [`search`]; relative
 /// entries (`./bin`) anchor to `cwd`, and with no cwd are dropped, as a
 /// grant's `path` selector and the bwrap search read `PATH`.
 pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<PathBuf> {
@@ -276,27 +345,11 @@ pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
 /// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
 /// trailing `;` is ubiquitous noise, so honouring it would put every file of
 /// every directory the user `cd`s into on the search list; off Unix, where
-/// [`is_executable_file`] calls any file executable, that is every file
+/// any file is a program ([`Located::is_executable`]), that is every file
 /// outright.  A user who wants the cwd searched writes `.`, which
 /// [`anchor_to_cwd`] honours deliberately.
 pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path_value).filter(|dir| !dir.as_os_str().is_empty())
-}
-
-pub(crate) fn is_executable_file(p: &Path) -> bool {
-    if !site!(Silent::WhichStat, p => is_file()) {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        site!(Silent::WhichStat, std::fs::metadata(p))
-            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 /// The resolver's fallback when `%PATHEXT%` is unset;
@@ -442,6 +495,7 @@ mod batch_tests {
 mod memo_tests {
     use super::*;
     use crate::sync::LockExt as _;
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
 
     fn cwd_at(dir: &Path) -> CwdPath {
@@ -460,8 +514,8 @@ mod memo_tests {
         guard
     }
 
-    /// Whatever the walk's executable test demands: the `+x` bit on Unix, and
-    /// nothing off it, where [`is_executable_file`] accepts any file.
+    /// Whatever the one executable predicate demands: the `+x` bit on Unix,
+    /// and nothing off it, where any file is a program.
     fn make_executable(p: &Path) {
         std::fs::write(p, b"#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -601,19 +655,6 @@ mod memo_tests {
         assert_eq!(without, None);
         assert!(with.is_some(), "got {with:?}");
     }
-
-    #[test]
-    fn a_separator_bearing_name_is_never_memoised() {
-        let _guard = cache_guard();
-        let tmp = tempfile::tempdir().unwrap();
-        let planted = tmp.path().join("runme");
-        make_executable(&planted);
-
-        assert!(locate("./runme", None, Some(&cwd_at(tmp.path()))).is_some());
-        std::fs::remove_file(&planted).unwrap();
-        // No `forget`, and still a fresh answer.
-        assert_eq!(locate("./runme", None, Some(&cwd_at(tmp.path()))), None);
-    }
 }
 
 /// The Windows resolver's own rules: `%PATHEXT%` suffixes append to the name
@@ -752,6 +793,7 @@ mod name_key_tests {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     fn cwd_at(dir: &Path) -> CwdPath {
         CwdPath::new(dir.to_path_buf()).expect("a fixture cwd is absolute")
@@ -762,16 +804,6 @@ mod tests {
         let mut perms = std::fs::metadata(p).unwrap().permissions();
         perms.set_mode(mode);
         std::fs::set_permissions(p, perms).unwrap();
-    }
-
-    #[test]
-    fn locate_folds_the_dots_out_of_an_anchored_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        touch(&tmp.path().join("runme"), 0o755);
-        // Folded, not merely joined: the answer is what the OS sandbox
-        // profile matches literally, and `/tmp/x/./runme` is not `/tmp/x/runme`.
-        let hit = locate("./runme", None, Some(&cwd_at(tmp.path()))).unwrap();
-        assert_eq!(hit, tmp.path().join("runme"));
     }
 
     #[test]
@@ -857,19 +889,56 @@ mod tests {
         assert_eq!(locate("runme", Some(path), None), None);
     }
 
-    /// Candidates include files the executable probe declines.
+    /// A search hands its judge a file `locate` passes over as no program.
     #[test]
-    fn candidates_include_a_non_executable_file() {
+    fn a_search_hands_the_judge_a_non_executable_file() {
         let _guard = super::memo_tests::cache_guard();
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("noexec"), 0o644);
-        let path_value = tmp.path().to_str().unwrap();
+        let path_value = tmp.path().to_str();
 
-        assert_eq!(locate("noexec", Some(path_value), None), None);
-        let p = command_candidates("noexec", Some(path_value), None)
-            .into_iter()
-            .next()
-            .expect("PATH holds a candidate");
-        assert_eq!(p, tmp.path().join("noexec"));
+        assert_eq!(locate("noexec", path_value, None), None);
+        let passed = search("noexec", path_value, None, |candidate| {
+            ControlFlow::<(), _>::Continue(candidate.arg0)
+        });
+        assert_eq!(passed, Err(vec![tmp.path().join("noexec")]));
+    }
+
+    /// The remembered program is walked first, and its verdict keeps its
+    /// place in `PATH` order.
+    #[test]
+    fn a_search_tries_the_remembered_program_first() {
+        let (_tmp, dirs) = shadowed_tool();
+        let path = std::env::join_paths(&dirs).unwrap();
+        let (key, candidates) = query("tool", path.to_str().unwrap(), None);
+        let mut walked = Vec::new();
+        let passed = fold(key, &candidates, Some(2), Instant::now(), |candidate| {
+            walked.push(candidate.arg0.clone());
+            ControlFlow::<(), _>::Continue(candidate.arg0)
+        });
+        assert_eq!(walked, [2, 0, 1, 3].map(|at| candidates[at].clone()));
+        assert_eq!(passed, Err(candidates));
+    }
+
+    /// Whatever its judge takes, a search's walks teach the memo where the
+    /// first program is.
+    #[test]
+    fn a_search_remembers_the_first_program_its_walks_found() {
+        let _guard = super::memo_tests::cache_guard();
+        let (_tmp, dirs) = shadowed_tool();
+        let path = std::env::join_paths(&dirs).unwrap();
+        let path = path.to_str();
+
+        let taken = search("tool", path, None, |candidate| {
+            if candidate.arg0.starts_with(&dirs[3]) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(taken, Ok(()));
+        std::fs::remove_file(dirs[2].join("tool")).unwrap();
+        // The file is gone, so only the memo can answer with it.
+        assert_eq!(locate("tool", path, None), Some(dirs[2].join("tool")));
     }
 }

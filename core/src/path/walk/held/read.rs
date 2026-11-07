@@ -7,13 +7,29 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 
 use super::{
-    Access, Data, Installing, Kind, Leaf, Located, ObjectId, Peeks, Reads, Stat, Visibility, host,
+    Access, Authority, Data, Installing, Kind, Leaf, Located, ObjectId, Peeks, Reads, Stat,
+    Visibility, host,
 };
 
 impl ObjectId {
     /// The identity of the object `f` holds, read from the handle.
     pub(crate) fn of(f: &File) -> io::Result<Self> {
         host::seen(f).map(|seen| seen.id)
+    }
+}
+
+impl<A: Authority> Located<A> {
+    /// The one executable predicate: a regular file, on Unix with an execute
+    /// bit.  Unjudged only inside `path`, where `PATH` search orders its
+    /// candidates by it; elsewhere [`Self::is_executable`].
+    pub(in crate::path) fn holds_program(&self) -> bool {
+        self.observed().is_some_and(|stat| {
+            #[cfg(unix)]
+            let runs = stat.mode & 0o111 != 0;
+            #[cfg(not(unix))]
+            let runs = true;
+            stat.kind == Kind::File && runs
+        })
     }
 }
 
@@ -27,15 +43,10 @@ impl<A: Peeks> Located<A> {
         self.stat().map(|stat| stat.kind)
     }
 
-    /// Kind `File` and, on Unix, `mode & 0o111`; on Windows what
-    /// `is_executable_file` decides today.  Asked of an admitted program,
-    /// never before the judgment.
+    /// [`Self::holds_program`], asked of an admitted program, never before
+    /// the judgment.
     pub(crate) fn is_executable(&self) -> bool {
-        #[cfg(unix)]
-        let executable = self.stat().is_some_and(|s| s.mode & 0o111 != 0);
-        #[cfg(not(unix))]
-        let executable = crate::path::is_executable_file(self.real().as_path());
-        self.kind() == Some(Kind::File) && executable
+        self.holds_program()
     }
 
     /// The link's target, read through the held leaf handle.

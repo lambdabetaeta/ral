@@ -86,10 +86,6 @@ pub(in crate::path) enum Silent {
     /// directory or a pointer file.  It is ral's own repository discovery, not
     /// a name the model gave, so it raises no card.
     GitDotGit,
-    /// The `which`/PATH probe: stats a candidate to read its executable bit.
-    /// An executable-probe predicate, not turn-time model data I/O, so it
-    /// raises no card.
-    WhichStat,
     /// `PATHEXT`, the Windows resolver's suffix list, which is no XDG base: a
     /// PATH-probe environment read, taken beside the other `which` probes.  It
     /// reads a variable and opens no object, so it raises no card.
