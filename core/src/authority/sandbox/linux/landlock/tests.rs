@@ -12,6 +12,16 @@ fn whole() -> Vec<RealPath> {
     vec![real("/")]
 }
 
+/// What an unrestricted fs shows: [`whole`], masking nothing.
+fn unmasked() -> Shown {
+    Shown {
+        binds: Vec::new(),
+        tolerated: BTreeSet::new(),
+        roots: whole(),
+        denies: Vec::new(),
+    }
+}
+
 /// The position of the `/`-rooted fixture name `spelled`, under a place
 /// nothing occupies.
 fn nowhere(spelled: &str) -> RealPath {
@@ -187,7 +197,7 @@ fn an_absent_admit_and_a_file_admit_now_a_directory_are_dropped() {
     let built = build(
         &ExecProjection::Restricted(table_of(&rules)),
         &FsProjection::Unrestricted,
-        &whole(),
+        &unmasked(),
         landlock,
         &mut Handoff::default(),
     )
@@ -214,7 +224,7 @@ fn an_admit_now_reached_through_a_symlink_refuses_the_launch() {
     let Err(why) = build(
         &ExecProjection::Restricted(table_of(&[rule(position, true, true)])),
         &FsProjection::Unrestricted,
-        &whole(),
+        &unmasked(),
         landlock,
         &mut Handoff::default(),
     ) else {

@@ -132,7 +132,8 @@ impl<'a> Envelope<'a> {
 /// `--info-fd` peer, beside the caller's (the warrant and report, at `slots`,
 /// and the Landlock ruleset).  bwrap takes options alone from `--args`, so the payload rides
 /// its argv, and runs the pinned inode whatever now holds its name.
-/// `shown` is the bind plan the Landlock ruleset was built against.
+/// `shown` is the plan the Landlock ruleset was built against, binds and
+/// masks alike.
 ///
 /// The second element of the return is `Kept`'s `--info-fd` peer — see
 /// [`InfoFd`].  Refused under a bwrap that builds no envelope or cannot mount
@@ -192,8 +193,8 @@ pub(crate) fn bwrap_command(
 }
 
 /// The bwrap options that confine a payload under `policy`: `binds` by
-/// slot, layer by layer, `deny` masked last at every name a bind
-/// shows them; a deny hiding `/proc`, which bwrap execs the trampoline
+/// slot, layer by layer, and their denies masked last, as planned, at every
+/// name a bind shows them; a deny hiding `/proc`, which bwrap execs the trampoline
 /// through, is refused, as is one holding `chdir`, which no mask lets bwrap
 /// enter.  Descriptors appear by slot number alone, one
 /// `--add-seccomp-fd` per slot of `seccomp`; [`bwrap_command`] lends them.
@@ -286,7 +287,7 @@ pub(crate) fn bwrap_argv(
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
-    if let Some(rules) = policy.fs.rules() {
+    if !binds.denies.is_empty() {
         // By stored name, where a mask lands, not folded as an exclusion is;
         // a cwd that resolves nowhere is left to bwrap's `--chdir`.
         let cwd = chdir.and_then(|dir| {
@@ -295,22 +296,19 @@ pub(crate) fn bwrap_argv(
                 RealPath::of(&LexicalPath::absolute(dir.as_path())?).ok()?,
             ))
         });
-        let mut denied: Vec<_> = rules.deny.iter().collect();
-        denied.sort();
-        for path in denied {
+        for deny in &binds.denies {
             if let Some((dir, at)) = &cwd
-                && path.holds_position(at)
+                && deny.name.holds_position(at)
             {
                 return Err(format!(
                     "sandbox: the working directory {} is excluded by {}, and no confined \
                      command can start inside an exclusion; run it from another directory \
                      (`cd` or `within [dir: …]`)",
                     crate::path::shown(dir.as_path()),
-                    path.as_str()
+                    deny.name.as_str()
                 ));
             }
-            let mask = DenyMask::over(path);
-            for name in binds.names(path) {
+            for name in binds.names(&deny.name) {
                 if name.holds("/proc") {
                     return Err(format!(
                         "sandbox: the grant denies {}, which hides /proc, and the envelope \
@@ -318,7 +316,7 @@ pub(crate) fn bwrap_argv(
                         name.as_str()
                     ));
                 }
-                mask.render(&mut c, name.as_str());
+                deny.mask.render(&mut c, name.as_str());
             }
         }
     }
@@ -397,8 +395,12 @@ impl Bind {
     }
 }
 
-/// The binds, each with the slot its handle was lent at.
-pub(crate) struct Binds(Vec<(Slot, Bind)>);
+/// The binds, each with the slot its handle was lent at, and the denies
+/// [`Shown`] planned over them.
+pub(crate) struct Binds {
+    lent: Vec<(Slot, Bind)>,
+    denies: Vec<Deny>,
+}
 
 impl Binds {
     /// Plan, open and lend: the one place a launch opens what it mounts, the two
@@ -409,6 +411,7 @@ impl Binds {
         let Shown {
             binds: mut planned,
             tolerated,
+            denies,
             ..
         } = shown;
         if let Some(tree) = cgroup_tree(env.host)
@@ -423,7 +426,7 @@ impl Binds {
                 opened.insert(bind.position.clone(), held);
             }
         }
-        let mut binds = Vec::new();
+        let mut lent = Vec::new();
         for bind in planned {
             // Absent: a name that shows nothing binds nothing.
             if let Some(Some(held)) = opened.get(&bind.position) {
@@ -433,17 +436,19 @@ impl Binds {
                         bind.object.as_str()
                     )
                 })?;
-                binds.push((handoff.lend(source)?, bind));
+                lent.push((handoff.lend(source)?, bind));
             }
         }
         for (bind, pin) in pinned([env.bwrap, env.trampoline])? {
-            binds.push((handoff.lend(pin)?, bind));
+            lent.push((handoff.lend(pin)?, bind));
         }
-        Ok(Self(binds))
+        Ok(Self { lent, denies })
     }
 
     fn layer(&self, layer: Layer) -> impl Iterator<Item = &(Slot, Bind)> {
-        self.0.iter().filter(move |(_, bind)| bind.layer == layer)
+        self.lent
+            .iter()
+            .filter(move |(_, bind)| bind.layer == layer)
     }
 
     /// Names still visible after the overlaid binds replace their destinations.
@@ -481,7 +486,9 @@ pub(crate) struct Shown {
     tolerated: BTreeSet<RealPath>,
     /// The deduped objects the view is rooted at: every shown object under a
     /// restricted fs, `/` under an unrestricted one.
-    pub(crate) roots: Vec<RealPath>,
+    roots: Vec<RealPath>,
+    /// Sorted by name; the one answer bwrap and Landlock both read.
+    denies: Vec<Deny>,
 }
 
 impl Shown {
@@ -490,7 +497,7 @@ impl Shown {
     /// object at its real name and at the name it was granted by, less what
     /// another bind already shows; read-only before writable, each sorted by
     /// name, so a parent precedes its children and a writable prefix inside
-    /// a read-only one wins.
+    /// a read-only one wins.  Each deny is read once, for its mask.
     pub(crate) fn of(policy: &RenderedProjection, baseline: &Baseline) -> Result<Self, String> {
         let FsProjection::Restricted(rules) = &policy.fs else {
             let root = open_dir_nofollow(&RealPath::universal())?.ok_or("sandbox: no root")?;
@@ -498,6 +505,7 @@ impl Shown {
                 binds: Vec::new(),
                 tolerated: BTreeSet::new(),
                 roots: vec![root.real().clone()],
+                denies: Vec::new(),
             });
         };
         let tolerated = (rules.read.iter())
@@ -519,11 +527,43 @@ impl Shown {
             .into_iter()
             .cloned()
             .collect();
+        let mut denied: Vec<_> = rules.deny.iter().collect();
+        denied.sort();
         Ok(Self {
             binds,
             tolerated,
             roots,
+            denies: denied.into_iter().map(Deny::read).collect(),
         })
+    }
+
+    /// The positions masked by a scratch tmpfs, which the payload may `chmod`
+    /// open: each deny that stood as a directory.
+    fn scratch(&self) -> Vec<RealPath> {
+        (self.denies.iter())
+            .filter(|deny| deny.mask == DenyMask::EmptyDir)
+            .filter_map(|deny| deny.position.clone())
+            .collect()
+    }
+}
+
+/// A deny as planned: the mask its name takes, and where the name led.
+struct Deny {
+    name: Rendered,
+    mask: DenyMask,
+    /// `None` where the name could not be walked.
+    position: Option<RealPath>,
+}
+
+impl Deny {
+    /// `name`, from one read of what stands there now.
+    fn read(name: &Rendered) -> Self {
+        let stood = standing(name);
+        Self {
+            name: name.clone(),
+            mask: DenyMask::of(stood.as_ref().and_then(Trace::kind)),
+            position: stood.map(|stood| stood.real().clone()),
+        }
     }
 }
 
@@ -831,7 +871,7 @@ impl InfoFd {
 /// The mount that masks one denied path, bwrap having no negative path rule.
 /// The target's shape forces which one, and getting it wrong costs the launch
 /// rather than the deny — `--tmpfs` over a regular file dies in `mkdir` before
-/// the body execs — so [`Self::over`] reads it off the denied path, and the
+/// the body execs — so [`Deny::read`] reads it off the denied path, and the
 /// mask goes on at each name that shows it.
 ///
 /// Every mask goes over a name that already exists: a mount bwrap must first
@@ -860,11 +900,6 @@ enum DenyMask {
 }
 
 impl DenyMask {
-    /// The mask `path` needs, from what stands there.
-    fn over(path: &Rendered) -> Self {
-        Self::of(standing(path).and_then(|stood| stood.kind()))
-    }
-
     /// The mask an object of `kind` needs; a name that stands nothing, none.
     fn of(kind: Option<Kind>) -> Self {
         match kind {

@@ -203,7 +203,7 @@ fn linux_sandboxed_command(
 }
 
 /// `env`'s trampoline, handed its warrant and the Landlock ruleset built
-/// here, against the binds the envelope will show.  The trampoline is *us*:
+/// here, against what the envelope will show.  The trampoline is *us*:
 /// our boot pin, which bwrap execs by descriptor.
 #[cfg(target_os = "linux")]
 pub(super) fn enveloped(
@@ -221,7 +221,7 @@ pub(super) fn enveloped(
     let confinement = super::linux::landlock::build(
         &rendered.exec,
         &rendered.fs,
-        &shown.roots,
+        &shown,
         env.host.landlock,
         &mut handoff,
     )?;

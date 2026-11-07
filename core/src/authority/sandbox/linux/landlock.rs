@@ -26,7 +26,7 @@
 
 use super::super::Refusal;
 use super::super::warrant::{Handoff, Slot};
-use super::{DenyMask, OpenError, leaf_fd, open_dir_nofollow, open_nofollow, standing};
+use super::{OpenError, Shown, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::authority::policy::{ExecDeny, ExecRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
 use crate::path::{Dir, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath, Trace};
@@ -369,8 +369,9 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
 
 /// The ruleset for `exec` on a kernel at `landlock`, lent to `handoff`, and
 /// what the payload is promised; `None` where there is nothing to enter.
-/// `roots` are the objects the envelope shows, which a directory admission is
-/// lowered onto; `fs` decides where a name veto is carried into one.
+/// `shown` is what the envelope will show: a directory admission is lowered
+/// onto its roots and kept out of its scratch masks; `fs` decides where a
+/// name veto is carried into one.
 ///
 /// # Errors
 /// As [`plan`]; a ruleset or rule the kernel refuses; an admit that cannot be
@@ -379,7 +380,7 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Refus
 pub(crate) fn build(
     exec: &ExecProjection,
     fs: &RenderedFs,
-    roots: &[RealPath],
+    shown: &Shown,
     landlock: Landlock,
     handoff: &mut Handoff,
 ) -> Result<Option<Landlocked>, Refusal> {
@@ -389,10 +390,10 @@ pub(crate) fn build(
     let ruleset = Ruleset::create(handled, scoped)
         .map_err(|e| Refusal::Launch(Error::Create(e).to_string()))?;
     if let Some(table) = kernel_table(exec) {
-        admit_exec(&ruleset, table, fs, roots)?;
+        admit_exec(&ruleset, table, fs, shown)?;
     }
     if handled.contains(Access::RESOLVE_UNIX) {
-        admit_sockets(fs, roots, &mut |admit| {
+        admit_sockets(fs, &shown.roots, &mut |admit| {
             ruleset.admit(admit.fd, Access::RESOLVE_UNIX)
         })
         .map_err(String::from)?;
@@ -441,23 +442,13 @@ fn admit_exec(
     ruleset: &Ruleset,
     table: &ExecRules,
     fs: &RenderedFs,
-    roots: &[RealPath],
+    shown: &Shown,
 ) -> Result<(), String> {
     let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Access::EXECUTE);
     admit_files(table, sink)?;
     let walks = vetoes_walk(table, fs);
-    expand(table, roots, &walks, &masked(fs), sink)?;
+    expand(table, &shown.roots, &walks, &shown.scratch(), sink)?;
     Ok(())
-}
-
-/// The positions the envelope masks with a scratch tmpfs: each deny that
-/// stands as a directory now.
-fn masked(fs: &RenderedFs) -> Vec<RealPath> {
-    (fs.rules().into_iter().flat_map(|rules| &rules.deny))
-        .filter_map(standing)
-        .filter(|stood| DenyMask::of(stood.kind()) == DenyMask::EmptyDir)
-        .map(|stood| stood.real().clone())
-        .collect()
 }
 
 /// Each file `table` allows, as itself, into `sink`.

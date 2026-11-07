@@ -40,7 +40,7 @@ fn stat_of(slot: Slot) -> rustix::fs::Stat {
 /// handoff lives.
 fn held_at(binds: &Binds, dest: &std::path::Path) -> rustix::fs::Stat {
     let dest = dest.to_string_lossy();
-    let (slot, _) = (binds.0.iter())
+    let (slot, _) = (binds.lent.iter())
         .find(|(_, bind)| bind.dest.as_str() == dest)
         .expect("a bind there");
     stat_of(*slot)
@@ -286,6 +286,41 @@ fn a_symlinked_deny_is_masked_at_its_target_and_never_at_the_link() {
         !args.iter().any(|a| *a == link.to_string_lossy()),
         "the link's own name must not be mounted over: {args:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What stands at a deny is read once, into the plan: a name whose kind
+/// changes afterwards is masked by bwrap, and kept from Landlock, as it
+/// stood then, so no scratch tmpfs Landlock admitted from above can exist.
+#[test]
+fn bwrap_and_landlock_take_each_denys_mask_from_one_read() {
+    let dir = workdir("deny-one-read");
+    let dir = std::fs::canonicalize(&dir).expect("the work dir is real");
+    let (was_dir, was_file) = (dir.join("was-dir"), dir.join("was-file"));
+    std::fs::create_dir(&was_dir).unwrap();
+    std::fs::write(&was_file, "x").unwrap();
+    let policy = deny_within(&dir, &[&was_dir, &was_file]);
+    let shown = plan(&policy);
+    std::fs::remove_dir(&was_dir).unwrap();
+    std::fs::write(&was_dir, "x").unwrap();
+    std::fs::remove_file(&was_file).unwrap();
+    std::fs::create_dir(&was_file).unwrap();
+    assert_eq!(
+        shown.scratch(),
+        [crate::test_helper::real(&was_dir)],
+        "Landlock keeps out of the directory that stood"
+    );
+    let binds = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default())
+        .expect("the binds open");
+    let args = render(&policy, &binds, None, Ownership::Kept, WHOLE);
+    let tmpfs = |p: &std::path::Path| {
+        position_of(&args, &["--perms", "0000", "--tmpfs", &p.to_string_lossy()]).is_some()
+    };
+    let node = |p: &std::path::Path| {
+        position_of(&args, &["--ro-bind", "/dev/null", &p.to_string_lossy()]).is_some()
+    };
+    assert!(tmpfs(&was_dir) && !node(&was_dir), "{args:?}");
+    assert!(node(&was_file) && !tmpfs(&was_file), "{args:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -726,24 +761,27 @@ fn cgroup_masks_follow_the_tree_shown_by_the_overlaid_bind() {
             .remove(0)
     };
     let tree = "/sys/fs/cgroup/ral";
-    let binds = Binds(vec![
-        (
-            info_slot(),
-            Bind::read_only(
-                Layer::Shown,
-                name("/sys"),
-                (crate::test_helper::place("/sys"), name("/sys")),
+    let binds = Binds {
+        lent: vec![
+            (
+                info_slot(),
+                Bind::read_only(
+                    Layer::Shown,
+                    name("/sys"),
+                    (crate::test_helper::place("/sys"), name("/sys")),
+                ),
             ),
-        ),
-        (
-            info_slot(),
-            Bind::read_only(
-                Layer::Over,
-                name(CGROUP),
-                (crate::test_helper::place(tree), name(tree)),
+            (
+                info_slot(),
+                Bind::read_only(
+                    Layer::Over,
+                    name(CGROUP),
+                    (crate::test_helper::place(tree), name(tree)),
+                ),
             ),
-        ),
-    ]);
+        ],
+        denies: Vec::new(),
+    };
     assert_eq!(
         binds.names(&name("/sys/fs/cgroup/other/cgroup.procs")),
         vec![]
@@ -976,7 +1014,7 @@ fn sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads()
     // The tree's handle, by the inode it opened.
     let tree = |host: HostEnvelope, policy: &SandboxProjection| {
         let (binds, _handoff) = lent(policy, host);
-        let (slot, bind) = (binds.0.iter())
+        let (slot, bind) = (binds.lent.iter())
             .find(|(_, bind)| bind.dest.as_str() == CGROUP)
             .expect("a cgroup bind");
         assert_eq!(bind.layer, Layer::Over);
