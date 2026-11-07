@@ -68,6 +68,10 @@ pub(crate) use warrant::serve_warrant;
 pub(crate) use diag::denial_hint;
 #[cfg(unix)]
 pub(crate) use diag::interpreter_hint;
+// Read by `start` as an enveloped program begins, for the pids its deny
+// lines may name.
+#[cfg(target_os = "linux")]
+pub(crate) use linux::payload::pids as payload_pids;
 
 /// Whether this platform can enforce `net: false`: Linux via `--unshare-net`,
 /// macOS via deny-default Seatbelt, Windows via an `AppContainer` with no

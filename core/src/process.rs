@@ -26,7 +26,6 @@ mod site;
 #[cfg(unix)]
 pub(crate) mod slot;
 pub(crate) mod spawn_lock;
-pub(crate) mod tree;
 
 pub(crate) use outcome::{Signal, WaitOutcome};
 
@@ -36,7 +35,6 @@ pub use lease::{RequestedTerminalAccess, TerminalLease};
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
 pub use fatal::Fatal;
 pub(crate) use reaper::Watch;
-pub(crate) use tree::sample_descendants;
 
 pub use cancel::{
     Ambient, AmbientForward, CancelCause, Cancellation, DurableRoot, Scope, ScopeId, ScopeNode,

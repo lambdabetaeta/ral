@@ -560,6 +560,49 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
     );
 }
 
+/// An enveloped start claims its program by the host pid a deny line would
+/// carry, read beneath the payload as it runs; never bwrap's monitor, which
+/// no deny-set confines.
+#[test]
+fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
+    use crate::shell::exec::command::{Claim, Started};
+    use std::time::Duration;
+
+    if envelope_launches(&unrestricted()).is_none() {
+        return;
+    }
+    start_granted("exec sleep 30", |started, shell| {
+        let Started { shown, args, born } = started;
+        let Claim::Confined(pids) = &born.claim else {
+            panic!("a launch under a grant is confined");
+        };
+        let crate::process::Landing::Owns(payload) = born.spawned.landing else {
+            panic!("a kept launch names its payload's group");
+        };
+        let comm = |pid: &u32| std::fs::read_to_string(format!("/proc/{pid}/comm"));
+        let program = crate::test_helper::eventually(Duration::from_secs(5), || {
+            pids.iter()
+                .find(|pid| comm(pid).is_ok_and(|comm| comm.trim_end() == "sleep"))
+                .copied()
+        });
+        let leader = pids.contains(&payload.as_raw().cast_unsigned());
+        let monitor = pids.contains(&born.spawned.child.id());
+        payload.kill();
+        let _ = crate::shell::exec::pipeline::join_lone(
+            born,
+            crate::shell::exec::command::Pumps::default(),
+            None,
+            shown,
+            args,
+            std::time::Instant::now(),
+            shell,
+        );
+        assert!(program.is_some(), "the running program is unclaimed");
+        assert!(leader, "the payload's leader is unclaimed");
+        assert!(!monitor, "bwrap's monitor is claimed");
+    });
+}
+
 fn signaled(signal: i32) -> crate::process::WaitOutcome {
     crate::process::WaitOutcome::Signaled(crate::process::Signal::new(signal))
 }

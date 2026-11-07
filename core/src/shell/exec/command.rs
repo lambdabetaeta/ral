@@ -25,7 +25,7 @@ mod vet;
 pub(crate) use detach::detach;
 pub(crate) use foreground::placement;
 pub(crate) use head::{Admission, Head};
-pub(crate) use process::{Started, ending, prepare, start};
+pub(crate) use process::{Born, Claim, Started, ending, prepare, start};
 pub(crate) use stdio::{ChildIo, ChildOut, boundary_stdin, wire_stdio};
 
 /// Runs a standalone external call from vetting to reap.  A bundled
@@ -55,19 +55,14 @@ pub(crate) fn run(
     // `finish_command` builds the `Command{External}` observation from
     // whatever error reaches it, so a start failure needs no emission of
     // its own here.
-    let Started {
-        shown,
-        args,
-        born: spawned,
-    } = start(prepared, policy)?;
+    let Started { shown, args, born } = start(prepared, policy)?;
     // Its `Drop` restores ral's pgid on every path out of here, sparing the
     // next REPL tty read an EIO from a background pgroup.
-    let loan = lending.and_then(|loan| loan.lend(spawned.child.id().cast_signed()));
+    let loan = lending.and_then(|loan| loan.lend(born.spawned.child.id().cast_signed()));
 
     // Nothing fallible may run between `start` and here: until the collector
     // holds it the bare child leaks on an early return.
-    super::pipeline::join_lone(spawned, pumps, loan, shown, args, started, shell)
-        .map(|()| Value::Unit)
+    super::pipeline::join_lone(born, pumps, loan, shown, args, started, shell).map(|()| Value::Unit)
 }
 
 /// A child's stdout/stderr pumps: planned as the [`Sink`] each drains into,

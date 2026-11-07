@@ -895,7 +895,8 @@ in-process guard —
 a kernel-reported sandbox denial into an actionable hint on the
 failing command's `Error`: it reads the kernel log over the call's wall window
 (Seatbelt on macOS, the seccomp record inside bwrap on Linux), and retains only
-parsed `Record`s attributable to the call's descendant PIDs. The heading says
+parsed `Record`s whose pid the call's start claimed
+([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]). The heading says
 "sandbox denials were recorded for this command's processes:"; a denial beside
 a failure does not establish its cause. **The parsed operation decides the
 remedy, and the hint answers once per class present**: a

@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{Head, Started};
+use super::super::command::{Born, Head, Started};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
@@ -160,10 +160,14 @@ fn launch_external_stage_direct(
             shown,
             args,
             born:
-                Spawned {
-                    mut child,
-                    landing,
-                    jail,
+                Born {
+                    spawned:
+                        Spawned {
+                            mut child,
+                            landing,
+                            jail,
+                        },
+                    claim,
                 },
         } = command::start(prepared, PgidPolicy::Join(group.leader_pgid()))?;
         let pumps = pumps.start(&mut child, &shell.scope);
@@ -175,6 +179,7 @@ fn launch_external_stage_direct(
             jail,
             pumps,
             landing,
+            claim,
         })
     })
 }

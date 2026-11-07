@@ -5,7 +5,7 @@ use seccompiler::SeccompAction;
 use std::fmt;
 use std::time::Duration;
 
-pub(super) fn read_window(elapsed: Duration) -> Option<Vec<Record>> {
+pub(in crate::authority::sandbox) fn read_window(elapsed: Duration) -> Option<Vec<Record>> {
     if let Some(text) = collect(Collector::Journal(elapsed)) {
         return Some(text.lines().filter_map(parse_journal).collect());
     }

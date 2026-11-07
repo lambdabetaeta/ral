@@ -275,8 +275,6 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   be armed is an `Err`, never a warning: the launch is refused as
   sandbox-unavailable
   ([[design/two-enforcers|two-enforcers]]).
-- `tree.rs` — `sample_descendants`, one `ps` sample of the process table,
-  which `with_denials` reads only for a sandboxed, uncancelled failure.
 - `report.rs`: a confined launch's report socket: the `Record`s the trampoline
   writes (`Witness`), and the parent's `Testimony`, which reads the first word
   under the launch's scope and amends a Linux child's ending

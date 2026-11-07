@@ -5,8 +5,8 @@
 //! Seatbelt and the seccomp filter inside the bwrap envelope report denials into
 //! a system log keyed by `(comm, pid)`, while the caller sees only an opaque
 //! `EPERM` or nonzero exit.  So [`denial_hint`] reads that log over the
-//! call's wall window and keeps records whose PID lay in the call's descendant
-//! tree. Each platform supplies a reader and a record parser.
+//! call's wall window and keeps the records whose pid the call's start
+//! claimed. Each platform supplies a reader and a record parser.
 //!
 //! Windows differs in kind: an `AppContainer` denial carries no audit record at
 //! all, so there the hint is gated on the exit code and never names a path.
@@ -268,8 +268,8 @@ fn collect_output(cmd: &mut std::process::Command) -> Option<String> {
 }
 
 /// The hint for a sandboxed command that failed with `exit_code`, or `None`
-/// when there is nothing to say: the denials in the window since `since` that
-/// are attributable to a PID in `pids`.
+/// when there is nothing to say: the denials in the window since `since`
+/// whose pid is in `pids`, the start's claim.
 #[cfg(unix)]
 pub(crate) fn denial_hint(
     pids: &HashSet<u32>,

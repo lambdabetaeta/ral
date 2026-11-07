@@ -34,6 +34,12 @@ pub(crate) enum Silent {
     /// probe, not the model's exec image.
     #[cfg(target_os = "linux")]
     JournalRead,
+    /// The host's `/proc/<pid>/task/*/children` lists beneath an envelope's
+    /// payload, read as its program starts for the host pids its kernel deny
+    /// lines carry.  It raises no card: ral reading its own children, not a
+    /// model's data I/O.
+    #[cfg(target_os = "linux")]
+    EnvelopeChain,
     /// `/usr/bin/log show`, spawned to read Seatbelt denial records from the
     /// unified log for a sandbox diagnostic.  It raises no card: a
     /// diagnostic probe, not turn-time model data I/O.

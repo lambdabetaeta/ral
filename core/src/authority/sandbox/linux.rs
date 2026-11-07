@@ -28,6 +28,7 @@
 mod gpu;
 mod host;
 pub(crate) mod landlock;
+pub(crate) mod payload;
 pub(crate) mod seccomp;
 
 use gpu::GpuNodes;

@@ -127,6 +127,41 @@ fn restricted(
 /// What a confined launch came to: its output, or why it never started.
 type Ran = Result<std::process::Output, Unstarted>;
 
+/// `sh -c script` started as a command under a grant that only withholds
+/// the GPU, which needs no Landlock: admitted, prepared and started by the
+/// shell, its streams closed, and handed with the shell to `then`.  Callers
+/// skip first where no envelope builds.
+fn start_granted<R>(
+    script: &str,
+    then: impl FnOnce(crate::shell::exec::command::Started, &crate::shell::runtime::Shell) -> R,
+) -> R {
+    use crate::process::{PgidPolicy, StdioSpec};
+    use crate::shell::exec::command::{Head, prepare, start};
+    let mut shell = crate::test_helper::core_shell();
+    let layer = crate::test_helper::layer(Capabilities {
+        gpu: Some(crate::authority::policy::Gpu::Withheld),
+        ..Capabilities::default()
+    });
+    shell.with_layer(layer, |shell| {
+        let head = Head::resolve(
+            &crate::ir::CommandName::Path("/bin/sh".into()),
+            &shell.context,
+        )
+        .admit(&crate::shell::runtime::Mooring::adrift(), shell)
+        .expect("the grant admits /bin/sh");
+        let args = ["-c", script].map(crate::shell::runtime::Value::string);
+        let mut prepared = prepare(head, &args, Ownership::Kept, shell).expect("the launch builds");
+        prepared
+            .launch
+            .stdin(StdioSpec::null())
+            .stdout(StdioSpec::null())
+            .stderr(StdioSpec::null());
+        let started = start(prepared, PgidPolicy::NewLeader)
+            .unwrap_or_else(|broke| panic!("the confined sh must start: {broke:?}"));
+        then(started, shell)
+    })
+}
+
 /// `/bin/sh -c script`, through [`run_admitted`].
 fn run_confined(env: &Envelope<'_>, policy: &SandboxProjection, script: &str) -> Ran {
     run_admitted(env, policy, &sh(), &sh_args(script))

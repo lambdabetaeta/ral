@@ -305,6 +305,7 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
             )),
             pumps: command::Pumps::default(),
             landing: crate::process::Landing::Joins,
+            claim: Claim::Unconfined,
         }),
         None,
         slot,
@@ -579,6 +580,7 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         jail: None,
         pumps: command::Pumps::default(),
         sent: None,
+        claim: Claim::Unconfined,
     };
     let settled = |scope: &Scope| {
         end()
@@ -1398,6 +1400,14 @@ fn spawned(cmd: &mut std::process::Command, policy: crate::process::PgidPolicy) 
     }
 }
 
+/// `spawned`, born of an unconfined start: it claims no deny line.
+fn unconfined(spawned: Spawned) -> Born {
+    Born {
+        spawned,
+        claim: Claim::Unconfined,
+    }
+}
+
 /// The lines a trapper appended to `hits`, one per signal it heard.
 #[cfg(unix)]
 fn heard(hits: &std::path::Path) -> usize {
@@ -1809,7 +1819,7 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
     let (sink, _bytes) = crate::io::new_buffer();
     let pumps = command::Pumps::new(Some(sink), None);
     let collect = CollectState::lone(
-        lone,
+        unconfined(lone),
         pumps,
         None,
         "sh".into(),
@@ -1845,7 +1855,7 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     let shell = lone_shell(&scope, None);
     let pumps = command::Pumps::default();
     let mut collect = CollectState::lone(
-        lone,
+        unconfined(lone),
         pumps,
         None,
         "sh".into(),
@@ -1856,9 +1866,73 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     collect.drive();
     assert!(alive(), "the filed leader must still be a zombie");
 
-    let settled = collect.settle_lone(pid, &shell);
+    let settled = collect.settle_lone();
     assert!(matches!(settled, Err(Break::Error(_))), "{settled:?}");
     assert!(!alive(), "a settled leader must be reaped");
+}
+
+/// An external is hinted from its own claim, never from a sample of ral's
+/// tree: an `exit 128` that a sandbox confined carries the fork brake's
+/// hint, an unconfined one none, alone or as a pipeline's stage.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_external_is_hinted_from_its_own_claim() {
+    let claim = |confined: bool| {
+        if confined {
+            Claim::Confined(std::collections::HashSet::new())
+        } else {
+            Claim::Unconfined
+        }
+    };
+    let error = |end: End| match end {
+        End::Err(error) => error,
+        other => panic!("an exit 128 is the command's error: {other:?}"),
+    };
+    for confined in [false, true] {
+        let hint = confined
+            .then(|| crate::process::limits::failure_hint(128))
+            .flatten();
+
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "exit 128"]);
+        let born = Born {
+            spawned: spawned(&mut cmd, crate::process::PgidPolicy::NewLeader),
+            claim: claim(confined),
+        };
+        let scope = DurableRoot::default().worker();
+        let shell = lone_shell(&scope, None);
+        let mut lone = CollectState::lone(
+            born,
+            command::Pumps::default(),
+            None,
+            "sh".into(),
+            Vec::new(),
+            Instant::now(),
+            &shell,
+        );
+        lone.drive();
+        let Err(Break::Error(alone)) = lone.settle_lone() else {
+            panic!("a lone exit 128 is the command's error");
+        };
+        assert_eq!(alone.hint.as_deref(), hint.as_deref(), "alone, {confined}");
+
+        let stage = StageEnd::External {
+            prov: shell.local.audit.call_site().clone(),
+            name: "sh".into(),
+            args: Vec::new(),
+            outcome: WaitOutcome::Exited(128),
+            jail: None,
+            pumps: command::Pumps::default(),
+            sent: None,
+            claim: claim(confined),
+        };
+        let staged = error(stage.settle(&shell, Instant::now(), &scope, None).end);
+        assert_eq!(
+            staged.hint.as_deref(),
+            hint.as_deref(),
+            "staged, {confined}"
+        );
+    }
 }
 
 /// A lone tenant's death by a key is heard as the terminal comes back,
@@ -1879,7 +1953,7 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
 
     let t0 = Instant::now();
     let settled = super::super::join_lone(
-        lone,
+        unconfined(lone),
         pumps,
         Some(loan),
         "sh".into(),
@@ -1939,6 +2013,7 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
         jail: None,
         pumps,
         landing: crate::process::Landing::Joins,
+        claim: Claim::Unconfined,
     };
     collect.push(StageHandle::new(StageKind::External(stage), None, slot));
 
@@ -2012,7 +2087,7 @@ fn a_lone_externals_windows_job_is_released() {
     assert!(crate::process::group::is_known_group(leader.as_raw()));
 
     let settled = super::super::join_lone(
-        lone,
+        unconfined(lone),
         command::Pumps::default(),
         None,
         "cmd".into(),

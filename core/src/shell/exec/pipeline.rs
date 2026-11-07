@@ -14,9 +14,10 @@ mod sentinel;
 mod stage;
 mod thread;
 
+use super::command::Born;
 use crate::io::Sink;
 use crate::ir::{Argv, Comp};
-use crate::process::{Spawned, TerminalLoan};
+use crate::process::TerminalLoan;
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -131,7 +132,7 @@ impl PipeNode {
 /// comes back the instant it is dead, before its pumps are joined; on
 /// Windows only once its job is empty, its descendants included.
 pub(crate) fn join_lone(
-    spawned: Spawned,
+    born: Born,
     pumps: super::command::Pumps<Sink>,
     loan: Option<TerminalLoan>,
     name: String,
@@ -139,20 +140,19 @@ pub(crate) fn join_lone(
     started: Instant,
     shell: &Shell,
 ) -> Settled<()> {
-    let pid = spawned.child.id();
     // Declared first, so an unwind kills before it releases.
     #[cfg(windows)]
-    let job = match spawned.landing {
+    let job = match born.spawned.landing {
         crate::process::Landing::Owns(leader) => Some(group::Job::owning(leader)),
         crate::process::Landing::Joins | crate::process::Landing::Shares => None,
     };
-    let mut collect = CollectState::lone(spawned, pumps, loan, name, args, started, shell);
+    let mut collect = CollectState::lone(born, pumps, loan, name, args, started, shell);
     collect.drive();
     #[cfg(windows)]
     if let Some(job) = job {
         job.drain(&shell.scope);
     }
-    collect.settle_lone(pid, shell)
+    collect.settle_lone()
 }
 
 /// Spawn each stage in turn onto `collect`, stopping at the first that fails.

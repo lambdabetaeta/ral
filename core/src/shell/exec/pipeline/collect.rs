@@ -5,7 +5,7 @@
 //! folds in launch order.  A lone external is collected as the one stage of
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
-use super::super::command;
+use super::super::command::{self, Born, Claim};
 use super::stage::{ExternalStage, StageHandle, StageKind};
 use crate::fact::{AuditIo, Command, ExitCode};
 use crate::io::Sink;
@@ -46,9 +46,8 @@ fn synth_external_stage_audit(
 /// The shell-touching finish the reaper's posting closure, holding no
 /// `&Shell`, could not give an external's raw outcome: the run's one ending,
 /// less a death by what this collector `sent`, whose stop is its own doing,
-/// consumed as a thread's is.  The kernel's denial hint is best-effort:
-/// siblings share the group, so deny lines are scoped to a descendant sample
-/// taken at the failure, over the pipeline-wide window from `started`.
+/// consumed as a thread's is.  Siblings share the window from `started`, so
+/// only the deny lines the stage's own `claim` owns are its.
 #[allow(
     clippy::too_many_arguments,
     reason = "the one shell-touching finish; each argument is a distinct fact of the settlement"
@@ -61,21 +60,14 @@ fn finish_external_settlement(
     cause: Option<CancelCause>,
     sent: Option<CancelCause>,
     scope: &Scope,
+    claim: &Claim,
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
     let settled = match outcome.cancelled_by(cause) {
         Some(cause) if sent == Some(cause) => Ok(()),
-        _ => command::ending(
-            name,
-            outcome,
-            cause,
-            scope,
-            shell,
-            || crate::process::sample_descendants(std::process::id()),
-            started,
-        )
-        .map_err(|broke| broke.claimed_by(|| prov.clone())),
+        _ => command::ending(name, outcome, cause, scope, claim, started)
+            .map_err(|broke| broke.claimed_by(|| prov.clone())),
     };
     let audit = synth_external_stage_audit(shell, prov, name, args, settled.as_ref().err());
     StageObservation {
@@ -98,6 +90,7 @@ pub(super) enum StageEnd {
         jail: Option<JailCgroup>,
         pumps: command::Pumps,
         sent: Option<CancelCause>,
+        claim: Claim,
     },
 }
 
@@ -123,10 +116,11 @@ impl StageEnd {
                 jail,
                 pumps,
                 sent,
+                claim,
             } => {
                 let cause = drained(jail, pumps, sent, scope, owned);
                 finish_external_settlement(
-                    &prov, &name, args, outcome, cause, sent, scope, shell, started,
+                    &prov, &name, args, outcome, cause, sent, scope, &claim, shell, started,
                 )
             }
         }
@@ -413,7 +407,7 @@ impl CollectState {
     /// group it landed in: one it leads, with no anchor; its enclosing
     /// stage's; or ral's own.  It has no thread stage to grant a grace.
     pub(super) fn lone(
-        spawned: Spawned,
+        born: Born,
         pumps: command::Pumps<Sink>,
         loan: Option<TerminalLoan>,
         name: String,
@@ -421,11 +415,15 @@ impl CollectState {
         started: Instant,
         shell: &Shell,
     ) -> Self {
-        let Spawned {
-            mut child,
-            landing,
-            jail,
-        } = spawned;
+        let Born {
+            spawned:
+                Spawned {
+                    mut child,
+                    landing,
+                    jail,
+                },
+            claim,
+        } = born;
         let pid = child.id();
         let pumps = pumps.start(&mut child, &shell.scope);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -446,6 +444,7 @@ impl CollectState {
             pumps,
             // In its collector's group, which is where it landed.
             landing: crate::process::Landing::Joins,
+            claim,
         };
         let mut state = Self::new(
             rx,
@@ -809,13 +808,14 @@ impl CollectState {
     /// died of, as no anchor reported one; then its pumps, after which no
     /// kill addresses its group and the pin goes; then its own ending, whose
     /// stop is the run's.
-    pub(super) fn settle_lone(mut self, pid: u32, shell: &Shell) -> Settled<()> {
+    pub(super) fn settle_lone(mut self) -> Settled<()> {
         let Some(Some(StageEnd::External {
             name,
             outcome,
             jail,
             pumps,
             sent,
+            claim,
             ..
         })) = self.observed.pop()
         else {
@@ -826,21 +826,7 @@ impl CollectState {
         }
         let cause = drained(jail, pumps, sent, &self.scope, self.group.owned());
         drop(self.pin.take());
-        // Only this child and its descendants may claim a kernel deny line.
-        let pids = || {
-            let mut pids = crate::process::sample_descendants(pid);
-            pids.insert(pid);
-            pids
-        };
-        command::ending(
-            &name,
-            outcome,
-            cause,
-            &self.scope,
-            shell,
-            pids,
-            self.started,
-        )
+        command::ending(&name, outcome, cause, &self.scope, &claim, self.started)
     }
 }
 
@@ -849,8 +835,12 @@ impl CollectState {
 #[cfg(all(test, unix))]
 pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<CancelCause>) {
     let pumps = command::Pumps::default();
-    let mut lone = CollectState::lone(
+    let born = Born {
         spawned,
+        claim: Claim::Unconfined,
+    };
+    let mut lone = CollectState::lone(
+        born,
         pumps,
         None,
         "test".into(),

@@ -1,7 +1,7 @@
 //! The collector's handle onto one running stage: its process or thread, the
 //! parent's hold on its outbound edge, and the cancel this collector sent it.
 
-use super::super::command;
+use super::super::command::{self, Claim};
 use super::collect::{Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
@@ -38,6 +38,8 @@ pub(super) struct ExternalStage {
     /// Where it sits against its collector's group: in it (`Joins`), or
     /// apart, behind a confining envelope, in its payload's own (`Owns`).
     pub(super) landing: Landing,
+    /// The deny lines its failure may claim, as its start knew them.
+    pub(super) claim: Claim,
 }
 
 pub(super) enum StageKind {
@@ -143,6 +145,7 @@ impl StageHandle {
             jail: e.jail,
             pumps: e.pumps,
             sent,
+            claim: e.claim,
         }
     }
 
@@ -171,6 +174,7 @@ impl StageHandle {
                 jail: None,
                 pumps: command::Pumps::default(),
                 landing: Landing::Joins,
+                claim: Claim::Unconfined,
             }),
             None,
             slot,
@@ -197,6 +201,7 @@ impl StageHandle {
                 jail: None,
                 pumps: command::Pumps::default(),
                 landing: Landing::Joins,
+                claim: Claim::Unconfined,
             }),
             None,
             slot,

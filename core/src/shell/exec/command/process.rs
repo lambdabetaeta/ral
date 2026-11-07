@@ -10,7 +10,9 @@ use crate::authority::sandbox::{Image, Ownership, Refusal, SandboxProjection};
 use crate::fact::{Failure, Unrunnable};
 use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
 use crate::shell::runtime::{Break, Error, Settled, Shell, Value, sig};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 impl From<Refusal> for Break {
     fn from(refusal: Refusal) -> Self {
@@ -31,6 +33,8 @@ pub(crate) struct Prepared {
     /// The launch's own sandbox, where it has one.
     #[cfg(unix)]
     projection: Option<SandboxProjection>,
+    /// Whether an OS sandbox or the guest jail confines the child.
+    confined: bool,
 }
 
 /// Read `head`'s verdict, vet `args`, and build the launch under
@@ -57,15 +61,56 @@ pub(crate) fn prepare(
 }
 
 /// A started call: its name and args, and what was born of it.
-pub(crate) struct Started<T = Spawned> {
+pub(crate) struct Started<T = Born> {
     pub(crate) shown: String,
     pub(crate) args: Vec<String>,
     pub(crate) born: T,
 }
 
-/// Start `prepared` in `pgid`.
+/// A kept child, and the deny lines its failure may claim.
+pub(crate) struct Born {
+    pub(crate) spawned: Spawned,
+    pub(crate) claim: Claim,
+}
+
+/// The host pids whose kernel deny lines a child's failure owns.  A line
+/// carries only the pid it denied, so each pid here was read while its
+/// process lived: what died before, or was born after, goes unclaimed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Claim {
+    /// No sandbox confined the child: no line is its.
+    Unconfined,
+    /// A confined child's pids, as the spawn knew them.
+    Confined(HashSet<u32>),
+}
+
+impl Claim {
+    /// What a launch confined as `confined` claims of `spawned`, taken the
+    /// moment it started: a direct child, its own pid; an enveloped one, the
+    /// envelope's chain while its program runs, whose host pids no process
+    /// inside the namespace can see.
+    fn of(confined: bool, enveloped: bool, spawned: &Spawned) -> Self {
+        match (confined, enveloped, spawned.landing) {
+            (false, ..) => Self::Unconfined,
+            (true, false, _) => Self::Confined(HashSet::from([spawned.child.id()])),
+            #[cfg(target_os = "linux")]
+            (true, true, crate::process::Landing::Owns(payload)) => {
+                Self::Confined(crate::authority::sandbox::payload_pids(payload))
+            }
+            // `Launch::spawn` lands an envelope in its payload's group.
+            (true, true, _) => Self::Confined(HashSet::new()),
+        }
+    }
+}
+
+/// Start `prepared` in `pgid`, and claim what it bore.
 pub(crate) fn start(prepared: Prepared, pgid: PgidPolicy) -> Settled<Started> {
-    started(prepared, |launch| launch.spawn(pgid))
+    let (confined, enveloped) = (prepared.confined, prepared.launch.enveloped());
+    started(prepared, |launch| {
+        let spawned = launch.spawn(pgid)?;
+        let claim = Claim::of(confined, enveloped, &spawned);
+        Ok(Born { spawned, claim })
+    })
 }
 
 /// Start `prepared` detached, a survivor nothing here can name again.
@@ -152,24 +197,22 @@ fn at_spawn(
 
 /// How the run ended, from how its child did: a death by one of `cause`'s
 /// signals is that cause's stop, success nothing, and any other end the
-/// command's failure, with the kernel's denial hint where a sandbox ran it.
+/// command's failure, with the kernel's account of the lines `claim` owns
+/// since `since`.
 pub(crate) fn ending(
     name: &str,
     outcome: WaitOutcome,
     cause: Option<CancelCause>,
     scope: &Scope,
-    shell: &Shell,
-    pids: impl FnOnce() -> std::collections::HashSet<u32>,
-    since: std::time::Instant,
+    claim: &Claim,
+    since: Instant,
 ) -> Settled<()> {
     if let Some(cause) = outcome.cancelled_by(cause) {
         return Err(Break::cancelled(cause, scope));
     }
     match outcome.failure() {
         None => Ok(()),
-        Some(failure) => {
-            Err(with_denials(Error::process(name, failure), shell, pids, since).into())
-        }
+        Some(failure) => Err(with_denials(name, failure, claim, since).into()),
     }
 }
 
@@ -197,6 +240,7 @@ fn build_launch(
         .is_none()
         .then(|| SandboxProjection::of(&shell.context.grants, shell.baseline(), Some(&admitted)))
         .flatten();
+    let confined = projection.is_some() || jail.is_some();
     let image = Image::of(&admitted);
     let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
     // The judged object and its directory handle end here: a launch holds a
@@ -241,33 +285,30 @@ fn build_launch(
         interpreter,
         #[cfg(unix)]
         projection,
+        confined,
     })
 }
 
-/// `err` with the kernel's denial hint, when a sandboxed child failed on its
-/// own account.  Only then are `pids` sampled: an unsandboxed failure never
-/// pays for the process-table walk.
-fn with_denials(
-    err: Error,
-    shell: &Shell,
-    pids: impl FnOnce() -> std::collections::HashSet<u32>,
-    since: std::time::Instant,
-) -> Error {
-    if shell.sandbox_projection().is_none() {
-        return err;
-    }
-    let exited = match err.reason.failure() {
-        Some(&crate::fact::Failure::Exited(n)) => Some(n),
+/// `name`'s `failure` as its error, with, where a sandbox confined it, the
+/// kernel's account: the deny lines since `since` that `claim` owns, else,
+/// on macOS, the fork brake's for an exit status of 128.  An unconfined
+/// failure reads no log.
+fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> Error {
+    let Claim::Confined(pids) = claim else {
+        return Error::process(name, failure);
+    };
+    let exited = match failure {
+        Failure::Exited(n) => Some(n),
         _ => None,
     };
-    if let Some(hint) = crate::authority::sandbox::denial_hint(&pids(), since, exited) {
-        return err.append_hint(hint);
-    }
+    let hint = crate::authority::sandbox::denial_hint(pids, since, exited);
     #[cfg(target_os = "macos")]
-    if let Some(hint) = exited.and_then(crate::process::limits::failure_hint) {
-        return err.append_hint(hint);
+    let hint = hint.or_else(|| exited.and_then(crate::process::limits::failure_hint));
+    let error = Error::process(name, failure);
+    match hint {
+        Some(hint) => error.with_hint(hint),
+        None => error,
     }
-    err
 }
 
 /// Thread the shell's env overrides, logical cwd and `PWD` into the
@@ -320,59 +361,48 @@ fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::with_denials;
+    use super::{Claim, with_denials};
     use crate::fact::{Failure, Reason};
-    use crate::shell::runtime::Error;
+    use std::time::Instant;
 
+    /// No line is an unconfined child's: its failure is the raw ending, with
+    /// no kernel account and no brake blamed, whatever the status.
     #[test]
-    fn unsandboxed_failures_keep_raw_exits_without_sampling_pids() {
-        let shell = crate::test_helper::core_shell();
-        assert!(shell.sandbox_projection().is_none());
-        for raw in [128, 384, -1, i32::MIN] {
-            let error = with_denials(
-                Error::from_reason(Reason::process("tool", Failure::Exited(raw))),
-                &shell,
-                || panic!("an unsandboxed failure must not sample pids"),
-                std::time::Instant::now(),
-            );
-            assert_eq!(error.reason, Reason::process("tool", Failure::Exited(raw)));
-            assert!(error.hint.is_none());
+    fn unconfined_failures_keep_raw_exits_without_a_hint() {
+        for failure in [
+            Failure::Exited(128),
+            Failure::Exited(384),
+            Failure::Exited(5),
+            Failure::Exited(0xC000_0022_u32.cast_signed()),
+            Failure::Exited(-1),
+            Failure::Exited(i32::MIN),
+            Failure::Signaled(31),
+        ] {
+            let error = with_denials("tool", failure.clone(), &Claim::Unconfined, Instant::now());
+            assert_eq!(error.reason, Reason::process("tool", failure));
+            assert!(error.hint.is_none(), "{:?}", error.hint);
         }
     }
 
+    /// The brake's hint is decided from the failure itself: an exit status
+    /// of 128, never a death by signal 128 nor any other status.  A claim of
+    /// no pid reads no log, so the brake's is the only hint here.
     #[cfg(target_os = "macos")]
     #[test]
-    fn sandboxed_fork_brake_hints_read_only_raw_exited_reasons() {
-        use crate::authority::policy::{Capabilities, FsPolicy};
-
-        let mut shell = crate::test_helper::core_shell();
-        let layer = crate::test_helper::layer(Capabilities {
-            fs: Some(FsPolicy::default()),
-            ..Capabilities::default()
-        });
-        shell.with_layer(layer, |shell| {
-            assert!(shell.sandbox_projection().is_some());
-            for reason in [
-                Reason::process("tool", Failure::Exited(128)),
-                Reason::process("tool", Failure::Exited(384)),
-                Reason::process("tool", Failure::Exited(-1)),
-                Reason::process("tool", Failure::Signaled(128)),
-                Reason::Raised("exit status 128".into()),
-            ] {
-                let expected = match reason.failure() {
-                    Some(&Failure::Exited(raw)) => crate::process::limits::failure_hint(raw),
-                    _ => None,
-                };
-                let error = with_denials(
-                    Error::from_reason(reason.clone()),
-                    shell,
-                    std::collections::HashSet::new,
-                    std::time::Instant::now(),
-                );
-                assert_eq!(error.reason, reason);
-                assert_eq!(error.hint.as_deref(), expected.as_deref());
-            }
-        });
+    fn a_confined_fork_brake_hint_reads_only_an_exit_status_of_128() {
+        let braked = crate::process::limits::failure_hint(128);
+        assert!(braked.is_some());
+        let claim = Claim::Confined(std::collections::HashSet::new());
+        for (failure, hint) in [
+            (Failure::Exited(128), braked.as_deref()),
+            (Failure::Exited(384), None),
+            (Failure::Exited(-1), None),
+            (Failure::Signaled(128), None),
+        ] {
+            let error = with_denials("tool", failure.clone(), &claim, Instant::now());
+            assert_eq!(error.reason, Reason::process("tool", failure));
+            assert_eq!(error.hint.as_deref(), hint);
+        }
     }
 }
 
@@ -430,6 +460,26 @@ mod judged_program {
         let out = prepared.launch.output().expect("the file runs");
         String::from_utf8(out.stdout).unwrap()
     }
+
+    /// No sandbox confines a start under no grant, so it claims no line.
+    #[test]
+    fn an_unconfined_start_claims_no_line() {
+        use super::{Born, Claim, Started, start};
+        let (tmp, mut shell) = workdir();
+        point_build_at(tmp.path(), &plant(tmp.path(), "a"));
+        let mut prepared = judge(&mut shell, &[]);
+        prepared.launch.stdout(crate::process::StdioSpec::null());
+        let Ok(Started {
+            born: Born { mut spawned, claim },
+            ..
+        }) = start(prepared, crate::process::PgidPolicy::Inherit)
+        else {
+            panic!("the file starts");
+        };
+        let _ = spawned.child.reap();
+        assert_eq!(claim, Claim::Unconfined);
+    }
+
     /// The control: the harness tells `a` from `b`, so the next test cannot
     /// pass by the two being alike.
     #[test]
@@ -649,14 +699,14 @@ mod at_spawn_tests {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod confined_start {
     use super::super::head::Head;
-    use super::{prepare, start};
+    use super::{Born, Claim, Started, prepare, start};
     use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
     use crate::authority::sandbox::Ownership;
     use crate::fact::{Failure, Reason, Unrunnable};
     use crate::ir::CommandName;
     use crate::path::FrozenPath;
     use crate::process::PgidPolicy;
-    use crate::shell::runtime::{Break, Error, Mooring};
+    use crate::shell::runtime::{Break, Error, Mooring, Settled};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -670,8 +720,12 @@ mod confined_start {
     }
 
     /// `script` started under a grant reading its directory and admitting
-    /// `exec`, with `between` run after the launch is built: the error.
-    fn started(script: &Path, exec: Option<ExecGrant>, between: impl FnOnce()) -> (String, Error) {
+    /// `exec`, with `between` run after the launch is built.
+    fn launched(
+        script: &Path,
+        exec: Option<ExecGrant>,
+        between: impl FnOnce(),
+    ) -> (String, Settled<Started>) {
         let mut shell = crate::test_helper::core_shell();
         let layer = crate::test_helper::layer(Capabilities {
             exec,
@@ -691,11 +745,38 @@ mod confined_start {
             let prepared = prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
             let shown = prepared.shown.clone();
             between();
-            let Err(Break::Error(error)) = start(prepared, PgidPolicy::Inherit) else {
-                panic!("the confined launch must not start");
-            };
-            (shown, error)
+            (shown, start(prepared, PgidPolicy::Inherit))
         })
+    }
+
+    /// [`launched`], which must not start: the error.
+    fn started(script: &Path, exec: Option<ExecGrant>, between: impl FnOnce()) -> (String, Error) {
+        let (shown, settled) = launched(script, exec, between);
+        let Err(Break::Error(error)) = settled else {
+            panic!("the confined launch must not start");
+        };
+        (shown, error)
+    }
+
+    /// A confined direct child is its program, `execve`d in place: it claims
+    /// its own pid, and no other.
+    #[test]
+    fn a_confined_start_claims_exactly_its_childs_pid() {
+        let (_dir, script) = script("#!/bin/sh\nexit 0\n");
+        let (_, settled) = launched(&script, None, || ());
+        let Ok(Started {
+            born: Born { mut spawned, claim },
+            ..
+        }) = settled
+        else {
+            panic!("the confined script starts");
+        };
+        let pid = spawned.child.id();
+        let _ = spawned.child.reap();
+        assert_eq!(
+            claim,
+            Claim::Confined(std::collections::HashSet::from([pid]))
+        );
     }
 
     fn not_runnable(shown: &str, why: Unrunnable) -> Reason {

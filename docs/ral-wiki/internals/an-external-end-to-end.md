@@ -2,7 +2,7 @@
 generated_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
 verified_at_date: 2026-11-07
-anchors: [prepare, start, start_detached, unstarted_error, ending, Started, Unstarted, Spawned, Landing, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+anchors: [prepare, start, start_detached, unstarted_error, ending, with_denials, Started, Born, Claim, payload_pids, Unstarted, Spawned, Landing, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
@@ -20,8 +20,8 @@ is [[design/exec|exec]]; what a confined launch adds is
 | stage | function | it does | its failures leave as |
 |---|---|---|---|
 | prepare | `prepare` | reads the head's verdict, vets the arguments (they are words), builds the launch (`Image`, the `#!` interpreter, the projection, env, cwd, limits), reads the run's scope once more | the head's verdict; a `Refusal` as raised text; a stop as the run's stop |
-| start | `start`, `start_detached` | take the `Prepared` by value and spawn it, returning `Started { shown, args, born }`; the one conversion of `Unstarted` | `unstarted_error`, below |
-| ending | `ending` | a death by a signal of a cause in force is that cause's stop; any other end is `Error::process`, with the kernel's denial hint where a sandbox ran the child | a stop, or a process failure |
+| start | `start`, `start_detached` | take the `Prepared` by value and spawn it, returning `Started { shown, args, born }`, where a kept start's `born` is the child and its `Claim`; the one conversion of `Unstarted` | `unstarted_error`, below |
+| ending | `ending` | a death by a signal of a cause in force is that cause's stop; any other end is `Error::process`, with the kernel's account of the deny lines its start claimed | a stop, or a process failure |
 
 - **Every failure of a stage has one constructor.** `From<Refusal> for Break`
   words every refusal of `prepare`; `unstarted_error` is the only place a launch
@@ -109,6 +109,41 @@ The records, the socket's discipline and why they hold are
   ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
   The supervisor that writes it is
   [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]].
+
+## Whose deny lines a failure owns
+
+**A failure owns only the kernel deny lines its start claimed.** `start` takes
+a `Claim` the moment the spawn returns, and `ending` hands `with_denials` the
+`Failure` itself, never its rendering.
+
+- **Confinement is `build_launch`'s fact**: a projection, or the guest jail.
+  An unconfined child claims nothing, so its failure reads no log.
+- **A line carries only the host pid the kernel denied**: Seatbelt's
+  `comm(pid)`, and seccomp's audit `pid=`, which is the host's number even
+  inside a pid namespace. So a claim is a set of pids, each read while its
+  process lived.
+  - A direct child (macOS, which `execve`s in place; the guest jail) claims
+    its own pid, which is the program's.
+  - An enveloped child (Linux) claims the chain beneath its payload's group
+    leader: the namespace's init, the supervisor, the program. bwrap's
+    monitor is confined by nothing, and no process inside the namespace can
+    name the program's host pid, so `payload_pids` reads the chain from the
+    host's `/proc/<pid>/task/*/children` right after the trampoline has said
+    `started`, the one moment the program is known to run.
+- **What a claim misses.** A process gone before its claim was read (a program
+  that dies within microseconds of starting) or born after it (every later
+  descendant, such as `sh -c 'cat x'`'s `cat`) is not claimed, and its line is
+  not shown.
+- **A line is never claimed falsely.** Each pid was read alive, so a line names
+  it only if that very process was denied, short of the host reusing the pid
+  within the window, which takes a wrap of its whole pid space.
+- **No sample is taken after the end.** A process's children are reparented
+  when it exits, not when it is reaped, and an envelope's namespace is dead
+  before bwrap exits: such a sample finds nothing of the command, and one of
+  ral's own live tree would claim a stranger's line.
+- **The hint is decided from the datum**: the claimed lines first; else, on
+  macOS, an `Exited(128)` gets the fork brake's conditional explanation. A death
+  by a signal is never read as a status.
 
 ## Where the child landed
 

@@ -55,6 +55,14 @@ the filesystem**
   envelope has died, and `Launch::spawn` returns no sooner. An empty record
   means bwrap died before reporting; an unreadable or malformed one makes
   the spawn kill and reap the envelope, then return an error.
+- **A deny line names a host pid.** The seccomp record carries the denied
+  process's host pid, which no process inside the namespace can name. So a
+  confined start claims the chain beneath the payload's group leader (init,
+  supervisor, program), read from the host's `/proc/<pid>/task/*/children`
+  once the trampoline has said `started` (`payload_pids`). A program dead
+  within microseconds of its start, and every descendant born later, go
+  unclaimed
+  ([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]).
 - **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
   whatever was asked, and returns the payload's group. `placement`
   never hands an envelope the terminal. A pipeline collector addresses each

@@ -312,7 +312,10 @@ The collector runs `/usr/bin/log show --style ndjson`, with a 2-second deadline
 and a 1 MiB stdout ceiling. Each JSON event is decoded before its `eventMessage`
 is parsed: it must begin with `Sandbox: `, then the first
 `(<digits>) deny(<digits>) ` supplies the PID and is followed by the operation
-and operand. Only records for the command's descendant PIDs reach the hint.
+and operand. Only records for the pid the command's start claimed reach the
+hint: the program's own, `execve`d in place. A descendant is not claimed, so its
+record is not shown; no record is claimed falsely
+([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]).
 Operands are held inert: C0, C1 and DEL are visible escapes, at most 512 Unicode
 scalar values are taken, and truncation is marked. The hint prints parsed
 records under "sandbox denials were recorded for this command's processes:";

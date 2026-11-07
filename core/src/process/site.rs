@@ -36,11 +36,6 @@ pub(in crate::process) enum Silent {
     /// Every other wait is the reaper's.  It raises no card: it observes no
     /// object a model named.
     ChildReap,
-    /// `/bin/ps`, spawned to sample the live process tree so a sandbox denial
-    /// can be attributed to a descendant of ral: denial records carry only a
-    /// command name and a pid.  It raises no card: a diagnostic probe, not
-    /// turn-time model data I/O.
-    PsSample,
     /// A throwaway socket to bring up the jail's private loopback; no peer I/O.
     #[cfg(seccomp)]
     JailLoopbackSocket,

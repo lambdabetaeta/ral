@@ -62,6 +62,60 @@ fn a_user_namespace_is_refused_not_killed() {
     );
 }
 
+/// A confined `sh -c` whose program the deny-set kills once it runs is
+/// hinted: the kill's line names the host pid its start read beneath the
+/// payload.  Requires `mount` and a kernel log this user can read.
+#[test]
+fn a_confined_program_killed_by_the_deny_set_is_hinted() {
+    use crate::fact::Failure;
+    use crate::shell::exec::command::Started;
+    use crate::shell::runtime::Break;
+    use crate::test_helper::confinement::skip_beyond_baseline;
+
+    if !on_path("mount") {
+        eprintln!("skipping: no `mount` on this host's PATH");
+        return;
+    }
+    if envelope_launches(&exec_policy(ExecProjection::Unrestricted)).is_none() {
+        return;
+    }
+    let since = std::time::Instant::now();
+    let settled = start_granted(
+        "sleep 0.5; exec mount -t tmpfs none /tmp",
+        |started, shell| {
+            let Started { shown, args, born } = started;
+            crate::shell::exec::pipeline::join_lone(
+                born,
+                crate::shell::exec::command::Pumps::default(),
+                None,
+                shown,
+                args,
+                since,
+                shell,
+            )
+        },
+    );
+    let Err(Break::Error(error)) = settled else {
+        panic!("a program the deny-set kills is the command's error: {settled:?}");
+    };
+    assert_eq!(
+        error.reason.failure(),
+        Some(&Failure::Signaled(libc::SIGSYS)),
+        "{error:?}"
+    );
+    let Some(hint) = error.hint.as_deref() else {
+        match crate::authority::sandbox::diag::platform::read_window(since.elapsed()) {
+            None => skip_beyond_baseline("this host's kernel log cannot be read"),
+            Some(records) if records.is_empty() => {
+                skip_beyond_baseline("this kernel logs no seccomp kill where ral reads");
+            }
+            Some(_) => panic!("the kill was logged, but its line was not claimed"),
+        }
+        return;
+    };
+    assert!(hint.contains("seccomp deny-set"), "{hint}");
+}
+
 /// `strace` opens with `PTRACE_TRACEME`/`ptrace`, killed with SIGSYS; then
 /// `describe_denial` must name it from the very syscall number the kernel
 /// logged. Requires `strace`.
