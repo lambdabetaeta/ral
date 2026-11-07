@@ -1,5 +1,6 @@
-//! The one walk of a directory tree: ral enumerates it, and `ignore` only
-//! matches.
+//! The one enumeration of a directory tree: ral walks it, and `ignore` only
+//! matches.  Each root and entry is resolved by the path resolver,
+//! [`crate::path::walk()`]; this walk only sequences those resolutions.
 //!
 //! A walk lists with [`Dir::read_dir`] and descends with [`Dir::open_dir`],
 //! depth first in name order, and polls the cancel scope at each entry.  The

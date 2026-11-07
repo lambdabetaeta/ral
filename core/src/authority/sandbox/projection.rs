@@ -128,8 +128,8 @@ pub(crate) enum ExecProjection {
 /// The OS-renderable projection of the effective grant, produced by
 /// [`SandboxProjection::of`] after meet-folding the whole stack.
 ///
-/// The platform backends `authority::sandbox::linux` and `authority::sandbox::macos` render it, in
-/// the launching process. Unlike a [`GrantLayer`](crate::authority::policy::GrantLayer),
+/// The platform backends `authority::sandbox::{linux, macos, windows}` render it,
+/// in the launching process. Unlike a [`GrantLayer`](crate::authority::policy::GrantLayer),
 /// no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProjection<A = FsAllow, X = FsDeny> {

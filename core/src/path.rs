@@ -12,7 +12,7 @@
 //! rule may mention; `tree` enumerates a directory tree, judging each entry as
 //! it goes.
 //!
-//! `walk` imports `Verdict` (`capability/fs.rs`) and `InstallToken`
+//! `walk` imports `Verdict` (`authority/policy/fs.rs`) and `InstallToken`
 //! (`sandbox.rs`): two inverted edges, each a token whose field only its own
 //! module can make, so neither constructor may be widened to straighten them.
 

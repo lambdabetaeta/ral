@@ -221,11 +221,13 @@ pub(crate) fn bwrap_command(
 /// we stop watching it.  Confinement itself — the mounts, the seccomp
 /// filter — is otherwise identical.
 ///
-/// The render takes `host`, `gpu` and descriptors as data, so a test can
-/// assert options for a host it is not running on.
+/// `host`, `gpu` and descriptors are data, so a test can assert options for a
+/// host it is not running on.  The disk is read for two things only: the
+/// real name of `chdir`, against the denies, and, without a virtual `/dev`,
+/// which device nodes exist.  Each deny's shape was read once, into [`Shown`].
 #[allow(
     clippy::too_many_arguments,
-    reason = "independent inputs to the pure envelope render"
+    reason = "independent inputs to the envelope render"
 )]
 pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,

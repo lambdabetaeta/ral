@@ -12,7 +12,7 @@
 //! [`chosen`] is pure over an injected environment and home.  [`walked`]
 //! holds each chosen directory as [`host_absolute`] does, refusing a malformed
 //! one, and walks it.  A `dir` selector keeps the directories, refusing one
-//! that names the world ([`expand_in`]; [`expand`] is its live wrapper); the
+//! that names the world ([`expand_in`]; `expand`, under `test-util`, is its live wrapper); the
 //! system reads keep what exists outside the world and the home
 //! ([`system_reads_in`]).
 

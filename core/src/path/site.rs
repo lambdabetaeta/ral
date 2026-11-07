@@ -87,8 +87,8 @@ pub(in crate::path) enum Silent {
     /// a name the model gave, so it raises no card.
     GitDotGit,
     /// `PATHEXT`, the Windows resolver's suffix list, which is no XDG base: a
-    /// PATH-probe environment read, taken beside the other `which` probes.  It
-    /// reads a variable and opens no object, so it raises no card.
+    /// PATH-probe environment read.
+    /// It reads a variable and opens no object, so it raises no card.
     #[cfg(windows)]
     Pathext,
     /// A surface already in normal form, lifted as a `Path`: lexical, with no

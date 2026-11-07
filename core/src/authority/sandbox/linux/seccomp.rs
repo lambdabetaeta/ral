@@ -539,10 +539,9 @@ impl Verdict {
 #[cfg(seccomp)]
 impl Filter {
     /// The compiled programs, including the x32 guard.
-    /// Compiled once per process: a filter that will not compile is cached
-    /// as a failure only implicitly — a failing compile is a static bug in
-    /// [`Filter::ENVELOPE`], so recomputing it on every call costs nothing in
-    /// practice and keeps this fallible without a `Clone` bound on `Error`.
+    /// Compiled once per process, on success.  A failure is not cached: it is
+    /// a static bug in [`Filter::ENVELOPE`], so each call recompiles and fails
+    /// again, which spares `Error` a `Clone` bound.
     pub(crate) fn programs(&self) -> Result<&'static Programs, Error> {
         static PROGRAMS: std::sync::OnceLock<Programs> = std::sync::OnceLock::new();
         if let Some(programs) = PROGRAMS.get() {

@@ -1,4 +1,4 @@
-//! Directory trees: the one walk over them, glob patterns enumerated by it, and their size.
+//! Directory trees: their enumeration ([`walk::Walk`]), glob patterns enumerated by it, and their size.
 
 use crate::authority::policy::Ungoverned;
 use crate::path::LexicalPath;

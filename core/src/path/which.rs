@@ -2,7 +2,7 @@
 //!
 //! `$PATH` is a list of directories tried in turn, so a candidate is a
 //! directory joined with the name (on Windows, with each `%PATHEXT%` suffix),
-//! reached by [`walk`] as any other spelling is.  That is a walk per `PATH`
+//! reached by [`walk()`](crate::path::walk()) as any other spelling is.  That is a walk per `PATH`
 //! entry, so where the walks find the first program is remembered for the
 //! extent of a run; [`LOCATED`] argues what that costs in freshness.
 //! Dispatch arrives via `shell::exec::command::head`.
