@@ -20,7 +20,11 @@ pub(super) enum ByteOut {
     /// The pipeline's output boundary, resolved against the shell's stdout
     /// sink.
     Parent,
-    Downstream(os_pipe::PipeWriter, Arc<Edge>),
+    /// An interior edge's write end, and the parent's hold on it.
+    Downstream {
+        writer: os_pipe::PipeWriter,
+        held: HeldEdge,
+    },
 }
 
 /// The parent's hold on a non-final stage's outbound edge: its fate, and a
@@ -36,24 +40,16 @@ pub(super) struct HeldEdge {
 pub(super) struct StageRoute {
     pub(super) stdin: ByteIn,
     pub(super) stdout: ByteOut,
-    /// `None` for the final stage, which has no outbound edge.
-    pub(super) held: Option<HeldEdge>,
 }
 
-fn open_edge() -> Settled<((ByteOut, Option<HeldEdge>), ByteIn)> {
+fn open_edge() -> Settled<(ByteOut, ByteIn)> {
     let (r, w) = crate::process::cloexec_pipe().map_err(|e| Error::io("pipe", &e))?;
-    let edge = Edge::new();
-    Ok((
-        (
-            ByteOut::Downstream(w, Arc::clone(&edge)),
-            Some(HeldEdge {
-                edge,
-                reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
-                listening: Cell::default(),
-            }),
-        ),
-        ByteIn::Upstream(r),
-    ))
+    let held = HeldEdge {
+        edge: Edge::new(),
+        reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
+        listening: Cell::default(),
+    };
+    Ok((ByteOut::Downstream { writer: w, held }, ByteIn::Upstream(r)))
 }
 
 /// Every edge is the same pipe, so position alone decides.
@@ -64,15 +60,9 @@ pub(super) fn open_stage_routes(n: usize) -> Settled<Vec<StageRoute>> {
         .into_iter()
         .unzip();
     let stdins = std::iter::once(ByteIn::Parent).chain(ins);
-    let stdouts = outs
-        .into_iter()
-        .chain(std::iter::once((ByteOut::Parent, None)));
+    let stdouts = outs.into_iter().chain(std::iter::once(ByteOut::Parent));
     Ok(stdins
         .zip(stdouts)
-        .map(|(stdin, (stdout, held))| StageRoute {
-            stdin,
-            stdout,
-            held,
-        })
+        .map(|(stdin, stdout)| StageRoute { stdin, stdout })
         .collect())
 }

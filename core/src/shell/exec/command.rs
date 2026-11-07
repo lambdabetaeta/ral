@@ -26,7 +26,7 @@ pub(crate) use detach::detach;
 pub(crate) use foreground::placement;
 pub(crate) use head::{Admission, Head};
 pub(crate) use process::{Born, Claim, Started, ending, prepare, start};
-pub(crate) use stdio::{ChildIo, ChildOut, boundary_stdin, wire_stdio};
+pub(crate) use stdio::{ChildOut, boundary_stdin, wire_stdio};
 
 /// Runs a standalone external call from vetting to reap.  A bundled
 /// coreutils/diffutils/ripgrep head takes the same path as any host
@@ -40,12 +40,12 @@ pub(crate) fn run(
     let mut prepared = prepare(head, args, Ownership::Kept, shell)?;
     let (policy, lending) = placement(shell, mooring, prepared.launch.enveloped());
     let readable = lending.is_some() || matches!(policy, PgidPolicy::Inherit);
-    let io = ChildIo {
-        stdin: boundary_stdin(&shell.io, readable),
-        stdout: ChildOut::Sink(&shell.io.stdout),
-        stderr: &shell.io.stderr,
-    };
-    let pumps = wire_stdio(&mut prepared.launch, io)?;
+    let pumps = wire_stdio(
+        &mut prepared.launch,
+        boundary_stdin(&shell.io, readable),
+        ChildOut::Sink(shell.io.stdout.clone()),
+        &shell.io.stderr,
+    )?;
 
     announce_command_title(&prepared.shown, shell);
 

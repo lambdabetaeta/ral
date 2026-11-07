@@ -57,15 +57,16 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   tool command can never steal the TUI's terminal; it is kept distinct from
   `Terminal` precisely so denial of byte input and denial of foreground stay
   separate effects.
-- `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
+- `sink.rs` — `Sink`, byte output and child stdio routing (`child_stdio`):
   terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
   watched worker's line surface (`Watch`, each whole line handed to a line
   function the builtin builds around `WatchEvent`, so `io` knows no deferred
   sink), a stage thread's pipe edge (`Sink::Pipe { writer, edge, stage }`,
   `stage` naming the writing stage's node for its reader-gone stop; the scope
-  a write polls is handed in, `write_under`). `child_stdout` / `child_stderr`
-  centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
-  hand; `same_destination` says whether two sinks deliver to one destination,
+  a write polls is handed in, `write_under`). `child_stdio(fd)` is the one
+  (stdio, pump) decision: a child inherits iff the sink is the inherited `fd`,
+  a `File` or `Pipe` hands over its fd, and anything else is piped and pumped,
+  so no caller computes inherit-vs-pipe by hand; `same_destination` says whether two sinks deliver to one destination,
   which decides whether a child's stderr may share stdout's descriptor.
   A `ByteBuffer` is `Arc<CapturedBytes>`: the prefix and its total byte count
   under one mutex, with a retention cap. `overflowed` compares that count

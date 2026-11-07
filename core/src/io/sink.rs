@@ -1,12 +1,12 @@
 //! Byte output for a pipeline stage.
 //!
-//! [`Sink`] is the single shape every writer routes through; [`ChildStdioPlan`]
-//! is its companion for children, pairing the stdio to hand `process::Launch`
-//! with the sink the caller must pump after spawn.  The buffer helpers below own
-//! the [`ByteBuffer`] idiom for captured bytes.
+//! [`Sink`] is the single shape every writer routes through, and
+//! [`Sink::child_stdio`] the one decision of how a child's output fd reaches
+//! one.  The buffer helpers below own the [`ByteBuffer`] idiom for captured
+//! bytes.
 
 use super::edge::{Edge, WriteStopped};
-use crate::process::{CancelCause, Scope, ScopeId};
+use crate::process::{CancelCause, Scope, ScopeId, StdioSpec};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
@@ -98,44 +98,11 @@ pub type ByteBuffer = Arc<CapturedBytes>;
 /// What a `Sink::Watch` hands each whole line of its stream.
 pub type LineFn = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
-/// One child stream's routing, stdout or stderr.
-///
-/// `pump: None` means the child writes the destination itself; `Some(sink)`
-/// means the kernel piped it and the caller must hand the child's fd to
-/// [`Sink::pump`] after spawn.
-///
-/// Only [`Sink::child_stdout`] and [`Sink::child_stderr`] decide which, so no
-/// caller reasons about "inherit, pipe, pump, tee" on its own.
-pub(crate) struct ChildStdioPlan {
-    pub(crate) stdio: crate::process::StdioSpec,
-    pub(crate) pump: Option<Sink>,
-}
-
-impl ChildStdioPlan {
-    /// The child gets the parent's matching fd directly.
-    pub(crate) fn inherit() -> Self {
-        Self {
-            stdio: crate::process::StdioSpec::inherit(),
-            pump: None,
-        }
-    }
-
-    /// A pipeline edge handed to the child whole: nothing of ral's writes it.
-    pub(crate) fn edge(writer: os_pipe::PipeWriter) -> Self {
-        Self {
-            stdio: crate::process::StdioSpec::from_pipe_writer(writer),
-            pump: None,
-        }
-    }
-
-    /// Route `sink` without inheriting: the kernel pipes the child's fd and the
-    /// caller pumps it into `sink`.
-    fn for_sink(sink: &Sink) -> Self {
-        Self {
-            stdio: crate::process::StdioSpec::piped(),
-            pump: Some(sink.clone()),
-        }
-    }
+/// A child's output fd: 1 or 2.
+#[derive(Clone, Copy)]
+pub(crate) enum OutFd {
+    Stdout,
+    Stderr,
 }
 
 /// Where a pipeline stage's byte output goes.
@@ -259,42 +226,23 @@ impl Sink {
         }
     }
 
-    /// Plan a child's stdout into this sink: `Terminal` inherits fd 1.
-    /// Both halves of the plan bind the caller: `plan.stdio` before spawn, then
-    /// the child's fd into [`Sink::pump`] if `plan.pump` is `Some`.
+    /// How a child's `fd` writes into this sink, and the sink to pump it
+    /// into after spawn: it inherits iff this sink is the inherited `fd`; a
+    /// `File` or `Pipe` is handed over; anything else is piped and pumped.
     ///
     /// # Errors
-    /// Returns `Err` if cloning the sink to pump fails.
-    pub(crate) fn child_stdout(&self) -> io::Result<ChildStdioPlan> {
-        if matches!(self, Self::Terminal) {
-            return Ok(ChildStdioPlan::inherit());
-        }
-        self.child_stdio_plan()
-    }
-
-    /// Plan a child's stderr into this sink: `Stderr` inherits fd 2.
-    ///
-    /// # Errors
-    /// Returns `Err` if cloning the sink to pump fails.
-    pub(crate) fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
-        if matches!(self, Self::Stderr) {
-            return Ok(ChildStdioPlan::inherit());
-        }
-        self.child_stdio_plan()
-    }
-
-    /// The shared tail of `child_stdout`/`child_stderr` once inheriting is
-    /// ruled out: a `File` or `Pipe` hands the child the fd directly,
-    /// everything else is pumped.
-    pub(crate) fn child_stdio_plan(&self) -> io::Result<ChildStdioPlan> {
-        let stdio = match self {
-            Self::File(f) => crate::process::StdioSpec::from_file(f.try_clone()?),
-            Self::Pipe { writer, .. } => {
-                crate::process::StdioSpec::from_pipe_writer(writer.try_clone()?)
+    /// Returns `Err` if duplicating the handed-over fd fails.
+    pub(crate) fn child_stdio(&self, fd: OutFd) -> io::Result<(StdioSpec, Option<Self>)> {
+        Ok(match (self, fd) {
+            (Self::Terminal, OutFd::Stdout) | (Self::Stderr, OutFd::Stderr) => {
+                (StdioSpec::inherit(), None)
             }
-            _ => return Ok(ChildStdioPlan::for_sink(self)),
-        };
-        Ok(ChildStdioPlan { stdio, pump: None })
+            (Self::File(f), _) => (StdioSpec::from_file(f.try_clone()?), None),
+            (Self::Pipe { writer, .. }, _) => {
+                (StdioSpec::from_pipe_writer(writer.try_clone()?), None)
+            }
+            _ => (StdioSpec::piped(), Some(self.clone())),
+        })
     }
 
     /// Do both sinks deliver to one destination?  Decides whether a child's
@@ -476,7 +424,7 @@ pub fn without_terminator(bytes: &[u8]) -> &[u8] {
 mod tests {
     #[cfg(unix)]
     use super::WriteStopped;
-    use super::{CapturedBytes, Edge, Sink, without_terminator};
+    use super::{CapturedBytes, Edge, OutFd, Sink, without_terminator};
     #[cfg(unix)]
     use crate::process::CancelCause;
     use crate::process::DurableRoot;
@@ -727,13 +675,13 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().worker().id(),
         };
-        let plan = sink.child_stdout().expect("plan");
-        assert!(plan.pump.is_none());
+        let (stdio, pump) = sink.child_stdio(OutFd::Stdout).expect("stdio");
+        assert!(pump.is_none());
         drop(sink);
 
         let mut child = crate::process::Launch::new("/bin/echo")
             .arg("hi")
-            .stdout(plan.stdio)
+            .stdout(stdio)
             .spawn(crate::process::PgidPolicy::Inherit)
             .expect("spawn")
             .child;
@@ -757,11 +705,11 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().worker().id(),
         };
-        let plan = sink.child_stdout().expect("plan");
+        let (stdio, _) = sink.child_stdio(OutFd::Stdout).expect("stdio");
 
         let mut child = crate::process::Launch::new("/bin/echo")
             .arg("hi")
-            .stdout(plan.stdio)
+            .stdout(stdio)
             .spawn(crate::process::PgidPolicy::Inherit)
             .expect("spawn")
             .child;
@@ -897,9 +845,42 @@ mod tests {
     }
 
     #[test]
-    fn a_file_plan_hands_over_the_fd_with_no_pump() {
-        let plan = file_sink().child_stdout().expect("plan");
-        assert!(plan.pump.is_none());
+    fn a_file_is_handed_to_either_fd_with_no_pump() {
+        use crate::process::StdioSpec;
+        let file = file_sink();
+        for fd in [OutFd::Stdout, OutFd::Stderr] {
+            let (stdio, pump) = file.child_stdio(fd).expect("stdio");
+            assert!(pump.is_none());
+            assert!(!matches!(
+                stdio,
+                StdioSpec::Inherit | StdioSpec::Null | StdioSpec::Piped
+            ));
+        }
+    }
+
+    /// A child inherits only the fd its sink is; any other sink but a file or
+    /// pipe is pumped into from a pipe.
+    #[test]
+    fn a_child_inherits_only_the_fd_its_sink_is() {
+        use crate::process::StdioSpec;
+        let inherits =
+            |sink: &Sink, fd| matches!(sink.child_stdio(fd), Ok((StdioSpec::Inherit, None)));
+        let pumped = |sink: &Sink, fd| {
+            matches!(
+                sink.child_stdio(fd),
+                Ok((StdioSpec::Piped, Some(pump))) if pump.same_destination(sink)
+            )
+        };
+        assert!(inherits(&Sink::Terminal, OutFd::Stdout));
+        assert!(inherits(&Sink::Stderr, OutFd::Stderr));
+        assert!(pumped(&Sink::Terminal, OutFd::Stderr));
+        assert!(pumped(&Sink::Stderr, OutFd::Stdout));
+        let (buffer, _) = super::new_buffer();
+        let tee = Sink::Tee(Box::new(buffer.clone()), Box::new(Sink::Terminal));
+        for fd in [OutFd::Stdout, OutFd::Stderr] {
+            assert!(pumped(&buffer, fd));
+            assert!(pumped(&tee, fd));
+        }
     }
 }
 

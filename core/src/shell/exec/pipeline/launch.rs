@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{Born, Head, Started};
+use super::super::command::{Born, ChildOut, Head, Started};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
@@ -61,12 +61,12 @@ fn dup_stdin_file() -> std::io::Result<std::fs::File> {
         .map(std::fs::File::from)
 }
 
-/// Wire a direct external stage: its pipe ends are the source and sink
-/// `wire_stdio` sees, and the parent's streams fill the boundary edges.
+/// Wire a direct external stage: its upstream pipe end is the source
+/// `wire_stdio` sees, the parent's stdin filling the boundary edge.
 fn wire_stage(
     cmd: &mut crate::process::Launch,
     stdin: ByteIn,
-    stdout: ByteOut,
+    stdout: ChildOut,
     holds_terminal: bool,
     shell: &Shell,
 ) -> Settled<command::Pumps<Sink>> {
@@ -78,16 +78,7 @@ fn wire_stage(
         }
         ByteIn::Parent => command::boundary_stdin(&shell.io, holds_terminal),
     };
-    let stdout = match stdout {
-        ByteOut::Downstream(writer, _edge) => command::ChildOut::Edge(writer),
-        ByteOut::Parent => command::ChildOut::Sink(&shell.io.stdout),
-    };
-    let io = command::ChildIo {
-        stdin,
-        stdout,
-        stderr: &shell.io.stderr,
-    };
-    command::wire_stdio(cmd, io)
+    command::wire_stdio(cmd, stdin, stdout, &shell.io.stderr)
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -104,6 +95,8 @@ pub(super) struct LaunchCx<'a> {
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`], which a direct
 /// stage's head leaves by value: nothing holds the program after it launches.
+/// Its stdout is resolved here, once for either kind: an edge's write end and
+/// fate go to the stage, its hold to the stage's handle.
 pub(super) fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
     launch: StageLaunch,
@@ -111,11 +104,14 @@ pub(super) fn spawn_stage(
     cx: &mut LaunchCx<'_>,
     slot: Slot,
 ) -> Settled<StageHandle> {
-    let StageRoute {
-        stdin,
-        stdout,
-        held,
-    } = route;
+    let StageRoute { stdin, stdout } = route;
+    let (stdout, held) = match stdout {
+        ByteOut::Parent => (ChildOut::Sink(cx.shell.io.stdout.clone()), None),
+        ByteOut::Downstream { writer, held } => {
+            let edge = Arc::clone(&held.edge);
+            (ChildOut::Edge { writer, edge }, Some(held))
+        }
+    };
     let name = match &stage.item {
         crate::ir::CompKind::Exec(exec) => exec.head.name().written(),
         _ => "pipeline".into(),
@@ -140,7 +136,7 @@ fn launch_external_stage_direct(
     args: &[Value],
     span: Option<Span>,
     stdin: ByteIn,
-    stdout: ByteOut,
+    stdout: ChildOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<LiveExternal> {

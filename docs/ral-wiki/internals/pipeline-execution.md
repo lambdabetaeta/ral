@@ -99,13 +99,17 @@ the edge dead. Neither endpoint of a pipe promises traffic, so a producer
 with nothing left to write for is the ordinary case, not an error path.
 
 **Bytes reach a stage thread through `Sink::Pipe` and a scoped
-`SourceReader`.** A `Thread` stage's `Io` is built straight from its
-`StageRoute`: `ByteOut::Downstream` becomes `Sink::Pipe { writer, edge, stage }`
-as the stage's `stdout`, so a discarded statement's bytes go down the wire like
-every other byte it writes. `stage` is the stage's *name*, for its reader-gone
-stop; the scope a write polls is the writer's own current scope, handed in at
-the write (`Sink::write_under`), so a cleanup's write is masked with its
-shield.
+`SourceReader`.** `spawn_stage` resolves a stage's stdout once, for either
+kind: `ByteOut::Downstream { writer, held }` gives the edge's write end and
+fate to the stage (`ChildOut::Edge`) and its hold to the stage's handle. A
+`Thread` stage writes the edge as `Sink::Pipe { writer, edge, stage }`, its
+`stdout`, so a discarded statement's bytes go down the wire like every other
+byte it writes. `stage` is the stage's *name*, for its reader-gone stop; the
+scope a write polls is the writer's own current scope, handed in at the write
+(`Sink::write_under`), so a cleanup's write is masked with its shield. A
+`Direct` stage has no node to name, so it never holds a `Sink::Pipe`: its
+child is handed the write end whole, and the sentinel, not the fate, hears
+its writes.
 A final stage has no edge, so `ByteOut::Parent` takes the parent's `stdout`:
 under `!{ … | … }` that is a capture buffer, and the final stage writes into it
 ([[design/capture|capture]]).

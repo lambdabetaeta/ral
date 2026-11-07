@@ -133,12 +133,14 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
     ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
-    Child stdio routing — the `(Stdio, pump)` plan for a spawned child's
-    stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
-    the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
+    Child stdio routing — how a spawned child's fd 1 or fd 2 reaches its
+    sink — is one decision, `Sink::child_stdio(fd)`, yielding the `StdioSpec`
+    and the sink to pump, if any ([[map/core/io-process|io-process]]), through
     which the standalone command, a direct pipeline stage, and an external a
-    stage thread spawns internally all route; `wire_stdio` takes the child's
-    `Source` as it stands, so the stdin choice is `boundary_stdin`'s alone.
+    stage thread spawns internally all route; a pipeline edge
+    (`ChildOut::Edge`) is handed over whole and needs no decision.
+    `wire_stdio` takes the child's `Source` as it stands, so the stdin choice
+    is `boundary_stdin`'s alone.
   - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
@@ -195,7 +197,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     node, then `launch`, one `spawn_stage` per stage pushed onto the collector,
     then, after a `roll_back` if that failed, `join`. `launch.rs` wires one
     stage's byte endpoints (`stage_stdin`, then the shared `wire_stdio`)
-    and dispatches it on its frozen `StageLaunch` (`spawn_stage`,
+    and dispatches it on its frozen `StageLaunch` (`spawn_stage`, which
+    resolves the stage's stdout once for either kind, and
     `launch_external_stage_direct`); `stage.rs` holds
     `StageHandle`, which dispatches `cancel`/`cut`/`watch`/`listen` over
     its two kinds, `External`/`Thread` — `cancel` records the cause on its own
@@ -260,7 +263,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     addresses), a further drain, while `CollectState::drop` writes
     `Terminated` on every live thread stage and kills whenever it is dropped
     with a stage still unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
-    stage's `Io` from its `StageRoute`, and its closure — given its
+    stage's `Io` from its stdin route and resolved stdout, and its closure — given its
     `Slot { ix, tx }`, wrapped in a `SettleOnDrop` — builds its own
     `StageObservation` and sends `Event::Returned(ix, obs)` as its last act,
     the guard armed until then so an unwind reports in its place. A non-final

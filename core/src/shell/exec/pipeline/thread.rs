@@ -2,9 +2,10 @@
 //! pipeline's process group with whatever externals it spawns.
 //! [`ThreadStage`] is the collector's handle onto the running thread.
 
+use super::super::command::ChildOut;
 use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
-use super::route::{ByteIn, ByteOut};
+use super::route::ByteIn;
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
@@ -88,11 +89,12 @@ impl Drop for ThreadStage {
     }
 }
 
-/// Spawn one ral-written stage on its own thread.
+/// Spawn one ral-written stage on its own thread, which writes an edge as a
+/// `Sink::Pipe` naming itself.
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     stdin: ByteIn,
-    stdout: ByteOut,
+    stdout: ChildOut,
     cx: &LaunchCx<'_>,
     slot: Slot,
 ) -> Settled<ThreadStage> {
@@ -101,12 +103,12 @@ pub(super) fn launch_thread_stage(
     let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
     let stdout = match stdout {
-        ByteOut::Downstream(w, edge) => Sink::Pipe {
-            writer: Arc::new(w),
+        ChildOut::Sink(sink) => sink,
+        ChildOut::Edge { writer, edge } => Sink::Pipe {
+            writer: Arc::new(writer),
             edge,
             stage: node.id(),
         },
-        ByteOut::Parent => cx.shell.io.stdout.clone(),
     };
 
     let io = Io {
@@ -192,7 +194,10 @@ mod tests {
         let _handle = launch_thread_stage(
             &stage,
             ByteIn::Parent,
-            ByteOut::Downstream(writer, Edge::new()),
+            ChildOut::Edge {
+                writer,
+                edge: Edge::new(),
+            },
             &cx,
             Slot { ix: 0, tx },
         )
@@ -233,7 +238,10 @@ mod tests {
         let handle = launch_thread_stage(
             &stage,
             ByteIn::Parent,
-            ByteOut::Downstream(writer, Edge::new()),
+            ChildOut::Edge {
+                writer,
+                edge: Edge::new(),
+            },
             &cx,
             Slot { ix: 0, tx },
         )

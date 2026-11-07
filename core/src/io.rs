@@ -22,7 +22,7 @@ pub(crate) use poll::poll_slice;
 pub(crate) use poll::{aborted, interrupt};
 pub use regime::{RunIo, RunStdin};
 pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Sink, without_terminator};
-pub(crate) use sink::{ChildStdioPlan, SINK_BUFFER_CAP, new_buffer, tee_with_buffer};
+pub(crate) use sink::{OutFd, SINK_BUFFER_CAP, new_buffer, tee_with_buffer};
 pub use source::{Source, SourceReader};
 
 pub(crate) use state::Io;

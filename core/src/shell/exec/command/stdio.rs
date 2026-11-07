@@ -3,9 +3,10 @@
 //! already installed on the shell's by `shell::exec::redirect`, and a pipeline
 //! edge is just another source or sink.
 
-use crate::io::{Io, Sink, Source};
+use crate::io::{Edge, Io, OutFd, Sink, Source};
 use crate::process::StdioSpec;
 use crate::shell::runtime::{Error, Settled};
+use std::sync::Arc;
 
 use super::Pumps;
 
@@ -22,17 +23,14 @@ pub(crate) fn boundary_stdin(io: &Io, readable: bool) -> &Source {
     }
 }
 
-/// Where a child's stdout goes: a ral sink, or a pipeline edge handed over whole.
-pub(crate) enum ChildOut<'a> {
-    Sink(&'a Sink),
-    Edge(os_pipe::PipeWriter),
-}
-
-/// The streams a child's three fds are wired from.
-pub(crate) struct ChildIo<'a> {
-    pub(crate) stdin: &'a Source,
-    pub(crate) stdout: ChildOut<'a>,
-    pub(crate) stderr: &'a Sink,
+/// Where a child's or a stage's stdout goes: a ral sink, or a pipeline edge
+/// handed over whole, its write end and its fate.
+pub(crate) enum ChildOut {
+    Sink(Sink),
+    Edge {
+        writer: os_pipe::PipeWriter,
+        edge: Arc<Edge>,
+    },
 }
 
 /// The child's stdin is its source: `Empty` is `/dev/null`, a reader a
@@ -48,9 +46,10 @@ fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
     })
 }
 
-/// Wire the child's stdin, stdout and stderr from `io`, returning the sinks
-/// its piped fds must be pumped into.  A `File` or `Pipe` sink is handed to
-/// the child directly.
+/// Wire the child's stdin, stdout and stderr, returning the sinks its piped
+/// fds must be pumped into.  A `File` or `Pipe` sink is handed to the child
+/// directly; an edge's fate is dropped, the sentinel hearing the child's
+/// writes in its place.
 ///
 /// The one platform split: when both output streams share a destination, Unix
 /// registers a `pre_exec` `dup2` that runs after the kernel wired fd 1, so
@@ -61,28 +60,28 @@ fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
 /// level in `shell::exec::capture::with_audit_capture`.
 pub(crate) fn wire_stdio(
     command: &mut crate::process::Launch,
-    io: ChildIo<'_>,
+    stdin: &Source,
+    stdout: ChildOut,
+    stderr: &Sink,
 ) -> Settled<Pumps<Sink>> {
-    command.stdin(stdin_stdio(io.stdin)?);
-    let (out, joined) = match io.stdout {
-        ChildOut::Sink(s) => (
-            s.child_stdout().map_err(|e| Error::io("pipe", &e))?,
-            io.stderr.same_destination(s).then_some(s),
-        ),
-        ChildOut::Edge(w) => (crate::io::ChildStdioPlan::edge(w), None),
+    let pipe = |e: std::io::Error| Error::io("pipe", &e);
+    command.stdin(stdin_stdio(stdin)?);
+    let (out, out_pump, joined) = match stdout {
+        ChildOut::Sink(sink) => {
+            let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe)?;
+            (out, pump, stderr.same_destination(&sink).then_some(sink))
+        }
+        ChildOut::Edge { writer, .. } => (StdioSpec::from_pipe_writer(writer), None, None),
     };
-    command.stdout(out.stdio);
-    let err_pump = if let Some(s) = joined {
-        join_stderr(command, s)?
+    command.stdout(out);
+    let err_pump = if let Some(sink) = joined {
+        join_stderr(command, &sink)?
     } else {
-        let err = io
-            .stderr
-            .child_stderr()
-            .map_err(|e| Error::io("pipe", &e))?;
-        command.stderr(err.stdio);
-        err.pump
+        let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe)?;
+        command.stderr(err);
+        pump
     };
-    Ok(Pumps::new(out.pump, err_pump))
+    Ok(Pumps::new(out_pump, err_pump))
 }
 
 #[cfg(unix)]
@@ -103,12 +102,11 @@ fn join_stderr(command: &mut crate::process::Launch, stdout: &Sink) -> Settled<O
             .as_handle()
             .try_clone_to_owned()
             .map_err(|e| Error::io("pipe", &e))?;
-        (crate::process::StdioSpec::from_owned_handle(owned), None)
+        (StdioSpec::from_owned_handle(owned), None)
     } else {
-        let plan = stdout
-            .child_stdio_plan()
-            .map_err(|e| Error::io("pipe", &e))?;
-        (plan.stdio, plan.pump)
+        stdout
+            .child_stdio(OutFd::Stderr)
+            .map_err(|e| Error::io("pipe", &e))?
     };
     command.stderr(stdio);
     Ok(pump)
