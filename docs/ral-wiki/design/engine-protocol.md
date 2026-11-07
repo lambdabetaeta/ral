@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e7
+generated_at_commit: f1b0a4a4
 generated_at_date: 2026-10-29
 ---
 
@@ -34,7 +34,7 @@ and a binding is only the carriage around it.
   either `Shell::root` and the root recipe over the `Origin::Root` (seating
   its cwd and env), then re-hold and install its `Root::grants` as permanent
   session layers, oldest first; or `Shell::child_of` over the `Bequest` a
-  `Origin::Child` seal decodes to; face the process's signals, jail a guest.
+  `Origin::Child` seal decodes to.
   The identity carrier constructs its child from the engine's `Arc<Runtime>`
   and the parked bequest, so a fork too is the trivial instantiation of what
   the wire encodes. Construction is attach: `IdentityTransport::boot`
@@ -43,7 +43,10 @@ and a binding is only the carriage around it.
   engine accepted. Every step of the attach (the runtime, the root recipe,
   the seal, `Shell::child_of` and the host's `GrantNarrower`) refuses with an
   `Error`, which crosses as a `WireError`, so a refusal's hints reach the
-  host on either carrier.
+  host on either carrier. A `WireError` is the message and the stored hints
+  alone: the far side rebuilds a `raised` error, code 1, and the record's
+  advice, which only a record has, is not sent
+  (`docs/SPEC.md` §13.1).
 - **No front-end holds a `Shell`.** Nothing public on `IdentityTransport`
   yields a `Shell` or accepts one. A front-end reaches its engine only through
   `Transport` — dispatch, probe, control — so a facility it needs must exist
@@ -51,7 +54,7 @@ and a binding is only the carriage around it.
   engine state through `ral_core::test_access` (feature `test-util`) or a
   probe, never a public method: `test_access::workers` reads through
   `IdentityTransport::inspect`, itself `test-util`-only, and core's own tests
-  boot their engines as every engine is booted, through `engine::testkit`.
+  boot their engines as every engine is booted, through `carrier::testkit`.
 - **The carrier adopts the fork.** A run that forks its session parks it or
   listens for it by the carrier's `Fork` arm, never by a `Host` method; both
   arms push the child's one grant layer through the same step (*Two
@@ -63,7 +66,7 @@ and a binding is only the carriage around it.
 
 |                   | answered (call)                                                    | one-way (notice)                                              |
 | ----------------- | ------------------------------------------------------------------- | --------------------------------------------------------------- |
-| **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — addressed strike, terminate, abort, out-of-band     |
+| **host → engine** | `Dispatch → Report` — one whole run: clocked, walled, cancel-scoped  | `Control` — addressed strike, end of the root, out-of-band     |
 | **engine → host** | `Enquiry → Answer` — nested inside a run, no clock of its own       | `Surface` — a run's live values, ordered before its Report; a worker's batch, on the session |
 
 Each direction owns one answered channel and one one-way channel, and the
@@ -209,12 +212,10 @@ payload's shape (the grant value's tables, verb sets as sequences) bumps
 `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 39.** An authored ceiling crosses as a grant
+dispatch. An authored ceiling crosses as a grant
 value, the record `grant` takes, in `Root.config`, and the engine decodes it where
 it lands (`Shell::decode_grant`, against its own anchor) as it decodes any
-grant: unknown keys are refused, a repeat adds nothing, a key may occur in
-both lists, and a file key naming a directory, a path-shaped name and an
-exclusion of the root are refused
+grant, under the refusals of every decoder
 ([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]). Rebuild guest media with `just vm::boot`. A `Fragment` never
 crosses: it lives only between loading and `extend`. A grant goes back out the
 same way: `Probe::Grants` answers each layer's value, never a summary of key

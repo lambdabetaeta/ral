@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6281520c
+generated_at_commit: f1b0a4a4
 ---
 
 # Authority's three carriers, and why they don't collapse
@@ -82,9 +82,9 @@ reading, never writing. Discovery retains each system-only walk's `Located`,
 checks the projection's exclusions on its trace before reading or yielding it,
 and reads its `#!` through that handle under `Ungoverned::read`. The same
 predicate judges linker traces. The parent also reads the launched program's
-interpreter through its judged handle and carries that interpreter in
-`ral-warrant/4`; a refused exec's hint uses the saved interpreter, even if the
-script changes before spawn. The guard consults none: an exclusion of a linker or an
+interpreter through its judged handle and keeps it beside the image, to word a
+failed start; the warrant does not carry it, and a refused exec's hint uses
+the saved interpreter even if the script changes before spawn. The guard consults none: an exclusion of a linker or an
 interpreter refuses the programs that start through it, though the policy says
 nothing about them, and the kernel's refusal is worded by the launch
 diagnostics. Same authority, two renderings, because there are

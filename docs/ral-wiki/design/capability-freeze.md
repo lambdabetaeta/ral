@@ -80,8 +80,8 @@ walk as it freezes it. In doing so it:
 - **rejects** a `` `gitdir `` whose `.git` pointer file names a directory that
   does not name the working tree back;
 - **rejects** an exec file key that names a directory, the root included
-  (`file_rules`, `PolicyError::root_program`), so the author is told to write
-  `` `dir ``; a `` `name `` that is path-shaped, since a name is a command name and
+  (`root_program`, raised by `authority/grant/resolve.rs`), so the author is
+  told to write `` `dir ``; a `` `name `` that is path-shaped, since a name is a command name and
   a path is a place (`bare_name`, judged under Windows rules on every host); and
   an exclusion of the root, or of a link to it (`Polar` for `Excluded`,
   `authority/grant/paths.rs`), which would exclude every path.
@@ -212,16 +212,18 @@ legitimately lies outside the tree, so no region bounds it. What bounds it is
   config of a repository split off with `--separate-git-dir`, the two records git
   itself keeps. Both ends must agree, and only one end is writable from inside
   the tree.
-- A pointer nothing claims is a `PolicyError` at the boundary (`authority::grant::freeze`, which holds the three `gitdir` refusals), like an escaping
-  `xdg-*` place. Silently narrowing to the cwd would be safe and unreadable — the same
+- A pointer nothing claims is an `Error` at the boundary (`bad_pointer` in
+  `authority::grant::freeze`, which holds the three `gitdir` refusals), like an
+  escaping `xdg-*` place. Silently narrowing to the cwd would be safe and unreadable — the same
   fail-closed-and-say-so reading the XDG guard takes.
 
 ## Composition is over resolved paths
 
-When several profiles merge into one ceiling — exarch's
-`base ◁ extend ⊓ restrict` ([[map/exarch/policy|policy]]) or the
-`--capabilities` fold in `apply_session_profiles` — each is resolved as it loads
-and the lattice operations run on the resolved layers.
+Each profile is resolved as it loads, and the lattice operations run on the
+resolved layers. Only `--extend` merges: exarch builds one ceiling,
+`base ◁ extend`, and then pushes each `--restrict` file as a layer of its own
+([[map/exarch/policy|policy]]); `apply_session_profiles` likewise pushes one
+layer per `--capabilities` file.
 
 - the meet and the extension compare **resolved positions**, so prefix containment is exact
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than

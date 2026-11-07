@@ -1,5 +1,5 @@
-<!-- verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37 -->
-<!-- generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37 -->
+<!-- verified_at_commit: f1b0a4a4 -->
+<!-- generated_at_commit: f1b0a4a4 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -2015,11 +2015,12 @@ raise    : ∀ε α. ErrorRecord → F^ε α
 describe : ErrorRecord → Returns String
 ```
 
-A re-raise preserves the record and recomputes reason hints, including the
-session's exit-hints lookup. Its resolved site renders as `script:line:col`,
-without a caret. Situational hints, context prefixes and unwind facts are
-report-only and do not survive a handler's re-raise. `await` propagates the
-live error instead, since no handler has intervened.
+A re-raise preserves the record. The record's advice is recomputed from it
+when the error is next rendered (§13.1), including the session's exit-hints
+lookup. Its resolved site renders as `script:line:col`, without a caret.
+Stored hints, context prefixes and unwind facts are report-only and do not
+survive a handler's re-raise. `await` propagates the live error instead,
+since no handler has intervened.
 
 An external command that exits unsuccessfully and a runtime operation that
 cannot complete also produce ordinary failures. They participate in `?` and
@@ -2192,11 +2193,10 @@ runs. Runtime failures retain the innermost available source position while
 they unwind; code loaded from another file is diagnosed against that file, not
 against an unrelated caller.
 
-When a failure has actionable context, ral may add a hint beneath the primary
-message. A failing external command may also contribute its own exit-status
-hint. These diagnostics are presentation: recovery uses the reason and the
-failing frame's name and site described above, never by parsing the
-rendered text.
+When a failure has actionable context, ral may add hints beneath the primary
+message; §13.1 says which, and in what order. These diagnostics are
+presentation: recovery uses the reason and the failing frame's name and site
+described above, never by parsing the rendered text.
 
 ### 8.10. Cancellation and signals
 
@@ -3781,13 +3781,23 @@ ordinary destinations; use `audit` when those bytes must also be retained as
 evidence. `audit`'s `` `err `` outcome and `poll`'s `` `ready `` `` `err ``
 outcome carry the same record as `try`.
 
-Situational hints, context prefixes, compile rejections and unwind facts stay
-on the live error, outside its record. Failed captures add their discarded
-byte counts, saturating at `u32::MAX`; written sequences and binds record
-whether later steps were abandoned. The renderer composes the hint, then one
-counted discard note, then an abandoned-tail note. The last note is omitted
-for spawn failures or when a situational or reason hint exists. Escapes carry
-no unwind facts. Re-raising a record drops these report-only facts.
+Hints, context prefixes, compile rejections and unwind facts stay on the live
+error, outside its record. A *hint* is advice a site attaches to the error as
+it unwinds; the error keeps its hints in attachment order. The record's
+*advice* is the one note its reason determines: signal advice for a
+`` `signaled `` process failure, the session's exit-hints entry for an
+`` `exited `` one, and none for any other reason. Advice is recomputed at each
+render and is never stored.
+
+**Hint composition.** The renderer shows every stored hint, in attachment
+order, and then the record's advice. None displaces another, and nothing
+parses the text of any. The compact form (§13.2) composes them identically.
+After them come one counted discard note, then an abandoned-tail note. Failed captures add their discarded byte counts,
+saturating at `u32::MAX`; written sequences and binds record whether later
+steps were abandoned. The abandoned-tail note is omitted for spawn failures
+and whenever any hint or advice is shown. Escapes carry no unwind facts.
+Re-raising a record drops these report-only facts; the advice is recomputed
+from the record.
 
 Errors raised by the evaluator use the same path as explicit failures. For
 example, a map is indexed by a key computed at runtime, so a key the map does
@@ -3821,7 +3831,7 @@ hint: REPAIR
 ```
 
 The status suffix appears only for worker `timed-out` and `cancelled` reasons;
-the hint line appears only when a hint exists. Errors in
+the hint line appears only when a hint or advice exists (§13.1). Errors in
 scripts, startup files, aliases, and other stored sources use the source-aware
 form instead.
 
@@ -3896,7 +3906,7 @@ The report is not itself an observation. It has two fields:
 included (§8.6), so
 one outcome vocabulary serves `try`, `poll` (§11.2), and `audit`: a reader who
 can read one can read all three. `describe` derives its text from the record;
-hints are advice for a person and never enter that data.
+hints and advice are for a person and never enter that data (§13.1).
 
 `audit` therefore handles an ordinary runtime error as data: evaluating the
 `audit` expression succeeds, with the failure in `outcome`. Control escapes are

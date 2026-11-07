@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 5eaef7d9
-verified_at_commit: 7ab5809a
-verified_at_date: 2026-10-26
-anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_lookups, withheld_services, rendered_ancestors, pinned_dirs, step]
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
+anchors: [apply_profile, build_profile, Profile, RESOLVER_SOCKET, gpu_name, emit_fs_restricted, emit_exec_rules, Clause, Filter, emit_lookups, WITHHELD_SERVICES, rendered_ancestors, pinned_dirs, step]
 ---
 
 # The Seatbelt profile: an object policy in a name language
@@ -14,7 +14,7 @@ cost of saying the second in the first:
 
 - **Two spellings per path.** `/tmp` is a firmlink to `/private/tmp`, and the
   kernel presents a lookup under whichever spelling the process used, so every
-  rendered name (`render_paths`) carries both — denies included.
+  rendered name (`render_real`, `render_excluded`) carries both — denies included.
 - **No case or normalisation spellings.** Measured (macOS 26.5), `literal`,
   `subpath` and `regex` all match modulo canonical caseless equivalence, for
   absent names as for existing ones, on case-insensitive and case-sensitive
@@ -50,7 +50,8 @@ cost of saying the second in the first:
 - **Order.** Seatbelt is last-match-wins, so every deny is emitted after every
   allow in the profile, not merely after its own. `Profile` is a record whose
   field order *is* that precedence — fs allows, exec rules, exec ancestors,
-  fs denies, pins, net — and its `Display` writes the sections in it.
+  fs denies, pins, net, gpu — and its `Display` writes the sections in it,
+  the `net` and `gpu` profiles only where the frame leaves them on.
 - **ral's own file.** A sandboxed command must not swap the ral that confines
   its children, so in every profile ral's file is write-denied and its
   ancestors unlink-denied, whatever the grant.
@@ -217,7 +218,7 @@ admits being variable-length.
   `~`, `whoami`, `id`), and the loggers (`os_log`; a denial is survivable, but
   every libSystem process hits it and would drown the denial log
   `authority::sandbox::diag` reads). Withheld, each with its reason as *data* in
-  `withheld_services` so the denial hint can quote it — a comment cannot reach the
+  `WITHHELD_SERVICES` so the denial hint can quote it — a comment cannot reach the
   agent holding the EPERM, and a deliberate `no` read as an accident is chased
   instead of worked around: `launchservicesd` (and `lsd.*`) would spawn
   whatever `/usr/bin/open` names as an unconfined child of launchd — `open -a

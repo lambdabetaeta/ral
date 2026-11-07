@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 38c3a490690ee06d69d54a998f950ee82303d124
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-10-27
-anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, PolicyError, Denial, Refusal, refused, record_check, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, SpawnGrant]
+anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, Denial, refused, record_check, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, SpawnGrant]
 ---
 
 # Capability is data; the guard and the sandbox are its two consumers
@@ -63,11 +63,11 @@ that took a `Context`.
   (`Shell::check_exec`) passes its call's `Mooring` to the same door and so
   broadcasts.
 - **A grant string becomes a `FrozenPath` in `guard::freeze`**, against one
-  `FreezeCtx` (`FreezeCtx::of(&Shell)`, owned `env` and `cwd`): `path`,
+  `FreezeCtx` (`Shell::freeze_ctx`, owned `env` and `cwd`): `path`,
   `paths`, `absolute`. `FrozenPath::from_surface` is the one minting door, and
   the `xdg:` escape guard asks the fs guard's own question,
-  `from_surface(home).contains::<Allow>(resolved.real().as_path())`. `PolicyError`
-  and the `gitdir:` refusals live there, `decode` and `SpawnGrant` beside it.
+  `from_surface(home).contains::<Allow>(resolved.real().as_path())`. The
+  freezer's refusals, `gitdir:` among them, live there, `decode` and `SpawnGrant` beside it.
 
 ### Rejected
 
@@ -101,10 +101,10 @@ that took a `Context`.
 (`GrantStack`, `Flag`, `admit`, `Admitted`, `Refused`, `ExecDenial`,
 `for_kernel`); `core/src/authority/sandbox/projection.rs`
 (`SandboxProjection::of`, `ExecProjection`); `core/src/authority/guard/enforce.rs`
-(`check_exec`, `check_flag`, `Denial`, `Refusal`), over `GrantStack`;
-`core/src/shell/runtime/state/checks.rs` (`Shell::refused`, `Refusal → Error`);
-`core/src/authority/grant/freeze.rs` (`FreezeCtx`, `PolicyError`);
-`core/src/shell/grant.rs` (`Shell::freeze_ctx`, `PolicyError → Break`) and
+(`check_exec`, `check_flag`, `Denial`), over `GrantStack`;
+`core/src/shell/runtime/state/checks.rs` (`Shell::refused`);
+`core/src/authority/grant/freeze.rs` (`FreezeCtx`);
+`core/src/shell/grant.rs` (`Shell::freeze_ctx`) and
 `shell/grant/{decode,spawn}.rs` (`decode_capability_map`, `SpawnGrant`);
 `core/src/shell/runtime/audit/fan_out.rs` (`Shell::record_check`).
 
@@ -116,3 +116,8 @@ that took a `Context`.
 by a host: `Shell::decode_grant` is it against the receiving shell's own anchor
 (`shell/grant/decode.rs`). `Capabilities` is a test builder that spells a grant
 value, not a route into a layer.
+
+**Amended 2026-11-07 by [[decisions/261105_the-error-record|the-error-record]].**
+The guard and the freezer return `Error`; `PolicyError` and `Refusal` are gone,
+and `Denial { check, error: Error }` pairs the check to record with the error
+that refuses. A refusal enters control flow through `From<Error> for Break`.

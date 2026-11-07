@@ -49,7 +49,7 @@ The follow-on cleanup runs in this order.
 5. **Narrow host accessors.** After frame assembly leaves hosts, re-check
    `durable_root`, `foreground`, `stderr_mut`, `set_surface`, and friends.
    Delete accessors whose only remaining job was old frame construction; keep
-   ambient REPL byte setup (`set_stdout`) unless `TurnIo` later grows an explicit
+   ambient REPL byte setup (`ReplHost::set_printer`) unless `TurnIo` later grows an explicit
    live-printer case.
 6. **Rename exarch's provider outcome if it still reads ambiguously.** With core
    `TurnOutcome` gone, `session::TurnOutcome` may remain, but
@@ -63,7 +63,7 @@ Do not collapse distinct channels just because the code is shorter:
   liveness.
 - Keep bytes and surface separate: `watch` needs durable byte sinks; surface is a
   turn-local structured effect.
-- Keep `set_stdout` until the host API has an equally explicit way to install the
+- Keep `ReplHost::set_printer` until the host API has an equally explicit way to install the
   REPL's ambient external printer.
 - Do not move tokio into `ral_core` while sharing the driver.
 
@@ -116,7 +116,7 @@ it set out to be, not a re-architecture.
 5. **Host accessors narrowed.** `Shell::durable_root` is `pub(crate)` — only
    `run_turn` mints the foreground scope now, no host does. The others have live
    host uses and stay: `foreground` (exarch cancel-poll tests), `stderr_mut`
-   (exarch diagnostics), `set_stdout` (the REPL's ambient external printer),
+   (exarch diagnostics), `ReplHost::set_printer` (the REPL's ambient external printer),
    `sources`/`terminal`/`is_interactive`/`enable_audit`/`take_audit_fragment`/
    `builtin_names`/`repl`/`repl_mut`.
 6. **`session::TurnOutcome` kept.** With core `TurnOutcome` gone there is no

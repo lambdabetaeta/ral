@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-11-06
-anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, ScopeOwner, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
+anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, BroodGuard, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
 # `await` is the block run here, and a worker ends with its children
@@ -13,7 +13,7 @@ anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, Completi
 > publication. `done`, `poll` and `try` around `await` receive the same closed
 > `[reason, cmd, site]` record with total site, not observer-relative locations.
 > `await` propagates the live error and its report facts; a handler's
-> `raise $e` keeps only the record and recomputable reason hints. `describe`
+> `raise $e` keeps only the record and the advice it determines. `describe`
 > derives its text. The original ownership rationale below is unchanged.
 
 > Amended 2026-11-05 (see [[design/endings|endings]]):
@@ -325,15 +325,15 @@ no return rule for runs.
 With I5, `cancel $parent` strikes the parent's node, and a grandchild would
 otherwise meet a stop naming a node not its own — a foreign stop that ends an
 agent's turn as `Ending::Stopped` for a `cancel` the agent made itself. So a
-worker's base converts iff the stop is a `WorkerStop` (`Cancelled`,
+worker's base converts iff the stop is one `Reason::stopped` knows (`Cancelled`,
 `TimedOut`) **and its owner is not the session root** (`convert_own_stop`).
-Root causes (`Terminated`, `Aborted`) and `Interrupted` are no `WorkerStop`
-and pass unchanged, as does a stop that names no node. A wall's `TimedOut` on
+Root causes (`Terminated`, `Aborted`) and `Interrupted` are no worker's own
+stop and pass unchanged, as does a stop that names no node. A wall's `TimedOut` on
 a run node reaching a call-owned child converts, harmlessly: the combinator's
 own next poll raises the real stop, and its halt path cancels the rest. This
 amends law 9 of
 [[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]:
-a worker consumes every in-session `WorkerStop`, not only one naming its own
+a worker consumes every in-session cancel or timeout, not only one naming its own
 node.
 
 ## Why `spawn` is syntax
@@ -379,8 +379,9 @@ join).
 
 What the leases kept that I9 needs became the handle's clock: `Stamp { mono,
 wall }`, a birth stamp set at `HandleInner::new` and an end stamp set by the
-worker's `Settler` on every exit path of its thread, from which `elapsed` (a
-running worker's age, a settled one's run time) and `settled_at` are derived,
+worker's `CompletionPermit` on every exit path of its thread, from which
+`elapsed` (a running worker's age, a settled one's run time) and `ended` are
+derived,
 each in one place. `poll`, `workers`, the `` `done `` event and the notice
 read them and nothing else.
 
@@ -463,7 +464,7 @@ code renders anything.
 `CompletionPermit`, `Stamp` in `core/src/shell/runtime/handle.rs`; `Birth`,
 `convert_own_stop`, `exit_brood` in `core/src/shell/builtins/concurrency/birth.rs`;
 `spawn_form` in `core/src/shell/builtins/concurrency.rs`; `Cradle`, `Brood`,
-`ScopeOwner` in `core/src/shell/runtime/handle/brood.rs`; `Owner` in
+`BroodGuard` in `core/src/shell/runtime/handle/brood.rs`; `Owner` in
 `core/src/shell/runtime/state/workers.rs`; `TitlePolicy` in
 `core/src/shell/runtime/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The
 runtime narrative is [[internals/cancellation|cancellation]] and

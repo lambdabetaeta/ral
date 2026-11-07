@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-03
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -141,13 +141,14 @@ authority and returns domain data, never runtime values or control flow.
   `fs_denial` (the wording of a `Refused`, one clause per case shared with
   `Display for Refused`), `check_flag`, and `check_device_name`.
   The exec and fs checks return
-  `Result<_, Box<Denial>>`, a `Denial { check, error: Refusal }`, over
-  `Refused::{Guarded, Withheld}`: a `fact::Check` and diagnostic data
-  (`Refusal { message, hint }`), given runtime status only by the shell.
-  Flag and device checks return `Result<(), Refusal>`. The judgment is reusable
+  `Result<_, Box<Denial>>`, a `Denial { check, error: Error }`, over
+  `Refused::{Guarded, Withheld}`: a `fact::Check` and the runtime `Error`
+  that refuses, hint included.
+  Flag and device checks return `Result<(), Error>`. The judgment is reusable
   without the report: `GrantStack::refusal_fs` decides — `Refused::Guarded`
   first, for a write onto a boot-pinned sandbox binary (the supplied
-  `Baseline`'s protected identities), before any grant is folded. `GrantStack::admits_fs` is the quiet twin a write asks before
+  `Baseline`'s protected identities), before any grant is folded: the empty
+  stack is exactly the case that veto must catch. `GrantStack::admits_fs` is the quiet twin a write asks before
   reading its before- and after-images.
 
 ## The shell adapter — `core/src/shell/runtime/state/checks.rs`
@@ -170,7 +171,6 @@ authority and returns domain data, never runtime values or control flow.
   operation before an error is disclosed; `GrantStack::locate` applies it for
   every caller and either handle kind, and `locate_existing` and `locate_first` judge
   failed walks through it.
-  `From<Refusal> for Error` preserves the message and hint at this boundary.
 
 ## Construction — `core/src/authority/grant/`
 
@@ -188,8 +188,8 @@ spawn adapter live in `shell::grant`.
   and `GrantValue::deny_all` is the value that withholds all positive authority;
 - `builder.rs` — the test builder over `Axes` (`Capabilities`, above);
 - `host.rs` — `Baseline::of_env`/`of_home`: the system reads
-  `toolchains::system_reads_in` keeps, as prefixes, refusing with a
-  `PolicyError` (hint kept); `authority.rs` attaches the sandbox's boot pins to
+  `toolchains::system_reads_in` keeps, as prefixes, refusing with an
+  `Error` (hint kept); `authority.rs` attaches the sandbox's boot pins to
   form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
   `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor:
@@ -212,8 +212,8 @@ spawn adapter live in `shell::grant`.
   be dead, so exarch's deny layer fails closed, in words about the path
   alone: its caller names who chose it, and only a payload's refusal
   (`live_absolute`) adds, as a hint, how a grant writes it; the tags `absolute`,
-  `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
-  refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
+  `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, the root-program refusal `root_program`, the `gitdir`
+  refusals (`bad_pointer`, from `BadPointer`), `Selector` (`Path | Toolchain(Toolchain)`) and
   the `path` selector (`path_dirs_in`, which
   classifies each absolute `PATH` entry raw, as an `absolute` payload, before
   the freeze folds it), and
@@ -246,7 +246,7 @@ spawn adapter live in `shell::grant`.
 ## Runtime decoding — `core/src/shell/grant/`
 
 `shell/grant.rs` supplies `Shell::freeze_ctx` (env, logical cwd and scratch)
-and the `PolicyError → Break` conversion; substantive freezing stays in
+and the `Error → Break` conversion; substantive freezing stays in
 `authority::grant::freeze`.
 
 - `decode.rs` — `decode_capability_map`, the one grant walker (crate-private),
@@ -468,7 +468,7 @@ constructor, so no call site can choose "here" for itself**
   `Answer` remembers the first candidate whose walk found a program
   (`Located::holds_program`, the one executable predicate), an undisclosed
   ordering hint: that candidate is walked first and judged at its `PATH`
-  place. `locate` is the unjudged fold of the same walk. `vet` reads the
+  place. `locate` is the unjudged fold of the same walk. `prepare` reads the
   judged fold's verdict without probing.
 - On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
   `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
@@ -650,18 +650,20 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   environment can choose the file. Two are pinned: this executable
   (`OWN`), so a confined re-exec runs the same binary even under an
   on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). Its
-  methods are `arg0` (the on-disk path, `argv[0]` of every exec), `exec_path`
-  (what `execve` is handed), on Linux `fd` (the pinned descriptor) and `names`
-  (the inode's current name, `None` once unlinked), and on macOS `verify`;
-  `reexec::launch(role)` is the one launch entry for the unconfined
+  methods are `arg0` (the on-disk path, `argv[0]` of every exec), `command`
+  (the `Command` that execs the pin: through `/proc/self/fd/<N>` on Linux, by
+  name elsewhere), `object_id`, on Linux `fd` (the pinned descriptor) and
+  `names` (the inode's current name, `None` once unlinked), and on macOS
+  `verify`; `reexec::launch(role)` is the one launch entry for the unconfined
   re-execs (the pipeline anchor, a bundled tool), through the pin when there is
   one, and `reexec::own()` is ral's own pin as a
-  `Result`, so a sandboxed launch refuses when ral could not pin itself. The `Pin`
-  variants say where a swap is even askable: `Fd` on Linux (the retained
-  descriptor, so `/proc/self/fd/N` resolves to the boot inode), `Stat` on
-  macOS (a `(dev, ino)` snapshot re-checked before each spawn), and
-  `Unguarded` on Windows, which has no parent-side self re-exec for a guard
-  to protect. On Windows there is no child re-entry at all — confinement is
+  `Result`, so a sandboxed launch refuses when ral could not pin itself. A swap
+  is askable where the host can say so: on Linux the retained descriptor makes
+  `/proc/self/fd/N` resolve to the boot inode; on macOS `verify` re-walks the
+  name and compares its `ObjectId` before each spawn; on Windows nothing is
+  pinned, since there is no parent-side self re-exec for a guard to protect
+  and `launch` takes the live `current_exe`. On Windows there is no child
+  re-entry at all — confinement is
   the AppContainer token the *parent* attaches at `CreateProcessW`, so a child
   asking to confine itself (`--warrant`) is refused with 126, and the pinned
   self serves to grant the container read on the bundled-tool re-exec image.
@@ -675,7 +677,9 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   support among them, beside the write prefixes, the system reads and the exclusions;
   allowances keep their resolved positions up to rendering, exclusions stay the
   read table's `FsDeny`s and render from the resolved real paths their walks
-  held; `FsLists`, whose `rendered()` derives `pinned_dirs` and whose
+  held; deny comes from the read region alone, the two regions holding the
+  same exclusions, so a disk change between the two folds can only drop a
+  write allow, which fails closed; `FsLists`, whose `SandboxProjection::rendered` derives `pinned_dirs` and whose
   `read_withheld` gives the read table's verdict; no write
   reach classification) and `ExecProjection::Restricted(KernelRules)`, the
   stack's table compiled once here, `for_kernel`, joined with the live
@@ -686,9 +690,11 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   `protocol::probe::Grants::of` into `withholds_gpu`: the one place the
   host's inability to withhold the GPU (Windows) is stated. A withheld GPU
   there projects as left on and refuses nothing.
-- `Refusal` (`sandbox.rs`) — why no confined child exists: nothing ran.
-  `Unavailable` is a confinement this host cannot establish: there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
-  first launch that needs it), or the pinned envelope failed to spawn.
+- `sandbox::unavailable` (defined in `process/launch.rs`, re-exported by
+  `sandbox.rs`) — mints the `Error` for a confinement this host cannot
+  establish, so that nothing ran and it is never the command's fault: there was
+  no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the first
+  launch that needs it), or the pinned envelope failed to spawn.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
   image; `build_launch` reaches it directly when no projection is active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
@@ -914,7 +920,7 @@ can load at all, handed to `session::confine` as a `RealPath`, so the
 canonical form the pin and the stamp's local-prefix allow-list demand is the
 type's, not the caller's care; and `` net: `offline `` is enforced by withholding the network
 capability SIDs — a LowBox token without them cannot open a socket, so
-`net_enforced()` holds on Windows.
+the network axis is enforced on Windows.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
 profile inherits, and `build_profile` lays the grant's rules over it. Its POSIX

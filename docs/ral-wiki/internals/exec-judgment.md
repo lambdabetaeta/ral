@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-03
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
 anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
 
@@ -179,15 +179,15 @@ Linux hosts, within the declared limits.**
   per-grant fs/exec kernel rules; direct admission still holds, as do the jail,
   its offline network namespace and seccomp, and the VM perimeter.
 
-**A refused `execve` of a script says why.** The child used to advise allowing
-the interpreter, which is wrong when an exclusion covers it, and it holds no
-policy to tell; discovery cannot tell either, since it skips a script the user
-can write. So the parent reads the `#!` line for diagnosis only, never as
-evidence, and records in the warrant's `Run::File` the exclusion covering the
-interpreter on either axis, if any; the hint then says `its interpreter {c} is
-excluded by {scope}`, followed by the remedy a guard refusal of that exclusion
-gives (`remedy::remove_the_exclusion`), and otherwise keeps the old advice. No
-dependency resolver is built.
+**A refused `execve` of a script says why.** The child holds no policy, and
+discovery cannot tell either, since it skips a script the user can write. So
+once the start has failed the parent reads the `#!` line for diagnosis only,
+never as evidence, and asks the launch's own projection what withholds the
+interpreter (`interpreter_hint`): an exclusion on either axis first, then a
+missing exec allowance, then a missing read. An exclusion reads `its
+interpreter {c} is excluded by {scope}`, followed by the remedy a guard refusal
+of that exclusion gives (`remedy::remove_the_exclusion`). No dependency
+resolver is built, and no warrant record carries the interpreter.
 
 ## An exclusion is a guardrail, not a wall
 

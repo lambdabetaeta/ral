@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
+generated_at_commit: f1b0a4a4
 ---
 
 # Authority is a table of scoped rules
@@ -604,7 +604,7 @@ spelling.
   interchangeable, and folding the two differently would leave a deny a
   differently spelled access slips past.
 - **The platform rules are a `PathRules` parameter, never a `cfg!` read**, in
-  `starts_with_identity`, `starts_with_collision`, `is_foreign_rooted`,
+  `starts_with_identity`, `starts_with_collision`, `absolute_under`,
   `is_discard_device`, `reserved_device_refusal` and
   the name key, with `PathRules::HOST` read once at each sole call site, so both tables are pinned by tests on every host and
   neither is dark on the other.
@@ -780,7 +780,10 @@ argues from.
   `FsDeny`s until rendering, so the lists judge as the read table does
   (`FsLists::read_withheld`, which the interpreter hint asks): the live filter
   drops only an allowance whose own subject an exclusion holds, which supports
-  nothing that exclusion does not, so no verdict or witness changes. They render
+  nothing that exclusion does not, so no verdict or witness changes. The
+  projection takes them from the read region alone: both regions hold the same
+  exclusions, and a disk change between the two folds can only drop a write
+  allowance, which fails closed. They render
   from the resolved real paths their walks held, by position (the identity
   reading is ral's own readers'). Each backend refuses a redirected allowance rather than
   following it: Linux's `open_nofollow` refuses the launch, Seatbelt matches the

@@ -18,11 +18,18 @@ run's own; a launch is built under none.
   blocked read would then never run the scope's poll, and neither Ctrl-C nor a
   deadline could end it.
 
-**Why.** Every wait in ral is one a cause can end
+**Why.** Every wait on a program is one a cause can end
 ([[internals/cancellation|cancellation]]). On Unix the first word is the only
-wait in the start, and an uncancellable one would be the one place a stopped
-program hangs the shell. Windows' start has no first word; its waits are the
+wait in the start that a program can prolong, and an uncancellable one would be
+the one place a stopped program hangs the shell. (On Linux the start also reads
+bwrap's `--info-fd` record to EOF, `payload_pgid`; that read is not cancellable,
+but it ends when the trampoline sweeps its descriptors, before it runs anything
+the program owns, or when the envelope dies.) Windows' start has no first word; its waits are the
 stamps, which poll the same scope
-([[internals/confined-launch|confined-launch]]).
+([[internals/confined-launch|confined-launch]]). The claim is about waits on
+a program. The waits no cause ends are on what ral has itself already ended:
+the intermediate of a `detach`, which has exited (`survivor_pid`), and an
+anchor's reporter thread, which ends when the anchor's pipe closes
+(`AnchorProcess::end`).
 
 See [[internals/an-external-end-to-end|an-external-end-to-end]].

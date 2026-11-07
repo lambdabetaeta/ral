@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 4957c6c4
+generated_at_commit: f1b0a4a4
 ---
 
 > **Amended 2026-10-13.** The accepted exception below is gone: the hatch and
@@ -234,3 +234,5 @@ See [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[internals/pipeline-execution|pipeline-execution]],
 [[internals/cancellation|cancellation]], [[map/core/io-process|io-process]],
 [[map/core/runtime|runtime]].
+
+**Amended 2026-11-07.** `RunningChild` is gone: a spawned child is a `ChildHandle` (`core/src/process/child.rs`), and the reaper owns its wait.

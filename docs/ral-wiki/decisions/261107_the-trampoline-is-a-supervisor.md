@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
-verified_at_commit: b9f3d1b708751d86428c306362f82a72d2904928
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-11-07
-anchors: [Confined, supervise, start_file, start_tool, tool_child, begin, outlive_group_signals, die_with, Witness, Running, Testimony, serve_warrant]
+anchors: [Confined, supervise, start_file, start_tool, tool_child, begin, Dawn, Unbegun, outlive_group_signals, die_with, Witness, Running, Testimony, serve_warrant]
 ---
 
 # The trampoline is a supervisor
@@ -75,3 +75,11 @@ cannot start is `not-found` or `not-runnable`, as an unconfined one is, never
 `core/src/process/child.rs` (`ChildHandle::into_watch`). The narrative is
 [[internals/an-external-end-to-end|an-external-end-to-end]] and
 [[internals/confined-launch|confined-launch]].
+
+**Amended 2026-11-07.** On Linux the trampoline says `started` only after its
+child has begun. The child reports on a close-on-exec pipe (`Dawn`) whether its
+own setup, `die_with` and for a bundled tool the signal reset, succeeded; a
+failed fork, a failed setup or a child dead before it began is `refused`
+(`Unbegun::Ours`), and only the program's own `execve` error is `unstarted`
+(`Unbegun::Program`). A launch that is not the program's fault is never reported
+as the program's ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).

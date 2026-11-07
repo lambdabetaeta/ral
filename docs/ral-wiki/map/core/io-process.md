@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-04
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -51,15 +51,15 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   spin on. `Source::reader` never *takes* a source: it hands every consumer —
   a builtin, an external's stdin, a nested stage — a duplicate, the scope left
   behind when a child inherits it, so a stage's
-  stdin outlives every command that reads it. `Empty` is also what a
-  tty-owning pipeline's stage 0 resolves to when it has no upstream reader —
-  a thread in the shell process cannot read a terminal whose foreground
-  belongs to the externals' group — and what an exarch tool run installs so a
-  tool command can never steal the TUI's terminal; it is kept distinct from
-  `Terminal` precisely so denial of byte input and denial of foreground stay
-  separate effects.
+  stdin outlives every command that reads it. `Empty` is also what a child in
+  a group of its own that cannot read the terminal gets (`boundary_stdin`), and
+  what an exarch tool run installs (`RunStdin::Empty`) so a tool command can
+  never steal the TUI's terminal; it is kept distinct from `Terminal` precisely
+  so denial of byte input and denial of foreground stay separate effects. A
+  thread stage 0 at a terminal keeps `Terminal`: its externals inherit it, and
+  a reading builtin refuses it with `no input` (`stdin_reader`).
 - `sink.rs` — `Sink`, byte output and child stdio routing (`child_stdio`):
-  terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
+  stdout, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
   watched worker's line surface (`Watch`, each whole line handed to a line
   function the builtin builds around `WatchEvent`, so `io` knows no deferred
   sink), a stage thread's pipe edge (`Sink::Pipe { writer, edge, stage }`,
@@ -127,9 +127,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   where two parties each ended it — a cancellation in force outranks the
   collector's reader-gone kill (raised only once the sentinel hears a dead
   write) by that order rather than by a special case. It is the sole input to
-  forgiveness for an external: only `Some(ReaderGone)`, and only a death that
-  kill actually caused, keeps no failure; every other status is kept, because
-  the kill precedes the wait and cannot rewrite a recorded status
+  forgiveness for an external, which keeps a failure only for a death the
+  collector did not cause; the rule is fixed in
+  [[internals/pipeline-execution|pipeline-execution]], and the kill precedes
+  the wait, so it cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]],
   [[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).
 - `spawn_lock.rs` — platform-specific process-wide spawn locks. Apple's `RwLock`
@@ -256,8 +257,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `group.rs` — `Pgid` / `PgidPolicy` and the platform `spawn_with_pgid`
   family (`group/unix.rs`) for process-group placement, and the two facts of
   who signals a group: `Membership` (a joined pipeline group and its stage
-  scope) and `Group` (`Owns(Pgid)`, signalled and killed whole, or
-  `Joins(Membership)`). A pgid is signalled directly by `kill(-pgid, …)`,
+  scope) and `Group` (`Owns(Pgid)`, signalled and killed whole;
+  `Enveloped(Pgid)`, a confining envelope's payload's, killed whole apart from
+  every group ral addresses; `Joins(Membership)`; or `Shares`, ral's own,
+  whose children go by pid; who may signal is fixed in
+  [[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]). A pgid is signalled directly by `kill(-pgid, …)`,
   never waited on. On Windows (`group/windows.rs`) a group is a Job Object
   and `break_pipeline_group` is the grace an owned group's teardown sends —
   the collector's `Address::signal` for a group — before escalating to
@@ -277,15 +281,16 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   external group.
 - `limits.rs` — what a child spawned under an active grant may consume: no
   core dump, and a process budget (macOS's fork brake,
-  `limits/fork_brake.rs`, a Windows Job Object cap). Resource-limit installation
-  is checked; the macOS cap respects the inherited hard limit, and
+  `limits/fork_brake.rs`; a Windows Job Object cap; Linux sets the core limit
+  alone). Resource-limit installation is checked; the macOS
+  cap respects the inherited hard limit, and
   `limits::failure_hint` offers a conditional process-limit explanation for
   status 128 when no kernel denial was attributed.
   `Launch::limit_resources` arms the pre-exec half; on Windows the Job Object
   cap is set at the launch boundary (`launched`, `set_active_process_limit`),
   on the child's group's job or a job made for it alone. A budget that cannot
-  be armed is an `Err`, never a warning: the launch is refused as
-  sandbox-unavailable
+  be armed is an `Err`, never a warning: on macOS the launch is refused at
+  build as sandbox-unavailable
   ([[design/two-enforcers|two-enforcers]]).
 - `report.rs`: a confined launch's report socket: the `Record`s the trampoline
   writes (`Witness`), and the parent's `Testimony`, which reads the first word

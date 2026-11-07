@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 0c6ec335
+generated_at_commit: f1b0a4a4
 ---
 
 # ral does not suspend
@@ -58,7 +58,7 @@ does not park. `kill -STOP` sent from outside is undone the same way,
 correctly, for the same reason. `SIGTTIN` (a background process touching
 the controlling tty) would in principle cycle stop → `CONT` → re-read → stop
 again, but with no `bg` there are no backgrounded, tty-attached pipelines to
-begin with: a `spawn` worker never receives the tty (`route_parent_stdin`
+begin with: a `spawn` worker never receives the tty (`boundary_stdin`
 gives it `Null`/`Empty` instead), so the cycle's precondition cannot arise.
 The invariant lives where the routing decision is made, not where the signal
 would land.
@@ -89,13 +89,13 @@ the temp file."
 distinction job control drew — a background job doesn't own the terminal,
 so `fg` exists to promote it. With no promotion, the only question left is
 `owned: bool`, and terminal ownership itself moves to whichever site holds
-the `TerminalPlan` that decides it, rather than being read off the role.
+the `Placement` that decides it, rather than being read off the role.
 
-**What stays, because it was never about stops.** `ForegroundGuard` /
+**What stays, because it was never about stops.** `TerminalLoan` /
 `tcsetpgrp` — `vim` still needs the terminal, whether or not it can ever be
 stopped and resumed by a job table. `TerminalLease`. `PipelineRelay`
 (Ctrl-C). The anchor as pgid-keeper and Ctrl-C witness. `PgidPolicy`.
-`TtyInputPermit`. Cancellation with grace. Thread stages. The collector's
+`Placement::readable`. Cancellation with grace. Thread stages. The collector's
 fold itself, which shrank by exactly the rows this decision removed rather
 than being replaced.
 
@@ -113,7 +113,7 @@ than being replaced.
   tools.
 - **`SIGTTIN` cycling** is impossible only as long as nothing ral launches
   reads the controlling tty from a non-foreground process group.
-  `route_parent_stdin` and `ForegroundDecision` enforce that today; the
+  `boundary_stdin` enforces that today, from `Placement::readable`; the
   invariant is named here because it is the one precondition the whole
   mechanism leans on, and it is enforced at the routing site, not the
   signal site.

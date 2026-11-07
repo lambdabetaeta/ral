@@ -165,14 +165,16 @@ echo $[!{length $hits} + #' matches'#]</code></pre>
           </div>
           <div class="output">
             <div class="listing-bar">what the agent is told</div>
-            <pre>[R0001] Error: command 'ls' denied by active grant: '/usr/bin/ls' is excluded by `` `name ls ``; an allowance cannot override an exclusion
+            <pre>[R0001] Error: command 'ls' denied by active grant: 'ls' is excluded by `` `absolute /usr/bin/ls ``
    ╭─[ turn.ral:4:9 ]
    │
  4 │         ls           # denied
    │         ─┬
    │          ╰── here
    │
-   │ Help: the exclusion belongs to the policy that imposes it; change that policy
+   │ Help: an allowance cannot override an exclusion; remove the exclusion from the policy that imposes it
+   │
+   │       'ls' is no program in any PATH directory the grant runs from
 ───╯</pre>
           </div>
         </div>

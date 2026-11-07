@@ -18,20 +18,21 @@ halt, never rolled back.
 
 **Every ending, not just the tidy ones.** A raise and a wall are two
 classifications of the same `Err(Break::Error(_))` return: both leave `dispatch`
-inside `RunReport::Ran` and so return through `Shell::enter`'s `Ok` arm, which
+inside `RunReport::Ran` and so return through `Shell::run_under`'s `Ok` arm, which
 never touches the checkpoint. `mid_script_wall_keeps_the_bindings_that_landed`
-(`core/src/shell/run.rs`) pins this for the wall specifically, with the cancel landing
+(`core/src/shell/run/tests.rs`) pins this for the wall specifically, with the cancel landing
 *mid-script* rather than before evaluation. Exarch pins the raise from its own
 side in `tool_call_partial_effects_persist_on_error`
-(`exarch/src/shell_eval.rs`), and `core/tests/top_level_vs_block.rs` is the
+(`exarch/src/shell_eval/tests.rs`), and `core/tests/top_level_vs_block.rs` is the
 contract's home.
 
-**The one rollback in the tree is not an exception to this.** `Shell::enter`
-checkpoints `(env, context)` at entry and restores it in exactly one arm — the
-`Err(payload)` arm of `catch_unwind`, which reports `run panicked: …`
-(`panicking_run_reports_failed_and_rolls_back`). That is host-panic recovery,
-reachable from no ral-level failure. A raise, a wall, an `exit`, a non-zero
-command exit: none of them reach it.
+**The one rollback in the tree is not an exception to this.** `Shell::run_under`
+checkpoints `(env, context)` at entry and restores it in exactly one place,
+after a panic, whether the panic was caught at the run's base (`End::Panic`) or
+unwound out of `dispatch` to the `catch_unwind`; the run then reports
+`run panicked: …` (`panicking_run_reports_panic_and_rolls_back`). That is
+host-panic recovery, reachable from no ral-level failure. A raise, a wall, an
+`exit`, a non-zero command exit: none of them reach it.
 
 **Transactionality is rejected, permanently.** A ral script's statements cause
 real, external, irreversible effects — it spawns subprocesses, redirects into

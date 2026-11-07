@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-04
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -63,15 +63,11 @@ fact data are reached through their owning modules.
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
   [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- `error.rs` — `Error { reason, prov, hint, witness, rejection, context,
-  unwound }`, with the one `fact::Reason` shared by the error record.
-  `Prov` pairs a failing frame name with a live span or resolved `CallSite`.
-  `Unwound` holds abandoned-tail and saturating discarded-byte facts.
-  `describe` and failure code delegate to `Reason`; hints/context remain
-  report-only ([[decisions/261105_the-error-record|the error record]]).
-  `Error::compile` converts a `CompileError` and its `Source` into a catchable
-  runtime error carrying its own rejection, without giving `compile` a runtime
-  dependency.
+- `error.rs` — the *rendering* of a runtime `Error` and its minting as a
+  record (`outcome_value`); the type itself is `core/src/error.rs`, described
+  in [[map/core/diagnostics|diagnostics]]. A loaded file's compile failure is
+  attached to an `Error` by `load::check_source` with `with_rejection`, so
+  `compile` has no runtime dependency.
   `audit.rs` — the
   `Audit` collector, holding one total `Prov` register, over
   `fact/observation.rs`'s `Observation` / `Observed`
@@ -99,10 +95,10 @@ fact data are reached through their owning modules.
   per `Shell`, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env,
   sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
   else in core spells the shadowing order out again.
-- `coerce.rs` — the `sig` / `sig_hint` runtime-error constructors and the
-  `Value::as_str` / `as_list` / `as_map` / `expect_handle` family of argument
-  decoders, which share one wording (`Value::expected`), read by builtins and
-  `shell::grant` through `crate::shell::runtime::*`.
+- `coerce.rs` — the `Value::as_str` / `as_list` / `as_map` / `expect_handle`
+  family of argument decoders, each failing with a bare `Error` in the one
+  wording of `Value::expected`, read by builtins and `shell::grant` through
+  `crate::shell::runtime::*`.
 - `walk.rs` — `AdmittedWalk` and `Shell::admitted_walk`: the live stack's
   `ReadRegion` and current cancel scope handed to `path::tree::Walk`; unseen
   entries skipped, domain cancellation converted to `Break`, and unnameable
@@ -407,8 +403,8 @@ Methods on `Shell` live by concern, one submodule each:
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
 - `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
-  `GrantStack` to `authority::guard`, converts its `Refusal` to runtime `Error`,
-  and records a `Denial` through `Shell::refused` (an exec refusal, with its
+  `GrantStack` to `authority::guard`, whose `Denial { check, error: Error }`
+  already carries the runtime `Error`, and records it through `Shell::refused` (an exec refusal, with its
   mooring, through `Shell::exec_refused`); also owns the judged path
   doors, sandbox projection and grant-layer scope guards;
 - `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
@@ -451,8 +447,8 @@ all built by the one exhaustive literal in `Shell::child`, so a field added to
 `Shell` cannot reach a child by defaulting. Each holds **no terminal
 authority**: no lease on the session, and the mooring the fork is handed
 carries `TerminalAccess::Denied` — the safe default for a store that is not
-the session's. Each also starts with stdin `Empty`, no hooks and no control
-counters; what rides along is the scope, context, Σ, builtin table, source
+the session's. Each also starts with no hooks and no control counters; a worker's and an
+aside's stdin is `Empty`, a stage's is whatever its pipeline hands it; what rides along is the scope, context, Σ, builtin table, source
 registry, root file, call site and exit hints. The kinds differ only in their
 `Holding` — cancel root and anchor, roster, cradle, and the `Seat` each birth
 states: its `Io`, interactivity and stage membership. A

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: bb5bc1a6
+generated_at_commit: f1b0a4a4
 ---
 
 # Capabilities and `grant`
@@ -145,7 +145,7 @@ restricts nothing and activates no launch hardening.
   only where granted, including by running. A system-read directory that is
   malformed (refused by `host_absolute`, the variable that chose it named) or
   whose walk fails prevents boot, the error carrying its hint to the host's
-  message (`Runtime::bare` answers the `PolicyError`); any selected directory
+  message (`Runtime::bare` returns the `Error`); any selected directory
   naming the world or lying in the home is dropped without error, defaults
   included. A system read is what exists, a file included (Linux lists
   `/etc/passwd`), where a selector keeps directories only.
@@ -165,35 +165,12 @@ restricts nothing and activates no launch hardening.
   allowance names what it named when granted, and how to grant the new target.
   *Respelled* keeps the explanation for an exclusion reached through case, Unicode
   or a filesystem alias.
-- **A grant has one outward form: its value.** Whatever shows a grant shows
-  the grant value, printed by ral's one value printer (`data::print`, beneath
-  `authority`; the shell prints its runtime values through the same): the
-  prompt exarch and synod give their agent, `Probe::Grants`, and a refusal
-  citing an exec exclusion. `GrantLayer::value` is decode's inverse,
-  `decode_grant(value(l)) == l` on the host that decoded `l`, so it computes no
-  effective permission per key: a key with both bits appears in both lists,
-  and the legend says exclusions win. Each rule prints resolved, from its
-  `written` spelling or key: an anchored place as the `absolute` spelling it
-  froze to, since after a `cd` `` `cwd src `` would predict the wrong denial;
-  a selector as the directories it chose; a name, allowed or excluded, as
-  written (a veto keeps the name beside the key it judges by). A list a table
-  leaves empty is left out, as the decoder reads it, and a table listing
-  nothing is written `[allow: []]` or `[read: []]`, as `grant` writes the
-  empty table: `read: []` beside a `write` list would read as "reads
-  nothing". *Every program* has no spelling, and arises only as `t ⊕ fragment` on
-  exec with the fragment's rules beside it, so a layer whose exec holds it
-  shows as its grant, exec left out, extended by `[exec: <those rules>]`; the
-  prompt writes `grant G extended by F`, the self layer
-  `` grant [] extended by [exec: [deny: [`absolute '…/exarch']]] ``.
-  Nothing beside the resolution is kept. A layer is shown where it restricts
-  *or* where its exec runs something (`GrantLayer::is_shown`): a ceiling of
-  every program beside `File(s)` with fs omitted denotes `t`, yet under a
-  nested fs-only restriction it makes `s` readable, so the reader needs to be
-  told. "Activates confinement" and "says something the reader needs" are two
-  predicates. The prompt shows the layers oldest first, under a legend of
-  semantics alone (layers meet, exclusions win, writing and running read, an
-  extension, the denial wording, the agent cannot start itself)
-  ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
+- **A grant has one outward form: its value.** Whatever shows a grant, the
+  prompt exarch and synod give their agent, `Probe::Grants`, a refusal citing
+  an exec exclusion, shows the grant value, printed by ral's one value
+  printer, and no second notation spells one. The form is `decode`'s inverse,
+  so the agent reads its authority in the syntax it writes a narrower grant
+  in ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 ## Policy, extension and the six rules
 
@@ -327,12 +304,12 @@ and none to clear, so no inner grant can hide from its caller's trail a denial
 that caller's authority produced.
 
 Filesystem checks are alias-aware and resolve symlinks, so a directory scoped by
-`within [dir: ...]` inside a grant cannot escape its policy. The bundled
-coreutils (`cp`, `mv`, `rm`, `mkdir`) route through the same check chokepoint as
-the structured primitives, closing the bypass.
+`within [dir: ...]` inside a grant cannot escape its policy. A
+bundled coreutil (`cp`, `mv`, `rm`, `mkdir`) is no bypass: it is a child like
+any external, `Image::Tool`, confined by the kernel under the same projection.
 
 The grant body evaluates locally. RAL-owned filesystem effects are checked in
-process by `check_fs_op` before the syscall; each external or bundled child the
+process through the fs door, `Shell::locate`, which judges the object it opens; each external or bundled child the
 body spawns is confined under the effective projection — per-command Seatbelt
 on macOS and bwrap on Linux, the projection's own AppContainer on Windows,
 whose token carries a capability SID per granted path

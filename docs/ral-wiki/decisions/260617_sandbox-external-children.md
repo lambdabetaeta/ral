@@ -158,6 +158,12 @@ lexical effect boundary pretending to be one.
 
 ## Implementation deviation: direct byte stages are the NoTerminal case only
 
+> **Amended 2026-11-07 by [[decisions/260902_stages-are-threads|stages-are-threads]].**
+> The re-exec is retired: `direct_spawnable`, `HelperEval` and `NoTerminal` are
+> gone. A stage is `StageLaunch::Direct`, an external with no redirect and no
+> byte-capturing audit, or `Thread`; where a child lands and which terminal it
+> is lent is one `Placement`.
+
 The "byte stages are direct children with a start-gate fd" letter above is
 realised narrowly. `direct_spawnable` (`runtime/pipeline/resolve.rs`) admits the
 `StageLaunch::Direct` path only when the stage carries no value edge **and** none

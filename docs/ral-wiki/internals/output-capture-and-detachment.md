@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-04
-anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, join_lone, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::overflowed]
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
+anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, join_lone, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
 # Output capture and detachment
@@ -88,15 +88,16 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   disarmable entry on the shared `process::deadline` scheduler (deadlines-as-data);
   on expiry the child's collector, which reads the scope each slice, tears the
   group down.
-- A non-interactive exarch external leads its own process group
-  (`PgidPolicy::NewLeader`, `core/src/shell/exec/command.rs`, gated by
+- A headless exarch external leads a session of its own, and so its own
+  process group (`PgidPolicy::NewSession`, chosen by `placement` in
+  `core/src/shell/exec/command.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
   so the cancel SIGTERMs then unconditionally SIGKILLs the *whole group* —
   grandchildren included. Every copy of the write end closes, the pump sees EOF,
   the drain joins, and the call returns at the wall with exit 124. The server dies
   with it.
 - The child's own report names the cause, not the signal: a death by the
-  deadline's own teardown signal is attributed to `Deadline`
+  deadline's own teardown signal is attributed to `TimedOut`
   ([[internals/cancellation|cancellation]]), so the command reads `timed out`
   at status 124 rather than `killed by signal 15`.
 - This is correct, not a defect: an inline command that never closes its pipe is
@@ -200,7 +201,7 @@ the rest.
   (`Shell::emit_ready_boundary_notices`, called from `run_framed` just before
   the frame tears down) and pushes it through that run's surface sink as a
   `` `notice `` value, beside the binding-lease's idle-prune notice; exarch
-  decodes it back (`card::value_to_notice`) into a `Forensic::Reap` record
+  decodes it back (`Surface::Notice(Notice::Reap)`) into a `Forensic::Reap` record
   that no printer draws. The model's later "where did my result go?" always
   has an answer in the log.
 

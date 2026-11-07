@@ -276,3 +276,5 @@ See also [[decisions/260902_stages-are-threads|stages-are-threads]],
 (unchanged: the forgiven-death rule is stated once, above the transport that
 realises a stage — only its trigger moved from a probe to an event).
 `docs/SPEC.md` §7, §7.6, §11.6.
+
+**Amended 2026-11-07.** `RunningChild` is gone: a spawned child is a `ChildHandle` (`core/src/process/child.rs`), and the reaper owns its wait. `StageGate` is gone with it.

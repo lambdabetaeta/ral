@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
+generated_at_commit: f1b0a4a4
 ---
 
 # Durable inside the process is not durable across it: work you stop owning is `detach`, born by double-fork
@@ -554,3 +554,5 @@ process cannot take),
 [[invariants/fixed-arity|fixed-arity]] (why a variadic effect has no `$detach`),
 [[design/grant|grant]] (where the sandbox question lands), and `docs/SPEC.md`
 §13.4, §13.7.
+
+**Amended 2026-11-07.** `RunningChild` is gone: a spawned child is a `ChildHandle` (`core/src/process/child.rs`), and the reaper owns its wait. `PgidPolicy::NewSession` is chosen by `placement` (`core/src/shell/exec/command.rs`).

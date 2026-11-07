@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-01
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -30,7 +30,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm admits the head
   (`Head::admit`) before its redirects open, refusing it outright, and carries
-  `Head<Admission>` to `vet`; the env, base, and handler arms pass through.
+  `Head<Admission>` to `command::run`; the env, base, and handler arms pass through.
   Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
   `{ |name args| … }` — with the calling convention fixed by surface position,
   not inferred from a value's runtime shape
@@ -52,47 +52,52 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   in force. The REPL external-editor hook uses this entry.
 - `dispatch.rs` also holds `call_external`, the call of an external: snapshot
   the audit start, tee its streams, locate a failure with the visible head
-  and span, settle the one `Observed::Command`. A failure becomes
-  `Reason::from_command(program, ..)` with `program` the head as dispatched;
-  its text is `Reason::describe`; `audit_start` returns `None` when nobody listens.
+  and span, settle the one `Observed::Command`. A failure is a
+  `Reason::process` named for the head as dispatched, minted where the child's
+  end is known (`command::ending`, `at_spawn`); its text is `Reason::describe`;
+  `audit_start` returns `None` when nobody listens.
   Direct external stages retain one `Prov` from launch through collection,
   completing errors and stops before the observation is settled.
-- `command.rs` — the External arm: vet the admitted head, launch its
-  admitted program, wire stdio from the sinks the call's redirects installed, spawn, and hand the child to the pipeline collector (`pipeline::join_lone`), its one waiter; `Pumps` lives here. `wire_stdio`
+- `command.rs` — the External arm: prepare the admitted head, build its
+  admitted program's launch, wire stdio from the sinks the call's redirects installed, spawn, and hand the child to the pipeline collector (`pipeline::join_lone`), its one waiter; `Pumps` lives here. `wire_stdio`
   hands a `>` file to the child as its own fd, no pump, and keeps
   `2>&1` a `dup2` when stderr's sink is `same_destination` as stdout's.
   The file reads top to bottom as the path does: `Head { shown, program }`, a
   frozen `Target` until `Head::admit` supplies
-  `Admission = Result<Admitted, Missing>`; `validate_argv` (the argv shape,
-  read by `prepare` after the 127/126 verdict); `prepare`; the stdio wiring and
-  `placement`; `start`; `ending`; `run`; `detach`. `uutils.rs`
+  `Admission = Result<Admitted, Error>`, the 127/126 verdict the judged walk
+  ended in; `validate_argv` (the argv shape, read by `prepare` after that
+  verdict); `prepare`; the stdio wiring and `placement`; `start`; `ending`;
+  `run`; `detach`. Building describes and starting acts
+  ([[design/exec|exec]]). `uutils.rs`
   holds [[map/core/builtins|bundled coreutils]]. `placement` decides once, for a
-  standalone command and a pipeline alike: it returns the `PgidPolicy`
-  and the prepared loan, `NewLeader` being exactly the foreground.
+  standalone command and a pipeline alike: it returns a
+  `Placement { policy, loan, readable }`: the `PgidPolicy`, the prepared loan,
+  and whether the terminal may be the child's stdin; `NewLeader` is exactly
+  the foreground.
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
     tool, a launch path, or a bare name with its effective `PATH` and
     `Context::cwd`. For a bare name, `Head::select` folds the `PATH`
-    candidates in order through `which::search`, which walks each once and
+    candidates in order through `path::search`, which walks each once and
     hands the judgment a `Candidate`; the memo's remembered program is walked
     first, its verdict keeping its place. Each candidate's object, absent leaf or
     `failure_trace` is judged before its kind or error is disclosed. The first
     admitted program runs; otherwise the first refusal or 126 says why, and
     only absence yields 127. `Head::admit` records a selected refusal through
-    `Shell::exec_refused`; `vet` reads `Missing` without probing again. A path
+    `Shell::exec_refused`; `prepare` reads the head's `Admission` without probing again. A path
     head's native target — as written, or expanded by `TildePath::expand` —
     is anchored at the launch cwd with only `.` folded; the launcher runs the
     judged program by its real path, the shown spelling as `argv[0]`
     ([[internals/exec-judgment|exec-judgment]]).
   - **The argv-shape step is one refused set read at two moments.**
-    `vet::reject_exec_arg` maps each argument's head (`Value::heads`) through
+    `reject_exec_arg` (from `validate_argv`) maps each argument's head (`Value::heads`) through
     `RefusedArg::of_head` (`core/src/ty/exec_arg.rs`) and carries the shape's own `remedy`; the
     checker maps the argument's *type* through `RefusedArg::of_ty` before the
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `detach` is that same machinery — `Head`, `Head::admit`, `vet`,
-    `build_launch` — up to the one act that differs: the child is born by
+  - `detach` is that same machinery — `Head`, `Head::admit`,
+    `prepare` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
     What replaces the handle is a first-order `{pid, desc}` receipt. The
@@ -128,9 +133,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     one rule for what a child at the boundary reads: a joined group passes its
     owner's source through, a startup tty survives only where the child's group
     can read it, and an unlent owned group reads EOF.
-    There is no parking: a stopped standalone child is answered with
-    `SIGCONT` inline, by whoever waits on it, the same rule everywhere
-    ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+    A child whose terminal handover fails is killed
+    (`unlent`), and the refusal is the verdict. There is no parking: the reaper
+    answers any stop with `SIGCONT`
+    ([[internals/pipeline-execution|pipeline-execution]],
+    [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
     ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     Child stdio routing — how a spawned child's fd 1 or fd 2 reaches its
@@ -154,181 +161,135 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     form back with `Observation::decode`. The observation *shapes* and their card
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
-- `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`
-  steps through a `PipeNode`: `PipeNode::run` resolves the plan, spawns
-  every stage into one process group, and `join`s them (`drive` then `fold`),
-  a launch that failed part-way rolled back first; no frame is pushed, so an unwinding panic tears the group down
-  through `PipelineGroup`'s `Drop` rather than through any undo of the
-  machine's.  `group` (the pgid anchor and the foreground guard)
-  stays alive across both `drive` and `fold` rather than dropped early
+- `pipeline/` — pipeline planning and execution; the mechanism, its teardown
+  order and its forgiveness rules are described in
+  [[internals/pipeline-execution|pipeline-execution]]. A multi-stage
+  `CompKind::Pipeline` steps through a `PipeNode { collect, group }`:
+  `PipeNode::run` resolves the plan, prepares or joins the group, launches
+  every stage onto the collector, rolls a part-way failed launch back, and
+  `join`s (`drive`, `end_anchor`, then `fold`). No frame is pushed, so an
+  unwinding panic tears the group down through the collector's `Drop`
   ([[map/core/evaluator|evaluator]]). `PipeNode`'s field order is its teardown
-  order: the
-  collector drops before the group, so its kill still reaches a live pgid before
-  the anchor is waited on. `resolve.rs` freezes each stage's launch decision once as
-  `StageLaunch` (`Direct { id, args }` | `Thread`) from the head's resolution,
-  its redirects, and whether a `!{…}` audit captures bytes, so launch reads a
-  decision rather than re-deriving a dispatch gate. A stage with redirects is a `Thread` stage run through that same `RedirectState`; a `Direct` stage has none, and `wire_stdio` wires its stage pipes without interpreting a redirect list. **Nothing about a stage's value enters that decision**: a
-  stage's dispatch may not depend on what its neighbours return, or the choice
-  would stop being observationally transparent. The pipeline's value is its final stage's,
-  read once in the fold.
-  `route.rs`'s `open_stage_routes` allocates every interior edge as an
-  operating-system byte pipe from **stage position alone** — the zip of
-  `Parent : ins` against `outs ++ [Parent]` — and no
-  stage is told which one it is: every stage reports what it settled, and the
-  fold, running in launch order, keeps the last `Ok`, which is the final
-  stage's whenever that stage is `Ok`
-  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
-  A non-final stage's returned value is discarded, never serialised onto an
-  edge; a `Thread` stage's final value rides home on its own
-  `StageObservation`, no wire in between. A `Direct` stage is a process in the group; a `Thread`
-  stage is an OS thread whose `Shell` starts from the parent's session, and only an external it spawns
-  — at any nesting depth — is a process. Ordinary application and bind do not
-  enter this runtime.
-  - A bundled (uutils) head routes `Direct` like any external, its
-    `ral --ral-bundled-tool` child the image chosen by `command::build_launch`
-    — nothing in the pipeline distinguishes a bundled head from a host binary,
-    so both classify as `External` carrying the resolved `Head`.
-    Value-style composition is evaluator application, never a stage-transport
-    concern. The terminal-ownership decision is `command::placement`, the
-    standalone command's own rule, gating on a reachable terminal lease and a
-    terminal-bound final sink or explicit loan, not on a `startup_foreground`
-    predicate.
+  order: the collector drops before the group, so its kill still reaches a pgid
+  the anchor pins ([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]).
+  A standalone external takes the same collector: `join_lone` builds a
+  `CollectState::lone` and settles it with `settle_lone`.
+  - `resolve.rs` freezes each stage's launch decision once as `StageLaunch`
+    (`Direct { head, args }` | `Thread`) from the head's resolution, its
+    redirects, and whether a `!{…}` audit captures bytes, so launch reads a
+    decision rather than re-deriving a dispatch gate. A stage with redirects is
+    a `Thread` stage run through `RedirectState`; a `Direct` stage has none,
+    and `wire_stdio` wires its stage pipes without interpreting a redirect
+    list. **Nothing about a stage's value enters that decision**: a stage's
+    dispatch may not depend on what its neighbours return, or the choice would
+    stop being observationally transparent. A `Direct` stage is a process in
+    the group; a `Thread` stage is an OS thread whose `Shell` starts from the
+    parent's session, and only an external it spawns, at any nesting depth, is
+    a process. A bundled (uutils) head routes `Direct` like any external, its
+    `ral --ral-bundled-tool` child the image chosen by `command::build_launch`.
+    Ordinary application and bind do not enter this runtime.
+  - `route.rs`'s `open_stage_routes` allocates every interior edge as an
+    operating-system byte pipe from **stage position alone** — the zip of
+    `Parent : ins` against `outs ++ [Parent]` — and no stage is told which one
+    it is: every stage reports what it settled, and the fold, running in launch
+    order, keeps the last `Ok`, which is the final stage's whenever that stage
+    is `Ok`
+    ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+    A non-final stage's returned value is discarded, never serialised onto an
+    edge; a `Thread` stage's final value rides home on its own
+    `StageObservation`, no wire in between.
   - `pipeline.rs` is the spine: `PipeNode::run` is resolve, group, collector,
-    node, then `launch`, one `spawn_stage` per stage pushed onto the collector,
-    then, after a `roll_back` if that failed, `join`. `launch.rs` wires one
-    stage's byte endpoints (`stage_stdin`, then the shared `wire_stdio`)
-    and dispatches it on its frozen `StageLaunch` (`spawn_stage`, which
-    resolves the stage's stdout once for either kind, and
-    `launch_external_stage_direct`); `stage.rs` holds
-    `StageHandle`, which dispatches `cancel`/`cut`/`watch`/`listen` over
-    its two kinds, `External`/`Thread` — `cancel` records the cause on its own
-    `sent`, joined by `max`, and tells a thread's scope (a process hears a
-    cancellation only as the signal the collector sends next); `cut` is that
-    same cancel with `ReaderGone` plus the external's kill, `Effect::KillStage`'s
-    action once the sentinel (`sentinel.rs`) has heard a dead write, never
-    reused for another kill; `listen` sets the sentinel on the outbound edge
-    once, marking the edge dead first outside a teardown, and `held` is
-    declared before `kind`, so a forced end drops the hold before it joins; and `watch` hands the collector a live
-    external's wait handle for its own per-pid teardown — an `External` is a
-    `crate::process::Watch` alone, the reaper's own subscription: no
-    dedicated waiter thread, since `ChildHandle::into_watch`'s closure posts
-    the exit straight onto the collector's channel as `Event::Ended(ix, _)`,
-    and a stop never reaches the collector at all — the reaper answers it
-    with `SIGCONT` before any subscriber sees one
-    ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
-    `StageEnd` carries a `Thread`'s already-built `StageObservation` or an
-    `External`'s raw outcome, unsettled pumps, jail, and the `sent` its handle
-    recorded; `StageEnd::settle` is what turns either into one
-    `StageObservation`, in the fold and nowhere else. The collector publishes
-    a direct external's observation; a thread's already-published
-    observations only merge into the trail. On an external's own
-    `Event::Ended`, `StageHandle::file_external_end` reaps the watch — after
-    the stage has left `stages`, so no later `KillStage` can ever name a
-    reaped pid — and releases the held-open edge, leaving the jail and the
-    pumps, which both wait on the group kill, to the fold;
-    `group.rs`
-    (`PipelineGroup::prepare` spawns the pgid anchor —
-    `--ral-pipeline-anchor`, ignoring `SIGTSTP`/`SIGTTIN`/`SIGTTOU` outright
-    and immune to termination signals — on every
+    `launch`, one `spawn_stage` per stage pushed onto the collector, then,
+    after a `roll_back` if that failed, `join`. Only an owning pipeline (no
+    enclosing stage) prepares and lends a `TerminalLoan`; `placement` is asked
+    only for that loan. `launch.rs` wires one stage's byte endpoints
+    (`stage_stdin`, then the shared `wire_stdio`) and dispatches it on its
+    frozen `StageLaunch` (`spawn_stage`, which resolves the stage's stdout
+    once for either kind, and `launch_external_stage_direct`); `LaunchCx`
+    carries what both read, `holds_terminal` among it.
+  - `stage.rs` holds `StageHandle`, which dispatches `cancel`/`cut`/`watch`/
+    `listen` over its two kinds, `External(LiveExternal)`/`Thread(ThreadStage)`.
+    `cancel` records the cause on its own `sent`, joined by `max`, and tells a
+    thread's scope (a process hears a cancellation only as the signal the
+    collector sends next); `cut` is that cancel with `ReaderGone` plus the
+    external's kill, `Effect::KillStage`'s action once the sentinel
+    (`sentinel.rs`) has heard a dead write; `listen` sets the sentinel on the
+    outbound edge once, and `held` is declared before `kind`, so a forced end
+    drops the hold before it joins. An `External` is a `crate::process::Watch`
+    alone, the reaper's own subscription: no dedicated waiter thread, the
+    reaper's posting closure putting the exit straight onto the collector's
+    channel as `Event::Ended(ix, _)`. `file_external_end` reaps the watch,
+    after the stage has left `stages`, so no later `KillStage` can name a
+    reaped pid, and releases the held-open edge, leaving an `ExternalEnd
+    { drain: Drain, settlement: Settlement }` to the fold: `Drain` is the jail
+    and the pumps, which wait on the group kill; `Settlement` is what the
+    ending reads.
+  - `group.rs` — `PipelineGroup` is `Owns { anchor, .. }` or `Joins(Membership)`.
+    `prepare` spawns the pgid anchor (`--ral-pipeline-anchor`, ignoring
+    `SIGTSTP`/`SIGTTIN`/`SIGTTOU` and immune to termination signals) on every
     platform before any stage exists. On Unix it waits for a zero readiness
-    byte after the signal handlers are installed, before lending the terminal
-    or admitting stages. It starts its witness in the same act:
-    a report reader blocking to EOF on the anchor's stdout, posting
+    byte after the handlers are installed, and starts its witness in the same
+    act: a report reader blocking to EOF on the anchor's stdout, posting
     `Event::Heard(signal)` raw per swallowed signal, and the anchor's own
-    `ChildHandle` handed to the reaper as a `Watch` whose posting closure maps
-    its every exit to `Event::AnchorDied`. Ownership is the anchor's presence, not a
-    flag: `group()` is `Group::Owns(leader)` exactly when the anchor is, and
-    only that pgid may be signalled or killed; a joining group answers
-    `Group::Joins(membership)` and lends no terminal on its own account:
-    `PipeNode::run` prepares and lends a `TerminalLoan` to the leader in the
-    owning branch alone; `PipelineGroup::joining` is that no-anchor, no-pgid shape a
-    nested pipeline inside a stage thread gets instead, and
-    `PipelineGroup::membership` what a thread stage's `Io` carries: an
-    owner's leader paired with the stage's scope, or a joiner's own. The anchor's own rare
-    stop is answered by the reaper like any other watched pid's, with no
-    thread of the anchor's own involved. `AnchorProcess::finish` joins the
-    report reader and drops the watch, whose `Drop` reaps. The group's verbs
-    are lifecycle only — `prepare`/`joining`, `group`, `membership`,
-    `leader_pgid`, `end_anchor` (which `PipeNode::join` calls between
-    `drive` and `fold`, so every report is on the channel), `Drop`: signalling
-    and killing belong to the collector, which is what holds the live stages.
-    `CollectState::cancel_all(cause)` spells cancel: `escalate` writes the
-    cause on every live stage in one sweep, then one grace signal per
-    `Address` the collector enumerates — the pipeline's group or pids, unless
-    the tty already delivered it (`pressed`) or, for a joining collector,
-    unless the cause is one its membership does not owe, and every confined
-    stage's envelope group regardless — a sliced `TEARDOWN_GRACE` drain that
-    escalates as it files, a wait for live thread stages bounded by the
-    cleanup grace (skipped under `Aborted`), the kill (`kill_live`, the same
-    addresses), a further drain, while `CollectState::drop` writes
-    `Terminated` on every live thread stage and kills whenever it is dropped
-    with a stage still unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
-    stage's `Io` from its stdin route and resolved stdout, and its closure — given its
-    `Slot { ix, tx }`, wrapped in a `SettleOnDrop` — builds its own
-    `StageObservation` and sends `Event::Returned(ix, obs)` as its last act,
-    the guard armed until then so an unwind reports in its place. A non-final
-    stage's `stdout` is its own edge; a **final** stage's is the parent's, so a
-    discarded statement in the final stage writes where an enclosing capture's
-    buffer (`shell.io.stdout`) is ([[design/capture|capture]]). A captured final
-    stage is a `Capture` node, so it runs as a thread stage: its stdin the
-    pipe, its buffer taking what the command writes.
-    `ThreadStage` is the collector's handle onto the running thread and the
-    stage's node: `cancel` writes the cause on that node — on Windows also one
-    `CancelSynchronousIo`, re-issued each pass of the collector's loop while
-    the stage's chain carries a cause — while `join_after_settled` reclaims a
-    thread whose `Returned` has already arrived and `Drop` writes `Terminated`
-    and joins one never observed a slice at a time; a stage thread's own
-    interior wait, for whatever child *it* spawned, is that child's own
-    collector, whose stops the reaper answers, structurally invisible to the
-    outer one); `collect.rs`
-    (`CollectState` owns the
-    stage handles from the first one launched, an `mpsc` channel every
-    producer feeds — the reaper (through a stage's own `Watch`), a stage
-    thread's own report, the sentinel, the anchor's witness and its watch —
-    received a slice at a time by `recv`, which first sweeps the edges
-    (`sweep_edges`: every live writer whose reader is gone gets its sentinel,
-    the edge marked dead outside a teardown), then reads the current scope
-    between slices and mints `Event::Cancelled` itself — carrying
-    `Event::{Ended, Returned, Wrote, Cancelled, AnchorDied, Heard}`, with no
-    `Stopped`/`Continued` variant at all, which the pure fold `step` folds
-    over, returning at most one `Effect` (`Option<Effect>`) for a
-    thin interpreter (`CollectState::run`) to perform:
-    `KillStage`, `CancelAll { cause }`. Completion is not
-    among them — the pipeline is finished exactly when no stage handle is left
-    (`live()`). A `Heard` key strikes the run's node and records `pressed` —
-    the kernel gave the whole pgid that signal already, so teardown sends no
-    second copy of it — but only through the collector's
-    `loan: Option<TerminalLoan>`, the one ear for a key: with no loan, or for
-    a signal no terminal sends, it is inert; the teardown follows from the
-    current scope read at the next slice. `fold` opens with
-    `CollectState::vacate`: it hears out every queued report, then returns the
-    loan, the terminal back before any pump is joined and nothing struck; only
-    then does it settle each external under `sent` joined with the cause on the
-    current scope. `holds_terminal` reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
-    The `Slot` a stage hands its own producers is minted by `launch` from the
-    sending half `PipeNode::run` holds and drops once the stages are launched —
-    the collector keeps none. Attribution rides the handle:
-    `StageHandle::sent` is the strongest cause
-    this collector ever sent that stage, joined by `max` and carried onto its
-    `StageEnd`, and `StageEnd::settle`, called by `CollectState::fold` — the one
-    place `&mut Shell` reaches an external's settlement (audit synthesis,
-    exit-hint lookup, sandbox-denial augmentation, via
-    `finish_external_settlement`) — is the one place that reads it back
-    against what actually happened: a thread's forgiveness reads its own
-    break alone (a `ReaderGone` break is only ever this collector's doing),
-    an external's is the collector's reading of `sent`: a death by its own
-    kill with `sent == Some(ReaderGone)`. The verdicts join by `stronger` over `Break::rank`, an
-    escape outranking an error and ties going to the earlier stage;
-    `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
-    `while live() { recv; step; run }`, no interval and
-    no backoff, returning when every stage is observed;
-    `PipeNode::join` is `drive()`, `end_anchor()`, then `fold(mooring, shell)`,
-    the group dropped after). `anchor.rs` is the hidden
-    `--ral-pipeline-anchor` child's entrypoint (`Role::PipelineAnchor`; a bundled tool's
-    `Role::BundledTool` is launched beside it by `authority::sandbox::reexec::launch`), a
-    ral-written stage running on a thread of the parent process instead. On Windows every external a stage thread spawns still
-    resolves `PgidPolicy::Join` against the anchor's registered Job Object,
-    assigned at creation under the suspended create → assign → resume path
+    `Watch` posting `Event::AnchorDied`. `group()` answers `Group::Owns` for an
+    owner and `Group::Joins(membership)` for a joiner, which lends no terminal
+    on its own account; `joining` is the no-anchor shape a nested pipeline in a
+    stage thread gets, and `membership` is what a thread stage's `Seat`
+    carries: an owner's leader paired with the stage's scope, or a joiner's
+    own. `AnchorProcess::end` closes the release pipe and joins the report
+    reader; dropping the anchor reaps it. The group's verbs are lifecycle only —
+    `prepare`/`joining`, `group`, `membership`, `leader_pgid`, `end_anchor`,
+    `Drop`: signalling and killing belong to the collector, which holds the
+    live stages ([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
+    On Windows an owned group also holds a `Job`.
+  - `thread.rs` — `launch_thread_stage` wires a `Thread` stage's `Io` from its
+    stdin route and resolved stdout; its closure, given its `Slot { ix, tx }`
+    and wrapped in a `SettleOnDrop`, builds its own `StageObservation` and
+    sends `Event::Returned(ix, obs)` as its last act, the guard armed until
+    then so an unwind reports in its place. A non-final stage's `stdout` is its
+    own edge; a **final** stage's is the parent's, so a discarded statement in
+    the final stage writes where an enclosing capture's buffer
+    (`shell.io.stdout`) is ([[design/capture|capture]]). A captured final stage
+    is a `Capture` node, so it runs as a thread stage. `ThreadStage` is the
+    collector's handle onto the running thread: `cancel` writes the cause on
+    its node (on Windows also one `CancelSynchronousIo`, re-issued while the
+    stage's chain carries a cause), `join_after_settled` reclaims a thread
+    whose `Returned` has arrived, and `Drop` cancels and joins one never
+    observed, a slice at a time.
+  - `collect.rs` — `CollectState` owns the stage handles from the first one
+    launched and an `mpsc` channel every producer feeds: the reaper, a stage
+    thread's own report, the sentinel, the anchor's witness and its watch. `recv`
+    first sweeps the edges (`sweep_edges`), then reads the current scope between
+    slices and mints `Event::Cancelled` itself. The events are `Ended`,
+    `Returned`, `Wrote`, `Cancelled`, `AnchorDied` and `Heard`; there is no
+    `Stopped` variant, the reaper having answered a stop already. The pure fold
+    `step` returns at most one `Effect` (`KillStage`, `CancelAll { cause }`)
+    for the thin interpreter `CollectState::run` to perform; `drive` is `while
+    live() { recv; step; run }`, with no interval and no backoff. Completion is
+    not an effect: the pipeline is finished exactly when no stage handle is
+    left. A `Heard` key strikes the run's node and records `pressed`, but only
+    through the collector's `loan: Option<TerminalLoan>`, the one ear for a key.
+    `cancel_all(cause)` is the teardown, in the order its home page fixes;
+    `CollectState::drop` writes `Terminated` on every live thread stage and
+    kills whenever it is dropped with a stage still unobserved. `fold` opens
+    with `vacate`, which hears out every queued report and returns the loan
+    before any pump is joined, then settles each external through
+    `StageEnd::settle` and `Settlement::observe`: the one place `&mut Shell`
+    reaches an external's settlement (audit synthesis, exit-hint lookup,
+    sandbox-denial augmentation). The verdicts join by `stronger` over
+    `Break::rank`, an escape outranking an error and ties going to the earlier
+    stage; `drive`, `cancel_all` and `step` take no `&Shell` at all. Which
+    stops the collector forgives is fixed in
+    [[internals/pipeline-execution|pipeline-execution]]. The `Slot` a stage
+    hands its own producers is minted by `launch` from the sending half
+    `PipeNode::run` holds and drops once the stages are launched; the
+    collector keeps none.
+  - `anchor.rs` is the hidden `--ral-pipeline-anchor` child's entrypoint
+    (`Role::PipelineAnchor`; a bundled tool's `Role::BundledTool` is launched
+    beside it by `authority::sandbox::reexec::launch`). On Windows every
+    external a stage thread spawns still resolves `PgidPolicy::Join` against
+    the anchor's registered Job Object, assigned at creation under the
+    suspended create → assign → resume path
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
 - **A `grant` is a dynamic effect scope, not a process boundary, so the grant
   body always evaluates locally** — the machine steps its body in process, with

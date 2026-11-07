@@ -5,7 +5,8 @@ spawns the program, or forks the bundled tool, waits, and reports.** A process
 that execs has no later, and the report's last record, `ended`, is written
 after the program's end. The code is
 `core/src/authority/sandbox/warrant/trampoline.rs` (`Confined::run`, one per
-platform, and `supervise`).
+platform; `start_file`, `start_tool` and `supervise`). This page is the one home
+of the supervisor and of the `SIGSEGV` example below.
 
 - **Before the spawn**, `outlive_group_signals` gives each of `SIGINT`,
   `SIGTERM`, `SIGHUP` and `SIGQUIT` a no-op handler, so the supervisor survives
@@ -19,7 +20,8 @@ platform, and `supervise`).
   gone before the `prctl` leaves no death signal to hear, and the check turns
   that into a failure instead of an orphan. The failure is ral's own: the child
   tells it on a close-on-exec pipe, and the supervisor reports `refused`, never
-  `unstarted`, which is the file's `execve` alone.
+  `unstarted`, which is the file's `execve` alone
+  ([[invariants/a-launchs-report-is-the-trampolines-alone|the report's records]]).
 - **The supervisor itself sets no death signal.** Its life is tied to ral's by
   the envelope: a launch the session keeps passes bwrap `--die-with-parent`
   (with `--info-fd`), so the envelope, and the supervisor inside it, ends when

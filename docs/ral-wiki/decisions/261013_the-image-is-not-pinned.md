@@ -1,7 +1,7 @@
 ---
 status: active
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 646bff0a
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 anchors: [Program, Head, build_launch, Warrant, Confined, Slot, build, admit_exec, Binds]
 ---
 
@@ -96,7 +96,7 @@ only ral's own heads. A pre-placed wrapper runs anything, unchecked, because an
 admitted program's children are unchecked there. The swap adds nothing.
 
 **Landlock-less kernels.** `landlock::plan` refuses a restricting exec grant
-where Landlock is absent (`Refusal::Unavailable`), so "confined, exec
+where Landlock is absent (an `unavailable` `Error`), so "confined, exec
 restricted, no Landlock" does not launch. No case is left.
 
 **What the model already declares.** [[design/two-enforcers|two-enforcers]],

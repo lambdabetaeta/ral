@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: 104cb519
+generated_at_commit: f1b0a4a4
 ---
 
 # An envelope does not touch the host
@@ -34,7 +34,7 @@ lifetime.
 
 ## Decision
 
-- `DenyMask::over` masks only a name that already exists: a directory takes
+- `DenyMask::of` chooses the mask from what stands at a name, and masks only a name that already exists: a directory takes
   `--perms 0000 --tmpfs`, an existing non-directory takes `--ro-bind
   /dev/null`, a symlink is masked at its resolved twin, and an absent name
   takes nothing at all, whatever the binds around it.

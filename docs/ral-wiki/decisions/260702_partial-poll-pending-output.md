@@ -16,7 +16,7 @@ of making pending polls non-idempotent.**
 `` `pending `` arm with a `Unit` payload: while the worker ran, `poll` could report
 *that* it was running but nothing it had done. Yet a spawned worker's stdout/stderr
 already accumulate in shared, mutex-guarded, already-bounded `ByteBuffer`s
-(`HandleInner.stdout_buf`/`stderr_buf`) as it runs — they are only emptied once, at
+(`HandleInner.buffers`) as it runs — they are only emptied once, at
 completion, by `take_buffer` in `complete_handle`. Partial `poll` reads those
 buffers rather than plumbing any new capture:
 
@@ -58,7 +58,7 @@ record of that reversal.
 ## Two benign wrinkles
 
 - **Watched handles report empty.** A `watch` worker's bytes flow live through
-  `Sink::LineFramed`; its `stdout_buf`/`stderr_buf` stay empty by design. A pending
+  `Sink::Watch`; its `buffers` stay empty by design. A pending
   `poll` on a watch handle therefore reports empty output — documented, not an error.
 - **Bounded, and byte-clean.** `SINK_BUFFER_CAP` (16 MiB, with its one-shot
   truncation marker) already bounds a chatty server, so peeking a running worker is
@@ -80,3 +80,5 @@ See also [[decisions/260615_poll-total-failed-arm|the settle decision]],
 [[internals/output-capture-and-detachment|output capture and detachment]],
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|map: builtins]]; `docs/SPEC.md` §11.2.
+
+**Amended 2026-11-07.** `take_buffer` and `peek_buffer` are `CapturedBytes::take` and `CapturedBytes::peek` (`core/src/io/sink.rs`), and `complete_handle` is the worker's terminal publication in `HandleInner` (`core/src/shell/runtime/handle.rs`), which takes the buffers once.

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
 ---
 
 # Exec: the one effect
@@ -141,10 +141,10 @@ externals the arm runs.
   globbed or re-lexed, at the call or in captured output
   ([[design/words|words]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-- **Values that are not words are refused at the boundary**: a list, a map or
-  record, a block, a handle, bytes. One declaration (`RefusedArg`) is read by
-  the checker on concrete types and again at the spawn by `vet`, so the two
-  refusals speak one language ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
+- **Values that are not words are refused at the boundary**: `()`, a list, a
+  map or record, a block, a handle, bytes. One declaration (`RefusedArg`) is
+  read by the checker on concrete types and again by `prepare`, through
+  `validate_argv`, on the values, so the two refusals speak one language ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - **Arguments play no part in authority.** An admitted program runs with any
   arguments.
 
@@ -268,22 +268,25 @@ wires its own streams between the first two
 ([[internals/an-external-end-to-end|an-external-end-to-end]]).
 
 - **Building a launch only describes it; starting it acts.** `prepare` waits
-  on nothing a stop must end, so it can only be refused. Two exceptions touch the world: a guest jail's
-  cgroup, which `JailCgroup::drop` removes if the built launch is dropped,
-  and Linux's bwrap host probe, which waits on bwrap children once per
-  process.
-  Every step that can be stopped, Windows' ACL stamps and the wait for a
-  trampoline's first word among them, runs in `start`, through
-  `Launch::spawn`, under the run's scope, which the spawn reads before it
-  confines and once more just before the child is made. So `start` is the
-  one place a launch is stopped or fails as a program
+  on nothing a stop must end, so it can only be refused. Two exceptions touch
+  the world: a guest jail's cgroup, which `JailCgroup::drop` removes if the
+  built launch is dropped, and Linux's bwrap host probe, which waits on bwrap
+  children once per process. Every step that can be stopped runs in `start`,
+  through `Launch::spawn`, under the run's scope. On Unix the spawn reads the
+  scope once before the fork and then waits for the trampoline's first word
+  under it; on Windows it reads the scope before the confinement, which
+  stamps ACLs, and again before `CreateProcessW`. A launch is spent by its
+  spawn, which takes it by value: a second spawn would read the envelope's
+  exit as the program's. So `start` is the one place a launch is stopped or
+  fails as a program
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
-  The order of the process limit, the `pre_exec` hooks, the report socket and
-  the warrant is fixed at build and unchanged by the spawn
+  The order of the process limit (macOS alone has one), the `pre_exec` hooks,
+  the report socket and the warrant is fixed at build and unchanged by the
+  spawn
   ([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
 
-- **A plain command.** Dispatch admits; `prepare` vets the argv and builds the
-  launch; the command wires the streams and decides the group; `start` spawns;
+- **A plain command.** Dispatch admits; `prepare` validates the argv and
+  builds the launch; the command wires the streams and decides the group; `start` spawns;
   it waits, joins the pumps and `ending` classifies how the child ended
   (`command::run`).
 - **A pipeline stage.** Only an external is a process; every other stage is a
@@ -329,9 +332,9 @@ when `SandboxProjection::of` finds something to enforce: a restricted
 filesystem, an offline network, a withheld GPU, or a restricted exec table
 where the kernel can render one.
 
-- **macOS.** ral re-execs its own pinned binary as `ral --warrant <fd>`; the
-  descriptor carries a *warrant*, the compiled Seatbelt profile and the
-  program. The child enters the profile and `execve`s the program in place,
+- **macOS.** ral re-execs its own pinned binary as `ral --warrant <w> <r>`;
+  slot `w` carries a *warrant*, the compiled Seatbelt profile and the
+  program, and slot `r` the report socket. The child enters the profile and `execve`s the program in place,
   so the program keeps the child's pid ([[internals/seatbelt-profile|seatbelt-profile]]).
 - **Linux.** ral spawns `bwrap`, the *envelope*, whose payload is the same
   `ral --warrant` trampoline. It enters Landlock and seccomp, then runs as a
@@ -419,7 +422,7 @@ success.
 ### Found before the spawn, or by it
 
 **Most failures are found by the probe, before any process exists**
-(`Head::select` and `validate_argv` in `command.rs`). A *walk* is the component-by-component
+(`Head::select` in `command.rs`). A *walk* is the component-by-component
 resolution of a path that the judgment also reads.
 
 - **The probe** reports absence as `not-found`; at a path head, a directory as
@@ -447,13 +450,8 @@ resolution of a path that the judgment also reads.
   it. The hint comes from this launch's own projection, asked only once the
   start has failed, about the interpreter read with the image; with no projection (the guest jail) there is no hint and a hidden
   interpreter reads as missing.
-- **A start is the program's failure only if the program's `execve` failed.**
-  Under confinement the `execve` happens in the trampoline, which reports it as
-  `unstarted(errno)`; a launcher or envelope that fails to exec, a payload
-  process group that cannot be named, the trampoline's `refused` (its own fork
-  or setup failing included), an envelope
-  that died before reporting, and a step of ral's own before the `execve` are
-  `raised` refusals, never a failure of the program
+- **A start is the program's failure only if the program's `execve` failed**,
+  and every other failure to start is a `raised` refusal
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]],
   [[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]).
 - **A grant refusal is `raised` text, not a process failure**, because the
@@ -465,7 +463,7 @@ resolution of a path that the judgment also reads.
 ### Stops: cancellation and signals
 
 **A death is a cancellation exactly when it is by a signal of a cause in
-force** (`WaitOutcome::classify`, `core/src/process/outcome.rs`;
+force** (`WaitOutcome::cancelled_by`, `core/src/process/outcome.rs`;
 [[internals/cancellation|cancellation]];
 [[decisions/260706_signals-are-causes|signals-are-causes]]).
 
@@ -527,12 +525,14 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
 
 - **Unwind facts.** `Unwound { abandoned_tail, discarded }`: whether the
   failure abandoned written steps of a block, and how many captured bytes a
-  failed `let` threw away. The abandoned-tail note is omitted for
-  `not-found` and `not-runnable`, and whenever a hint is present.
-- **Hints**, first match wins: a situational hint from the failing site; then
-  the reason's own, signal advice for `signaled`; then the session's
-  exit-hints table, keyed on the basename of `program` and the status, for
-  `exited` only (`ExitHints`, `core/src/shell/runtime/exit_hints.rs`).
+  failed `let` threw away. The abandoned-tail note is omitted for `not-found`
+  and `not-runnable`, and whenever any hint or advice is shown.
+- **Hints and advice.** A site attaches a *hint* to the error as it unwinds;
+  the record's *advice* is one renderer function of its reason: signal advice
+  for `signaled`, and for `exited` the session's exit-hints table, keyed on
+  the basename of `program` and the status (`advice`, `ExitHints`,
+  `core/src/shell/runtime/error.rs`, `exit_hints.rs`). Their composition is
+  `docs/SPEC.md` §13.1's: stored hints in attachment order, then the advice.
 - **A fix both enforcers suggest is worded once**, in `authority::remedy`
   (`remove_the_exclusion`, `add_to_fs`, `add_to_exec`). A guard refusal and a
   kernel-denial hint each word their own cause, then end in that text, so a
@@ -542,8 +542,8 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   given no arguments, which was most likely meant as text: to a refused
   admission, and to a run that named a directory or plain file. It is appended
   after the grant's own hints, never before them.
-- A handler's re-raise keeps every hint the record determines and drops the
-  rest.
+- A handler's re-raise keeps the record, so its advice is recomputed, and
+  drops the stored hints.
 
 ### Who observes the ending
 

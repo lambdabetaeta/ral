@@ -462,3 +462,5 @@ and [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt
 (the embedding seam this extends), [[map/repl/loop|repl/loop]],
 [[map/exarch/shell-eval|exarch/shell-eval]], and
 [[invariants/turn-ends-ready|turn-ends-ready]].
+
+**Amended 2026-11-07.** `CancelCause` names its causes `ReaderGone < Interrupted < Cancelled < TimedOut < Terminated < Aborted` (`core/src/process/cancel.rs`): `Interrupt` is `Interrupted`, `Explicit` is `Cancelled`, `Deadline` is `TimedOut`, `Terminate` is `Terminated`, `RootAbort` is `Aborted`. The signal-reachable slots are `request_interrupt` and `request_root_cancel(RootCause)`, and `RunningChild` is gone: a spawned child is a `ChildHandle` (`core/src/process/child.rs`) and the reaper owns its wait.

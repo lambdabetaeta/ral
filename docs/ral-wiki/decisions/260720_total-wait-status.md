@@ -51,3 +51,5 @@ preserves that law.
   text at the existing `std::io::Result` boundary.
 
 See [[map/core/io-process|core IO/process]].
+
+**Amended 2026-11-07.** `RunningChild` is gone: a spawned child is a `ChildHandle` (`core/src/process/child.rs`), and the reaper owns its wait.

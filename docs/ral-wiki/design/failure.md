@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
 ---
 
 # Failure: status, not truth
@@ -48,9 +48,10 @@ operands and never inspects command success.
   means a span in a session source; prelude frames defer to the user's call.
   Name and site come from that same frame. Every run supplies a base, so an
   otherwise unclaimed failure is sited at its start, `script:1:1`.
-- Reason hints are recomputed on re-raise; situational hints, context and
-  unwind facts are report-only and are dropped. A worker's live error carries
-  its completed provenance to `done`, `poll` and `await` alike.
+- A re-raise keeps the record, so the record's advice is recomputed at the
+  next render; stored hints, context and unwind facts are report-only and are
+  dropped (`docs/SPEC.md` §13.1 composes hints and advice). A worker's live
+  error carries its completed provenance to `done`, `poll` and `await` alike.
 - The exit code is derived from `reason`, never stored beside it. Raised
   text exits 1; scripts choosing a code use top-level `exit n`.
 
@@ -58,9 +59,10 @@ operands and never inspects command success.
 the failure arose.** An external's life is `prepare`, `start` and `ending`
 ([[internals/an-external-end-to-end|an-external-end-to-end]]):
 
-- `prepare` raises ral's refusals as `raised` text; `start` converts the one
-  `Unstarted` there is, and `ending` the one wait status, so no other path
-  builds a process failure.
+- `prepare` raises ral's refusals as `raised` text, and its head probe finds
+  `not-found` and `not-runnable` before any process exists; `start` converts
+  the one `Unstarted` there is, and `ending` the one wait status. These are
+  the only builders of a process failure.
 - A start that failed in ral's own step, or in a launcher that is not the
   program, is a refusal and never `process [program, failure]`: an error names
   the program only when the program's own `execve` failed
@@ -96,9 +98,9 @@ Failure propagates predictably through the rest of the grammar:
 
 - a written sequence or `let` halts at the first failure and records whether
   it abandoned written steps. Compiler-generated operand hoists, returned-thunk
-  splits and capture decoding set no such fact. Rendering follows the hint,
-  counted capture-discard note, then eligible abandoned-tail note; the last
-  is omitted for spawn failures or when a hint exists;
+  splits and capture decoding set no such fact. The renderer adds the counted
+  capture-discard note and the eligible abandoned-tail note after the hints
+  (`docs/SPEC.md` §13.1);
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
   ral itself ended because its reader was gone;
 - `for` / `map` stop iterating on a failing body;

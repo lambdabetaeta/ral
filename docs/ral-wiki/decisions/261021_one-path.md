@@ -1,7 +1,7 @@
 ---
 status: active
-generated_at_commit: 1dc7c6e7
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-10-25
 anchors: [Trace, RealPath, Hold, Excluded, Dir, Located, walk, walk_excluded, GrantLayer, GrantPath, Extent, GrantStack::judge, rehold, Walk, AdmittedWalk, Shell::admitted_walk]
 ---
@@ -244,7 +244,7 @@ Step 10 (macOS): `an_exclusion_holds_its_leaf_by_the_walks_own_o_evtonly_descrip
 Two names of the deleted list remain at lexical boundaries:
 
 - `RealPath::rendered` (Linux only): the bwrap renderer walks a `Rendered` envelope name back to a position.
-- `FrozenPath::{lexical, of_real}`: a grant's written spelling enters the walk, and a launch's support files are shown as grant paths.
+- `FrozenPath::{lexical, freeze}`: a grant's written spelling enters the walk, and a path held natively is frozen as a grant.
 
 The first green macOS and Windows legs of `ci.yml` on the landing commit
 discharges them; it is recorded here when it comes.

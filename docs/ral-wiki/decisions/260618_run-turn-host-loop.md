@@ -162,7 +162,7 @@ pub struct TurnRequest<'a> {
 
 pub enum TurnIo {
     /// Clone the session's ambient streams. The REPL has already installed
-    /// its rustyline `ExternalPrinter` with `set_stdout`; batch inherits the
+    /// its rustyline `ExternalPrinter` with `ReplHost::set_printer`; batch inherits the
     /// process streams.
     Inherit,
     /// Core mints stdout/stderr buffers and returns them in `TurnReport::Ran`.
@@ -553,3 +553,5 @@ the loop's cancel arm reads),
 [[internals/output-capture-and-detachment|output-capture-and-detachment]] (the
 data-pipe story this completes for the surface), [[map/exarch|map: exarch]],
 [[map/repl/loop|repl/loop]].
+
+**Amended 2026-11-07.** `TurnIo` is gone; the REPL's rustyline `ExternalPrinter` is held by `ReplHost` (`ral/src/repl/host.rs`) and installed with `ReplHost::set_printer`.

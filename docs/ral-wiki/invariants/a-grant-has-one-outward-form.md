@@ -1,7 +1,8 @@
 # A grant has one outward form
 
 **Whatever shows a grant shows its grant value, printed by ral's one value
-printer; no second notation spells one.** The dual of
+printer; no second notation spells one.** This page is the one home of a
+grant's printed form. The dual of
 [[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]:
 a grant comes in as a value and goes out as one.
 
@@ -14,8 +15,8 @@ a grant comes in as a value and goes out as one.
 - **A rule prints resolved.** An anchored place shows as the `absolute`
   spelling it froze to (`` `cwd src `` as `` `absolute '/work/src' ``), a
   selector as the directories it chose, a bare name, allowed or excluded, as
-  written: an exclusion's file found under the name shows beside it, and a
-  veto (`exec::Veto`) keeps the name beside the folded key it judges by. A
+  written: an excluded name also shows the file it was found as, and its veto
+  (`exec::Veto`) judges by a folded key while showing the name as written. A
   rule keeps no `Place`: after a `cd`, `` `cwd src `` would predict the wrong
   denial.
 - **An empty list is left out.** The decoder reads an omitted table list as
@@ -35,10 +36,12 @@ a grant comes in as a value and goes out as one.
 - **Every reader takes it.** `Probe::Grants` answers each layer a reader
   needs (`GrantLayer::is_shown`: it restricts, or its exec runs something,
   which stays readable under a nested fs restriction) as its `LayerValue`,
-  with the host's `withholds_gpu` (`protocol/probe.rs`, `Grants`). exarch's and synod's prompt prints each in
-  `grant` syntax, oldest first, an extension as `grant G extended by F` (`Display for LayerValue`, `authority/grant/value.rs`), under
-  a legend that says only what grants mean (`exarch/data/grant-legend.md`;
-  `prompt::grant_section`). A refusal citing an exec exclusion prints it as
+  with the host's `withholds_gpu` (`Grants`, `protocol/probe.rs`). The engine's
+  prompt, exarch's and a synod guest's alike, prints each in `grant` syntax,
+  oldest first, an extension as `grant G extended by F`
+  (`Display for LayerValue`, `authority/grant/value.rs`), under a legend that
+  says only what grants mean (`exarch/data/grant-legend.md`; `grant_section`,
+  `exarch/src/prompt.rs`). A refusal citing an exec exclusion prints it as
   its value (`Display for ExecDeny`), and so does the file-key refusal.
 - **The printer is beneath `authority`.** `data::print::pretty_print` reads a
   value through a `Printable` view that `FOValue` and the shell's `Value` each

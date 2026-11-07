@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
-covers_paths: [core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
+covers_paths: [core/src/error.rs, core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
 
 # Map: core (ral-core)
@@ -154,8 +154,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   (`core/src/shell/runtime/`).
 - [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
   shell across a process boundary (`core/src/seed.rs`, `seed/table.rs`, `io/frame.rs`).
-- [[map/core/diagnostics|diagnostics]] — source locations and error rendering
-  (`core/src/source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
+- [[map/core/diagnostics|diagnostics]] — the runtime `Error` value, source locations and error
+  rendering (`core/src/error.rs`, `source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library
   (`core/src/shell/prelude.ral`).
 

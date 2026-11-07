@@ -4,7 +4,10 @@
 by the one decoder on the host that enforces it.** No host resolves a grant for
 another, and no second route builds a layer: whoever authors the grant, a
 `GrantLayer` is the output of the decoder walker `decode_capability_map`
-(`core/src/shell/grant/decode.rs`, crate-private) and of nothing else.
+(`core/src/shell/grant/decode.rs`, crate-private), or the ambient root layer
+that says nothing (`GrantLayer::root`, a spawn's `Inherit`), or a decoded
+layer extended by a decoded fragment (`GrantLayer::extend`), and of nothing
+else.
 
 - **One front-end, many authors.** `grant [...] { body }`
   (`shell/evaluator/machine.rs`), profiles (`shell/load/profile.rs`), a spawn's
@@ -49,15 +52,16 @@ the wire carries spellings, never positions or identities.
 **What the decoder refuses, on every route.**
 
 - **A file key naming a directory** (`file_rules`): it names a binary that
-  cannot exist; the hint says `` `dir ``. The root is one such directory
-  (`PolicyError::root_program`).
+  cannot exist; the hint says `` `dir ``. The root is one such directory, whose
+  refusal is `freeze::root_program` (`authority/grant/freeze.rs`), raised where
+  a walked file key becomes a rule (`Keyed::file`, `authority/grant/resolve.rs`).
 - **A path-shaped name** (`bare_name`, `path_shaped`): `` `name `` takes a bare
   command name. Shape is judged under Windows rules on every host, so a profile
   that loads on Linux refuses alike on Windows.
 - **An exclusion of the root** (`Polar::root` and `Polar::grant` for `Excluded`, `authority/grant/paths.rs`): the root
   holds no object to name, and a link to the root is the root under another
   name. The root is the raw `/`, an `absolute` payload tested as a string before
-  any classification or fold (`FreezeCtx::walked`, `Placed::Root`), so it means
+  any classification or fold (`Placed::absolute`, `Placed::Root`), so it means
   everywhere on every host and no foreign spelling folds to it.
 - **A spelling absolute only on another platform** is the *dead grant*:
   `FreezeCtx::walked` answers `None` (`live_absolute`), the key makes no rule and

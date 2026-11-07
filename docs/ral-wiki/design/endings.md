@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
 ---
 
 # Endings
@@ -33,7 +33,7 @@ protocol::Ending = Ending<FOValue, ErrorRecord, CancelCause>
   first-order encoding: `[reason, frame, site]`, with a total site and no stored
   status or derived message. The wire and `Done` share `F`. A non-data result
   (handle, block or function) becomes `Err`, code 1, completed from the run's
-  retained base and rendered with its situational hint.
+  retained base and rendered with its stored hint.
   Exarch's exit tip reads the record's `reason()`.
 - `Report::Ran(Ran { ending, rendered, single_command, captured, trail })`
   holds rendering and run context outside the cases; hosts pass the `Ran`
@@ -99,10 +99,12 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
   keeps its raw `i32` for the message and the denial/limit hints; those hints
   read the raw reason, never `code`.
 - **One failure-code table lives on `Reason`.** `Error`, `ErrorRecord` and
-  process failures delegate to it, `process` through `Failure`: `exited` clamps, `signaled` gives 128+s,
-  `not-found` 127, `not-runnable` 126, `timed-out` 124, `cancelled` 143,
-  `raised` 1. `Reason::stopped` converts a `CancelCause` and the two
-  worker-stop cases take their code and words from it. A panic belongs to the ending, code 101.
+  process failures delegate to it, `process` through `Failure`: `exited`
+  clamps, `signaled` gives 128+s, `not-found` 127, `not-runnable` 126,
+  `timed-out` 124, `cancelled` 143, `raised` 1. `Reason::stopped` maps the two
+  causes a worker converts, `Cancelled` and `TimedOut`, onto their reasons, so
+  a converted stop takes its code and words from the table. A panic belongs to
+  the ending, code 101.
 - Stored host rejection statuses (`Rejection.status`, `Report::Static` and
   `Faulted`) remain `NonZeroU8`. A desk refusal is plain `raised`, with no
   status field. Serde and data's `NonZeroU8` decoder refuse 0; data's `u8`
@@ -114,8 +116,8 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
   the two command-audit observers read `Break`'s `code`.
 - Signal handlers call `failure_code` without allocation or locking, widening
   only at `_exit`/`ExitProcess`. `Failure::Signaled` projects `128 + n` through
-  `failure_byte`; `Signal::of_status` (bounded to `1..=SIGRTMAX`) decodes a status
-  to a signal only where a supervisor left no word
+  `failure_byte`; `Signal::of_status` decodes a status to a signal only where
+  a supervisor left no word
   ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
   The utility subprocess's own `i32` clamp in
   `core/src/uutils.rs` is outside the shell ending family and is unchanged.

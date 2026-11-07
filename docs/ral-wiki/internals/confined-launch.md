@@ -1,8 +1,8 @@
 ---
-generated_at_commit: fea8d9f0
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-03
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, Refusal, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
+anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -20,13 +20,9 @@ projection, it calls `sandboxed_command`
 confinement. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
-**Building describes; the spawn confines.** The build waits on nothing a
-stop must end, so it returns a launch or a refusal. Two exceptions touch the
-world: a guest jail's cgroup, which `JailCgroup::drop` removes if the built
-launch is dropped, and Linux's bwrap host probe, which waits on bwrap
-children once per process. Everything that may be stopped runs in
-`Launch::spawn` (`spawn_detached`), under the scope `start` hands it, which
-it reads before confining and once more just before the child is made.
+**Building describes; the spawn confines** ([[design/exec|exec]]). Everything
+that may be stopped runs in `Launch::spawn` (`spawn_detached`), under the scope
+`start` hands it; the build waits on nothing a stop must end.
 
 - **Unix builds** render the projection, open the binds, create the Landlock
   ruleset, seal the warrant, open the report socket and register the `pre_exec`
@@ -88,7 +84,7 @@ socket, on which the trampoline says what became of the program
     writer closes before the child exists.
 - **The child refuses anything unexpected:** an unsealed memfd, a non-socket, or
   a warrant not in canonical form. Decoding re-encodes and compares.
-- **On Linux the real argv is `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w>`.**
+- **On Linux the real argv is `bwrap --args <a> -- /proc/self/fd/<t> --warrant <w> <r>`.**
   `bwrap_argv` is pure in descriptor numbers and returns only bwrap's
   options, which bwrap reads from `--args`. The trampoline is ral's own pin.
 - **Every descriptor a launch hands down crosses at the number it was lent
@@ -99,19 +95,17 @@ socket, on which the trampoline says what became of the program
   nothing is `dup2`'d, so no descriptor the child still needs (`std`'s
   exec-error pipe, `detach`'s handshake) can be displaced. Each number is
   named as data: to bwrap in its options, the ruleset's in the warrant,
-  the warrant's in argv. The report socket's writer crosses at its own slot.
+  the warrant's in argv. The report socket's writer crosses at its own slot, which the parent holds open
+  until the fork ([[internals/an-external-end-to-end|an-external-end-to-end]]).
   Once confined, the child closes every descriptor above stderr but the
   report's and marks that one close-on-exec, so the program inherits none, and a
   `Kept` launch's read of `--info-fd` ends: the payload's group exists.
 - **`serve_warrant` runs before `authority::sandbox::boot`.** The trampoline pins and
   opens nothing before it is confined.
-- **The trampoline testifies; it does not exit with a verdict.** A failure
-  before the program starts is a `refused` record, a program that cannot start
-  an `unstarted(errno)` that the parent words as an unconfined spawn's failure.
-  A confined program that cannot start is `not-found` or `not-runnable`, never
-  `exited 127` or `exited 126`. The trampoline prints nothing once it holds a
-  report socket; the parent words what it is told. Only a call that names no
-  report socket, made by hand, is refused on stderr.
+- **The trampoline testifies; it does not exit with a verdict.** The trampoline
+  prints nothing once it holds a report socket, and the parent words what it is
+  told; only a call that names no report socket, made by hand, is refused on
+  stderr.
 
 ## The trampoline testifies, and on Linux supervises
 
@@ -122,24 +116,20 @@ trampoline's. Its code is `core/src/authority/sandbox/warrant/trampoline.rs`;
 `warrant.rs` is the codec only (`warrant/handoff.rs` holds the descriptors
 handed down), and the warrant carries the `Image` verbatim.
 
-- **The records** are `refused(message)`, `unstarted(errno)`, `started` and
-  `ended(status)`. `refused` is the warrant's failure to be received or its
-  confinement to be entered: nothing ran. `unstarted` is the program's own
-  spawn or `execve` failing once the confinement was entered. `started` and
-  `ended` are Linux's.
+- **The records** and what each may say are
+  [[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]'s. `refused` is the
+  warrant's failure to be received or its confinement to be entered; `unstarted`
+  is the program's own spawn or `execve` failing once the confinement was
+  entered; `started` and `ended` are Linux's.
 - **On macOS the trampoline becomes the program**: a host file is `execve`d in
   place, and the report's close-on-exec writer closing is the start; a bundled
   tool runs here, after the report is dropped. The program keeps the child's
   pid and its exact wait status.
-- **On Linux the trampoline is a supervisor.** It spawns the host file as its
-  child, or forks the bundled tool, says `started`, waits, says `ended` with the
-  exact status, and exits with the program's code or `128 + n`. It never
-  `execve`s, and it is single-threaded up to the fork of a tool. A confined
-  `SIGSEGV` is `signaled 11` and an `exit 139` is `exited 139`.
-  [[invariants/a-supervisor-never-execs|a-supervisor-never-execs]] states the
-  rule and what the supervisor does about signals, its program's death with it,
-  and the forked tool's start; the choice is
-  [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]].
+- **On Linux the trampoline is a supervisor** and never `execve`s
+  ([[invariants/a-supervisor-never-execs|a-supervisor-never-execs]]; the choice
+  is [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]]).
+  It spawns the host file as its child, or forks the bundled tool, says
+  `started`, waits, and says `ended` with the exact status.
 - **The ending is amended at the reaper**, from the testimony the child's
   handle carries
   ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
@@ -260,19 +250,15 @@ APPLICATION PACKAGES`) can satisfy that shortcut.
 ## When confinement is unavailable
 
 **A host launch whose required projection cannot be installed is refused, and
-the refusal says the sandbox is why** (`authority::sandbox::Refusal::Unavailable`).
+the refusal says the sandbox is why** (`sandbox::unavailable`).
 
-- **Some causes show only at spawn.** On Linux the envelope is bwrap, a host
-  package, and a host without it fails at the spawn with `ENOENT`.
+- **A host without bwrap is refused at build.** `linux::envelope()` reports the
+  pin boot did not find, and `linux_sandboxed_command` refuses with it. Other
+  causes show only at spawn.
 - **A launcher that fails to exec is the envelope's failure, never the
-  target's.** `prepare`'s probe has already found the target on `PATH`, and an envelope
-  execs its target itself, reporting a target that cannot start as an
-  `unstarted(errno)`. So a spawn error of a confined launch's launcher, `ENOENT`
-  included, is `Refused`, worded as the sandbox being unavailable
-  (`unforked`, on an `Exec` failure; a `Prepare` failure is ral's own whatever
-  the launcher). Reading it as the target's would accuse the one program
-  known to exist, and make a host without bubblewrap look like a grant that
-  denies everything
+  target's.** `prepare`'s probe has already found the target on `PATH`, so a
+  spawn error of a confined launch's launcher, `ENOENT` included, is `Refused`
+  (`unforked`, on an `Exec` failure), worded as the sandbox being unavailable
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
 - **An envelope that ends before its trampoline speaks is a refusal too**,
   worded with whatever it left on the command's stderr (`vanished`):

@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: f71d64dd
+generated_at_commit: f1b0a4a4
 ---
 
 # The lent terminal returns the gesture
@@ -58,3 +58,10 @@ See [[internals/cancellation|cancellation]],
 [[internals/pipeline-execution|pipeline-execution]],
 [[decisions/260905_one-delivery-path|one-delivery-path]],
 [[decisions/260619_terminal-lease|terminal-lease]].
+
+**Amended 2026-11-07.** One decision, `placement` (`core/src/shell/exec/command.rs`),
+now answers where a lone command's child lands and which terminal it is lent:
+it returns a `Placement { policy, loan, readable }`, the `PgidPolicy`, the
+prepared `TerminalLoan` and whether the terminal may be the child's stdin. It is
+a record of those three facts, not the rejected seat enum: the loan and the
+`Group` are still held by the parties that need them.

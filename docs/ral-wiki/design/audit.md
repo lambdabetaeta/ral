@@ -21,7 +21,7 @@ in one vocabulary: exactly `[reason, frame, site]`, with a total site and no
 stored status or derived message. A reader that can read one can read all three. `trail`
 is the list of observations. Nothing else: no status field duplicating the
 process exit status the host already owns and `audit` never changes, and no
-hint in the error record, because a hint is advice for a person and a
+hint or advice in the error record, because both are for a person and a
 report is data. An ordinary failure settles into `` `err ``; an
 `exit` escape and a stop are not failures and walk past the report entirely
 ([[design/failure|failure]]).

@@ -131,3 +131,5 @@ root; deliberately out of scope here.
   — the same discipline for the user-facing interrupt.
 - `core/src/process/signal.rs`, `core/src/process/signal/unix.rs`,
   `core/src/shell/exec/command/child.rs`, `ral/src/repl/session.rs`.
+
+**Amended 2026-11-07.** `CancelCause` names its causes `ReaderGone < Interrupted < Cancelled < TimedOut < Terminated < Aborted` (`core/src/process/cancel.rs`): `Interrupt` is `Interrupted`, `Explicit` is `Cancelled`, `Deadline` is `TimedOut`, `Terminate` is `Terminated`, `RootAbort` is `Aborted`. The handlers are the `Disposition`s `Interrupt`, `Shutdown` and `Abort` (`core/src/process/signal/unix.rs`), replacing `handler` and `term_handler`; the interrupt calls `request_interrupt`, the others raise a `RootCause`. `RunningChild::wait` is the reaper's.

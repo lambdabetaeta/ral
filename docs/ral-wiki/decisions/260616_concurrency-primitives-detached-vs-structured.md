@@ -6,7 +6,7 @@ status: active
 
 > Amended 2026-10-21: `worker <id>` is deleted; a worker's handle is a
 > capability held only in the bindings that received it from `spawn` or `watch`.
-> A gather owns its children through a `ScopeOwner` (`Frame::Gather` or a
+> A gather owns its children through a `BroodGuard` (`Frame::Gather` or a
 > worker's base) that closes membership on exit and drains all accepted
 > children to a terminal state (`ready` or `consumed`) within the cleanup grace.
 >

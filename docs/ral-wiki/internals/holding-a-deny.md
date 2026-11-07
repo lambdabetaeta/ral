@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 104cb519
-verified_at_commit: 002c654a
-verified_at_date: 2026-10-13
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
 anchors: [pinned_dirs, build_profile, DenyMask, Binds, Layer, Shown]
 ---
 
@@ -117,8 +117,8 @@ what it made.
 
 ## The shape of the path picks the mount
 
-**Choosing the wrong mount kills the launch, so `DenyMask::over` is the only
-constructor, and it reads the shape of the denied path.** `--tmpfs` makes its
+**Choosing the wrong mount kills the launch, so `DenyMask::of` is the only
+constructor, and it takes the shape `Deny::read` read off the denied path.** `--tmpfs` makes its
 own mountpoint, so over an existing regular file it fails with `ENOTDIR` before
 bwrap runs anything. That is a deny that denies nothing, because nothing runs.
 
@@ -166,7 +166,7 @@ directories, so that creation lands on the host disk:
   forbids, on the host, for good.
 
 Neither is a deny ([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
-So `DenyMask::over` gives an absent name nothing (`LeftAbsent`).
+So `DenyMask::of` gives an absent name nothing (`LeftAbsent`).
 
 - **Under a read-only bind the host can create the name during a launch,
   and that launch reads it; the next one masks it.** The bind refuses the

@@ -106,9 +106,9 @@ shell computation inside its own foreground process group cannot both own the
 terminal and remain the parent's session — and a thread in the parent's own
 process cannot read a terminal whose foreground belongs to the externals'
 group either, which is why a ral-written stage 0 with nothing else to read
-from sees EOF on an interactive terminal
-(`!{ from-line } | cat` at the prompt) rather than falling through to the
-controlling tty.
+from is handed the terminal as a source that a reading builtin refuses with
+`no input` (`!{ from-line } | cat` at the prompt), rather than falling through
+to the controlling tty.
 
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and

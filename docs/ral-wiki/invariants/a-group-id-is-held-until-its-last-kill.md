@@ -17,8 +17,9 @@ name.
   drops the pin after `drained`, once no kill addresses the group.
 - Any other filed external is reaped as it files: it has left `stages`, so no
   kill names its pid.
-- Behind an envelope there is no pin once the monitor ends: the payload leads
-  the group, and the child the collector holds is only the envelope's monitor.
+- Behind an envelope there is no pin: the payload leads the group, and the child
+  the collector holds is only the envelope's monitor, whose pid is not the
+  group's id.
 
 Why: the reaper's `WNOWAIT` leaves the zombie to its `Watch`, so reaping is a
 decision of the collector, taken last; a reaped leader's group, once empty,

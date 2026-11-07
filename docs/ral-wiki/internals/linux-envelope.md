@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1dc7c6e7
-verified_at_commit: 104cb51994d4dce2c9892a96008426463be2d404
-verified_at_date: 2026-10-26
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
 anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read]
 ---
 
@@ -110,17 +110,12 @@ spelling is only the destination at which the opened object is bound.
   `/proc`, which bwrap execs the trampoline through, is refused. An `Over`
   bind replaces names beneath its destination with those it shows: a cgroup
   deny outside ral's subtree needs no mask, and one inside follows the re-root.
-- **Each deny is read once, at planning.** `Shown::of` reads what stands at every
-  deny with `Deny::read` into its mask (`DenyMask::of` its kind) and the position
-  it led to, sorted by name. `bwrap_argv` renders those planned masks and reads
-  nothing for them, and `landlock::build` takes the same `Shown`, keeping its exec
-  ruleset out of the scratch masks, the positions planned as `EmptyDir`. The
-  mask follows the kind of the thing denied, and an empty-directory tmpfs is the
-  sandboxed user's own, which it may `chmod` open. Two reads could disagree: a
-  deny that changed kind between them would get that tmpfs from bwrap while
-  Landlock, having read a file, admitted it from above. One read makes the two
-  agree by construction
-  ([[invariants/a-deny-is-read-once|a-deny-is-read-once]]).
+- **Each deny is read once, at planning**
+  ([[invariants/a-deny-is-read-once|a-deny-is-read-once]]). `Shown::of` reads
+  what stands at every deny with `Deny::read` into its mask (`DenyMask::of` its
+  kind) and the position it led to, sorted by name; `bwrap_argv` renders those
+  planned masks and `landlock::build` takes the same `Shown`, keeping its exec
+  ruleset out of the scratch masks, the positions planned as `EmptyDir`.
 - **An unusable bwrap refuses in its own words.** A bwrap that builds no
   envelope refuses every confined launch. A failed `--ro-bind-fd` probe keeps
   bwrap's own error; only an unknown-option error adds the version question.
@@ -147,9 +142,9 @@ lowered, and its planned deny masks, which no admission may reach from above.
 Inside a restricted envelope a bind's root has the envelope's own directories
 above it, so a rule on a host directory above a bind root is off every walk
 inside that bind (the payload's `REFER` admission already worked around this for
-the envelope's root). `enveloped` once built the ruleset before `bwrap_command`
-opened the binds; the deduped shown roots, with their objects, are now computed
-first, and opening stays where it was.
+the envelope's root). `enveloped` therefore computes the deduped shown roots,
+with their objects, before it builds the ruleset; opening the binds stays in
+`bwrap_command`.
 
 - **A directory admission `D`** puts a rule on `D` itself where some bind root's
   object lies at or above `D`, and a rule on every bind root whose object lies
@@ -319,7 +314,7 @@ cannot is a host bind like any other, present only where something needs it.**
   as it is.
 
 Pinned by `authority::sandbox::linux::tests::render::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
-and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
+and `spawn::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
 
 ## The envelope binary is fixed at boot
 
@@ -353,12 +348,12 @@ any confinement.
   session cannot vet the enforcer it boots on. Where the pinned bwrap is
   writable by ral's uid, the remedy is a root-owned bwrap (the distro package).
 - **A host with no bwrap** is reported by `linux::envelope` at the first launch
-  that needs one, through `Refusal::Unavailable`. `Launch::envelope` names the
-  binary only for the wording of a spawn failure.
+  that needs one, and refused as `sandbox::unavailable`. The launch's
+  `Envelope::program` names the binary only for the wording of a spawn failure.
 
 Pinned by `authority::sandbox::linux::tests::render::the_launcher_is_the_pinned_envelope_and_never_a_name`,
 `::the_envelope_binary_is_read_only_inside_every_envelope`,
-`::a_pinned_binary_inside_a_writable_prefix_is_locked` and
+`trampoline::a_pinned_binary_inside_a_writable_prefix_is_locked` and
 `authority::guard::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
 
 ## Exercising the envelope

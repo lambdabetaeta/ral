@@ -1,8 +1,8 @@
 ---
 status: active
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-10-25
 anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, drain_nested]
 ---
@@ -334,7 +334,9 @@ named.
   `Shell::has_active_capabilities` delegates to it; no activation marker is
   added to the decoder, wire format or launch state. Transitive consumers
   were audited: resource limits, process braking and loader scrubbing, pipeline
-  braking, the assertion in `guard/grant.rs`, and exarch's `grant_summary`,
+  braking, the assertion in `guard/grant.rs`, and exarch's `grant_summary`
+  (since replaced by the grant's one outward form,
+  [[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]),
   which had a second private predicate calling a layer ambient when exec, fs and
   net said nothing, so a layer withholding `detach` read as "every command,
   path, and network call is permitted" and no summary printed a verb. Ambience
@@ -356,10 +358,10 @@ named.
   ([[design/engine-protocol|engine-protocol]]). `Capabilities` formerly ignored
   unknown fields, so an old `detach: false` would have vanished, widening, in a
   peer that read it; it now denies unknown fields, as `FsPolicy` already did.
-- **Decoder and freeze types** (`guard::freeze`, public): `Place` is
+- **Decoder and freeze types** (`authority::grant::freeze`, public): `Place` is
   `Absolute | Cwd | Home | Tempdir | Gitdir | Xdg(XdgKind, _)` and `Selector`
   is `Path | System` (`Homebrew` joined). `FreezeCtx::place` returns
-  `Result<Option<FrozenPath>, PolicyError>` (`None` the dead grant) and
+  `Result<Option<FrozenPath>, Error>` (`None` the dead grant) and
   `FreezeCtx::selector` a `Vec`. `FreezeCtx::path`, `paths`, `absolute`, the
   special cases in `freeze_exec_grant` and `looks_like_path_or_sigil` are
   deleted; `parse_literal_sigil` and `relative_suffix` left the freeze, and
@@ -463,7 +465,7 @@ Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
    layer was the one production caller of the string freezer and moves to
    places; classify `P` on raw input, not after folding; make repeats
    idempotent rather than refused; name the diagnostic and summary changes
-   (`RowExtraField` wording, `grant_summary`'s second activation predicate).
+   (`RowExtraField` wording, the second activation predicate of exarch's `grant_summary`).
 
 ## Relations
 
@@ -497,3 +499,7 @@ The typed grant value is also what crosses between hosts, decoded by the same
 walker (`Shell::decode_grant`) and refused alike: a file key naming a directory,
 a path-shaped name, an exclusion of the root. `ExecGrant` and `ExecKey` are a
 test builder that spells such a value; no grant spells every program.
+
+**Amended 2026-11-07 by [[decisions/261105_the-error-record|the-error-record]].**
+The freezer and the decoder return `Error`; `PolicyError` is gone. The decoder's
+key path is report-only context (`Error::with_context`), not part of the record.

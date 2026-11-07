@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-04
-anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Refusal, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, GuestJail::plan, Launch::apply_guest_jail, install_pre_exec, GrantStack::net]
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
+anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, build_launch, GuestJail::plan, Launch::apply_guest_jail, install_pre_exec, GrantStack::net]
 ---
 
 # Capability enforcement: one model, two enforcers
@@ -52,8 +52,8 @@ those facts.
 **The guard reads a `GrantStack` and returns domain data, never runtime control
 flow.** `authority/guard/enforce.rs`'s free `check_*(&GrantStack, …)` functions
 fold every layer, not just the top one. The model's refusals (`ExecDenial`,
-`Refused`) become a `Denial` — a `fact::Check` beside a `Refusal`'s message and
-hint. `shell/runtime/state/checks.rs` alone adds runtime status and control
+`Refused`) become a `Denial`: a `fact::Check` beside the `Error` that carries
+the refusal's message and hints. `shell/runtime/state/checks.rs` alone adds runtime status and control
 flow: `Shell::refused` records the check and raises an `Error`, preserving its
 wording. Flag and device refusals cross the same conversion without a check
 fact. The doors are:
@@ -165,7 +165,7 @@ the system reads in `Baseline`, the platform's system paths, after the meet:
 only a `deny` removes them. They are host state, resolved once by
 `authority::grant` where the `Runtime` is built (a host whose system read is
 malformed or cannot be walked refuses to boot, naming the variable that chose
-it, with the `PolicyError`'s hint) and passed to every reader; no stack holds
+it, with the `Error`'s own hint) and passed to every reader; no stack holds
 them and no
 wire carries them. No backend carries a system set of
 its own. They differ in *when* the fold runs, and in what an exclusion is
@@ -181,6 +181,15 @@ fixed to; the kernel renderers by position alone
   resolved real position and as nothing else; an exclusion renders from the
   resolved real paths its walk held, never from the text as written. A backend refuses a launch whose frozen allowance has
   been redirected rather than follow it.
+
+**The pinned-binary veto runs before the stack fold.** Under `Write`,
+`refusal_fs` asks the `Baseline` whether the target is a boot-pinned identity
+before it folds any layer, since the empty stack is exactly the case the veto
+must catch.
+
+**The projection takes its denies from the read region alone.** Both regions
+hold the same exclusions, so one copy suffices; a disk change between the two
+folds can only drop a write allow, which fails closed.
 
 **The projection never carries an allow beneath an exclusion (`live()`).** Such
 an allow is dead. It must never reach a backend whose primitive puts explicit

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-verified_at_date: 2026-11-06
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, join_lone, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
@@ -345,8 +345,8 @@ coincide; inside a cleanup the scope is a shield under the node. A write never
 aims at the current scope. A shield is minted as a `Scope` alone, so no
 `ScopeNode` of it exists and nothing can write it.
 
-A collector consumes a stop iff it names one of its stages' nodes, forgiving
-it. A worker consumes every `Cancelled` or `TimedOut` stop whose owner is a
+A collector consumes a stop iff it names one of its stages' nodes
+([[internals/pipeline-execution|pipeline-execution]]). A worker consumes every `Cancelled` or `TimedOut` stop whose owner is a
 node of the session other than its root — its own, an ancestor worker's, the
 call it is a child of — into the handle's `Reason::Cancelled` or
 `Reason::TimedOut` error, preserving `Stop.at`, so a cancel
@@ -415,40 +415,20 @@ every external's one teardown:
   it without reaching ral. The pipeline anchor swallows every console event,
   so a group's grace never ends the process holding it open.
 
-**A process group is its owner's to signal.** The collector addresses a child
-by where it *landed*, and no collector ever signals a group it does not own
-([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]):
-
-- `Owns`: a child leading its own group, with no anchor, is signalled and
-  killed whole (`Group::Owns`).
-- `Joins`: a child that joined a pipeline's group from inside a stage thread
-  (`Group::Joins`) is addressed by pid, and opens with a grace signal only for
-  a cause `Membership::owes`: one stronger than the stage's scope holds, every
-  cause the stage holds being one the pipeline's owner delivers to the whole
-  group once.
-- `Shares`: a child in ral's own group is addressed by pid, never with
-  `kill(-pgid)`. It is owed every cause but `Interrupted`: Ctrl-C reached it
-  from the terminal, and it gets no second copy by pid.
-
-**One teardown, in a fixed order.** `cancel_all` writes the cause on every live
-stage, sends the grace signal once per address (a group's is followed by
-`SIGCONT`), waits the grace out a slice at a time, then kills the group or pid
-*and* each live stage's guest-jail cgroup, and only then drains. Pumps are
-joined after the kill, in settlement
-([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]);
-a collector dropped mid-flight kills and joins nothing, detaching its pumps. On
-Windows an owned `Job` is the group: its `drain` kills it once under a cause,
-and its `Drop` releases it.
+**A collector signals only the group it owns.** It addresses a child by where
+it *landed*, and every other child by pid
+([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
+A teardown kills before it joins, and a collector dropped mid-flight joins no
+pump ([[invariants/a-teardown-kills-before-it-joins|a-teardown-kills-before-it-joins]]).
 
 Every external wait goes through this one `recv`/`cancel_all` shape, a lone
 command's included (it is a pipeline of one, `join_lone`), the interactive
-REPL foreground included. ral does not suspend
-([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): a stop
-never reaches this channel at all, since the reaper answers it with
-`SIGCONT` on its own before any subscriber sees one — a stop is never itself
-a cause for teardown. A foreground external still gets its Ctrl-C from the
-kernel directly — it holds the lent terminal — and the key is heard back by
-the loan when the terminal returns (§Attribution); a SIGTERM delivered to
+REPL foreground included. ral does not suspend: a stop never reaches this
+channel, and is never itself a cause for teardown
+([[internals/pipeline-execution|pipeline-execution]]). A foreground external
+still gets its Ctrl-C from the kernel directly — it holds the lent terminal —
+and the key is heard back by the loan when the terminal returns
+(§Attribution); a SIGTERM delivered to
 *ral* preempts even that wait through the root cause, read at the next
 slice.
 
@@ -658,10 +638,9 @@ SIGHUP its `Terminated`; SIGTERM, no key's, asks what a hangup does.
   *by reaping*, not by ignoring.
 - **SIGTERM/SIGHUP → `Shutdown`** — translates to a root `Terminated` (the whole
   session unwinds, the REPL loop exits 143) and walks the escalation ladder;
-  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `Ignore`** — the shell answers a stop
-  reaching one of its own children through `waitpid`/`SIGCONT` rather than
-  ever being stopped itself, and rewrites terminal state without being
-  stopped ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `Ignore`** — the shell is never stopped
+  itself, a stop reaching one of its own children is the reaper's to answer,
+  and it rewrites terminal state without being stopped ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 **No disposition restarts a call it cuts.** Every handler ral installs (the
 three dispositions, the pipeline anchor's report, the Linux supervisor's

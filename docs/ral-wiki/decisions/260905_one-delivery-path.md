@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: ccb05833
+generated_at_commit: f1b0a4a4
 ---
 
 # One delivery path
@@ -13,7 +13,7 @@ and a process cannot tell them apart, so it received the same interrupt twice.
 
 - **The relay is deleted.** `PipelineRelay`, `RELAY_PGIDS`,
   `relay_signal_to_groups`, and `relay_handler` are gone. The interactive
-  SIGINT disposition is `interrupt_handler`, which calls
+  SIGINT disposition is `Disposition::Interrupt`, which calls
   `request_foreground_cancel(Interrupt)` and nothing else. (Later, `3e43ce37`:
   it calls `request_interrupt`, forwarded as `Control::Interrupt` to the
   dispatch in flight.)
@@ -28,17 +28,17 @@ and a process cannot tell them apart, so it received the same interrupt twice.
   `Event::Heard(signal)`, a key only to a terminal loan:
   [[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]].)
 - **`grace_signal(cause)` is the one cause→signal table**, read by
-  `RunningChild::terminate` and `cancel_all` alike: `Interrupt` → SIGINT,
-  `Explicit`/`Deadline`/`Terminate` → SIGTERM, `ReaderGone`/`RootAbort` →
-  `None`, straight to the kill at every nesting level.
-- **Attribution lives in `from_outcome`.** `CommandFailure::from_outcome(outcome,
-  sent)` attributes the death to the cause `sent` names, so a pipeline external
+  `CollectState::cancel_all`, and through `signals_of` by the attribution of a
+  death: `Interrupted` → SIGINT, `Cancelled`/`TimedOut`/`Terminated` → SIGTERM,
+  `ReaderGone`/`Aborted` → `None`, straight to the kill at every nesting level.
+- **Attribution lives in `from_outcome`.** `from_outcome(outcome,
+  sent)` attributed the death to the cause `sent` names, so a pipeline external
   torn down under a deadline says so in the same words a standalone external
   does; `attribute_to` is private to `outcome.rs`. (Later, `5803377b`: both
-  gave way to `WaitOutcome::classify(cause, enveloped)`, whose attributed
-  death is `ChildEnd::Cancelled(cause)`, minting the same `Error::cancelled`
-  as any poll point, so a cause's status no longer depends on whether it
-  landed before or after the spawn.)
+  gave way to `WaitOutcome::cancelled_by(cause)`, whose attributed death is
+  `Break::cancelled(cause, scope)`, the same stop as any poll point's, so a
+  cause's status no longer depends on whether it landed before or after the
+  spawn.)
 
 ## Rejected shapes
 

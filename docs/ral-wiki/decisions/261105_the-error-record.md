@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
 ---
 
 # The error record
@@ -36,7 +36,8 @@ Reason  = process [program: String, failure: Failure]
         | timed-out | cancelled | raised String
 Failure = exited Int | signaled Int | not-found
         | not-runnable [found: String, why: Unrunnable]
-Unrunnable = permission-denied | directory | not-executable | io String
+Unrunnable = permission-denied | directory | not-executable
+           | missing-interpreter [interpreter: Option String] | io String
 ErrorRecord = [reason: Reason, frame: String,
                site: [script: String, line: Int, col: Int]]
 
@@ -56,9 +57,10 @@ describe : ErrorRecord → Returns String
 - **One code table is `FailureCode for Reason`.** `process` delegates to
   `Failure`: `exited n` clamps through `failure_byte`; `signaled s` gives
   128+s; `not-found` 127; `not-runnable` 126. `timed-out` 124; `cancelled`
-  143; `raised` 1. Worker-stop cases delegate through `WorkerStop` to
-  `CancelCause`; errors, records and process failures delegate to the reason. External raw `i32` survives for wording and hints
-  until code projection. Panic 101 belongs to the ending, not the reason.
+  143; `raised` 1. A worker's own stop becomes `timed-out` or `cancelled`
+  through `Reason::stopped`; errors, records and process failures delegate to
+  the reason. External raw `i32` survives for wording and hints until code
+  projection. Panic 101 belongs to the ending, not the reason.
   Choosing a script code is top-level `exit n`, not `fail`.
 - **`describe` is the one wording of a reason.** Process wording takes
   `program` as its subject; provenance never enters it. Runtime and record
@@ -108,18 +110,22 @@ Visibility has one definition: the span lies in a session source.
 
 ## Report facts are not the value
 
-- Reason hints depend on the reason and session exit-hints table: signal
-  advice, path-as-text advice, external exit hints keyed on `program`. They
-  are recomputed, never stored on the error. Situational hints depend on additional context and
-  override reason hints.
-- Context prefixes, witnesses, compile rejections and unwind facts are
-  report-only. Context applies to every reason without rewriting it.
+- The record determines one piece of advice: signal advice for `signaled`,
+  the session exit-hints entry for `exited`. It is recomputed at each render
+  by one function, never stored on the error, and so survives `raise`.
+  Everything stored belongs to one unwinding: stored hints, context prefixes,
+  witnesses, compile rejections and unwind facts are report-only.
+- Hints accumulate, in attachment order, and none overrides another: the
+  record's advice follows the stored hints. Independent advice has no
+  precedence (`docs/SPEC.md` §13.1 is the home of the composition).
+- Context applies to every reason without rewriting it.
   `Unwound { abandoned_tail: bool, discarded: u32 }` records abandoned written
   steps and sums capture bytes saturatingly; escapes carry no such facts.
-- One renderer composes the hint, counted discard note, then abandoned-tail
-  note. The latter is omitted for spawn failures or when a hint exists.
+- One renderer composes the hints, the counted discard note, then the
+  abandoned-tail note. The latter is omitted for spawn failures or when a
+  hint precedes it.
 - A handler's re-raise preserves the record and **keeps every hint the record
-  determines**, including session exit-hints lookup. It drops situational
+  determines**, including the session exit-hints lookup. It drops stored
   hints, context and unwind facts from the first unwinding. A resolved site
   renders without a caret. `await` propagates the live error: no handler
   intervened, so its report facts remain.
@@ -127,14 +133,26 @@ Visibility has one definition: the span lies in a session source.
   separate `refused` reason enter the record. Audit keeps forensic bytes;
   domain outcomes are values; `raised` plus the frame name describes refusal.
 
+> **Amended (261107).** Hints accumulate and none overrides another. The
+> original text let situational hints override reason hints; that hid true
+> advice (a sandbox denial hid the signal advice and the exit-hints entry).
+> Path-as-text is a stored hint, written by the evaluator when a grant refuses
+> a path head, not a reason hint. The error is one type in every layer
+> (`Error`, `core/src/error.rs`): `reason` and `prov` are its only public
+> fields, each report fact is private with one writer (`with_hint`,
+> `with_context`, `with_witness`, `with_rejection`), `Error::new` is the one
+> constructor, and an `Error` enters control flow only through
+> `From<Error> for Break`.
+
 ## Hosts and transport
 
 - The wire ending remains `Ending<FOValue, ErrorRecord, CancelCause>` and
   carries the record through its strict `Datum` encoding. `Display::Done` in
   `record.jsonl` uses that encoding too. The protocol version changes; there
   is no compatibility for old records, envelopes or scripts.
-- `Report::Static` and `Faulted` keep their nonzero host status. Desk refusals
-  have no status field and become plain raised errors.
+- `Report::Static` and `Faulted` keep their nonzero host status. A desk
+  refusal has no status field: it is an `Error` that crosses either carrier as
+  a `WireError` (message and hints) and is rebuilt by `WireError::to_error`.
 - Boot answers `settled` settings or `capabilities-refused` diagnostics,
   rendered engine-side so compile reports survive. The host chooses exit 2
   for capability rejection; rc failures remain error endings.

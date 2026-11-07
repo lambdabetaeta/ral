@@ -1,9 +1,9 @@
 ---
 status: active
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
 verified_at_date: 2026-11-06
-anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::cancelled, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, WorkerStop, Reason::Cancelled, Reason::TimedOut, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
+anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::cancelled, final_poll, End, Stop, ExitCode, Shell::poll, Shell::scope, Mooring::home, Scope::in_force, ScopeId, POLL_SLICE, Reason::stopped, Reason::Cancelled, Reason::TimedOut, convert_own_stop, StageObservation::names, CollectState::cancel_all, CollectState::recv, Ending::Stopped]
 ---
 
 # Delimiters are handlers for `poll`
@@ -76,9 +76,9 @@ defect in the area was one face of that spelling.
 
 - **The sort.** `Escape ::= Exit n | Stopped { cause, owner: Option<ScopeId>,
   at }`, minted only by `Break::stopped`. `Error`'s statuses are `Raised n`,
-  `Process f` and `WorkerStopped o` (`o : WorkerStop ::= Cancelled |
-  TimedOut`), the last being a stop an owner *converted* at its boundary; no
-  poll point mints it. `Reason` is flat: `` `exited n | `signaled n |
+  `Process f` and the two reasons `Cancelled` and `TimedOut`, the last two
+  being a stop an owner *converted* at its boundary; no poll point mints
+  them. `Reason` is flat: `` `exited n | `signaled n |
   `cancelled | `timed-out | `not-found | `not-runnable | `raised ``. `try`
   catches errors and nothing else, as the Agda's `βtry-err`/`βtry-esc` already
   said.
@@ -116,7 +116,7 @@ defect in the area was one face of that spelling.
   once more after the body settled, so a stop that landed after the last poll
   is not lost. A stop at a boundary is consumed iff it names that owner's node.
   A worker consumes a stop naming its own node into the handle's error
-  (`convert_own_stop`, `Error::worker_stopped`). A stage forwards everything;
+  (`convert_own_stop`, `Reason::stopped`). A stage forwards everything;
   its *collector* consumes every stop naming that stage's node — its reader-gone
   stop, and the teardown the collector itself ran. A direct external stage has
   no node; the collector's record of what it sent (`sent`) is its name.
@@ -213,7 +213,8 @@ worker's escape is data on its `` `done `` card.
    holds, ended by the stop at the grace and forgiven). A corollary of 3 and
    9.
 7. `code(fail (Raised n)) = n`; `code(fail (Process f)) = f.code()`;
-   `code(fail (WorkerStopped o)) = o.cause().code()`; `code(exit n) = n`;
+   `code(fail Cancelled) = CancelCause::Cancelled.code()` and likewise
+   `TimedOut`; `code(exit n) = n`;
    `code(stop c) = c.code()`. `Ending::status` is this function
    (`Break::code`); the wire clamps it.
 8. Panics are defects: a panic unwinds to its machine's base, where the top of
@@ -301,7 +302,7 @@ lands, when a mask ends, and for a process which write is first dead.
 - **Two contracts for one owner.** A worker a `cancel` detached reported
   "handle is cancelled", status 1, `` `raised ``; one whose lease expired was
   left attached and reported 124, catchable like any error. Both are now the
-  owner's `WorkerStopped` record.
+  owner's `cancelled` or `timed-out` record.
 - **`fail $e` re-minted every record** as `` `raised `` with `cmd: fail`.
 
 ## Rejected shapes
@@ -447,7 +448,7 @@ lands, when a mask ends, and for a process which write is first dead.
 `Escape`, `Stop`, `End`, `Break::stopped`, `Break::cancelled`, `final_poll` in
 `core/src/shell/runtime/flow.rs` (`From<Cancellation> for Break` preserves cause
 and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
-`Cancellation`, `WorkerStop`, `POLL_SLICE`, `resolve` in
+`Cancellation`, `POLL_SLICE`, `resolve` in
 `core/src/process/cancel.rs` (`Scope::poll` returns domain cancellation); `Shell::scope`, `Shell::poll`,
 `Shell::write_sink` in `core/src/shell/runtime/state/mod.rs`; `Mooring::home` in
 `core/src/shell/runtime/mooring.rs`; `Break::rank` in `core/src/shell/runtime/flow.rs`; the collector's `recv`, `escalate`,
@@ -456,3 +457,8 @@ and owner as a non-catchable stop); `Scope`, `ScopeNode`, `ScopeId`,
 `core/src/fact/ending.rs`. See [[internals/cancellation|cancellation]] for the
 runtime narrative and [[design/effects-handlers|effects-handlers]] for the
 handler reading.
+
+**Amended 2026-11-07 by [[decisions/261105_the-error-record|the-error-record]].**
+`Error`'s statuses are the one `Reason`; the owner's
+conversion is `Reason::stopped(cause)`, `Cancelled` or `TimedOut`, and any
+other stop stays a stop.

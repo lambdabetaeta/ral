@@ -1,7 +1,7 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-06
-covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
+covers_paths: [core/src/error.rs, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
 # Map: core / diagnostics
@@ -20,16 +20,32 @@ AST, IR, and typechecker. `Span::join` merges two spans; `Span::range` yields
 the `std::ops::Range<usize>` ariadne expects. Carrying only byte offsets keeps
 the IR free of presentation state.
 
-## Runtime source identity — `SourceDb`
+## The error value — `core/src/error.rs`
 
-**A runtime error carries one provenance: the failing frame's name and site.**
-`Error` (`shell/runtime/error.rs`) holds `prov: Option<Prov>` until located.
-`Break::locate(name, span, shell)` claims an unlocated error or stop only when
-its span lies in a session source. `Prov::Live { name, span }` draws a caret;
+**One type is every runtime failure.** An `Error` is the record, `reason: Reason`
+and `prov: Option<Prov>`, together with the report of one unwinding: stored
+`hints` (boxed, innermost site first), a `witness` span, an optional
+`rejection`, a `context` prefix and the `Unwound` facts (`abandoned_tail`, a
+saturating `discarded` byte count). Its optional parts are boxed because an
+`Error` rides in every `Settled`, and a compile-time assertion keeps it under
+clippy's `result_large_err` threshold. `Error::new` takes anything that is a
+`Reason`; `with_hint` appends, `with_context` prepends, and `Display` is the
+context chain followed by `Reason::describe`. Rendering is not here: it lives in
+`shell/runtime/error.rs`, below. The wording of an I/O failure is `io_message`,
+the one phrasing every door shares, which says the same fixed string for
+`NotFound` and `PermissionDenied` on every host.
+
+**A failure carries one provenance: the failing frame's name and site.**
+`prov` is `None` until claimed. `Break::locate(name, span, shell)`
+(`shell/runtime/flow.rs`) claims an unlocated error or stop only when its span
+lies in a session source. `Prov::Live { name: FrameName, span }` draws a caret;
 `Prov::Resolved` holds a name and `CallSite`, drawing coordinates without a
-caret. An initial `_` does not hide a frame; the baked prelude is invisible
+caret, and is what `Prov::leaving` makes of a live span the parent registry does
+not hold. An initial `_` does not hide a frame; the baked prelude is invisible
 because its spans are outside session sources. See
 [[decisions/261105_the-error-record|the error record]].
+
+## Runtime source identity — `SourceDb`
 
 Every registered `Source` carries its `SourceOrigin` (`source.rs`): a
 `File` by the native path it was read from, or a `Virtual` label —
@@ -92,8 +108,8 @@ spanless pre-run failure (an unknown hook, a non-ground argument) — whose
 `Error`: a loaded file's parse error would then raise status 2, not 1. A file
 loaded at runtime — a `use`d module, the rc, a plugin, a capability profile —
 carries its rejection on the runtime `Error` instead, as `Error::rejection`,
-from `Error::compile` (`shell/runtime/error.rs`) at the loader's compile door
-(`shell::load::check_source`); `CompileError` itself knows no runtime error.
+which `shell::load::check_source` attaches with `with_rejection` at the
+loader's compile door; `CompileError` itself knows no runtime error.
 Its `Reason::Raised` carries the plain compile sentence a `try` handler reads
 with `describe`; a loader's context prefix belongs only to the report.
 `locate` supplies the `use` frame's provenance, so `$err[site]` names the
@@ -124,10 +140,12 @@ Rendering tests live inline with each owner: generic renderer tests in
 the described reason and report-only facts; `Stop::diagnosis` supplies its
 cause and provenance. `Reason::describe(&self)` is the one wording, reading
 the reason alone; `Error::describe` and `ErrorRecord::describe` delegate.
-Reason hints (`Reason::hint(&self)`: signal, path-as-text on `program`, session
-exit-hints lookup by `program` basename and status) are recomputed; a stored
-situational hint takes precedence. Context prefixes never change the reason. The renderer
-composes hint, saturating counted discard, then eligible abandoned-tail note.
+A report's notes are the error's stored hints, then `advice`: the one note the
+record determines (signal advice for `signaled`, the session's exit-hints entry
+for `exited`, keyed by program basename and status), recomputed at each render.
+Notes have no precedence; all are shown, composed under SPEC §13.1. Context
+prefixes never change the reason. The renderer then adds the saturating counted
+discard and, when no note is present and the failure is not a spawn refusal, an abandoned-tail note.
 A panic is spanless `run panicked: …`; values, exits and reader-gone stops
 render nothing. `Error::render`, `compact` and `render_spanless` use that same
 renderer; `Error::plain` is its words alone, uncoloured and unlaid (message

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-06
+generated_at_commit: f1b0a4a4
+generated_at_date: 2026-11-07
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -66,7 +66,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 39): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 43): checked at `Attach`; a mismatch refuses.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -113,8 +113,9 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `WireError { message, hints }` — the one wire form of an `Error`: a refused
   enquiry's `Frame::Answer`, `SessionEvent::Refused` and `Severed::Refused`.
   `WireError::of(&Error)` takes the message line, context included, and the
-  hints; `to_error` folds them back through `with_hint` as a plain
-  `Reason::Raised`. Both carriers pass every refusal through the pair, so a
+  stored hints, nothing else; `to_error` folds them back through `with_hint`
+  as a plain `Reason::Raised`, so the far side reads status 1 and the record's
+  advice (signal, exit-hint) is not carried. Both carriers pass every refusal through the pair, so a
   refusal reads the same under either and its hints survive the crossing.
   The record (`ErrorRecord`, `$err`) is untouched: hints stay report facts.
 - `Control` — `Strike(DispatchId, CancelCause)` and `End(RootCause)`, the
@@ -249,7 +250,7 @@ The two interpretations of the algebra, and what they share.
   forwarding `Surface`/`Enquiry` to `host`; `Result<Report, Severed>`.
   With `within`, it polls every `POLL_SLICE` and sends an addressed strike
   before dispatch and whenever the observed cause rises.
-- `ControlSender` — `interrupt()`, `cancel(id)`, `terminate()` over one of two
+- `ControlSender` — `interrupt()`, `cancel(id)`, `end(RootCause)` over one of two
   routes: `ControlRoute::Identity` applies the verb straight onto the engine's
   `Scopes`; `ControlRoute::Wire` holds its transport's `Line` weakly and writes
   a `Control` frame through it, a no-op once the line is gone.

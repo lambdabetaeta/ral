@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 773daa1062bb84e64c799cf502a0a5288c173f20
-verified_at_commit: 002c654a
-verified_at_date: 2026-10-13
+generated_at_commit: f1b0a4a4
+verified_at_commit: f1b0a4a4
+verified_at_date: 2026-11-07
 anchors: [GrantStack, GrantLayer::extend, Fragment, Axis, join_top, Evidence, Table::meet, Table::withheld, region, rules, for_invocation]
 against: [design/grant, design/authority-tables, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
@@ -260,7 +260,7 @@ built by `join_top` over a fragment of exclusions.
   places without restricting; verbs join by union, fs by union of lists, net by
   `Offline`.
 - **at the point of use**: `GrantStack::admit` and the fs guard
-  (`check_fs_op`, `Shell::locate`) fold every layer and decide once, with `↓`,
+  (`GrantStack::refusal_fs`, `Shell::locate`) fold every layer and decide once, with `↓`,
   by `Table::withheld`, which cites an exclusion that applies or names the missing
   permission. Any layer's exclusion excludes; any layer's missing allowance
   refuses.
