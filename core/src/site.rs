@@ -56,12 +56,6 @@ pub(crate) enum Silent {
     /// Sweep inherited descriptors before the payload runs; no model I/O.
     #[cfg(target_os = "linux")]
     InheritedSweep,
-    /// Detach's second fork surrenders process ownership; its exec card already fired.
-    #[cfg(unix)]
-    DetachFork,
-    /// A reaper test forks an exit-status fixture; no model I/O.
-    #[cfg(all(unix, test))]
-    ReaperExitFork,
     /// ral's own pin, run as an anchor under bwrap to ask whether this host
     /// builds an envelope at all.  A setup-time host capability probe, not a
     /// model exec image, so it raises no card.
@@ -103,31 +97,21 @@ pub(crate) enum Silent {
     /// The confined program's `Command`, built inside the trampoline once its
     /// confinement is entered.  It raises no card: the surface card fired
     /// before the handoff, so the exec itself raises none.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     RespawnSpawn,
-    /// The `exec` of the sandbox respawn handoff, which replaces this process
-    /// image with the confined target.  It raises no card: the surface card
-    /// fired before the handoff, so the exec itself raises none.
+    /// The macOS trampoline's `execve` of the confined program, which
+    /// becomes it.  It raises no card: the surface card fired before the
+    /// handoff, so the exec itself raises none.
     #[cfg(target_os = "macos")]
     RespawnExec,
-    /// The Linux trampoline's wait for the program it supervises inside the
-    /// envelope, a stop being no end to report.  It raises no card: the
-    /// surface card fired before the handoff.
-    #[cfg(target_os = "linux")]
-    SupervisorWait,
-    /// The Linux trampoline's fork of the bundled tool it supervises, as it
-    /// supervises a file.  It raises no card: the surface card fired before
-    /// the handoff.
-    #[cfg(target_os = "linux")]
-    SupervisorFork,
     /// A stat and an access check by name under the directory handle a walk
     /// holds, asking whether the entry is still the walked object and beyond
     /// the user's write.  It raises no card: sandbox rendering over the walk's
     /// own names, not a model's data I/O.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     CarrierSystemOnly,
     /// Read through a system-only walk's handle; only the system can author it.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     CarrierRead,
     /// The real path of an admitted file whose spawn failed `ENOENT`, statted
     /// without following a final link: a file gone is `not-found`, one still

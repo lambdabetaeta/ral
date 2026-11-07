@@ -21,6 +21,12 @@ pub(in crate::process) enum Silent {
     /// the lock, not the exec, and what is run is surfaced where its caller
     /// built it.
     ForkSpawn,
+    /// The one bare `fork` ([`crate::process::fork`]): detach's intermediate,
+    /// forked in its spawn's hook, and the Linux trampoline's bundled tool,
+    /// which runs ral's own code under its supervisor.  It raises no card:
+    /// the exec card fired where the launch was built.
+    #[cfg(unix)]
+    Fork,
     /// `Command::status`'s own wait, taken outside the spawn lock on a child
     /// nobody parks, so a stop is not a case here.  It raises no card: it
     /// observes a child its caller already launched.

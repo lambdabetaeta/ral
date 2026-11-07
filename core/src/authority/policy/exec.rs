@@ -390,7 +390,7 @@ impl ExecRules {
     }
 
     /// The files a rule admits.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     pub(crate) fn allowed_files(&self) -> impl Iterator<Item = &RealPath> {
         self.live().filter_map(|scope| match scope {
             ExecAllow::File { real, .. } => Some(real),
@@ -954,7 +954,7 @@ pub(super) mod tests {
     fn an_exact_allow_whose_name_is_vetoed_is_not_live() {
         let rules: ExecRules = [allow_file("/x/bash"), veto("bash")].into_iter().collect();
         assert_eq!(rules.live().count(), 0);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(unix)]
         assert_eq!(rules.allowed_files().count(), 0);
     }
 

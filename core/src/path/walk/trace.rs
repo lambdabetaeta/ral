@@ -177,7 +177,7 @@ impl RealPath {
     ///
     /// # Errors
     /// `raw` is not a position's spelling.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     pub(crate) fn off_the_wire(raw: &OsStr) -> io::Result<Self> {
         Self::parse(raw)
     }

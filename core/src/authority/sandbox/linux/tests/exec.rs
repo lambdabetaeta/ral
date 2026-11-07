@@ -1281,19 +1281,13 @@ fn a_refused_exec_hint_keeps_the_interpreter_read_before_spawn() {
     let Some(env) = envelope_launches(&policy) else {
         return;
     };
-    let image = Image::of(&admitted);
+    let read = crate::authority::sandbox::interpreter_of(&admitted)
+        .expect("a script names its interpreter");
     let ran = run_after(&env, &policy, &admitted, &[], || {
         std::fs::write(&script, format!("#!{}\n", other.display())).unwrap();
     });
     assert!(trampoline_refused(&ran), "{ran:?}");
-    let Image::File {
-        interpreter: Some(read),
-        ..
-    } = &image
-    else {
-        panic!("a script's image names its interpreter");
-    };
-    let hint = crate::authority::sandbox::interpreter_hint(&policy, read).unwrap_or_default();
+    let hint = crate::authority::sandbox::interpreter_hint(&policy, &read).unwrap_or_default();
     assert!(hint.contains(interpreter.to_str().unwrap()), "{hint}");
     assert!(!hint.contains(other.to_str().unwrap()), "{hint}");
 }

@@ -5,7 +5,6 @@ use rustix::process::Pid;
 
 use super::{Landing, Pgid, PgidPolicy};
 use crate::process::reset_child_signals;
-use crate::site::{Silent, site};
 
 impl PgidPolicy {
     /// Apply this policy from inside a post-fork `pre_exec` closure: no
@@ -172,13 +171,10 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> Result<Survivor, Spawn
     let fd = handshake.as_raw_fd();
     let (intermediate, _its_landing) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
-            // Async-signal-safe throughout: fork, write, _exit, setsid, fcntl.
-            let pid = unsafe { site!(Silent::DetachFork, libc::fork()) };
-            if pid < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if pid > 0 {
-                let bytes = pid.to_ne_bytes();
+            // SAFETY: a spawn's hook, async-signal-safe throughout: fork,
+            // write, _exit, setsid, fcntl.
+            if let crate::process::Forked::Parent(pid) = unsafe { crate::process::fork() }? {
+                let bytes = pid.as_raw_pid().to_ne_bytes();
                 unsafe {
                     let _ = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
                     libc::_exit(0);

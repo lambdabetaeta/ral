@@ -14,18 +14,18 @@
 //! A script refused at its start reads no log: `interpreter_hint` asks the
 //! launch's own projection whether it withholds the `#!` interpreter.
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 use crate::syntax::quote::quote_word;
 use std::collections::HashSet;
-#[cfg(not(windows))]
+#[cfg(unix)]
 use std::fmt::Write;
 use std::time::Instant;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Inert(String);
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 impl Inert {
     #[cfg_attr(
         not(any(test, target_os = "macos")),
@@ -52,14 +52,14 @@ impl Inert {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 impl std::fmt::Display for Inert {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Record {
     pid: u32,
@@ -78,7 +78,7 @@ pub(super) mod platform;
 /// What a denial's record names, and so which remedy the hint owes.  A service
 /// never arrives as a path, so no wording can offer one as something to
 /// grant — the confusion this taxonomy exists to make unsayable.
-#[cfg(not(windows))]
+#[cfg(unix)]
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -113,7 +113,7 @@ pub(super) enum Denied {
     Opaque,
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 impl Denied {
     fn operand(&self) -> Option<&Inert> {
         match self {
@@ -128,10 +128,10 @@ impl Denied {
 }
 
 /// Records shown before the hint starts counting.
-#[cfg(not(windows))]
+#[cfg(unix)]
 const MAX_DENIAL_LINES: usize = 3;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 enum Collector {
     #[cfg(target_os = "macos")]
     Log(std::time::Duration),
@@ -141,7 +141,7 @@ enum Collector {
     Dmesg(std::time::Duration),
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 impl Collector {
     #[cfg_attr(
         target_os = "macos",
@@ -207,12 +207,12 @@ impl Collector {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn collect(collector: Collector) -> Option<String> {
     collect_output(&mut collector.command()?)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn collect_output(cmd: &mut std::process::Command) -> Option<String> {
     use crate::process::{ChildHandle, WaitOutcome, deadline::arm_callback};
     use crate::sync::LockExt as _;
@@ -270,7 +270,7 @@ fn collect_output(cmd: &mut std::process::Command) -> Option<String> {
 /// The hint for a sandboxed command that failed with `exit_code`, or `None`
 /// when there is nothing to say: the denials in the window since `since` that
 /// are attributable to a PID in `pids`.
-#[cfg(not(windows))]
+#[cfg(unix)]
 pub(crate) fn denial_hint(
     pids: &HashSet<u32>,
     since: Instant,
@@ -374,7 +374,7 @@ pub(crate) fn denial_hint(
 }
 
 /// Render attributed records without trusting log text.
-#[cfg(not(windows))]
+#[cfg(unix)]
 pub(super) fn build_hint(denials: &[Record]) -> String {
     let mut out = String::from("sandbox denials were recorded for this command's processes:");
     for record in denials.iter().take(MAX_DENIAL_LINES) {
@@ -398,7 +398,7 @@ pub(super) fn build_hint(denials: &[Record]) -> String {
 /// `exec` set can admit, a service it cannot open at all, a socket that is the
 /// `net:` bit alone, the GPU that is the `gpu:` bit alone.  Leading with whichever line happened to carry a path is
 /// what once offered a startup plist as the cure for a withheld keychain service.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn remedies(denials: &[Record]) -> Vec<String> {
     let (mut reads, mut writes, mut execs, mut services) = (vec![], vec![], vec![], vec![]);
     let mut unix_sockets = vec![];
@@ -456,7 +456,7 @@ fn remedies(denials: &[Record]) -> Vec<String> {
 
 /// Keep what is not already listed: one denied operand is logged once per
 /// probe, and a hint that repeats it reads as several separate problems.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn note<'a>(seen: &mut Vec<&'a Inert>, item: &'a Inert) {
     if !seen.contains(&item) {
         seen.push(item);
@@ -464,7 +464,7 @@ fn note<'a>(seen: &mut Vec<&'a Inert>, item: &'a Inert) {
 }
 
 /// The class's operands, under the same cap as the records.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn listing(items: &[&Inert]) -> String {
     let mut out = String::new();
     for item in items.iter().take(MAX_DENIAL_LINES) {
@@ -478,7 +478,7 @@ fn listing(items: &[&Inert]) -> String {
 
 /// `set` is the grant's own field, `read` or `write`: a denied write answered
 /// by widening `read` is advice that fails a second time.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn path_remedy(paths: &[&Inert], set: &str) -> String {
     let one = paths.len() == 1;
     let mut out = format!(
@@ -505,7 +505,7 @@ fn path_remedy(paths: &[&Inert], set: &str) -> String {
 
 /// Exec is its own set, and the kernel layer is the only one that sees a
 /// re-exec — so this denial is never the fs grant's to answer.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn exec_remedy(paths: &[&Inert]) -> String {
     let mut out = String::from("the active grant's exec allow-list does not admit what ran here:");
     out.push_str(&listing(paths));
@@ -521,7 +521,7 @@ fn exec_remedy(paths: &[&Inert]) -> String {
 
 /// Services carrying a stated reason first: a refusal the profile can explain is
 /// worth more than the startup probes that outnumber it.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn service_remedy(services: &[&Inert]) -> String {
     let mut ranked: Vec<(&Inert, Option<&'static str>)> = services
         .iter()
@@ -554,17 +554,17 @@ fn service_remedy(services: &[&Inert]) -> String {
     out
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 const NET_REMEDY: &str = "a socket was denied, so the active grant is `` net: `offline` ``; and that bit is the whole of \
      it. No fs or exec widening opens a socket, and a hostname cannot carry bytes out as a \
      query label either: the resolver is closed at the same layer.";
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 const GPU_REMEDY: &str = "the GPU was denied: this frame withholds the GPU (`` gpu: `withheld ``), and \
      that is the whole of it. No fs, net or exec widening reaches the GPU, and no inner grant \
      restores it: run the command where no layer withholds the GPU.";
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied: request a stated fs write covering its \
      path, e.g. `` fs: [write: [`absolute /path/to/socket]] ``; an fs deny still wins. This admits \
      the daemon's authority outside the sandbox. Unrestricted fs admits no outside socket; \
@@ -573,7 +573,7 @@ const UNIX_SOCKET_REMEDY: &str = "a Unix socket was denied: request a stated fs 
 /// The record names nothing to act on, so the hint says so rather than
 /// guessing at an fs grant — unless a typed deny-set (Linux) has its own words
 /// for the syscall.
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn opaque_remedy(op: Option<&platform::Operation>) -> String {
     if let Some(described) = op.and_then(platform::describe_denial) {
         return described;

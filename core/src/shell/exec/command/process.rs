@@ -10,6 +10,7 @@ use crate::authority::sandbox::{Image, Ownership, Refusal, SandboxProjection};
 use crate::fact::{Failure, Unrunnable};
 use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
 use crate::shell::runtime::{Break, Error, Settled, Shell, Value, sig};
+use std::path::{Path, PathBuf};
 
 impl From<Refusal> for Break {
     fn from(refusal: Refusal) -> Self {
@@ -24,6 +25,9 @@ pub(crate) struct Prepared {
     pub(crate) args: Vec<String>,
     pub(crate) launch: Launch,
     image: Image,
+    /// The `#!` interpreter `image` names, read with it: the parent's alone,
+    /// to word a failure to start it.
+    interpreter: Option<PathBuf>,
     /// The launch's own sandbox, where it has one.
     #[cfg(unix)]
     projection: Option<SandboxProjection>,
@@ -96,34 +100,29 @@ fn unstarted_error(prepared: &Prepared, unstarted: Unstarted) -> Break {
         #[cfg(unix)]
         Unstarted::Stopped(stop) => stop.into(),
         Unstarted::Program(e) => {
+            let interpreter = prepared.interpreter.as_deref();
             let withheld = || -> Option<String> {
                 #[cfg(unix)]
-                if let (
-                    Some(projection),
-                    Image::File {
-                        interpreter: Some(interpreter),
-                        ..
-                    },
-                ) = (&prepared.projection, &prepared.image)
-                {
+                if let (Some(projection), Some(interpreter)) = (&prepared.projection, interpreter) {
                     return crate::authority::sandbox::interpreter_hint(projection, interpreter);
                 }
                 None
             };
-            at_spawn(&e, &prepared.image, withheld, &prepared.shown).into()
+            at_spawn(&e, &prepared.image, interpreter, withheld, &prepared.shown).into()
         }
     }
 }
 
-/// What `program`'s failure to start `image` means.  A script whose `#!`
-/// interpreter its sandbox withholds, as `withheld` words it, is denied
-/// permission whether Seatbelt refused the exec or bwrap hid the interpreter
-/// (`ENOENT`).  Otherwise `ENOENT` for a file still at its real path is its
-/// missing interpreter or loader, and for one gone, or a bundled tool,
-/// `program` not found.
+/// What `program`'s failure to start `image`, whose `#!` names `interpreter`,
+/// means.  A script whose interpreter its sandbox withholds, as `withheld`
+/// words it, is denied permission whether Seatbelt refused the exec or bwrap
+/// hid the interpreter (`ENOENT`).  Otherwise `ENOENT` for a file still at
+/// its real path is its missing interpreter or loader, and for one gone, or a
+/// bundled tool, `program` not found.
 fn at_spawn(
     e: &std::io::Error,
     image: &Image,
+    interpreter: Option<&Path>,
     withheld: impl FnOnce() -> Option<String>,
     program: &str,
 ) -> Error {
@@ -135,20 +134,15 @@ fn at_spawn(
         .flatten();
     match (denied, e.kind(), image) {
         (Some(hint), ..) => failed(Unrunnable::PermissionDenied).with_hint(hint),
-        (
-            None,
-            NotFound,
-            Image::File {
-                real, interpreter, ..
-            },
-        ) if site!(
-            Silent::SpawnedImageStat,
-            std::fs::symlink_metadata(real.as_path())
-        )
-        .is_ok() =>
+        (None, NotFound, Image::File { real, .. })
+            if site!(
+                Silent::SpawnedImageStat,
+                std::fs::symlink_metadata(real.as_path())
+            )
+            .is_ok() =>
         {
             failed(Unrunnable::MissingInterpreter(
-                interpreter.as_deref().map(crate::path::shown),
+                interpreter.map(crate::path::shown),
             ))
         }
         (None, NotFound, _) => Error::process(program, Failure::NotFound),
@@ -204,6 +198,7 @@ fn build_launch(
         .then(|| SandboxProjection::of(&shell.context.grants, shell.baseline(), Some(&admitted)))
         .flatten();
     let image = Image::of(&admitted);
+    let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
     // The judged object and its directory handle end here: a launch holds a
     // name, never the object it was admitted for.
     drop(admitted);
@@ -243,6 +238,7 @@ fn build_launch(
         args,
         launch,
         image,
+        interpreter,
         #[cfg(unix)]
         projection,
     })
@@ -523,22 +519,21 @@ mod at_spawn_tests {
         Reason::process("run", Failure::not_runnable("run", why))
     }
 
-    /// The image of `real` as built, its `#!` interpreter read then.
-    fn file(real: crate::path::RealPath, interpreter: Option<&str>) -> Image {
+    fn file(real: crate::path::RealPath) -> Image {
         Image::File {
             real,
             arg0: "run".into(),
-            interpreter: interpreter.map(Into::into),
         }
     }
 
-    /// `e` starting `image`, under no sandbox that withholds anything.
-    fn unwithheld(e: &Error, image: &Image) -> Reason {
-        at_spawn(e, image, || None, "run").reason
+    /// `e` starting `image`, whose `#!` named `interpreter` when it was
+    /// built, under no sandbox that withholds anything.
+    fn unwithheld(e: &Error, image: &Image, interpreter: Option<&str>) -> Reason {
+        at_spawn(e, image, interpreter.map(Path::new), || None, "run").reason
     }
 
-    fn enoent(image: &Image) -> Reason {
-        unwithheld(&Error::from(ErrorKind::NotFound), image)
+    fn enoent(image: &Image, interpreter: Option<&str>) -> Reason {
+        unwithheld(&Error::from(ErrorKind::NotFound), image, interpreter)
     }
 
     /// The interpreter named is the one read when the image was built, never
@@ -550,13 +545,13 @@ mod at_spawn_tests {
         std::fs::write(&script, "#!/bin/sh\n").unwrap();
         let real = crate::test_helper::real(&script);
         assert_eq!(
-            enoent(&file(real.clone(), Some("/no/such/interpreter"))),
+            enoent(&file(real.clone()), Some("/no/such/interpreter")),
             not_runnable(Unrunnable::MissingInterpreter(Some(
                 "/no/such/interpreter".into()
             )))
         );
         assert_eq!(
-            enoent(&file(real, None)),
+            enoent(&file(real), None),
             not_runnable(Unrunnable::MissingInterpreter(None))
         );
     }
@@ -564,13 +559,10 @@ mod at_spawn_tests {
     #[test]
     fn a_vanished_file_or_a_tool_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let gone = file(
-            crate::test_helper::place(dir.path().join("gone")),
-            Some("/bin/sh"),
-        );
+        let gone = file(crate::test_helper::place(dir.path().join("gone")));
         for image in [&gone, &Image::Tool("ls")] {
             assert_eq!(
-                enoent(image),
+                enoent(image, Some("/bin/sh")),
                 Reason::process("run", Failure::NotFound),
                 "{image:?}"
             );
@@ -582,12 +574,12 @@ mod at_spawn_tests {
     fn eacces_is_permission_denied_and_the_rest_is_io() {
         let tool = Image::Tool("ls");
         assert_eq!(
-            unwithheld(&Error::from_raw_os_error(libc::EACCES), &tool),
+            unwithheld(&Error::from_raw_os_error(libc::EACCES), &tool, None),
             not_runnable(Unrunnable::PermissionDenied)
         );
         let e = Error::from_raw_os_error(libc::E2BIG);
         assert_eq!(
-            unwithheld(&e, &tool),
+            unwithheld(&e, &tool, None),
             not_runnable(Unrunnable::Io(e.to_string()))
         );
     }
@@ -601,15 +593,19 @@ mod at_spawn_tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("run");
         std::fs::write(&script, "#!/opt/x/bin/python3\n").unwrap();
-        let image = file(
-            crate::test_helper::real(&script),
-            Some("/opt/x/bin/python3"),
-        );
+        let image = file(crate::test_helper::real(&script));
+        let interpreter = Some(Path::new("/opt/x/bin/python3"));
         let hint = "its interpreter /opt/x/bin/python3 is not admitted by the grant";
         let withheld = || Some(hint.to_owned());
 
         for errno in [libc::ENOENT, libc::EACCES] {
-            let denied = at_spawn(&Error::from_raw_os_error(errno), &image, withheld, "run");
+            let denied = at_spawn(
+                &Error::from_raw_os_error(errno),
+                &image,
+                interpreter,
+                withheld,
+                "run",
+            );
             assert_eq!(
                 denied.reason,
                 not_runnable(Unrunnable::PermissionDenied),
@@ -620,6 +616,7 @@ mod at_spawn_tests {
         let missing = at_spawn(
             &Error::from_raw_os_error(libc::ENOENT),
             &image,
+            interpreter,
             || None,
             "run",
         );
@@ -634,6 +631,7 @@ mod at_spawn_tests {
         let other = at_spawn(
             &e2big,
             &image,
+            interpreter,
             || panic!("only a denial or an absence asks for the verdict"),
             "run",
         );

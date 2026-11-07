@@ -258,24 +258,12 @@ fn finish(pid: u32) -> io::Result<()> {
     blocking_reap(pid)
 }
 
-/// The one raw `waitpid` in this module: a real, consuming wait, called only
-/// after unsubscribing so the reaper thread's own `WNOWAIT` scan cannot race
-/// it for the same pid's exit status. By raw pid, not through a
-/// `std::process::Child`, since this module never holds one.
+/// A real, consuming wait, made only after unsubscribing so the reaper
+/// thread's own `WNOWAIT` scan cannot race it for the same pid's exit status.
 fn blocking_reap(pid: u32) -> io::Result<()> {
-    let mut status: libc::c_int = 0;
-    loop {
-        let ret = unsafe { libc::waitpid(pid as libc::pid_t, &raw mut status, 0) };
-        if ret == -1 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        break;
-    }
-    Ok(())
+    let pid = RawPid::from_raw(pid.cast_signed())
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))?;
+    crate::process::reap(pid).map(drop)
 }
 
 #[cfg(test)]
@@ -380,14 +368,14 @@ mod tests {
     /// 3.2 exits a syntax error with 258, which is status 2.
     #[test]
     fn an_exit_code_is_a_byte() {
-        // Only `_exit` runs in the child, so forking a threaded process is sound.
-        let pid = unsafe { crate::site::site!(crate::site::Silent::ReaperExitFork, libc::fork()) };
-        assert!(pid >= 0, "fork");
-        if pid == 0 {
-            unsafe { libc::_exit(258) };
-        }
+        // SAFETY: only `_exit` runs in the child, so forking a threaded
+        // process is sound.
+        let pid = match unsafe { crate::process::fork() }.expect("fork") {
+            crate::process::Forked::Child => unsafe { libc::_exit(258) },
+            crate::process::Forked::Parent(pid) => pid,
+        };
         let (tx, rx) = channel();
-        let watch = watch(pid.cast_unsigned(), tx, std::convert::identity);
+        let watch = watch(pid.as_raw_pid().cast_unsigned(), tx, std::convert::identity);
 
         assert_eq!(recv_timeout(&rx), WaitOutcome::Exited(2));
         watch.reap().expect("reap");

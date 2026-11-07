@@ -255,7 +255,7 @@ impl Launch {
     }
 
     /// Run under the trampoline `confined` describes.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     pub(crate) fn confine(&mut self, confined: Confined) -> &mut Self {
         self.confined = Some(confined);
         self
@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// `program` run under a trampoline that is never told anything.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     fn confined(program: &str) -> Launch {
         let (reader, writer) = crate::process::cloexec_socketpair().expect("socketpair");
         let mut launch = Launch::new(program);
@@ -592,7 +592,7 @@ mod tests {
 
     /// Confinement changes whose the `execve` is, never whose ral's own
     /// step is: a failed placement is ral's, not the launcher's.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     #[test]
     fn a_confined_launch_s_failed_step_is_ral_s_and_its_exec_the_launcher_s() {
         let nobody = PgidPolicy::Join(Pgid::from_raw(i32::MAX).expect("positive"));

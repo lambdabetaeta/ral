@@ -2,7 +2,7 @@
 //! program, and its only owner: the [`Warrant`] — the confinement to enter,
 //! the image to run — on a descriptor no other process can write, and the
 //! descriptors every confined launch hands down, each at the number it
-//! already holds ([`Handoff`]).
+//! already holds ([`Handoff`]).  The re-exec's side is [`trampoline`].
 //!
 //! The re-exec's whole argv is `ral --warrant <w> <r>`: the warrant's slot,
 //! then the report socket's ([`crate::process::report`]).  The warrant is
@@ -16,16 +16,18 @@
 //! The decoder accepts only what the encoder emits, byte for byte, so the
 //! encoding is canonical and injective.
 
+mod trampoline;
+
+pub(crate) use trampoline::serve_warrant;
+
 use super::launch::Image;
 #[cfg(target_os = "linux")]
 use super::linux::landlock::Landlocked;
 use crate::Role;
 use crate::path::{RealPath, shown};
-use crate::process::report::Witness;
+#[cfg(target_os = "linux")]
 use crate::site::{Silent, site};
 use libc::c_int;
-#[cfg(target_os = "linux")]
-use rustix::process::Pid;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -34,8 +36,6 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
-#[cfg(target_os = "linux")]
-use std::process::ExitStatus;
 
 /// The number a handed-down descriptor holds, the same in parent and child:
 /// from [`Self::FIRST`] up, away from stdio. Only a
@@ -98,6 +98,22 @@ impl Slots {
             self.warrant.to_string(),
             self.report.to_string(),
         ]
+    }
+
+    /// The slots `args`, what follows [`Self::argv`]'s flag, name.
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let [warrant, report] = args else {
+            return Err(format!(
+                "{} takes two arguments, the descriptors its warrant and its report arrive on: \
+                 it is how ral starts its own confined children, never a command to run by hand",
+                Role::Warrant.flag()
+            ));
+        };
+        let slot = |arg: &OsString| Slot::parse(&shown(arg));
+        Ok(Self {
+            warrant: slot(warrant)?,
+            report: slot(report)?,
+        })
     }
 }
 
@@ -183,8 +199,7 @@ pub(super) type Native = Seatbelt;
 #[cfg(target_os = "linux")]
 pub(super) type Native = Option<Landlocked>;
 
-/// The confinement, and what runs inside it: the image without the
-/// interpreter the parent read, which stays the parent's.
+/// The confinement, and the image to run inside it.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Warrant {
     confinement: Native,
@@ -199,210 +214,11 @@ pub(super) struct Confined {
     args: Vec<OsString>,
 }
 
-impl Confined {
-    /// Run the program, and say on `witness` what became of it.  On macOS a
-    /// host file is `execve`d, which returns only when the kernel refuses,
-    /// and a bundled tool runs here.  On Linux either is this process's
-    /// child, waited for: a tool may itself `execve` (`env`), and the
-    /// supervisor never does.
-    pub(super) fn run(self, witness: Witness) -> u8 {
-        let Self { image, args } = self;
-        match image {
-            Image::File { real, arg0, .. } => {
-                let mut program = site!(Silent::RespawnSpawn, Command::new(real.as_path()));
-                program.arg0(arg0).args(args);
-                run_file(program, witness)
-            }
-            Image::Tool(tool) => run_tool(tool, args, witness),
-        }
-    }
-}
-
-/// Become `program`: its `execve` closes the close-on-exec report, which
-/// the parent reads as its start.
-#[cfg(target_os = "macos")]
-fn run_file(mut program: Command, witness: Witness) -> u8 {
-    let e = site!(Silent::RespawnExec, &mut program => exec());
-    witness.unstarted(&e);
-    unstarted_code(&e)
-}
-
-/// Spawn `program` as this process's child, and [`supervise`] it.
-#[cfg(target_os = "linux")]
-fn run_file(mut program: Command, witness: Witness) -> u8 {
-    outlive_group_signals();
-    let supervisor = rustix::process::getpid();
-    // SAFETY: `die_with` makes only async-signal-safe syscalls.
-    unsafe {
-        program.pre_exec(move || die_with(supervisor));
-    }
-    match crate::process::spawn(&mut program) {
-        Ok(mut child) => supervise(
-            witness,
-            || site!(Silent::SupervisorWait, &mut child => wait()),
-        ),
-        Err(e) => {
-            witness.unstarted(&e);
-            unstarted_code(&e)
-        }
-    }
-}
-
-/// Run the bundled `tool` here: its start is the report's EOF, and an
-/// `execve` of its own keeps this process's pid, which the parent waits on.
-#[cfg(target_os = "macos")]
-fn run_tool(tool: &'static str, args: Vec<OsString>, witness: Witness) -> u8 {
-    drop(witness);
-    tool_code(tool, args)
-}
-
-/// Fork the bundled `tool` as this process's child, and [`supervise`] it.
-#[cfg(target_os = "linux")]
-fn run_tool(tool: &'static str, args: Vec<OsString>, witness: Witness) -> u8 {
-    let caught = outlive_group_signals();
-    let supervisor = rustix::process::getpid();
-    // SAFETY: the trampoline is single-threaded, its warrant role starting
-    // no thread, so the child may run anything.
-    match unsafe { site!(Silent::SupervisorFork, libc::fork()) } {
-        -1 => {
-            let e = io::Error::last_os_error();
-            witness.unstarted(&e);
-            unstarted_code(&e)
-        }
-        0 => {
-            drop(witness);
-            tool_child(tool, args, &caught, supervisor)
-        }
-        pid => supervise(witness, || reap(pid)),
-    }
-}
-
-/// Tell the program's start and, waited for, its exact end, which bwrap
-/// would fold into an exit status; exit as it did.  What the payload's
-/// group is sent this process outlives, but `SIGKILL`, whose silence the
-/// parent reads as such.
-#[cfg(target_os = "linux")]
-fn supervise(mut witness: Witness, wait: impl FnOnce() -> io::Result<ExitStatus>) -> u8 {
-    use std::os::unix::process::ExitStatusExt;
-    crate::process::ignore(libc::SIGPIPE);
-    witness.started();
-    let Ok(ended) = wait() else {
-        // Unreachable: the program is this process's own child.
-        return 126;
-    };
-    witness.ended(ended);
-    ended
-        .code()
-        .or_else(|| ended.signal().map(|signal| 128 + signal))
-        .and_then(|code| u8::try_from(code).ok())
-        .unwrap_or(u8::MAX)
-}
-
-/// The forked tool's whole life, begun as a spawned program begins; it never
-/// returns to the trampoline's frames, by a panic either.
-#[cfg(target_os = "linux")]
-fn tool_child(tool: &'static str, args: Vec<OsString>, caught: &[c_int], supervisor: Pid) -> ! {
-    let code = match as_spawned(caught, supervisor) {
-        // 101: `std`'s exit for a panicking `main`.
-        Ok(()) => std::panic::catch_unwind(move || tool_code(tool, args)).unwrap_or(101),
-        Err(e) => {
-            crate::io::terminal::cmd_error(
-                "ral",
-                &format!("cannot start the bundled tool {tool} under its supervisor: {e}"),
-            );
-            126
-        }
-    };
-    let _ = (io::stdout().flush(), io::stderr().flush());
-    // SAFETY: `_exit` runs no atexit hook over the trampoline's state.
-    unsafe { libc::_exit(i32::from(code)) }
-}
-
-/// What a spawned program begins with: no signal blocked, each one caught
-/// here and SIGPIPE at its default, and death with its supervisor.
-#[cfg(target_os = "linux")]
-fn as_spawned(caught: &[c_int], supervisor: Pid) -> io::Result<()> {
-    for &signal in caught.iter().chain(&[libc::SIGPIPE]) {
-        crate::process::default(signal);
-    }
-    nix::sys::signal::SigSet::empty().thread_set_mask()?;
-    die_with(supervisor)
-}
-
-/// Be killed when `supervisor`, this process's parent, dies.
-#[cfg(target_os = "linux")]
-fn die_with(supervisor: Pid) -> io::Result<()> {
-    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
-    // A supervisor gone before the prctl leaves no death to hear.
-    if rustix::process::getppid() != Some(supervisor) {
-        return Err(io::Error::from_raw_os_error(libc::ESRCH));
-    }
-    Ok(())
-}
-
-/// The end of this process's child `pid`, a stop being none.
-#[cfg(target_os = "linux")]
-fn reap(pid: libc::pid_t) -> io::Result<ExitStatus> {
-    use std::os::unix::process::ExitStatusExt;
-    let mut status = 0;
-    // SAFETY: `status` is this frame's to write.
-    while unsafe { libc::waitpid(pid, &raw mut status, 0) } < 0 {
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
-    Ok(ExitStatus::from_raw(status))
-}
-
-/// A no-op handler for each group signal not ignored, which resets to its
-/// default at the program's `execve`; a signal ignored stays so, for the
-/// program to inherit.  The signals given the handler.
-#[cfg(target_os = "linux")]
-fn outlive_group_signals() -> Vec<c_int> {
-    extern "C" fn heard(_: c_int) {}
-    let caught: Vec<c_int> = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
-        .into_iter()
-        .filter(|&signal| {
-            // SAFETY: a null action only reads the disposition.
-            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
-            (unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut was) } == 0)
-                && was.sa_sigaction != libc::SIG_IGN
-        })
-        .collect();
-    for &signal in &caught {
-        crate::process::install(signal, heard);
-    }
-    caught
-}
-
-/// POSIX's two codes for a program that did not start, as the shell's own.
-fn unstarted_code(e: &io::Error) -> u8 {
-    if e.kind() == io::ErrorKind::NotFound {
-        127
-    } else {
-        126
-    }
-}
-
-/// The bundled `tool`'s exit code, run in this process.
-fn tool_code(tool: &'static str, args: Vec<OsString>) -> u8 {
-    crate::uutils::serve(tool.as_ref(), args)
-}
-
 impl Warrant {
     pub(super) fn new(confinement: Native, image: &Image, args: &[String]) -> Self {
-        let image = match image {
-            Image::File { real, arg0, .. } => Image::File {
-                real: real.clone(),
-                arg0: arg0.clone(),
-                interpreter: None,
-            },
-            Image::Tool(tool) => Image::Tool(tool),
-        };
         Self {
             confinement,
-            image,
+            image: image.clone(),
             args: args.iter().map(OsString::from).collect(),
         }
     }
@@ -451,7 +267,7 @@ impl Warrant {
 
     fn encode(&self) -> Result<Vec<u8>, String> {
         let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match &self.image {
-            Image::File { real, arg0, .. } => (
+            Image::File { real, arg0 } => (
                 b"file",
                 real.as_path().as_os_str().as_bytes(),
                 Some(arg0.as_os_str().as_bytes()),
@@ -490,7 +306,30 @@ impl Warrant {
         let confinement = Native::parse(text(next("confinement")?)?)?;
         let kind = next("kind")?;
         let program = OsStr::from_bytes(next("program")?);
-        let arg0 = (kind == b"file").then(|| next("argv[0]")).transpose()?;
+        let image = match kind {
+            b"file" => Image::File {
+                real: RealPath::off_the_wire(program).map_err(|e| {
+                    format!(
+                        "the warrant's file program {} is not a real path, which is absolute \
+                         and names no link, `.` or `..`: {e}; refusing PATH lookup",
+                        shown(program)
+                    )
+                })?,
+                arg0: OsStr::from_bytes(next("argv[0]")?).into(),
+            },
+            b"tool" => Image::Tool(crate::uutils::bundled_name(program).ok_or_else(|| {
+                format!(
+                    "the warrant names an unknown bundled tool, {:?}",
+                    shown(program)
+                )
+            })?),
+            other => {
+                return Err(format!(
+                    "the warrant names an unknown kind of program, {:?}",
+                    String::from_utf8_lossy(other)
+                ));
+            }
+        };
         let argc: usize = text(next("argument count")?)?
             .parse()
             .map_err(|e| format!("the warrant's argument count: {e}"))?;
@@ -501,33 +340,6 @@ impl Warrant {
                 args.len()
             ));
         }
-        let image = match (kind, arg0) {
-            (b"file", Some(arg0)) => Image::File {
-                real: RealPath::off_the_wire(program).map_err(|e| {
-                    format!(
-                        "the warrant's file program {} is not a real path, which is absolute \
-                         and names no link, `.` or `..`: {e}; refusing PATH lookup",
-                        shown(program)
-                    )
-                })?,
-                arg0: OsStr::from_bytes(arg0).into(),
-                interpreter: None,
-            },
-            (b"tool", None) => {
-                Image::Tool(crate::uutils::bundled_name(program).ok_or_else(|| {
-                    format!(
-                        "the warrant names an unknown bundled tool, {:?}",
-                        shown(program)
-                    )
-                })?)
-            }
-            (other, _) => {
-                return Err(format!(
-                    "the warrant names an unknown kind of program, {:?}",
-                    String::from_utf8_lossy(other)
-                ));
-            }
-        };
         let warrant = Self {
             confinement,
             image,
@@ -637,12 +449,11 @@ fn unwritable(fd: &OwnedFd) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn unwritable(fd: &OwnedFd) -> Result<(), String> {
-    use rustix::fs::{FileType, fstat};
-    let stat = fstat(fd).map_err(|e| format!("cannot stat the warrant: {e}"))?;
-    if FileType::from_raw_mode(stat.st_mode) == FileType::Socket {
-        Ok(())
-    } else {
-        Err("the warrant is not a socket; refusing it".to_string())
+    use std::os::fd::AsFd;
+    match crate::process::report::is_socket(fd.as_fd()) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the warrant is not a socket; refusing it".to_string()),
+        Err(e) => Err(format!("cannot stat the warrant: {e}")),
     }
 }
 
@@ -855,7 +666,6 @@ mod tests {
             image: Image::File {
                 real: RealPath::off_the_wire(OsStr::from_bytes(real)).expect("a real path"),
                 arg0: OsStr::from_bytes(arg0).into(),
-                interpreter: None,
             },
             args: args.iter().map(|a| OsStr::from_bytes(a).into()).collect(),
         }
@@ -874,30 +684,6 @@ mod tests {
         );
         let bytes = warrant.encode().expect("encodes");
         assert_eq!(Warrant::decode(&bytes).expect("decodes"), warrant);
-    }
-
-    /// The interpreter the parent read is its own, for wording a failure: it
-    /// never crosses.
-    #[test]
-    fn a_warrant_carries_no_interpreter() {
-        let real = RealPath::off_the_wire(OsStr::new("/script")).expect("a real path");
-        let read = Image::File {
-            real,
-            arg0: "script".into(),
-            interpreter: Some("/bin/sh".into()),
-        };
-        let warrant = Warrant::new(confinement(), &read, &[]);
-        assert_eq!(
-            Warrant::decode(&warrant.encode().unwrap()).unwrap(),
-            warrant
-        );
-        assert!(matches!(
-            warrant.image,
-            Image::File {
-                interpreter: None,
-                ..
-            }
-        ));
     }
 
     #[test]

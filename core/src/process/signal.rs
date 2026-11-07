@@ -22,6 +22,8 @@ use super::outcome::Signal;
 mod unix;
 #[cfg(unix)]
 use unix::gesture_signal;
+#[cfg(target_os = "linux")]
+pub(crate) use unix::ignored;
 #[cfg(unix)]
 pub(crate) use unix::{KILL, gesture, grace_signal};
 #[cfg(unix)]

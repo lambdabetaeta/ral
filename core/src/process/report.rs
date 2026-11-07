@@ -10,7 +10,7 @@ use super::launch::Unstarted;
 use crate::authority::sandbox::Refusal;
 use crate::process::Scope;
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
@@ -163,16 +163,22 @@ impl Testimony {
     }
 }
 
-/// The trampoline's end of the report socket.  A write that fails finds the
-/// parent gone, and so nobody to tell.
+/// Whether `fd` is a socket: what a report is, and a macOS parcel.
+pub(crate) fn is_socket(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    use rustix::fs::{FileType, fstat};
+    Ok(FileType::from_raw_mode(fstat(fd)?.st_mode) == FileType::Socket)
+}
+
+/// The trampoline's end of the report socket, before its program runs.  A
+/// write that fails finds the parent gone, and so nobody to tell.
 pub(crate) struct Witness(UnixStream);
 
 impl Witness {
     /// `fd`, if it is a socket: no other file is ral's report.
     pub(crate) fn new(fd: OwnedFd) -> Option<Self> {
-        use rustix::fs::{FileType, fstat};
-        let stat = fstat(&fd).ok()?;
-        (FileType::from_raw_mode(stat.st_mode) == FileType::Socket).then(|| Self(fd.into()))
+        is_socket(fd.as_fd())
+            .unwrap_or(false)
+            .then(|| Self(fd.into()))
     }
 
     fn say(&mut self, record: &Record) {
@@ -191,14 +197,22 @@ impl Witness {
         ));
     }
 
+    /// The program runs: all that is left to tell is how it ends.
     #[cfg(target_os = "linux")]
-    pub(crate) fn started(&mut self) {
+    pub(crate) fn started(mut self) -> Running {
         self.say(&Record::Started);
+        Running(self)
     }
+}
 
-    #[cfg(target_os = "linux")]
+/// Linux: the report once its program runs.
+#[cfg(target_os = "linux")]
+pub(crate) struct Running(Witness);
+
+#[cfg(target_os = "linux")]
+impl Running {
     pub(crate) fn ended(mut self, status: ExitStatus) {
-        self.say(&Record::Ended(status));
+        self.0.say(&Record::Ended(status));
     }
 }
 

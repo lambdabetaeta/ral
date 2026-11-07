@@ -19,7 +19,7 @@ compile_error!("ral's sandbox has backends for Linux, macOS and Windows only");
 
 use crate::path::ObjectId;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 mod carriers;
 #[cfg(any(windows, all(test, target_os = "linux")))]
 mod carve;
@@ -37,7 +37,7 @@ pub(crate) use linux::seccomp::{Filter, Programs};
 mod macos;
 mod projection;
 pub(crate) mod reexec;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 mod warrant;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -54,14 +54,14 @@ pub use reexec::pinned_arg0;
 // `shell::exec::command::process::build_launch` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
 // already confines it; `serve_warrant` is the trampoline's side, entering the
-// confinement before it becomes the program.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use carriers::carriers;
+// confinement before it runs the program.
 #[cfg(unix)]
-pub use launch::serve_warrant;
-pub(crate) use launch::{Image, Ownership, sandboxed_command};
+pub(crate) use carriers::carriers;
+pub(crate) use launch::{Image, Ownership, interpreter_of, sandboxed_command};
 #[cfg(target_os = "macos")]
 pub use macos::ALREADY_PROFILED;
+#[cfg(unix)]
+pub(crate) use warrant::serve_warrant;
 
 // Read by `shell::exec::command` on a failure that ran under an active OS
 // sandbox, for a hint naming the denied path or the refused interpreter.
@@ -78,7 +78,7 @@ const NET_ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos", wi
 /// Metal rules, Linux by absent device nodes.  An `AppContainer` reaches
 /// Direct3D with no capability to withhold, so on Windows a withheld GPU
 /// projects as left on and every summary says so.
-pub(crate) const WITHHOLDS_GPU: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+pub(crate) const WITHHOLDS_GPU: bool = cfg!(unix);
 
 // Whether this platform's backend carries the exec allow-list into the
 // kernel, per the rendering named in this module's header: Seatbelt's
@@ -97,7 +97,7 @@ pub(crate) const WITHHOLDS_GPU: bool = cfg!(any(target_os = "linux", target_os =
 pub(crate) use linux::landlock::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
 pub(crate) const EXEC_ENFORCED: bool = false;
 
 /// Why no child exists, through no fault of the command's, so never phrased

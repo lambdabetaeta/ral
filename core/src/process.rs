@@ -10,6 +10,8 @@ pub(crate) mod child;
 pub mod deadline;
 mod fatal;
 pub(crate) mod foreground;
+#[cfg(unix)]
+mod fork;
 pub(crate) mod group;
 pub(crate) mod jail;
 pub(crate) mod launch;
@@ -58,6 +60,8 @@ pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 
 #[cfg(unix)]
 pub use foreground::{TerminalLoan, interrupt_foreground_child, termios_snapshot};
+#[cfg(unix)]
+pub(crate) use fork::{Forked, fork, reap};
 #[cfg(unix)]
 pub(crate) use group::{SpawnError, spawn_with_pgid};
 #[cfg(unix)]

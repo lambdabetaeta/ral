@@ -17,7 +17,7 @@
 #[cfg(unix)]
 use crate::authority::policy::Extent;
 use crate::authority::policy::GrantPath;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 use crate::authority::policy::Subject;
 use crate::authority::policy::{
     Admitted, Baseline, ExecRules, FsAllow, FsOp, FsRules as FsTable, Gpu, GrantStack, Join,
@@ -297,7 +297,7 @@ fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
 /// exec exclusion (`table`) or an fs exclusion (`read`) covers.  Support
 /// yields to every exclusion on either axis: a file that cannot be both run and
 /// read serves no launch.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn live_support(
     table: Option<&ExecRules>,
     read: Option<&FsTable>,
@@ -323,7 +323,7 @@ fn live_support(
 
 /// No kernel exec layer here ([`crate::authority::sandbox::EXEC_ENFORCED`]), so nothing
 /// to carry.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
 fn live_support(
     _: Option<&ExecRules>,
     _: Option<&FsTable>,
@@ -513,7 +513,7 @@ mod tests {
 
     /// Support reads a system script's interpreter where the fs grant names
     /// neither, with exec omitted or restricted to the script.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     #[test]
     fn live_support_reads_a_system_scripts_interpreter() {
         let Some((script, interp)) = crate::authority::sandbox::carriers::system_script() else {
@@ -547,7 +547,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(unix)]
     #[test]
     fn an_excluded_system_seed_contributes_no_interpreter_on_either_axis() {
         let Some((script, interpreter)) = super::super::carriers::system_script() else {

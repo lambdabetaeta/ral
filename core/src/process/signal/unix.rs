@@ -147,15 +147,18 @@ fn snapshot_once() {
 }
 
 fn snapshot_inherited_ignored() {
-    let mut mask: u64 = 0;
-    for &sig in MANAGED_SIGNALS {
-        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::sigaction(sig, std::ptr::null(), &raw mut old) };
-        if rc == 0 && old.sa_sigaction == libc::SIG_IGN {
-            mask |= 1u64 << sig;
-        }
-    }
+    let mask = (MANAGED_SIGNALS.iter())
+        .filter(|&&sig| ignored(sig))
+        .fold(0u64, |mask, &sig| mask | (1u64 << sig));
     INHERITED_IGNORED.store(mask, Ordering::Release);
+}
+
+/// Whether `sig` is ignored now.
+pub(crate) fn ignored(sig: libc::c_int) -> bool {
+    // SAFETY: zeroed is a valid `sigaction`, and a null action only reads.
+    let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+    (unsafe { libc::sigaction(sig, std::ptr::null(), &raw mut now) } == 0)
+        && now.sa_sigaction == libc::SIG_IGN
 }
 
 fn was_inherited_ignored(sig: libc::c_int) -> bool {

@@ -12,7 +12,7 @@
 //! --warrant <w> <r>`, and the warrant it reads off slot `w` names both the
 //! confinement — macOS's Seatbelt profile, compiled here; Linux's promise of
 //! the Landlock ruleset built here in the host, which the payload inherits —
-//! and the image it runs once inside ([`serve_warrant`]); slot `r` is the
+//! and the image it runs once inside (`serve_warrant`); slot `r` is the
 //! report socket it says what became of the program on.  On Linux the
 //! trampoline runs inside the bwrap envelope, which is what makes the Landlock
 //! layer possible at all: a domain handling any fs right forbids `mount(2)`,
@@ -23,17 +23,15 @@
 use super::linux::Envelope;
 #[cfg(target_os = "macos")]
 use super::warrant::Seatbelt;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::warrant::{Handoff, Slot, Slots, Warrant};
+#[cfg(unix)]
+use super::warrant::{Handoff, Slots, Warrant};
 use super::{Refusal, SandboxProjection};
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, Program};
 use crate::path::{CwdPath, RealPath};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 use crate::process::report::Report;
 #[cfg(unix)]
-use std::ffi::OsString;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::AsFd;
 #[cfg(all(test, target_os = "macos"))]
 use std::path::Path;
@@ -60,30 +58,20 @@ pub(crate) enum Ownership {
 }
 
 /// What a launch runs: a host file by the real path the guard judged, under
-/// the spelling the user wrote, or a bundled tool, run as ral itself.  A
-/// file carries the `#!` interpreter read through the judged handle, to word
-/// a failure to start it; a warrant carries the image without it.
+/// the spelling the user wrote, or a bundled tool, run as ral itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Image {
-    File {
-        real: RealPath,
-        arg0: PathBuf,
-        interpreter: Option<PathBuf>,
-    },
+    File { real: RealPath, arg0: PathBuf },
     Tool(&'static str),
 }
 
 impl Image {
-    /// The admitted program's image, read once while its handle is held.
+    /// The admitted program's image.
     pub(crate) fn of(admitted: &Admitted) -> Self {
         match admitted.program() {
             Program::File { arg0, located } => Self::File {
                 real: located.real().clone(),
                 arg0: arg0.clone(),
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
-                interpreter: super::carriers::launched_shebang(located),
-                #[cfg(windows)]
-                interpreter: None,
             },
             Program::Tool(tool) => Self::Tool(tool),
         }
@@ -93,7 +81,7 @@ impl Image {
     /// Windows to confine at the spawn.
     pub(crate) fn launch(&self, args: &[String]) -> Result<crate::process::Launch, Refusal> {
         let mut launch = match self {
-            Self::File { real, arg0, .. } => {
+            Self::File { real, arg0 } => {
                 let mut launch = crate::process::Launch::new(real.as_path());
                 launch.arg0(arg0);
                 launch
@@ -111,6 +99,20 @@ impl Image {
         launch.args(args);
         Ok(launch)
     }
+}
+
+/// The `#!` interpreter of the admitted file, read through its judged
+/// handle: the parent's alone, to word a failure to start it.
+#[cfg_attr(
+    windows,
+    allow(unused_variables, reason = "no Windows file names an interpreter")
+)]
+pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
+    #[cfg(unix)]
+    if let Program::File { located, .. } = admitted.program() {
+        return super::carriers::launched_shebang(located);
+    }
+    None
 }
 
 /// Build a [`Launch`](crate::process::Launch) running `image` and its
@@ -167,14 +169,18 @@ pub(crate) fn sandboxed_command(
 
 /// The warrant lent to `handoff`, and the report socket kept for the child:
 /// the trampoline's two slots, and the parent's ends of the report.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, Report), Refusal> {
     let parcel = warrant.parcel()?;
-    let warrant = handoff.lend(parcel.as_fd())?;
+    let warrant_at = handoff.lend(parcel.as_fd())?;
     let (reader, writer) = crate::process::cloexec_socketpair()
         .map_err(|e| format!("sandbox: cannot open the confined launch's report socket: {e}"))?;
-    let (writer, report) = handoff.keep(writer.as_fd())?;
-    Ok((Slots { warrant, report }, Report::new(reader, writer)))
+    let (kept, report_at) = handoff.keep(writer.as_fd())?;
+    let slots = Slots {
+        warrant: warrant_at,
+        report: report_at,
+    };
+    Ok((slots, Report::new(reader, kept)))
 }
 
 /// Linux: the payload is always the trampoline, launched under this host's
@@ -302,56 +308,9 @@ pub(super) fn trampoline(
     launch
 }
 
-/// Serve `ral --warrant <w> <r>`: `args` must be those two slots.
-///
-/// Take the report socket at `r` and the warrant the launch left at `w`, enter
-/// its confinement — Seatbelt on macOS, the Landlock layer inside the bwrap
-/// envelope on Linux; sweep every descriptor above stderr but the report,
-/// then run the program and say on the report what became of it.  Nothing
-/// runs unconfined, and nothing is printed: the parent words what it is told.
-/// Only a call naming no report socket, made by hand, is refused on stderr.
-#[cfg(unix)]
-pub fn serve_warrant(args: &[OsString]) -> u8 {
-    let slots = match args {
-        [warrant, report] => Slot::parse(&crate::path::shown(warrant)).and_then(|warrant| {
-            Ok(Slots {
-                warrant,
-                report: Slot::parse(&crate::path::shown(report))?,
-            })
-        }),
-        _ => Err(format!(
-            "{} takes two arguments, the descriptors its warrant and its report arrive on: it \
-             is how ral starts its own confined children, never a command to run by hand",
-            Role::Warrant.flag()
-        )),
-    };
-    let witness = slots.and_then(|slots| {
-        let at = slots.report;
-        let fd = at
-            .take()
-            .ok_or_else(|| format!("no report socket at fd {at}"))?;
-        crate::process::report::Witness::new(fd)
-            .map(|witness| (slots, witness))
-            .ok_or_else(|| format!("fd {at} is not ral's report socket"))
-    });
-    match witness {
-        Ok((slots, witness)) => match Warrant::confine(slots) {
-            Ok(confined) => confined.run(witness),
-            Err(why) => {
-                witness.refused(&why);
-                126
-            }
-        },
-        Err(e) => {
-            crate::io::terminal::cmd_error("ral", &e);
-            126
-        }
-    }
-}
-
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
 /// a dispatch.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, unix))]
 pub(super) fn admitted(program: crate::authority::policy::Program) -> Admitted {
     crate::authority::policy::GrantStack::root()
         .admit(&Baseline::default(), program)
@@ -362,48 +321,40 @@ pub(super) fn admitted(program: crate::authority::policy::Program) -> Admitted {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::authority::sandbox::warrant::Slot;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sh() -> Program {
         Program::file("/bin/sh".into()).expect("/bin/sh exists")
     }
 
     /// What an unrestricted guard admits of `program`, as a launch runs it.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn image(program: Program) -> Image {
         Image::of(&admitted(program))
     }
 
     /// A scope nothing stops.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn unstopped() -> crate::process::ScopeNode {
         crate::process::DurableRoot::default().worker()
     }
 
-    // Needed only by the per-platform launch tests; elsewhere the two
-    // refusals are the only tests, and they need no scaffolding.
     #[cfg(target_os = "macos")]
     use crate::authority::policy::{ExecAllow, ExecDeny, Rule};
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{
         authority::policy::{FsAllow, GrantPath},
         authority::sandbox::{ExecProjection, FsProjection, FsRules},
         path::{Excluded, FrozenPath, Trace},
     };
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prefix(path: &str) -> FsAllow {
         FsAllow::Prefix(
             GrantPath::<Trace>::walk(FrozenPath::from_surface(path)).expect("a prefix walks"),
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn excluding(path: &str) -> GrantPath<Excluded> {
         GrantPath::<Excluded>::walk(FrozenPath::from_surface(path)).expect("an exclusion walks")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
@@ -418,7 +369,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn argv(launch: &crate::process::Launch) -> Vec<String> {
         (launch.command().get_args())
             .map(|a| a.to_string_lossy().into_owned())
@@ -447,25 +397,6 @@ mod tests {
             for at in [warrant, report] {
                 Slot::parse(at).expect("a slot");
             }
-        }
-    }
-
-    /// Refused before any descriptor is touched, so it is safe in-process:
-    /// the trampoline takes two arguments, both slots.
-    #[test]
-    fn a_warrant_flag_naming_no_slot_runs_nothing() {
-        for args in [
-            &[][..],
-            &["sh"],
-            &["101"],
-            &["97", "101"],
-            &["+101", "102"],
-            &["0101", "102"],
-            &["101", "sh"],
-            &["101", "102", "sh"],
-        ] {
-            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-            assert_eq!(serve_warrant(&args), 126, "{args:?}");
         }
     }
 
@@ -792,18 +723,12 @@ mod tests {
         } else {
             confined_to(&[&work, Path::new("/bin")], &[&work], &["/bin/sh"], every())
         };
-        let image = image(Program::file(script).expect("a script"));
-        let launch = macos_sandboxed_command(&projection, &image, &[], &unstopped())
+        let admitted = admitted(Program::file(script).expect("a script"));
+        let interpreter = interpreter_of(&admitted).expect("a script names its interpreter");
+        let launch = macos_sandboxed_command(&projection, &Image::of(&admitted), &[], &unstopped())
             .expect("build host command");
         let out = confined(launch);
-        let Image::File {
-            interpreter: Some(interpreter),
-            ..
-        } = &image
-        else {
-            panic!("a script's image names its interpreter");
-        };
-        let hint = super::super::interpreter_hint(&projection, interpreter);
+        let hint = super::super::interpreter_hint(&projection, &interpreter);
         let _ = std::fs::remove_dir_all(&work);
         (out, hint)
     }
@@ -860,19 +785,13 @@ mod tests {
             .admit(&baseline, Program::file(script.clone()).unwrap())
             .unwrap();
         let projection = SandboxProjection::of(&grants, &baseline, Some(&admitted)).unwrap();
-        let image = Image::of(&admitted);
-        let launch = macos_sandboxed_command(&projection, &image, &[], &unstopped()).unwrap();
+        let interpreter = interpreter_of(&admitted).expect("a script names its interpreter");
+        let launch =
+            macos_sandboxed_command(&projection, &Image::of(&admitted), &[], &unstopped()).unwrap();
         std::fs::write(&script, "#!/usr/bin/false\n").unwrap();
         let out = confined(launch);
         assert!(refused(&out), "{out:?}");
-        let Image::File {
-            interpreter: Some(interpreter),
-            ..
-        } = &image
-        else {
-            panic!("a script's image names its interpreter");
-        };
-        let hint = super::super::interpreter_hint(&projection, interpreter).unwrap_or_default();
+        let hint = super::super::interpreter_hint(&projection, &interpreter).unwrap_or_default();
         assert!(hint.contains("its interpreter /bin/sh"), "{hint}");
         assert!(!hint.contains("/usr/bin/false"), "{hint}");
     }
