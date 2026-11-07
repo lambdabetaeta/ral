@@ -255,29 +255,36 @@ fn layer(value: &LayerValue) -> String {
     }
 }
 
-/// Pin the grant section `grants` renders to the file `golden`; with
-/// `RAL_BLESS` set, write it there instead.
-///
-/// # Panics
-/// If the section differs from the file, or the file cannot be read or
-/// written.
+#[cfg(any(test, feature = "test-util"))]
+pub use golden::pin_grant_section;
+
 #[cfg(any(test, feature = "test-util"))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
-pub fn pin_grant_section(golden: &Path, grants: &Grants) {
-    let shown = grant_section(grants);
-    if std::env::var_os("RAL_BLESS").is_some() {
-        std::fs::write(golden, &shown)
-            .unwrap_or_else(|e| panic!("bless {}: {e}", golden.display()));
-        return;
+mod golden {
+    use super::{Grants, Path, grant_section};
+
+    /// Pin the grant section `grants` renders to the file `golden`; with
+    /// `RAL_BLESS` set, write it there instead.
+    ///
+    /// # Panics
+    /// If the section differs from the file, or the file cannot be read or
+    /// written.
+    pub fn pin_grant_section(golden: &Path, grants: &Grants) {
+        let shown = grant_section(grants);
+        if std::env::var_os("RAL_BLESS").is_some() {
+            std::fs::write(golden, &shown)
+                .unwrap_or_else(|e| panic!("bless {}: {e}", golden.display()));
+            return;
+        }
+        let pinned = std::fs::read_to_string(golden)
+            .unwrap_or_else(|e| panic!("{}: {e}; `RAL_BLESS=1` writes it", golden.display()));
+        assert_eq!(
+            shown,
+            pinned,
+            "the grant section differs from {}",
+            golden.display()
+        );
     }
-    let pinned = std::fs::read_to_string(golden)
-        .unwrap_or_else(|e| panic!("{}: {e}; `RAL_BLESS=1` writes it", golden.display()));
-    assert_eq!(
-        shown,
-        pinned,
-        "the grant section differs from {}",
-        golden.display()
-    );
 }
 
 /// The Skills section: `name: description` per skill, the same
