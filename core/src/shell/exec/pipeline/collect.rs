@@ -6,42 +6,19 @@
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
 use super::super::command::{self, Born, Claim};
-use super::stage::{ExternalStage, StageHandle, StageKind};
-use crate::fact::{AuditIo, Command, ExitCode};
+use super::stage::{ExternalStage, StageAudit, StageHandle, StageKind};
+use crate::fact::AuditIo;
 use crate::io::Sink;
 use crate::process::jail::JailCgroup;
 use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Observed, Prov, Settled,
-    Shell, Stop, Value,
+    AuditFragment, Break, CommandOrigin, End, Error, Escape, Mooring, Settled, Shell, Stop, Value,
 };
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
-
-/// Built whether or not anyone is listening: this phase performs no effects,
-/// and `fold` hands the fragment to the one emission point, which is where the
-/// interest is judged.
-fn synth_external_stage_audit(
-    shell: &Shell,
-    prov: &Prov,
-    name: &str,
-    args: Vec<String>,
-    broke: Option<&Break>,
-) -> AuditFragment {
-    let mut obs = shell.observation(Observed::Command(Command::new(
-        name,
-        args,
-        broke.map_or(0, ExitCode::code),
-        CommandOrigin::External,
-        AuditIo::default(),
-        broke.map(Break::to_string),
-    )));
-    obs.site = prov.site(&shell.session.sources);
-    AuditFragment::from_observations(vec![obs])
-}
 
 /// The shell-touching finish the reaper's posting closure, holding no
 /// `&Shell`, could not give an external's raw outcome: the run's one ending,
@@ -53,9 +30,8 @@ fn synth_external_stage_audit(
     reason = "the one shell-touching finish; each argument is a distinct fact of the settlement"
 )]
 fn finish_external_settlement(
-    prov: &Prov,
+    audit: Option<Box<StageAudit>>,
     name: &str,
-    args: Vec<String>,
     outcome: WaitOutcome,
     cause: Option<CancelCause>,
     sent: Option<CancelCause>,
@@ -66,13 +42,32 @@ fn finish_external_settlement(
 ) -> StageObservation {
     let settled = match outcome.cancelled_by(cause) {
         Some(cause) if sent == Some(cause) => Ok(()),
-        _ => command::ending(name, outcome, cause, scope, claim, started)
-            .map_err(|broke| broke.claimed_by(|| prov.clone())),
+        _ => command::ending(name, outcome, cause, scope, claim, started).map_err(|broke| {
+            match &audit {
+                Some(audit) => broke.claimed_by(|| audit.prov.clone()),
+                None => broke,
+            }
+        }),
     };
-    let audit = synth_external_stage_audit(shell, prov, name, args, settled.as_ref().err());
+    // No start: nobody was listening at launch.
+    let fragment = audit
+        .and_then(|audit| {
+            let StageAudit { prov, start, args } = *audit;
+            let mut obs = shell.command_observation(
+                &start?,
+                name,
+                args,
+                CommandOrigin::External,
+                settled.as_ref().err(),
+                AuditIo::default(),
+            );
+            obs.site = prov.site(&shell.session.sources);
+            Some(AuditFragment::from_observations(vec![obs]))
+        })
+        .unwrap_or_else(AuditFragment::empty);
     StageObservation {
         end: End::settled(settled.map(|()| Value::Unit)),
-        audit,
+        audit: fragment,
     }
 }
 
@@ -83,9 +78,8 @@ pub(super) enum StageEnd {
         stage: ScopeId,
     },
     External {
-        prov: Prov,
+        audit: Option<Box<StageAudit>>,
         name: String,
-        args: Vec<String>,
         outcome: WaitOutcome,
         jail: Option<JailCgroup>,
         pumps: command::Pumps,
@@ -109,9 +103,8 @@ impl StageEnd {
             Self::Thread { obs, stage } if obs.names(&stage) => obs.forgiven(),
             Self::Thread { obs, .. } => obs,
             Self::External {
-                prov,
+                audit,
                 name,
-                args,
                 outcome,
                 jail,
                 pumps,
@@ -120,7 +113,7 @@ impl StageEnd {
             } => {
                 let cause = drained(jail, pumps, sent, scope, owned);
                 finish_external_settlement(
-                    &prov, &name, args, outcome, cause, sent, scope, &claim, shell, started,
+                    audit, &name, outcome, cause, sent, scope, &claim, shell, started,
                 )
             }
         }
@@ -411,7 +404,6 @@ impl CollectState {
         pumps: command::Pumps<Sink>,
         loan: Option<TerminalLoan>,
         name: String,
-        args: Vec<String>,
         started: Instant,
         shell: &Shell,
     ) -> Self {
@@ -437,9 +429,8 @@ impl CollectState {
         let pin = leads.then(|| Arc::clone(&watch));
         let stage = ExternalStage {
             watch,
-            prov: shell.local.audit.call_site().clone(),
             name,
-            args,
+            audit: None,
             jail,
             pumps,
             // In its collector's group, which is where it landed.
@@ -839,15 +830,7 @@ pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<
         spawned,
         claim: Claim::Unconfined,
     };
-    let mut lone = CollectState::lone(
-        born,
-        pumps,
-        None,
-        "test".into(),
-        Vec::new(),
-        Instant::now(),
-        shell,
-    );
+    let mut lone = CollectState::lone(born, pumps, None, "test".into(), Instant::now(), shell);
     lone.drive();
     match lone.observed.pop().flatten() {
         Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),

@@ -12,13 +12,11 @@
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
 use crate::authority::policy::{Flag, ShellVerb};
-use crate::fact::{AuditIo, Command, Receipt};
+use crate::fact::{AuditIo, Receipt};
 use crate::ir::CommandName;
 use crate::process::StdioSpec;
 use crate::process::group::Survivor;
-use crate::shell::runtime::{
-    CommandOrigin, HandlerLookup, Mooring, Observed, Settled, Shell, Value, sig,
-};
+use crate::shell::runtime::{CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
 use super::head::Head;
 use super::process::{Started, prepare, start_detached};
@@ -60,47 +58,65 @@ pub(crate) fn detach(
             None => {}
         }
     }
-    shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
-    // The grant's verdict on the program, then existence (127/126) and argv
-    // shape: the same judgments an ordinary external passes, so a bundled
-    // uutils tool falls out as its own image with no special case here.  The
-    // survivor outlives this run, but confining it happens here, under this
-    // run's scope: a cancel during the stamp abandons the birth.
-    let head = Head::resolve(&name, &shell.context).admit(mooring, shell)?;
-    let mut prepared = prepare(
-        head,
-        argv,
-        crate::authority::sandbox::Ownership::Surrendered,
-        shell,
-    )?;
-    prepared
-        .launch
-        .stdin(StdioSpec::null())
-        .stdout(StdioSpec::null())
-        .stderr(StdioSpec::null());
-    let Started {
-        shown,
-        args,
-        born: survivor,
-    } = start_detached(prepared)?;
-    shell.observe(
-        mooring,
-        Observed::Command(Command::new(
+    let head = Head::resolve(&name, &shell.context);
+    let shown = head.shown.clone();
+    let start = shell.audit_start(mooring);
+    let launched = (|| -> Settled<Started<Survivor>> {
+        shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
+        // The grant's verdict on the program, then existence (127/126) and argv
+        // shape: the same judgments an ordinary external passes, so a bundled
+        // uutils tool falls out as its own image with no special case here.  The
+        // survivor outlives this run, but confining it happens here, under this
+        // run's scope: a cancel during the stamp abandons the birth.
+        let head = head.admit(mooring, shell)?;
+        let mut prepared = prepare(
+            head,
+            argv,
+            crate::authority::sandbox::Ownership::Surrendered,
+            shell,
+        )?;
+        prepared
+            .launch
+            .stdin(StdioSpec::null())
+            .stdout(StdioSpec::null())
+            .stderr(StdioSpec::null());
+        start_detached(prepared)
+    })();
+    let (shown, args, result) = match launched {
+        Ok(Started {
+            shown,
+            args,
+            born: Survivor::Named(pid),
+        }) => (
+            shown,
+            args,
+            Ok(Value::from_datum(Receipt {
+                pid,
+                desc: desc.into(),
+            })),
+        ),
+        Ok(Started {
+            shown,
+            args,
+            born: Survivor::Unnamed(why),
+        }) => {
+            let lost = sig(format!(
+                "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
+            ));
+            (shown, args, Err(lost))
+        }
+        Err(broke) => (shown, Value::render_argv(argv), Err(broke)),
+    };
+    if let Some(start) = &start {
+        let obs = shell.command_observation(
+            start,
             &shown,
             args,
-            0,
             CommandOrigin::Detached,
+            result.as_ref().err(),
             AuditIo::default(),
-            None,
-        )),
-    );
-    match survivor {
-        Survivor::Named(pid) => Ok(Value::from_datum(Receipt {
-            pid,
-            desc: desc.into(),
-        })),
-        Survivor::Unnamed(why) => Err(sig(format!(
-            "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
-        ))),
+        );
+        shell.observe_stamped(Some(mooring), obs);
     }
+    result
 }

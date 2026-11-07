@@ -5,11 +5,11 @@
 //! `evaluator::machine`'s `Exec` rule is the entry that resolves and runs
 //! every arm; pipeline staging reaches `resolve_command_word` directly.
 
-use crate::fact::{AuditIo, Command, ExitCode};
+use crate::fact::AuditIo;
 use crate::ir::{CommandName, CommandWord};
 use crate::shell::runtime::{
-    AuditStart, Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring,
-    Observation, Observed, Settled, Shell, Value, epoch_us,
+    AuditStart, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring, Settled,
+    Shell, Value,
 };
 
 use super::capture::with_audit_capture;
@@ -125,7 +125,7 @@ pub(crate) fn run_external(
 }
 
 /// An external's door: stamp the start, tee its stdout and stderr through
-/// the capture, name a failure, and settle the one [`Observed::Command`].
+/// the capture, name a failure, and settle the one `Command` observation.
 fn call_external(
     shown: &str,
     args: &[Value],
@@ -154,23 +154,13 @@ fn finish_command(
 ) {
     let Some(start) = start else { return };
     // A stop is recorded too, as a pipeline's external stage records it.
-    let broke = result.as_ref().err();
-    let obs = Observation::spanning(
-        start.site,
-        start.time,
-        epoch_us(),
-        shell.context.principal(),
-        Observed::Command(Command::new(
-            shown,
-            Value::render_argv(args),
-            broke.map_or(0, ExitCode::code),
-            CommandOrigin::External,
-            io,
-            broke.map(|b| match b {
-                Break::Error(e) => e.describe().into_owned(),
-                Break::Escape(e) => e.to_string(),
-            }),
-        )),
+    let obs = shell.command_observation(
+        &start,
+        shown,
+        Value::render_argv(args),
+        CommandOrigin::External,
+        result.as_ref().err(),
+        io,
     );
     shell.observe_stamped(Some(mooring), obs);
 }
@@ -180,6 +170,8 @@ fn finish_command(
 mod tests {
     use super::*;
     use crate::authority::policy::{Capabilities, ExecGrant};
+    use crate::fact::ExitCode as _;
+    use crate::shell::runtime::{Break, Observed};
     use std::os::unix::fs::PermissionsExt;
 
     fn external() -> (tempfile::TempDir, Shell) {

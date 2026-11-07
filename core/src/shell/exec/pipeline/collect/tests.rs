@@ -4,10 +4,19 @@ use crate::fact::FailureCode as _;
 #[cfg(unix)]
 use crate::process::Membership;
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{Escape, Stop};
+use crate::shell::runtime::{AuditStart, Escape, Observed, Stop};
 use crate::source::{FileId, Span};
 use std::num::NonZeroU8;
 use std::time::Duration;
+
+/// A pipeline stage's audit part, spelling `ls -l`, from `start` if any.
+fn stage_audit(shell: &Shell, start: Option<AuditStart>) -> StageAudit {
+    StageAudit {
+        prov: shell.local.audit.call_site().clone(),
+        start,
+        args: vec!["-l".into()],
+    }
+}
 
 fn nz(n: u8) -> NonZeroU8 {
     NonZeroU8::new(n).unwrap()
@@ -297,9 +306,8 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
     state.push(StageHandle::new(
         StageKind::External(ExternalStage {
             watch: slot.watch(crate::process::ChildHandle::from_std(child)),
-            prov: crate::shell::runtime::Audit::default().call_site().clone(),
             name: "sleep".to_string(),
-            args: Vec::new(),
+            audit: None,
             jail: Some(crate::process::jail::JailCgroup::at(
                 dir.path().to_path_buf(),
             )),
@@ -566,6 +574,48 @@ fn with_no_loan_a_heard_signal_is_inert() {
     );
 }
 
+/// An external stage's settlement carries one `Command` record when its
+/// launch took a start, and none when nobody was listening.
+#[test]
+fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
+    let shell = crate::test_helper::core_shell();
+    let settle = |start| {
+        StageEnd::External {
+            audit: Some(Box::new(stage_audit(&shell, start))),
+            name: "ls".to_string(),
+            outcome: WaitOutcome::Exited(3),
+            jail: None,
+            pumps: command::Pumps::default(),
+            sent: None,
+            claim: Claim::Unconfined,
+        }
+        .settle(
+            &shell,
+            Instant::now(),
+            &DurableRoot::default().worker(),
+            None,
+        )
+        .audit
+        .into_observations()
+    };
+    assert_eq!(settle(None).len(), 0);
+    let start = AuditStart {
+        site: shell.call_site(),
+        time: 7,
+    };
+    let recorded = settle(Some(start));
+    let [observation] = recorded.as_slice() else {
+        panic!("one record, got {}", recorded.len())
+    };
+    assert_eq!(observation.start, 7);
+    let Observed::Command(command) = &observation.what else {
+        panic!("the stage's record is its command");
+    };
+    assert_eq!(command.argv, ["ls", "-l"]);
+    assert_eq!(command.status, 3);
+    assert!(command.error.is_some(), "{command:?}");
+}
+
 /// A stage dead of SIGINT nobody sent is the key's stop only if the current
 /// scope carries the key, and its own signal otherwise.
 #[cfg(unix)]
@@ -573,9 +623,8 @@ fn with_no_loan_a_heard_signal_is_inert() {
 fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
     let shell = crate::test_helper::core_shell();
     let end = || StageEnd::External {
-        prov: shell.local.audit.call_site().clone(),
+        audit: Some(Box::new(stage_audit(&shell, None))),
         name: "sleep".to_string(),
-        args: Vec::new(),
         outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
         jail: None,
         pumps: command::Pumps::default(),
@@ -1823,7 +1872,6 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
         pumps,
         None,
         "sh".into(),
-        Vec::new(),
         Instant::now(),
         &shell,
     );
@@ -1859,7 +1907,6 @@ fn a_lone_leader_is_reaped_only_once_settled() {
         pumps,
         None,
         "sh".into(),
-        Vec::new(),
         Instant::now(),
         &shell,
     );
@@ -1906,7 +1953,6 @@ fn an_external_is_hinted_from_its_own_claim() {
             command::Pumps::default(),
             None,
             "sh".into(),
-            Vec::new(),
             Instant::now(),
             &shell,
         );
@@ -1917,9 +1963,8 @@ fn an_external_is_hinted_from_its_own_claim() {
         assert_eq!(alone.hint.as_deref(), hint.as_deref(), "alone, {confined}");
 
         let stage = StageEnd::External {
-            prov: shell.local.audit.call_site().clone(),
+            audit: Some(Box::new(stage_audit(&shell, None))),
             name: "sh".into(),
-            args: Vec::new(),
             outcome: WaitOutcome::Exited(128),
             jail: None,
             pumps: command::Pumps::default(),
@@ -1957,7 +2002,6 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
         pumps,
         Some(loan),
         "sh".into(),
-        Vec::new(),
         Instant::now(),
         &shell,
     );
@@ -2007,9 +2051,8 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
     let slot = Slot { ix: 0, tx };
     let stage = ExternalStage {
         watch: slot.watch(child),
-        prov: shell.local.audit.call_site().clone(),
+        audit: Some(Box::new(stage_audit(&shell, None))),
         name: "sh".into(),
-        args: Vec::new(),
         jail: None,
         pumps,
         landing: crate::process::Landing::Joins,
@@ -2091,7 +2134,6 @@ fn a_lone_externals_windows_job_is_released() {
         command::Pumps::default(),
         None,
         "cmd".into(),
-        Vec::new(),
         Instant::now(),
         &shell,
     );

@@ -83,13 +83,12 @@ fn a_confined_program_killed_by_the_deny_set_is_hinted() {
     let settled = start_granted(
         "sleep 0.5; exec mount -t tmpfs none /tmp",
         |started, shell| {
-            let Started { shown, args, born } = started;
+            let Started { shown, born, .. } = started;
             crate::shell::exec::pipeline::join_lone(
                 born,
                 crate::shell::exec::command::Pumps::default(),
                 None,
                 shown,
-                args,
                 since,
                 shell,
             )

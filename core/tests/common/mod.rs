@@ -214,6 +214,20 @@ pub fn facts(observations: &[Value], label: &str) -> Vec<(Map, Option<Value>)> {
         .collect()
 }
 
+/// The `Command` facts among a stream of observation records, in order.
+pub fn commands(observations: &[Value]) -> Vec<ral_core::fact::Command> {
+    use ral_core::data::FOValue;
+    use ral_core::data::datum::Datum as _;
+    observations
+        .iter()
+        .map(|v| Observation::decode(&FOValue::try_from(v).unwrap()).unwrap())
+        .filter_map(|obs| match obs.what {
+            ral_core::fact::Observed::Command(command) => Some(command),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The `fields` of a check fact's payload, `{resource, decision, fields}`.
 pub fn check_fields(payload: &Map) -> Map {
     match payload.get("fields").as_deref() {

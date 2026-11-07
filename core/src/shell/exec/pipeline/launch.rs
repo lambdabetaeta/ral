@@ -7,11 +7,12 @@ use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::{StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, StageRoute};
-use super::stage::{ExternalStage, StageHandle, StageKind};
+use super::stage::{ExternalStage, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
+use crate::fact::AuditIo;
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::{PgidPolicy, Scope, Spawned};
-use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
 
@@ -147,15 +148,33 @@ fn launch_external_stage_direct(
     let mooring = cx.mooring;
     let group = cx.group;
     let holds_terminal = cx.holds_terminal;
-    cx.shell.at_site(name, span, |shell| {
+    cx.shell.at_site(name.clone(), span, |shell| {
+        let audit_start = shell.audit_start(mooring);
         let head = head.admit(mooring, shell)?;
-        let mut prepared = command::prepare(
-            head,
-            args,
-            crate::authority::sandbox::Ownership::Kept,
-            shell,
-        )?;
-        let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
+        let launched = (|| -> Settled<_> {
+            let mut prepared = command::prepare(
+                head,
+                args,
+                crate::authority::sandbox::Ownership::Kept,
+                shell,
+            )?;
+            let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
+            let started = command::start(prepared, PgidPolicy::Join(group.leader_pgid()))?;
+            Ok((started, pumps))
+        })();
+        let (started, pumps) = launched.inspect_err(|broke| {
+            if let Some(start) = &audit_start {
+                let obs = shell.command_observation(
+                    start,
+                    &name,
+                    Value::render_argv(args),
+                    CommandOrigin::External,
+                    Some(broke),
+                    AuditIo::default(),
+                );
+                shell.observe_stamped(Some(mooring), obs);
+            }
+        })?;
         let Started {
             shown,
             args,
@@ -169,13 +188,16 @@ fn launch_external_stage_direct(
                         },
                     claim,
                 },
-        } = command::start(prepared, PgidPolicy::Join(group.leader_pgid()))?;
+        } = started;
         let pumps = pumps.start(&mut child, &shell.scope);
         Ok(ExternalStage {
             watch: slot.watch(child),
-            prov: shell.local.audit.call_site().clone(),
             name: shown,
-            args,
+            audit: Some(Box::new(StageAudit {
+                prov: shell.local.audit.call_site().clone(),
+                start: audit_start,
+                args,
+            })),
             jail,
             pumps,
             landing,

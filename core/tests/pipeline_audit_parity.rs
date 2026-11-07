@@ -1,6 +1,6 @@
 //! One external command is one fact, whether it ran alone or as a pipeline
 //! stage.  Both paths mint their `Observed::Command` through
-//! `evaluator::audit::command_fact` and both leave the emission to the one
+//! `Shell::command_observation` and both leave the emission to the one
 //! gated recorder, so the two must agree on the argv they spell *and* on whether
 //! anything is emitted at all under a given sink/trail configuration.
 //!
@@ -163,4 +163,37 @@ fn a_refused_stage_reports_the_same_check_as_a_refused_standalone_run() {
         "a direct stage's refusal must be the standalone's"
     );
     assert!(check_fields(&alone[0].0).get("args").is_none());
+}
+
+/// A direct stage that `prepare`'s vetting refuses never spawned, and still
+/// leaves its one `Command` record, carrying the refusal.
+#[test]
+fn a_direct_stage_refused_by_vetting_leaves_one_command_record() {
+    // The list arrives decoded, so only the run, not the checker, refuses it.
+    let (result, events) = run(
+        "let xs = /bin/echo '[1, 2, 3]' | from-json; /bin/echo hi | /usr/bin/printf $xs",
+        true,
+    );
+    assert!(result.is_err());
+    let commands = common::commands(&events);
+    let refused: Vec<_> = commands
+        .iter()
+        .filter(|command| {
+            command
+                .argv
+                .first()
+                .is_some_and(|name| name == "/usr/bin/printf")
+        })
+        .collect();
+    let [command] = refused.as_slice() else {
+        panic!("one record for the refused stage, got {commands:?}");
+    };
+    assert_ne!(command.status, 0);
+    assert!(
+        command
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cannot pass List")),
+        "{command:?}"
+    );
 }

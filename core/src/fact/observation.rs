@@ -303,8 +303,8 @@ record!(typed Act {
 #[strum(serialize_all = "kebab-case")]
 pub enum CommandOrigin {
     External,
-    /// A background spawn: the status is 0 by construction, not by
-    /// observation, since nothing waits for the child.
+    /// A background spawn: a born child's status is 0 by construction, not
+    /// by observation, since nothing waits for it.
     Detached,
 }
 

@@ -27,6 +27,7 @@
 mod common;
 
 use ral_core::data::FOValue;
+use ral_core::fact::CommandOrigin;
 use ral_core::protocol::Run;
 use ral_core::protocol::probe::Probe;
 use ral_core::shell::run::RunReport;
@@ -290,6 +291,26 @@ fn a_launch_whose_interpreter_is_missing_says_so() {
         message.contains("its interpreter /nonexistent/ral-test-interpreter does not exist"),
         "the refusal must name the missing interpreter, got {message:?}"
     );
+}
+
+/// A birth that fails is still one `detach` record, carrying its failure.
+#[test]
+fn a_detach_of_a_missing_program_leaves_one_record_carrying_its_failure() {
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
+    let mut shell = with_detach();
+    let (result, events) = common::run_recorded(
+        &mut shell,
+        "detach #'never born'# /nonexistent/ral-test-program",
+        true,
+    );
+    assert!(result.is_err(), "a missing program is not born");
+    let commands = common::commands(&events);
+    let [command] = commands.as_slice() else {
+        panic!("one record, got {commands:?}");
+    };
+    assert_eq!(command.origin, CommandOrigin::Detached);
+    assert_ne!(command.status, 0);
+    assert!(command.error.is_some(), "{command:?}");
 }
 
 /// The survivor's three streams are `/dev/null`, never the host's own.  The

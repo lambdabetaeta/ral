@@ -572,7 +572,7 @@ fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
         return;
     }
     start_granted("exec sleep 30", |started, shell| {
-        let Started { shown, args, born } = started;
+        let Started { shown, born, .. } = started;
         let Claim::Confined(pids) = &born.claim else {
             panic!("a launch under a grant is confined");
         };
@@ -593,7 +593,6 @@ fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
             crate::shell::exec::command::Pumps::default(),
             None,
             shown,
-            args,
             std::time::Instant::now(),
             shell,
         );

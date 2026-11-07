@@ -10,7 +10,7 @@ use super::thread::ThreadStage;
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
 use crate::process::{CancelCause, Landing, Pgid, WaitOutcome, Watch};
-use crate::shell::runtime::Prov;
+use crate::shell::runtime::{AuditStart, Prov};
 use std::sync::Arc;
 
 pub(super) struct StageHandle {
@@ -27,11 +27,9 @@ pub(super) struct StageHandle {
 /// [`Watch`] holds the wait and posts the outcome.
 pub(super) struct ExternalStage {
     pub(super) watch: Arc<Watch>,
-    pub(super) prov: Prov,
-    /// The shown name, and its arguments as vetted for exec: the stage's
-    /// observation spells the same argv a standalone dispatch would.
     pub(super) name: String,
-    pub(super) args: Vec<String>,
+    /// Absent for a lone command, whose own door claims and records.
+    pub(super) audit: Option<Box<StageAudit>>,
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
@@ -40,6 +38,15 @@ pub(super) struct ExternalStage {
     pub(super) landing: Landing,
     /// The deny lines its failure may claim, as its start knew them.
     pub(super) claim: Claim,
+}
+
+/// What a pipeline stage's settlement owes its audit: the site that claims
+/// its failure, and, if anyone listened at launch, where its record starts
+/// and the argv as vetted for exec, spelled as a standalone dispatch would.
+pub(super) struct StageAudit {
+    pub(super) prov: Prov,
+    pub(super) start: Option<AuditStart>,
+    pub(super) args: Vec<String>,
 }
 
 pub(super) enum StageKind {
@@ -138,9 +145,8 @@ impl StageHandle {
         }
         drop(held);
         StageEnd::External {
-            prov: e.prov,
+            audit: e.audit,
             name: e.name,
-            args: e.args,
             outcome,
             jail: e.jail,
             pumps: e.pumps,
@@ -168,9 +174,8 @@ impl StageHandle {
         Self::new(
             StageKind::External(ExternalStage {
                 watch: slot.watch(child),
-                prov: crate::shell::runtime::Audit::default().call_site().clone(),
                 name: "test".to_string(),
-                args: Vec::new(),
+                audit: None,
                 jail: None,
                 pumps: command::Pumps::default(),
                 landing: Landing::Joins,
@@ -195,9 +200,8 @@ impl StageHandle {
         Self::new(
             StageKind::External(ExternalStage {
                 watch,
-                prov: crate::shell::runtime::Audit::default().call_site().clone(),
                 name: "fake".to_string(),
-                args: Vec::new(),
+                audit: None,
                 jail: None,
                 pumps: command::Pumps::default(),
                 landing: Landing::Joins,

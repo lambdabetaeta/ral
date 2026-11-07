@@ -136,7 +136,6 @@ pub(crate) fn join_lone(
     pumps: super::command::Pumps<Sink>,
     loan: Option<TerminalLoan>,
     name: String,
-    args: Vec<String>,
     started: Instant,
     shell: &Shell,
 ) -> Settled<()> {
@@ -146,7 +145,7 @@ pub(crate) fn join_lone(
         crate::process::Landing::Owns(leader) => Some(group::Job::owning(leader)),
         crate::process::Landing::Joins | crate::process::Landing::Shares => None,
     };
-    let mut collect = CollectState::lone(born, pumps, loan, name, args, started, shell);
+    let mut collect = CollectState::lone(born, pumps, loan, name, started, shell);
     collect.drive();
     #[cfg(windows)]
     if let Some(job) = job {
