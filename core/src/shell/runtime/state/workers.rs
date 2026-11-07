@@ -22,6 +22,7 @@
 use crate::data::FOValue;
 use crate::data::datum::{Datum, tag, untag};
 use crate::fact::{Done, WorkerId};
+use crate::process::{DEFAULT_CLEANUP_GRACE, TEARDOWN_GRACE};
 use crate::protocol::probe::WorkerRow;
 use crate::shell::runtime::handle::compacting::Compacting;
 use crate::shell::runtime::{HandleInner, Sample};
@@ -34,11 +35,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use strum::{IntoStaticStr, VariantArray};
 
-/// The default drain grace: the cleanup grace a host grants by default
-/// (`Run::foreground`'s five seconds) plus the teardown grace, so a shielded
-/// cleanup's child is not orphaned by the session's end.  A host granting
-/// more accepts that a wipe may cut it.
-const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(5_500);
+/// The default drain grace: the default cleanup grace plus the teardown
+/// grace, so a shielded cleanup's child is not orphaned by the session's end.
+/// A host granting more accepts that a wipe may cut it.
+const WORKER_DRAIN_GRACE: Duration = DEFAULT_CLEANUP_GRACE.saturating_add(TEARDOWN_GRACE);
 
 impl WorkerId {
     pub(crate) fn mint() -> Self {

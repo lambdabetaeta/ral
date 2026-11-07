@@ -17,12 +17,13 @@ let timed-record = [reason: `timed-out, frame: sleep, site: $site]
 let timed = caught { raise $timed-record }
 assert_eq 'timed-out reason' true $[$timed[reason] == `timed-out]
 assert_eq 'timed-out record' $timed-record $timed
-assert_eq 'timed-out description' 'worker timed out' !{describe $timed}
+assert_eq 'timed-out description' 'timed out' !{describe $timed}
 
 let stopped-record = [reason: `cancelled, frame: sleep, site: $site]
 let stopped = caught { raise $stopped-record }
 assert_eq 'cancelled reason' true $[$stopped[reason] == `cancelled]
 assert_eq 'cancelled record' $stopped-record $stopped
+assert_eq 'cancelled description' 'cancelled' !{describe $stopped}
 
 # The reasons are told apart by tag, as a case does
 let tag = { |e|

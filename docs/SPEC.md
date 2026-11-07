@@ -2866,8 +2866,8 @@ worker's own shell. It does not hold for:
 - a block that spawns: run inline in a run, its inner `spawn` would be a
   session worker, while as a worker it awaits that child before it settles
   (§11.3), so the awaiter sees the child's output and failure too;
-- a cancelled or timed-out worker, which ends with `worker was cancelled` or
-  `worker timed out` (below), an ending the block run inline could not have;
+- a cancelled or timed-out worker, which ends with `cancelled` or
+  `timed out` (below), an ending the block run inline could not have;
 - `exit`: an `exit` in the block ends the run that awaits it, which may be a
   later run than the one that spawned it.
 
@@ -2988,7 +2988,7 @@ If several handles are `` `ready `` when inspected, list order breaks the tie;
 a pending caller cancellation at the start of the sweep unwinds before any
 `` `ready `` handle is claimed. A worker stopped by an enclosing scope (without
 being directly claimed by `cancel`) publishes `` `ready `` with the
-`worker was cancelled` or `worker timed out` ending and can win the race. An
+`cancelled` or `timed out` ending and can win the race. An
 empty list is an error.
 
 #### `cancel`
@@ -3014,9 +3014,9 @@ Cancellation returns `()`. Since `cancel` claims the handle, a later `await` or
 
 A worker stopped by anything but its own `cancel` ends as its own `` `ready ``
 failure: cancelling a worker cancels every worker it started (§11.1), each of
-which ends with `worker was cancelled`, reason `` `cancelled ``, status 143, and
+which ends with `cancelled`, reason `` `cancelled ``, status 143, and
 a worker reached by a timeout on an enclosing scope ends with
-`worker timed out`, reason `` `timed-out ``, status 124. An `await` that claims
+`timed out`, reason `` `timed-out ``, status 124. An `await` that claims
 such a worker raises that ending as the awaiting run's own failure, which `try`
 can recover (§8.6), and `poll` reports it as that error record in `` `ready ``.
 A cancelled worker's halt claims the workers it started (§11.3), so an `await`

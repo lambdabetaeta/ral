@@ -2,6 +2,7 @@
 //! report envelope its failed outcome.  Bytes are absent by design: `audit` is
 //! the forensic path.  Minted from an `Error` in `shell::runtime::error`.
 
+use crate::process::CancelCause;
 use crate::source::CallSite;
 use crate::{record, variant};
 use std::borrow::Cow;
@@ -100,6 +101,16 @@ record!(typed ErrorRecord {
 });
 
 impl Reason {
+    /// The reason a worker's own switch records for `cause`: a cancel or a
+    /// timeout, the two a worker converts; any other stop is the host's.
+    pub fn stopped(cause: CancelCause) -> Option<Self> {
+        match cause {
+            CancelCause::Cancelled => Some(Self::Cancelled),
+            CancelCause::TimedOut => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+
     pub fn process(program: impl Into<String>, failure: Failure) -> Self {
         Self::Process(Box::new(Process {
             program: program.into(),
@@ -117,8 +128,8 @@ impl Reason {
     pub fn describe(&self) -> Cow<'_, str> {
         match self {
             Self::Process(process) => process.describe().into(),
-            Self::TimedOut => "worker timed out".into(),
-            Self::Cancelled => "worker was cancelled".into(),
+            Self::TimedOut => CancelCause::TimedOut.message().into(),
+            Self::Cancelled => CancelCause::Cancelled.message().into(),
             Self::Raised(message) => message.as_str().into(),
         }
     }
@@ -183,15 +194,6 @@ impl Process {
                 "the process terminated from {}", crate::process::Signal::new(n)
             ).into()),
             _ => None,
-        }
-    }
-}
-
-impl From<crate::process::WorkerStop> for Reason {
-    fn from(stop: crate::process::WorkerStop) -> Self {
-        match stop {
-            crate::process::WorkerStop::Cancelled => Self::Cancelled,
-            crate::process::WorkerStop::TimedOut => Self::TimedOut,
         }
     }
 }

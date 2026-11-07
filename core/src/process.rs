@@ -38,9 +38,9 @@ pub(crate) use reaper::Watch;
 
 pub use cancel::{
     Ambient, AmbientForward, CancelCause, Cancellation, DurableRoot, Scope, ScopeId, ScopeNode,
-    WorkerStop, forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
+    forward_ambient, interrupt_epoch, request_interrupt, request_root_cancel,
 };
-pub(crate) use cancel::{POLL_SLICE, TEARDOWN_GRACE};
+pub(crate) use cancel::{DEFAULT_CLEANUP_GRACE, POLL_SLICE, TEARDOWN_GRACE};
 
 pub use child::ChildHandle;
 pub(crate) use foreground::PreparedTerminalLoan;

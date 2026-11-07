@@ -5,7 +5,7 @@ use super::flow::Stop;
 use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
 use crate::fact::{Ending, Failure, FailureCode, Reason};
-use crate::process::{CancelCause, WorkerStop};
+use crate::process::CancelCause;
 use crate::source::{CallSite, FileId, Source, SourceDb, Span};
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
@@ -201,10 +201,6 @@ impl Error {
             PermissionDenied => Self::new(format!("{what}: permission denied")),
             _ => Self::new(format!("{what}: {e}")),
         }
-    }
-
-    pub(crate) fn worker_stopped(owned: WorkerStop) -> Self {
-        Self::from_reason(owned.into())
     }
 
     pub(crate) fn abandoning_tail(mut self) -> Self {

@@ -3,7 +3,7 @@ use super::*;
 use crate::data::FOValue;
 use crate::fact::{ExitCode as _, FailureCode as _};
 use crate::io::{ByteBuffer, CapturedBytes, Streams, new_buffer};
-use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
+use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::shell::runtime::{
     Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, End, Error, Escape,
     HandleInner, Map, Owner, ReapCause, Sample, ScopeOwner, Stop, WatchEvent, WorkerId,
@@ -1969,16 +1969,11 @@ fn stopped_error(b: Break) -> Error {
     }
 }
 
-fn expect_worker_stop(e: &Error, stop: WorkerStop) {
-    assert_eq!(e.reason, crate::fact::Reason::from(stop));
-    assert_eq!(e.failure_code(), stop.cause().failure_code());
-    assert_eq!(e.describe(), crate::fact::Reason::from(stop).describe());
-    let reason = &e.reason;
-    let want = match stop {
-        WorkerStop::Cancelled => crate::fact::Reason::Cancelled,
-        WorkerStop::TimedOut => crate::fact::Reason::TimedOut,
-    };
-    assert_eq!(*reason, want);
+fn expect_worker_stop(e: &Error, cause: CancelCause) {
+    let reason = crate::fact::Reason::stopped(cause).expect("a worker's own stop");
+    assert_eq!(e.reason, reason);
+    assert_eq!(e.failure_code(), cause.failure_code());
+    assert_eq!(e.describe(), cause.message());
 }
 
 /// `cancel` then `await`: `cancel` claimed the handle, so `await` finds it claimed.
@@ -2010,7 +2005,7 @@ fn a_cancel_during_await_claims_it_from_the_awaiter() {
 }
 
 /// A worker whose node is struck from elsewhere, with no claimer, ends with
-/// its own `worker was cancelled`, and the `await` that claims it raises it.
+/// its own `cancelled` error, and the `await` that claims it raises it.
 #[test]
 fn a_worker_stopped_unclaimed_is_its_awaiters_error() {
     let mut shell = crate::test_helper::core_shell();
@@ -2018,7 +2013,7 @@ fn a_worker_stopped_unclaimed_is_its_awaiters_error() {
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
     handle.cancel.cancel(CancelCause::Cancelled);
     let err = await_handle(&handle, "await", &mut shell).expect_err("stopped from elsewhere");
-    expect_worker_stop(&stopped_error(err), WorkerStop::Cancelled);
+    expect_worker_stop(&stopped_error(err), CancelCause::Cancelled);
 }
 
 fn exiting_worker(shell: &mut Shell) -> HandleInner {
@@ -2137,9 +2132,9 @@ fn a_stage_inside_a_worker_names_the_worker() {
     let node = root.worker();
     node.cancel(CancelCause::TimedOut);
     let inner = node.child();
-    let (cause, owner) = inner.in_force().expect("the chain carries the cause");
-    assert_eq!(owner, node.id());
-    match convert_own_stop(Err(Break::stopped(cause, Some(owner))), &root) {
+    let join = inner.in_force().expect("the chain carries the cause");
+    assert_eq!(join.owner, node.id());
+    match convert_own_stop(Err(join.into()), &root) {
         Err(Break::Error(e)) => assert_eq!(e.reason, crate::fact::Reason::TimedOut),
         other => panic!("expected the worker's error, got {other:?}"),
     }

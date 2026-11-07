@@ -5,7 +5,7 @@
 use super::flow::Settled;
 use super::state::Bequest;
 use super::value::Value;
-use crate::process::{DurableRoot, ScopeNode};
+use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode};
 use crate::sync::LockExt as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -238,7 +238,7 @@ impl Mooring {
             desk: None,
             fork: None,
             home: DurableRoot::default().worker(),
-            cleanup_grace: Duration::from_secs(5),
+            cleanup_grace: DEFAULT_CLEANUP_GRACE,
             worker_cap: None,
             worker_title: TitlePolicy::Optional,
             terminal_access: TerminalAccess::Denied,

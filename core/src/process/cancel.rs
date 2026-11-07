@@ -49,12 +49,15 @@ pub enum CancelCause {
     ReaderGone = 1,
     /// Ctrl-C / Esc.
     Interrupted = 2,
-    /// A targeted teardown: `cancel <handle>`, or a `race` loser reaped.
+    /// A targeted teardown: `cancel <handle>`, a `race` loser reaped, an
+    /// `exit` cutting its pipeline's siblings, or a host's failure latch.
     Cancelled = 3,
     /// A wall-clock or lifetime ceiling expired.
     TimedOut = 4,
-    /// SIGTERM / SIGHUP.  Lands on the durable root, so it reaches
-    /// workers and not just the foreground run.
+    /// SIGTERM / SIGHUP: lands on the durable root, so it reaches workers and
+    /// not just the foreground run.  Overloaded: a pipeline's teardown of
+    /// stages nobody observed (a dropped collector or stage) writes it too,
+    /// though no signal raised it.
     Terminated = 5,
     /// Ctrl-\, reaping the session root.
     Aborted = 6,
@@ -65,7 +68,11 @@ crate::label!(typed CancelCause);
 /// How long ral's teardown waits between its cause signal and the kill that
 /// ends the argument.  Short — a cancelled call is already over budget — but
 /// enough for a test runner to print its summary and exit.
-pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const TEARDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// What a `guard` cleanup gets, from the strike, unless its host says
+/// otherwise (`Run::cleanup_grace`).
+pub(crate) const DEFAULT_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
 impl CancelCause {
     /// The word every poll point and every host's parked wait reports this
@@ -221,31 +228,6 @@ impl Drop for AmbientForward {
     }
 }
 
-/// A stop an owner converted into an error at its boundary: the two a
-/// worker's own switch can carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerStop {
-    Cancelled,
-    TimedOut,
-}
-
-impl WorkerStop {
-    pub fn of(cause: CancelCause) -> Option<Self> {
-        match cause {
-            CancelCause::Cancelled => Some(Self::Cancelled),
-            CancelCause::TimedOut => Some(Self::TimedOut),
-            _ => None,
-        }
-    }
-
-    pub fn cause(self) -> CancelCause {
-        match self {
-            Self::Cancelled => CancelCause::Cancelled,
-            Self::TimedOut => CancelCause::TimedOut,
-        }
-    }
-}
-
 /// A scope node's identity: the name a stop carries for its owner.
 #[derive(Clone)]
 pub struct ScopeId(Arc<Vertex>);
@@ -270,6 +252,14 @@ pub struct Cancellation {
     pub cause: CancelCause,
     pub(crate) owner: ScopeId,
 }
+
+impl std::fmt::Display for Cancellation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.cause.message())
+    }
+}
+
+impl std::error::Error for Cancellation {}
 
 /// Every sliced wait's period: a blocked wait re-reads its scope this often.
 pub(crate) const POLL_SLICE: Duration = Duration::from_millis(10);
@@ -424,7 +414,7 @@ impl Scope {
 
     /// The strongest [`CancelCause`] in this scope's join, or `None`.
     pub fn cause(&self) -> Option<CancelCause> {
-        self.in_force().map(|(cause, _)| cause)
+        self.in_force().map(|c| c.cause)
     }
 
     /// Observe the cancellation in force, named for its owner.
@@ -432,17 +422,14 @@ impl Scope {
     /// # Errors
     /// The strongest cause and the outermost node attaining it.
     pub fn poll(&self) -> Result<(), Cancellation> {
-        self.in_force()
-            .map_or(Ok(()), |(cause, owner)| Err(Cancellation { cause, owner }))
+        self.in_force().map_or(Ok(()), Err)
     }
 
     /// The strongest cause in force and the node that attained it.
-    pub(crate) fn in_force(&self) -> Option<(CancelCause, ScopeId)> {
-        resolve(&self.0).map(|j| {
-            (
-                CancelCause::from_repr(j.cause).expect("a nonzero flag is a cause"),
-                ScopeId(Arc::clone(j.node)),
-            )
+    pub(crate) fn in_force(&self) -> Option<Cancellation> {
+        resolve(&self.0).map(|j| Cancellation {
+            cause: CancelCause::from_repr(j.cause).expect("a nonzero flag is a cause"),
+            owner: ScopeId(Arc::clone(j.node)),
         })
     }
 
@@ -708,6 +695,14 @@ mod tests {
     }
 
     #[test]
+    fn a_cancellation_is_worded_by_its_cause() {
+        let (_, node) = pair();
+        node.cancel(CancelCause::TimedOut);
+        let stop = node.poll().expect_err("struck");
+        assert_eq!(stop.to_string(), CancelCause::TimedOut.message());
+    }
+
+    #[test]
     fn a_fresh_scope_polls_clear() {
         assert_eq!(DurableRoot::default().poll(), Ok(()));
     }
@@ -767,7 +762,10 @@ mod tests {
         inner.cancel(CancelCause::ReaderGone);
         assert_eq!(
             inner.in_force(),
-            Some((CancelCause::ReaderGone, inner.id()))
+            Some(Cancellation {
+                cause: CancelCause::ReaderGone,
+                owner: inner.id(),
+            })
         );
     }
 

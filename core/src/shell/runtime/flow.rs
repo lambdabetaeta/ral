@@ -118,7 +118,7 @@ impl Break {
     /// the host's.
     pub(crate) fn cancelled(cause: CancelCause, scope: &Scope) -> Self {
         match scope.in_force() {
-            Some((join, owner)) => Self::stopped(join, Some(owner)),
+            Some(join) => Self::from(join),
             None => Self::stopped(cause, None),
         }
     }
@@ -155,12 +155,13 @@ impl From<Cancellation> for Break {
 pub(crate) fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
     match (node.in_force(), settled) {
         (_, exit @ Err(Break::Escape(Escape::Exit(_)))) => exit,
-        (Some((join, owner)), Err(Break::Escape(Escape::Stopped(stop))))
-            if stop.cause > join || (stop.cause == join && stop.owner.as_ref() == Some(&owner)) =>
+        (Some(join), Err(Break::Escape(Escape::Stopped(stop))))
+            if stop.cause > join.cause
+                || (stop.cause == join.cause && stop.owner.as_ref() == Some(&join.owner)) =>
         {
             Err(Break::Escape(Escape::Stopped(stop)))
         }
-        (Some((join, owner)), _) => Err(Break::stopped(join, Some(owner))),
+        (Some(join), _) => Err(join.into()),
         (None, settled) => settled,
     }
 }

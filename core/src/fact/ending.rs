@@ -191,11 +191,10 @@ impl FailureCode for CancelCause {
 
 impl FailureCode for Reason {
     fn failure_code(&self) -> NonZeroU8 {
-        use crate::process::WorkerStop;
         match self {
             Self::Process(process) => process.failure.failure_code(),
-            Self::TimedOut => WorkerStop::TimedOut.cause().failure_code(),
-            Self::Cancelled => WorkerStop::Cancelled.cause().failure_code(),
+            Self::TimedOut => CancelCause::TimedOut.failure_code(),
+            Self::Cancelled => CancelCause::Cancelled.failure_code(),
             Self::Raised(_) => NonZeroU8::MIN,
         }
     }
@@ -248,6 +247,7 @@ impl Done {
 mod tests {
     use super::*;
     use crate::fact::Reason;
+    use strum::VariantArray as _;
 
     fn failure() -> ErrorRecord {
         ErrorRecord {
@@ -281,6 +281,21 @@ mod tests {
             (CancelCause::ReaderGone, 141),
         ] {
             assert_eq!(cause.failure_code().get(), code, "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn a_worker_converts_only_a_cancel_or_a_timeout() {
+        for cause in CancelCause::VARIANTS.iter().copied() {
+            let reason = Reason::stopped(cause);
+            match cause {
+                CancelCause::Cancelled | CancelCause::TimedOut => {
+                    let reason = reason.expect("a worker's own stop");
+                    assert_eq!(reason.failure_code(), cause.failure_code());
+                    assert_eq!(reason.describe(), cause.message());
+                }
+                _ => assert_eq!(reason, None, "{cause:?} is the host's"),
+            }
         }
     }
 

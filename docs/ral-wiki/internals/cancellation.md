@@ -74,8 +74,9 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   `is_cancelled` and `poll` are its readers, and every part it reads is
   private to `cancel.rs`. It mutates nothing. No mutex, no allocation beyond
   the chain walk.
-- **The name.** `in_force` returns the join *and* `ν`, the **outermost** node
-  whose own flag attains it — a declared tie-break, not a record of who struck
+- **The name.** `in_force` returns one `Cancellation`: the join *and* `ν`, the
+  **outermost** node whose own flag attains it (it words itself by
+  `CancelCause::message`, so a `poll` is an `Err` as it stands) — a declared tie-break, not a record of who struck
   first. A `ScopeId` (pointer identity) is that name; a stop carries it for its
   owner. A cause the collector writes on a stage that an ancestor already
   carries therefore renames nothing.
@@ -105,7 +106,7 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   | `Interrupted` | 2 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
   | `Cancelled` | 3 | a targeted worker teardown | `cancel <handle>`, `race` loser, a gather's halt rule |
   | `TimedOut` | 4 | a wall-clock deadline expired | `process::deadline` |
-  | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP |
+  | `Terminated` | 5 | the process was asked to shut down | SIGTERM / SIGHUP; also a pipeline teardown of unobserved stages |
   | `Aborted` | 6 | the session root is being reaped | Ctrl-`\` |
 
 **`Scope::poll` returns domain data: `Result<(), Cancellation>`, carrying the
@@ -428,8 +429,9 @@ holds the ending. Runtime error and data record share the one `Reason`:
 
 `Reason::describe` is the one wording; the one `FailureCode for Reason`
 table supplies failure codes (`Process` delegating to `Failure`), with errors,
-records and process-layer failures delegating. Worker-stop cases delegate
-through `WorkerStop` to `CancelCause`.
+records and process-layer failures delegating. `Reason::stopped` is
+the one conversion from a cause (`Cancelled`, `TimedOut`); its words and
+codes come from `CancelCause`.
 A worker completes otherwise unlocated errors from its inherited register
 before publication, so `done`, `poll` and `await` agree on name and site.
 
@@ -461,8 +463,8 @@ status on the error record. Host `Static`/`Faulted` statuses stay `NonZeroU8`
 | spawn: not found | 127 |
 | spawn: any other | 126 |
 | `stop Interrupted` | 130 (`128 + SIGINT`) |
-| `stop Cancelled`, `WorkerStopped(Cancelled)` | 143 (`128 + SIGTERM`, what `kill` sends) |
-| `stop TimedOut`, `WorkerStopped(TimedOut)` | 124 (as `timeout(1)`) |
+| `stop Cancelled`, `Reason::Cancelled` | 143 (`128 + SIGTERM`, what `kill` sends) |
+| `stop TimedOut`, `Reason::TimedOut` | 124 (as `timeout(1)`) |
 | `stop Terminated` | 143 (`128 + SIGTERM`) |
 | `stop Aborted` | 131 (`128 + SIGQUIT`) |
 | `stop ReaderGone` | 141 (`128 + SIGPIPE`) |

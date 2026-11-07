@@ -2,9 +2,9 @@
 //! rule a gather and a worker's base share: join the brood, or end it.
 
 use super::join;
-use crate::fact::Worker;
+use crate::fact::{Reason, Worker};
 use crate::io::{Sink, Streams, new_buffer};
-use crate::process::{DurableRoot, Scope, WorkerStop};
+use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
     Break, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, Error, Escape,
     HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, SurfaceSink, Value,
@@ -191,9 +191,9 @@ pub(super) fn convert_own_stop(result: Settled<Value>, root: &DurableRoot) -> Se
     match result {
         Err(Break::Escape(Escape::Stopped(stop))) => {
             if stop.owner.as_ref().is_some_and(|owner| *owner != root.id())
-                && let Some(cause) = WorkerStop::of(stop.cause)
+                && let Some(reason) = Reason::stopped(stop.cause)
             {
-                let mut error = Error::worker_stopped(cause);
+                let mut error = Error::from_reason(reason);
                 error.prov = stop.at;
                 Err(error.into())
             } else {

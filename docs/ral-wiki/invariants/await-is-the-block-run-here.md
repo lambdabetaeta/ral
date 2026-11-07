@@ -28,8 +28,8 @@ concurrently, in the worker's own shell, and the equation does not hold for:
   session worker, while as a worker it joins that child before it settles
   ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]),
   so the awaiter sees the child's bytes and failure too;
-- *a cancelled or timed-out block*, which ends `worker was cancelled` or
-  `worker timed out`, an ending no inline run has;
+- *a cancelled or timed-out block*, which ends `cancelled` or
+  `timed out`, an ending no inline run has;
 - *`exit`*, which ends the run that awaits, possibly a later one than the run
   that spawned it.
 

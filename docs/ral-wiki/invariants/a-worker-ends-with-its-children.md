@@ -57,7 +57,7 @@ scope at a `gather` in a run — and a session birth under the session root. So
 `cancel $h` reaches everything `$h` started, and an interrupt or a wall on a
 run reaches its gathers' children but never a session worker. A worker
 converts a `Cancelled` or `TimedOut` stop owned by any node but the session
-root into its own `worker was cancelled` / `worker timed out` error, so a
+root into its own `cancelled` / `timed out` error, so a
 cancel made inside the session is a failure the awaiter can `try`, while a
 stop the host owns passes as the escape it is. A gather that is not a worker
 converts nothing.

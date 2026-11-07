@@ -101,8 +101,8 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
 - **One failure-code table lives on `Reason`.** `Error`, `ErrorRecord` and
   process failures delegate to it, `process` through `Failure`: `exited` clamps, `signaled` gives 128+s,
   `not-found` 127, `not-runnable` 126, `timed-out` 124, `cancelled` 143,
-  `raised` 1. The worker-stop cases delegate through `WorkerStop` to
-  `CancelCause`. A panic belongs to the ending, code 101.
+  `raised` 1. `Reason::stopped` converts a `CancelCause` and the two
+  worker-stop cases take their code and words from it. A panic belongs to the ending, code 101.
 - Stored host rejection statuses (`Rejection.status`, `Report::Static` and
   `Faulted`) remain `NonZeroU8`. A desk refusal is plain `raised`, with no
   status field. Serde and data's `NonZeroU8` decoder refuse 0; data's `u8`

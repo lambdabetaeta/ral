@@ -206,7 +206,7 @@ Bodies are grouped by concern, one submodule each:
   (the ok/err half of `End::outcome`, its `` `err `` payload built through
   `Error::record`, the record `try` hands its handler), or
   `` `consumed [elapsed] ``. A worker stopped from elsewhere settles with its
-  own `WorkerStopped` record; on a `Ready` handle an `exit`, a
+  own `cancelled`/`timed-out` error; on a `Ready` handle an `exit`, a
   foreign stop or a panic is re-raised, as `await` re-raises them, while `poll`
   never fails because a handle is `Stopping` or `Consumed`. `is-done`
   (`builtin_is_done`) is the boolean predicate over the same states, returning

@@ -788,8 +788,8 @@ impl CollectState {
             let owner = self
                 .scope
                 .in_force()
-                .filter(|(c, _)| *c == cause)
-                .map(|(_, id)| id);
+                .filter(|c| c.cause == cause)
+                .map(|c| c.owner);
             verdict = verdict.or_else(|| Some(Break::stopped(cause, owner)));
         }
         verdict.map_or(Ok(last), Err)

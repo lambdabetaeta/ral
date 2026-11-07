@@ -275,7 +275,7 @@ impl Run {
             program: program.into(),
             origin,
             wall: None,
-            cleanup_grace: std::time::Duration::from_secs(5),
+            cleanup_grace: crate::process::DEFAULT_CLEANUP_GRACE,
             worker_cap: None,
             worker_title: crate::shell::runtime::TitlePolicy::Optional,
             io: RunIo::Inherit,
