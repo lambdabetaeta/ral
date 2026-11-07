@@ -38,8 +38,9 @@ pushed layer**:
   [[invariants/a-grant-never-reaches-its-own-key|exarch's and synod's own credential files]]
   the same way, wherever some layer's fs restricts (the layer is pushed on the
   denotation, so `dangerous` extended with a positive-only fs gets none);
-- pushes last the *self layer*: `self_layer(own: Option<&Path>)` excludes the
-  supplied binary with `ExecGrant::of([], [exarch]).with_every()` wherever
+- pushes last the *self layer*: `self_layer(own, ctx)` excludes the
+  supplied binary, `[exec: [deny: [`absolute own]]]` read as an extension of
+  the top (every program less it), wherever
   some layer's exec restricts, so every spawned agent of a restricted session
   inherits it. The agent cannot start
   exarch as a process there; `dangerous` is ambient authority, its stack

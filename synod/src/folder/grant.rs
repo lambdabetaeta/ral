@@ -1,11 +1,12 @@
 //! Authority is derived from one resolved host folder; capabilities name guest paths only.
 
 use crate::site::{Silent, site};
-use ral_core::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy, Gpu, Ungoverned};
-use ral_core::path::{
-    FrozenPath, GuestPath, LeafMode, RealPath, shown, spelled, walk_dir, walk_lenient,
-};
-use std::collections::BTreeSet;
+use ral_core::authority::grant::freeze::Place;
+use ral_core::authority::policy::{Gpu, Ungoverned};
+use ral_core::data::FOValue;
+use ral_core::data::datum::{Datum as _, tag};
+use ral_core::path::{LeafMode, RealPath, shown, spelled, walk_dir, walk_lenient};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Bare names keep the toolbox independent of additions to image directories.
@@ -203,35 +204,39 @@ impl Grant {
             .map_or_else(|| self.root.to_string(), ral_core::path::shown)
     }
 
+    /// The guest's ceiling, a grant value the guest resolves in its own
+    /// namespace: the folder and the scratch, the office toolbox, no editor
+    /// and no GPU.  `shell` is omitted: the guest VM bounds every survivor a
+    /// detach could birth.
     #[allow(
         clippy::unused_self,
-        reason = "capabilities require an admitted grant even though guest paths are fixed"
+        reason = "a ceiling requires an admitted grant even though guest paths are fixed"
     )]
-    pub(crate) fn capabilities(&self) -> Capabilities {
-        // Guest paths must fold in the guest's namespace, even on Windows.
-        let prefixes = || {
-            vec![
-                FrozenPath::from_guest(&GuestPath::from_static(guest_abi::layout::WORK)),
-                FrozenPath::from_guest(&GuestPath::from_static(guest_abi::layout::SCRATCH)),
-            ]
+    pub(crate) fn ceiling(&self) -> FOValue {
+        let places = || {
+            [guest_abi::layout::WORK, guest_abi::layout::SCRATCH]
+                .map(|p| Place::Absolute(p.to_owned()).value())
+                .to_vec()
         };
-        Capabilities {
-            fs: Some(FsPolicy {
-                read_prefixes: prefixes(),
-                write_prefixes: prefixes(),
-                deny_paths: Vec::new(),
-            }),
-            exec: Some(ExecGrant::of(
-                TOOLBOX
-                    .iter()
-                    .map(|name| ExecKey::Name((*name).to_string())),
-                [],
-            )),
-            editor: Some(BTreeSet::new()),
-            gpu: Some(Gpu::Withheld),
-            // `shell` stays default: the guest VM bounds every survivor a detach could birth.
-            ..Capabilities::default()
-        }
+        let toolbox = TOOLBOX
+            .iter()
+            .map(|name| tag("name", Some((*name).to_owned().encode())))
+            .collect();
+        let table = |lists: Vec<(&str, Vec<FOValue>)>| {
+            (lists.into_iter().map(|(key, list)| (key.to_owned(), list)))
+                .collect::<BTreeMap<_, _>>()
+                .encode()
+        };
+        BTreeMap::from([
+            ("editor".to_owned(), Vec::<FOValue>::new().encode()),
+            ("exec".to_owned(), table(vec![("allow", toolbox)])),
+            (
+                "fs".to_owned(),
+                table(vec![("read", places()), ("write", places())]),
+            ),
+            ("gpu".to_owned(), tag(Gpu::Withheld.into(), None)),
+        ])
+        .encode()
     }
 }
 
@@ -543,9 +548,9 @@ mod tests {
     #[test]
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
         let (_dir, grant) = granted("grant-fs");
-        let layer = ral_core::test_helper::layer(grant.capabilities());
-
         let mut shell = ral_core::test_helper::core_shell();
+        let layer =
+            (shell.decode_grant(&grant.ceiling(), "the ceiling")).expect("the ceiling resolves");
         // Probe reads and test writes directly: locate would fail first on these absent paths.
         shell.with_layer(layer, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
@@ -568,19 +573,33 @@ mod tests {
         });
     }
 
-    /// Host-side guard simulation cannot detect a host/guest normalizer split; assert wire spelling.
+    /// The ceiling's places, as the wire carries them.
+    fn places_of(list: &FOValue) -> Vec<&str> {
+        let FOValue::List { items } = list else {
+            panic!("a list of places: {list:?}");
+        };
+        (items.iter())
+            .map(|item| match ral_core::data::datum::untag(item) {
+                Some(("absolute", Some(FOValue::String { value }))) => value.as_str(),
+                other => panic!("an `absolute` place: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Host-side guard simulation cannot detect a host/guest normalizer split;
+    /// the ceiling crosses unfolded, for the guest to resolve, so assert the
+    /// wire spelling.
     #[test]
     fn the_guest_prefixes_are_spelled_the_guests_way_on_every_host() {
         let (_dir, grant) = granted("grant-guest-spelling");
-        let fs = grant
-            .capabilities()
-            .fs
-            .expect("the office grant restricts the filesystem");
+        let ceiling = grant.ceiling();
+        let fs = (ceiling.field("fs")).expect("the office grant restricts the filesystem");
         let guest = [guest_abi::layout::WORK, guest_abi::layout::SCRATCH];
-        for (which, prefixes) in [("read", &fs.read_prefixes), ("write", &fs.write_prefixes)] {
-            let spelled: Vec<&str> = prefixes.iter().map(FrozenPath::as_str).collect();
+        for which in ["read", "write"] {
+            let list = fs.field(which).expect("the office grant lists its places");
             assert_eq!(
-                spelled, guest,
+                places_of(list),
+                guest,
                 "the fs {which} set must name the guest's paths as the guest spells them"
             );
         }
@@ -590,12 +609,15 @@ mod tests {
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
         let (_dir, grant) = granted("grant-exec");
-        let caps = grant.capabilities();
-        let exec = caps.exec.as_ref().expect("the office grant restricts exec");
+        let ceiling = grant.ceiling();
+        let exec = (ceiling.field("exec")).expect("the office grant restricts exec");
+        let Some(FOValue::List { items: allowed }) = exec.field("allow") else {
+            panic!("the office grant allows a list: {exec:?}");
+        };
+        assert!(exec.field("deny").is_none(), "{exec:?}");
         for tool in ["pandoc", "soffice", "python3", "qpdf", "csvcut"] {
-            let key = ExecKey::Name(tool.into());
             assert!(
-                exec.allows().any(|k| *k == key) && exec.denies().all(|k| *k != key),
+                allowed.contains(&tag("name", Some(tool.to_owned().encode()))),
                 "the office toolbox must admit {tool}"
             );
         }
@@ -604,7 +626,8 @@ mod tests {
         let bin =
             ral_core::test_helper::Tree::lay(tmp.path(), cuts.map(|cut| format!("/usr/bin/{cut}")));
         let mut shell = ral_core::test_helper::core_shell();
-        shell.with_layer(ral_core::test_helper::layer(caps), |sh| {
+        let layer = (shell.decode_grant(&ceiling, "the ceiling")).expect("the ceiling resolves");
+        shell.with_layer(layer, |sh| {
             for cut in cuts {
                 let path = bin.at(&format!("/usr/bin/{cut}"));
                 assert!(

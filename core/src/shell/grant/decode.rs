@@ -1,5 +1,6 @@
-//! Decode a capability `Value` — the argument of `grant [...]`, or a
-//! `--capabilities` profile — into a resolved [`GrantLayer`].
+//! Decode a capability `Value` — the argument of `grant [...]`, a
+//! `--capabilities` profile, or a grant value one host authored for another —
+//! into a resolved [`GrantLayer`]: the one grant front-end.
 //!
 //! A dimension the record does not name stays `None` and inherits the
 //! surrounding frame, so an attenuation touches only what it lists.  The
@@ -17,10 +18,11 @@ use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
     EditorVerb, ExecRules, FsLayer, Gpu, GrantLayer, GrantPath, Net, Rule, ShellVerb,
 };
+use crate::data::FOValue;
 use crate::path::lex::has_drive;
 use crate::path::sigil::SigilHead;
 use crate::path::{Excluded, Kind, PathRules, Trace, names_a_path_for};
-use crate::shell::runtime::{List, Map, Value, settings_map};
+use crate::shell::runtime::{List, Map, Shell, Value, settings_map};
 use crate::syntax::quote::quote_word;
 use crate::text::{indefinite, near_names};
 use crate::typecheck::contract::{
@@ -393,8 +395,8 @@ fn unknown_exec_key(key: &str, value: &Value) -> PolicyError {
 ///
 /// The single `Value → GrantLayer` constructor for a record, shared by the
 /// `grant [...] { body }` builtin in `evaluator::scope`, the
-/// profile loader in `load::profile`, and [`crate::SpawnGrant`]'s
-/// resolver; every spelling is walked against `ctx` right here, so "a
+/// profile loader in `load::profile`, [`crate::SpawnGrant`]'s
+/// resolver and [`Shell::decode_grant`]; every spelling is walked against `ctx` right here, so "a
 /// `GrantLayer` has every spelling already resolved" holds by construction
 /// whoever comes through.  Unknown keys error here and in each dimension's
 /// decoder rather than being silently dropped; the keyset is `grant`'s own
@@ -435,6 +437,21 @@ pub fn decode_capability_map(
         }
     }
     Ok(GrantLayer::new(fs, exec, net, gpu, editor, shell))
+}
+
+impl Shell {
+    /// `record`, a grant value that crossed as data, resolved against this
+    /// shell's own anchor: what the host that enforces it makes of it.
+    ///
+    /// # Errors
+    /// As [`decode_capability_map`].
+    pub fn decode_grant(
+        &self,
+        record: &FOValue,
+        err_prefix: &str,
+    ) -> Result<GrantLayer, PolicyError> {
+        decode_capability_map(&Value::from(record.clone()), err_prefix, &self.freeze_ctx())
+    }
 }
 
 #[cfg(test)]

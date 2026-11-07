@@ -446,8 +446,7 @@ pub(crate) fn rules(grants: &GrantStack) -> Option<ExecRules> {
 pub(super) mod tests {
     use super::*;
     use crate::authority::grant::name_rules;
-    use crate::authority::policy::{Evidence, ExecGrant, ExecKey};
-    use crate::host::EnvVars;
+    use crate::authority::policy::{Capabilities, Evidence, ExecGrant, ExecKey};
     use crate::path::Trace;
     use crate::path::utf8;
     use crate::test_helper::{Tree, real as walked, trace};
@@ -986,13 +985,21 @@ pub(super) mod tests {
         );
     }
 
+    fn exec(grant: ExecGrant) -> Capabilities {
+        Capabilities {
+            exec: Some(grant),
+            ..Capabilities::default()
+        }
+    }
+
     /// The rules a grant makes: each key walked, a key in both sets both
-    /// kinds of rule, and `every` is `Any`.
+    /// kinds of rule.
     fn granting(
         allow: impl IntoIterator<Item = ExecKey>,
         deny: impl IntoIterator<Item = ExecKey>,
     ) -> ExecRules {
-        ExecRules::of_grant(&ExecGrant::of(allow, deny), &EnvVars::new()).unwrap()
+        let layer = crate::test_helper::layer(exec(ExecGrant::of(allow, deny)));
+        layer.exec().cloned().expect("an exec grant")
     }
 
     /// The directory `name` of `root`, made.
@@ -1017,18 +1024,17 @@ pub(super) mod tests {
         walked(path)
     }
 
+    /// No grant spells every program: `Any` is what extending an omitted
+    /// exec axis makes, never what a grant decodes to.
     #[test]
-    fn of_grant_resolves_both_sets_and_sets_any() {
+    fn a_grant_resolves_both_sets_and_spells_no_any() {
         let key = ExecKey::Dir(written("/d"));
-        let grant = ExecGrant::of([key.clone()], [key]);
-        let rules = ExecRules::of_grant(&grant, &EnvVars::new()).unwrap();
+        let rules = granting([key.clone()], [key]);
         assert_eq!(
             rules.evidence(Subject::Dir(path::Subject::Position(&real("/d")))),
             BOTH
         );
-        let every = ExecGrant::of([ExecKey::Name("zzz-no-such".into())], []).with_every();
-        let rules = ExecRules::of_grant(&every, &EnvVars::new()).unwrap();
-        assert!(rules.allows().any(|s| *s == ExecAllow::Any));
+        assert!(!rules.allows().any(|s| *s == ExecAllow::Any), "{rules:?}");
     }
 
     /// One file, two path keys: an exclusion on the link `a` and an allowance on
@@ -1188,9 +1194,33 @@ pub(super) mod tests {
             (ExecGrant::of([key()], []), "filesystem root"),
             (ExecGrant::of([], [key()]), "excluding the root"),
         ] {
-            let why = ExecRules::of_grant(&grant, &EnvVars::new()).unwrap_err();
+            let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
             assert!(why.message.contains(wording), "{}", why.message);
         }
+    }
+
+    /// A file key naming a directory is refused on every route, as a ral
+    /// author's is: it names a binary that cannot exist.
+    #[test]
+    fn a_file_key_naming_a_directory_is_refused() {
+        let (_tmp, root) = tmp();
+        let dir = made(&root, "tools");
+        for grant in [
+            ExecGrant::of([ExecKey::Path(spelled(&dir))], []),
+            ExecGrant::of([], [ExecKey::Path(spelled(&dir))]),
+        ] {
+            let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
+            assert!(why.message.contains("is a directory"), "{}", why.message);
+            assert!(why.hint.is_some_and(|h| h.contains("`dir")), "a `dir` hint");
+        }
+    }
+
+    /// A bare name is a command name, never a path, whoever authored it.
+    #[test]
+    fn a_path_shaped_name_key_is_refused() {
+        let grant = ExecGrant::of([ExecKey::Name("bin/tool".into())], []);
+        let why = crate::test_helper::decoded(exec(grant)).unwrap_err();
+        assert!(why.message.contains("bare command name"), "{}", why.message);
     }
 
     /// A grant has no "here": a relative `PATH` entry is the environment's, so

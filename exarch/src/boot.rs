@@ -5,10 +5,7 @@
 use crate::app::{SCRATCH_VAR, seed_var};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
-use ral_core::authority::policy::{Capabilities, GrantLayer};
 use ral_core::data::FOValue;
-use ral_core::data::datum::Datum as _;
-use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::{EngineSpec, Root};
 use ral_core::shell::boot::boot_runtime;
@@ -50,11 +47,12 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, String> {
 /// a `within [env: …]` could redirect.
 ///
 /// A root whose config is not unit carries the ceiling its host authored for
-/// this engine, resolved here, on the host it runs on, and pushed as a session
-/// layer: synod's guest names its places in the guest's namespace.
+/// this engine, a grant value, resolved here against the engine's own anchor
+/// and pushed as a session layer: synod's guest names its places in the
+/// guest's namespace.
 ///
 /// # Errors
-/// A root that names no scratch, or whose ceiling does not decode or resolve.
+/// A root that names no scratch, or whose ceiling does not resolve.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
@@ -66,14 +64,12 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), String> {
     };
     shell.set_scratch(scratch.as_str());
     if !matches!(root.config, FOValue::Unit) {
-        let ceiling = Capabilities::decode(&root.config)
-            .map_err(|e| format!("exarch engine: the root's ceiling does not decode: {e}"))?;
-        let layer = GrantLayer::from_capabilities(ceiling, &EnvVars::new()).map_err(|e| {
-            format!(
-                "exarch engine: the root's ceiling cannot be resolved: {}",
-                e.message
-            )
-        })?;
+        let layer = shell
+            .decode_grant(&root.config, "the root's ceiling")
+            .map_err(|e| match e.hint {
+                Some(hint) => format!("exarch engine: {}\nhint: {hint}", e.message),
+                None => format!("exarch engine: {}", e.message),
+            })?;
         shell.push_session_capabilities(layer);
     }
     crate::library::install_agent_library(&ral_core::shell::runtime::Mooring::adrift(), shell)
@@ -166,8 +162,13 @@ mod tests {
     use super::{engine_root, engine_runtime, test_shell};
     use crate::app::{EXARCH, SCRATCH_VAR, Scratch};
     use ral_core::Shell;
+    use ral_core::authority::grant::freeze::Place;
+    use ral_core::authority::policy::FsOp;
+    use ral_core::data::FOValue;
+    use ral_core::data::datum::Datum as _;
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
+    use std::collections::BTreeMap;
 
     /// Cargo's own TLS wants a Mach service no profile admits, so a confined session
     /// must hand it the `git` binary instead — invisible in every log, hence
@@ -217,6 +218,65 @@ mod tests {
         .expect("the place is live");
         assert!(frozen.as_str().contains("a-session-scratch"), "{frozen:?}");
         assert!(!frozen.as_str().contains("elsewhere"), "{frozen:?}");
+    }
+
+    /// A shell at `cwd`, as an engine roots one, and a root there naming the
+    /// scratch and carrying `ceiling`.
+    fn rooted(cwd: &std::path::Path, ceiling: FOValue) -> (Shell, Root) {
+        let at = EnginePath::Host(cwd.to_path_buf());
+        let spec = EngineSpec::new(crate::shell_eval::builtins::INSTALLER_TAG, at.clone());
+        let shell = Shell::root(
+            engine_runtime(&spec)
+                .expect("a test host resolves its baseline")
+                .into(),
+            ral_core::path::CwdPath::new(cwd.to_path_buf()).expect("an absolute cwd"),
+        );
+        let scratch = ral_core::path::utf8(cwd).expect("a test path is Unicode");
+        let root = Root::new(at)
+            .with_env(vec![(SCRATCH_VAR.to_owned(), scratch.to_owned())])
+            .with_config(ceiling);
+        (shell, root)
+    }
+
+    /// The grant value `[axis: [list: items]]`.
+    fn grant(axis: &str, list: &str, items: Vec<FOValue>) -> FOValue {
+        let table = BTreeMap::from([(list.to_owned(), items)]).encode();
+        BTreeMap::from([(axis.to_owned(), table)]).encode()
+    }
+
+    /// The root's ceiling is a grant value, resolved by the one front-end
+    /// against the engine's own anchor: a `cwd` place names the root's cwd.
+    #[test]
+    fn a_ceiling_resolves_against_the_engines_own_anchor() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let tmp = ral_core::test_helper::real(dir.path())
+            .as_path()
+            .to_path_buf();
+        let cwd = tmp.join("work");
+        std::fs::create_dir(&cwd).expect("the root's cwd");
+        let here = grant("fs", "read", vec![Place::Cwd(".".into()).value()]);
+        let (mut shell, root) = rooted(&cwd, here);
+        engine_root(&root, &mut shell).expect("the ceiling resolves");
+        let reads = |path: &std::path::Path| {
+            shell.admits_fs(&FsOp::Read, &ral_core::test_helper::trace(path))
+        };
+        assert!(reads(&cwd.join("notes")), "the root's cwd is read");
+        assert!(!reads(&tmp.join("elsewhere")), "nothing else is");
+    }
+
+    /// A ceiling the front-end refuses refuses the attach, in the decoder's
+    /// words and with its hint: a file key naming a directory.
+    #[test]
+    fn a_ceiling_naming_a_directory_as_a_program_is_refused() {
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let dir = ral_core::path::utf8(tmp.path()).expect("a test path is Unicode");
+        let program = grant("exec", "allow", vec![Place::Absolute(dir.into()).value()]);
+        let (mut shell, root) = rooted(tmp.path(), program);
+        let Err(why) = engine_root(&root, &mut shell) else {
+            panic!("a directory is no program");
+        };
+        assert!(why.contains("is a directory"), "{why}");
+        assert!(why.contains("hint:") && why.contains("`dir"), "{why}");
     }
 
     #[test]

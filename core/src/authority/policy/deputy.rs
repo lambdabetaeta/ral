@@ -65,7 +65,7 @@ fn runnable(exec: &ExecRules) -> FsRules {
 mod tests {
     use super::deputy_prefixes;
     use crate::authority::policy::{
-        Baseline, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantStack,
+        Baseline, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
     };
     use crate::path::{FrozenPath, shown, utf8};
     use crate::test_helper::{Tree, layer, stack};
@@ -107,11 +107,6 @@ mod tests {
             ExecGrant::of(keys(allow), keys(deny))
         }
 
-        /// The grant excluding `deny`, with `every` set.
-        fn every(&self, deny: &[&str]) -> ExecGrant {
-            self.exec_dirs(&[], deny).with_every()
-        }
-
         fn fs(&self, write: &[&str], deny: &[&str]) -> FsPolicy {
             FsPolicy {
                 write_prefixes: write.iter().map(|p| self.lit(p)).collect(),
@@ -121,12 +116,21 @@ mod tests {
         }
     }
 
-    fn found(exec: ExecGrant, fs: FsPolicy) -> Vec<String> {
-        report(&stack([layer(Capabilities {
+    fn of(exec: ExecGrant, fs: FsPolicy) -> GrantLayer {
+        layer(Capabilities {
             exec: Some(exec),
             fs: Some(fs),
             ..Capabilities::default()
-        })]))
+        })
+    }
+
+    fn found(exec: ExecGrant, fs: FsPolicy) -> Vec<String> {
+        report(&stack([of(exec, fs)]))
+    }
+
+    /// As [`found`], the exec beside every program, less `deny`.
+    fn found_under_every(disk: &Disk, deny: &[&str], fs: FsPolicy) -> Vec<String> {
+        report(&stack([of(disk.exec_dirs(&[], deny), fs).with_every()]))
     }
 
     /// The finding as the audit shows it.
@@ -244,9 +248,10 @@ mod tests {
         let disk = Disk::new();
         let stack = stack([
             layer(Capabilities {
-                exec: Some(disk.every(&[])),
+                exec: Some(ExecGrant::default()),
                 ..Capabilities::default()
-            }),
+            })
+            .with_every(),
             layer(Capabilities {
                 exec: Some(disk.exec_dirs(&["/work"], &[])),
                 fs: Some(disk.fs(&["/work/a"], &[])),
@@ -259,7 +264,7 @@ mod tests {
     #[test]
     fn an_every_layer_excluding_a_subdirectory_still_finds_the_write_region() {
         let disk = Disk::new();
-        let found = found(disk.every(&["/work/private"]), disk.fs(&["/work"], &[]));
+        let found = found_under_every(&disk, &["/work/private"], disk.fs(&["/work"], &[]));
         assert_eq!(found, disk.named(&["/work"]));
     }
 
@@ -296,7 +301,7 @@ mod tests {
     fn an_exec_that_denotes_top_has_no_finding() {
         let disk = Disk::new();
         assert_eq!(
-            found(disk.every(&[]), disk.fs(&["/work"], &[])),
+            found_under_every(&disk, &[], disk.fs(&["/work"], &[])),
             Vec::<String>::new()
         );
     }

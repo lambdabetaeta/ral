@@ -10,9 +10,9 @@
 //! one place a layer still composes eagerly: `--extend` joins a [`Fragment`]
 //! onto a base ceiling at load time, before any attenuation runs.
 //!
-//! [`Capabilities`] is the authored value: what a grant file decodes to, and
-//! what [`GrantLayer::from_capabilities`] resolves for a layer written in code.
-//! Nothing judges it and no layer keeps it.
+//! A grant is authored as a record, its *grant value*, and resolved by one
+//! front-end, `shell::grant::decode_capability_map`, on the host that
+//! enforces it; a layer keeps the resolution, never the record.
 //!
 //! Every policy denotes a function from requests to Belnap's four values,
 //! [`Evidence`].  Restriction is truth meet ([`Meet`]), extension information
@@ -27,9 +27,7 @@
 use super::exec::ExecRules;
 use super::fs::FsLayer;
 use crate::path::{FrozenPath, RealPath, Subject, Trace};
-use crate::syntax::quote::quote_word;
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
@@ -110,13 +108,13 @@ pub(crate) trait Axis: Join + Sized {
 
 /// An extension fragment: an omitted axis states nothing (`⊥`), where an
 /// omitted axis of a [`GrantLayer`] restricts nothing (`t`).  Only
-/// [`GrantLayer::extend`] consumes one, and only the loader makes one.
+/// [`GrantLayer::extend`] consumes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fragment(GrantLayer);
 
 impl Fragment {
-    /// Only `load::profile` calls this.
-    pub(crate) fn of(layer: GrantLayer) -> Self {
+    /// `layer` read as an extension: an axis it omits now states nothing.
+    pub fn of(layer: GrantLayer) -> Self {
         Self(layer)
     }
 }
@@ -128,121 +126,6 @@ fn extend<T: Axis>(base: Option<T>, fragment: Option<T>) -> Option<T> {
         (None, Some(fragment)) => fragment.join_top(),
         (Some(base), Some(fragment)) => Some(base.join(fragment)),
     }
-}
-
-/// An exec key as the author wrote it: the written twin of
-/// `authority::policy::exec::{ExecAllow, ExecDeny}`, which resolve it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum ExecKey {
-    /// A bare name: `git`.
-    Name(String),
-    /// A path, frozen: `/usr/bin/git`.
-    Path(FrozenPath),
-    /// A directory, frozen, and each directory a selector expands to.
-    Dir(FrozenPath),
-}
-
-/// The key as a grant spells it: a file as an `absolute` place, a directory
-/// under its `dir` constructor.
-impl std::fmt::Display for ExecKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Name(name) => write!(f, "`name {}", quote_word(name)),
-            Self::Path(path) => write!(f, "`absolute {}", quote_word(&path.shown())),
-            Self::Dir(dir) => write!(f, "`dir `absolute {}", quote_word(&dir.shown())),
-        }
-    }
-}
-
-/// Exec authority as authored. A key in both sets is Both.
-///
-/// The author's spellings, which [`GrantLayer::from_capabilities`] resolves
-/// into the rules of `authority::policy::exec`; nothing judges a grant of this form.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecGrant {
-    every: bool,
-    #[serde(deserialize_with = "allow_keys")]
-    allow: BTreeSet<ExecKey>,
-    #[serde(deserialize_with = "deny_keys")]
-    deny: BTreeSet<ExecKey>,
-}
-
-/// The keys of `field`, each stated once.
-fn distinct_keys<'de, D: Deserializer<'de>>(
-    field: &str,
-    deserializer: D,
-) -> Result<BTreeSet<ExecKey>, D::Error> {
-    let mut keys = BTreeSet::new();
-    for key in Vec::<ExecKey>::deserialize(deserializer)? {
-        if let Some(repeated) = keys.replace(key) {
-            return Err(D::Error::custom(format!(
-                "exec `{field}` lists {repeated} twice; state each key once"
-            )));
-        }
-    }
-    Ok(keys)
-}
-
-fn allow_keys<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<ExecKey>, D::Error> {
-    distinct_keys("allow", d)
-}
-
-fn deny_keys<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeSet<ExecKey>, D::Error> {
-    distinct_keys("deny", d)
-}
-
-impl ExecGrant {
-    pub fn of(
-        allow: impl IntoIterator<Item = ExecKey>,
-        deny: impl IntoIterator<Item = ExecKey>,
-    ) -> Self {
-        Self {
-            every: false,
-            allow: allow.into_iter().collect(),
-            deny: deny.into_iter().collect(),
-        }
-    }
-
-    /// This grant, admitting every program less its exclusions.
-    #[must_use]
-    pub fn with_every(self) -> Self {
-        Self {
-            every: true,
-            ..self
-        }
-    }
-
-    pub fn every(&self) -> bool {
-        self.every
-    }
-
-    pub fn allows(&self) -> impl Iterator<Item = &ExecKey> {
-        self.allow.iter()
-    }
-
-    pub fn denies(&self) -> impl Iterator<Item = &ExecKey> {
-        self.deny.iter()
-    }
-}
-
-/// Filesystem access within a `grant` block.
-///
-/// `deny_paths` carve out subtrees no read, write, link, or rename may touch
-/// even under a covering prefix, matched as subpaths — a file denies itself, a
-/// directory everything beneath it.  This is what keeps the agent's own
-/// capability profile unwritable inside an otherwise-writable cwd, and the
-/// credential dirs (`xdg-config gh`, `xdg-config op`, …) unreadable under a
-/// wholesale-readable `xdg-config .`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsPolicy {
-    #[serde(default)]
-    pub read_prefixes: Vec<FrozenPath>,
-    #[serde(default)]
-    pub write_prefixes: Vec<FrozenPath>,
-    #[serde(default)]
-    pub deny_paths: Vec<FrozenPath>,
 }
 
 /// The `_ed-*` builtins a layer lets through.
@@ -327,46 +210,6 @@ pub enum Net {
 #[strum(serialize_all = "kebab-case")]
 pub enum Gpu {
     Withheld,
-}
-
-/// The per-effect policies as authored: every place a spelling, nothing yet
-/// resolved.
-///
-/// [`GrantLayer::from_capabilities`] resolves this authored form into a layer.
-/// Runtime records instead cross `shell::grant::decode_capability_map`, which
-/// walks each spelling as it freezes it. Either way the layer keeps the
-/// resolution, not this authored form.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Capabilities {
-    #[serde(default)]
-    pub exec: Option<ExecGrant>,
-    #[serde(default)]
-    pub fs: Option<FsPolicy>,
-    #[serde(default)]
-    pub net: Option<Net>,
-    #[serde(default)]
-    pub gpu: Option<Gpu>,
-    /// `None` inherits, so silence permits as on every other axis.
-    #[serde(default)]
-    pub editor: Option<BTreeSet<EditorVerb>>,
-    #[serde(default)]
-    pub shell: Option<BTreeSet<ShellVerb>>,
-}
-
-impl Capabilities {
-    /// Lattice bottom for positive authority: every effect pinned to its
-    /// most-restrictive value, so pushing it as a layer zeroes every axis.
-    pub fn deny_all() -> Self {
-        Self {
-            exec: Some(ExecGrant::default()),
-            fs: Some(FsPolicy::default()),
-            net: Some(Net::Offline),
-            gpu: Some(Gpu::Withheld),
-            editor: Some(BTreeSet::new()),
-            shell: Some(BTreeSet::new()),
-        }
-    }
 }
 
 /// A verb a layer may withhold, gating a builtin rather than an access.
@@ -565,6 +408,18 @@ impl GrantLayer {
         }
         if let Some(exec) = &mut self.exec {
             exec.rehold();
+        }
+    }
+
+    /// This layer, its exec beside every program: the table an extension of
+    /// an omitted exec axis makes, which no grant spells.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_every(self) -> Self {
+        let every = ExecRules::new([super::exec::ExecAllow::Any], []);
+        Self {
+            exec: Some(self.exec.unwrap_or_default().join(every)),
+            ..self
         }
     }
 
@@ -835,5 +690,139 @@ impl<V: Ord + VariantArray> Axis for BTreeSet<V> {
 
     fn is_top(&self) -> bool {
         self.len() == V::VARIANTS.len()
+    }
+}
+
+// ── A test's grant, authored ──────────────────────────────────────────────
+
+#[cfg(any(test, feature = "test-util"))]
+pub use builder::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+
+/// A grant a test writes in Rust: it spells a grant value, which the one
+/// front-end resolves as it resolves any other.
+#[cfg(any(test, feature = "test-util"))]
+mod builder {
+    use super::{EditorVerb, Gpu, Net, ShellVerb};
+    use crate::authority::grant::freeze::Place;
+    use crate::data::FOValue;
+    use crate::data::datum::{Datum, tag};
+    use crate::path::FrozenPath;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// An exec key: a bare name, a file, or every program beneath a directory.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ExecKey {
+        Name(String),
+        Path(FrozenPath),
+        Dir(FrozenPath),
+    }
+
+    /// Exec authority as written. A key in both sets is Both.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ExecGrant {
+        allow: BTreeSet<ExecKey>,
+        deny: BTreeSet<ExecKey>,
+    }
+
+    impl ExecGrant {
+        pub fn of(
+            allow: impl IntoIterator<Item = ExecKey>,
+            deny: impl IntoIterator<Item = ExecKey>,
+        ) -> Self {
+            Self {
+                allow: allow.into_iter().collect(),
+                deny: deny.into_iter().collect(),
+            }
+        }
+
+        pub fn allows(&self) -> impl Iterator<Item = &ExecKey> {
+            self.allow.iter()
+        }
+
+        pub fn denies(&self) -> impl Iterator<Item = &ExecKey> {
+            self.deny.iter()
+        }
+    }
+
+    /// Filesystem access as written: `deny_paths` carve out subtrees no
+    /// access may touch, even under a covering prefix.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct FsPolicy {
+        pub read_prefixes: Vec<FrozenPath>,
+        pub write_prefixes: Vec<FrozenPath>,
+        pub deny_paths: Vec<FrozenPath>,
+    }
+
+    /// The per-effect policies as written, `None` inheriting: every path an
+    /// `absolute` spelling, nothing resolved.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Capabilities {
+        pub exec: Option<ExecGrant>,
+        pub fs: Option<FsPolicy>,
+        pub net: Option<Net>,
+        pub gpu: Option<Gpu>,
+        pub editor: Option<BTreeSet<EditorVerb>>,
+        pub shell: Option<BTreeSet<ShellVerb>>,
+    }
+
+    impl Capabilities {
+        /// The grant value this spells, as an author writes it in ral.
+        pub fn value(self) -> FOValue {
+            let Self {
+                exec,
+                fs,
+                net,
+                gpu,
+                editor,
+                shell,
+            } = self;
+            let entries = [
+                exec.map(|e| {
+                    let targets = |keys: &BTreeSet<ExecKey>| keys.iter().map(target).collect();
+                    (
+                        "exec",
+                        table([("allow", targets(&e.allow)), ("deny", targets(&e.deny))]),
+                    )
+                }),
+                fs.map(|f| {
+                    let places = |paths: &[FrozenPath]| paths.iter().map(place).collect();
+                    let read = ("read", places(&f.read_prefixes));
+                    let write = ("write", places(&f.write_prefixes));
+                    ("fs", table([read, write, ("deny", places(&f.deny_paths))]))
+                }),
+                net.map(|n| ("net", tag(n.into(), None))),
+                gpu.map(|g| ("gpu", tag(g.into(), None))),
+                editor.map(|v| ("editor", verbs(v))),
+                shell.map(|v| ("shell", verbs(v))),
+            ];
+            let entries = entries.into_iter().flatten();
+            (entries.map(|(key, value)| (key.to_owned(), value)))
+                .collect::<BTreeMap<_, _>>()
+                .encode()
+        }
+    }
+
+    fn place(path: &FrozenPath) -> FOValue {
+        Place::Absolute(path.as_str().to_owned()).value()
+    }
+
+    fn target(key: &ExecKey) -> FOValue {
+        match key {
+            ExecKey::Name(name) => tag("name", Some(name.clone().encode())),
+            ExecKey::Path(file) => place(file),
+            ExecKey::Dir(dir) => tag("dir", Some(place(dir))),
+        }
+    }
+
+    fn table<const N: usize>(lists: [(&str, Vec<FOValue>); N]) -> FOValue {
+        (lists.into_iter().map(|(key, list)| (key.to_owned(), list)))
+            .collect::<BTreeMap<_, _>>()
+            .encode()
+    }
+
+    fn verbs<V: Into<&'static str>>(set: BTreeSet<V>) -> FOValue {
+        (set.into_iter().map(|v| tag(v.into(), None)))
+            .collect::<Vec<_>>()
+            .encode()
     }
 }

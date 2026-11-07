@@ -110,8 +110,8 @@ pub(crate) enum ExecProjection {
 /// [`SandboxProjection::of`] after meet-folding the whole stack.
 ///
 /// The platform backends `authority::sandbox::linux` and `authority::sandbox::macos` render it, in
-/// the launching process. Unlike a [`Capabilities`](crate::authority::policy::Capabilities)
-/// frame, no further composition can widen it.
+/// the launching process. Unlike a [`GrantLayer`](crate::authority::policy::GrantLayer),
+/// no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProjection<A = FsAllow, X = GrantPath<Excluded>> {
     pub fs: FsProjection<A, X>,
@@ -468,9 +468,12 @@ mod tests {
     }
 
     fn project(base: Capabilities) -> super::SandboxProjection {
-        crate::test_helper::core_shell().with_layer(layer(base), |sh| {
-            sh.sandbox_projection().expect("restricted")
-        })
+        project_layer(layer(base))
+    }
+
+    fn project_layer(base: crate::authority::policy::GrantLayer) -> super::SandboxProjection {
+        crate::test_helper::core_shell()
+            .with_layer(base, |sh| sh.sandbox_projection().expect("restricted"))
     }
 
     /// The run place joins the read region, and nothing becomes writable.
@@ -487,15 +490,8 @@ mod tests {
     /// still reach the read region.
     #[test]
     fn exec_that_denotes_top_is_unrestricted_and_its_places_still_read() {
-        let every = ExecGrant::of(
-            [ExecKey::Dir(FrozenPath::from_surface("/ral-test/bin"))],
-            [],
-        )
-        .with_every();
-        let projection = project(Capabilities {
-            exec: Some(every),
-            ..authored(Some("/ral-test/w"), None)
-        });
+        let every = layer(authored(Some("/ral-test/w"), Some("/ral-test/bin"))).with_every();
+        let projection = project_layer(every);
         assert_eq!(projection.exec, ExecProjection::Unrestricted);
         let read = fs_read_paths(&projection.fs).expect("fs restricted");
         assert!(read.iter().any(|p| p == "/ral-test/bin"), "{read:?}");

@@ -397,21 +397,20 @@ clauses after the positive ones.
 **Exec has two languages, each with allowance and exclusion sets; the kernel
 reads the resolved one.**
 
-- `ExecKey { Name, Path, Dir }`: the grant *as written*. `ExecGrant` is a
-  pair of private `BTreeSet<ExecKey>`s, `allow` and `deny`, plus the flag
-  `every`. `ExecGrant::of(allow, deny)` builds the sets; `allows` and `denies`
-  read them. Keys carry no polarity: membership in both sets supplies Both.
-  It rides the wire; displayed keys spell a directory as `` `dir ``.
-  `with_every` sets `every`, read through `every()`: it is not a key and has no
-  negative form, so "every program" can never be excluded.
+- The `exec` record of a grant value, `allow` and `deny` lists of targets:
+  the grant *as written*. Targets carry no polarity: membership in both lists
+  supplies Both. No grant spells every program; `Any` is what extending an
+  omitted exec axis makes, and it has no negative form, so "every program"
+  can never be excluded. (`ExecKey`/`ExecGrant` are a test builder that
+  spells such a record.)
 - `ExecAllow` and `ExecDeny`: the grant *resolved where it is decoded*
   (in `authority::grant`): a bare name becomes the bundled tool of that name,
   the file the decoding environment's `PATH` finds and, for negative evidence
-  alone, a `Name` veto; a path key a `File`, a dir key a `Dir`; `every` the
-  allowance `Any`. A key walks as its polarity walks: the positive bit to the
-  position it reached, the negative to the objects it held. `of_grant` walks
-  `allows()` through `key_rules::<Trace>` and `denies()` through
-  `key_rules::<Excluded>`; a key in both sets yields both entries.
+  alone, a `Name` veto; a path key a `File`, a dir key a `Dir`. A key walks
+  as its polarity walks: the positive bit to the position it reached, the
+  negative to the objects it held. `decode_capability_map` walks `allow`
+  at `Trace` and `deny` at `Excluded`; a key in both lists yields both
+  entries.
   A name found nowhere makes no allowance and keeps its
   veto. The veto carries only the negative bit, since a
 positive one would assert support for every executable sharing the basename: an
@@ -650,9 +649,9 @@ spelling.
 
 ### Namespaces
 
-- **synod mints guest prefixes with the POSIX fold**
-  (`FrozenPath::from_guest`, `lex::fold_dots_under` under Posix rules),
-  because the guard that matches them runs inside the machine, and on a
+- **synod folds no guest prefix**: it sends them as a grant value, folded
+  by the guest that decodes it, because the guard that matches them runs
+  inside the machine, and on a
   Windows host the host fold once rebuilt `/work` as `\work`, a relative path
   in the namespace it claimed to name ([[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]).
 - **A spelling carries no namespace.** Whose machine a path names is settled by
@@ -812,9 +811,8 @@ argues from.
   object the moment it has another name. Creating a granted directory after the
   grant, or `rm -rf dir && mkdir dir`, keeps working: these are path grants, not
   inode pins.
-- **A guest's grant is resolved inside the machine.** synod spells it with
-  `FrozenPath::from_guest` and sends the authored `Capabilities`; the guest engine
-  resolves it on its own filesystem, so a redirect made in one guest run cannot
+- **A guest's grant is resolved inside the machine.** synod sends it as a
+  grant value, unfolded; the guest engine decodes it on its own filesystem, so a redirect made in one guest run cannot
   take effect in the next.
 - **The projection renders what the guard judged**, once at spawn, because that
   is when the profile is written.

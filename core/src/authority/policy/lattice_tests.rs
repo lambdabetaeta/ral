@@ -1,7 +1,7 @@
 //! Lattice-algebra tests for the capability types.
 //!
 //! In-crate rather than under `core/tests/` because these reach crate-private
-//! entries: `decode_capability_map`, the layers' tables, `Fragment::of`.
+//! entries: the layers' tables and the rules they hold.
 
 use super::exec::{ExecRules, Subject};
 use super::*;
@@ -56,8 +56,7 @@ fn spelled(p: &Path) -> FrozenPath {
     FrozenPath::from_surface(path::utf8(p).unwrap())
 }
 
-/// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`
-/// directly rather than through `decode_capability_map`.
+/// A prefix witness for the fixtures that build `FsPolicy`/`ExecGrant`.
 fn nprefix(s: &str) -> FrozenPath {
     spelled(&at(s))
 }
@@ -308,12 +307,19 @@ fn every_flag() -> Vec<Flag> {
         .collect()
 }
 
+/// The `deny_all` grant value, resolved as any other, withholds every axis.
 #[test]
 fn deny_all_withholds_every_verb() {
-    let stack = test_helper::stack([layer(Capabilities::deny_all())]);
+    let value = Value::from(crate::authority::grant::deny_all());
+    let nothing = decode_capability_map(&value, "test", &test_ctx("/h")).unwrap();
+    assert!(nothing.exec().is_some_and(|e| e.allows().next().is_none()));
+    assert!(nothing.fs().is_some_and(|f| !f.is_top()));
+    let stack = test_helper::stack([nothing]);
     for flag in every_flag() {
         assert!(!stack.permits(flag), "{} must be withheld", flag.key());
     }
+    assert_eq!(stack.net_veto(), Some(Net::Offline));
+    assert_eq!(stack.gpu().collect::<Vec<_>>(), [Gpu::Withheld]);
 }
 
 /// What a stack decides: each verb, an exec admission, and the net opinions.
@@ -424,27 +430,52 @@ fn exec_keys_follow_the_frozen_surface() {
     assert_eq!(linked.allows().count(), 2);
 }
 
-/// A key displays as the target that wrote it: a directory keeps its `dir`
-/// constructor, distinct from a file at the same path.
+/// A layer shows each key as the grant that wrote it spells it: a directory
+/// keeps its `dir` constructor, distinct from a file at the same path.
 #[cfg(unix)]
 #[test]
-fn exec_keys_display_as_their_targets() {
-    assert_eq!(name("git").to_string(), "`name git");
+fn a_layer_shows_each_key_as_its_grant_spells_it() {
     let tools = Tree::nowhere().at("/tools");
-    assert_eq!(path_key("/tools").to_string(), format!("`absolute {tools}"));
+    let shown = with_exec(ExecGrant::of(
+        [path_key("/tools"), dir_key("/tools")],
+        [name("git")],
+    ))
+    .summary()
+    .and_then(|s| s.exec)
+    .expect("an exec grant shows itself");
     assert_eq!(
-        dir_key("/tools").to_string(),
-        format!("`dir `absolute {tools}")
+        shown.allows,
+        [
+            format!("`absolute {tools}"),
+            format!("`dir `absolute {tools}")
+        ]
     );
+    assert!(shown.denies.contains(&"`name git".to_owned()), "{shown:?}");
 }
 
-/// An unfrozen field is refused: a peer's stale `detach` must not vanish into
-/// a wider grant.
+/// A grant value crossing the wire is read by the grant's own words: a
+/// peer's stale `detach` must not vanish into a wider grant.
 #[test]
-fn capabilities_refuse_an_unknown_wire_field() {
-    let err = serde_json::from_str::<Capabilities>(r#"{"detach":false}"#)
-        .expect_err("`detach` is no field of a layer");
-    assert!(err.to_string().contains("detach"), "{err}");
+fn a_grant_value_refuses_an_unknown_key() {
+    let stale = crate::data::FOValue::Map {
+        entries: vec![("detach".into(), crate::data::FOValue::Bool { value: false })],
+    };
+    let err = decode_capability_map(&Value::from(stale), "test", &test_ctx("/h"))
+        .expect_err("`detach` is no key of a grant");
+    assert!(err.message.contains("detach"), "{}", err.message);
+}
+
+/// A spelling absolute only under the other platform's rules is a dead grant
+/// whoever wrote it: dropped where it is decoded, never walked as a path here.
+#[cfg(unix)]
+#[test]
+fn a_foreign_spelling_is_a_dead_grant_on_every_route() {
+    let foreign = with_fs(FsPolicy {
+        read_prefixes: vec![FrozenPath::from_surface(r"C:\x")],
+        ..FsPolicy::default()
+    });
+    let reads = foreign.fs().expect("an fs grant").table(&FsOp::Read);
+    assert_eq!(reads.allows().count(), 0, "{foreign:?}");
 }
 
 /// A stack with `Offline` and partial verb sets crosses the engine protocol
@@ -783,44 +814,43 @@ fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
     );
 }
 
+/// A grant value crosses the wire whole, both sets and all, and resolves on
+/// arrival as it would have where it was written.
 #[test]
-fn exec_grants_round_trip_both_sets_and_every() {
-    let key = name("git");
-    let every = ExecGrant::of([key.clone()], [key]).with_every();
-    let json = serde_json::to_string(&every).unwrap();
-    assert_eq!(serde_json::from_str::<ExecGrant>(&json).unwrap(), every);
+fn a_grant_value_round_trips_both_sets() {
+    let caps = Capabilities {
+        exec: Some(ExecGrant::of(
+            [name("git"), dir_key("/ral-lattice/bin")],
+            [name("git")],
+        )),
+        ..witness_b()
+    };
+    let json = serde_json::to_string(&caps.clone().value()).unwrap();
+    let crossed: crate::data::FOValue = serde_json::from_str(&json).unwrap();
+    let here = FreezeCtx::at(crate::host::EnvVars::new(), test_helper::process_cwd());
+    let resolved = decode_capability_map(&Value::from(crossed), "test", &here).unwrap();
+    assert_eq!(resolved, layer(caps));
 }
 
-/// Every field is required, no other is known, and no key repeats within a
-/// set, the error naming the key and the set.
+/// The exec table knows only `allow` and `deny`: `every` is no key, so a
+/// grant cannot spell every program.  A repeated key adds nothing.
 #[test]
-fn exec_grants_cross_the_wire_strictly() {
-    for json in [
-        r#"{"every":false,"allow":[],"deny":[],"unknown":true}"#,
-        r#"{"allow":[],"deny":[]}"#,
-        r#"{"every":false,"deny":[]}"#,
-        r#"{"every":false,"allow":[]}"#,
-    ] {
-        assert!(serde_json::from_str::<ExecGrant>(json).is_err(), "{json}");
-    }
-    for (field, json) in [
-        (
-            "allow",
-            r#"{"every":false,"allow":[{"Name":"git"},{"Name":"git"}],"deny":[]}"#,
-        ),
-        (
-            "deny",
-            r#"{"every":false,"allow":[],"deny":[{"Name":"git"},{"Name":"git"}]}"#,
-        ),
-    ] {
-        let message = serde_json::from_str::<ExecGrant>(json)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            message.contains(&format!("`{field}`")) && message.contains("`name git"),
-            "{message}"
-        );
-    }
+fn a_grant_value_spells_no_every_and_a_repeat_adds_nothing() {
+    let every = map(vec![(
+        "exec",
+        map(vec![
+            ("every", Value::Bool(true)),
+            ("allow", Value::list(vec![])),
+        ]),
+    )]);
+    let err = decode_capability_map(&every, "test", &test_ctx("/h")).unwrap_err();
+    assert!(err.message.contains("every"), "{}", err.message);
+    let git = || tagged("name", "git");
+    let decode = |allow: Vec<Value>| {
+        let exec = map(vec![("exec", map(vec![("allow", Value::list(allow))]))]);
+        decode_capability_map(&exec, "test", &test_ctx("/h")).unwrap()
+    };
+    assert_eq!(decode(vec![git(), git()]), decode(vec![git()]));
 }
 
 // ── Joining and extension ─────────────────────────────────────────────────
@@ -1029,11 +1059,12 @@ fn some(rng: &mut Rng, n: usize) -> bool {
     rng.below(n) == 0
 }
 
-/// A random exec grant over the universe, `every` set one time in four where
-/// the grant is a policy and not an authored fragment.
-fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
+/// A random exec grant over the universe, and whether its table also holds
+/// every program: one time in four where the grant is a policy and not an
+/// authored fragment.
+fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> (Option<ExecGrant>, bool) {
     if some(rng, 3) {
-        return None;
+        return (None, false);
     }
     let (mut allow, mut deny) = (Vec::new(), Vec::new());
     // Drawn as allowed, excluded, or both; allowed twice as often.
@@ -1062,12 +1093,7 @@ fn rand_exec(u: &Universe, rng: &mut Rng, every_ok: bool) -> Option<ExecGrant> {
             place(rng, ExecKey::Name(n.into()));
         }
     }
-    let grant = ExecGrant::of(allow, deny);
-    Some(if every_ok && some(rng, 4) {
-        grant.with_every()
-    } else {
-        grant
-    })
+    (Some(ExecGrant::of(allow, deny)), every_ok && some(rng, 4))
 }
 
 fn rand_fs(u: &Universe, rng: &mut Rng) -> Option<FsPolicy> {
@@ -1087,13 +1113,15 @@ fn rand_fs(u: &Universe, rng: &mut Rng) -> Option<FsPolicy> {
     })
 }
 
-/// The layer of an authored `exec` and `fs`.
-fn rand_layer_of(exec: Option<ExecGrant>, fs: Option<FsPolicy>) -> GrantLayer {
-    layer(Capabilities {
+/// The layer of an authored `exec` and `fs`, its exec beside every program
+/// where `every`.
+fn rand_layer_of((exec, every): (Option<ExecGrant>, bool), fs: Option<FsPolicy>) -> GrantLayer {
+    let layer = layer(Capabilities {
         exec,
         fs,
         ..Capabilities::default()
-    })
+    });
+    if every { layer.with_every() } else { layer }
 }
 
 fn rand_layer(u: &Universe, rng: &mut Rng) -> GrantLayer {
@@ -1158,8 +1186,8 @@ fn law_4_extension_invariant_on_fs() {
     for _ in 0..1500 {
         let (base, frag) = (rand_fs(&u, &mut rng), rand_fs(&u, &mut rng));
         let (base_layer, frag_layer) = (
-            rand_layer_of(None, base.clone()),
-            rand_layer_of(None, frag.clone()),
+            rand_layer_of((None, false), base.clone()),
+            rand_layer_of((None, false), frag.clone()),
         );
         let extended = base_layer.clone().extend(Fragment::of(frag_layer.clone()));
         let evidence = |layer: &GrantLayer, op: &FsOp, f: &str| {
@@ -1301,21 +1329,21 @@ fn an_allowance_keeps_each_link_its_spelling_passed() {
 /// Activation reads denotations: an axis that denotes `t` activates nothing.
 #[test]
 fn activation_is_denotational() {
-    let every = ExecGrant::of([name("git")], []).with_every();
     let writes_root = FsPolicy {
         write_prefixes: vec![FrozenPath::root()],
         ..FsPolicy::default()
     };
     let top = layer(Capabilities {
-        exec: Some(every),
+        exec: Some(ExecGrant::of([name("git")], [])),
         fs: Some(writes_root.clone()),
         ..Capabilities::default()
-    });
+    })
+    .with_every();
     assert!(top.exec().is_some_and(Axis::is_top));
     assert!(top.fs().is_some_and(Axis::is_top));
     assert!(!top.is_restrictive());
     assert!(!test_helper::stack([top]).is_restrictive());
-    let excluding = with_exec(ExecGrant::of([], [dir_key("/bad")]).with_every());
+    let excluding = with_exec(ExecGrant::of([], [dir_key("/bad")])).with_every();
     assert!(
         excluding.is_restrictive(),
         "an `every` table with exclusions restricts"
@@ -1564,11 +1592,22 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
 /// walk; as an exclusion it is refused.
 #[test]
 fn the_root_key_resolves_with_no_walk() {
+    let fs = |list: &str| {
+        let root = Value::list(vec![tagged("absolute", "/")]);
+        map(vec![("fs", map(vec![(list, root)]))])
+    };
+    let ctx = test_ctx("/h");
     let before = crate::test_access::walk_steps();
-    let root = GrantPath::<Trace>::walk(FrozenPath::root()).unwrap();
-    assert_eq!(root.real, Extent::Everywhere);
+    let read = decode_capability_map(&fs("read"), "test", &ctx).unwrap();
     assert_eq!(crate::test_access::walk_steps(), before);
-    assert!(GrantPath::<Excluded>::walk(FrozenPath::root()).is_err());
+    let reads: Vec<_> = (read.fs().unwrap().table(&FsOp::Read).allows())
+        .map(|a| match a {
+            FsAllow::Prefix(prefix) => &prefix.real,
+            FsAllow::RunPlace(_) => panic!("a decoded fs list holds no run place"),
+        })
+        .collect();
+    assert_eq!(reads, [&Extent::Everywhere]);
+    assert!(decode_capability_map(&fs("deny"), "test", &ctx).is_err());
 }
 
 /// The counter the test above reads sees a walk of the root, which opens the

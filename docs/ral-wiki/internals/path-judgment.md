@@ -149,8 +149,8 @@ function of its layers.**
   kept selector directory, default or override, meets the same root/home/ancestor
   refusal on its followed trace before polarity converts it; an exclusion still
   keeps its held objects. System-read discovery drops unsafe prefixes instead
-  of refusing them. A `Capabilities` that arrives already decoded is
-  resolved by `GrantLayer::from_capabilities`, the same walk. A `GrantLayer`
+  of refusing them. A grant value that crosses from another host is
+  resolved by the same decoder, where it arrives. A `GrantLayer`
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.
 - **An allowance is an `Extent`**: `Everywhere` where the spelling is, or walks

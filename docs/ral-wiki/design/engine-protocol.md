@@ -205,10 +205,10 @@ payload's shape (an `ExecGrant`'s allowance and exclusion sets, verb
 sets as sequences) bumps `PROTOCOL_VERSION` and rebuilds the guest media, whose
 manifest the host compares before packaging. Without the bump stale media passes
 the packaging check and the attach handshake and fails decoding the first
-dispatch. **`PROTOCOL_VERSION` is 34.** `Capabilities` carries an authored
-`ExecGrant` as `every`, `allow` and `deny`: the two sets encode as sequences,
-omitted sets default to empty, and unknown fields are refused. A key may occur
-in both sets. Rebuild guest media with `just vm::boot`. A `Fragment` never
+dispatch. **`PROTOCOL_VERSION` is 34.** An authored ceiling crosses as a grant
+value, the record `grant` takes, which the engine decodes as it decodes any
+grant: unknown keys are refused, a repeat adds nothing, and a key may occur in
+both lists. Rebuild guest media with `just vm::boot`. A `Fragment` never
 crosses: it lives only between loading and `extend`.
 
 ## The laws of an enquiry

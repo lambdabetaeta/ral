@@ -13,14 +13,13 @@
 //! A redirected `endpoint` aims the agent's own traffic at an arbitrary server, so
 //! the file is an exfiltration channel to whoever can write it. Hence two defences:
 //! it lives at the XDG config home, never the working tree the sandboxed agent can
-//! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
+//! write, and it evaluates under [`deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process guard suffices.
 
 use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adapter, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
-use ral_core::authority::policy::{Capabilities, GrantLayer};
-use ral_core::host::EnvVars;
+use ral_core::authority::grant::deny_all;
 use ral_core::own::UserFile;
 use ral_core::shell::runtime::{Break, Escape, Mooring, Value};
 use ral_core::source::{SourceFile, SourceOrigin};
@@ -161,7 +160,7 @@ pub(crate) fn read_optional_file(file: &UserFile, label: &str) -> Result<Option<
     file.read().map_err(|e| format!("{label}: {e}"))
 }
 
-/// Evaluate `source` under a [`Capabilities::deny_all`] layer, so the config can
+/// Evaluate `source` under a [`deny_all`] layer, so the config can
 /// compute a value but reach no effect. Shared with [`crate::net_policy::load`].
 pub(crate) fn evaluate_no_authority(
     shell: &mut Shell,
@@ -172,10 +171,11 @@ pub(crate) fn evaluate_no_authority(
     // No run is in hand — a throwaway shell computing a value — so nothing is
     // installed: no surface, no desk, no nursery.
     let mooring = Mooring::adrift();
-    let deny_all = GrantLayer::from_capabilities(Capabilities::deny_all(), &EnvVars::new())
+    let nothing = shell
+        .decode_grant(&deny_all(), "deny_all")
         .map_err(|e| format!("{label} {origin}: {}", e.message))?;
     shell
-        .with_layer(deny_all, |sh| {
+        .with_layer(nothing, |sh| {
             ral_core::shell::load::evaluate_source(&mooring, sh, source, origin, None)
         })
         .map_err(|e| match e {

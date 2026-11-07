@@ -76,7 +76,7 @@ could omit ([[map/exarch/policy|policy]]).
 
 - **A trusted location still gets a no-authority evaluation.** `config.ral` is
   source, so it is *evaluated*, not parsed (`exarch/src/config.rs`) — under a
-  no-authority [[design/grant|grant]] (`Capabilities::deny_all`: `exec`, `net`,
+  no-authority [[design/grant|grant]] (the `deny_all` grant value: `exec`, `net`,
   and `fs` all denied), in a throwaway shell. It can compute a value, cause
   no effect. The asymmetry is deliberate: even a file the agent cannot write is
   evaluated as if it might be hostile, because a redirected endpoint is an

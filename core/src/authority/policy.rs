@@ -28,9 +28,10 @@ pub(crate) use exec::{ExecAllow, ExecDeny};
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
 pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
 pub(crate) use lattice::Axis;
+#[cfg(any(test, feature = "test-util"))]
+pub use lattice::{Capabilities, ExecGrant, ExecKey, FsPolicy};
 pub use lattice::{
-    Capabilities, EditorVerb, Evidence, ExecGrant, ExecKey, ExecSummary, Extent, Flag, Fragment,
-    FsPolicy, FsSummary, Gpu, GrantLayer, GrantPath, GrantStack, GrantSummary, Join, LayerSummary,
-    Meet, Net, ShellVerb,
+    EditorVerb, Evidence, ExecSummary, Extent, Flag, Fragment, FsSummary, Gpu, GrantLayer,
+    GrantPath, GrantStack, GrantSummary, Join, LayerSummary, Meet, Net, ShellVerb,
 };
 pub use table::Withheld;

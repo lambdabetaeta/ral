@@ -57,12 +57,14 @@ impl Polar for Excluded {
 }
 
 impl<W: Polar> GrantPath<W> {
-    /// `written` resolved as its polarity resolves it: the root spelling by
-    /// polarity alone, every other walked.
+    /// `written` resolved as its polarity resolves it, the root spelling by
+    /// polarity alone and every other walked: a test's rule, made without a
+    /// grant value.
     ///
     /// # Errors
     /// A spelling whose walk fails for any reason but an absent or
     /// unenterable tail, named; what the polarity refuses of the root.
+    #[cfg(test)]
     pub(crate) fn walk(written: FrozenPath) -> Result<GrantPath<W::Grant>, PolicyError> {
         if written.is_root() {
             W::root(written)

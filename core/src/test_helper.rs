@@ -48,8 +48,22 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
 /// # Panics
 /// If a spelling cannot be resolved.
 pub fn layer(caps: crate::authority::policy::Capabilities) -> crate::authority::policy::GrantLayer {
-    crate::authority::policy::GrantLayer::from_capabilities(caps, &crate::host::EnvVars::new())
-        .expect("a test grant resolves")
+    decoded(caps).expect("a test grant resolves")
+}
+
+/// `caps` resolved by the one grant front-end, as its grant value, anchored at
+/// [`process_cwd`] and finding a bare name on the host's `PATH`.
+///
+/// # Errors
+/// What the decoder refuses of the grant value.
+pub fn decoded(
+    caps: crate::authority::policy::Capabilities,
+) -> Result<crate::authority::policy::GrantLayer, crate::authority::grant::freeze::PolicyError> {
+    crate::shell::grant::decode_capability_map(
+        &crate::shell::runtime::Value::from(caps.value()),
+        "test grant",
+        &crate::authority::grant::freeze::FreezeCtx::at(crate::host::EnvVars::new(), process_cwd()),
+    )
 }
 
 /// The stack of `layers` over the ambient root.

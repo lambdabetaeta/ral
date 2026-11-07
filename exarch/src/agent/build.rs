@@ -19,9 +19,9 @@ use crate::provider::{Provider, Toolset};
 use crate::record::Opening;
 use crate::record::{AgentId, AgentLog, Inherited, Mail, Model, Resumed, Schedules, Selected};
 use crate::shell_eval::builtins;
-use ral_core::authority::policy::{Capabilities, GrantStack};
+use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::{Severed, WireTransport};
-use ral_core::data::datum::Datum as _;
+use ral_core::data::FOValue;
 use ral_core::engine::EngineInstaller;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
@@ -131,7 +131,8 @@ pub enum RootEngine {
     },
 }
 impl RootEngine {
-    /// A guest engine's control stream, its scratch named by `SCRATCH_VAR`.
+    /// A guest engine's control stream, its scratch named by `SCRATCH_VAR`,
+    /// and `ceiling`, the grant value its recipe resolves where it runs.
     ///
     /// # Errors
     /// Refuses a control stream that cannot be adopted.
@@ -139,13 +140,13 @@ impl RootEngine {
         stream: WireStream,
         cwd: GuestPath,
         scratch: GuestPath,
-        ceiling: Capabilities,
+        ceiling: FOValue,
     ) -> Result<Self, String> {
         let transport = WireTransport::adopt(stream, Liveness::default())
             .map_err(|e| format!("could not take control of the machine: {e}"))?;
         let root = Root::new(EnginePath::Guest(cwd))
             .with_env(guest_scratch_env(&scratch))
-            .with_config(ceiling.encode());
+            .with_config(ceiling);
         let attach = Attach::root(
             EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Guest(scratch)),
             root,

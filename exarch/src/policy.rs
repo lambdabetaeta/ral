@@ -16,14 +16,16 @@ mod load;
 
 use base::resolve_base;
 use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
-use ral_core::authority::grant::freeze::{FreezeCtx, host_absolute};
-use ral_core::authority::policy::{
-    Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, GrantStack,
-};
+use ral_core::authority::grant::freeze::{FreezeCtx, Place, host_absolute};
+use ral_core::authority::policy::{Fragment, GrantLayer, GrantStack};
+use ral_core::data::FOValue;
+use ral_core::data::datum::Datum as _;
 use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::{CwdPath, FrozenPath};
-use std::collections::BTreeSet;
+use ral_core::shell::grant::decode_capability_map;
+use ral_core::shell::runtime::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Compose a session's effective [`GrantStack`], with the restrict files'
@@ -102,9 +104,9 @@ pub fn for_invocation(
     // the agent, as an `--extend` file is.
     if !stack.fs_is_top() {
         if !restricts.is_empty() {
-            stack.push(deny_layer(&restricts)?);
+            stack.push(deny_layer(&restricts, &ctx)?);
         }
-        stack.push(deny_layer(&crate::provider::credential_files())?);
+        stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
 
     // On the same footing: exec unrestricted asked not to be confined, and an
@@ -112,7 +114,7 @@ pub fn for_invocation(
     // A child a `dangerous` parent narrows thus runs exarch, regaining only the
     // parent's own authority.
     if !stack.exec_is_top() {
-        stack.push(self_layer(own)?);
+        stack.push(self_layer(own, &ctx)?);
     }
 
     Ok(Invocation { stack, restricts })
@@ -152,56 +154,51 @@ pub fn base_layer(base_name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, String
     resolve_base(base_name, &anchor.with_scratch(ctx.scratch()))
 }
 
-/// A deny layer carving `paths` out of an otherwise-unrestricted fs policy:
-/// `t ⊕ (f if X)`, written as everywhere less `paths`.  A constructor, not a
-/// mutator, since composition is the stack: each caller pushes the layer this
-/// returns.
+/// A deny layer carving `paths` out of an otherwise-unrestricted fs policy.
+/// A constructor, not a mutator, since composition is the stack: each caller
+/// pushes the layer this returns.
 ///
 /// Each path's walk holds the object it names, which the in-process check and
 /// the OS sandbox profiles each judge, expanded to the firmlink variants.
 /// A path [`host_absolute`] refuses fails the layer whole: a deny that named
 /// nothing would fail open.
-fn deny_layer(paths: &[PathBuf]) -> Result<GrantLayer, String> {
-    let deny_paths: Vec<_> = paths
+fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    let held = paths
         .iter()
-        .map(|p| host_absolute(p))
+        .map(|p| host_absolute(p).map(FrozenPath::into_string))
         .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|e| e.message)?
-        .into_iter()
-        .collect();
-    let everywhere = || vec![FrozenPath::root()];
-    let fs = (!deny_paths.is_empty()).then(|| FsPolicy {
-        read_prefixes: everywhere(),
-        write_prefixes: everywhere(),
-        deny_paths,
-    });
-    GrantLayer::from_capabilities(
-        Capabilities {
-            fs,
-            ..Capabilities::default()
-        },
-        &EnvVars::new(),
-    )
-    .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    carve_out(excluding("fs", held), ctx)
 }
 
 /// Exclude the boot-pinned binary `own` from exec. Called only when exec is
 /// restricted; refuses if `own` is `None`. An fs exclusion would refuse every
 /// bundled tool.
-fn self_layer(own: Option<&Path>) -> Result<GrantLayer, String> {
+fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
     let exe = own.ok_or(
         "exarch could not pin its own binary at startup (is it missing or unreadable?), \
          so cannot exclude it from exec",
     )?;
-    let exarch = ExecKey::Path(FrozenPath::freeze(exe)?);
-    GrantLayer::from_capabilities(
-        Capabilities {
-            exec: Some(ExecGrant::of([], [exarch]).with_every()),
-            ..Capabilities::default()
-        },
-        &EnvVars::new(),
-    )
-    .map_err(|e| e.message)
+    let held = host_absolute(exe).map_err(|e| e.message)?.into_string();
+    carve_out(excluding("exec", [held]), ctx)
+}
+
+/// The grant value `[axis: [deny: paths]]`, each path an `absolute` place.
+fn excluding(axis: &str, paths: impl IntoIterator<Item = String>) -> FOValue {
+    let denies: Vec<_> = paths
+        .into_iter()
+        .map(|p| Place::Absolute(p).value())
+        .collect();
+    let deny = BTreeMap::from([("deny".to_owned(), denies)]).encode();
+    BTreeMap::from([(axis.to_owned(), deny)]).encode()
+}
+
+/// `t ⊕ record`: every request less what `record` excludes, the record read
+/// as an extension of the top, as `--extend` reads a fragment.
+fn carve_out(record: FOValue, ctx: &FreezeCtx) -> Result<GrantLayer, String> {
+    let layer =
+        decode_capability_map(&Value::from(record), "exarch", ctx).map_err(|e| e.message)?;
+    Ok(GrantLayer::root().extend(Fragment::of(layer)))
 }
 
 #[cfg(test)]
@@ -313,9 +310,13 @@ mod tests {
             .filter_map(|s| s.exec)
             .flat_map(|exec| exec.denies)
             .collect();
+        let own_text = ral_core::path::shown(&own);
         assert_eq!(
             denied,
-            [ExecKey::Path(FrozenPath::freeze(&own).unwrap()).to_string()]
+            [format!(
+                "`absolute {}",
+                ral_core::syntax::quote_word(&own_text)
+            )]
         );
 
         let mut shell = ral_core::test_helper::core_shell();

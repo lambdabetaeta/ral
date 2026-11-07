@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::authority::policy::{Capabilities, GrantStack, GrantSummary};
+use crate::authority::policy::{GrantStack, GrantSummary};
 use crate::data::datum::{Datum, tag, untag};
 use crate::data::{Bytes, FOValue, Finite};
 use crate::shell::runtime::{Done, Owner, Sample, Value};
@@ -202,19 +202,6 @@ impl Datum for GrantSummary {
     fn decode(v: &FOValue) -> Result<Self, String> {
         serde_json::from_slice(&Bytes::decode(v)?)
             .map_err(|e| format!("expected an encoded grant summary: {e}"))
-    }
-}
-
-/// Opaque to ral likewise: an authored ceiling crosses in the same codec, for
-/// an engine to resolve on the host it runs on (`Root.config`).
-impl Datum for Capabilities {
-    fn encode(self) -> FOValue {
-        Bytes::from(serde_json::to_vec(&self).expect("a ceiling is plain data")).encode()
-    }
-
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        serde_json::from_slice(&Bytes::decode(v)?)
-            .map_err(|e| format!("expected an encoded ceiling: {e}"))
     }
 }
 

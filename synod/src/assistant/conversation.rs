@@ -81,7 +81,7 @@ impl Conversation {
         })?;
 
         // Authority and prompt paths use only the guest namespace.
-        let caps = grant.capabilities();
+        let ceiling = grant.ceiling();
         let system =
             crate::assistant::prompt::assemble(guest_abi::layout::WORK.as_ref(), &grant.name())?;
 
@@ -121,7 +121,7 @@ impl Conversation {
         let guest = Guest::start(
             booted,
             config,
-            caps,
+            ceiling,
             provider,
             netgate::Config {
                 policy: Arc::new(policy),

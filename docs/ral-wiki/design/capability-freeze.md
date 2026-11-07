@@ -9,9 +9,10 @@ authority* is a type split: nothing unresolved reaches the dynamic stack, and a
 
 The types (`core/src/authority/policy/lattice.rs`):
 
-- *`Capabilities`* — the authored value: per-effect policies (`exec`, `fs`,
-  `net`, and the `editor` and `shell` verb sets) over spellings. Nothing
-  judges it and no layer keeps it.
+- *the grant value* — the authored record: per-effect policies (`exec`, `fs`,
+  `net`, and the `editor` and `shell` verb sets) over spellings, as `grant`
+  takes it or a host authors it for another. Nothing judges it and no layer
+  keeps it; `Capabilities` is a test builder that spells one.
 - *`GrantLayer`* — what a layer in force is: its rules, resolved, and the axes
   that name no path. Each path is a `GrantPath { written, real }`: the
   spelling as written, and what its walk made of it (`Extent` for an allowance,
@@ -76,9 +77,10 @@ before the program runs, and the decoder refuses it again for a value that
 arrived untyped. Authors write `` `cwd sub `` to pin "relative to here" once.
 
 The inline grant, profile loader (`core/src/shell/load/profile.rs`) and
-spawn grant (`core/src/shell/grant/spawn.rs`) share this decoder. Authored
-`Capabilities` pass through `GrantLayer::from_capabilities`, the same walk;
-`root` / `deny_all` / `default` construct path-free layers. So *resolved by construction* is
+spawn grant (`core/src/shell/grant/spawn.rs`) share this decoder, and so does
+every grant value a host authors (synod's ceiling, exarch's carve-outs,
+`deny_all`), through `Shell::decode_grant` or the decoder itself; `root` /
+`default` construct path-free layers. So *resolved by construction* is
 a visibility fact, not a discipline: no surface admits an unresolved layer.
 
 ## What decode pins, and what the access resolves
@@ -102,9 +104,8 @@ the walk's to say, once. That makes the algebra a pure function of the layers.
 - **Resolving refuses a path that is not Unicode** where it is a spelling
   (`FrozenPath::freeze`); a position is kept native and byte-exact.
 - **A guest's grant is resolved on the guest's own filesystem, not the host's.**
-  synod spells it with `FrozenPath::from_guest` and sends the authored
-  `Capabilities` as the guest engine's config; the engine resolves it where the
-  guard that matches it runs. Spellings cross hosts, a position or an identity
+  synod sends it as a grant value, unfolded, in the guest engine's
+  `Root.config`; the engine decodes it where the guard that matches it runs. Spellings cross hosts, a position or an identity
   never does ([[design/authority-tables|authority-tables]]).
 - **The access is walked before matching.** A grant of
   `` read: [`home sandbox] `` is not escaped by a `~/sandbox/leak → /etc/passwd`

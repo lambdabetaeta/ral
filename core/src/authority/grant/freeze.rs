@@ -46,6 +46,8 @@
 use super::Polar;
 use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
+use crate::data::FOValue;
+use crate::data::datum::{Datum as _, tag};
 use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::identity::windows_identity_components;
@@ -164,6 +166,12 @@ impl Place {
             | Self::Xdg(_, s) => s,
         }
     }
+
+    /// The place as a grant value spells it, for one host to author and
+    /// another to freeze against its own anchor.
+    pub fn value(&self) -> FOValue {
+        tag(&self.tag(), Some(self.payload().to_owned().encode()))
+    }
 }
 
 /// A set of directories the environment chooses, valid only under `dir`.
@@ -256,8 +264,8 @@ impl PolicyError {
             written.shown()
         ))
         .with_hint(
-            "To run every program write `every`; for every program beneath a directory write \
-             `dir` before the place.",
+            "To run every program leave `exec` out; for every program beneath a directory \
+             write `dir` before the place.",
         )
     }
 }

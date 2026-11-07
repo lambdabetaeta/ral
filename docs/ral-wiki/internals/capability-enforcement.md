@@ -90,7 +90,7 @@ under intersection: a bare key means whatever file the decoding env's `PATH` fin
 ([[decisions/260906_object-not-name|object-not-name]]). So a layer is resolved
 where it is decoded, and the fold meets what it holds. A `GrantLayer` keeps its
 rules and nothing beside them: every spelling was walked as the layer was made
-(`GrantLayer::from_capabilities`, or `shell::grant::decode_capability_map`), an allowance
+(`shell::grant::decode_capability_map`, the one front-end), an allowance
 holding the position its walk reached (`Extent`: everywhere, or under a
 position), an exclusion the objects its walk held (`Excluded`: the name and,
 where it was a link, its target), a bare name the file the decoding env's `PATH`

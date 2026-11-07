@@ -7,7 +7,7 @@ use exarch::host::{EngineLost, Factory, Host, LaunchConfig, RootEngine};
 use exarch::port::{BusReceiver, Port};
 use exarch::provider::Provider;
 use exarch::record::AgentId;
-use ral_core::authority::policy::Capabilities;
+use ral_core::data::FOValue;
 use ral_core::own::OwnDir;
 use ral_core::path::{GuestPath, shown};
 use vm_manager::{Booted, GuestConsole, Machine};
@@ -43,7 +43,7 @@ impl Guest {
     pub(crate) fn start(
         booted: Booted,
         mut config: LaunchConfig,
-        ceiling: Capabilities,
+        ceiling: FOValue,
         provider: Arc<Provider>,
         net: netgate::Config,
     ) -> Result<Self, String> {
