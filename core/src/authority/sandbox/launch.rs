@@ -320,7 +320,7 @@ mod tests {
 
     /// A scope nothing stops.
     fn unstopped() -> crate::process::ScopeNode {
-        crate::process::DurableRoot::default().worker()
+        crate::process::DurableRoot::default().child()
     }
 
     #[cfg(target_os = "macos")]

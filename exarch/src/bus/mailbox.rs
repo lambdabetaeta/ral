@@ -94,7 +94,7 @@ pub(crate) struct WeakAgentAddress(Weak<Shared>);
 struct Shared {
     id: AgentId,
     parent: Option<AgentAddress>,
-    life: ScopeNode,
+    home: ScopeNode,
     admission: Admission,
     journal: Recorder,
     // A panic can leave these folds disagreeing with the journal: keep poison.
@@ -363,7 +363,7 @@ impl Txn<'_> {
         &self.cell.model
     }
     pub(crate) fn is_live(&self) -> bool {
-        !self.shared.life.is_cancelled()
+        !self.shared.home.is_cancelled()
     }
     pub(crate) fn weak(&self) -> WeakAgentAddress {
         WeakAgentAddress(Arc::downgrade(self.shared))
@@ -730,7 +730,7 @@ impl Shared {
     fn poisoned(&self) -> Unavailable {
         let failure = self.journal.cell_poisoned(format!(
             "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log", self.id));
-        self.life.cancel(CancelCause::Cancelled);
+        self.home.cancel(CancelCause::Cancelled);
         self.notify();
         failure
     }
@@ -747,7 +747,7 @@ impl Shared {
 impl AgentMailbox {
     pub(crate) fn new(
         id: AgentId,
-        life: ScopeNode,
+        home: ScopeNode,
         journal: Recorder,
         admission: Admission,
         parent: Option<AgentAddress>,
@@ -761,7 +761,7 @@ impl AgentMailbox {
             shared: Arc::new(Shared {
                 id,
                 parent,
-                life,
+                home,
                 admission,
                 journal,
                 cell: Mutex::new(Cell {
@@ -789,8 +789,8 @@ impl AgentMailbox {
     pub(crate) fn address(&self) -> AgentAddress {
         AgentAddress(self.shared.clone())
     }
-    pub(crate) fn life(&self) -> Scope {
-        (*self.shared.life).clone()
+    pub(crate) fn home(&self) -> Scope {
+        (*self.shared.home).clone()
     }
     pub(crate) fn transact<T>(&self, f: impl FnOnce(&mut Txn<'_>) -> T) -> Result<T, Unavailable> {
         self.address().transact(f)
@@ -834,7 +834,7 @@ impl AgentMailbox {
                     Err(_) => Next::Ended,
                     Ok(Queued::Command(command)) => Next::Command(command),
                     Ok(Queued::Input(input)) => {
-                        let exchange = Lease::under(&self.shared.life);
+                        let exchange = Lease::under(&self.shared.home);
                         txn.cell.exchange = Some(exchange.node());
                         Next::Take { input, exchange }
                     }
@@ -859,7 +859,7 @@ impl AgentMailbox {
                 (None, Admission::Parent { idle }) => {
                     let remaining = idle.saturating_sub(txn.cell.since.elapsed());
                     if remaining.is_zero() {
-                        self.shared.life.cancel(CancelCause::TimedOut);
+                        self.shared.home.cancel(CancelCause::TimedOut);
                         self.shared.notify();
                         return Next::Ended;
                     }
@@ -870,7 +870,7 @@ impl AgentMailbox {
             txn.cell.waiting_for_input = !rest.pending && !txn.cell.schedules_pending();
             let waited = crate::site::site!(super::transaction::Silent::CellWait,
             &self.shared.signal => wait_timeout_while(txn.cell, wait, |cell: &mut Cell| {
-                !self.shared.life.is_cancelled() && cell.rung.is_empty()
+                !self.shared.home.is_cancelled() && cell.rung.is_empty()
                     && cell.next_index(self.shared.admission).is_none()
             }));
             if let Ok((cell, _)) = waited {
@@ -952,7 +952,7 @@ impl AgentMailbox {
 impl Drop for AgentMailbox {
     fn drop(&mut self) {
         let _ended = self.transact(|txn| {
-            txn.shared.life.cancel(CancelCause::Cancelled);
+            txn.shared.home.cancel(CancelCause::Cancelled);
             txn.cell.queue.clear();
         });
     }
@@ -1003,7 +1003,7 @@ impl AgentAddress {
     pub(crate) fn ring(&self, label: String, id: ScheduleId) {
         let _entered = super::transaction::Entered::new(&self.0, self.0.id);
         if let Ok(mut cell) = self.0.cell.lock_strict()
-            && !self.0.life.is_cancelled()
+            && !self.0.home.is_cancelled()
         {
             cell.rung
                 .entry(label)
@@ -1099,7 +1099,7 @@ impl AgentAddress {
     }
 
     pub(crate) fn end(&self, cause: CancelCause) {
-        let _ended = self.transact(|txn| txn.shared.life.cancel(cause));
+        let _ended = self.transact(|txn| txn.shared.home.cancel(cause));
     }
 
     pub(crate) fn is_live(&self) -> bool {

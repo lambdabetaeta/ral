@@ -257,7 +257,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
     for entry in workers(&session) {
         entry
             .handle
-            .cancel
+            .home
             .cancel(ral_core::process::CancelCause::Cancelled);
     }
 }
@@ -349,7 +349,7 @@ fn gone_joins_and_collects_failures_without_a_model_prompt() {
     let mut session = Agent::for_test("system").unwrap();
     let helper = test_agent(
         &session.fleet,
-        TestAgentSpec::child("helper", &session.handle(), session.mailbox.life().child()),
+        TestAgentSpec::child("helper", &session.handle(), session.mailbox.home().child()),
     )
     .unwrap();
     crate::agent::testkit::take_task(&helper, &helper.mailbox);

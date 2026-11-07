@@ -374,7 +374,7 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
             &[],
             None,
             Ownership::Kept,
-            &crate::process::DurableRoot::default().worker(),
+            &crate::process::DurableRoot::default().child(),
         )
         .unwrap();
         let late = HostPty::open();
@@ -484,7 +484,7 @@ fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
         ready.display()
     );
 
-    let striker = DurableRoot::default().worker();
+    let striker = DurableRoot::default().child();
     let (spawned, _, shell) = spawn_confined(&script, &striker);
 
     let canceller = std::thread::spawn(move || {
@@ -536,7 +536,7 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
     if envelope_launches(&unrestricted()).is_none() {
         return;
     }
-    let scope = DurableRoot::default().worker();
+    let scope = DurableRoot::default().child();
     let (spawned, pgid, shell) = spawn_confined("sleep 30", &scope);
     assert!(
         rustix::process::test_kill_process_group(pgid.as_pid()).is_ok(),

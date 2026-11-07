@@ -100,7 +100,7 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         grandchild.status().unwrap().job.is_some()
     });
     crate::agent::attend::hooks::panic_on_run(child.id());
-    let life = child.mailbox.life();
+    let life = child.mailbox.home();
     child
         .handle()
         .0
@@ -136,7 +136,7 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         1
     );
     let answer = parent.ral(
-        &parent.mailbox.life().child(),
+        &parent.mailbox.home().child(),
         "exarch-agents `read 'helper'",
         5,
         &emit,

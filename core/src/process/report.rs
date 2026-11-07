@@ -252,7 +252,7 @@ mod tests {
     fn a_stop_ends_the_wait_on_an_open_silent_report() {
         use crate::process::{CancelCause, DurableRoot, POLL_SLICE};
         let (reader, _writer) = crate::process::cloexec_socketpair().expect("socketpair");
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let stopper = scope.clone();
         let stop = std::thread::spawn(move || {
             std::thread::sleep(3 * POLL_SLICE);

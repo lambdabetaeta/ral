@@ -27,7 +27,7 @@ fn ended_helpers_without_debt_are_not_pending_and_failures_are_taken_once() {
     let parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     crate::agent::testkit::take_task(&helper, &helper.mailbox);
@@ -66,12 +66,12 @@ fn dismiss_all_ends_every_helper_before_joining_any() {
     let parent = trunk(false);
     let first = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("first", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("first", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let second = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("second", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("second", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let first_handle = (*first).clone();
@@ -128,7 +128,7 @@ fn newest_name_remains_discoverable_after_join() {
     let mut nursery = Nursery::default();
     let old = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let old_handle = (*old).clone();
@@ -142,7 +142,7 @@ fn newest_name_remains_discoverable_after_join() {
     assert_eq!(nursery.join(old_handle.id()), Vec::<String>::new());
     let new = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let new_handle = (*new).clone();

@@ -509,7 +509,7 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
             );
             let child = test_agent(
                 &fleet,
-                TestAgentSpec::child("child", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("child", &root, root.mailbox.home().child()),
             )
             .unwrap();
             born(&mut app, child.id(), "child", root.id());
@@ -579,7 +579,7 @@ fn a_root_parked_on_a_working_helper_reads_as_waiting_on_agents() {
     let (mut app, rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
     let child = test_agent(
         &fleet,
-        TestAgentSpec::child("child", &root, root.mailbox.life().child()),
+        TestAgentSpec::child("child", &root, root.mailbox.home().child()),
     )
     .unwrap();
     born(&mut app, child.id(), "child", root.id());
@@ -616,7 +616,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
     let (mut app, _rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
     let helper = test_agent(
         &fleet,
-        TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
+        TestAgentSpec::child("helper", &root, root.mailbox.home().child()),
     )
     .unwrap();
     crate::agent::testkit::take_task(&helper, &helper.mailbox);
@@ -632,7 +632,7 @@ fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_contin
 
     assert_eq!(root_exchange.cause(), Some(CancelCause::Interrupted));
     assert!(helper.is_live(), "Stop preserves helpers");
-    assert!(!helper.mailbox.life().is_cancelled());
+    assert!(!helper.mailbox.home().is_cancelled());
     helper
         .report(ChildStatus::Stopped)
         .expect("the helper reports");

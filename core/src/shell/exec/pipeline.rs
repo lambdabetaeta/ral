@@ -305,7 +305,7 @@ mod tests {
         let trapper = Trapper::new();
         let mut shell = crate::test_helper::core_shell();
         let mooring = Mooring::adrift();
-        let frame = crate::process::DurableRoot::default().worker();
+        let frame = crate::process::DurableRoot::default().child();
         let (tx, rx) = std::sync::mpsc::channel();
         let group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");
         let mut cmd = std::process::Command::new("/bin/sh");

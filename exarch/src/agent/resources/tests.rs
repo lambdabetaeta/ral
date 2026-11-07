@@ -229,7 +229,7 @@ fn resource_rows_survey_the_agents_accumulators() {
     for entry in workers(&session) {
         entry
             .handle
-            .cancel
+            .home
             .cancel(ral_core::process::CancelCause::Cancelled);
     }
 }

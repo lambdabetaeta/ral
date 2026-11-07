@@ -533,7 +533,7 @@ impl Agent {
             .map_err(|error| error.to_string())?;
         Self::born(
             &self.fleet,
-            Parent::Agent(&self.handle, self.mailbox.life().child()),
+            Parent::Agent(&self.handle, self.mailbox.home().child()),
             name,
             engine,
             self.body.client.clone(),

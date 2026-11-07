@@ -13,7 +13,7 @@ fn root(fleet: &Arc<Fleet>, name: &str) -> TestAgent {
 fn child(fleet: &Arc<Fleet>, parent: &TestAgent, name: &str) -> TestAgent {
     test_agent(
         fleet,
-        TestAgentSpec::child(name, parent, parent.mailbox.life().child()),
+        TestAgentSpec::child(name, parent, parent.mailbox.home().child()),
     )
     .unwrap()
 }
@@ -135,7 +135,7 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
         .message(&parent.handle(), "follow up".into())
         .unwrap();
     let handle = child.handle();
-    let life = child.mailbox.life();
+    let life = child.mailbox.home();
     handle
         .0
         .address

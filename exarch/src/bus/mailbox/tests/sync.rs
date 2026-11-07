@@ -133,7 +133,7 @@ fn report_syncs_its_status_before_parent_delivery_and_parent_sync() {
     let helper = configured_mailbox(
         Admission::Parent { idle: WAIT },
         helper_journal.clone(),
-        parent.life().child(),
+        parent.home().child(),
         Some(parent.address()),
         true,
     );
@@ -167,7 +167,7 @@ fn failed_status_sync_uses_precommit_debt_and_sends_only_one_failed_fallback() {
     let helper = configured_mailbox(
         Admission::Parent { idle: WAIT },
         journal.clone(),
-        parent.life().child(),
+        parent.home().child(),
         Some(parent.address()),
         true,
     );

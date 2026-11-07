@@ -142,7 +142,7 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let outcome = session.deliberate(
-        &session.mailbox.life().child(),
+        &session.mailbox.home().child(),
         Some(("compute then crash".into(), Voice::Human)),
         None,
         &emit,
@@ -318,7 +318,7 @@ fn panic_after_prune_does_not_resurrect_binding() {
         ),
     );
     let outcome = session.deliberate(
-        &session.mailbox.life().child(),
+        &session.mailbox.home().child(),
         Some(("compute then crash".into(), Voice::Human)),
         None,
         &emit,

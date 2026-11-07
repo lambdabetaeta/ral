@@ -81,7 +81,7 @@ fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
     let (report, report_writer) = crate::process::cloexec_socketpair().unwrap();
     launch.confine(crate::process::launch::Confined {
         report: crate::process::report::Report::new(report, report_writer.into()),
-        scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
+        scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().child()),
         envelope: Some(crate::process::launch::Envelope {
             program: "bwrap",
             payload_pgid: Some(Box::new(move || {

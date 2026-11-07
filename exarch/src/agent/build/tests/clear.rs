@@ -222,7 +222,7 @@ impl Seeded {
                 .iter()
                 .any(|binding| binding.name == "keep" && binding.preview == "1")
         );
-        assert!(!self.entries[0].handle.cancel.is_cancelled());
+        assert!(!self.entries[0].handle.home.is_cancelled());
         assert_eq!(crate::agent::testkit::schedules(agent).len(), 1);
         assert_eq!(agent.body.pins.len(), 1);
         assert_eq!(
@@ -505,7 +505,7 @@ fn clear_cancels_workers_and_records_the_outgoing_engines_failure_once() {
     assert_eq!(entries.len(), 1);
     agent.clear().unwrap();
     assert_eq!(outgoing.session_ended().unwrap(), Some(143));
-    assert!(entries[0].handle.cancel.is_cancelled());
+    assert!(entries[0].handle.home.is_cancelled());
     assert_eq!(probe_count(&agent, ral_core::test_access::worker_count), 0);
     let failures = agent.teardown().failures;
     assert_eq!(failures.len(), 1);
@@ -705,7 +705,7 @@ fn clear_in_one_root_leaves_another_roots_queued_report_alone() {
     let parent = Agent::for_test("system").unwrap();
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     take_task(&helper, &helper.mailbox);

@@ -321,7 +321,7 @@ mod tests {
             HandleInner::new(
                 WorkerId(id),
                 title,
-                DurableRoot::default().worker(),
+                DurableRoot::default().child(),
                 Streams::default(),
             )
         };

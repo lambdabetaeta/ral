@@ -807,7 +807,7 @@ mod chokepoint_tests {
         let (handle, permit) = HandleInner::new(
             WorkerId(99),
             "stopping-pin",
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
             Streams::default(),
         );
         handle.claim_and_stop();

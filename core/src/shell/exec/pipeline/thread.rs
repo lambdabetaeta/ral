@@ -17,25 +17,25 @@ use std::sync::Arc;
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
-    cancel: ScopeNode,
+    home: ScopeNode,
 }
 
 impl ThreadStage {
     /// The collector's write on the stage's node; on Windows, one interrupt
     /// of the I/O in flight.
     pub(super) fn cancel(&self, cause: CancelCause) {
-        self.cancel.cancel(cause);
+        self.home.cancel(cause);
         #[cfg(windows)]
         self.interrupt();
     }
 
     pub(super) fn id(&self) -> ScopeId {
-        self.cancel.id()
+        self.home.id()
     }
 
     #[cfg(windows)]
     pub(super) fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.home.is_cancelled()
     }
 
     /// `CancelSynchronousIo` cancels only the I/O pending when it lands, so a
@@ -58,12 +58,12 @@ impl ThreadStage {
     /// transition-table tests, and the scope it was built over.
     #[cfg(test)]
     pub(super) fn fake() -> (Self, Scope) {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let view = Scope::clone(&node);
         (
             Self {
                 join: None,
-                cancel: node,
+                home: node,
             },
             view,
         )
@@ -140,7 +140,7 @@ pub(super) fn launch_thread_stage(
 
     Ok(ThreadStage {
         join: Some(join),
-        cancel: node,
+        home: node,
     })
 }
 
@@ -329,7 +329,7 @@ mod tests {
         parent.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
         let outer = Mooring {
             terminal_access: TerminalAccess::Leased,
-            home: DurableRoot::default().worker(),
+            home: DurableRoot::default().child(),
             cleanup_grace: Duration::ZERO,
             ..Mooring::adrift()
         };
@@ -340,7 +340,7 @@ mod tests {
 
         let stage_mooring = Mooring::for_thread(
             &outer,
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
             outer.surface.clone(),
         );
         assert!(

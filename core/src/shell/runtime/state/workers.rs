@@ -532,7 +532,7 @@ mod tests {
         let (handle, permit) = HandleInner::new(
             WorkerId(id),
             title,
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
             Streams::default(),
         );
         (handle, move || {

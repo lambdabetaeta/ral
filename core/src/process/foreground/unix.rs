@@ -39,7 +39,7 @@ pub struct TerminalLoan {
     saved_pgid: Pid,
     saved_termios: Option<Termios>,
     /// The run's node, struck with every key heard (never the current scope).
-    frame: ScopeNode,
+    home: ScopeNode,
     pressed: Option<CancelCause>,
 }
 
@@ -78,12 +78,12 @@ impl TerminalLoan {
     )]
     pub(crate) fn prepare(
         _lease: &crate::process::TerminalLease,
-        frame: &ScopeNode,
+        home: &ScopeNode,
     ) -> Option<PreparedTerminalLoan> {
         Some(PreparedTerminalLoan(Self {
             saved_pgid: rustix::process::getpgrp(),
             saved_termios: termios_snapshot(),
-            frame: frame.clone(),
+            home: home.clone(),
             pressed: None,
         }))
     }
@@ -91,12 +91,12 @@ impl TerminalLoan {
     /// A loan with no handoff, so the strike can be tested alone: restoring
     /// the foreground as found is a no-op.
     #[cfg(test)]
-    pub(crate) fn for_test(frame: &ScopeNode) -> Self {
+    pub(crate) fn for_test(home: &ScopeNode) -> Self {
         Self {
             saved_pgid: rustix::termios::tcgetpgrp(rustix::stdio::stdin())
                 .unwrap_or_else(|_| rustix::process::getpgrp()),
             saved_termios: None,
-            frame: frame.clone(),
+            home: home.clone(),
             pressed: None,
         }
     }
@@ -106,7 +106,7 @@ impl TerminalLoan {
     pub(crate) fn hear(&mut self, signal: Signal) {
         if let Some(key) = gesture(signal) {
             self.pressed = self.pressed.max(Some(key));
-            self.frame.cancel(key);
+            self.home.cancel(key);
         }
     }
 
@@ -238,14 +238,14 @@ mod tests {
         assert_eq!(sigttou_is_blocked(), was_blocked);
     }
 
-    /// What a loan struck on its frame as it heard `heard`.
+    /// What a loan struck on its home as it heard `heard`.
     fn struck_after(heard: &[i32]) -> Option<CancelCause> {
-        let frame = crate::process::DurableRoot::new().worker();
-        let mut loan = TerminalLoan::for_test(&frame);
+        let home = crate::process::DurableRoot::new().child();
+        let mut loan = TerminalLoan::for_test(&home);
         for &n in heard {
             loan.hear(Signal::new(n));
         }
-        frame.cause()
+        home.cause()
     }
 
     /// A key heard is struck at once; a signal no terminal

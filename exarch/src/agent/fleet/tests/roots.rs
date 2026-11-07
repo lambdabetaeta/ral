@@ -20,11 +20,11 @@ fn fleet_end_ends_every_agent_and_future_roots_are_born_cancelled() {
     fleet.registry.end(RootCause::Terminated);
     for owner in [&root, &child, &other] {
         assert!(!owner.is_live());
-        assert_eq!(owner.mailbox.life().cause(), Some(CancelCause::Terminated));
+        assert_eq!(owner.mailbox.home().cause(), Some(CancelCause::Terminated));
     }
     let late = agent(&fleet, "late", None);
     assert!(!late.is_live());
-    assert_eq!(late.mailbox.life().cause(), Some(CancelCause::Terminated));
+    assert_eq!(late.mailbox.home().cause(), Some(CancelCause::Terminated));
     assert!(fleet.registry.live().is_empty());
     assert!(fleet.registry.human_children().is_empty());
     assert!(fleet.registry.resolve("late").is_none());

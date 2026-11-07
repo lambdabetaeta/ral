@@ -858,7 +858,7 @@ mod tests {
                 handoff,
                 slots,
                 report,
-                &crate::process::DurableRoot::default().worker(),
+                &crate::process::DurableRoot::default().child(),
             );
             launch.stdin(crate::process::StdioSpec::Null);
             Ok::<_, super::super::Refusal>(launch)

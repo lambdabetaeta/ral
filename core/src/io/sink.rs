@@ -518,9 +518,9 @@ mod tests {
         let mut sink = Sink::Pipe {
             writer: Arc::new(writer),
             edge: Edge::new(),
-            stage: DurableRoot::default().worker().id(),
+            stage: DurableRoot::default().child().id(),
         };
-        sink.write_under(&DurableRoot::default().worker(), b"hello")
+        sink.write_under(&DurableRoot::default().child(), b"hello")
             .expect("write");
         drop(sink);
 
@@ -573,7 +573,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_past_a_dead_edge_is_the_stages_reader_gone_stop() {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let (_reader, mut sink, edge, _writer) = pipe_sink(&node);
         edge.mark_dead();
         let stop = write_stopped(sink.write_under(&node, b"x").expect_err("a dead edge"));
@@ -584,7 +584,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_to_a_closed_pipe_is_a_broken_pipe() {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let (reader, mut sink, ..) = pipe_sink(&node);
         drop(reader);
         assert!(matches!(
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn a_write_blocked_under_a_cause_is_stopped() {
         let (node, scope) = (
-            DurableRoot::default().worker(),
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
+            DurableRoot::default().child(),
         );
         let (_reader, mut sink, _edge, writer) = pipe_sink(&node);
         fill(&writer);
@@ -626,8 +626,8 @@ mod tests {
     #[test]
     fn a_pump_blocked_on_a_full_edge_ends_once_its_scope_is_cancelled() {
         let (node, scope) = (
-            DurableRoot::default().worker(),
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
+            DurableRoot::default().child(),
         );
         let (_edge_reader, sink, _edge, writer) = pipe_sink(&node);
         fill(&writer);
@@ -656,7 +656,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_under_a_shield_waits() {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let (mut reader, mut sink, _edge, writer) = pipe_sink(&node);
         node.cancel(CancelCause::Interrupted);
         let shield = node.shielded(Duration::from_secs(1));
@@ -672,8 +672,8 @@ mod tests {
     #[test]
     fn an_always_ready_pipe_still_polls_per_chunk() {
         let (node, scope) = (
-            DurableRoot::default().worker(),
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
+            DurableRoot::default().child(),
         );
         let (mut reader, mut sink, ..) = pipe_sink(&node);
         let drain = std::thread::spawn(move || {
@@ -696,7 +696,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_full_dead_edge_stops_a_blocked_write() {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let (_reader, mut sink, edge, writer) = pipe_sink(&node);
         node.cancel(CancelCause::Interrupted);
         let shield = node.shielded(Duration::from_secs(1));
@@ -721,7 +721,7 @@ mod tests {
         let sink = Sink::Pipe {
             writer: Arc::new(writer),
             edge: Edge::new(),
-            stage: DurableRoot::default().worker().id(),
+            stage: DurableRoot::default().child().id(),
         };
         let (stdio, pump) = sink.child_stdio(OutFd::Stdout).expect("stdio");
         assert!(pump.is_none());
@@ -751,7 +751,7 @@ mod tests {
         let sink = Sink::Pipe {
             writer: writer.clone(),
             edge: Edge::new(),
-            stage: DurableRoot::default().worker().id(),
+            stage: DurableRoot::default().child().id(),
         };
         let (stdio, _) = sink.child_stdio(OutFd::Stdout).expect("stdio");
 
@@ -829,9 +829,9 @@ mod tests {
         };
         // Empty flush before any bytes is a no-op.
         sink.flush_pending();
-        sink.write_under(&DurableRoot::default().worker(), b"one\r\ntw")
+        sink.write_under(&DurableRoot::default().child(), b"one\r\ntw")
             .unwrap();
-        sink.write_under(&DurableRoot::default().worker(), b"o\nthree\nfour\r\nfive")
+        sink.write_under(&DurableRoot::default().child(), b"o\nthree\nfour\r\nfive")
             .unwrap();
         sink.flush_pending();
         // Second flush after tail was already taken is a no-op.
@@ -860,7 +860,7 @@ mod tests {
             }),
             pending: Vec::new(),
         };
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sink.write_under(&node, b"a\nb\nc")
         }));
@@ -881,7 +881,7 @@ mod tests {
             }),
             pending: Vec::new(),
         };
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         sink.write_under(&node, b"tail").unwrap();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sink.flush_pending();

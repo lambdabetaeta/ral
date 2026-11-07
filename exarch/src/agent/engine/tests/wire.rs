@@ -34,7 +34,7 @@ fn with_wire_host<R>(
             engine: crate::boot::test_attach().0,
         },
         handle: parent.handle(),
-        life: parent.mailbox.life(),
+        life: parent.mailbox.home(),
         emit: emit.clone(),
         acts: AtomicRefCell::new(Vec::new()),
     };

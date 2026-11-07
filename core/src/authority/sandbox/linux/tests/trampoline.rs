@@ -111,7 +111,7 @@ fn run_trampoline(
         cmd,
         info,
         report,
-        &crate::process::DurableRoot::default().worker(),
+        &crate::process::DurableRoot::default().child(),
     );
     launch.stdin(crate::process::StdioSpec::Null);
     launch.output()

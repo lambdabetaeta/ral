@@ -132,9 +132,9 @@ pub struct HandleInner {
     pub started: Stamp,
     /// The worker's own node: a child of its cradle's `under`, the session
     /// root for a session birth, the gather's entry scope (a worker's own
-    /// node, for its body) for a gather's child.  `cancel`, a halting parent
+    /// node, for its body) for a gather's child.  `cancel $h`, a halting parent
     /// and `race`'s losers fire it, and the worker stops at its next poll.
-    pub cancel: ScopeNode,
+    pub home: ScopeNode,
 }
 
 impl PartialEq for HandleInner {
@@ -164,7 +164,7 @@ impl HandleInner {
     pub(crate) fn new(
         id: WorkerId,
         title: impl Into<String>,
-        cancel: ScopeNode,
+        home: ScopeNode,
         buffers: Streams<ByteBuffer>,
     ) -> (Self, CompletionPermit) {
         let handle = Self {
@@ -174,7 +174,7 @@ impl HandleInner {
             id,
             title: title.into(),
             started: Stamp::now(),
-            cancel,
+            home,
         };
         let permit = CompletionPermit(Some(handle.clone()));
         (handle, permit)
@@ -252,7 +252,7 @@ impl HandleInner {
         let mut state = self.state.lock_ignore_poison();
         let discarded = match &mut *state {
             HandleState::Running => {
-                self.cancel.cancel(CancelCause::Cancelled);
+                self.home.cancel(CancelCause::Cancelled);
                 *state = HandleState::Stopping;
                 return;
             }
@@ -324,7 +324,7 @@ pub(crate) fn idle_handle() -> Value {
     let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
-        crate::process::DurableRoot::default().worker(),
+        crate::process::DurableRoot::default().child(),
         Streams::default(),
     );
     Value::Handle(Box::new(handle))
@@ -341,7 +341,7 @@ mod tests {
         let (handle, permit) = HandleInner::new(
             WorkerId::mint(),
             "<handle-test>",
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
             buffers.clone(),
         );
         (handle, permit, buffers.stdout, buffers.stderr)
@@ -432,7 +432,7 @@ mod tests {
 
         handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Stopping);
-        assert!(handle.cancel.is_cancelled());
+        assert!(handle.home.is_cancelled());
         assert!(handle.sample().is_live());
         assert!(!handle.sample().has_ended());
         assert!(handle.sample().is_claimed());
@@ -523,7 +523,7 @@ mod tests {
                 Sample::Running(()) => std::thread::yield_now(),
                 Sample::Stopping => {
                     assert!(
-                        handle.cancel.is_cancelled(),
+                        handle.home.is_cancelled(),
                         "cancel must be signalled before state becomes Stopping"
                     );
                     break;
@@ -566,12 +566,12 @@ mod tests {
     #[test]
     fn ancestor_cancellation_leaves_handle_running_until_published() {
         let root = DurableRoot::default();
-        let parent = root.worker();
+        let parent = root.child();
         let child_node = parent.child();
         let (handle, permit) =
             HandleInner::new(WorkerId::mint(), "<child>", child_node, Streams::default());
         parent.cancel(CancelCause::Cancelled);
-        assert!(handle.cancel.is_cancelled());
+        assert!(handle.home.is_cancelled());
         // Not directly claimed: still Running, not Stopping.
         assert_eq!(handle.sample(), Sample::Running(()));
         permit.finish(End::Ok(Value::Unit));

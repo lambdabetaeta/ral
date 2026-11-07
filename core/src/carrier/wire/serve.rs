@@ -608,7 +608,7 @@ mod wire_desk_tests {
             filler.parks.fill(eid, Ok(FOValue::Int { value: 42 }));
         });
 
-        let answer = desk.enquire(FOValue::Int { value: 41 }, &DurableRoot::default().worker());
+        let answer = desk.enquire(FOValue::Int { value: 41 }, &DurableRoot::default().child());
         front_end.join().expect("front-end thread");
         assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
         assert!(
@@ -633,7 +633,7 @@ mod wire_desk_tests {
         });
 
         let Break::Error(err) = desk
-            .enquire(FOValue::Unit, &DurableRoot::default().worker())
+            .enquire(FOValue::Unit, &DurableRoot::default().child())
             .expect_err("refused")
         else {
             panic!("a refusal is an error, not a stop");
@@ -667,7 +667,7 @@ mod wire_desk_tests {
     #[test]
     fn cancel_wakes_a_parked_enquiry() {
         let (desk, _peer) = lone_desk();
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
 
         // Long enough that `enquire` is provably parked before the cancel
         // lands, so this test cannot pass by the pre-park check alone.
@@ -705,7 +705,7 @@ mod wire_desk_tests {
     #[test]
     fn cancel_before_the_enquiry_never_parks() {
         let (desk, _peer) = lone_desk();
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         scope.cancel(CancelCause::Cancelled);
 
         let stop = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
@@ -734,7 +734,7 @@ mod wire_desk_tests {
                 })
             },
         };
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         scope.cancel(CancelCause::Cancelled);
 
         assert_eq!(

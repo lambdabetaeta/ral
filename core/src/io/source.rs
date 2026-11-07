@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn a_blocked_read_returns_eof_once_the_cause_lands() {
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
         let canceller = cancel_after(&scope, 20);
 
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn data_written_before_the_cause_is_still_delivered() {
         let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
 
         use std::io::Write;
@@ -211,7 +211,7 @@ mod tests {
     fn a_ready_read_under_a_cause_is_eof() {
         use std::io::Write;
         let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let mut reader = SourceReader::pipe(r).interruptible(Scope::clone(&scope));
         w.write_all(b"pending").expect("write");
         scope.cancel(CancelCause::Interrupted);

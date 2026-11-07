@@ -52,7 +52,7 @@ impl PreparedTerminalLoan {
 impl TerminalLoan {
     pub(crate) fn prepare(
         _lease: &crate::process::TerminalLease,
-        _frame: &crate::process::ScopeNode,
+        _home: &crate::process::ScopeNode,
     ) -> Option<PreparedTerminalLoan> {
         let modes =
             [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(ConsoleMode::capture);

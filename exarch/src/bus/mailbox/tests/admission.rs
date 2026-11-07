@@ -138,7 +138,7 @@ fn a_resting_helper_times_out_and_refuses_later_input() {
     address.post(wakeup(1, "held")).unwrap();
     let worker = std::thread::spawn(move || mailbox.next(QUIET));
     let finished = wait_until(|| worker.is_finished());
-    let cause = address.0.life.cause();
+    let cause = address.0.home.cause();
     address.end(CancelCause::Cancelled);
     assert!(matches!(worker.join().unwrap(), Next::Ended));
     assert!(finished, "a resting helper must enforce its idle deadline");
@@ -159,7 +159,7 @@ fn idle_expiry_does_not_end_an_open_job_before_it_settles() {
     settled(&mailbox, false);
     assert!(mailbox.address().is_live());
     assert!(matches!(mailbox.next(QUIET), Next::Ended));
-    assert_eq!(mailbox.life().cause(), Some(CancelCause::TimedOut));
+    assert_eq!(mailbox.home().cause(), Some(CancelCause::TimedOut));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn a_parent_message_racing_the_idle_limit_is_taken_or_refused_ended() {
                 assert!(address.status().unwrap().job.is_some());
             }
             (Err(Refused::Ended), Next::Ended) => {
-                assert_eq!(mailbox.life().cause(), Some(CancelCause::TimedOut));
+                assert_eq!(mailbox.home().cause(), Some(CancelCause::TimedOut));
             }
             _ => panic!("idle expiry and posting must linearize under the same lock"),
         }

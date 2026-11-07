@@ -100,7 +100,7 @@ fn stop_recalls_only_human_text_and_preserves_helpers_and_the_job() {
     let mailbox = mailbox(Admission::Free);
     let exchange = start(&mailbox);
     let address = mailbox.address();
-    let helper_life = mailbox.life().child();
+    let helper_life = mailbox.home().child();
     let helper_exchange = Lease::under(&helper_life);
     let job = address.status().unwrap().job;
     let id = job.unwrap();

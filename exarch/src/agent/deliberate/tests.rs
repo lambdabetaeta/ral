@@ -63,7 +63,7 @@ fn turn_started_precedes_the_first_sync_and_a_sync_failure_ends_the_life() {
     });
     let (emit, _) = crate::bus::dummy_emitter();
     let result = session.deliberate(
-        &session.mailbox.life().child(),
+        &session.mailbox.home().child(),
         Some(("request".into(), Voice::Human)),
         None,
         &emit,
@@ -388,7 +388,7 @@ fn sub_agent_returns_through_reply() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     let outcome = child.deliberate(
-        &child.mailbox.life().child(),
+        &child.mailbox.home().child(),
         Some(("write a report".into(), Voice::Human)),
         None,
         &emit,
@@ -442,17 +442,17 @@ fn reply_preserves_live_descendants_and_queued_input() {
     let mut child = forked_child(&parent, "helper", "`inherit");
     let direct = test_agent(
         &child.fleet,
-        TestAgentSpec::child("direct", &child.handle(), child.mailbox.life().child()),
+        TestAgentSpec::child("direct", &child.handle(), child.mailbox.home().child()),
     )
     .unwrap();
     let grandchild = test_agent(
         &child.fleet,
-        TestAgentSpec::child("grandchild", &direct, direct.mailbox.life().child()),
+        TestAgentSpec::child("grandchild", &direct, direct.mailbox.home().child()),
     )
     .unwrap();
     let sibling = test_agent(
         &child.fleet,
-        TestAgentSpec::child("sibling", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("sibling", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     child.handle().steer("next task".into()).unwrap();
@@ -468,7 +468,7 @@ fn reply_preserves_live_descendants_and_queued_input() {
     let emit = Emitter::new(tx, child.id());
     assert!(matches!(
         child.deliberate(
-            &child.mailbox.life().child(),
+            &child.mailbox.home().child(),
             Some(("return early".into(), Voice::Human)),
             None,
             &emit,
@@ -596,7 +596,7 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id());
     let first = session.deliberate(
-        &session.mailbox.life().child(),
+        &session.mailbox.home().child(),
         Some(("first exchange".into(), Voice::Human)),
         None,
         &emit,
@@ -604,7 +604,7 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
     assert!(matches!(first, Err(Fault::Provider(_))), "{first:?}");
     assert!(session.is_ready());
     let second = session.deliberate(
-        &session.mailbox.life().child(),
+        &session.mailbox.home().child(),
         Some(("second exchange after error".into(), Voice::Human)),
         None,
         &emit,
@@ -1024,17 +1024,17 @@ fn ending_a_sub_agent_then_dropping_its_engine_cancels_its_workers() {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
     child.ral(
-        &child.mailbox.life().child(),
+        &child.mailbox.home().child(),
         "spawn \"blocker\" { test-clear-block-forever }",
         30,
         &emit,
     );
     let entries = workers(&child);
     assert_eq!(entries.len(), 1);
-    assert!(!entries[0].handle.cancel.is_cancelled());
+    assert!(!entries[0].handle.home.is_cancelled());
     child.handle().end();
     drop(child);
-    assert!(entries[0].handle.cancel.is_cancelled());
+    assert!(entries[0].handle.home.is_cancelled());
 }
 
 #[test]
@@ -1314,7 +1314,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
         let mut child = forked_child(&parent, "helper", "`inherit");
         let grandchild = test_agent(
             &parent.fleet,
-            TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
+            TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.home().child()),
         )
         .unwrap();
         child.body.nursery.adopt(
@@ -1369,7 +1369,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, child.id());
         let outcome = child.deliberate(
-            &child.mailbox.life().child(),
+            &child.mailbox.home().child(),
             Some(("original task".into(), Voice::Human)),
             None,
             &emit,
@@ -1398,7 +1398,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
             };
             let prompt = child.admit(input).expect("live input survives reply");
             let outcome = child.deliberate(
-                &child.mailbox.life().child(),
+                &child.mailbox.home().child(),
                 Some((prompt.text, prompt.voice)),
                 None,
                 &emit,
@@ -1440,7 +1440,7 @@ fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
     let emit = Emitter::new(tx, child.id());
     assert!(matches!(
         child.deliberate(
-            &child.mailbox.life().child(),
+            &child.mailbox.home().child(),
             Some(("before rewind".into(), Voice::Human)),
             None,
             &emit,
@@ -1486,7 +1486,7 @@ fn a_returning_roots_reply_leaves_arrivals_queued_without_an_extra_request() {
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, root.id());
     let outcome = root.deliberate(
-        &root.mailbox.life().child(),
+        &root.mailbox.home().child(),
         Some(("one task".into(), Voice::Human)),
         None,
         &emit,

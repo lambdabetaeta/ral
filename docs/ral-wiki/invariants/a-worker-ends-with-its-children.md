@@ -2,7 +2,7 @@
 
 **A gather ends with its children, and a worker's body is a gather.** A
 *gather* — a `gather { … }` form, or a worker's body — owns every `spawn` or
-`watch` born inside it, a pipeline stage's included: its `ScopeOwner`, in birth
+`watch` born inside it, a pipeline stage's included: its `BroodGuard`, in birth
 order. When the gather begins exiting, it closes membership first so any late
 birth from a pipeline stage thread still unwinding against that cradle is
 cancelled and rejected before it can start. On exit it applies one rule,
@@ -16,9 +16,9 @@ cancelled and rejected before it can start. On exit it applies one rule,
   *A normal return joins; it never cancels*;
 - **halt** — a raise, an escape, a stop: membership is closed and every
   unclaimed child is claimed, cancelled and drained within the grace
-  (`ScopeOwner::end`); a body that panics or unwinds closes membership and
-  cancels them on `Drop` (`ScopeOwner::stop`) without waiting;
-- **drain (I4′)**: on every normal or halting exit (`ScopeOwner::drain`), the
+  (`BroodGuard::end`); a body that panics or unwinds closes membership and
+  cancels them on `Drop` (`BroodGuard::stop`) without waiting;
+- **drain (I4′)**: on every normal or halting exit (`BroodGuard::drain`), the
   gather waits, within one shared cleanup grace, for **every** child it
   accepted to reach a terminal state (`ready` or `consumed`) — including
   children cancelled earlier by `cancel $h` inside the body (`stopping`). So

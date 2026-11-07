@@ -14,7 +14,7 @@ mod roots;
 fn agent(fleet: &Arc<Fleet>, name: &str, parent: Option<&TestAgent>) -> TestAgent {
     let spec = parent.map_or_else(
         || TestAgentSpec::new(name),
-        |parent| TestAgentSpec::child(name, parent, parent.mailbox.life().child()),
+        |parent| TestAgentSpec::child(name, parent, parent.mailbox.home().child()),
     );
     test_agent(fleet, spec).expect("a fresh directory name")
 }
@@ -45,7 +45,7 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
         "settlement does not end the life"
     );
     assert!(matches!(helper.mailbox.next(rest), Next::Ended));
-    assert_eq!(helper.mailbox.life().cause(), Some(CancelCause::TimedOut));
+    assert_eq!(helper.mailbox.home().cause(), Some(CancelCause::TimedOut));
     assert!(parent.handle().is_live());
     assert!(parent.fleet.registry.resolve("short-lived").is_none());
     assert!(matches!(

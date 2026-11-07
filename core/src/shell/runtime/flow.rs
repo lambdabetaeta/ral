@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn node_under(cause: C) -> ScopeNode {
-        let node = DurableRoot::default().worker();
+        let node = DurableRoot::default().child();
         node.cancel(cause);
         node
     }
@@ -348,7 +348,7 @@ mod tests {
             )),
             (C::Interrupted, Some(node.id()), Some(sp()))
         );
-        let other = crate::process::DurableRoot::default().worker().id();
+        let other = crate::process::DurableRoot::default().child().id();
         assert_eq!(
             cause(final_poll(
                 stopped(C::Interrupted, Some(other), Some(sp())),
@@ -365,7 +365,7 @@ mod tests {
             final_poll(Err(Break::Escape(Escape::Exit(3))), &aborted),
             Err(Break::Escape(Escape::Exit(3)))
         ));
-        let calm = DurableRoot::default().worker();
+        let calm = DurableRoot::default().child();
         assert!(matches!(
             final_poll(Err(Break::Error(Error::raised("x"))), &calm),
             Err(Break::Error(e)) if e.failure_code() == nz(1)

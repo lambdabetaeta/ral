@@ -128,7 +128,7 @@ fn a_bound_name_refuses_a_second_owner() {
     assert_eq!(
         test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.life().child())
+            TestAgentSpec::child("helper", &root, root.mailbox.home().child())
         )
         .err(),
         Some(Unborn::NameTaken("helper".into()))
@@ -220,7 +220,7 @@ fn a_child_constructed_beneath_an_ended_parent_is_born_cancelled() {
     let late = agent(&fleet, "late", Some(&root));
     assert!(!late.is_live());
     assert!(fleet.registry.resolve("late").is_none());
-    assert_eq!(late.mailbox.life().cause(), Some(CancelCause::Cancelled));
+    assert_eq!(late.mailbox.home().cause(), Some(CancelCause::Cancelled));
     drop(late);
     assert!(fleet.registry.name("late").is_ok());
 }

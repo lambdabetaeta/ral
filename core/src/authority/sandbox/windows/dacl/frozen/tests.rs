@@ -138,7 +138,7 @@ fn a_grant_since_replaced_by_a_junction_is_refused_on_the_next_launch() {
                 &pin,
                 CAP_SID,
                 GrantKind::ReadOnly,
-                &DurableRoot::default().worker(),
+                &DurableRoot::default().child(),
             )
             .unwrap();
         }
@@ -161,7 +161,7 @@ fn a_read_write_grant_stamps_dacl_and_label_through_the_held_handle() {
             &pin,
             CAP_SID,
             GrantKind::ReadWrite,
-            &DurableRoot::default().worker(),
+            &DurableRoot::default().child(),
         )
         .unwrap();
         assert!(labelled(&sub));

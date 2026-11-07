@@ -119,7 +119,7 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         Some((interrupted, Some(1))),
         "equal stops keep the earlier"
     );
-    let root = DurableRoot::default().worker();
+    let root = DurableRoot::default().child();
     assert!(is_error(&stronger(cut(&root.id()), error_break(7)), 7));
     assert!(is_error(&stronger(error_break(7), cut(&root.id())), 7));
     assert!(matches!(
@@ -350,7 +350,7 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     let owner = PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns");
     let pgid = owner.leader_pgid();
     let joining =
-        PipelineGroup::joining(owner.membership(&crate::process::DurableRoot::default().worker()));
+        PipelineGroup::joining(owner.membership(&crate::process::DurableRoot::default().child()));
 
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", "sleep 30"]);
@@ -363,7 +363,7 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
         rx,
         joining.group(),
         None,
-        Scope::clone(&DurableRoot::default().worker()),
+        Scope::clone(&DurableRoot::default().child()),
         Duration::ZERO,
         Instant::now(),
     );
@@ -560,7 +560,7 @@ fn a_cancelled_event_cancels_all() {
 #[cfg(unix)]
 #[test]
 fn a_heard_key_strikes_the_node_and_tears_nothing_down() {
-    let frame = crate::process::DurableRoot::new().worker();
+    let frame = crate::process::DurableRoot::new().child();
     let mut state = state_with(1);
     state.loan = Some(TerminalLoan::for_test(&frame));
     let heard = |n| Event::Heard(crate::process::Signal::new(n));
@@ -604,7 +604,7 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
         .settle(
             &shell,
             Instant::now(),
-            &DurableRoot::default().worker(),
+            &DurableRoot::default().child(),
             None,
         )
         .audit
@@ -651,7 +651,7 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
             .end
             .into_settled()
     };
-    let pressed = DurableRoot::default().worker();
+    let pressed = DurableRoot::default().child();
     pressed.cancel(CancelCause::Interrupted);
     match settled(&pressed) {
         Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
@@ -659,7 +659,7 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
         }
         other => panic!("expected the key's stop, got {other:?}"),
     }
-    match settled(&DurableRoot::default().worker()) {
+    match settled(&DurableRoot::default().child()) {
         Err(Break::Error(e)) => assert!(
             matches!(
                 e.reason.failure(),
@@ -755,7 +755,7 @@ fn a_stage_kill_is_forgiven_by_sent_and_kept_without_it() {
 
     // An ancestor's reader-gone stop forgives nothing this collector did not send.
     let mut ancestors = state_with(1);
-    let above = DurableRoot::default().worker();
+    let above = DurableRoot::default().child();
     ancestors.scope = Scope::clone(&above);
     above.cancel(CancelCause::ReaderGone);
     let _ = step(&mut ancestors, Event::Ended(0, kill));
@@ -835,7 +835,7 @@ fn a_foreign_reader_gone_is_forwarded() {
     let (mut state, _scopes, _tx) = threads_with(1);
     let _ = step(
         &mut state,
-        returned(0, halted(cut(&DurableRoot::default().worker().id()))),
+        returned(0, halted(cut(&DurableRoot::default().child().id()))),
     );
     match fold_of(state) {
         Err(Break::Escape(Escape::Stopped(Stop { cause, .. }))) => {
@@ -849,7 +849,7 @@ fn a_foreign_reader_gone_is_forwarded() {
 #[test]
 fn an_armed_stage_that_ends_interrupted_is_kept() {
     let (mut state, _scopes, _tx) = threads_with(1);
-    let root = DurableRoot::default().worker().id();
+    let root = DurableRoot::default().child().id();
     let stop = Break::stopped(CancelCause::Interrupted, Some(root));
     let _ = step(&mut state, returned(0, halted(stop)));
     match fold_of(state) {
@@ -894,7 +894,7 @@ fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
     );
     let _ = step(
         &mut state,
-        returned(1, halted(cut(&DurableRoot::default().worker().id()))),
+        returned(1, halted(cut(&DurableRoot::default().child().id()))),
     );
     assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
 }
@@ -1205,7 +1205,7 @@ fn a_panic_mid_teardown_escalates_to_abort() {
 #[test]
 fn a_stronger_cause_mid_teardown_is_written_on_the_stages() {
     let (mut state, scopes, tx) = threads_with(2);
-    let held = DurableRoot::default().worker();
+    let held = DurableRoot::default().child();
     state.scope = Scope::clone(&held);
     let survivors = scopes.clone();
     let helper = std::thread::spawn(move || {
@@ -1289,7 +1289,7 @@ fn a_dropped_collector_writes_terminated_on_its_stages() {
 #[test]
 fn a_cancelled_scope_is_read_between_slices() {
     let (mut state, _tx) = CollectState::for_step_test();
-    let held = DurableRoot::default().worker();
+    let held = DurableRoot::default().child();
     state.scope = Scope::clone(&held);
     let striker = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
@@ -1500,7 +1500,7 @@ fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
     cmd.arg("30");
     let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
 
-    let striker = DurableRoot::default().worker();
+    let striker = DurableRoot::default().child();
     let shell = lone_shell(&striker, None);
     let canceller = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
@@ -1656,7 +1656,7 @@ fn interrupt_tears_down_external_subprocess_tree() {
         jail: None,
     };
 
-    let striker = DurableRoot::default().worker();
+    let striker = DurableRoot::default().child();
     let shell = lone_shell(&striker, None);
     let canceller = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
@@ -1712,7 +1712,7 @@ fn wait_revives_an_ownerless_sigstopped_child() {
     rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
         .expect("SIGSTOP the sleep");
 
-    let scope = DurableRoot::default().worker();
+    let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope, None);
     let t0 = Instant::now();
     let _ = lone_end(lone, &shell);
@@ -1755,7 +1755,7 @@ fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
             jail: None,
         };
 
-        let stage = DurableRoot::default().worker();
+        let stage = DurableRoot::default().child();
         let own = stage.child();
         let membership = Membership::new(pgid, Scope::clone(&stage));
         let shell = lone_shell(&own, Some(membership));
@@ -1797,7 +1797,7 @@ fn a_child_sharing_rals_group_is_sent_no_second_interrupt() {
         ]);
         let lone = spawned(&mut cmd, crate::process::PgidPolicy::Inherit);
 
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let shell = lone_shell(&scope, None);
         let striker = std::thread::spawn(move || {
             crate::test_helper::eventually(Duration::from_secs(5), || ready.exists().then_some(()))
@@ -1848,7 +1848,7 @@ fn a_stopped_member_of_a_lone_group_hears_its_grace_signal() {
     ]);
     let lone = spawned(&mut cmd, crate::process::PgidPolicy::NewLeader);
 
-    let scope = DurableRoot::default().worker();
+    let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope, None);
     let striker = std::thread::spawn(move || {
         let pid = ready_pid(&ready);
@@ -1878,7 +1878,7 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
     .stdout(std::process::Stdio::piped());
     let lone = spawned(&mut cmd, crate::process::PgidPolicy::Inherit);
 
-    let scope = DurableRoot::default().worker();
+    let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope, None);
     let (sink, _bytes) = crate::io::new_buffer();
     let pumps = command::Pumps::new(Some(sink), None);
@@ -1914,7 +1914,7 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     let pid = lone.child.id();
     let alive = || unsafe { libc::kill(pid.cast_signed(), 0) } == 0;
 
-    let scope = DurableRoot::default().worker();
+    let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope, None);
     let pumps = command::Pumps::default();
     let mut collect = CollectState::lone(
@@ -1961,7 +1961,7 @@ fn an_external_is_hinted_from_its_own_claim() {
             spawned: spawned(&mut cmd, crate::process::PgidPolicy::NewLeader),
             claim: claim(confined),
         };
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let shell = lone_shell(&scope, None);
         let mut lone = CollectState::lone(
             born,
@@ -2003,7 +2003,7 @@ fn an_external_is_hinted_from_its_own_claim() {
 #[cfg(unix)]
 #[test]
 fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
-    let frame = DurableRoot::default().worker();
+    let frame = DurableRoot::default().child();
     let shell = lone_shell(&frame, None);
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", "sleep 5 & kill -INT $$"])
@@ -2044,7 +2044,7 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
 #[cfg(unix)]
 #[test]
 fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
-    let frame = DurableRoot::default().worker();
+    let frame = DurableRoot::default().child();
     let shell = lone_shell(&frame, None);
     let (tx, rx) = std::sync::mpsc::channel();
     let mut group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");

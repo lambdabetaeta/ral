@@ -196,12 +196,12 @@ fn identity_and_wire_peers_exchange_messages_through_one_desk() {
     with_wire_desk(FakeFactory::new(Guest::Spawns), |desk, fleet, parent| {
         let identity_peer = test_agent(
             &fleet,
-            TestAgentSpec::child("identity-peer", &parent, parent.mailbox.life().child()),
+            TestAgentSpec::child("identity-peer", &parent, parent.mailbox.home().child()),
         )
         .unwrap();
         let wire_peer = test_agent(
             &fleet,
-            TestAgentSpec::child("wire-peer", &parent, parent.mailbox.life().child()),
+            TestAgentSpec::child("wire-peer", &parent, parent.mailbox.home().child()),
         )
         .unwrap();
         desk.ask(message_req("identity-peer", "note for identity"))

@@ -31,7 +31,7 @@ pub(crate) use handler::{
 mod handle;
 #[allow(unused_imports)]
 pub(crate) use handle::brood::{
-    Brood, BroodOwner, Cradle, EnrolClosed, ScopeOwner, stop_and_drain,
+    Brood, BroodGuard, BroodOwner, Cradle, EnrolClosed, stop_and_drain,
 };
 #[cfg(test)]
 pub(crate) use handle::idle_handle;

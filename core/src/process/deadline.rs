@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn arm_does_not_fire_before_the_ceiling() {
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
         std::thread::sleep(Duration::from_millis(50));
         assert!(
@@ -218,8 +218,8 @@ mod tests {
     /// Exercises the daemon's pop-and-re-peek, not just its first entry.
     #[test]
     fn multiple_armed_scopes_each_fire() {
-        let one = DurableRoot::default().worker();
-        let two = DurableRoot::default().worker();
+        let one = DurableRoot::default().child();
+        let two = DurableRoot::default().child();
         let _d1 = arm_lifetime(one.clone(), Duration::from_millis(20));
         let _d2 = arm_lifetime(two.clone(), Duration::from_millis(20));
 
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn a_claimed_deadline_is_reported() {
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let claimed = arm_lifetime(scope.clone(), Duration::from_millis(1));
         for _ in 0..200 {
             if scope.is_cancelled() {
@@ -247,7 +247,7 @@ mod tests {
         claimed.disarm().expect("the daemon has claimed it").wait();
         assert!(scope.is_cancelled());
 
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         let distant = arm_lifetime(scope.clone(), Duration::from_hours(1));
         assert!(distant.disarm().is_none());
         std::thread::sleep(Duration::from_millis(20));
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn disarmed_deadline_does_not_fire() {
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         drop(arm_lifetime(scope.clone(), Duration::from_millis(20)));
         std::thread::sleep(Duration::from_millis(80));
         assert!(
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn kept_deadline_fires_after_handle_dropped() {
-        let scope = DurableRoot::default().worker();
+        let scope = DurableRoot::default().child();
         arm_lifetime(scope.clone(), Duration::from_millis(20)).keep();
 
         let mut fired = false;

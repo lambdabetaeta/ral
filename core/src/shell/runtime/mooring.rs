@@ -196,7 +196,8 @@ pub struct Mooring {
     /// a descendant swapped by frames, which coincides with this at the base.
     pub home: ScopeNode,
     /// What a `guard` cleanup gets, from the strike, before the stop ends
-    /// it: the host's policy, as `wall` is.
+    /// it: the run's [`Run::cleanup_grace`](crate::protocol::Run::cleanup_grace),
+    /// [`DEFAULT_CLEANUP_GRACE`] when adrift; a child thread inherits it.
     pub(crate) cleanup_grace: Duration,
     /// Admission cap enforced at the spawn, counting only *running*
     /// entries — settled ones lingering under retention never block a birth.
@@ -228,10 +229,10 @@ impl Mooring {
         }
     }
 
-    /// A mooring tied to no run: nothing installed, and a node under a root
-    /// nothing else holds.  For a builtin body invoked outside a run — a
-    /// host-embedding test, above all — which a host stops through
-    /// [`Shell::cancel_handle`](crate::Shell::cancel_handle).
+    /// A mooring tied to no run: nothing installed, `home` a node under a
+    /// root nothing holds, so nothing can cancel it, and the default cleanup
+    /// grace.  For a builtin body invoked outside a run, a host-embedding
+    /// test above all.
     pub fn adrift() -> Self {
         Self {
             surface: None,

@@ -242,7 +242,7 @@ pub(crate) fn scope_has(session: &mut Agent, name: &str) -> bool {
     // Discarded, so a block- or handle-valued binding still settles on data.
     let text = session
         .ral(
-            &session.mailbox.life().child(),
+            &session.mailbox.home().child(),
             &format!("let _ = ${name}"),
             5,
             &emit,
@@ -425,7 +425,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         .unwrap_or_else(|| panic!("the run never forked a child: {report:?}"));
     Agent::born(
         &parent.fleet,
-        Parent::Agent(&parent.handle, parent.mailbox.life().child()),
+        Parent::Agent(&parent.handle, parent.mailbox.home().child()),
         reserved,
         engine,
         parent.body.client.clone(),

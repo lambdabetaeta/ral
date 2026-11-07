@@ -1222,7 +1222,7 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
         &["-c".to_string(), "echo RAN".to_string()],
         None,
         Ownership::Kept,
-        &crate::process::DurableRoot::default().worker(),
+        &crate::process::DurableRoot::default().child(),
     );
     let Err(e) = launch else {
         panic!("a restricted exec grant needs Landlock");
@@ -1261,7 +1261,7 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     launch
         .confine(crate::process::launch::Confined {
             report,
-            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
+            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().child()),
             envelope: None,
         })
         .stdin(crate::process::StdioSpec::Null);

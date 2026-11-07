@@ -184,7 +184,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
     let child_recorder = child.recorder();
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let setup = child.ral(
-        &child.mailbox.life().child(),
+        &child.mailbox.home().child(),
         "headless-short-drain\nlet h = spawn \"held helper worker\" { headless-held-worker }",
         5,
         &emit,

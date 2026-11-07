@@ -55,7 +55,7 @@ mod tests {
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
         let mooring = Mooring {
             terminal_access: TerminalAccess::Leased,
-            home: DurableRoot::default().worker(),
+            home: DurableRoot::default().child(),
             cleanup_grace: std::time::Duration::ZERO,
             ..Mooring::adrift()
         };

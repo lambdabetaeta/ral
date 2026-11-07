@@ -139,7 +139,7 @@ mod tests {
     fn a_joined_group_passes_its_owners_source_through() {
         let mut shell = at_a_tty();
         let group = Pgid::from_raw(1).expect("1 is positive");
-        let stage = Scope::clone(&DurableRoot::default().worker());
+        let stage = Scope::clone(&DurableRoot::default().child());
         shell.session.stage = Some(Membership::new(group, stage));
         assert!(matches!(boundary_stdin(&shell, false), Source::Terminal));
         shell.io.stdin = Source::Empty;

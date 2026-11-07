@@ -24,9 +24,9 @@ use crate::shell::exec::pipeline;
 use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
-    Binding, Break, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle, DisplacedSite, Env,
-    Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, Mooring, ScopeOwner, Settled, Shell,
-    Signature, TrailScope, Value, report_value, sig, sig_hint,
+    Binding, Break, BroodGuard, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle,
+    DisplacedSite, Env, Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, Mooring,
+    Settled, Shell, Signature, TrailScope, Value, report_value, sig, sig_hint,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -121,7 +121,7 @@ enum Frame {
     /// `gather`: the unique owner of its body's brood, and the cradle to
     /// restore when it exits.
     Gather {
-        owner: ScopeOwner,
+        owner: BroodGuard,
         prev: Cradle,
         span: Option<Span>,
     },
@@ -804,7 +804,7 @@ impl Machine {
             CompKind::Gather { body } => {
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
-                let owner = ScopeOwner::new(BroodOwner::Gather);
+                let owner = BroodGuard::new(BroodOwner::Gather);
                 let prev = std::mem::replace(
                     &mut shell.local.cradle,
                     Cradle::owning(shell.scope.clone(), owner.brood()),

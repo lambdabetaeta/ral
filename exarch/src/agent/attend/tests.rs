@@ -692,7 +692,7 @@ fn a_grandchild_report_wakes_a_reported_child_without_nudging_it() {
     let (emit, rx) = emitter(&child);
     let grandchild = test_agent(
         &child.fleet,
-        TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.life().child()),
+        TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.home().child()),
     )
     .unwrap();
     take_task(&grandchild, &grandchild.mailbox);

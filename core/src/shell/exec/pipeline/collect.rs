@@ -484,7 +484,7 @@ impl CollectState {
     #[cfg(test)]
     pub(super) fn for_step_test() -> (Self, Sender<Event>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let anchor = Scope::clone(&crate::process::DurableRoot::default().worker());
+        let anchor = Scope::clone(&crate::process::DurableRoot::default().child());
         let state = Self {
             stages: Vec::new(),
             observed: Vec::new(),

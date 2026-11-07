@@ -162,7 +162,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
             &mut launch,
             &projection,
             None,
-            &DurableRoot::default().worker(),
+            &DurableRoot::default().child(),
         )
     };
     confine().expect("a real directory is granted");
@@ -293,7 +293,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
             &mut launch,
             &projection,
             Some(&image),
-            &DurableRoot::default().worker(),
+            &DurableRoot::default().child(),
         )
         .expect("confine under a derived capability SID");
         let mut child = launch
@@ -449,7 +449,7 @@ fn confined(
         &mut launch,
         projection,
         Some(&walked(cmd())),
-        &DurableRoot::default().worker(),
+        &DurableRoot::default().child(),
     )?;
     Ok(launch)
 }
@@ -694,7 +694,7 @@ fn an_image_is_granted_to_its_own_launch_alone() {
                 &mut launch,
                 &only_a,
                 Some(image),
-                &DurableRoot::default().worker(),
+                &DurableRoot::default().child(),
             )
             .unwrap();
             let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;

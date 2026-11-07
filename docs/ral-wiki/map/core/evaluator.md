@@ -69,7 +69,7 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   operations use `at_site`; delayed eliminations locate their own refusals.
   See [[decisions/261105_the-error-record|the error record]].
 - Shell rules dispatch `Exec`, launch and join a `PipeNode` for `Pipeline`,
-  and birth workers for `Spawn`. `Frame::Gather` owns a `ScopeOwner` and
+  and birth workers for `Spawn`. `Frame::Gather` owns a `BroodGuard` and
   restores its displaced cradle before the shared brood-exit machinery
   joins or stops children. See [[internals/pipeline-execution|pipelines]]
   and [[invariants/a-worker-ends-with-its-children|worker scope]].

@@ -273,9 +273,9 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
     );
     let entries = workers(&agent);
     assert_eq!(entries.len(), 1);
-    assert!(!entries[0].handle.cancel.is_cancelled());
+    assert!(!entries[0].handle.home.is_cancelled());
     drop(agent);
-    assert!(entries[0].handle.cancel.is_cancelled());
+    assert!(entries[0].handle.home.is_cancelled());
 }
 
 #[test]

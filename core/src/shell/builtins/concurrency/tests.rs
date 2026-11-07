@@ -5,8 +5,8 @@ use crate::fact::{ExitCode as _, FailureCode as _};
 use crate::io::{ByteBuffer, CapturedBytes, Streams, new_buffer};
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::shell::runtime::{
-    Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, End, Error, Escape,
-    HandleInner, Map, Owner, ReapCause, Sample, ScopeOwner, Stop, WatchEvent, WorkerId,
+    Break, BroodGuard, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, End, Error,
+    Escape, HandleInner, Map, Owner, ReapCause, Sample, Stop, WatchEvent, WorkerId,
 };
 use crate::test_helper::SLEEP;
 use std::cell::Cell;
@@ -70,7 +70,7 @@ fn handle_with_panicked_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
     let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
-        DurableRoot::default().worker(),
+        DurableRoot::default().child(),
         buffers,
     );
     handle
@@ -204,7 +204,7 @@ fn a_cancelled_handle_is_claimed() {
 fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (u8, ScopeNode) {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
-    let node = shell.session.root.worker();
+    let node = shell.session.root.child();
     let worker_mooring = Mooring::for_thread(&Mooring::adrift(), node.clone(), None);
     let _join = shell
         .spawn_worker(
@@ -233,7 +233,7 @@ fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (
 #[test]
 fn worker_scope_cancel_stops_the_worker() {
     let shell = crate::test_helper::core_shell();
-    let sibling = shell.session.root.worker();
+    let sibling = shell.session.root.child();
     let sibling_mooring = Mooring::for_thread(&Mooring::adrift(), sibling.clone(), None);
     let _idle_join = shell
         .spawn_worker(
@@ -278,7 +278,7 @@ fn root_cancel_reaches_the_worker() {
 fn foreground_cancel_spares_worker() {
     let shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
-    let worker_scope = shell.session.root.worker();
+    let worker_scope = shell.session.root.child();
     let worker_mooring = Mooring::for_thread(&m, worker_scope.clone(), None);
     let _join = shell
         .spawn_worker(
@@ -302,7 +302,7 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     // A still-running worker, root-parented as a real `spawn`'s is: its
     // permit stays alive, unfinished.
-    let worker_scope = shell.session.root.worker();
+    let worker_scope = shell.session.root.child();
     let (handle, _permit) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
@@ -327,7 +327,7 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 #[test]
 fn first_ready_reraises_mid_wait_cancel_without_claiming_the_worker() {
     let mut shell = crate::test_helper::core_shell();
-    let worker_scope = shell.session.root.worker();
+    let worker_scope = shell.session.root.child();
     // Retain the unfinished permit so the handle stays running.
     let (handle, _permit) = HandleInner::new(
         WorkerId::mint(),
@@ -474,11 +474,11 @@ fn cancel_through_the_handle_ends_a_titled_worker() {
         .expect("cancel must succeed on a running worker");
 
     assert!(
-        handle.cancel.is_cancelled(),
+        handle.home.is_cancelled(),
         "cancel fires the worker's scope"
     );
     assert_eq!(
-        handle.cancel.cause(),
+        handle.home.cause(),
         Some(crate::process::CancelCause::Cancelled)
     );
     wait_ended(&handle);
@@ -806,7 +806,7 @@ fn cancel_after_await_is_nothing() {
         .expect("cancel of a claimed handle succeeds");
     assert_eq!(cancelled, Value::Unit);
     assert!(
-        !handle.cancel.is_cancelled(),
+        !handle.home.is_cancelled(),
         "a claimed handle's worker is not stopped"
     );
 }
@@ -839,7 +839,7 @@ fn await_replays_a_cut_stream_then_notes_the_cut() {
     let (handle, permit) = HandleInner::new(
         WorkerId::mint(),
         "<chatty>",
-        DurableRoot::default().worker(),
+        DurableRoot::default().child(),
         buffers,
     );
     permit.finish(End::Ok(Value::Unit));
@@ -1713,11 +1713,11 @@ fn dropping_a_shell_cancels_its_workers() {
         .snapshot()
         .pop()
         .expect("the spawn registered its worker");
-    assert!(!entry.handle.cancel.is_cancelled());
+    assert!(!entry.handle.home.is_cancelled());
 
     drop(shell);
     assert!(
-        entry.handle.cancel.is_cancelled(),
+        entry.handle.home.is_cancelled(),
         "the dropped shell must cancel its registered workers"
     );
 
@@ -2014,7 +2014,7 @@ fn a_worker_stopped_unclaimed_is_its_awaiters_error() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
-    handle.cancel.cancel(CancelCause::Cancelled);
+    handle.home.cancel(CancelCause::Cancelled);
     let err = await_handle(&handle, "await", &mut shell).expect_err("stopped from elsewhere");
     expect_worker_stop(&stopped_error(err), CancelCause::Cancelled);
 }
@@ -2116,7 +2116,7 @@ fn a_foreign_stop_is_reraised_by_await_and_poll() {
 fn a_worker_converts_a_cancel_from_inside_the_session_and_passes_a_root_stop() {
     use super::birth::convert_own_stop;
     let root = DurableRoot::default();
-    let parent = root.worker();
+    let parent = root.child();
     let at = crate::shell::runtime::Prov::Resolved(Box::new((
         "worker-op".into(),
         crate::source::CallSite {
@@ -2155,7 +2155,7 @@ fn a_worker_converts_a_cancel_from_inside_the_session_and_passes_a_root_stop() {
 fn a_stage_inside_a_worker_names_the_worker() {
     use super::birth::convert_own_stop;
     let root = DurableRoot::default();
-    let node = root.worker();
+    let node = root.child();
     node.cancel(CancelCause::TimedOut);
     let inner = node.child();
     let join = inner.in_force().expect("the chain carries the cause");
@@ -2299,7 +2299,7 @@ fn cancelling_a_worker_cancels_its_children() {
         .expect("registered");
     assert_eq!(entry.owner, Owner::Worker(outer.id));
     builtin_cancel(&[Value::Handle(Box::new(outer.clone()))]).unwrap();
-    assert!(within(2, || inner.cancel.cause()
+    assert!(within(2, || inner.home.cause()
         == Some(CancelCause::Cancelled)
         && outer.sample().has_ended()
         && inner.sample().has_ended()
@@ -2413,7 +2413,7 @@ fn a_top_level_birth_hangs_at_the_root() {
         .session
         .root
         .cancel(crate::process::RootCause::Terminated);
-    assert!(handle.cancel.is_cancelled(), "the root reaches it");
+    assert!(handle.home.is_cancelled(), "the root reaches it");
 }
 
 /// A worker's title is the one written, else the line that spawned it.
@@ -2609,7 +2609,7 @@ fn retention_spares_a_running_workers_settled_child() {
 fn retention_spares_a_gathers_settled_child() {
     let mut shell = crate::test_helper::core_shell();
     shell.arm_worker_retention(1);
-    let owner = ScopeOwner::new(BroodOwner::Gather);
+    let owner = BroodGuard::new(BroodOwner::Gather);
     shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
     let child = spawn_child(
         &Mooring::adrift(),
@@ -2717,7 +2717,7 @@ fn a_gather_cancels_its_children_on_an_interrupt() {
     let mut shell = crate::test_helper::core_shell();
     let m = Mooring::adrift();
     shell.scope = Scope::clone(&m.home);
-    let owner = ScopeOwner::new(BroodOwner::Gather);
+    let owner = BroodGuard::new(BroodOwner::Gather);
     shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
     let child = spawn_child(&m, &mut shell, spawned("<parked>"), check_loop).unwrap();
     let run = m.home.clone();
@@ -2729,7 +2729,7 @@ fn a_gather_cancels_its_children_on_an_interrupt() {
     striker.join().unwrap();
     assert!(matches!(err, Break::Escape(Escape::Stopped(_))));
     assert!(
-        child.cancel.is_cancelled(),
+        child.home.is_cancelled(),
         "the run's stop reaches the child"
     );
     assert!(within(6, || child.sample().has_ended()));
@@ -2743,7 +2743,7 @@ fn a_gather_cancels_its_children_on_an_interrupt() {
 #[test]
 fn a_cancelled_child_is_drained_at_the_gathers_exit() {
     let mut shell = crate::test_helper::core_shell();
-    let owner = ScopeOwner::new(BroodOwner::Gather);
+    let owner = BroodGuard::new(BroodOwner::Gather);
     shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
     let child = spawn_child(
         &Mooring::adrift(),
@@ -2811,12 +2811,12 @@ fn a_spawn_inside_a_worker_is_not_announced() {
 /// ended (`consumed`) one is pruned when the owner closes (or compacts).
 #[test]
 fn a_brood_prunes_only_a_claimed_and_ended_child() {
-    let owner = ScopeOwner::new(BroodOwner::Gather);
+    let owner = BroodGuard::new(BroodOwner::Gather);
     let brood = owner.brood();
     let (running, _settler) = HandleInner::new(
         WorkerId::mint(),
         "<running>",
-        DurableRoot::default().worker(),
+        DurableRoot::default().child(),
         Streams::default(),
     );
     let ended = handle_with_panicked_worker(b"", b"");
@@ -2859,7 +2859,7 @@ fn first_of_takes_the_winner_and_drains_losers() {
 
 // ── lifecycle & ownership regressions (§11.1–11.4) ───────────────────
 
-/// When `exit_brood` panics while joining a panicked child, `ScopeOwner::drop`
+/// When `exit_brood` panics while joining a panicked child, `BroodGuard::drop`
 /// still stops every remaining sibling — both in a top-level `gather` and in a
 /// nested `gather` inside a worker.
 #[test]
@@ -2867,7 +2867,7 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
     // 1. Top-level gather join panic with a gated sibling.
     {
         let mut shell = crate::test_helper::core_shell();
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
         let m = Mooring::adrift();
 
@@ -2898,9 +2898,9 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
         assert_eq!(
             sibling.sample(),
             Sample::Stopping,
-            "ScopeOwner::drop must claim and stop the remaining sibling on unwind"
+            "BroodGuard::drop must claim and stop the remaining sibling on unwind"
         );
-        assert!(sibling.cancel.is_cancelled());
+        assert!(sibling.home.is_cancelled());
 
         gate.release();
         wait_ended(&sibling);
@@ -2916,7 +2916,7 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
         let (mut gate, gate_rx) = GateGuard::new();
 
         let outer = spawn_child(&m, &mut shell, spawned("<outer>"), move |mooring, child| {
-            let gather_owner = ScopeOwner::new(BroodOwner::Gather);
+            let gather_owner = BroodGuard::new(BroodOwner::Gather);
             let prev = std::mem::replace(
                 &mut child.local.cradle,
                 Cradle::owning(child.scope.clone(), gather_owner.brood()),
@@ -2940,9 +2940,9 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
         assert_eq!(
             sibling.sample(),
             Sample::Stopping,
-            "nested gather's ScopeOwner::drop must stop its gated sibling when join unwinds"
+            "nested gather's BroodGuard::drop must stop its gated sibling when join unwinds"
         );
-        assert!(sibling.cancel.is_cancelled());
+        assert!(sibling.home.is_cancelled());
 
         gate.release();
         wait_ended(&sibling);
@@ -2957,7 +2957,7 @@ fn gather_exit_join_panic_cancels_remaining_siblings_top_level_and_nested() {
 }
 
 /// If the `gather` body itself panics before reaching `exit_brood`, dropping
-/// `ScopeOwner` closes membership and stops every enrolled child.
+/// `BroodGuard` closes membership and stops every enrolled child.
 #[test]
 fn gather_body_panic_cancels_enrolled_children_via_scope_owner_drop() {
     let mut shell = crate::test_helper::core_shell();
@@ -2966,7 +2966,7 @@ fn gather_body_panic_cancels_enrolled_children_via_scope_owner_drop() {
     let mut child_slot: Option<HandleInner> = None;
 
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
         let child = spawn_child(&m, &mut shell, spawned("<gated>"), move |_, _| {
             let _ = gate_rx.recv();
@@ -2980,7 +2980,7 @@ fn gather_body_panic_cancels_enrolled_children_via_scope_owner_drop() {
 
     let child = child_slot.expect("child was spawned before body panic");
     assert_eq!(child.sample(), Sample::Stopping);
-    assert!(child.cancel.is_cancelled());
+    assert!(child.home.is_cancelled());
 
     gate.release();
     wait_ended(&child);
@@ -3321,7 +3321,7 @@ fn late_enrolment_on_closed_brood_cancels_and_reports_clean_error() {
         ),
     ] {
         let mut shell = crate::test_helper::core_shell();
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         owner.close();
         shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
 
@@ -3348,7 +3348,7 @@ fn late_enrolment_on_closed_brood_cancels_and_reports_clean_error() {
         let snapshot = shell.local.workers.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].handle.sample(), Sample::Stopping);
-        assert!(snapshot[0].handle.cancel.is_cancelled());
+        assert!(snapshot[0].handle.home.is_cancelled());
 
         gate.release();
         wait_ended(&snapshot[0].handle);
@@ -3382,7 +3382,7 @@ fn exit_brood_and_race_wait_for_already_stopping_children() {
     // 1. `exit_brood` on a halting gather body waits for a pre-cancelled child.
     {
         let mut shell = crate::test_helper::core_shell();
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         shell.local.cradle = Cradle::owning(shell.scope.clone(), owner.brood());
         let child =
             spawn_child(&Mooring::adrift(), &mut shell, spawned("<slow>"), slow_body).unwrap();

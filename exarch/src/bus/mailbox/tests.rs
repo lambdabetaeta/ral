@@ -67,7 +67,7 @@ fn helper_of(parent: &AgentMailbox) -> AgentMailbox {
             idle: Duration::from_secs(60),
         },
         Recorder::none(),
-        parent.life().child(),
+        parent.home().child(),
         Some(parent.address()),
         true,
     )

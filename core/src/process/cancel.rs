@@ -544,11 +544,6 @@ impl DurableRoot {
         Self(ScopeNode(Scope(mint(None, None))))
     }
 
-    #[cfg(test)]
-    pub fn worker(&self) -> ScopeNode {
-        self.child()
-    }
-
     /// Record `cause` on the root, reaching the foreground run and every
     /// worker at once.
     pub fn cancel(&self, cause: RootCause) {
@@ -696,7 +691,7 @@ mod tests {
 
     #[test]
     fn parent_cancel_reaches_child() {
-        let parent = DurableRoot::default().worker();
+        let parent = DurableRoot::default().child();
         let child = parent.child();
         assert!(!child.is_cancelled(), "a fresh child starts uncancelled");
         parent.cancel(CancelCause::Interrupted);
@@ -728,7 +723,7 @@ mod tests {
     #[test]
     fn a_nested_frame_observes_its_parents_interrupt() {
         let root = DurableRoot::new();
-        let outer = root.worker().child();
+        let outer = root.child().child();
         outer.cancel(CancelCause::Interrupted);
         let inner = outer.child();
         assert_eq!(
@@ -747,7 +742,7 @@ mod tests {
     /// ancestors the runs enclosing it.
     #[test]
     fn an_outer_frames_deadline_reaches_the_nest() {
-        let outer = DurableRoot::new().worker().child();
+        let outer = DurableRoot::new().child().child();
         let inner = outer.child();
         outer.cancel(CancelCause::TimedOut);
         assert_eq!(
@@ -762,8 +757,8 @@ mod tests {
     #[test]
     fn a_worker_is_spared_the_interrupt_and_hears_the_shutdown() {
         let root = DurableRoot::new();
-        let frame = root.worker().child();
-        let worker = root.worker();
+        let frame = root.child().child();
+        let worker = root.child();
         frame.cancel(CancelCause::Interrupted);
         assert_eq!(
             worker.cause(),
@@ -788,7 +783,7 @@ mod tests {
     }
 
     fn pair() -> (ScopeNode, ScopeNode) {
-        let parent = DurableRoot::default().worker();
+        let parent = DurableRoot::default().child();
         let node = parent.child();
         (parent, node)
     }

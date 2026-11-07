@@ -98,7 +98,7 @@ fn read_answers_the_published_reply_even_after_the_helper_ends() {
     with_spawnable_desk(3, |desk, fleet, agent| {
         let child = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &agent, agent.mailbox.life().child()),
+            TestAgentSpec::child("helper", &agent, agent.mailbox.home().child()),
         )
         .unwrap();
         adopt_synthetic(&desk, &child);
@@ -134,14 +134,14 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
     with_spawnable_desk(3, |desk, fleet, agent| {
         let child = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &agent, agent.mailbox.life().child()),
+            TestAgentSpec::child("helper", &agent, agent.mailbox.home().child()),
         )
         .unwrap();
         crate::agent::testkit::take_task(&child, &child.mailbox);
         adopt_synthetic(&desk, &child);
         let grandchild = test_agent(
             &fleet,
-            TestAgentSpec::child("grandchild", &child, child.mailbox.life().child()),
+            TestAgentSpec::child("grandchild", &child, child.mailbox.home().child()),
         )
         .unwrap();
         grandchild
@@ -170,7 +170,7 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
         );
         let silent = test_agent(
             &fleet,
-            TestAgentSpec::child("silent", &agent, agent.mailbox.life().child()),
+            TestAgentSpec::child("silent", &agent, agent.mailbox.home().child()),
         )
         .unwrap();
         adopt_synthetic(&desk, &silent);
@@ -196,7 +196,7 @@ fn read_refuses_an_old_reply_while_a_follow_up_is_working() {
     with_spawnable_desk(3, |desk, fleet, agent| {
         let child = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &agent, agent.mailbox.life().child()),
+            TestAgentSpec::child("helper", &agent, agent.mailbox.home().child()),
         )
         .unwrap();
         adopt_synthetic(&desk, &child);
@@ -236,7 +236,7 @@ fn start_answers_the_fleets_state_not_a_receipt() {
         let sibling = crate::agent::testkit::TestAgentSpec::child(
             "already-there",
             &desk.call.handle,
-            agent.mailbox.life().child(),
+            agent.mailbox.home().child(),
         );
         let _already_there = crate::agent::testkit::test_agent(&fleet, sibling)
             .expect("a fresh child of a live parent");
@@ -584,17 +584,17 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
         |mut desk, fleet, root| {
             let mid = test_agent(
                 &fleet,
-                TestAgentSpec::child("mid", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("mid", &root, root.mailbox.home().child()),
             )
             .unwrap();
             let grandchild = test_agent(
                 &fleet,
-                TestAgentSpec::child("grandchild", &mid, mid.mailbox.life().child()),
+                TestAgentSpec::child("grandchild", &mid, mid.mailbox.home().child()),
             )
             .unwrap();
             let sibling = test_agent(
                 &fleet,
-                TestAgentSpec::child("sibling", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("sibling", &root, root.mailbox.home().child()),
             )
             .unwrap();
             let great_grandchild = test_agent(
@@ -602,12 +602,12 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
                 TestAgentSpec::child(
                     "great-grandchild",
                     &grandchild,
-                    grandchild.mailbox.life().child(),
+                    grandchild.mailbox.home().child(),
                 ),
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.life();
+            desk.call.life = mid.mailbox.home();
             assert!(
                 desk.agent_stop("grandchild").is_ok(),
                 "Stop at rest is harmless"
@@ -681,21 +681,21 @@ fn stop_answers_say_what_they_did_or_why_they_refused() {
         |mut desk, fleet, root| {
             let mid = test_agent(
                 &fleet,
-                TestAgentSpec::child("mid", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("mid", &root, root.mailbox.home().child()),
             )
             .unwrap();
             let grandchild = test_agent(
                 &fleet,
-                TestAgentSpec::child("grandchild", &mid, mid.mailbox.life().child()),
+                TestAgentSpec::child("grandchild", &mid, mid.mailbox.home().child()),
             )
             .unwrap();
             let sibling = test_agent(
                 &fleet,
-                TestAgentSpec::child("sibling", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("sibling", &root, root.mailbox.home().child()),
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.life();
+            desk.call.life = mid.mailbox.home();
             for refused in ["sibling", "mid"] {
                 let message = desk
                     .agent_stop(refused)
@@ -728,7 +728,7 @@ fn dismiss_propagates_the_helpers_teardown_failures_to_its_parent() {
     with_spawnable_desk(3, |desk, fleet, root| {
         let helper = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
+            TestAgentSpec::child("helper", &root, root.mailbox.home().child()),
         )
         .unwrap();
         let helper = adopt_failing(&desk, helper, vec!["helper's teardown failure".into()]);
@@ -749,7 +749,7 @@ fn dismissing_an_already_joined_helper_says_so() {
     with_spawnable_desk(3, |desk, fleet, root| {
         let helper = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
+            TestAgentSpec::child("helper", &root, root.mailbox.home().child()),
         )
         .unwrap();
         let helper = adopt_failing(&desk, helper, Vec::new());
@@ -769,16 +769,16 @@ fn message_reaches_a_working_peer_but_a_resting_helper_admits_only_its_parent() 
         |mut desk, fleet, root| {
             let mid = test_agent(
                 &fleet,
-                TestAgentSpec::child("mid", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("mid", &root, root.mailbox.home().child()),
             )
             .unwrap();
             let sibling = test_agent(
                 &fleet,
-                TestAgentSpec::child("sibling", &root, root.mailbox.life().child()),
+                TestAgentSpec::child("sibling", &root, root.mailbox.home().child()),
             )
             .unwrap();
             desk.call.handle = (*mid).clone();
-            desk.call.life = mid.mailbox.life();
+            desk.call.life = mid.mailbox.home();
             desk.ask(message_req("parent", "hi")).unwrap();
             assert!(
                 desk.ask(message_req("mid", "hi"))
@@ -863,13 +863,13 @@ fn dismiss_refuses_a_grandchild_and_leaves_both_lives_untouched() {
     with_spawnable_desk(3, |desk, fleet, root| {
         let child = test_agent(
             &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.life().child()),
+            TestAgentSpec::child("helper", &root, root.mailbox.home().child()),
         )
         .unwrap();
         adopt_synthetic(&desk, &child);
         let grandchild = test_agent(
             &fleet,
-            TestAgentSpec::child("grandchild", &child, child.mailbox.life().child()),
+            TestAgentSpec::child("grandchild", &child, child.mailbox.home().child()),
         )
         .unwrap();
         let error = desk

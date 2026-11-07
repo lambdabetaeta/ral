@@ -186,7 +186,7 @@ fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
     with_scoped_state_dir(|| {
         let td = tempfile::tempdir().unwrap();
         let canonical = real(td.path());
-        let cancel = DurableRoot::default().worker();
+        let cancel = DurableRoot::default().child();
         cancel.cancel(CancelCause::TimedOut);
 
         let err = grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);

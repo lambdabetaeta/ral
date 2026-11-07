@@ -533,7 +533,7 @@ mod tests {
         let mut launch = Launch::new(program);
         launch.confine(super::Confined {
             report: crate::process::report::Report::new(reader, writer.into()),
-            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().worker()),
+            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().child()),
             envelope: None,
         });
         launch

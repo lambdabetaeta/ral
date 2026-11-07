@@ -48,26 +48,26 @@ impl From<BroodOwner> for Owner {
     }
 }
 
-/// Refusal from [`Brood::enrol`] once its [`ScopeOwner`] has closed membership:
+/// Refusal from [`Brood::enrol`] once its [`BroodGuard`] has closed enrolment:
 /// the rejected handle has already been claimed and stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EnrolClosed;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MembershipState {
+enum EnrolmentState {
     Open,
     Closed,
 }
 
-struct Membership {
-    state: MembershipState,
+struct Enrolment {
+    state: EnrolmentState,
     children: Compacting<HandleInner>,
 }
 
-impl Default for Membership {
+impl Default for Enrolment {
     fn default() -> Self {
         Self {
-            state: MembershipState::Open,
+            state: EnrolmentState::Open,
             children: Compacting::default(),
         }
     }
@@ -75,29 +75,29 @@ impl Default for Membership {
 
 /// The shared enrolment side of a gather or worker brood.
 ///
-/// Only [`ScopeOwner::new`] constructs a fresh [`Brood`], and only
-/// [`ScopeOwner`] holds close, stop and drain authority.
+/// Only [`BroodGuard::new`] constructs a fresh [`Brood`], and only
+/// [`BroodGuard`] holds close, stop and drain authority.
 #[derive(Clone)]
 pub(crate) struct Brood {
     /// Whom its children's entries name as owner.
     pub(crate) owner: BroodOwner,
-    membership: Arc<Mutex<Membership>>,
+    enrolment: Arc<Mutex<Enrolment>>,
 }
 
 impl Brood {
     /// Enrol `handle` in birth order while the owner is open, compacting
     /// consumed entries on an amortized schedule.  If the owner has already
-    /// closed membership, releases the membership lock, claims/stops `handle`,
+    /// closed enrolment, releases the enrolment lock, claims/stops `handle`,
     /// and returns [`Err(EnrolClosed)`](EnrolClosed).
     pub(crate) fn enrol(&self, handle: HandleInner) -> Result<(), EnrolClosed> {
-        let mut guard = self.membership.lock_ignore_poison();
+        let mut guard = self.enrolment.lock_ignore_poison();
         let m = &mut *guard;
         match m.state {
-            MembershipState::Open => {
+            EnrolmentState::Open => {
                 m.children.push(handle);
                 Ok(())
             }
-            MembershipState::Closed => {
+            EnrolmentState::Closed => {
                 drop(guard);
                 handle.claim_and_stop();
                 Err(EnrolClosed)
@@ -108,19 +108,19 @@ impl Brood {
 
 /// The unique guard owning a [`Brood`]'s lifecycle.
 ///
-/// Dropping a `ScopeOwner` closes enrolment and stops every unclaimed child
+/// Dropping a `BroodGuard` closes enrolment and stops every unclaimed child
 /// without waiting, so a panic in the body or in the exit join cannot leave
 /// sibling workers running uncancelled.
-pub(crate) struct ScopeOwner {
+pub(crate) struct BroodGuard {
     brood: Brood,
 }
 
-impl ScopeOwner {
+impl BroodGuard {
     pub(crate) fn new(owner: BroodOwner) -> Self {
         Self {
             brood: Brood {
                 owner,
-                membership: Arc::default(),
+                enrolment: Arc::default(),
             },
         }
     }
@@ -132,16 +132,16 @@ impl ScopeOwner {
     /// Monotonically close enrolment and prune consumed entries once,
     /// retaining the remaining handles for join or stop.
     pub(crate) fn close(&self) {
-        let mut m = self.brood.membership.lock_ignore_poison();
-        if m.state == MembershipState::Open {
-            m.state = MembershipState::Closed;
+        let mut m = self.brood.enrolment.lock_ignore_poison();
+        if m.state == EnrolmentState::Open {
+            m.state = EnrolmentState::Closed;
             m.children.prune();
         }
     }
 
     /// Every retained child, in birth order.
     pub(crate) fn children(&self) -> Vec<HandleInner> {
-        self.brood.membership.lock_ignore_poison().children.to_vec()
+        self.brood.enrolment.lock_ignore_poison().children.to_vec()
     }
 
     /// Close enrolment, snapshot retained handles out of the lock, and claim
@@ -170,16 +170,16 @@ impl ScopeOwner {
 
     #[cfg(test)]
     pub(crate) fn retained_len(&self) -> usize {
-        self.brood.membership.lock_ignore_poison().children.len()
+        self.brood.enrolment.lock_ignore_poison().children.len()
     }
 
     #[cfg(test)]
     pub(crate) fn compaction_visits(&self) -> usize {
-        self.brood.membership.lock_ignore_poison().children.visits()
+        self.brood.enrolment.lock_ignore_poison().children.visits()
     }
 }
 
-impl Drop for ScopeOwner {
+impl Drop for BroodGuard {
     fn drop(&mut self) {
         self.stop();
     }
@@ -215,14 +215,14 @@ mod tests {
         HandleInner::new(
             WorkerId::mint(),
             "<brood-test>",
-            DurableRoot::default().worker(),
+            DurableRoot::default().child(),
             Streams::default(),
         )
     }
 
     #[test]
-    fn enrol_on_closed_membership_cancels_running_and_consumes_ready() {
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+    fn enrol_on_closed_enrolment_cancels_running_and_consumes_ready() {
+        let owner = BroodGuard::new(BroodOwner::Gather);
         let brood = owner.brood();
         owner.close();
 
@@ -231,7 +231,7 @@ mod tests {
         let (running, _running_permit) = fresh_handle();
         assert_eq!(brood.enrol(running.clone()), Err(EnrolClosed));
         assert_eq!(running.sample(), Sample::Stopping);
-        assert!(running.cancel.is_cancelled());
+        assert!(running.home.is_cancelled());
 
         // An already-ready handle rejected by closed enrolment is immediately Consumed.
         let (ready, ready_permit) = fresh_handle();
@@ -244,18 +244,18 @@ mod tests {
 
     #[test]
     fn dropping_brood_clone_does_not_stop_children_but_dropping_owner_does() {
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         let brood = owner.brood();
         let (child, _permit) = fresh_handle();
         brood.enrol(child.clone()).expect("open");
 
         drop(brood);
         assert_eq!(child.sample(), Sample::Running(()));
-        assert!(!child.cancel.is_cancelled());
+        assert!(!child.home.is_cancelled());
 
         drop(owner);
         assert_eq!(child.sample(), Sample::Stopping);
-        assert!(child.cancel.is_cancelled());
+        assert!(child.home.is_cancelled());
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn compaction_is_amortized_on_all_live_and_mostly_consumed_workloads() {
         // 1. Mostly-consumed workload: 1 long-lived child + 200 consumed children.
-        let owner = ScopeOwner::new(BroodOwner::Gather);
+        let owner = BroodGuard::new(BroodOwner::Gather);
         let brood = owner.brood();
         let (live, _live_permit) = fresh_handle();
         brood.enrol(live).expect("enrol live");
@@ -313,7 +313,7 @@ mod tests {
         );
 
         // 2. All-live workload: 200 live children double sweep_at at 32, 64, 128.
-        let live_owner = ScopeOwner::new(BroodOwner::Gather);
+        let live_owner = BroodGuard::new(BroodOwner::Gather);
         let live_brood = live_owner.brood();
         let mut permits = Vec::new();
         for _ in 0..200 {

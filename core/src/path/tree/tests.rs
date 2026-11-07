@@ -691,7 +691,7 @@ fn a_listing_states_the_live_length_before_its_writer_closes() {
 fn a_cancelled_scope_stops_the_walk_at_the_next_entry() {
     let (_tmp, root) = tmp();
     lay(&root, &[("a", ""), ("b", "")]);
-    let node = DurableRoot::default().worker();
+    let node = DurableRoot::default().child();
     let mut entries = (Walk::all(&lexical(&root)).readable_by(open())).entries(Scope::clone(&node));
     assert!(entries.next().expect("the root").is_ok());
     node.cancel(CancelCause::Interrupted);
@@ -709,7 +709,7 @@ fn a_cancelled_scope_stops_the_walk_at_the_next_entry() {
 fn a_cancelled_scope_stops_a_listing_between_its_entries() {
     let (_tmp, root) = tmp();
     lay(&root, &[("a", ""), ("b", "")]);
-    let node = DurableRoot::default().worker();
+    let node = DurableRoot::default().child();
     let entries = (Walk::all(&lexical(&root)).readable_by(open())).entries(Scope::clone(&node));
     let dir = entries.region.judge(walk_dir(&lexical(&root)).unwrap());
     let dir = dir.unwrap_or_else(|_| panic!("the root is readable"));

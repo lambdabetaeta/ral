@@ -290,12 +290,12 @@ mod tests {
     #[test]
     fn a_nested_stage_answers_to_the_outermost_owners_stage() {
         let owner = prepared();
-        let outer = DurableRoot::default().worker();
+        let outer = DurableRoot::default().child();
         let membership = owner.membership(&outer);
         assert_eq!(membership.group(), owner.leader_pgid());
 
         let joiner = PipelineGroup::joining(membership);
-        let inner = DurableRoot::default().worker();
+        let inner = DurableRoot::default().child();
         let nested = joiner.membership(&inner);
         assert_eq!(nested.group(), owner.leader_pgid());
         #[cfg(unix)]

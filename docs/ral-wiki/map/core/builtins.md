@@ -141,12 +141,12 @@ Bodies are grouped by concern, one submodule each:
   `first-settled` (`race` ends its losers and drains any already-`stopping`
   handles through `stop_and_drain`, `shell/runtime/handle/brood.rs`), and `concurrency/tests.rs` the tests; the
   worker's deferred surface lives in `shell/runtime/handle/surface.rs`, its
-  cradle, brood and `ScopeOwner` in `shell/runtime/handle/brood.rs` (builtins under their bare
+  cradle, brood and `BroodGuard` in `shell/runtime/handle/brood.rs` (builtins under their bare
   names; `par`, `both` and `first-of` are prelude code over them,
   [[map/core/prelude|prelude]]). `spawn` and `gather` are control operators,
   not rows: the machine forms `spawn`'s operands and calls its door, and runs
-  `gather` as a frame (`Frame::Gather`) that settles its `ScopeOwner` by
-  `exit_brood` on return, `ScopeOwner::end` on halt, and `ScopeOwner::stop` on
+  `gather` as a frame (`Frame::Gather`) that settles its `BroodGuard` by
+  `exit_brood` on return, `BroodGuard::end` on halt, and `BroodGuard::stop` on
   `abandon`/`Drop` ([[map/core/evaluator|evaluator]]). All
   but the host-installed two seed through `CORE_BUILTINS`;
   the other two live here
@@ -218,13 +218,13 @@ Bodies are grouped by concern, one submodule each:
   foreground scope: under the durable session root in a run outside any
   gather, so a foreground cancel never reaps it, and inside a gather — a
   worker's body or a `gather { … }` — under the gather's entry scope, enrolled
-  in its `Brood` (`Cradle::owning` paired with a unique `ScopeOwner`): when the
+  in its `Brood` (`Cradle::owning` paired with a unique `BroodGuard`): when the
   gather exits it closes membership first (rejecting and cancelling any late
   birth from a stage thread still unwinding against that cradle), awaits each
-  unclaimed child on return, cancels them on a halt (`ScopeOwner::end`), and on
+  unclaimed child on return, cancels them on a halt (`BroodGuard::end`), and on
   every normal or halting exit waits within one shared grace for every child it
   accepted to reach a terminal state (`Ready` or `Consumed`)
-  (`ScopeOwner::drain`), so `cancel` of a worker reaches its tree and nothing a
+  (`BroodGuard::drain`), so `cancel` of a worker reaches its tree and nothing a
   gather started outlives it by more than the grace. `await` shares `race`'s
   cancel-aware wait loop (`claim_first`, over `first_ready`), so a deadline
   unwinds the wait while a session worker survives

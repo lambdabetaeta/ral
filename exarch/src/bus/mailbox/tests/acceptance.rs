@@ -78,7 +78,7 @@ fn random_cell_operations_keep_queue_equal_to_mail_and_file_replay_equal_to_cell
             let mailbox = configured_mailbox(
                 admission,
                 journal.clone(),
-                parent.life().child(),
+                parent.home().child(),
                 matches!(admission, Admission::Parent { .. }).then(|| parent.address()),
                 true,
             );

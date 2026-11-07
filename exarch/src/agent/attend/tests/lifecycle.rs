@@ -309,7 +309,7 @@ fn a_parent_waking_after_a_report_cannot_settle_without_reading_it() {
         let mut parent = trunk(kind);
         let helper = test_agent(
             &parent.fleet,
-            TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+            TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
         )
         .unwrap();
         take_task(&helper, &helper.mailbox);
@@ -492,7 +492,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
     let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     take_task(&helper, &helper.mailbox);
@@ -657,7 +657,7 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
     let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let id = helper.id();
@@ -826,7 +826,7 @@ fn read_uses_a_helpers_published_status_even_before_its_report_is_taken_up() {
     let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     take_task(&helper, &helper.mailbox);
@@ -869,7 +869,7 @@ fn clear_joins_a_retiring_helper_before_discarding_its_notification() {
     let mut parent = trunk(false);
     let helper = test_agent(
         &parent.fleet,
-        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.life().child()),
+        TestAgentSpec::child("helper", &parent.handle(), parent.mailbox.home().child()),
     )
     .unwrap();
     let handle = (*helper).clone();
@@ -1050,7 +1050,7 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
     assert!(handle.status().unwrap().job.is_none());
     assert!(handle.status().unwrap().owes);
     let pending = handle.0.address.queued_posts();
-    let life = root.mailbox.life();
+    let life = root.mailbox.home();
     handle
         .0
         .address

@@ -6,9 +6,9 @@ use crate::fact::{Reason, Worker};
 use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
-    Break, Brood, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, Error,
-    HandleInner, Mooring, Observed, Owner, ScopeOwner, Settled, Shell, SurfaceSink, Value,
-    WatchEvent, WorkerEntry, WorkerId, sig,
+    Break, Brood, BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed,
+    Error, HandleInner, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent,
+    WorkerEntry, WorkerId, sig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,7 +122,7 @@ where
     shell.spawn_worker(worker_mooring, sinks, move |mooring, child| {
         let end = child.base(&mooring.home, |child| {
             // A panic drops the owner and stops accepted children (I4, I5).
-            let owner = ScopeOwner::new(BroodOwner::Worker(id));
+            let owner = BroodGuard::new(BroodOwner::Worker(id));
             child.local.cradle = Cradle::owning(Scope::clone(&mooring.home), owner.brood());
             let body = work(mooring, child);
             exit_brood(&owner, body, mooring.cleanup_grace, child)
@@ -204,7 +204,7 @@ pub(super) fn convert_own_stop(end: End, root: &DurableRoot) -> End {
 /// child that failed under the join, stops and drains them all.  The `Err` is
 /// the body's, the child's, or the stop that cut the join.
 pub(crate) fn exit_brood(
-    owner: &ScopeOwner,
+    owner: &BroodGuard,
     body: Settled<Value>,
     grace: Duration,
     shell: &mut Shell,

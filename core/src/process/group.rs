@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_member_owes_only_what_its_stage_does_not_hold() {
-        let stage = DurableRoot::default().worker();
+        let stage = DurableRoot::default().child();
         let member = membership(&stage);
         assert!(
             CancelCause::VARIANTS.iter().all(|&c| member.owes(c)),
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn strike_order_does_not_change_what_a_member_owes() {
-        let stage = DurableRoot::default().worker();
+        let stage = DurableRoot::default().child();
         let own = stage.child();
         own.cancel(CancelCause::Terminated);
         stage.cancel(CancelCause::TimedOut);
@@ -259,7 +259,7 @@ mod tests {
             Pgid::from_raw(7).expect("positive"),
             Pgid::from_raw(9).expect("positive"),
         );
-        let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().worker()));
+        let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().child()));
         assert!(matches!(
             Landing::Owns(nine).group(Some(&stage)),
             Group::Owns(g) if g == nine

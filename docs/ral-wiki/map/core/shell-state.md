@@ -190,7 +190,7 @@ checkpoint, since a run never writes it.
   (`shell/runtime/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
   (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
-  scope and its `Brood`, paired with a unique `ScopeOwner` holding the handles
+  scope and its `Brood`, paired with a unique `BroodGuard` holding the handles
   of every `spawn`/`watch` born inside it (`Cradle::owning`) — set first thing
   in the worker closure for a worker's body, and by `Frame::Gather` for the
   extent of a `gather { … }`; a stage shares its parent's, so a `spawn` in a

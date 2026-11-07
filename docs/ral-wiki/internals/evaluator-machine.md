@@ -2,7 +2,7 @@
 generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
 verified_at_date: 2026-11-03
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, ScopeOwner, exit_brood]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, BroodGuard, exit_brood]
 ---
 
 # The evaluator: a CEK machine for CBPV
@@ -86,7 +86,7 @@ snapshots.
 - Shell frames restore their own dynamic state: redirects settle writes,
   `Within` restores env overrides, cwd and handlers, `Grant` pops its layer,
   `Unmask` restores a handler, and `Audit` closes its trail scope.
-- `Gather` holds a `ScopeOwner` and the displaced cradle. Its body runs on
+- `Gather` holds a `BroodGuard` and the displaced cradle. Its body runs on
   this machine; its exit restores the cradle and joins or stops the brood
   through the shared worker exit machinery
   ([[invariants/a-worker-ends-with-its-children|a worker ends with its children]]).
