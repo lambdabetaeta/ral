@@ -661,7 +661,10 @@ mod vet {
         let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
         let e = refused(head, &mut shell);
         assert_eq!(e.failure_code().get(), 127);
-        assert_eq!(e.hint.as_deref(), Some(r"did you mean '.\zztool.bat'?"));
+        assert_eq!(
+            e.hints().first().map(|h| &**h),
+            Some(r"did you mean '.\zztool.bat'?")
+        );
     }
 
     /// Resolution and verdict are two projections of one walk, so they agree
@@ -802,7 +805,11 @@ mod vet {
                 (e, shell.local.audit.close(scope))
             });
             assert!(e.describe().contains("denied by active grant"), "{e:?}");
-            let hint = e.hint.as_deref().expect("a refusal carries a hint");
+            let hint = e
+                .hints()
+                .first()
+                .map(|h| &**h)
+                .expect("a refusal carries a hint");
             assert_eq!(
                 hint.split_once("\n\n").expect("both hints are kept").0,
                 format!("'{name}' is no program in any PATH directory the grant runs from")
@@ -1188,7 +1195,7 @@ mod process {
                 let error =
                     with_denials("tool", failure.clone(), &Claim::Unconfined, Instant::now());
                 assert_eq!(error.reason, Reason::process("tool", failure));
-                assert!(error.hint.is_none(), "{:?}", error.hint);
+                assert!(error.hints().is_empty(), "{:?}", error.hints());
             }
         }
 
@@ -1209,7 +1216,7 @@ mod process {
             ] {
                 let error = with_denials("tool", failure.clone(), &claim, Instant::now());
                 assert_eq!(error.reason, Reason::process("tool", failure));
-                assert_eq!(error.hint.as_deref(), hint);
+                assert_eq!(error.hints().first().map(|h| &**h), hint);
             }
         }
     }
@@ -1468,7 +1475,7 @@ mod process {
                     not_runnable(Unrunnable::PermissionDenied),
                     "{errno}"
                 );
-                assert_eq!(denied.hint.as_deref(), Some(hint), "{errno}");
+                assert_eq!(denied.hints().first().map(|h| &**h), Some(hint), "{errno}");
             }
             let missing = at_spawn(
                 &Error::from_raw_os_error(libc::ENOENT),
@@ -1483,7 +1490,7 @@ mod process {
                     "/opt/x/bin/python3".into()
                 )))
             );
-            assert!(missing.hint.is_none(), "{:?}", missing.hint);
+            assert!(missing.hints().is_empty(), "{:?}", missing.hints());
             let e2big = Error::from_raw_os_error(libc::E2BIG);
             let other = at_spawn(
                 &e2big,
@@ -1496,7 +1503,7 @@ mod process {
                 other.reason,
                 not_runnable(Unrunnable::Io(e2big.to_string()))
             );
-            assert!(other.hint.is_none(), "{:?}", other.hint);
+            assert!(other.hints().is_empty(), "{:?}", other.hints());
         }
     }
 
@@ -1617,7 +1624,7 @@ mod process {
                 error.reason,
                 not_runnable(&shown, Unrunnable::PermissionDenied)
             );
-            assert!(error.hint.is_none(), "{:?}", error.hint);
+            assert!(error.hints().is_empty(), "{:?}", error.hints());
         }
 
         /// The hint names the interpreter read through the judged handle before
@@ -1633,7 +1640,7 @@ mod process {
                 error.reason,
                 not_runnable(&shown, Unrunnable::PermissionDenied)
             );
-            let hint = error.hint.as_deref().unwrap_or_default();
+            let hint = error.hints().first().map(|h| &**h).unwrap_or_default();
             assert!(
                 hint.contains("its interpreter /bin/sh is not admitted"),
                 "{hint}"

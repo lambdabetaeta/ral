@@ -60,9 +60,10 @@ impl RunReport {
             } => {
                 let ending = match ending {
                     End::Ok(value) => FOValue::try_from(&value)
-                        .map_err(|error| Error {
-                            prov: Some(base),
-                            ..not_data(error)
+                        .map_err(|error| {
+                            let mut error = not_data(error);
+                            error.prov = Some(base);
+                            error
                         })
                         .into(),
                     End::Err(error) => Ending::Err(error),
@@ -91,7 +92,7 @@ impl Report {
     /// two it is printing.
     pub(crate) fn refused(message: impl Into<String>) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(message),
+            &Error::new(message.into()),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Static { rendered, status }
@@ -104,7 +105,7 @@ impl Report {
     #[cfg(unix)]
     pub(crate) fn faulted(message: impl Into<String>) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(message),
+            &Error::new(message.into()),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Faulted { rendered, status }

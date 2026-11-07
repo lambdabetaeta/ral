@@ -354,12 +354,6 @@ mod tests {
             Reason::process("sh", Failure::Signaled(libc::SIGKILL)).describe(),
             "sh: killed by signal 9 (SIGKILL)"
         );
-        assert_eq!(
-            Reason::process("sh", Failure::Signaled(libc::SIGSEGV))
-                .hint()
-                .as_deref(),
-            Some("the process crashed with a segmentation fault")
-        );
     }
 
     /// A zombie's exit status cannot be overwritten by a kill that arrives

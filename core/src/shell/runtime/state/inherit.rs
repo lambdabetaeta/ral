@@ -325,14 +325,12 @@ mod tests {
         let span = crate::source::Span::new(file, 8, 11);
         let join = parent
             .spawn_worker(Mooring::adrift(), inherited(), move |_, child| {
-                crate::shell::runtime::Error {
-                    prov: Some(crate::shell::runtime::Prov::Live {
-                        name: "fail".into(),
-                        span,
-                    }),
-                    ..crate::shell::runtime::Error::new("boom")
-                }
-                .render(&child.session.sources, None, child.exit_hints())
+                let mut error = crate::shell::runtime::Error::new("boom");
+                error.prov = Some(crate::shell::runtime::Prov::Live {
+                    name: "fail".into(),
+                    span,
+                });
+                error.render(&child.session.sources, None, child.exit_hints())
             })
             .expect("spawn_worker");
 

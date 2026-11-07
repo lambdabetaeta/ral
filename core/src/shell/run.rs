@@ -268,7 +268,7 @@ impl Shell {
                 let body = move |m: &Mooring, s: &mut Self| {
                     crate::shell::evaluator::apply(&hook.binding.value, args, m, s).map_err(|brk| {
                         match brk {
-                            Break::Error(e) => Break::Error(e.context(label)),
+                            Break::Error(e) => Break::Error(e.with_context(label)),
                             escape @ Break::Escape(_) => escape,
                         }
                     })

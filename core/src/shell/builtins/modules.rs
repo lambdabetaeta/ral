@@ -20,17 +20,17 @@ use std::sync::Arc;
 fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let read = located.read();
     drop(located);
-    let mut file = read.map_err(|e| Error::io(shown, &e).context("use"))?;
+    let mut file = read.map_err(|e| Error::io(shown, &e).with_context("use"))?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source)
-        .map_err(|e| Error::io(shown, &e).context("use"))?;
+        .map_err(|e| Error::io(shown, &e).with_context("use"))?;
     Ok(crate::source::normalize_source_text(source))
 }
 
 /// Report the loader's context without changing the failure value.
 fn tag_loader_error(e: Break) -> Break {
     match e {
-        Break::Error(err) if err.context.is_none() => Break::Error(err.context("use")),
+        Break::Error(err) if err.context.is_none() => Break::Error(err.with_context("use")),
         error @ Break::Error(_) => error,
         other @ Break::Escape(_) => other,
     }
@@ -59,7 +59,7 @@ pub(crate) fn builtin_use(
     };
 
     let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(e.to_string()).context("use"))?;
+        .map_err(|e| Error::new(e.to_string()).with_context("use"))?;
     let source = read_and_normalize(located, &crate::path::shown(file.path()))?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
@@ -120,7 +120,7 @@ fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::
     match origin.and_then(SourceOrigin::file) {
         Some(script) => resolver
             .resolve_in_script(path, script)
-            .map_err(|e| Error::new(e.to_string()).context("use").into()),
+            .map_err(|e| Error::new(e.to_string()).with_context("use").into()),
         None => Ok(resolver.resolve(path)),
     }
 }

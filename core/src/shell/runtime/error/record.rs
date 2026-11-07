@@ -1,6 +1,6 @@
 //! Minting the record `try` hands its handler.
 
-use super::{Error, Prov};
+use crate::error::Error;
 use crate::fact::{ErrorRecord, tag};
 use crate::shell::runtime::{Shell, Value};
 
@@ -21,13 +21,6 @@ impl Error {
             prov.name().into(),
             prov.site(&shell.session.sources),
         )
-    }
-
-    pub(crate) fn from_record(record: ErrorRecord) -> Self {
-        Self {
-            prov: Some(Prov::Resolved(Box::new((record.frame, record.site)))),
-            ..Self::from_reason(record.reason)
-        }
     }
 }
 

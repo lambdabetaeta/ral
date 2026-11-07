@@ -2183,14 +2183,12 @@ fn spawn_failing_in(shell: &mut Shell, own: bool) -> Error {
             } else {
                 parent_file
             };
-            Err(Error {
-                prov: Some(Prov::Live {
-                    name: "fail".into(),
-                    span: Span::new(file, 10, 10),
-                }),
-                ..Error::new("inner boom")
-            }
-            .into())
+            let mut error = Error::new("inner boom");
+            error.prov = Some(Prov::Live {
+                name: "fail".into(),
+                span: Span::new(file, 10, 10),
+            });
+            Err(error.into())
         },
     )
     .unwrap();

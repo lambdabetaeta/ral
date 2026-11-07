@@ -95,7 +95,7 @@ fn static_codes(src: &str) -> Vec<String> {
 fn the_exec_boundary_names_the_spread_that_lowers_a_list() {
     match run_capture("let show = { |v| cat $v }; show [a, b]").0 {
         Err(Break::Error(e)) => assert!(
-            e.hint.is_some_and(|h| h.contains("...")),
+            e.hints().first().is_some_and(|h| h.contains("...")),
             "the refusal should point at `...`"
         ),
         other => panic!("expected a refusal, got {other:?}"),
@@ -116,7 +116,7 @@ fn a_polymorphic_argument_is_left_to_the_spawn() {
         "a parameter's shape is not known here, so nothing may be refused"
     );
     match run_capture(call).0 {
-        Err(Break::Error(e)) => assert!(e.hint.is_some(), "the refusal carries the idiom"),
+        Err(Break::Error(e)) => assert!(!e.hints().is_empty(), "the refusal carries the idiom"),
         other => panic!("`vet` must refuse the shape at run time, got {other:?}"),
     }
     // Nor is a spread's elements' shape: an empty spread reaches `execve(2)`

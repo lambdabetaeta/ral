@@ -1,8 +1,8 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::Shell;
-use super::error::{Error, Prov};
 use super::value::Value;
+use crate::error::{Error, Prov};
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
 use crate::process::{CancelCause, Cancellation, Scope, ScopeId};
 use crate::source::{SourceDb, Span};
@@ -417,11 +417,9 @@ mod tests {
             span: Span::new(file, 2, 3),
         };
 
-        let kept = End::Err(Error {
-            prov: Some(live(inherited)),
-            ..Error::raised("x")
-        })
-        .leaving(&child);
+        let mut raised = Error::new("x");
+        raised.prov = Some(live(inherited));
+        let kept = End::Err(raised).leaving(&child);
         assert!(matches!(
             kept,
             End::Err(Error {

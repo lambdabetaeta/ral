@@ -296,7 +296,7 @@ impl RcPlan {
             match loaded {
                 Err(Break::Error(e)) => {
                     let what = format!("plugin '{name}'");
-                    report_failed_load(shell, &what, &e.context(&what), None);
+                    report_failed_load(shell, &what, &e.with_context(&what), None);
                 }
                 Err(escape) => return Err(escape),
                 Ok(()) => {}

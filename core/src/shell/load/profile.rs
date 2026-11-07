@@ -142,7 +142,7 @@ pub fn apply_session_profiles(
 
 fn wrap(origin: impl std::fmt::Display, e: Break) -> Break {
     match e {
-        Break::Error(err) => Break::Error(err.context(format!("capability file {origin}"))),
+        Break::Error(err) => Break::Error(err.with_context(format!("capability file {origin}"))),
         other @ Break::Escape(_) => other,
     }
 }

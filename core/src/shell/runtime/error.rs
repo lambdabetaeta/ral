@@ -1,262 +1,52 @@
-//! The runtime error type.
+//! The rendering of a runtime error, and its minting as a record.
 
 use super::ExitHints;
 use super::flow::Stop;
-use crate::compile::CompileError;
 use crate::diagnostic::{Label, Rejection, Report, palette};
+use crate::error::{Error, Prov, Unwound, under_context};
 use crate::fact::{Ending, Failure, FailureCode, Reason};
 use crate::process::CancelCause;
-use crate::source::{CallSite, FileId, Source, SourceDb, Span};
+use crate::source::{FileId, SourceDb, Span};
 use std::borrow::Cow;
-use std::fmt::{self, Write as _};
+use std::fmt::Write as _;
 use std::num::NonZeroU8;
-use std::sync::Arc;
 
 mod record;
 pub use record::outcome_value;
-
-/// Rides in every `Settled`, so its optional parts are boxed: clippy's
-/// `result_large_err` refuses an `Err` of 128 bytes.
-#[derive(Debug, Clone)]
-pub struct Error {
-    pub reason: Reason,
-    pub prov: Option<Prov>,
-    /// Only advice that depends on more than the failure record.
-    pub hint: Option<Box<str>>,
-    pub witness: Option<Box<Span>>,
-    pub rejection: Option<Box<Rejection>>,
-    pub context: Option<Box<str>>,
-    pub unwound: Unwound,
-}
-
-/// Where a failure was claimed.  `Live` is resolved against a source registry
-/// only when drawn; `Resolved` carries its coordinates and renders no caret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Prov {
-    Live { name: FrameName, span: Span },
-    Resolved(Box<(String, CallSite)>),
-}
-
-/// A frame's name.  Static spellings and shared [`crate::ir::Name`]s clone
-/// without allocating, which the evaluator's per-step register depends on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FrameName {
-    Static(&'static str),
-    Shared(Arc<str>),
-}
-
-impl std::ops::Deref for FrameName {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        match self {
-            Self::Static(name) => name,
-            Self::Shared(name) => name,
-        }
-    }
-}
-
-impl From<&'static str> for FrameName {
-    fn from(name: &'static str) -> Self {
-        Self::Static(name)
-    }
-}
-
-impl From<Arc<str>> for FrameName {
-    fn from(name: Arc<str>) -> Self {
-        Self::Shared(name)
-    }
-}
-
-impl From<&Arc<str>> for FrameName {
-    fn from(name: &Arc<str>) -> Self {
-        Self::Shared(Arc::clone(name))
-    }
-}
-
-impl From<Cow<'static, str>> for FrameName {
-    fn from(name: Cow<'static, str>) -> Self {
-        match name {
-            Cow::Borrowed(name) => Self::Static(name),
-            Cow::Owned(name) => name.into(),
-        }
-    }
-}
-
-impl From<String> for FrameName {
-    fn from(name: String) -> Self {
-        Self::Shared(name.into())
-    }
-}
-
-impl Prov {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Live { name, .. } => name,
-            Self::Resolved(pair) => &pair.0,
-        }
-    }
-
-    pub fn span(&self) -> Option<Span> {
-        match self {
-            Self::Live { span, .. } => Some(*span),
-            Self::Resolved(_) => None,
-        }
-    }
-
-    pub(crate) fn site(&self, db: &SourceDb) -> CallSite {
-        match self {
-            Self::Live { span, .. } => db.site(*span).expect("live provenance is registered"),
-            Self::Resolved(pair) => pair.1.clone(),
-        }
-    }
-
-    /// Leaving the shell `db` belongs to: a span into a file the parent
-    /// registry does not hold (or holds as another file) becomes coordinates.
-    pub(crate) fn leaving(self, db: &SourceDb) -> Self {
-        match self {
-            Self::Live { name, span } if !db.inherits(span.file) => match db.site(span) {
-                Some(site) => Self::Resolved(Box::new((name.to_string(), site))),
-                None => Self::Live { name, span },
-            },
-            prov => prov,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Unwound {
-    pub abandoned_tail: bool,
-    pub discarded: u32,
-}
 
 /// Said the same way wherever a block is sequenced: a phrase list
 /// (`evaluator::run_phrases`) and a `Bind` chain (`evaluator::machine`).
 const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
                                    `attempt` if its failure should not stop the rest";
 
-const _: () = assert!(
-    std::mem::size_of::<Error>() < 128,
-    "Error must stay under clippy's result_large_err threshold"
-);
-
-impl FailureCode for Error {
-    fn failure_code(&self) -> NonZeroU8 {
-        self.reason.failure_code()
+/// The one hint the record determines: signal advice for `signaled`, the
+/// session's exit-hints entry for `exited`.  Recomputed at each render.
+fn advice<'a>(reason: &'a Reason, exit_hints: &ExitHints) -> Option<Cow<'a, str>> {
+    let Reason::Process(process) = reason else {
+        return None;
+    };
+    match process.failure {
+        #[cfg(unix)]
+        Failure::Signaled(libc::SIGKILL) => Some(
+            "the process was killed with SIGKILL; the kernel or another process may have terminated it".into(),
+        ),
+        #[cfg(unix)]
+        Failure::Signaled(libc::SIGSEGV) => {
+            Some("the process crashed with a segmentation fault".into())
+        }
+        Failure::Signaled(n) => Some(
+            format!(
+                "the process terminated from {}",
+                crate::process::Signal::new(n)
+            )
+            .into(),
+        ),
+        Failure::Exited(n) => exit_hints.lookup(&process.program, n).map(Cow::Owned),
+        Failure::NotFound | Failure::NotRunnable(_) => None,
     }
 }
 
 impl Error {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self::raised(message)
-    }
-
-    /// A loaded file's failure: the plain message for a handler to read, the
-    /// whole rejection for a renderer to draw.
-    pub(crate) fn compile(error: CompileError, source: Source) -> Self {
-        let message = error.to_string();
-        Self {
-            rejection: Some(Box::new(error.reject(source))),
-            ..Self::new(message)
-        }
-    }
-
-    pub fn raised(message: impl Into<String>) -> Self {
-        Self::from_reason(Reason::Raised(message.into()))
-    }
-
-    pub fn from_reason(reason: Reason) -> Self {
-        Self {
-            reason,
-            prov: None,
-            hint: None,
-            witness: None,
-            rejection: None,
-            context: None,
-            unwound: Unwound::default(),
-        }
-    }
-
-    /// The failure's own provenance, else the register's frame.
-    pub(crate) fn prov_or<'a>(&'a self, register: &'a Prov) -> &'a Prov {
-        self.prov.as_ref().unwrap_or(register)
-    }
-
-    pub fn describe(&self) -> Cow<'_, str> {
-        self.reason.describe()
-    }
-
-    /// An I/O failure on `what`, in the one phrasing every door shares.  The
-    /// OS's errors and ral's own say the fixed string for `NotFound` and
-    /// `PermissionDenied`, the same on every host; the exception is the
-    /// directory's refusal of a staged write (`path::directory_refused`),
-    /// whose words say whose refusal it is.
-    pub fn io(what: impl fmt::Display, e: &std::io::Error) -> Self {
-        use std::io::ErrorKind::{NotFound, PermissionDenied};
-        match e.kind() {
-            NotFound => Self::new(format!("{what}: no such file or directory")),
-            PermissionDenied if crate::path::directory_refused(e) => {
-                Self::new(format!("{what}: {e}"))
-            }
-            PermissionDenied => Self::new(format!("{what}: permission denied")),
-            _ => Self::new(format!("{what}: {e}")),
-        }
-    }
-
-    pub(crate) fn abandoning_tail(mut self) -> Self {
-        self.unwound.abandoned_tail = true;
-        self
-    }
-
-    pub(crate) fn discarded(mut self, bytes: u32) -> Self {
-        self.unwound.discarded = self.unwound.discarded.saturating_add(bytes);
-        self
-    }
-
-    /// A command that ended or never became a process.  A bare exit code
-    /// takes its hint from the session's `exit_hints` table.
-    pub(crate) fn process(program: &str, failure: Failure) -> Self {
-        Self::from_reason(Reason::process(program, failure))
-    }
-
-    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into().into());
-        self
-    }
-
-    /// Appends `more` below any hint already carried.
-    pub(crate) fn append_hint(mut self, more: impl Into<String>) -> Self {
-        let more = more.into();
-        self.hint = Some(match self.hint.take() {
-            Some(hint) => format!("{hint}\n\n{more}").into(),
-            None => more.into(),
-        });
-        self
-    }
-
-    /// Prepends `more` above any hint already carried.
-    pub(crate) fn prepend_hint(mut self, more: impl Into<String>) -> Self {
-        let more = more.into();
-        self.hint = Some(match self.hint.take() {
-            Some(hint) => format!("{more}\n\n{hint}").into(),
-            None => more.into(),
-        });
-        self
-    }
-
-    pub(crate) fn with_witness(mut self, witness: Option<Span>) -> Self {
-        self.witness = witness.map(Box::new);
-        self
-    }
-
-    pub fn context(mut self, ctx: impl std::fmt::Display) -> Self {
-        self.context = Some(match self.context.take() {
-            Some(inner) => format!("{ctx}: {inner}").into(),
-            None => ctx.to_string().into(),
-        });
-        self
-    }
-
     /// A loaded file that failed to compile draws its own report.  Otherwise
     /// compact only when the error stayed inside `compact_root`'s file, the id
     /// of an input that compiled to a single command.
@@ -268,55 +58,52 @@ impl Error {
     /// expecting a trailing newline (`eprint!`, `write_all`, a wire payload)
     /// keeps it as is; one that stores it for a later `println!`/`eprintln!`
     /// must `trim_end()` first, or that newline doubles.
-    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>, hints: &ExitHints) -> String {
-        render(&self.diagnosis(hints), db, compact_root)
+    pub fn render(
+        &self,
+        db: &SourceDb,
+        compact_root: Option<FileId>,
+        exit_hints: &ExitHints,
+    ) -> String {
+        render(&self.diagnosis(exit_hints), db, compact_root)
     }
 
-    pub fn compact(&self, hints: &ExitHints) -> String {
-        let diagnosis = self.diagnosis(hints);
+    pub fn compact(&self, exit_hints: &ExitHints) -> String {
+        let diagnosis = self.diagnosis(exit_hints);
         let (message, hint) = diagnosis.compose();
         diagnosis.compact(&message, hint.as_deref())
     }
 
     /// A host refusal has no source location.
-    pub(crate) fn render_spanless(&self, hints: &ExitHints) -> String {
+    pub(crate) fn render_spanless(&self, exit_hints: &ExitHints) -> String {
         render(
             &Diagnosis {
                 at: None,
                 witness: None,
                 rejection: None,
-                ..self.diagnosis(hints)
+                ..self.diagnosis(exit_hints)
             },
             &SourceDb::default(),
             None,
         )
     }
 
-    fn diagnosis(&self, hints: &ExitHints) -> Diagnosis<'_> {
-        let hint = self
-            .hint
-            .as_deref()
-            .map(Cow::Borrowed)
-            .or_else(|| self.reason.hint())
-            .or_else(|| {
-                let Reason::Process(process) = &self.reason else {
-                    return None;
-                };
-                let Failure::Exited(n) = process.failure else {
-                    return None;
-                };
-                hints.lookup(&process.program, n).map(Cow::Owned)
-            });
+    fn diagnosis(&self, exit_hints: &ExitHints) -> Diagnosis<'_> {
+        let hints = self
+            .hints()
+            .iter()
+            .map(|hint| Cow::Borrowed(&**hint))
+            .chain(advice(&self.reason, exit_hints))
+            .collect();
         Diagnosis {
             message: self.describe(),
             at: self.prov.as_ref(),
-            witness: self.witness.as_deref().copied(),
-            hint,
+            witness: self.witness(),
+            hints,
             shown: matches!(self.reason, Reason::TimedOut | Reason::Cancelled)
                 .then(|| self.failure_code()),
-            rejection: self.rejection.as_deref(),
-            context: self.context.as_deref(),
-            unwound: self.unwound,
+            rejection: self.rejection(),
+            context: self.context(),
+            unwound: self.unwound(),
             spawn: matches!(
                 self.reason.failure(),
                 Some(Failure::NotFound | Failure::NotRunnable(_))
@@ -329,7 +116,7 @@ struct Diagnosis<'a> {
     message: Cow<'a, str>,
     at: Option<&'a Prov>,
     witness: Option<Span>,
-    hint: Option<Cow<'a, str>>,
+    hints: Vec<Cow<'a, str>>,
     shown: Option<NonZeroU8>,
     rejection: Option<&'a Rejection>,
     context: Option<&'a str>,
@@ -343,7 +130,7 @@ impl Stop {
             message: Cow::Borrowed(self.cause.message()),
             at: self.at.as_ref(),
             witness: None,
-            hint: None,
+            hints: Vec::new(),
             shown: Some(self.failure_code()),
             rejection: None,
             context: None,
@@ -355,10 +142,15 @@ impl Stop {
 
 impl<V> Ending<V, Error, Stop> {
     /// The one rendering: values, exits and reader-gone stops are silent.
-    pub fn render(&self, db: &SourceDb, compact_root: Option<FileId>, hints: &ExitHints) -> String {
+    pub fn render(
+        &self,
+        db: &SourceDb,
+        compact_root: Option<FileId>,
+        exit_hints: &ExitHints,
+    ) -> String {
         match self {
             Self::Ok(_) | Self::Exited(_) => String::new(),
-            Self::Err(error) => render(&error.diagnosis(hints), db, compact_root),
+            Self::Err(error) => render(&error.diagnosis(exit_hints), db, compact_root),
             Self::Stopped(stop) if stop.cause == CancelCause::ReaderGone => String::new(),
             Self::Stopped(stop) => render(&stop.diagnosis(), db, compact_root),
             Self::Panic(text) => render(
@@ -366,7 +158,7 @@ impl<V> Ending<V, Error, Stop> {
                     message: Cow::Owned(format!("run panicked: {text}")),
                     at: None,
                     witness: None,
-                    hint: None,
+                    hints: Vec::new(),
                     shown: None,
                     rejection: None,
                     context: None,
@@ -397,10 +189,7 @@ impl Diagnosis<'_> {
     /// The words of a diagnosis before layout: the message under its context
     /// and resolved site, and the notes under it.
     fn compose(&self) -> (String, Option<String>) {
-        let message = match self.context {
-            Some(context) => format!("{context}: {}", self.message),
-            None => self.message.to_string(),
-        };
+        let message = under_context(self.context, &self.message);
         let message = match self.at {
             Some(Prov::Resolved(pair)) => format!(
                 "{}:{}:{}: {message}",
@@ -409,10 +198,9 @@ impl Diagnosis<'_> {
             _ => message,
         };
         let mut notes = self
-            .hint
-            .as_deref()
-            .map(str::to_owned)
-            .into_iter()
+            .hints
+            .iter()
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         if self.unwound.discarded > 0 {
             notes.push(format!(
@@ -420,7 +208,7 @@ impl Diagnosis<'_> {
                 self.unwound.discarded,
             ));
         }
-        if self.unwound.abandoned_tail && !self.spawn && self.hint.is_none() {
+        if self.unwound.abandoned_tail && !self.spawn && self.hints.is_empty() {
             notes.push(ABANDONED_TAIL_HINT.into());
         }
         (message, (!notes.is_empty()).then(|| notes.join("\n\n")))
@@ -480,21 +268,13 @@ impl Diagnosis<'_> {
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.describe())
-    }
-}
-
-impl std::error::Error for Error {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::CompileError;
     use crate::shell::runtime::End;
-    use crate::source::{SourceFile, SourceOrigin};
+    use crate::source::{Source, SourceFile, SourceOrigin};
     use crate::syntax::parser::{ParseError, ParseErrorKind};
-    use std::io::{self, ErrorKind};
 
     fn file_origin(path: &str) -> SourceOrigin {
         SourceOrigin::File(SourceFile::new(path).expect("UTF-8"))
@@ -562,19 +342,18 @@ mod tests {
             kind: ParseErrorKind::Plain { hint: None },
             incomplete: false,
         };
-        let err = Error::compile(
-            CompileError::Parse(parse),
-            Source::from_text(file_origin("plugin.ral"), "let [x"),
-        )
-        .discarded(412)
-        .abandoning_tail()
-        .context("use");
+        let compile = CompileError::Parse(parse);
+        let err = Error::new(compile.to_string())
+            .with_rejection(compile.reject(Source::from_text(file_origin("plugin.ral"), "let [x")))
+            .discarded(412)
+            .abandoning_tail()
+            .with_context("use");
         let (db, root) = db_with("main.ral", "load-plugin plugin");
         let out = err.render(&db, Some(root), &ExitHints::default());
         assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
         assert_eq!(err.describe(), "parse error: expected ]");
         assert_eq!(err.failure_code(), NonZeroU8::MIN);
-        assert_eq!(err.rejection.as_ref().unwrap().status.get(), 2);
+        assert_eq!(err.rejection().unwrap().status.get(), 2);
         let discard = out.find("412 bytes written").expect("discard note");
         let tail = out.find("later steps").expect("abandoned tail note");
         assert!(
@@ -606,7 +385,9 @@ mod tests {
                 name: "fail".into(),
                 span,
             });
-        err.hint = hint.map(Into::into);
+        if let Some(hint) = hint {
+            err = err.with_hint(hint);
+        }
         crate::io::ansi::strip(&err.render(db, None, &ExitHints::default()))
     }
 
@@ -700,8 +481,8 @@ mod tests {
         assert_eq!(record.describe(), "boom");
         let decorated = error
             .with_hint("specific advice")
-            .context("inner")
-            .context("outer");
+            .with_context("inner")
+            .with_context("outer");
         let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
         assert!(rendered.contains("outer: inner: boom"), "{rendered}");
         assert!(
@@ -712,41 +493,28 @@ mod tests {
         assert_eq!(decorated.discarded(u32::MAX).unwound.discarded, u32::MAX);
     }
 
-    fn said(e: &io::Error) -> String {
-        Error::io("f", e).describe().into_owned()
-    }
-
-    /// `NotFound` and `PermissionDenied` say the fixed string, whoever made
-    /// them and whatever words they carry.
+    #[cfg(unix)]
     #[test]
-    fn io_says_the_fixed_string_for_not_found_and_permission_denied() {
-        let os_not_found = io::Error::from_raw_os_error(2);
-        assert_eq!(os_not_found.kind(), ErrorKind::NotFound);
-        assert_eq!(said(&os_not_found), "f: no such file or directory");
+    fn a_signal_carries_its_advice() {
+        let reason = Reason::process("sh", Failure::Signaled(libc::SIGSEGV));
         assert_eq!(
-            said(&ErrorKind::PermissionDenied.into()),
-            "f: permission denied"
-        );
-        assert_eq!(
-            said(&ErrorKind::NotFound.into()),
-            "f: no such file or directory"
-        );
-        assert_eq!(
-            said(&io::Error::new(ErrorKind::PermissionDenied, "other words")),
-            "f: permission denied"
-        );
-        assert_eq!(
-            said(&io::Error::new(ErrorKind::NotFound, "other words")),
-            "f: no such file or directory"
+            advice(&reason, &ExitHints::default()).as_deref(),
+            Some("the process crashed with a segmentation fault")
         );
     }
 
-    /// The directory's refusal of a staged write says whose refusal it is.
     #[test]
-    fn io_says_the_directorys_refusal_in_its_own_words() {
-        assert_eq!(
-            said(&crate::path::directory_refusal_for_test()),
-            "f: its directory is not writable"
-        );
+    fn stored_hints_come_first_and_the_records_advice_last() {
+        let exit_hints = ExitHints::from_text("sh 3 the table's entry");
+        let error = Error::new(Reason::process("sh", Failure::Exited(3)))
+            .with_hint("the site's hint")
+            .with_hint("a second site");
+        let out = crate::io::ansi::strip(&error.compact(&exit_hints));
+        let at = |needle| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {out}"))
+        };
+        assert!(at("the site's hint") < at("a second site"), "{out}");
+        assert!(at("a second site") < at("the table's entry"), "{out}");
     }
 }

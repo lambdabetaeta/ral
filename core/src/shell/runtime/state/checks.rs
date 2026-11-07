@@ -14,10 +14,7 @@ use std::io;
 
 impl From<Refusal> for Error {
     fn from(Refusal { message, hint }: Refusal) -> Self {
-        Self {
-            hint: hint.map(Into::into),
-            ..Self::new(message)
-        }
+        hint.into_iter().fold(Self::new(message), Self::with_hint)
     }
 }
 
@@ -316,7 +313,7 @@ mod tests {
                     crate::path::shown(&file)
                 )
             );
-            assert_eq!(fs.hint.as_deref(), Some("add it to the grant's fs `read` or `write` list"));
+            assert_eq!(fs.hints().first().map(|h| &**h), Some("add it to the grant's fs `read` or `write` list"));
             assert_eq!(fs.failure_code().get(), 1);
 
             let Break::Error(flag) = shell.check(Flag::Shell(ShellVerb::Detach), "detach").unwrap_err()
@@ -324,7 +321,7 @@ mod tests {
                 panic!("a grant refusal is an error, never an escape");
             };
             assert_eq!(flag.describe(), "detach: an active grant withholds it, so nothing here may outlive this session. Would `spawn` do, since it ends when the session does?");
-            assert!(flag.hint.is_none());
+            assert_eq!(flag.hints(), []);
             assert_eq!(flag.failure_code().get(), 1);
         });
     }

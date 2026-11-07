@@ -169,7 +169,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         Ok(()) => {}
         Err(Break::Error(e)) => {
             let diagnostic =
-                e.context("--capabilities")
+                e.with_context("--capabilities")
                     .render(shell.sources(), None, shell.exit_hints());
             return Ok(Value::from(
                 BootAnswer::CapabilitiesRefused(diagnostic).encode(),

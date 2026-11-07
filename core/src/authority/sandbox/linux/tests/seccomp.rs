@@ -102,7 +102,7 @@ fn a_confined_program_killed_by_the_deny_set_is_hinted() {
         Some(&Failure::Signaled(libc::SIGSYS)),
         "{error:?}"
     );
-    let Some(hint) = error.hint.as_deref() else {
+    let Some(hint) = error.hints().first().map(|h| &**h) else {
         match crate::authority::sandbox::diag::platform::read_window(since.elapsed()) {
             None => skip_beyond_baseline("this host's kernel log cannot be read"),
             Some(records) if records.is_empty() => {

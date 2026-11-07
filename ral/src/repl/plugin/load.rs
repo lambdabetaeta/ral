@@ -31,7 +31,7 @@ fn load_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
     load_plugin(name, &Map::new(), mooring, shell)
         .map(|()| Value::Unit)
         .map_err(|b| match b {
-            Break::Error(e) => e.context(format!("plugin '{name}'")).into(),
+            Break::Error(e) => e.with_context(format!("plugin '{name}'")).into(),
             escape @ Break::Escape(_) => escape,
         })
 }
@@ -41,7 +41,7 @@ fn unload_plugin_builtin(args: &[Value], mooring: &Mooring, shell: &mut Shell) -
     unload_plugin(name, mooring, shell)
         .map(|()| Value::Unit)
         .map_err(|b| match b {
-            Break::Error(e) => e.context(format!("plugin '{name}'")).into(),
+            Break::Error(e) => e.with_context(format!("plugin '{name}'")).into(),
             escape @ Break::Escape(_) => escape,
         })
 }
@@ -220,7 +220,7 @@ fn install_bindings(
             shell
                 .install_alias(name.clone(), value.clone())
                 .map_err(|e| match e {
-                    Break::Error(err) => err.context(format!("alias '{name}'")),
+                    Break::Error(err) => err.with_context(format!("alias '{name}'")),
                     Break::Escape(_) => load_err(format!("alias '{name}' installation escaped")),
                 })?,
         );

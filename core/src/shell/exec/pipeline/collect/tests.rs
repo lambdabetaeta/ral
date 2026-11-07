@@ -1975,7 +1975,11 @@ fn an_external_is_hinted_from_its_own_claim() {
         let Err(Break::Error(alone)) = lone.settle_lone() else {
             panic!("a lone exit 128 is the command's error");
         };
-        assert_eq!(alone.hint.as_deref(), hint.as_deref(), "alone, {confined}");
+        assert_eq!(
+            alone.hints().first().map(|h| &**h),
+            hint.as_deref(),
+            "alone, {confined}"
+        );
 
         let stage = StageEnd::External {
             end: ExternalEnd {
@@ -1990,7 +1994,7 @@ fn an_external_is_hinted_from_its_own_claim() {
         };
         let staged = error(stage.settle(&shell, Instant::now(), &scope, None).end);
         assert_eq!(
-            staged.hint.as_deref(),
+            staged.hints().first().map(|h| &**h),
             hint.as_deref(),
             "staged, {confined}"
         );

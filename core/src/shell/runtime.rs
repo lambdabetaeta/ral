@@ -64,7 +64,8 @@ pub use map::Map;
 pub use crate::data::Bytes;
 
 mod error;
-pub use error::{Error, FrameName, Prov, Unwound, outcome_value};
+pub use crate::error::{Error, FrameName, Prov, Unwound};
+pub use error::outcome_value;
 
 mod exit_hints;
 pub use exit_hints::ExitHints;
@@ -102,7 +103,7 @@ pub use crate::source::CallSite;
 mod mooring;
 pub use mooring::{
     DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT, Nursery,
-    NurseryId, SurfaceSink, TitlePolicy,
+    NurseryId, SurfaceSink, TitlePolicy, no_desk,
 };
 pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 

@@ -2,6 +2,7 @@
 //! structured-event sink, its enquiry desk, its session-[`Fork`] handle, and
 //! its terminal-foreground authority.
 
+use super::Error;
 use super::flow::Settled;
 use super::state::Bequest;
 use super::value::Value;
@@ -45,6 +46,11 @@ pub const NO_DESK: &str = "this host answers no enquiries";
 /// since the wording must not reveal which host refused.
 pub const NO_DESK_HINT: &str =
     "only a foreground run has a desk: call it directly, not in `spawn` or a pipeline stage";
+
+/// The refusal a host with no desk answers, as an error.
+pub fn no_desk() -> Error {
+    Error::new(NO_DESK).with_hint(NO_DESK_HINT)
+}
 
 /// The host's answer desk for the engine→host answered channel.  `enquire` is
 /// blocking and short by contract: a receipt, a ledger read, a verdict — never

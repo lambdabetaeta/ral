@@ -1311,7 +1311,7 @@ mod tests {
     #[cfg(unix)]
     fn failure_hint(source: &str, shell: &mut Shell) -> Option<String> {
         match run_source(source, shell) {
-            Err(Break::Error(e)) => e.hint.as_deref().map(str::to_owned),
+            Err(Break::Error(e)) => e.hints().first().map(ToString::to_string),
             other => panic!("expected an error, got {other:?}"),
         }
     }
@@ -1451,7 +1451,7 @@ mod tests {
             panic!("expected the inner failure, got {result:?}")
         };
         assert_eq!(e.unwound.discarded, 7, "ab\\n plus cde\\n");
-        assert!(e.hint.is_none());
+        assert_eq!(e.hints(), []);
         let rendered = e.render(shell.sources(), None, shell.exit_hints());
         assert_eq!(rendered.matches("were discarded").count(), 1, "{rendered}");
         assert!(rendered.contains("7 bytes written to stdout"), "{rendered}");
@@ -1472,7 +1472,7 @@ mod tests {
         };
         assert_eq!(e.unwound.discarded, 3);
         assert!(e.unwound.abandoned_tail);
-        assert!(e.hint.is_none());
+        assert_eq!(e.hints(), []);
         let rendered = e.render(shell.sources(), None, shell.exit_hints());
         let discard = rendered
             .find("3 bytes written to stdout")

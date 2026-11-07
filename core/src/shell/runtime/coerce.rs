@@ -3,11 +3,11 @@
 use super::{Break, Closure, Error, HandleInner, List, Map, Value};
 
 pub fn sig(message: impl Into<String>) -> Break {
-    Error::new(message).into()
+    Error::new(message.into()).into()
 }
 
 pub(crate) fn sig_hint(message: impl Into<String>, hint: impl Into<String>) -> Break {
-    Error::new(message).with_hint(hint).into()
+    Error::new(message.into()).with_hint(hint.into()).into()
 }
 
 /// Each decoder fails with a bare `Error`: a shape mismatch is never an exit,

@@ -287,18 +287,18 @@ mod tests {
         shell.set_exit_hints(ExitHints::from_text("tool 3 check the input"));
         let record = ErrorRecord::new(tool(Failure::Exited(3)), "wrapper".into(), site());
         let error = reraised(&record);
-        assert!(error.hint.is_none());
+        assert_eq!(error.hints(), []);
         let rendered = error.render(shell.sources(), None, shell.exit_hints());
         assert!(rendered.contains("check the input"), "{rendered}");
         let decorated = error
             .with_hint("check this invocation")
-            .context("outer")
+            .with_context("outer")
             .discarded(12);
         let rendered = decorated.render(shell.sources(), None, shell.exit_hints());
         assert!(rendered.contains("check this invocation"), "{rendered}");
         assert!(!rendered.contains("check the input"), "{rendered}");
         let raised = reraised(&decorated.record(&shell));
-        assert!(raised.hint.is_none() && raised.context.is_none());
+        assert!(raised.hints().is_empty() && raised.context.is_none());
         assert_eq!(raised.unwound, crate::shell::runtime::Unwound::default());
         assert!(
             raised

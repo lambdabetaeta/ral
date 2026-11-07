@@ -100,6 +100,18 @@ record!(typed ErrorRecord {
     site: "site",
 });
 
+impl From<String> for Reason {
+    fn from(message: String) -> Self {
+        Self::Raised(message)
+    }
+}
+
+impl From<&str> for Reason {
+    fn from(message: &str) -> Self {
+        Self::Raised(message.to_owned())
+    }
+}
+
 impl Reason {
     /// The reason a worker's own switch records for `cause`: a cancel or a
     /// timeout, the two a worker converts; any other stop is the host's.
@@ -131,13 +143,6 @@ impl Reason {
             Self::TimedOut => CancelCause::TimedOut.message().into(),
             Self::Cancelled => CancelCause::Cancelled.message().into(),
             Self::Raised(message) => message.as_str().into(),
-        }
-    }
-
-    pub fn hint(&self) -> Option<Cow<'_, str>> {
-        match self {
-            Self::Process(process) => process.hint(),
-            _ => None,
         }
     }
 }
@@ -177,23 +182,6 @@ impl Process {
                     Unrunnable::Io(message) => format!("{program}: {message}"),
                 }
             }
-        }
-    }
-
-    fn hint(&self) -> Option<Cow<'_, str>> {
-        match self.failure {
-            #[cfg(unix)]
-            Failure::Signaled(libc::SIGKILL) => Some(
-                "the process was killed with SIGKILL; the kernel or another process may have terminated it".into(),
-            ),
-            #[cfg(unix)]
-            Failure::Signaled(libc::SIGSEGV) => {
-                Some("the process crashed with a segmentation fault".into())
-            }
-            Failure::Signaled(n) => Some(format!(
-                "the process terminated from {}", crate::process::Signal::new(n)
-            ).into()),
-            _ => None,
         }
     }
 }

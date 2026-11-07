@@ -187,10 +187,11 @@ pub(super) fn convert_own_stop(end: End, root: &DurableRoot) -> End {
     match end {
         End::Stopped(stop) if stop.owner.as_ref().is_some_and(|owner| *owner != root.id()) => {
             match Reason::stopped(stop.cause) {
-                Some(reason) => End::Err(Error {
-                    prov: stop.at,
-                    ..Error::from_reason(reason)
-                }),
+                Some(reason) => {
+                    let mut error = Error::new(reason);
+                    error.prov = stop.at;
+                    End::Err(error)
+                }
                 None => End::Stopped(stop),
             }
         }
