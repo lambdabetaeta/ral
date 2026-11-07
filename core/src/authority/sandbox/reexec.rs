@@ -26,14 +26,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Canonical self path and role flag, so a ral-sh symlink cannot intercept it.
+/// Canonical self path, so a ral-sh symlink cannot intercept it.
 #[cfg(unix)]
-pub(crate) fn indirect(role: Role) -> io::Result<(PathBuf, &'static str)> {
-    let exe = site!(
+pub(crate) fn indirect() -> io::Result<PathBuf> {
+    site!(
         Silent::IndirectReexec,
         std::fs::canonicalize(std::env::current_exe()?)
-    )?;
-    Ok((exe, role.flag()))
+    )
 }
 
 // ── Pinned ───────────────────────────────────────────────────────────────
@@ -42,14 +41,15 @@ pub(crate) fn indirect(role: Role) -> io::Result<(PathBuf, &'static str)> {
 /// `Command` the sandbox execs is ever built from, so nothing a session does
 /// to its environment can choose the file.
 pub(super) struct Pinned {
-    #[cfg_attr(windows, allow(dead_code))]
-    pin: Pin,
-    /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
-    #[cfg_attr(windows, allow(dead_code))]
-    exec_path: PathBuf,
     arg0: PathBuf,
-    /// What `arg0` reached when it was pinned: the one hold on the binary.
+    /// What `arg0` reached when it was pinned: the one hold on the binary,
+    /// and the identity everything else reads.
     trace: Trace,
+    /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode.
+    /// Close-on-exec, so no child inherits it: `execve` opens the target
+    /// before closing the fd, which suffices for an ELF, never a `#!` script.
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
 }
 
 impl Pinned {
@@ -57,12 +57,20 @@ impl Pinned {
     /// `None` on any failure, which every caller reads as "unpinned".
     pub(super) fn open(arg0: PathBuf) -> Option<Self> {
         let trace = reach(&arg0).ok()?.trace().clone();
-        let (pin, exec_path) = build_pin(&arg0, &trace)?;
+        // An absent name pins nothing.
+        trace.leaf_id()?;
+        #[cfg(target_os = "linux")]
+        let fd = {
+            let file = site!(Silent::PinOpen, std::fs::File::open(&arg0)).ok()?;
+            // The file opened must be the object `trace` holds.
+            (ObjectId::of(&file).ok() == trace.leaf_id())
+                .then(|| std::os::fd::OwnedFd::from(file))?
+        };
         Some(Self {
-            pin,
-            exec_path,
             arg0,
             trace,
+            #[cfg(target_os = "linux")]
+            fd,
         })
     }
 
@@ -77,24 +85,26 @@ impl Pinned {
         &self.arg0
     }
 
-    /// What `execve` is handed to run the pinned file.
-    #[cfg(unix)]
-    pub(super) fn exec_path(&self) -> &Path {
-        &self.exec_path
-    }
-
-    /// Exec the pinned file under its on-disk name, which `exec_path` on
-    /// Linux is not.  The program is an absolute path, so the child's `PATH`
-    /// — the shell's override included — is never consulted.
+    /// Exec the pinned file under its on-disk name, run through
+    /// `/proc/self/fd/<N>` on Linux.  The program is an absolute path, so the
+    /// child's `PATH` — the shell's override included — is never consulted.
     #[cfg(unix)]
     pub(super) fn command(&self) -> std::process::Command {
         use std::os::unix::process::CommandExt;
-        let mut cmd = site!(
-            Silent::PinnedExec,
-            std::process::Command::new(self.exec_path())
-        );
-        cmd.arg0(self.arg0());
+        #[cfg(target_os = "linux")]
+        let program = self.proc_path();
+        #[cfg(not(target_os = "linux"))]
+        let program = self.arg0.clone();
+        let mut cmd = site!(Silent::PinnedExec, std::process::Command::new(program));
+        cmd.arg0(&self.arg0);
         cmd
+    }
+
+    /// The pinned descriptor's slot name.
+    #[cfg(target_os = "linux")]
+    fn proc_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        crate::path::proc_fd_path(self.fd.as_raw_fd())
     }
 
     /// Where the pinned inode lives *now*, after any rename since boot, so a
@@ -102,7 +112,7 @@ impl Pinned {
     /// whatever has since taken its name; `None` once it has no name.
     #[cfg(target_os = "linux")]
     pub(super) fn names(&self) -> std::io::Result<Option<PathBuf>> {
-        let name = site!(Silent::PinLocate, std::fs::read_link(self.exec_path()))?;
+        let name = site!(Silent::PinLocate, std::fs::read_link(self.proc_path()))?;
         // Counted after the read, so an unlink in between reads as none,
         // never as ` (deleted)`.
         Ok((rustix::fs::fstat(self.fd())?.st_nlink > 0).then_some(name))
@@ -112,19 +122,13 @@ impl Pinned {
     #[cfg(target_os = "linux")]
     pub(super) fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
         use std::os::fd::AsFd;
-        let Pin::Fd { fd, .. } = &self.pin;
-        fd.as_fd()
+        self.fd.as_fd()
     }
 
     /// The held object's identity, independent of its current name.
     #[cfg(unix)]
     pub(super) fn object_id(&self) -> ObjectId {
-        match &self.pin {
-            #[cfg(target_os = "linux")]
-            Pin::Fd { id, .. } => *id,
-            #[cfg(target_os = "macos")]
-            Pin::Stat { id } => *id,
-        }
+        self.trace.last_id()
     }
 
     /// Refuse to spawn a foreign build: macOS execs the trampoline by name,
@@ -156,26 +160,6 @@ fn reach(arg0: &Path) -> io::Result<Located> {
     let at = LexicalPath::absolute(arg0)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a pinned name is absolute"))?;
     walk(&at, LeafMode::Follow)
-}
-
-/// How `exec_path` stays bound to the binary we pinned.
-enum Pin {
-    /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode;
-    /// `id` is that inode's identity for [`Pinned::object_id`].
-    /// Close-on-exec, so no child inherits it: `execve` opens the target
-    /// before closing the fd, which suffices for an ELF, never a `#!` script.
-    #[cfg(target_os = "linux")]
-    Fd {
-        fd: std::os::fd::OwnedFd,
-        id: ObjectId,
-    },
-    /// Compared against a fresh stat before each spawn.
-    #[cfg(target_os = "macos")]
-    Stat { id: ObjectId },
-    /// Nothing to guard where confinement happens at the parent's spawn; the
-    /// variant only gives `build_pin` one shape on every platform.
-    #[cfg(windows)]
-    Unguarded,
 }
 
 pub(super) static OWN: OnceLock<Pinned> = OnceLock::new();
@@ -245,45 +229,6 @@ pub(super) fn pin_self() {
     if let Some(pinned) = Pinned::open(arg0) {
         let _ = OWN.set(pinned);
     }
-}
-
-/// Open `arg0` and produce the `(pin, exec_path)` pair; `None` on any
-/// failure, which the caller reads as "leave this binary unpinned".  The
-/// file opened must be the object `trace` holds.
-#[cfg(target_os = "linux")]
-fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
-    use std::os::fd::{AsRawFd, OwnedFd};
-
-    let file = site!(Silent::PinOpen, std::fs::File::open(arg0)).ok()?;
-    let id = ObjectId::of(&file).ok()?;
-    if trace.leaf_id() != Some(id) {
-        return None;
-    }
-    let fd: OwnedFd = file.into();
-    let exec_path = crate::path::proc_fd_path(fd.as_raw_fd());
-    Some((Pin::Fd { fd, id }, exec_path))
-}
-
-#[cfg(target_os = "macos")]
-fn build_pin(arg0: &Path, trace: &Trace) -> Option<(Pin, PathBuf)> {
-    Some((
-        Pin::Stat {
-            id: trace.leaf_id()?,
-        },
-        arg0.to_path_buf(),
-    ))
-}
-
-/// Windows pinning cannot fail because it does nothing: no fd to open, no
-/// inode to snapshot, only the path to carry.  The `Option` is the shape
-/// `pin_self` shares with the Unix arms, which can genuinely fail.
-#[cfg(windows)]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the Option is the cross-platform contract of build_pin, not a claim that this arm can fail: see the doc above"
-)]
-fn build_pin(arg0: &Path, _: &Trace) -> Option<(Pin, PathBuf)> {
-    Some((Pin::Unguarded, arg0.to_path_buf()))
 }
 
 #[cfg(all(test, target_os = "macos"))]

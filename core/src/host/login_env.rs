@@ -66,13 +66,13 @@ fn decode(bytes: &[u8]) -> Option<Vec<(OsString, OsString)>> {
 pub fn collect() -> Result<Vec<(OsString, OsString)>, String> {
     let mut report =
         tempfile::tempfile().map_err(|e| format!("cannot create the environment report: {e}"))?;
-    let (exe, flag) = reexec::indirect(crate::Role::EnvReport)
-        .map_err(|e| format!("cannot locate the environment reporter: {e}"))?;
+    let exe =
+        reexec::indirect().map_err(|e| format!("cannot locate the environment reporter: {e}"))?;
     let mut command = site!(Silent::LoginCommand, Command::new("/bin/sh"));
     command
         .args(["-l", "-c", r#"exec "$0" "$1""#])
         .arg(exe)
-        .arg(flag);
+        .arg(crate::Role::EnvReport.flag());
     let report_fd = report.as_raw_fd();
     // SAFETY: the child calls only async-signal-safe descriptor/signal operations.
     unsafe {
