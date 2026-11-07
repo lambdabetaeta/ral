@@ -10,7 +10,7 @@
 
 use crate::authority::sandbox::Ownership;
 use crate::io::Sink;
-use crate::process::{POLL_SLICE, Scope};
+use crate::process::{POLL_SLICE, PgidPolicy, Scope};
 use crate::shell::runtime::{Mooring, Settled, Shell, Value};
 
 #[cfg(unix)]
@@ -23,12 +23,10 @@ mod vet;
 
 #[cfg(unix)]
 pub(crate) use detach::detach;
+pub(crate) use foreground::placement;
 pub(crate) use head::{Admission, Head};
 pub(crate) use process::{Started, ending, prepare, start};
-pub(crate) use stdio::{ChildIo, ChildOut, TtyInputPermit, wire_stdio};
-
-use foreground::ForegroundDecision;
-use stdio::inherit_tty;
+pub(crate) use stdio::{ChildIo, ChildOut, boundary_stdin, wire_stdio};
 
 /// Runs a standalone external call from vetting to reap.  A bundled
 /// coreutils/diffutils/ripgrep head takes the same path as any host
@@ -40,21 +38,14 @@ pub(crate) fn run(
     shell: &Shell,
 ) -> Settled<Value> {
     let mut prepared = prepare(head, args, Ownership::Kept, shell)?;
-
-    let inherit_tty = inherit_tty(shell);
-    let pumps = wire_stdio(
-        &mut prepared.launch,
-        shell,
-        ChildIo::from(&shell.io),
-        Some(TtyInputPermit::for_standalone_external()),
-        inherit_tty,
-    )?;
-    let needs_pump = pumps.pumps_stdout();
-
-    let fg =
-        ForegroundDecision::for_standalone(shell, needs_pump, prepared.launch.enveloped(), mooring);
-    #[cfg(debug_assertions)]
-    trace_io_wiring(&prepared.shown, inherit_tty, needs_pump, &fg, shell);
+    let (policy, lending) = placement(shell, mooring, prepared.launch.enveloped());
+    let readable = lending.is_some() || matches!(policy, PgidPolicy::Inherit);
+    let io = ChildIo {
+        stdin: boundary_stdin(&shell.io, readable),
+        stdout: ChildOut::Sink(&shell.io.stdout),
+        stderr: &shell.io.stderr,
+    };
+    let pumps = wire_stdio(&mut prepared.launch, io)?;
 
     announce_command_title(&prepared.shown, shell);
 
@@ -64,15 +55,14 @@ pub(crate) fn run(
     // `finish_command` builds the `Command{External}` observation from
     // whatever error reaches it, so a start failure needs no emission of
     // its own here.
-    let prepared_loan = fg.prepare(shell, mooring);
     let Started {
         shown,
         args,
         born: spawned,
-    } = start(prepared, fg.pgid_policy())?;
+    } = start(prepared, policy)?;
     // Its `Drop` restores ral's pgid on every path out of here, sparing the
     // next REPL tty read an EIO from a background pgroup.
-    let loan = prepared_loan.and_then(|loan| loan.lend(spawned.child.id().cast_signed()));
+    let loan = lending.and_then(|loan| loan.lend(spawned.child.id().cast_signed()));
 
     // Nothing fallible may run between `start` and here: until the collector
     // holds it the bare child leaks on an early return.
@@ -103,10 +93,6 @@ impl<T> Default for Pumps<T> {
 impl Pumps<Sink> {
     pub(crate) const fn new(stdout: Option<Sink>, stderr: Option<Sink>) -> Self {
         Self { stdout, stderr }
-    }
-
-    pub(crate) const fn pumps_stdout(&self) -> bool {
-        self.stdout.is_some()
     }
 
     /// Start the planned drainers over `child`'s piped stdout/stderr, each
@@ -157,32 +143,4 @@ fn announce_command_title(cmd: &str, shell: &Shell) {
         let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
     }
-}
-
-/// Debug-only single-line trace of the I/O wiring decisions.  The function and
-/// its call are cfg-gated, not just `dbg_trace!`, which alone would leave the
-/// sink match running in release.
-#[cfg(debug_assertions)]
-fn trace_io_wiring(
-    cmd_name: &str,
-    inherit_tty: bool,
-    needs_pump: bool,
-    fg: &ForegroundDecision,
-    shell: &Shell,
-) {
-    let sink = match &shell.io.stdout {
-        crate::io::Sink::Terminal => "Terminal",
-        _ => "Other",
-    };
-    crate::dbg_trace!(
-        "exec",
-        "cmd={cmd_name} tty=[in:{} out:{} err:{}] \
-         sink={sink} inherit={inherit_tty} pump={needs_pump} \
-         interactive={} fg_job={}",
-        shell.io.terminal.startup_stdin_tty,
-        shell.io.terminal.startup_stdout_tty,
-        shell.io.terminal.startup_stderr_tty,
-        shell.io.interactive,
-        fg.want_fg(),
-    );
 }

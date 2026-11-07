@@ -1,8 +1,8 @@
-//! Pipeline execution engine.  `resolve` freezes the terminal handoff and each
-//! stage's launch decision, `launch` places every stage in one process group,
-//! `join` folds their observations into one value.  Its collector is every
-//! external's one waiter: [`join_lone`] waits on a lone command's child as on
-//! the one stage of the group it landed in.
+//! Pipeline execution engine.  `resolve` freezes each stage's launch
+//! decision, `launch` places every stage in one process group, `join` folds
+//! their observations into one value.  Its collector is every external's one
+//! waiter: [`join_lone`] waits on a lone command's child as on the one stage
+//! of the group it landed in.
 
 pub(crate) mod anchor;
 mod collect;
@@ -27,7 +27,7 @@ pub(crate) use collect::lone_end;
 use collect::{CollectState, Event, Slot};
 use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
-use resolve::{StageSpec, TerminalPlan, resolve_pipeline};
+use resolve::{StageSpec, resolve_pipeline};
 use route::open_stage_routes;
 
 /// What a stage needs of the machine, handed in by the evaluator so the
@@ -67,26 +67,20 @@ impl PipeNode {
         shell: &mut Shell,
     ) -> Settled<Value> {
         shell.poll()?;
-        let plan = resolve_pipeline(stages, env, eval, mooring, shell)?;
+        let specs = resolve_pipeline(stages, env, eval, shell)?;
 
         // Window start for the sandbox-denial reader.
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        // A joined group never prepares a loan: dropping one restores the
-        // terminal, out from under the owning pipeline.
-        let (group, loan) = if let Some(membership) = shell.io.stage.as_ref() {
-            (PipelineGroup::joining(membership.clone()), None)
-        } else {
-            // Capture before even the anchor can run; stages share this snapshot.
-            let prepared = (plan.terminal == TerminalPlan::ForegroundExternalGroup)
-                .then(|| shell.terminal_lease(mooring))
-                .flatten()
-                .and_then(|lease| crate::process::TerminalLoan::prepare(lease, &mooring.home));
-            let group = PipelineGroup::prepare(tx.clone())?;
-            let loan = prepared.and_then(|loan| loan.lend(group.leader_pgid().as_raw()));
-            (group, loan)
+        // Only the loan is placement's, prepared before even the anchor runs:
+        // the anchor leads its own group, and a joined group is lent nothing.
+        let (_, lending) = super::command::placement(shell, mooring, false);
+        let group = match shell.io.stage.clone() {
+            Some(membership) => PipelineGroup::joining(membership),
+            None => PipelineGroup::prepare(tx.clone())?,
         };
+        let loan = lending.and_then(|loan| loan.lend(group.leader_pgid().as_raw()));
 
         let collect = CollectState::new(
             rx,
@@ -105,7 +99,7 @@ impl PipeNode {
             group: &node.group,
             holds_terminal: node.collect.holds_terminal(),
         };
-        let launched = launch(stages, plan.specs, &mut cx, &mut node.collect, &tx);
+        let launched = launch(stages, specs, &mut cx, &mut node.collect, &tx);
         // The collector keeps no sender: `recv` sees the last producer go.
         drop(tx);
         if launched.is_err() {
@@ -116,9 +110,9 @@ impl PipeNode {
     }
 
     /// Wait on every stage and fold their observations into one value.  The
-    /// anchor ends before the fold, so every key it heard is on the channel;
-    /// its zombie pins the pgid until the group drops, after the fold's last
-    /// kill.
+    /// anchor ends before the fold, so every key it heard is on the channel
+    /// and struck before the terminal returns; its zombie pins the pgid until
+    /// the group drops, after the fold's last kill.
     fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let Self {
             mut collect,

@@ -1902,6 +1902,74 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
     );
 }
 
+/// A pipeline's terminal, like a lone tenant's, comes back once its stages are
+/// dead and before their pumps are joined: a descendant that escaped holding
+/// the captured pipe keeps the join open, and a key that now reaches ral
+/// strikes a cause that lets the join kill it, rather than wait it out.
+#[cfg(unix)]
+#[test]
+fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
+    let frame = DurableRoot::default().worker();
+    let shell = lone_shell(&frame, None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");
+    let mut collect = CollectState::new(
+        rx,
+        group.group(),
+        Some(TerminalLoan::for_test(&frame)),
+        shell.scope.clone(),
+        Duration::ZERO,
+        Instant::now(),
+    );
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 30 &"])
+        .stdout(std::process::Stdio::piped());
+    let Spawned { mut child, .. } = spawned(
+        &mut cmd,
+        crate::process::PgidPolicy::Join(group.leader_pgid()),
+    );
+    let (sink, _bytes) = crate::io::new_buffer();
+    let pumps = command::Pumps::new(Some(sink), None).start(&mut child, &shell.scope);
+    let slot = Slot { ix: 0, tx };
+    let stage = ExternalStage {
+        watch: slot.watch(child),
+        prov: shell.local.audit.call_site().clone(),
+        name: "sh".into(),
+        args: Vec::new(),
+        jail: None,
+        pumps,
+        landing: crate::process::Landing::Joins,
+    };
+    collect.push(StageHandle::new(StageKind::External(stage), None, slot));
+
+    collect.drive();
+    group.end_anchor();
+    let observed = collect.vacate();
+    assert!(
+        !collect.holds_terminal(),
+        "the pumps are joined under a lent terminal"
+    );
+
+    let t0 = Instant::now();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            frame.cancel(CancelCause::Interrupted);
+        });
+        for end in observed.into_iter().flatten() {
+            end.settle(
+                &shell,
+                collect.started,
+                &collect.scope,
+                collect.group.owned(),
+            );
+        }
+    });
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    drop(collect);
+    drop(group);
+}
+
 /// No console event reaches a pid, so a teardown owed to one opens with the
 /// kill rather than waiting out a grace nothing can end.
 #[cfg(windows)]

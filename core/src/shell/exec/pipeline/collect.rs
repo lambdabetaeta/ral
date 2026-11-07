@@ -460,8 +460,8 @@ impl CollectState {
         state
     }
 
-    /// Whether the group holds the terminal — the loan actually made, never
-    /// the plan it was launched under.  Settled before any stage exists.
+    /// Whether the group holds the terminal: the loan actually made, before
+    /// any stage exists, and not yet returned.
     pub(super) fn holds_terminal(&self) -> bool {
         self.loan.is_some()
     }
@@ -734,15 +734,27 @@ impl CollectState {
         }
     }
 
+    /// Take what the stages left to settle, once the anchor has ended: every
+    /// key it reported is struck first, then the terminal comes back from
+    /// tenants all dead, before any pump is joined, as a lone command's does.
+    fn vacate(&mut self) -> Vec<Option<StageEnd>> {
+        #[cfg(unix)]
+        self.hear_out();
+        if !self.live()
+            && let Some(loan) = self.loan.take()
+        {
+            loan.reclaim(None);
+        }
+        std::mem::take(&mut self.observed)
+    }
+
     /// The audit and verdict fold, in launch order — the one place `&Shell`
     /// reaches an external's settlement, and why `last` is the final stage's
     /// value whenever that stage is `Ok` and unread otherwise.  The audit is
     /// merged before the verdict is ranked, so a failing stage still
     /// contributes what it observed.
     pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        #[cfg(unix)]
-        self.hear_out();
-        let observed = std::mem::take(&mut self.observed);
+        let observed = self.vacate();
         let mut verdict: Option<Break> = None;
         let mut panic: Option<String> = None;
         let mut last = Value::Unit;

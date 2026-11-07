@@ -259,25 +259,20 @@ impl Sink {
         }
     }
 
-    /// Plan a child's stdout into this sink.
-    ///
-    /// `Terminal` always inherits; with `inherit_tty` — the caller's assertion
-    /// that fd 1 really is this shell's terminal — so does `Stderr`, since a
-    /// direct dup is the only way the child sees a TTY.
+    /// Plan a child's stdout into this sink: `Terminal` inherits fd 1.
     /// Both halves of the plan bind the caller: `plan.stdio` before spawn, then
     /// the child's fd into [`Sink::pump`] if `plan.pump` is `Some`.
     ///
     /// # Errors
     /// Returns `Err` if cloning the sink to pump fails.
-    pub(crate) fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
-        if matches!(self, Self::Terminal) || (inherit_tty && matches!(self, Self::Stderr)) {
+    pub(crate) fn child_stdout(&self) -> io::Result<ChildStdioPlan> {
+        if matches!(self, Self::Terminal) {
             return Ok(ChildStdioPlan::inherit());
         }
         self.child_stdio_plan()
     }
 
-    /// Plan a child's stderr into this sink: `Stderr` inherits fd 2, everything
-    /// else is pumped.  No `inherit_tty` twin — stderr never owns the TTY.
+    /// Plan a child's stderr into this sink: `Stderr` inherits fd 2.
     ///
     /// # Errors
     /// Returns `Err` if cloning the sink to pump fails.
@@ -732,7 +727,7 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().worker().id(),
         };
-        let plan = sink.child_stdout(false).expect("plan");
+        let plan = sink.child_stdout().expect("plan");
         assert!(plan.pump.is_none());
         drop(sink);
 
@@ -762,7 +757,7 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().worker().id(),
         };
-        let plan = sink.child_stdout(false).expect("plan");
+        let plan = sink.child_stdout().expect("plan");
 
         let mut child = crate::process::Launch::new("/bin/echo")
             .arg("hi")
@@ -903,7 +898,7 @@ mod tests {
 
     #[test]
     fn a_file_plan_hands_over_the_fd_with_no_pump() {
-        let plan = file_sink().child_stdout(false).expect("plan");
+        let plan = file_sink().child_stdout().expect("plan");
         assert!(plan.pump.is_none());
     }
 }

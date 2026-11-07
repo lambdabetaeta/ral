@@ -15,8 +15,9 @@ use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
 
-/// A thread stage sees a tty only when its group holds the terminal (its
-/// externals inherit it, `stdin_reader` refuses it); otherwise EOF.
+/// A thread stage's stdin: its boundary's, where a tty passes as the
+/// terminal (its externals inherit it, `stdin_reader` refuses it), and any
+/// other fd as a reader its scope interrupts.
 pub(super) fn stage_stdin(
     route: ByteIn,
     shell: &Shell,
@@ -25,14 +26,10 @@ pub(super) fn stage_stdin(
 ) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => SourceReader::pipe(r),
-        ByteIn::Parent => match &shell.io.stdin {
+        ByteIn::Parent => match command::boundary_stdin(&shell.io, holds_terminal) {
             Source::Empty => return Ok(Source::Empty),
             Source::Terminal if shell.io.terminal.startup_stdin_tty => {
-                return Ok(if holds_terminal {
-                    Source::Terminal
-                } else {
-                    Source::Empty
-                });
+                return Ok(Source::Terminal);
             }
             Source::Terminal => SourceReader::file(
                 dup_stdin_file().map_err(|e| Error::io("could not duplicate stdin", &e))?,
@@ -78,7 +75,7 @@ fn wire_stage(
             upstream = Source::Reader(SourceReader::pipe(r));
             &upstream
         }
-        ByteIn::Parent => &shell.io.stdin,
+        ByteIn::Parent => command::boundary_stdin(&shell.io, holds_terminal),
     };
     let stdout = match stdout {
         ByteOut::Downstream(writer, _edge) => command::ChildOut::Edge(writer),
@@ -89,10 +86,7 @@ fn wire_stage(
         stdout,
         stderr: &shell.io.stderr,
     };
-    // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY.
-    let inherit_tty = shell.io.terminal.startup_stdout_tty && holds_terminal;
-    let grant = holds_terminal.then(command::TtyInputPermit::for_pure_external_pipeline);
-    command::wire_stdio(cmd, shell, io, grant, inherit_tty)
+    command::wire_stdio(cmd, io)
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -200,5 +194,42 @@ mod tests {
         assert!(matches!(held, Source::Terminal));
         let denied = stage_stdin(ByteIn::Parent, &shell, &scope, false).expect("stage_stdin");
         assert!(matches!(denied, Source::Empty));
+    }
+
+    /// `!{ cat } | wc` and `!{ cat | head -1 } | wc` agree: `cat`, a lone
+    /// child or a nested pipeline's stage, joins the stage's group and reads
+    /// what the stage was given, the terminal under the loan and EOF without.
+    #[test]
+    fn a_stages_external_reads_the_stages_stdin_however_it_runs() {
+        for lent in [true, false] {
+            let expected = |seen: &Source| {
+                if lent {
+                    matches!(seen, Source::Terminal)
+                } else {
+                    matches!(seen, Source::Empty)
+                }
+            };
+            let mut shell = crate::test_helper::core_shell();
+            shell.io.terminal.startup_stdin_tty = true;
+            shell.io.stdin = Source::Terminal;
+            let node = shell.scope.child();
+            let given = stage_stdin(ByteIn::Parent, &shell, &node, lent).expect("stage_stdin");
+            assert!(expected(&given));
+
+            // The stage's own `Io`, as `launch_thread_stage` builds it.
+            let group = crate::process::Pgid::from_raw(1).expect("1 is positive");
+            shell.io.stdin = given;
+            shell.io.stage = Some(crate::process::Membership::new(group, Scope::clone(&node)));
+            let (policy, lending) = command::placement(&shell, &Mooring::adrift(), false);
+            assert!(matches!(policy, PgidPolicy::Join(_)) && lending.is_none());
+            // Joined, the lone child and the nested stage read the same source,
+            // whatever their group could read.
+            for readable in [true, false] {
+                assert!(expected(command::boundary_stdin(&shell.io, readable)));
+                let nested =
+                    stage_stdin(ByteIn::Parent, &shell, &node, readable).expect("stage_stdin");
+                assert!(expected(&nested));
+            }
+        }
     }
 }
