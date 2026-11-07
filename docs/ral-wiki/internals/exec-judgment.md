@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 verified_at_commit: f1b0a4a4
 verified_at_date: 2026-11-07
-anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
+anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, settle, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -55,12 +55,20 @@ launch for a direct pipeline stage and `detach`.
   in candidate order: a refusal or 126. With only absence, the verdict is 127.
   No `PATH`, or `~` with no `HOME`, names no candidate and yields 127.
 - **A path head's admitted walk decides its diagnostic**: absence is 127; a
-  directory or any other present non-program is 126. A failed walk other than
-  `NotFound` or `NotADirectory` is 126 permission denied. For a `PATH`
-  candidate only a regular file lacking `+x` is 126; every other non-program,
-  walk failures included, is absence.
-- **A refused bare name reveals nothing about the candidates' kinds.** Its
-  hint is `'{name}' is no program in any PATH directory the grant runs from`.
+  directory or any other present non-program is 126. For a `PATH` candidate
+  only a regular file lacking `+x` is 126; every other present non-program
+  is absence.
+- **A failed walk reads alike at a path head and a `PATH` candidate**: `NotFound` or
+  `NotADirectory` is absence; any other failure is 126, permission denied
+  for a refusal (`EACCES`) and the OS's words otherwise. A `PATH`
+  candidate's failure names the file the walk was reaching, so a `PATH`
+  entry ral may not search reads as that refusal, not as absence.
+- **A refused bare name reveals nothing about the candidates' kinds.** The
+  hint `'{name}' is no program in any PATH directory the grant runs from` is
+  added (`settle`) only when every candidate was absent or refused for a
+  missing allowance alone, which places it outside the grant. An exclusion's
+  refusal carries the exclusion's hint alone: it is no evidence of absence.
+  Only verdicts decide the hint, never a refused candidate's kind.
   A refused path head offers itself as text. Refusal messages name the shown
   command, and denial records keep that name and any exclusion, never the
   resolved target: a refusal grants no authority to read a link's target.

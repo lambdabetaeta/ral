@@ -162,24 +162,22 @@ impl Process {
             ),
             Failure::NotFound => format!("{program}: command not found"),
             Failure::NotRunnable(NotRunnable { found, why }) => {
-                let names = |what: &str| {
-                    if found == program {
-                        format!("{program} is {what}")
-                    } else {
-                        format!("{program}: {found} is {what}")
-                    }
+                let at = if found == program {
+                    program.clone()
+                } else {
+                    format!("{program}: {found}")
                 };
                 match why {
-                    Unrunnable::PermissionDenied => format!("{program}: permission denied"),
-                    Unrunnable::Directory => names("a directory, not a command"),
-                    Unrunnable::NotExecutable => names("a file, not an executable"),
+                    Unrunnable::PermissionDenied => format!("{at}: permission denied"),
+                    Unrunnable::Directory => format!("{at} is a directory, not a command"),
+                    Unrunnable::NotExecutable => format!("{at} is a file, not an executable"),
                     Unrunnable::MissingInterpreter(Some(interpreter)) => {
                         format!("{program}: its interpreter {interpreter} does not exist")
                     }
                     Unrunnable::MissingInterpreter(None) => {
                         format!("{program}: the interpreter or loader it names does not exist")
                     }
-                    Unrunnable::Io(message) => format!("{program}: {message}"),
+                    Unrunnable::Io(message) => format!("{at}: {message}"),
                 }
             }
         }

@@ -168,37 +168,41 @@ impl Head {
 
     /// Select under the live stack, recording a refusal against `mooring`.
     pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Head<Admission>> {
-        let search = matches!(&self.program, Target::Search { .. });
-        let shown = self.shown.clone();
         self.select(&shell.context.grants, shell.baseline())
-            .map_err(|Denied { denial, .. }| {
-                let refusal = shell.exec_refused(*denial, mooring);
-                if search {
-                    refusal.map_error(|e| {
-                        e.with_hint(format!(
-                            "'{shown}' is no program in any PATH directory the grant runs from"
-                        ))
-                    })
-                } else {
-                    refusal
-                }
-            })
+            .map_err(|Denied { denial, .. }| shell.exec_refused(*denial, mooring))
     }
 }
 
 /// The searched program; failing every candidate, the first failure other
-/// than absence, in `PATH` order.
+/// than absence, in `PATH` order.  A refusal says the name is no program
+/// where the grant runs from only if each candidate was absent or outside
+/// the grant's allowances: an exclusion's refusal is no evidence of absence.
 fn settle(
     searched: Result<Admitted, Vec<Result<Error, Denied>>>,
     shown: &str,
 ) -> Result<Admission, Denied> {
-    match searched {
-        Ok(admitted) => Ok(Ok(admitted)),
-        Err(failures) => failures
-            .into_iter()
-            .find(|failure| !failure.as_ref().is_ok_and(is_absent))
-            .unwrap_or_else(|| Ok(not_found(shown)))
-            .map(Err),
+    let failures = match searched {
+        Ok(admitted) => return Ok(Ok(admitted)),
+        Err(failures) => failures,
+    };
+    let unfound = failures.iter().all(|failure| match failure {
+        Ok(error) => is_absent(error),
+        Err(denied) => denied.denial.missing_allowance,
+    });
+    match failures
+        .into_iter()
+        .find(|failure| !failure.as_ref().is_ok_and(is_absent))
+    {
+        None => Ok(Err(not_found(shown))),
+        Some(Ok(error)) => Ok(Err(error)),
+        Some(Err(mut denied)) => {
+            if unfound {
+                denied.denial.error = denied.denial.error.with_hint(format!(
+                    "'{shown}' is no program in any PATH directory the grant runs from"
+                ));
+            }
+            Err(denied)
+        }
     }
 }
 
@@ -244,12 +248,9 @@ fn judge(
                     denial,
                 })?;
             }
-            return Ok(Err(match (candidate_kind, error.kind()) {
-                (_, ErrorKind::NotFound | ErrorKind::NotADirectory)
-                | (CandidateKind::Search, _) => not_found(shown),
-                (CandidateKind::Path, _) => {
-                    unstartable(candidate_kind, shown, &arg0, unrunnable(&error))
-                }
+            return Ok(Err(match error.kind() {
+                ErrorKind::NotFound | ErrorKind::NotADirectory => not_found(shown),
+                _ => unstartable(candidate_kind, shown, &arg0, unrunnable(&error)),
             }));
         }
     };

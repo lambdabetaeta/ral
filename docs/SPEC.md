@@ -1465,8 +1465,9 @@ command with the same byte-pipe, failure, audit, and sandbox behavior as an
 external program. Use a path head to select a particular system binary.
 
 A missing bare command fails with status 127. A file found on `PATH` but not
-executable fails with status 126, as does a path naming a directory; the
-diagnostic says which. Under a grant this is said only of a command the grant
+executable fails with status 126, as does a path naming a directory, and a
+path or `PATH` entry the operating system refuses to search; the diagnostic
+says which. Under a grant this is said only of a command the grant
 admits running (§12.3). A path head offers itself as text (`#'…'#`). A
 command that never became a process is not advised to `attempt`. A non-zero
 process result is a failure, except in a non-final byte-pipe stage that was
@@ -3484,7 +3485,7 @@ A link inside a granted directory to a file outside it admits nothing: the grant
 
 A bare name is resolved against the host `PATH` afresh at each run (one submitted line, one script or one dispatch), so the program launched is the program judged, with one residual: the program is started by its real name, and a file put at that name between the judgment and the start runs unjudged. So `` `name git `` also admits `/usr/bin/git` spelled `` `absolute /usr/bin/git ``, because it is the same file. A deny of a name also vetoes the command by file name wherever it lives, so `` deny: [`name bash] `` cannot be avoided through a link or another directory. A denial holds every spelling some filesystem takes for its name, in any case or Unicode form, so it also refuses `BASH` or a file under a differently cased denied directory; an allowance holds its name only as stored. An excluded program is, as in §12.2, the object its spelling reached when the grant was decoded: a hard link to it is the same program, and a copy of it is another.
 
-There is no specificity. A target is permitted when some allowance covers it and no exclusion does: an exclusion of a directory refuses the exact file or deeper directory an allowance names inside it, a target in both lists is denied, and the refusal names an exclusion that applies. A command is judged before anything about it is looked at. A path that names nothing, a directory or a link loop fails with status 127 or 126 only where the grant admits running that path; elsewhere it is refused as a program there would be. A bare name runs the first `PATH` candidate the grant admits that is a program, passing over candidates it refuses. Failing every candidate, the first that was refused or was a file lacking execute permission says why, and otherwise the status is 127.
+There is no specificity. A target is permitted when some allowance covers it and no exclusion does: an exclusion of a directory refuses the exact file or deeper directory an allowance names inside it, a target in both lists is denied, and the refusal names an exclusion that applies. A command is judged before anything about it is looked at. A path that names nothing, a directory or a link loop fails with status 127 or 126 only where the grant admits running that path; elsewhere it is refused as a program there would be. A bare name runs the first `PATH` candidate the grant admits that is a program, passing over candidates it refuses. Failing every candidate, the first that was refused, was a file lacking execute permission, or could not be searched says why, and otherwise the status is 127.
 
 Once an `exec` table is present, commands not admitted by it are denied: `exec: [allow: []]` admits no executable (ral's own binary included), and omitting `exec` inherits. Nested `exec` tables intersect, and every denial remains effective.
 

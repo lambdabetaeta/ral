@@ -26,6 +26,9 @@ use std::fmt::{self, Display};
 pub(crate) struct Denial {
     pub check: Check,
     pub error: Error,
+    /// Refused for a missing allowance alone: no exclusion, nor ral's pinned
+    /// binary, refused it.
+    pub missing_allowance: bool,
 }
 
 impl Denial {
@@ -33,6 +36,7 @@ impl Denial {
         resource: Resource,
         fields: impl IntoIterator<Item = (&'static str, String)>,
         error: Error,
+        missing_allowance: bool,
     ) -> Self {
         let fields = fields
             .into_iter()
@@ -41,6 +45,7 @@ impl Denial {
         Self {
             check: Check::new(resource, fields),
             error,
+            missing_allowance,
         }
     }
 }
@@ -213,9 +218,13 @@ fn exec_denial(shown: &str, why: &ExecDenial, error: Error) -> Denial {
         ExecDenial::Read(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
         _ => None,
     };
+    let missing_allowance = matches!(
+        why,
+        ExecDenial::Run(Withheld::MissingAllowance) | ExecDenial::Read(Withheld::MissingAllowance)
+    );
     let fields =
         std::iter::once(("name", shown.to_string())).chain(deny.map(|deny| ("deny", deny)));
-    Denial::new(Resource::Exec, fields, error)
+    Denial::new(Resource::Exec, fields, error, missing_allowance)
 }
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
@@ -235,6 +244,7 @@ pub(crate) fn fs_denial(
     let name = <&str>::from(op);
     let path = path.shown();
     let said = says(&refused, &path);
+    let missing_allowance = matches!(refused, Refused::Withheld(Withheld::MissingAllowance));
     let (verdict, detail, hint) = match refused {
         Refused::Withheld(Withheld::MissingAllowance) => {
             let hint = nested(grants.fs()).map_or_else(
@@ -269,7 +279,7 @@ pub(crate) fn fs_denial(
     let fields = [("op", name.to_string()), ("path", path)]
         .into_iter()
         .chain(detail);
-    Denial::new(Resource::Fs, fields, error)
+    Denial::new(Resource::Fs, fields, error, missing_allowance)
 }
 
 /// Refuse a verb or builtin some layer of the stack withholds; `who` names it

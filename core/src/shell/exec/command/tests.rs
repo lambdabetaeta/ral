@@ -613,12 +613,16 @@ mod vet {
     }
 
     fn run_from(dir: &Path) -> GrantLayer {
+        run_from_excluding(dir, [])
+    }
+
+    fn run_from_excluding(dir: &Path, excluded: impl IntoIterator<Item = ExecKey>) -> GrantLayer {
         crate::test_helper::layer(Capabilities {
             exec: Some(ExecGrant::of(
                 [ExecKey::Dir(FrozenPath::from_surface(
                     crate::path::utf8(dir).unwrap(),
                 ))],
-                [],
+                excluded,
             )),
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
@@ -787,8 +791,11 @@ mod vet {
         assert!(!e.describe().contains("permission denied"), "{e:?}");
     }
 
+    /// A name in no directory the grant runs from, whether absent or found
+    /// outside them, is refused by the first candidate outside, and said to
+    /// be no program there.
     #[test]
-    fn refused_and_absent_candidates_record_the_first_refusal_with_a_bare_hint() {
+    fn a_name_unfound_where_the_grant_runs_records_the_first_refusal_with_a_bare_hint() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "zzdeniedbare");
         let dirs = ["admitted", "first-denied", "later-denied"].map(|dir| {
@@ -834,6 +841,94 @@ mod vet {
                 ))
             );
         }
+    }
+
+    /// An excluded program was found, so its refusal carries the exclusion's
+    /// hint alone, even when an earlier candidate outside the grant refused
+    /// first.
+    #[test]
+    fn an_excluded_program_on_path_is_not_said_to_be_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let [outside, admitted] = ["outside", "admitted"].map(|dir| {
+            let dir = tmp.path().join(dir);
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        });
+        let name = plant(&admitted, "zzexcluded");
+        let excluded = ExecKey::Path(FrozenPath::from_surface(
+            crate::path::utf8(&admitted.join(&name)).unwrap(),
+        ));
+        let mut shell = crate::test_helper::core_shell();
+        for dirs in [vec![&admitted], vec![&outside, &admitted]] {
+            shell.context.set_env_var(
+                "PATH",
+                std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
+            );
+            let e = shell.with_layer(run_from_excluding(&admitted, [excluded.clone()]), |shell| {
+                refused(
+                    Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context),
+                    shell,
+                )
+            });
+            assert!(e.describe().contains("denied by active grant"), "{e:?}");
+            assert_eq!(e.hints().len(), 1, "{dirs:?}: {:?}", e.hints());
+            if dirs.len() == 1 {
+                assert!(e.describe().contains("is excluded by"), "{e:?}");
+                assert_eq!(
+                    e.hints(),
+                    [Box::<str>::from(
+                        crate::authority::remedy::remove_the_exclusion()
+                    )]
+                );
+            }
+        }
+    }
+
+    /// A `PATH` entry the OS refuses to search is reported as that refusal,
+    /// as a path head's is: absence is only what remains when nothing else
+    /// failed.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_path_entry_is_permission_denied_not_absent() {
+        use crate::fact::NotRunnable;
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let [locked, empty] = ["locked", "empty"].map(|dir| {
+            let dir = tmp.path().join(dir);
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        });
+        let name = plant(&locked, "zzlocked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        shell.context.set_env_var(
+            "PATH",
+            std::env::join_paths([&empty, &locked])
+                .unwrap()
+                .into_string()
+                .unwrap(),
+        );
+        let e = refused(
+            Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context),
+            &mut shell,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = crate::path::shown(locked.join(&name));
+        assert!(
+            matches!(
+                e.reason.failure(),
+                Some(Failure::NotRunnable(NotRunnable {
+                    found: at,
+                    why: Unrunnable::PermissionDenied,
+                })) if *at == found
+            ),
+            "{e:?}"
+        );
+        assert_eq!(e.failure_code().get(), 126);
+        assert_eq!(e.describe(), format!("{name}: {found}: permission denied"));
     }
 
     /// A path head naming no file is a missing command, and the refusal names

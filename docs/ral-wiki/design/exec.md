@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 3e3fbc84
 ---
 
 # Exec: the one effect
@@ -408,8 +408,8 @@ exit code is a projection of the reason (`FailureCode`), never stored.
 | `not-runnable … missing-interpreter` | the spawn reports `ENOENT` for a file that still exists: its `#!` interpreter (named) or loader is missing | failure | 126 |
 | `not-runnable … directory` | a path head names a directory | failure | 126 |
 | `not-runnable … not-executable` | a file without an execute bit, or another non-program at a path head | failure | 126 |
-| `not-runnable … permission-denied` | the spawn reports `EACCES`; or a path head's walk is refused; or a confined script's interpreter is hidden by the launch's own projection (`ENOENT` or `EACCES`), with the interpreter hint | failure | 126 |
-| `not-runnable … io m` | any other spawn error, or any other failure of a path head's walk | failure | 126 |
+| `not-runnable … permission-denied` | the spawn reports `EACCES`; or a path head's or `PATH` candidate's walk is refused; or a confined script's interpreter is hidden by the launch's own projection (`ENOENT` or `EACCES`), with the interpreter hint | failure | 126 |
+| `not-runnable … io m` | any other spawn error, or any other failure of a path head's or `PATH` candidate's walk | failure | 126 |
 | grant refusal | the judgment denies the program | failure, `raised` | 1 |
 | argument refusal | an argument is not a word | failure, `raised` | 1 |
 | launch refused | ral could not start the launch: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, or the envelope dies before the program starts | failure, `raised` | 1 |
@@ -428,10 +428,12 @@ resolution of a path that the judgment also reads.
 - **The probe** reports absence as `not-found`; at a path head, a directory as
   `directory` and any other present non-program as `not-executable`; at a
   `PATH` candidate only a regular file lacking an execute bit counts, and
-  everything else is passed over as absent. Any execute bit counts, whoever
-  owns it. A path-head walk that is refused is
-  `permission-denied`; one that fails in any other way but absence is `io`. Failing every `PATH` candidate, the first that was
-  refused or not executable says why, else `not-found`.
+  every other present non-program is passed over as absent. Any execute bit
+  counts, whoever owns it. A walk that is refused, at a path head or a `PATH`
+  candidate, is `permission-denied`; one that fails in any other way but
+  absence is `io`; a candidate's names the file it was reaching. Failing
+  every `PATH` candidate, the first that was refused, not executable or
+  whose walk failed says why, else `not-found`.
 - **The spawn** reports what the program's own `execve` met, and the image
   says what it means (`at_spawn`). `EACCES` is
   `permission-denied`; everything else but `ENOENT` is `io`. **`ENOENT` for a
@@ -440,9 +442,9 @@ resolution of a path that the judgment also reads.
   needs; for a bundled tool or a file gone, it is `not-found`. A script with no
   `#!` line (`ENOEXEC`) is `io`; an execute bit for another user or a `noexec`
   mount is `EACCES`.
-- **Only a permission refusal is `permission-denied`.** A path head's walk that
-  fails otherwise reads as itself, `io` with the OS's words, and a `PATH`
-  candidate's walk failure is absence.
+- **Only a permission refusal is `permission-denied`.** A walk that fails
+  otherwise reads as itself, `io` with the OS's words, at a path head and a
+  `PATH` candidate alike.
 - **A confined script whose interpreter the launch's own projection hides is
   `permission-denied` with the interpreter hint**, whatever `errno` the kernel
   chose: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
@@ -468,23 +470,15 @@ force** (`WaitOutcome::cancelled_by`, `core/src/process/outcome.rs`;
 [[decisions/260706_signals-are-causes|signals-are-causes]]).
 
 - A cause reaches a child as a cause-directed teardown, sent to its group
-  when the child leads one and to its pid otherwise:
-
-  | cause | raised by | teardown | code |
-  |---|---|---|---:|
-  | `interrupted` | Ctrl-C | `SIGINT`, 500 ms, `SIGKILL` | 130 |
-  | `cancelled` | `cancel`, a `race` loser | `SIGTERM`, 500 ms, `SIGKILL` | 143 |
-  | `timed-out` | a deadline | `SIGTERM`, 500 ms, `SIGKILL` | 124 |
-  | `terminated` | `SIGTERM`, `SIGHUP` to ral | `SIGTERM`, 500 ms, `SIGKILL` | 143 |
-  | `aborted` | Ctrl-\ | `SIGKILL` | 131 |
-  | `reader-gone` | the pipeline collector | `SIGKILL` | 141 |
-
+  when the child leads one and to its pid otherwise; which signal opens it,
+  and the grace before the kill, is
+  [[internals/cancellation#External children: teardown by cause|cancellation]]'s.
 - **A death by any other signal is the program's own** `signaled s`, a
   `SIGSEGV` during a teardown included. **An exit is never a signal**:
   `exit 130` is the program's choice. A confined program's end is its
-  supervisor's exact word, so a confined `SIGSEGV` is `signaled 11` and an
-  `exit 139` is `exited 139`
-  ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
+  supervisor's exact word
+  ([[invariants/a-supervisor-never-execs|a-supervisor-never-execs]],
+  [[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
 - **Only a terminal ral lent can turn a key into a cancellation.** While a
   command or pipeline holds the terminal, the kernel delivers Ctrl-C to it,
   not to ral; ral hears the key back when it reclaims the terminal and strikes

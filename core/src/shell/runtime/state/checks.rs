@@ -25,14 +25,14 @@ impl Shell {
 
     /// Record `check` and mint the `Break` that refuses.  Its callers hold no
     /// `Mooring`, so the denial reaches the trail alone.
-    fn refused(&mut self, Denial { check, error }: Denial) -> Break {
+    fn refused(&mut self, Denial { check, error, .. }: Denial) -> Break {
         self.record_check(None, check);
         error.into()
     }
 
     /// Record an exec `denial` against `mooring` and mint the `Break` that refuses.
     pub(crate) fn exec_refused(&mut self, denial: Denial, mooring: &Mooring) -> Break {
-        let Denial { check, error } = denial;
+        let Denial { check, error, .. } = denial;
         self.record_check(Some(mooring), check);
         error.into()
     }
