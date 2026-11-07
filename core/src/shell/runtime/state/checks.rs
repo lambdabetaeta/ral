@@ -7,7 +7,7 @@ use crate::authority::guard::{Denial, Refusal, check_device_name, check_flag, fs
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
 use crate::path::walk::{Kind, is_loop};
-use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
+use crate::path::{Dir, Handle, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
@@ -100,20 +100,21 @@ impl Shell {
     /// I/O error, phrased with the name as written; or the refusal of a
     /// reserved device name.
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
-        let located = self.locate_unworded::<O>(path)?;
+        let located = self.locate_unworded::<O, Located>(path)?;
         located.map_err(|e| Error::io(path.shown(), &e).into())
     }
 
-    /// [`locate`](Self::locate), the walk's failure left for the caller to word.
+    /// [`locate`](Self::locate) to either handle kind, the walk's failure
+    /// left for the caller to word.
     ///
     /// # Errors
     /// As [`locate`](Self::locate), less the walk's failure.
-    pub(crate) fn locate_unworded<O: Op>(
+    pub(crate) fn locate_unworded<O: Op, H: Handle>(
         &mut self,
         path: &LexicalPath,
-    ) -> Settled<io::Result<Located<Judged<O>>>> {
+    ) -> Settled<io::Result<H::As<Judged<O>>>> {
         check_device_name(path).map_err(Error::from)?;
-        let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
+        let verdict = (self.context.grants).locate::<O, H>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
     }
 
@@ -122,9 +123,7 @@ impl Shell {
     /// # Errors
     /// As [`locate`](Self::locate).
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
-        check_device_name(path).map_err(Error::from)?;
-        let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
-        let dir = self.raised::<O, _>(path, verdict)?;
+        let dir = self.locate_unworded::<O, Dir>(path)?;
         dir.map_err(|e| Error::io(path.shown(), &e).into())
     }
 

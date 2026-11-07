@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::{Fragment, GrantLayer};
-use crate::path::Reading;
+use crate::path::{Located, Reading};
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, sig};
 use crate::source::{SourceFile, SourceOrigin};
@@ -66,7 +66,7 @@ pub fn load_capabilities_from_path(
         _ => sig(format!("capability file {display}: {e}")),
     };
     let rp = shell.anchor(path);
-    let located = (shell.locate_unworded::<Reading>(&rp))
+    let located = (shell.locate_unworded::<Reading, Located>(&rp))
         .map_err(|e| wrap(&display, e))?
         .map_err(|e| unread(&e))?;
     let file = SourceFile::new(located.real().as_path().to_path_buf())

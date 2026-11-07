@@ -5,11 +5,12 @@
 //! the voucher it needs: `walk(p)?.read()` and `walk(p)?.stat()` are errors,
 //! in this crate and in another.  A case is a file under `tests/markers/`
 //! with the compiler's complaint beside it; `pass/` holds what must keep
-//! compiling.  These are the `pub` surface.  What needs a `pub(crate)` door
-//! is pinned from inside the crate, by `path::walk::held::tests::markers`, and
-//! the two tokens' construction sites by its source scan.  `installing/` holds the
-//! doors of the OS sandbox side, which exist where a renderer holds a
-//! position: not on macOS.
+//! compiling.  These are the `pub` surface, the two tokens unnameable here
+//! included.  What needs a `pub(crate)` door is pinned from inside the crate,
+//! by `path::walk::held::tests::markers`; that each token's field stays
+//! private to its module is left to review.  `installing/` holds the doors of
+//! the OS sandbox side, which exist where a renderer holds a position: not on
+//! macOS.
 //!
 //! After a deliberate change to a diagnostic, regenerate the `.stderr` files
 //! with `TRYBUILD=overwrite cargo test -p ral-core --test markers` and read

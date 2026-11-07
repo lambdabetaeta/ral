@@ -496,8 +496,8 @@ The files a program touches on its own account, outside any shell, are
   bans them, and each caller is a typed site that says why the name is the
   user's: a CLI argument, a TUI command, the install tree.
 
-`own/site.rs` holds three authority-mint sites, `Silent::{Read, Write,
-WriteDir}`, for clippy-banned `Ungoverned` methods, but no syscall sites:
+`own/site.rs` holds two authority-mint sites, `Silent::{Read, Write}`, for
+clippy-banned `Ungoverned` methods, but no syscall sites:
 each syscall it needs is a walk primitive
 (`walk_dir_made`, `Located::{remove, rename, open_data}`, and `Visibility`'s
 `Public`, `Private` and `Secret`). The config home holds only what the user
@@ -980,8 +980,8 @@ for cross-domain sites, and domain-local `site.rs` declarations in `path`,
 `host`, `own`, `process` and `sync`, each variant documenting why its place is
 exempt. `Ungoverned::{read, region, write}`
 are also clippy-banned, so each authority mint is a documented typed site.
-`core/src/own/site.rs` declares the three own-file authority mints
-(`Silent::{Read, Write, WriteDir}`), used in `own.rs`,
+`core/src/own/site.rs` declares the two own-file authority mints
+(`Silent::{Read, Write}`, the second over a file or a directory), used in `own.rs`,
 but no syscall sites, since every syscall it needs is a walk primitive
 ([[decisions/261022_own-files|own-files]]). The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here

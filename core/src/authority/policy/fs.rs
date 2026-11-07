@@ -447,8 +447,8 @@ impl GrantStack {
     }
 
     /// Judge `h` for `O`: [`refusal_fs`](Self::refusal_fs), then, admitted,
-    /// the handle vouched for.  The one place the stack's evidence becomes
-    /// authority.
+    /// the handle vouched for.  One of the two places the stack's evidence
+    /// becomes authority, with [`ReadRegion::judge`].
     ///
     /// # Errors
     /// [`Refused`], the veto's or the stack's.
@@ -1172,11 +1172,13 @@ mod tests {
         let kinds: [fn(&GrantStack, &LexicalPath) -> Option<LocateError>; 2] =
             [told::<Located>, told::<Dir>];
         for locate in kinds {
-            let denied = locate(&grants, &at("secret/gone/f"));
-            assert!(
-                matches!(denied, Some(LocateError::Refused(_))),
-                "{denied:?}"
-            );
+            for name in ["secret/gone", "secret/gone/f"] {
+                let denied = locate(&grants, &at(name));
+                assert!(
+                    matches!(denied, Some(LocateError::Refused(_))),
+                    "{name}: {denied:?}"
+                );
+            }
             let open = locate(&grants, &at("gone/f"));
             assert!(
                 matches!(&open, Some(LocateError::Io(e)) if e.kind() == io::ErrorKind::NotFound),

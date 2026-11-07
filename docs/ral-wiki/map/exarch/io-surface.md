@@ -370,8 +370,8 @@ for what clippy cannot state.**
   would break the build on vendored code.
 - **A program's own files need no syscall sites.** What a program keeps for itself
   and what the user writes at the places it chooses go through `ral_core::own`,
-  whose every syscall is a walk primitive. `core/src/own.rs` holds only three
-  authority-mint sites, `own/site.rs`'s `Silent::{Read, Write, WriteDir}`; every
+  whose every syscall is a walk primitive. `core/src/own.rs` holds only two
+  authority-mint sites, `own/site.rs`'s `Silent::{Read, Write}`; every
   `std::fs` ban points there, and the env bans point at
   `ral_core::host::{var, var_os, vars_os}`. What the user names to it
   (`read_named`, `open_named`, `kind_named`, `create_named`) takes any path, so it

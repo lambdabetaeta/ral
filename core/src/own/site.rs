@@ -10,16 +10,12 @@ pub(super) enum Silent {
     /// and handed on for reading.  It raises no card: no model names the
     /// object, so no grant or read card applies.
     Read,
-    /// The leaf write mint of `own` (`writing`): a program-kept file or a new
-    /// file the user named, vouched for as the user's own and handed on for
-    /// writing.  It raises no card: no model names the object, so no grant or
-    /// write card applies.
+    /// The write mint of `own` (`writing`): a program-kept file, a directory
+    /// of the program's own layout, or a new file or a directory the user
+    /// named, vouched for as the user's own and handed on for writing.  It
+    /// raises no card: no model names the object, so no grant or write card
+    /// applies.
     Write,
-    /// The directory write mint of `own` (`writing_dir`): a directory of the
-    /// program's own layout or one the user named, vouched for as the user's own
-    /// and handed on for writing.  It raises no card: no model names the
-    /// directory, so no grant or write card applies.
-    WriteDir,
 }
 
 impl Site for Silent {}

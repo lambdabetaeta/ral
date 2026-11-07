@@ -36,7 +36,7 @@ use crate::path::walk::{
     Access, dangling, sync_dir, sync_dir_chain, unsynced, walk_dir_made, walk_dir_made_synced,
 };
 use crate::path::{
-    Dir, EntryName, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
+    Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver, Stat,
     Visibility, Writing, XdgKind, app_dir, shown, spelled_parent, walk, walk_dir,
 };
 use crate::site::site;
@@ -67,14 +67,9 @@ fn reading(l: Located) -> Located<Judged<Reading>> {
     site!(Silent::Read, Ungoverned::read(l))
 }
 
-/// `l`, vouched for as the user's own, for writing.
-fn writing(l: Located) -> Located<Judged<Writing>> {
-    site!(Silent::Write, Ungoverned::write(l))
-}
-
-/// `d`, vouched for as the user's own, for writing.
-fn writing_dir(d: Dir) -> Dir<Judged<Writing>> {
-    site!(Silent::WriteDir, Ungoverned::write(d))
+/// `h`, vouched for as the user's own, for writing.
+fn writing<H: Handle>(h: H) -> H::As<Judged<Writing>> {
+    site!(Silent::Write, Ungoverned::write(h))
 }
 
 // ── Errors ────────────────────────────────────────────────────────────
@@ -305,7 +300,7 @@ fn anchored(path: &Path) -> Result<LexicalPath, OwnError> {
 /// owner-only first; `at` is how errors name it.
 fn made(spelling: &LexicalPath, at: &Path) -> Result<Dir<Judged<Writing>>, OwnError> {
     walk_dir_made(spelling)
-        .map(writing_dir)
+        .map(writing)
         .map_err(|e| walked(Act::Make, at, e))
 }
 
@@ -380,7 +375,7 @@ impl OwnDir {
             let resolved = if synced {
                 let spelling = anchored(&path)?;
                 let dir = walk_dir_made_synced(&spelling)
-                    .map(writing_dir)
+                    .map(writing)
                     .map_err(|error| walked(Act::Make, &path, error))?;
                 Self::new(dir, spelling)
             } else {
@@ -696,7 +691,7 @@ impl OwnDir {
                 .map_err(|e| io_at(Act::Make, &self.path().join(prefix), e.into()))?;
             match writing(self.0.dir.absent(name.clone())).create_dir(Visibility::Private) {
                 Ok(dir) => {
-                    let dir = Self::new(writing_dir(dir), self.0.path.join(&name));
+                    let dir = Self::new(writing(dir), self.0.path.join(&name));
                     return Ok((name, dir));
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries + 1 < MAKE_TRIES => {
@@ -728,7 +723,7 @@ impl OwnDir {
     /// The directory below, one step down, as [`dir`](Self::dir) reaches it.
     fn descend(&self, name: &EntryName) -> Result<Self, OwnError> {
         match self.0.dir.open_dir(name) {
-            Ok(dir) => Ok(Self::new(writing_dir(dir), self.0.path.join(name))),
+            Ok(dir) => Ok(Self::new(writing(dir), self.0.path.join(name))),
             // The step refuses a link and any other non-directory alike.
             Err(e) if e.kind() == io::ErrorKind::NotADirectory && self.is_link(name) => {
                 Err(OwnError::Linked(self.at(name)))
@@ -744,7 +739,7 @@ impl OwnDir {
             found => return found,
         }
         match writing(self.0.dir.absent(name.clone())).create_dir(Visibility::Private) {
-            Ok(dir) => Ok(Self::new(writing_dir(dir), self.0.path.join(name))),
+            Ok(dir) => Ok(Self::new(writing(dir), self.0.path.join(name))),
             // Another process made it first: it is there now.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => self.descend(name),
             Err(e) => Err(self.failed(Act::Make, name, e)),

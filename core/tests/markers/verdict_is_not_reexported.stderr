@@ -1,0 +1,15 @@
+error[E0603]: struct `Verdict` is private
+ --> tests/markers/verdict_is_not_reexported.rs:3:34
+  |
+3 | use ral_core::authority::policy::Verdict;
+  |                                  ^^^^^^^ private struct
+  |
+note: the struct `Verdict` is defined here
+ --> src/authority/policy.rs
+  |
+  | pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
+  |                                                ^^^^^^^
+help: import `Verdict` directly
+  |
+3 | use ral_core::authority::policy::fs::Verdict;
+  |                                  ++++
