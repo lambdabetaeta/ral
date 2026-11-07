@@ -1,6 +1,5 @@
 //! The operation's path, tested stage by stage: a submodule per former file.
 
-#[allow(clippy::disallowed_methods, reason = "test code")]
 mod head {
     use super::super::*;
     use crate::authority::policy::{Baseline, Capabilities, ExecGrant, ExecKey, GrantStack};
@@ -558,7 +557,6 @@ mod head {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code")]
 mod vet {
     use super::super::*;
     use crate::authority::policy::{
@@ -816,16 +814,15 @@ mod vet {
                 (e, shell.local.audit.close(scope))
             });
             assert!(e.describe().contains("denied by active grant"), "{e:?}");
-            let hint = e
-                .hints()
-                .first()
-                .map(|h| &**h)
-                .expect("a refusal carries a hint");
+            let [grant, bare] = e.hints() else {
+                panic!("the grant's hint, then the bare-name lead: {:?}", e.hints());
+            };
             assert_eq!(
-                hint.split_once("\n\n").expect("both hints are kept").0,
+                &**bare,
                 format!("'{name}' is no program in any PATH directory the grant runs from")
             );
-            assert!(!hint.contains("#'"), "{hint}");
+            assert_ne!(grant, bare);
+            assert!(!grant.contains("#'") && !bare.contains("#'"), "{e:?}");
             let [observation] = trail.as_slice() else {
                 panic!("only the first refusal is recorded: {trail:?}");
             };
@@ -973,7 +970,6 @@ mod vet {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code")]
 mod stdio {
     use super::super::{boundary_stdin, stdin_stdio};
     use crate::io::Source;
@@ -1235,7 +1231,6 @@ mod process {
     /// What runs is the file that was judged, by its real path and under the
     /// spelling the user wrote, however the spelling moves in between.
     #[cfg(unix)]
-    #[allow(clippy::disallowed_methods, reason = "test code")]
     mod judged_program {
         use super::{Head, Prepared, prepare};
         use crate::authority::sandbox::Ownership;
@@ -1286,6 +1281,33 @@ mod process {
             String::from_utf8(out.stdout).unwrap()
         }
 
+        /// Building only describes, so a stop in force refuses no build; the
+        /// start sees it, and is the run's stop with no child.
+        #[test]
+        fn a_stop_is_the_starts_and_never_the_builds() {
+            use super::start;
+            let (tmp, mut shell) = workdir();
+            point_build_at(tmp.path(), &plant(tmp.path(), "a"));
+            let stopped = crate::process::DurableRoot::default().child();
+            stopped.cancel(crate::process::CancelCause::Cancelled);
+            shell.scope = crate::process::Scope::clone(&stopped);
+            let prepared = judge(&mut shell, &[]);
+            let started = start(prepared, crate::process::PgidPolicy::Inherit, &shell.scope);
+            assert!(
+                matches!(
+                    started,
+                    Err(crate::shell::runtime::Break::Escape(
+                        crate::shell::runtime::Escape::Stopped(crate::shell::runtime::Stop {
+                            cause: crate::process::CancelCause::Cancelled,
+                            ..
+                        })
+                    ))
+                ),
+                "{:?}",
+                started.err()
+            );
+        }
+
         /// No sandbox confines a start under no grant, so it claims no line.
         #[test]
         fn an_unconfined_start_claims_no_line() {
@@ -1297,7 +1319,7 @@ mod process {
             let Ok(Started {
                 born: Born { mut spawned, claim },
                 ..
-            }) = start(prepared, crate::process::PgidPolicy::Inherit)
+            }) = start(prepared, crate::process::PgidPolicy::Inherit, &shell.scope)
             else {
                 panic!("the file starts");
             };
@@ -1382,7 +1404,6 @@ mod process {
     }
 
     #[cfg(unix)]
-    #[allow(clippy::disallowed_methods, reason = "test code")]
     mod at_spawn_tests {
         use super::at_spawn;
         use crate::authority::sandbox::Image;
@@ -1521,7 +1542,6 @@ mod process {
     /// A confined launch that cannot start is a process failure, as an
     /// unconfined one is, never a trampoline's exit status.
     #[cfg(target_os = "macos")]
-    #[allow(clippy::disallowed_methods, reason = "test code")]
     mod confined_start {
         use super::{Born, Claim, Head, Started, prepare, start};
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
@@ -1570,7 +1590,7 @@ mod process {
                     prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
                 let shown = prepared.shown.clone();
                 between();
-                (shown, start(prepared, PgidPolicy::Inherit))
+                (shown, start(prepared, PgidPolicy::Inherit, &shell.scope))
             })
         }
 

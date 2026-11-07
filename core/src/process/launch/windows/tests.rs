@@ -40,7 +40,10 @@ fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
 fn only_create_process_s_failure_is_the_program_s() {
     let refused = |mut launch: Launch| {
         matches!(
-            launch.spawn(PgidPolicy::Inherit),
+            launch.spawn(
+                PgidPolicy::Inherit,
+                &crate::process::DurableRoot::default().child()
+            ),
             Err(Unstarted::Refused(_))
         )
     };
@@ -49,7 +52,10 @@ fn only_create_process_s_failure_is_the_program_s() {
     nul.arg("a\0b");
     assert!(refused(nul));
     assert!(matches!(
-        Launch::new(r"C:\ral-no-such-dir\tool.exe").spawn(PgidPolicy::Inherit),
+        Launch::new(r"C:\ral-no-such-dir\tool.exe").spawn(
+            PgidPolicy::Inherit,
+            &crate::process::DurableRoot::default().child()
+        ),
         Err(Unstarted::Program(_))
     ));
 }

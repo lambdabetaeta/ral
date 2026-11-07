@@ -260,6 +260,21 @@ they wire around it.** Each runs the same three stages, `prepare`, `start` (or
 wires its own streams between the first two
 ([[internals/an-external-end-to-end|an-external-end-to-end]]).
 
+- **Building a launch only describes it; starting it acts.** `prepare` waits
+  on nothing a stop must end, so it can only be refused. Two exceptions touch the world: a guest jail's
+  cgroup, which `JailCgroup::drop` removes if the built launch is dropped,
+  and Linux's bwrap host probe, which waits on bwrap children once per
+  process.
+  Every step that can be stopped, Windows' ACL stamps and the wait for a
+  trampoline's first word among them, runs in `start`, through
+  `Launch::spawn`, under the run's scope, which the spawn reads before it
+  confines and once more just before the child is made. So `start` is the
+  one place a launch is stopped or fails as a program
+  ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
+  The order of the process limit, the `pre_exec` hooks, the report socket and
+  the warrant is fixed at build and unchanged by the spawn
+  ([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
+
 - **A plain command.** Dispatch admits; `prepare` vets the argv and builds the
   launch; the command wires the streams and decides the group; `start` spawns;
   it waits, joins the pumps and `ending` classifies how the child ended
@@ -323,7 +338,8 @@ where the kernel can render one.
   `not-found` or `not-runnable`, never `exited 127` or `exited 126`
   ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]]).
 - **Windows.** No re-exec: the program's own `CreateProcessW` carries an
-  AppContainer token whose capabilities are this launch's grants.
+  AppContainer token whose capabilities are this launch's grants, stamped by
+  the spawn, under the run's scope.
 - The details, including how a denied path is kept denied, are
   [[internals/confined-launch|confined-launch]] and
   [[internals/holding-a-deny|holding-a-deny]].
@@ -387,7 +403,7 @@ exit code is a projection of the reason (`FailureCode`), never stored.
 | grant refusal | the judgment denies the program | failure, `raised` | 1 |
 | argument refusal | an argument is not a word | failure, `raised` | 1 |
 | launch refused | ral could not start the launch: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, or the envelope dies before the program starts | failure, `raised` | 1 |
-| stopped | a death by a signal of a cause in force, or a cause seen before the spawn | stop | 124, 130, 131, 141, 143 |
+| stopped | a death by a signal of a cause in force, or a cause the start sees before the program runs | stop | 124, 130, 131, 141, 143 |
 | cut at the write | a non-final stage writes after its reader ended | stop, forgiven by its pipeline | none |
 
 The clamp's floor is 1, so a negative Windows `NTSTATUS` never reads as

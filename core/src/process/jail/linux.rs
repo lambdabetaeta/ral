@@ -480,6 +480,7 @@ mod tests {
                 "the guest jail requires root"
             );
             let path = root.join(format!("ral-jail-test-{}", std::process::id()));
+            let unstopped = crate::process::DurableRoot::default().child();
             std::fs::create_dir(&path).unwrap();
             let _tree = JailCgroup::at(path.clone());
             let mut shared = JailPlan {
@@ -540,7 +541,8 @@ mod tests {
             shared.limits = JailLimits::default();
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&shared).unwrap();
-            let Err(crate::process::Unstarted::Program(e)) = failed.spawn_detached() else {
+            let Err(crate::process::Unstarted::Program(e)) = failed.spawn_detached(&unstopped)
+            else {
                 panic!("a program that does not exist is not born");
             };
             assert_eq!(e.kind(), io::ErrorKind::NotFound);
@@ -573,7 +575,7 @@ mod tests {
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&kept).unwrap();
             let Err(crate::process::Unstarted::Program(e)) =
-                failed.spawn(crate::process::PgidPolicy::NewLeader)
+                failed.spawn(crate::process::PgidPolicy::NewLeader, &unstopped)
             else {
                 panic!("a program that does not exist is not born");
             };

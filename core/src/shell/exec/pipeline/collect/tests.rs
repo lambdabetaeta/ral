@@ -2145,7 +2145,7 @@ fn a_lone_externals_windows_job_is_released() {
     let mut launch = crate::process::Launch::new("cmd.exe");
     launch.args(["/c", "exit 0"]);
     let lone = launch
-        .spawn(crate::process::PgidPolicy::NewLeader)
+        .spawn(crate::process::PgidPolicy::NewLeader, &shell.scope)
         .expect("spawn cmd.exe");
     let crate::process::Landing::Owns(leader) = lone.landing else {
         panic!("NewLeader registers a group");

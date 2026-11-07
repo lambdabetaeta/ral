@@ -133,7 +133,11 @@ fn launch_external_stage_direct(
                 shell,
             )?;
             let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
-            let started = command::start(prepared, PgidPolicy::Join(group.leader_pgid()))?;
+            let started = command::start(
+                prepared,
+                PgidPolicy::Join(group.leader_pgid()),
+                &shell.scope,
+            )?;
             Ok((started, pumps))
         })();
         let (started, pumps) = launched.inspect_err(|broke| {

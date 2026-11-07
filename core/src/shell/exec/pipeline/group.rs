@@ -172,15 +172,18 @@ impl AnchorProcess {
         };
         #[cfg(windows)]
         cmd.stdout(crate::process::StdioSpec::Null);
+        // ral's own process, so no stop ends its birth: each stage's start
+        // sees one.
+        let unstoppable = crate::process::DurableRoot::default().child();
         let Spawned {
             mut child, landing, ..
-        } = cmd
-            .spawn(PgidPolicy::NewLeader)
-            .map_err(|unstarted| match unstarted {
+        } = cmd.spawn(PgidPolicy::NewLeader, &unstoppable).map_err(
+            |unstarted| match unstarted {
                 Unstarted::Program(e) => Break::from(Error::new(io_message("pipeline anchor", &e))),
                 Unstarted::Refused(refusal) => Break::from(refusal),
                 Unstarted::Stopped(stop) => Break::from(stop),
-            })?;
+            },
+        )?;
         drop(cmd);
         let Landing::Owns(pgid) = landing else {
             discard(&mut child);

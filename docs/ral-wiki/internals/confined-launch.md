@@ -16,8 +16,32 @@ network namespaces still apply there.
 When `prepare` builds the launch of an admitted external or bundled child
 (`build_launch`, `shell/exec/command.rs`) on a host under a restrictive
 projection, it calls `sandboxed_command`
-(`authority/sandbox/launch.rs`), which confines that one child. Why it is per command is
+(`authority/sandbox/launch.rs`), which describes that one child's
+confinement. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
+
+**Building describes; the spawn confines.** The build waits on nothing a
+stop must end, so it returns a launch or a refusal. Two exceptions touch the
+world: a guest jail's cgroup, which `JailCgroup::drop` removes if the built
+launch is dropped, and Linux's bwrap host probe, which waits on bwrap
+children once per process. Everything that may be stopped runs in
+`Launch::spawn` (`spawn_detached`), under the scope `start` hands it, which
+it reads before confining and once more just before the child is made.
+
+- **Unix builds** render the projection, open the binds, create the Landlock
+  ruleset, seal the warrant, open the report socket and register the `pre_exec`
+  hooks: descriptors of this process, and hooks in their fixed order. A guest
+  jail instead creates its cgroup and registers its hook in that order. The
+  linker glob is a bounded walk of a handful of library directories and polls
+  nothing; the bwrap host probe runs its bwrap children once per process and
+  caches the answer. The spawn forks, then waits for the first word.
+- **Windows builds** a `Confined` that only describes the token: the
+  projection and the image. Every spawn runs `session::confine` (profile,
+  carving, stamps, unreachability proof) and hands the token it returns
+  straight to `CreateProcessW`, so no launch holds a token apart from its
+  confinement and a retry confines again. A stop is seen before each stamp
+  and between directories of each proof; a stamp's own Win32 propagation
+  runs to its end.
 
 On Unix, `build_launch` registers the session's `ChildLimits` hook immediately
 after `apply_env`, before `limit_resources`. `pre_exec` hooks run in registration
@@ -40,7 +64,7 @@ The grant's limit is part of the launch, applied inside the platform's spawn
   alone, then `execve`s exactly that file.
 - **Windows** attaches the projection's AppContainer LowBox
   `SECURITY_CAPABILITIES` to the child's own `CreateProcessW`
-  (`authority::sandbox::windows::session::confine`). The parent's spawn is the confinement point;
+  (`authority::sandbox::windows::session::confine`, run by `Launch::spawn`). The parent's spawn is the confinement point;
   there is no re-exec. One process-wide inheritance mutex covers ral's raw
   launches and helper-backed standard spawns through creation and restoration
   of temporary inherit flags, not Job Object placement/resume or child waits.
@@ -254,7 +278,7 @@ the refusal says the sandbox is why** (`authority::sandbox::Refusal::Unavailable
   worded with whatever it left on the command's stderr (`vanished`):
   on Linux, EOF on the report before any record.
 - **The launch records which envelope it execs** (an `Envelope`, held in its
-  `Confined` beside the report and the scope, and read back by
+  `Confined` beside the report, and read back by
   `Confined::launcher`). Only a backend whose envelope is a separate binary sets
   one; Windows has none. Blame is read off what the launcher did, not
   re-derived from the shell's state.

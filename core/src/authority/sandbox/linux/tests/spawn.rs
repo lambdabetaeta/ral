@@ -21,11 +21,10 @@ fn spawn_confined(
         &sh_args(script),
         Ownership::Kept,
         shell.context.cwd(),
-        scope,
     )
     .expect("build confined launch");
     let spawned = launch
-        .spawn(PgidPolicy::NewLeader)
+        .spawn(PgidPolicy::NewLeader, scope)
         .expect("spawn confined sh");
     let Landing::Owns(pgid) = spawned.landing else {
         panic!("a kept launch names its payload's group");
@@ -374,7 +373,6 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
             &[],
             None,
             Ownership::Kept,
-            &crate::process::DurableRoot::default().child(),
         )
         .unwrap();
         let late = HostPty::open();
@@ -616,12 +614,11 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
         args,
         Ownership::Kept,
         shell.context.cwd(),
-        &shell.scope,
     )
     .expect("build confined launch");
     launch.stdin(crate::process::StdioSpec::Null);
     let Spawned { child, .. } = launch
-        .spawn(PgidPolicy::NewLeader)
+        .spawn(PgidPolicy::NewLeader, &shell.scope)
         .expect("spawn the confined program");
     let (tx, rx) = std::sync::mpsc::channel();
     let watch = child.into_watch(tx, std::convert::identity);

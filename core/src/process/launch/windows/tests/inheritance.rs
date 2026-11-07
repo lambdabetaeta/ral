@@ -56,7 +56,10 @@ impl Drop for ReapedChild {
 }
 
 fn raw_child(launch: &mut Launch) -> io::Result<ReapedChild> {
-    match launch.spawn(PgidPolicy::Inherit) {
+    match launch.spawn(
+        PgidPolicy::Inherit,
+        &crate::process::DurableRoot::default().child(),
+    ) {
         Ok(spawned) => Ok(ReapedChild(spawned.child)),
         Err(crate::process::Unstarted::Program(e)) => Err(e),
         Err(crate::process::Unstarted::Refused(why)) => panic!("the launch was refused: {why}"),

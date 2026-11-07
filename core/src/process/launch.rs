@@ -51,19 +51,27 @@ pub(crate) struct Envelope {
     pub(crate) payload_pgid: Option<PayloadPgid>,
 }
 
-/// A confined launch's trampoline: the report it makes on its program, the
-/// scope whose stop ends the wait for its first word, and the envelope that
-/// runs it, where one does.  Forked, the report is the parent's read end.
+/// A confined launch's trampoline: the report it makes on its program, and
+/// the envelope that runs it, where one does.  Forked, the report is the
+/// parent's read end.
 #[cfg(not(windows))]
 pub(crate) struct Confined<R = crate::process::report::Report> {
     pub(crate) report: R,
-    pub(crate) scope: crate::process::Scope,
     pub(crate) envelope: Option<Envelope>,
+}
+
+/// A confined launch's token, described: the projection its spawn stamps and
+/// mints into an `AppContainer` token, and the image that token must load.
+#[cfg(windows)]
+pub(crate) struct Confined {
+    pub(crate) projection: crate::authority::sandbox::SandboxProjection,
+    pub(crate) image: Option<crate::path::RealPath>,
 }
 
 /// Why a launch made no child: the program's own failure to become a
 /// process, something that is never the program's fault, or the run's stop
-/// while a confined launch waited to hear its program start.
+/// before the child existed or while a confined launch waited to hear its
+/// program start.
 #[derive(Debug)]
 pub(crate) enum Unstarted {
     Program(std::io::Error),
@@ -103,18 +111,40 @@ pub(crate) struct Launch {
     stderr: StdioSpec,
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
-    security_capabilities: Option<SecurityCapabilitiesAttr>,
+    /// Applied by every spawn of this launch.
+    confined: Option<Confined>,
     /// A grant's process budget, set on the child's Job Object while it is
     /// still suspended.
     pub(super) process_cap: bool,
 }
 
-/// Owners retained until the launch is dropped, independently of teardown.
+/// A confined spawn's `SECURITY_CAPABILITIES`, as `session::confine` mints
+/// them: owners held until `CreateProcessW` returns.
 #[cfg(windows)]
-struct SecurityCapabilitiesAttr {
+pub(crate) struct SecurityCapabilitiesAttr {
     app_container_sid: Arc<OwnedContainerSid>,
     filesystem: Vec<Arc<OwnedCapabilitySid>>,
     network: Option<Arc<CapabilitySids>>,
+}
+
+#[cfg(windows)]
+impl SecurityCapabilitiesAttr {
+    pub(crate) const fn new(
+        app_container_sid: Arc<OwnedContainerSid>,
+        filesystem: Vec<Arc<OwnedCapabilitySid>>,
+        network: Option<Arc<CapabilitySids>>,
+    ) -> Self {
+        Self {
+            app_container_sid,
+            filesystem,
+            network,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn network_capability_count(&self) -> usize {
+        self.network.as_ref().map_or(0, |caps| caps.sids().count())
+    }
 }
 
 #[cfg(windows)]
@@ -307,28 +337,33 @@ impl Launch {
         Ok(())
     }
 
-    /// Spawn into `pgid`, and on a confined launch read what its trampoline
-    /// says of the start: the child, where it landed, and whatever jail
-    /// cgroup `apply_guest_jail` staged.  An enveloped launch is placed
-    /// `NewLeader` whatever was asked: the envelope process is nobody's to
-    /// address, and its payload's group, named once it exists, is where the
-    /// child lands.
+    /// Spawn into `pgid` under `scope`, and on a confined launch read what
+    /// its trampoline says of the start: the child, where it landed, and
+    /// whatever jail cgroup `apply_guest_jail` staged.  An enveloped launch
+    /// is placed `NewLeader` whatever was asked: the envelope process is
+    /// nobody's to address, and its payload's group, named once it exists,
+    /// is where the child lands.
     ///
     /// # Errors
     /// [`Unstarted`]: the program's own `execve`; a refusal for the fork,
     /// any of ral's pre-exec steps, or any failure of the envelope or
-    /// trampoline; or a stop before the trampoline spoke.  Any child is then
-    /// killed and reaped.
-    pub(crate) fn spawn(&mut self, pgid: crate::process::PgidPolicy) -> Result<Spawned, Unstarted> {
+    /// trampoline; or a stop on `scope` before the fork or before the
+    /// trampoline spoke.  Any child is then killed and reaped.
+    pub(crate) fn spawn(
+        &mut self,
+        pgid: crate::process::PgidPolicy,
+        scope: &crate::process::Scope,
+    ) -> Result<Spawned, Unstarted> {
         let pgid = if self.enveloped() {
             crate::process::PgidPolicy::NewLeader
         } else {
             pgid
         };
+        scope.poll()?;
         let ((child, landing), confined) =
             self.fork(|cmd| crate::process::spawn_with_pgid(cmd, pgid))?;
         let mut child = crate::process::ChildHandle::from_std(child);
-        let payload = match confined.map(|confined| confined.hear(&mut child)) {
+        let payload = match confined.map(|confined| confined.hear(&mut child, scope)) {
             None => None,
             Some(Ok(payload)) => payload,
             Some(Err(unstarted)) => return Err(discarded(child, unstarted)),
@@ -355,18 +390,20 @@ impl Launch {
     /// [`Unstarted`], as for [`Self::spawn`], but the survivor is never
     /// killed; a survivor whose pid is lost is `Survivor::Unnamed`.
     #[cfg(unix)]
-    pub(crate) fn spawn_detached(&mut self) -> Result<crate::process::group::Survivor, Unstarted> {
+    pub(crate) fn spawn_detached(
+        &mut self,
+        scope: &crate::process::Scope,
+    ) -> Result<crate::process::group::Survivor, Unstarted> {
         assert!(
             self.jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
+        scope.poll()?;
         let (survivor, confined) = self.fork(crate::process::group::spawn_detached)?;
         if let Some(confined) = confined {
             let launcher = confined.launcher();
-            let Confined {
-                mut report, scope, ..
-            } = confined;
-            report.first(&scope, || vanished(launcher, None))?;
+            let Confined { mut report, .. } = confined;
+            report.first(scope, || vanished(launcher, None))?;
         }
         Ok(survivor)
     }
@@ -398,7 +435,9 @@ impl Launch {
         use std::io::Read;
         use std::os::unix::process::ExitStatusExt;
         self.stdout(StdioSpec::Piped).stderr(StdioSpec::Piped);
-        let Spawned { mut child, .. } = self.spawn(crate::process::PgidPolicy::Inherit)?;
+        let unstopped = crate::process::DurableRoot::default().child();
+        let Spawned { mut child, .. } =
+            self.spawn(crate::process::PgidPolicy::Inherit, &unstopped)?;
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
@@ -430,7 +469,6 @@ impl Confined {
     fn forked(self) -> Confined<Testimony> {
         Confined {
             report: self.report.forked(),
-            scope: self.scope,
             envelope: self.envelope,
         }
     }
@@ -448,24 +486,24 @@ impl<R> Confined<R> {
 
 #[cfg(not(windows))]
 impl Confined<Testimony> {
-    /// Hear `child`'s start from its trampoline: its payload's group, where
-    /// the envelope names one.  On Linux the child keeps the testimony for
-    /// its end.
+    /// Hear `child`'s start from its trampoline, a stop on `scope` ending the
+    /// wait: its payload's group, where the envelope names one.  On Linux the
+    /// child keeps the testimony for its end.
     fn hear(
         self,
         child: &mut crate::process::ChildHandle,
+        scope: &crate::process::Scope,
     ) -> Result<Option<crate::process::Pgid>, Unstarted> {
         let launcher = self.launcher();
         let Self {
             mut report,
-            scope,
             envelope,
         } = self;
         let payload = match envelope.and_then(|envelope| envelope.payload_pgid) {
             Some(ask) => ask().map_err(Error::new)?,
             None => None,
         };
-        report.first(&scope, || vanished(launcher, child.stderr_said()))?;
+        report.first(scope, || vanished(launcher, child.stderr_said()))?;
         #[cfg(target_os = "linux")]
         child.testify(report);
         Ok(payload)
@@ -517,19 +555,25 @@ fn discarded(mut child: crate::process::ChildHandle, why: Unstarted) -> Unstarte
 #[cfg(all(test, unix))]
 mod tests {
     use super::{Launch, Unstarted};
-    use crate::process::{Pgid, PgidPolicy};
+    use crate::process::{CancelCause, DurableRoot, Pgid, PgidPolicy, ScopeNode};
+
+    fn unstopped() -> ScopeNode {
+        DurableRoot::default().child()
+    }
 
     /// ral's own step failing refuses the launch; the `execve` failing is
     /// the program's.
     #[test]
     fn ral_s_failed_step_is_refused_and_the_program_s_exec_is_its_own() {
         let nobody = PgidPolicy::Join(Pgid::from_raw(i32::MAX).expect("positive"));
-        let Err(Unstarted::Refused(why)) = Launch::new("/bin/sh").spawn(nobody) else {
+        let Err(Unstarted::Refused(why)) = Launch::new("/bin/sh").spawn(nobody, &unstopped())
+        else {
             panic!("a group nobody leads cannot be joined");
         };
         assert!(why.describe().contains("could not prepare"), "{why}");
 
-        let missing = Launch::new("ral-no-such-program-exists").spawn(PgidPolicy::Inherit);
+        let missing =
+            Launch::new("ral-no-such-program-exists").spawn(PgidPolicy::Inherit, &unstopped());
         assert!(
             matches!(&missing, Err(Unstarted::Program(e)) if e.kind() == std::io::ErrorKind::NotFound),
             "{:?}",
@@ -544,7 +588,6 @@ mod tests {
         let mut launch = Launch::new(program);
         launch.confine(super::Confined {
             report: crate::process::report::Report::new(reader, writer.into()),
-            scope: crate::process::Scope::clone(&crate::process::DurableRoot::default().child()),
             envelope: None,
         });
         launch
@@ -556,12 +599,13 @@ mod tests {
     #[test]
     fn a_confined_launch_s_failed_step_is_ral_s_and_its_exec_the_launcher_s() {
         let nobody = PgidPolicy::Join(Pgid::from_raw(i32::MAX).expect("positive"));
-        let Err(Unstarted::Refused(why)) = confined("/bin/sh").spawn(nobody) else {
+        let Err(Unstarted::Refused(why)) = confined("/bin/sh").spawn(nobody, &unstopped()) else {
             panic!("a group nobody leads cannot be joined, confined or not");
         };
         assert!(why.describe().contains("could not prepare"), "{why}");
 
-        let missing = confined("ral-no-such-program-exists").spawn(PgidPolicy::Inherit);
+        let missing =
+            confined("ral-no-such-program-exists").spawn(PgidPolicy::Inherit, &unstopped());
         let Err(Unstarted::Refused(why)) = missing else {
             panic!(
                 "a launcher that cannot start is unavailable: {:?}",
@@ -573,6 +617,28 @@ mod tests {
                 "sandbox confinement unavailable: cannot start ral's sandbox trampoline"
             ),
             "{why}"
+        );
+    }
+
+    /// A stop in force when a launch starts is the run's stop, and no child
+    /// is made, confined or not.
+    #[test]
+    fn a_launch_started_under_a_stop_makes_no_child() {
+        let stopped = unstopped();
+        stopped.cancel(CancelCause::Cancelled);
+        for mut launch in [Launch::new("/bin/sh"), confined("/bin/sh")] {
+            let spawned = launch.spawn(PgidPolicy::Inherit, &stopped);
+            assert!(
+                matches!(spawned, Err(Unstarted::Stopped(_))),
+                "{:?}",
+                spawned.err()
+            );
+        }
+        let survivor = confined("/bin/sh").spawn_detached(&stopped);
+        assert!(
+            matches!(survivor, Err(Unstarted::Stopped(_))),
+            "{:?}",
+            survivor.err()
         );
     }
 }
@@ -591,7 +657,7 @@ impl Launch {
             stderr: StdioSpec::Inherit,
             creation_flags: 0,
             admitted_handles: Vec::new(),
-            security_capabilities: None,
+            confined: None,
             process_cap: false,
         }
     }
@@ -680,40 +746,45 @@ impl Launch {
         self
     }
 
-    /// Stage `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` for the spawn.
-    pub(crate) fn security_capabilities(
-        &mut self,
-        app_container_sid: Arc<OwnedContainerSid>,
-        filesystem: Vec<Arc<OwnedCapabilitySid>>,
-        network: Option<Arc<CapabilitySids>>,
-    ) -> &mut Self {
-        self.security_capabilities = Some(SecurityCapabilitiesAttr {
-            app_container_sid,
-            filesystem,
-            network,
-        });
+    /// Run under the `AppContainer` token `confined` describes, which the
+    /// spawn stamps and mints.
+    pub(crate) fn confine(&mut self, confined: Confined) -> &mut Self {
+        self.confined = Some(confined);
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn network_capability_count(&self) -> usize {
-        self.security_capabilities
-            .as_ref()
-            .and_then(|caps| caps.network.as_ref())
-            .map_or(0, |caps| caps.sids().count())
-    }
-
-    /// Lower through `CreateProcessW` and spawn with the requested
-    /// process-group placement: the child, and where it landed.  The jail
-    /// cgroup is always `None`: Linux guests only.
+    /// Confine under `scope`, then lower through `CreateProcessW` and spawn
+    /// with the requested process-group placement: the child, and where it
+    /// landed.  The jail cgroup is always `None`: Linux guests only.  The
+    /// token goes straight from the confinement to `CreateProcessW`, so
+    /// every spawn of a confined launch confines, a retry included.
     ///
     /// # Errors
     /// [`Unstarted`]: `CreateProcessW`'s own failure, the program's; a
-    /// refusal for a `.bat`/`.cmd` program and for any of ral's steps: a NUL
-    /// in an argument, path or environment entry, handle admission, or a Job
-    /// Object that cannot take the child or its process budget.
-    pub(crate) fn spawn(&mut self, pgid: crate::process::PgidPolicy) -> Result<Spawned, Unstarted> {
-        windows::spawn(self, pgid).map(|(child, landing)| Spawned {
+    /// refusal for the confinement, for a `.bat`/`.cmd` program and for any
+    /// of ral's steps: a NUL in an argument, path or environment entry,
+    /// handle admission, or a Job Object that cannot take the child or its
+    /// process budget; or a stop on `scope` before, during or after the
+    /// confinement, short of `CreateProcessW`.
+    pub(crate) fn spawn(
+        &mut self,
+        pgid: crate::process::PgidPolicy,
+        scope: &crate::process::Scope,
+    ) -> Result<Spawned, Unstarted> {
+        scope.poll()?;
+        let caps = self
+            .confined
+            .as_ref()
+            .map(|Confined { projection, image }| {
+                crate::authority::sandbox::windows::session::confine(
+                    projection,
+                    image.as_ref(),
+                    scope,
+                )
+            })
+            .transpose()?;
+        scope.poll()?;
+        windows::spawn(self, pgid, caps.as_ref()).map(|(child, landing)| Spawned {
             child,
             landing,
             jail: None,
@@ -802,7 +873,9 @@ mod windows_args {
 
 #[cfg(windows)]
 mod windows {
-    use super::{EnvEdit, Launch, StdioSpec, Unstarted, unprepared, windows_args};
+    use super::{
+        EnvEdit, Launch, SecurityCapabilitiesAttr, StdioSpec, Unstarted, unprepared, windows_args,
+    };
     use crate::error::Error;
     use crate::process::outcome::KILL_EXIT_CODE;
     use crate::process::{ChildHandle, PgidPolicy};
@@ -834,11 +907,12 @@ mod windows {
     pub(super) fn spawn(
         launch: &mut Launch,
         policy: PgidPolicy,
+        caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<(ChildHandle, crate::process::Landing), Unstarted> {
         reject_batch(&launch.program)?;
         let prepared = crate::process::group::prepare_group(policy)
             .map_err(|e| Error::new(format!("cannot prepare the child's Job Object: {e}")))?;
-        match launched(launch, policy, &prepared) {
+        match launched(launch, policy, &prepared, caps) {
             Ok(child) => {
                 let landing = crate::process::group::register_prepared_group(prepared, &child);
                 Ok((child, landing))
@@ -856,6 +930,7 @@ mod windows {
         launch: &mut Launch,
         policy: PgidPolicy,
         prepared: &crate::process::group::PreparedGroup,
+        caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<ChildHandle, Unstarted> {
         let grouped = crate::process::group::prepared_job(prepared);
         let own = (launch.process_cap && grouped.is_none())
@@ -872,7 +947,7 @@ mod windows {
                 crate::process::limits::unbudgeted("cannot cap the child's Job Object").into(),
             );
         }
-        let created = spawn_inner(launch, policy, job.is_some())?;
+        let created = spawn_inner(launch, policy, job.is_some(), caps)?;
         if let Some(job) = job {
             created.enter(job)?;
         }
@@ -940,6 +1015,7 @@ mod windows {
         launch: &mut Launch,
         policy: PgidPolicy,
         suspended: bool,
+        caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<Created, Unstarted> {
         let stdin = ChildStdio::lower(
             std::mem::replace(&mut launch.stdin, StdioSpec::Null),
@@ -976,26 +1052,16 @@ mod windows {
             .map_err(unprepared)?;
         let mut env = environment_block(&launch.env).map_err(unprepared)?;
 
-        let attr_count: u32 = if launch.security_capabilities.is_some() {
-            2
-        } else {
-            1
-        };
-        let mut capabilities =
-            launch
-                .security_capabilities
-                .as_ref()
-                .map_or_else(Vec::new, |caps| {
-                    crate::authority::sandbox::windows::appcontainer::capability_entries(
-                        &caps.filesystem,
-                        caps.network.as_deref(),
-                    )
-                });
-        // The local array and launch's owners outlive CreateProcessW.
-        let security_caps_value: Option<SECURITY_CAPABILITIES> = launch
-            .security_capabilities
-            .as_ref()
-            .map(|caps| SECURITY_CAPABILITIES {
+        let attr_count: u32 = if caps.is_some() { 2 } else { 1 };
+        let mut capabilities = caps.map_or_else(Vec::new, |caps| {
+            crate::authority::sandbox::windows::appcontainer::capability_entries(
+                &caps.filesystem,
+                caps.network.as_deref(),
+            )
+        });
+        // The local array and the caller's owners outlive CreateProcessW.
+        let security_caps_value: Option<SECURITY_CAPABILITIES> =
+            caps.map(|caps| SECURITY_CAPABILITIES {
                 AppContainerSid: caps.app_container_sid.sid(),
                 Capabilities: capabilities.as_mut_ptr(),
                 CapabilityCount: u32::try_from(capabilities.len())

@@ -287,7 +287,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[design/two-enforcers|two-enforcers]]).
 - `report.rs`: a confined launch's report socket: the `Record`s the trampoline
   writes (`Witness`), and the parent's `Testimony`, which reads the first word
-  under the launch's scope and amends a Linux child's ending
+  under the start's scope and amends a Linux child's ending
   ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]],
   [[invariants/a-first-word-is-waited-for-under-the-scope|a-first-word-is-waited-for-under-the-scope]]).
 - `launch.rs` — the owned launch value and its platform interpreters, and the

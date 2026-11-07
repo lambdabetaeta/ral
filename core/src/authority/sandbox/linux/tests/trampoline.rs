@@ -107,12 +107,7 @@ fn run_trampoline(
         Ownership::Kept,
     )
     .expect("the launch builds");
-    let mut launch = bwrapped(
-        cmd,
-        info,
-        report,
-        &crate::process::DurableRoot::default().child(),
-    );
+    let mut launch = bwrapped(cmd, info, report);
     launch.stdin(crate::process::StdioSpec::Null);
     launch.output()
 }

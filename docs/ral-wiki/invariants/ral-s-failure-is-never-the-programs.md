@@ -18,8 +18,11 @@ case is a claim about blame that the run's error then repeats to the user.
   depends on confinement.
 - **On Windows only `CreateProcessW`'s own error is `Program`**; a `.bat` or
   `.cmd`, a NUL in an argument and handle admission are `Refused`.
-- **`Stopped`** is a cancellation while waiting for the trampoline's first word
-  (Unix only); it is the run's stop, not a failure.
+- **`Stopped`** is a cancellation the start sees: before the child is made,
+  before one of Windows' stamps, or while waiting for the trampoline's first
+  word. It is the run's stop, not a failure. Building a launch only describes
+  it, so it is never stopped there
+  ([[design/exec#Modes|exec]]).
 
 **Why.** An error blames a subject: `prog: permission denied` accuses `prog`.
 A launch that fails in ral's own step, a join into a process group that is gone

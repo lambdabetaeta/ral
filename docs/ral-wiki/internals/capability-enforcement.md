@@ -194,9 +194,10 @@ is stamped.
 A `grant` is a *local* dynamic effect scope: its body evaluates in process, and
 `transport::dispatch` runs it locally. Nested grants compose by intersection on
 the `GrantStack`, which is not a process boundary ([[design/grant|grant]]).
-Confinement happens one level down: when `build_launch` spawns an admitted
-external or bundled child on a host under a restrictive projection, it calls
-`sandboxed_command`, which confines that one child
+Confinement happens one level down: when `build_launch` builds the launch of
+an admitted external or bundled child on a host under a restrictive
+projection, it calls `sandboxed_command`, which describes that one child's
+confinement, applied by its spawn
 ([[internals/confined-launch|confined-launch]]).
 
 Two consequences follow:

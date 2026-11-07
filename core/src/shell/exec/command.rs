@@ -381,9 +381,7 @@ pub(crate) struct Prepared {
 }
 
 /// Read `head`'s verdict, vet `args`, and build the launch under
-/// `ownership`.  Confinement can run for minutes on Windows, so the run's
-/// scope is read again on the way out: a wall that expired mid-stamp must
-/// not be discovered only once the child is already running.
+/// `ownership`.
 pub(crate) fn prepare(
     head: Head<Admission>,
     args: &[Value],
@@ -393,22 +391,7 @@ pub(crate) fn prepare(
     let Head { shown, program } = head;
     let admitted = program?;
     let args = validate_argv(&shown, args)?;
-    let prepared = build_launch(shown, admitted, args, ownership, shell).map_err(unbuilt)?;
-    shell.poll()?;
-    Ok(prepared)
-}
-
-/// A launch that could not be built: a refusal as itself, a stop as the run's.
-/// Nothing was spawned, so no program failed to start; the arm is ral's own
-/// step failing.
-fn unbuilt(unstarted: Unstarted) -> Break {
-    match unstarted {
-        Unstarted::Refused(refusal) => refusal.into(),
-        Unstarted::Stopped(stop) => stop.into(),
-        Unstarted::Program(e) => {
-            Error::new(io_message("ral could not build the launch", &e)).into()
-        }
-    }
+    Ok(build_launch(shown, admitted, args, ownership, shell)?)
 }
 
 /// Build `admitted`'s launch with `args` under `ownership`, and apply the
@@ -416,6 +399,12 @@ fn unbuilt(unstarted: Unstarted) -> Break {
 /// dropped here, so the launch holds no judged program nor its directory
 /// handle, only its [`Image`].  Stdio and `pre_exec` hooks are the caller's:
 /// they differ between the standalone and pipeline contexts.
+///
+/// Building only describes: nothing here waits on anything a stop must end,
+/// so the one failure is a refusal.  Two exceptions touch the world: a guest
+/// jail's cgroup, which `JailCgroup::drop` removes if the built launch is
+/// dropped, and the once-per-process bwrap host probe.  What may be stopped
+/// is [`start`]'s.
 ///
 /// `ownership` reaches the Linux bwrap backend, which ties the envelope to
 /// this process's death unless the child is being surrendered, and the guest
@@ -426,7 +415,7 @@ fn build_launch(
     args: Vec<String>,
     ownership: Ownership,
     shell: &Shell,
-) -> Result<Prepared, Unstarted> {
+) -> Result<Prepared, Error> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
     // The in-process guard in `Head::admit` runs either way.
@@ -443,14 +432,17 @@ fn build_launch(
     drop(admitted);
     // A `grant` body evaluates in this process unconfined; spawned children
     // are the only thing an OS sandbox reaches, and this is where it does.
-    let mut launch = match &projection {
+    #[cfg(unix)]
+    let held = projection.as_ref();
+    #[cfg(windows)]
+    let held = projection;
+    let mut launch = match held {
         Some(projection) => crate::authority::sandbox::sandboxed_command(
             projection,
             &image,
             &args,
             ownership,
             shell.context.cwd(),
-            &shell.scope,
         )?,
         None => image.launch(&args)?,
     };
@@ -777,20 +769,23 @@ impl Claim {
     }
 }
 
-/// Start `prepared` in `pgid`, and claim what it bore.
-pub(crate) fn start(prepared: Prepared, pgid: PgidPolicy) -> Settled<Started> {
+/// Start `prepared` in `pgid` under `scope`, and claim what it bore.  The
+/// one place a launch is stopped or fails as a program: its confinement is
+/// applied, and its first word awaited, here.
+pub(crate) fn start(prepared: Prepared, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
     let (confined, enveloped) = (prepared.confined, prepared.launch.enveloped());
     started(prepared, |launch| {
-        let spawned = launch.spawn(pgid)?;
+        let spawned = launch.spawn(pgid, scope)?;
         let claim = Claim::of(confined, enveloped, &spawned);
         Ok(Born { spawned, claim })
     })
 }
 
-/// Start `prepared` detached, a survivor nothing here can name again.
+/// Start `prepared` detached under `scope`, a survivor nothing here can
+/// name again.
 #[cfg(unix)]
-fn start_detached(prepared: Prepared) -> Settled<Started<Survivor>> {
-    started(prepared, Launch::spawn_detached)
+fn start_detached(prepared: Prepared, scope: &Scope) -> Settled<Started<Survivor>> {
+    started(prepared, |launch| launch.spawn_detached(scope))
 }
 
 /// `prepared`, spawned once by `spawn`.
@@ -945,7 +940,7 @@ pub(crate) fn run(
     // `finish_command` builds the `Command{External}` observation from
     // whatever error reaches it, so a start failure needs no emission of
     // its own here.
-    let Started { shown, born, .. } = start(prepared, policy)?;
+    let Started { shown, born, .. } = start(prepared, policy, &shell.scope)?;
     // Its `Drop` restores ral's pgid on every path out of here, sparing the
     // next REPL tty read an EIO from a background pgroup.
     let loan = lending.and_then(|loan| loan.lend(born.spawned.child.id().cast_signed()));
@@ -1027,8 +1022,9 @@ pub(crate) fn detach(
         // The grant's verdict on the program, then existence (127/126) and argv
         // shape: the same judgments an ordinary external passes, so a bundled
         // uutils tool falls out as its own image with no special case here.  The
-        // survivor outlives this run, but confining it happens here, under this
-        // run's scope: a cancel during the stamp abandons the birth.
+        // survivor outlives this run, but its start is under this run's scope:
+        // a stop before the fork makes no survivor; one while its trampoline
+        // is silent leaves it.
         let head = head.admit(mooring, shell)?;
         let mut prepared = prepare(head, argv, Ownership::Surrendered, shell)?;
         prepared
@@ -1036,7 +1032,7 @@ pub(crate) fn detach(
             .stdin(StdioSpec::Null)
             .stdout(StdioSpec::Null)
             .stderr(StdioSpec::Null);
-        start_detached(prepared)
+        start_detached(prepared, &shell.scope)
     })();
     let (shown, args, result) = match launched {
         Ok(Started {
@@ -1078,4 +1074,5 @@ pub(crate) fn detach(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

@@ -27,7 +27,8 @@ covers.
 **`path::pinned_dirs` (`core/src/path/render.rs`) names every proper ancestor
 of a deny that lies within a write prefix**, the write prefix's root
 included. `SandboxProjection::rendered` derives the set for every Unix
-launch, and both Unix backends read it.
+launch, and both Unix backends read it. A folded projection's pin slot is
+`()` (`FsLists`'s `P`), so no pin reaches a backend but a derived one.
 
 - **It covers every spelling.** The set is the ancestor closure of every
   *rendered* deny name within a rendered write name: the deny's surface

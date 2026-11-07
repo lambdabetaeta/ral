@@ -56,7 +56,7 @@ fn rules(read: &[&str], write: &[&str], deny: &[&str]) -> FsLists {
                 )
             })
             .collect(),
-        pinned_dirs: Vec::new(),
+        ..FsLists::default()
     }
 }
 
@@ -138,10 +138,40 @@ fn an_exclusion_apart_from_every_whole_grant_is_kept() {
     }
 }
 
+/// A confined launch is stamped by its spawn: under a stop, the spawn is
+/// the run's stop and makes no child.
+#[test]
+fn a_confined_launch_started_under_a_stop_makes_no_child() {
+    use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
+    use crate::process::launch::Confined;
+    use crate::process::{CancelCause, DurableRoot, Launch, PgidPolicy};
+    let _env = crate::host::env::test_support::env_guard();
+    let root = tempfile::tempdir().unwrap();
+    let projection = SandboxProjection {
+        fs: FsProjection::Restricted(rules(&[root.path().to_str().unwrap()], &[], &[])),
+        net: Some(crate::authority::policy::Net::Offline),
+        gpu: None,
+        exec: ExecProjection::default(),
+    };
+    let _session = SessionGuard;
+    let stopped = DurableRoot::default().child();
+    stopped.cancel(CancelCause::Cancelled);
+    let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
+    launch.confine(Confined {
+        projection,
+        image: None,
+    });
+    let spawned = launch.spawn(PgidPolicy::Inherit, &stopped);
+    assert!(
+        matches!(spawned, Err(Unstarted::Stopped(_))),
+        "{:?}",
+        spawned.err()
+    );
+}
+
 #[test]
 fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
-    use crate::process::Launch;
     use crate::process::cancel::DurableRoot;
     let _env = crate::host::env::test_support::env_guard();
     let root = tempfile::tempdir().unwrap();
@@ -155,15 +185,7 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
         exec: ExecProjection::default(),
     };
     let _session = SessionGuard;
-    let confine = || {
-        let mut launch = Launch::new(r"C:\Windows\System32\cmd.exe");
-        super::confine(
-            &mut launch,
-            &projection,
-            None,
-            &DurableRoot::default().child(),
-        )
-    };
+    let confine = || super::confine(&projection, None, &DurableRoot::default().child()).map(drop);
     confine().expect("a real directory is granted");
     std::fs::remove_dir(&granted).unwrap();
     let junction = std::process::Command::new("cmd")
@@ -239,7 +261,6 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 fn confined_child_writes_inside_the_grant_and_not_outside() {
     let _env = crate::host::env::test_support::env_guard();
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
-    use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
     use std::path::Path;
 
@@ -291,15 +312,15 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         launch.stdin(StdioSpec::Null);
         launch.stdout(StdioSpec::Null);
         launch.stderr(StdioSpec::Null);
-        super::confine(
-            &mut launch,
-            &projection,
-            Some(&image),
-            &DurableRoot::default().child(),
-        )
-        .expect("confine under a derived capability SID");
+        launch.confine(crate::process::launch::Confined {
+            projection: projection.clone(),
+            image: Some(image.clone()),
+        });
         let mut child = launch
-            .spawn(PgidPolicy::Inherit)
+            .spawn(
+                PgidPolicy::Inherit,
+                &crate::process::DurableRoot::default().child(),
+            )
             .expect("CreateProcessW must accept the derived capability SIDs")
             .child;
         let status = child.reap().expect("wait for the confined child");
@@ -433,7 +454,8 @@ fn cmd() -> &'static Path {
     Path::new(r"C:\Windows\System32\cmd.exe")
 }
 
-/// `confine` a `cmd.exe` launch under `projection`, from `cwd`.
+/// A `cmd.exe` launch from `cwd`, confined under `projection` by its spawn,
+/// and refused here as that spawn would refuse it.
 fn confined(
     projection: &crate::authority::sandbox::SandboxProjection,
     cwd: &Path,
@@ -447,12 +469,12 @@ fn confined(
     launch.stdin(StdioSpec::Null);
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
-    super::confine(
-        &mut launch,
-        projection,
-        Some(&walked(cmd())),
-        &DurableRoot::default().child(),
-    )?;
+    let image = walked(cmd());
+    super::confine(projection, Some(&image), &DurableRoot::default().child())?;
+    launch.confine(crate::process::launch::Confined {
+        projection: projection.clone(),
+        image: Some(image),
+    });
     Ok(launch)
 }
 
@@ -473,7 +495,13 @@ fn assert_reads(
 fn assert_launch_reads(mut launch: crate::process::Launch, relative: &str, readable: bool) {
     use crate::process::PgidPolicy;
     use std::io::Read;
-    let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
+    let mut child = launch
+        .spawn(
+            PgidPolicy::Inherit,
+            &crate::process::DurableRoot::default().child(),
+        )
+        .unwrap()
+        .child;
     let mut stdout = Vec::new();
     child
         .take_stdout()
@@ -670,7 +698,6 @@ fn image_read_child() {
 /// launch under the same projection does not read it.
 #[test]
 fn an_image_is_granted_to_its_own_launch_alone() {
-    use crate::process::cancel::DurableRoot;
     use crate::process::{Launch, PgidPolicy, StdioSpec};
     use std::io::Read;
 
@@ -698,14 +725,17 @@ fn an_image_is_granted_to_its_own_launch_alone() {
             launch.stdin(StdioSpec::Null);
             launch.stdout(StdioSpec::Null);
             launch.stderr(StdioSpec::Piped);
-            super::confine(
-                &mut launch,
-                &only_a,
-                Some(image),
-                &DurableRoot::default().child(),
-            )
-            .unwrap();
-            let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
+            launch.confine(crate::process::launch::Confined {
+                projection: only_a.clone(),
+                image: Some(image.clone()),
+            });
+            let mut child = launch
+                .spawn(
+                    PgidPolicy::Inherit,
+                    &crate::process::DurableRoot::default().child(),
+                )
+                .unwrap()
+                .child;
             let mut stderr = String::new();
             child
                 .take_stderr()
@@ -742,7 +772,13 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
             exec: ExecProjection::default(),
         };
         let mut launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
-        let mut child = launch.spawn(PgidPolicy::Inherit).unwrap().child;
+        let mut child = launch
+            .spawn(
+                PgidPolicy::Inherit,
+                &crate::process::DurableRoot::default().child(),
+            )
+            .unwrap()
+            .child;
         let ended = child.reap().unwrap();
         assert!(
             w.join("made.txt").exists(),

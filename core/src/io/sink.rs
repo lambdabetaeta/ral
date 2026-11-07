@@ -730,7 +730,10 @@ mod tests {
         let mut child = crate::process::Launch::new("/bin/echo")
             .arg("hi")
             .stdout(stdio)
-            .spawn(crate::process::PgidPolicy::Inherit)
+            .spawn(
+                crate::process::PgidPolicy::Inherit,
+                &DurableRoot::default().child(),
+            )
             .expect("spawn")
             .child;
 
@@ -758,7 +761,10 @@ mod tests {
         let mut child = crate::process::Launch::new("/bin/echo")
             .arg("hi")
             .stdout(stdio)
-            .spawn(crate::process::PgidPolicy::Inherit)
+            .spawn(
+                crate::process::PgidPolicy::Inherit,
+                &DurableRoot::default().child(),
+            )
             .expect("spawn")
             .child;
         child.reap().expect("reap");

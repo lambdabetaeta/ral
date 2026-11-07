@@ -1,10 +1,10 @@
 # A first word is waited for under the scope
 
 **The parent's wait for the trampoline's first word is a cancellable wait: it
-reads the launch's own scope between slices of `POLL_SLICE`, and a stop ends
+reads the start's scope between slices of `POLL_SLICE`, and a stop ends
 it.** `Testimony::first` (`core/src/process/report.rs`) is that wait. The scope
-is the one the launch's `Confined` holds, set when it was confined
-(`Launch::confine`).
+is the one the start hands the spawn (`Launch::spawn`, `spawn_detached`), the
+run's own; a launch is built under none.
 
 - **On a stop, the child is discarded and the result is `Stopped`.** The child
   is killed and reaped (`discarded`, `core/src/process/launch.rs`); the launch
@@ -19,8 +19,10 @@ is the one the launch's `Confined` holds, set when it was confined
   deadline could end it.
 
 **Why.** Every wait in ral is one a cause can end
-([[internals/cancellation|cancellation]]). The first word is the only wait in
-the start, and an uncancellable one would be the one place a stopped program
-hangs the shell.
+([[internals/cancellation|cancellation]]). On Unix the first word is the only
+wait in the start, and an uncancellable one would be the one place a stopped
+program hangs the shell. Windows' start has no first word; its waits are the
+stamps, which poll the same scope
+([[internals/confined-launch|confined-launch]]).
 
 See [[internals/an-external-end-to-end|an-external-end-to-end]].

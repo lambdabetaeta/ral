@@ -100,7 +100,13 @@ mod tests {
         cmd.args(["-c", "ulimit -Su; ulimit -Hu"]);
         cmd.stdout(StdioSpec::Piped);
         cmd.limit_resources().unwrap();
-        let mut child = cmd.spawn(PgidPolicy::Inherit).unwrap().child;
+        let mut child = cmd
+            .spawn(
+                PgidPolicy::Inherit,
+                &crate::process::DurableRoot::default().child(),
+            )
+            .unwrap()
+            .child;
         let mut out = String::new();
         child
             .take_stdout()

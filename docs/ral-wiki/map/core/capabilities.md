@@ -795,8 +795,9 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   bwrap's argv. A malformed or unreadable `InfoFd` record makes
   `Launch::spawn` kill and reap the envelope before returning its error;
   an empty record means bwrap died before reporting its payload. Windows builds the
-  target's `Launch` directly and `windows::session::confine` attaches its
-  projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
+  target's `Launch` directly with a `Confined` describing its token, and
+  every `Launch::spawn` runs `windows::session::confine`, which stamps and returns its
+  projection's AppContainer LowBox `SECURITY_CAPABILITIES` for `CreateProcessW`, so the parent's own
   spawn is the confinement point — never a re-exec child. The process module's
   `spawn_lock::lock_inheritance` serializes raw `Launch` creation and temporary
   inherit-flag restoration with helper-backed `Command::spawn`, releasing before

@@ -41,8 +41,9 @@ use crate::authority::sandbox::carve;
 use crate::authority::sandbox::{FsLists, SandboxProjection, unavailable};
 use crate::error::{Error, io_message};
 use crate::path::{Installing, Located, RealPath, Walked, shown};
+use crate::process::Unstarted;
 use crate::process::cancel::Scope;
-use crate::process::{Launch, Unstarted};
+use crate::process::launch::SecurityCapabilitiesAttr;
 use crate::sync::LockExt as _;
 
 use super::appcontainer::{
@@ -135,12 +136,13 @@ fn profile_name(index: u32) -> String {
     format!("ral.sandbox.s{}.p{index}", std::process::id())
 }
 
-/// Confine `launch` under its projection's `AppContainer`: resolve the
-/// projection to this session's profile for it, make sure each of this
+/// Confine a launch under its projection's `AppContainer`: resolve the
+/// projection to this session's profile for it, make sure each of the
 /// launch's grants carries the persistent ACE for its `(path, kind)`
-/// capability, and attach the `SECURITY_CAPABILITIES` — profile SID plus
-/// exactly those capabilities — that the spawn boundary threads into
-/// `CreateProcessW`.
+/// capability, and return the `SECURITY_CAPABILITIES` — profile SID plus
+/// exactly those capabilities — that the spawn threads into
+/// `CreateProcessW`.  Run by every `Launch::spawn`, never by the launch's
+/// build: a stop on `cancel` before a stamp is the spawn's `Stopped`.
 ///
 /// The stamps are idempotent and shared: a prefix some earlier session already
 /// stamped costs a witness check, not another tree walk, and nothing here ever
@@ -175,11 +177,10 @@ fn profile_name(index: u32) -> String {
     reason = "the session lock is deliberately held for the whole of `confine`: see the comment at the guard"
 )]
 pub(crate) fn confine(
-    launch: &mut Launch,
     projection: &SandboxProjection,
     program_image: Option<&RealPath>,
     cancel: &Scope,
-) -> Result<(), Unstarted> {
+) -> Result<SecurityCapabilitiesAttr, Unstarted> {
     // Traced in three parts, each a different kind of cost: minting the
     // profile, ensuring the grants, and proving the exclusions.
     #[cfg(debug_assertions)]
@@ -343,9 +344,12 @@ pub(crate) fn confine(
         lists.deny.len(),
         t_deny.elapsed(),
     );
-    launch.security_capabilities(profile_sid, filesystem, network);
     crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
-    Ok(())
+    Ok(SecurityCapabilitiesAttr::new(
+        profile_sid,
+        filesystem,
+        network,
+    ))
 }
 
 /// Ensure `pin`'s grant of `kind`, once per session, and name its capability.

@@ -853,13 +853,7 @@ mod tests {
             let mut handoff = Handoff::default();
             let (slots, report) = super::super::launch::issue(warrant, &mut handoff)?;
             let own = super::super::reexec::own().unwrap();
-            let mut launch = super::super::launch::trampoline(
-                own,
-                handoff,
-                slots,
-                report,
-                &crate::process::DurableRoot::default().child(),
-            );
+            let mut launch = super::super::launch::trampoline(own, handoff, slots, report);
             launch.stdin(crate::process::StdioSpec::Null);
             Ok::<_, crate::error::Error>(launch)
         };

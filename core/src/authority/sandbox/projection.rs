@@ -32,9 +32,10 @@ use std::collections::BTreeSet;
 /// Allowances and exclusions stay as the guard judges them, up to rendering:
 /// an exclusion with the objects its walk held.  `A` names an allowance and
 /// `X` an exclusion: [`FsAllow`] and [`FsDeny`] as folded, `Object` and
-/// `Rendered` as rendered.
+/// `Rendered` as rendered.  `P` holds the pins: `()` until rendered, so a
+/// folded projection cannot carry any.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsLists<A = FsAllow, X = FsDeny> {
+pub struct FsLists<A = FsAllow, X = FsDeny, P = ()> {
     /// The live read region: authored reads and writes, the run places, the
     /// live support and the [`Baseline`].
     pub(crate) read: Vec<A>,
@@ -48,8 +49,8 @@ pub struct FsLists<A = FsAllow, X = FsDeny> {
     /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
     /// prefix root is the ancestor) and the denied bytes resurface at a name
     /// no deny rule covers.  Derived after rendering, so both a deny's surface
-    /// chain and its resolved chain are pinned.  Empty until then.
-    pub(crate) pinned_dirs: Vec<X>,
+    /// chain and its resolved chain are pinned.
+    pub(crate) pinned_dirs: P,
     /// The positions among `read` the [`Baseline`] supplies, which a host may
     /// keep from this user: Linux, opening what it shows, drops one it cannot.
     #[cfg(target_os = "linux")]
@@ -59,13 +60,13 @@ pub struct FsLists<A = FsAllow, X = FsDeny> {
 /// Empty under any naming: rules over no paths, the shape a backend falls back
 /// to at the unrestricted top.  Hand-written because the derive would demand
 /// `A: Default`.
-impl<A, X> Default for FsLists<A, X> {
+impl<A, X, P: Default> Default for FsLists<A, X, P> {
     fn default() -> Self {
         Self {
             read: Vec::new(),
             write: Vec::new(),
             deny: Vec::new(),
-            pinned_dirs: Vec::new(),
+            pinned_dirs: P::default(),
             #[cfg(target_os = "linux")]
             tolerated: BTreeSet::new(),
         }
@@ -90,15 +91,15 @@ impl FsLists {
 /// the other extreme: fs was attenuated to nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(any(test, feature = "test-util"), derive(Default))]
-pub enum FsProjection<A = FsAllow, X = FsDeny> {
+pub enum FsProjection<A = FsAllow, X = FsDeny, P = ()> {
     #[cfg_attr(any(test, feature = "test-util"), default)]
     Unrestricted,
-    Restricted(FsLists<A, X>),
+    Restricted(FsLists<A, X, P>),
 }
 
-impl<A, X> FsProjection<A, X> {
+impl<A, X, P> FsProjection<A, X, P> {
     /// The lists when restricted, `None` at the unrestricted top.
-    pub(crate) fn lists(&self) -> Option<&FsLists<A, X>> {
+    pub(crate) fn lists(&self) -> Option<&FsLists<A, X, P>> {
         match self {
             Self::Unrestricted => None,
             Self::Restricted(r) => Some(r),
@@ -132,8 +133,8 @@ pub(crate) enum ExecProjection {
 /// in the launching process. Unlike a [`GrantLayer`](crate::authority::policy::GrantLayer),
 /// no further composition can widen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxProjection<A = FsAllow, X = FsDeny> {
-    pub fs: FsProjection<A, X>,
+pub struct SandboxProjection<A = FsAllow, X = FsDeny, P = ()> {
+    pub fs: FsProjection<A, X, P>,
     /// The stack's network veto; `None` is online.
     pub net: Option<Net>,
     /// The stack's GPU veto, where this host can withhold the GPU; `None`
@@ -142,16 +143,17 @@ pub struct SandboxProjection<A = FsAllow, X = FsDeny> {
     pub(crate) exec: ExecProjection,
 }
 
-/// A projection with every fs name rendered: what a Unix backend emits.
+/// A projection with every fs name rendered and its pins derived: what a
+/// Unix backend emits.
+#[cfg(unix)]
+pub(crate) type RenderedProjection = SandboxProjection<Object, Rendered, Vec<Rendered>>;
 #[cfg(target_os = "linux")]
-pub(crate) type RenderedProjection = SandboxProjection<Object, Rendered>;
-#[cfg(target_os = "linux")]
-pub(crate) type RenderedFs = FsProjection<Object, Rendered>;
+pub(crate) type RenderedFs = FsProjection<Object, Rendered, Vec<Rendered>>;
 #[cfg(target_os = "macos")]
-pub(crate) type RenderedLists = FsLists<Object, Rendered>;
+pub(crate) type RenderedLists = FsLists<Object, Rendered, Vec<Rendered>>;
 
 #[cfg(any(test, feature = "test-util"))]
-impl<A, X> Default for SandboxProjection<A, X> {
+impl<A, X, P> Default for SandboxProjection<A, X, P> {
     fn default() -> Self {
         Self {
             fs: FsProjection::default(),
@@ -186,7 +188,7 @@ impl SandboxProjection {
     /// A name whose expansion cannot be spelled faithfully, as
     /// [`render_excluded`] refuses it.
     #[cfg(unix)]
-    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Object, Rendered>, String> {
+    pub(crate) fn rendered(&self) -> Result<RenderedProjection, String> {
         let Self { fs, net, gpu, exec } = self;
         let fs = match fs {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
@@ -194,8 +196,7 @@ impl SandboxProjection {
                 read,
                 write,
                 deny,
-                // Derived below, so nothing a caller supplied is authority.
-                pinned_dirs: _,
+                pinned_dirs: (),
                 #[cfg(target_os = "linux")]
                 tolerated,
             }) => {
@@ -292,7 +293,7 @@ impl SandboxProjection {
                     // the two folds can only drop a write allow, which fails
                     // closed.
                     deny: read.denies().cloned().collect(),
-                    pinned_dirs: Vec::new(),
+                    pinned_dirs: (),
                     #[cfg(target_os = "linux")]
                     tolerated: (read.live().filter_map(FsAllow::real))
                         .filter(|&position| baseline.allows().any(|b| b.real() == Some(position)))
@@ -381,12 +382,11 @@ mod rendered_tests {
         )
     }
 
-    fn projection(write: &[&str], deny: &[&str], pinned: &[&str]) -> SandboxProjection {
+    fn projection(write: &[&str], deny: &[&str]) -> SandboxProjection {
         SandboxProjection {
             fs: FsProjection::Restricted(FsLists {
                 write: write.iter().copied().map(prefix).collect(),
                 deny: deny.iter().copied().map(excluding).collect(),
-                pinned_dirs: pinned.iter().copied().map(excluding).collect(),
                 ..FsLists::default()
             }),
             ..SandboxProjection::default()
@@ -395,8 +395,8 @@ mod rendered_tests {
 
     /// The pins the traversal derives, through the real renderer.
     /// Containment, not equality: the renderer may add spellings.
-    fn pinned(write: &[&str], deny: &[&str], carried: &[&str]) -> Vec<String> {
-        let out = projection(write, deny, carried)
+    fn pinned(write: &[&str], deny: &[&str]) -> Vec<String> {
+        let out = projection(write, deny)
             .rendered()
             .expect("ASCII paths render");
         let lists = out.fs.lists().expect("restricted in, restricted out");
@@ -411,7 +411,7 @@ mod rendered_tests {
     /// deny, so it is pinned alongside the two intermediate directories.
     #[test]
     fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
-        let dirs = pinned(&["/repo"], &["/repo/a/b/secret"], &[]);
+        let dirs = pinned(&["/repo"], &["/repo/a/b/secret"]);
         for expect in ["/repo", "/repo/a", "/repo/a/b"] {
             assert!(dirs.iter().any(|d| d == expect), "got {dirs:?}");
         }
@@ -419,29 +419,12 @@ mod rendered_tests {
 
     #[test]
     fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
-        assert_eq!(
-            pinned(&[], &["/repo/.ssh/id_rsa"], &[]),
-            Vec::<String>::new()
-        );
+        assert_eq!(pinned(&[], &["/repo/.ssh/id_rsa"]), Vec::<String>::new());
     }
 
     #[test]
     fn pins_nothing_for_a_deny_outside_every_prefix() {
-        assert_eq!(
-            pinned(&["/repo"], &["/etc/secret"], &[]),
-            Vec::<String>::new()
-        );
-    }
-
-    /// A supplied pin is not authority: the traversal recomputes the set.
-    #[test]
-    fn a_carried_pin_is_replaced_by_the_derived_one() {
-        let dirs = pinned(&["/repo"], &["/repo/a/secret"], &["/somewhere/else"]);
-        assert!(dirs.iter().any(|d| d == "/repo/a"), "got {dirs:?}");
-        assert!(
-            !dirs.iter().any(|d| d.contains("somewhere")),
-            "got {dirs:?}"
-        );
+        assert_eq!(pinned(&["/repo"], &["/etc/secret"]), Vec::<String>::new());
     }
 
     /// An allowance renders as its frozen real path, and a prefix granted

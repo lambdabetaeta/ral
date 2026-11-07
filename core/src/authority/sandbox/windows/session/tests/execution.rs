@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn capture(launch: &mut Launch) -> std::io::Result<Output> {
-    let mut child = match launch.spawn(PgidPolicy::Inherit) {
+    let mut child = match launch.spawn(
+        PgidPolicy::Inherit,
+        &crate::process::DurableRoot::default().child(),
+    ) {
         Ok(spawned) => spawned.child,
         Err(Unstarted::Program(e)) => return Err(e),
         Err(Unstarted::Refused(why)) => panic!("the probe was refused: {why}"),
