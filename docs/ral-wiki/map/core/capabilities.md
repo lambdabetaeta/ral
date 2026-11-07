@@ -179,8 +179,10 @@ spawn adapter live in `shell::grant`.
   `Target`, `Place`) encodes to a `GrantValue`, the only way a host spells one,
   and `GrantValue::deny_all` is the value that withholds all positive authority;
 - `builder.rs` — the test builder over `Axes` (`Capabilities`, above);
-- `host.rs` — platform system-read discovery and resolution; `authority.rs`
-  attaches the sandbox's boot pins to form the runtime `Baseline`;
+- `host.rs` — `Baseline::of_env`/`of_home`: the system reads
+  `toolchains::system_reads_in` keeps, as prefixes, refusing with a
+  `PolicyError` (hint kept); `authority.rs` attaches the sandbox's boot pins to
+  form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
   `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor:
   `FreezeCtx::at` (an owned `host::EnvVars` and `CwdPath`: the `Resolver` pair,
@@ -195,10 +197,11 @@ spawn adapter live in `shell::grant`.
   `HeadKind::Posix` is `EligibleOn::Posix`, a non-verbatim `//srv/sh` share is
   `EligibleOn::Both`, and a `HeadKind::Drive` or other `HeadKind::Unc`, a
   verbatim root included, is `EligibleOn::Windows`, dead under POSIX) and
-  `selector`; `host_absolute`, a path the host holds classified on its
-  native text and frozen as an `absolute` grant, refused with
-  `GrantRefusal::ForeignOrRelative` where a payload would be dead, so exarch's
-  deny layer fails closed; the tags `absolute`,
+  `selector`; `host_absolute`, the one classifier of a path the host holds
+  or chooses (exarch's carve-outs, `PATH` entries, toolchain and system-read
+  directories), classified on its native text and frozen as an `absolute`
+  grant, refused with `GrantRefusal::ForeignOrRelative` where a payload would
+  be dead, so exarch's deny layer fails closed; the tags `absolute`,
   `cwd`, `home`, `tempdir`, `scratch`, `gitdir` and `xdg-*`, `PolicyError`, the `gitdir`
   refusals (`From<BadPointer>`), `Selector` (`Path | Toolchain(Toolchain)`) and
   the `path` selector (`path_dirs`, over the pure `path_dirs_in`, which
@@ -208,19 +211,24 @@ spawn adapter live in `shell::grant`.
   `the_world`, the one predicate for a root, the home or an ancestor of it,
   which system-read discovery uses too;
   `FrozenPath::freeze` refuses a path that is not Unicode;
-- `toolchains.rs` — every other directory selector as one table: `enum
+- `toolchains.rs` — the directories the host chooses, as one table: `enum
   Toolchain` (`system` and the package managers), each a few `Location`s of
-  overrides and defaults, from one exhaustive `match`; `chosen` selects over an
-  injected host environment and home, and `walked` drops absent/non-directories.
-  `expand_in` checks every kept directory's followed trace against the world,
-  naming either its override or its default spelling and resolved position in a
-  refusal, before `W::grant` retains the allowance position or exclusion objects.
+  overrides and defaults, from one exhaustive `match`, and `LISTED`, each
+  platform's system reads no selector names, `Location`s too (Windows' are
+  `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%` as overrides).
+  `chosen` selects over an injected host environment and home; `walked`, the
+  one walker of chosen directories, holds each by `host_absolute` (a malformed
+  one refused, naming the variable or default and what would hold it), walks
+  it by `GrantPath::walked` and drops the absent. `expand_in` keeps the
+  directories and checks each followed trace against the world, naming either
+  its override or its default spelling and resolved position in a refusal,
+  before `W::grant` retains the allowance position or exclusion objects.
   `FreezeCtx::selector` calls it with the host environment; the public `expand`
-  wrapper returns the surviving spellings as native `PathBuf`s. Also
-  `SYSTEM_READS`, the four system-wide prefixes (`homebrew`, `macports`, `nix`,
-  `pkgsrc`) used by grant's host system-read discovery, keeping only what is
-  neither in the process's home nor `the_world` ([[design/grant|grant]]
-  §Selectors states the rules).
+  wrapper returns the surviving spellings as native `PathBuf`s.
+  `system_reads_in` walks `LISTED` and the rows of `SYSTEM_READS` (`homebrew`,
+  `macports`, `nix`, `pkgsrc`), keeping what exists, a file included, outside
+  the process's home and `the_world` (`keeps_system_read`)
+  ([[design/grant|grant]] §Selectors states the rules).
 
 ## Runtime decoding — `core/src/shell/grant/`
 

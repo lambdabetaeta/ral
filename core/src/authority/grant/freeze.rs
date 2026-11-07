@@ -656,7 +656,9 @@ pub(crate) fn live_absolute(raw: &str, rules: PathRules) -> Result<bool, PolicyE
     Ok(live)
 }
 
-/// A path the host holds, frozen as an `absolute` grant naming it would be.
+/// A path the host holds, frozen as an `absolute` grant naming it would be:
+/// the one classifier of a path the host chose (a `PATH` entry, a toolchain
+/// or system-read directory) or holds (exarch's carve-outs).
 ///
 /// Classified by [`live_absolute`] under the host's rules on its native
 /// text, and frozen in its native form, never re-read through a payload

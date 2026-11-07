@@ -7,6 +7,7 @@ use super::hooks::HookTable;
 use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
+use crate::authority::grant::freeze::PolicyError;
 use crate::authority::policy::{Baseline, GrantStack};
 use crate::host::EnvVars;
 use crate::io::terminal::TerminalState;
@@ -43,9 +44,9 @@ impl Runtime {
     /// No builtins, no prelude, no docs, over the baseline of this host.
     ///
     /// # Errors
-    /// A baseline path whose walk fails, named: a host that cannot resolve its
-    /// own baseline cannot run anything.
-    pub fn bare(terminal: TerminalState) -> Result<Self, String> {
+    /// A system read that is malformed or whose walk fails, named: a host
+    /// that cannot resolve its own baseline cannot run anything.
+    pub fn bare(terminal: TerminalState) -> Result<Self, PolicyError> {
         Ok(Self::bare_on(Baseline::of_host()?, terminal))
     }
 

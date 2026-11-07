@@ -12,8 +12,9 @@ impl policy::Baseline {
     /// Must run after `sandbox::boot()` or `sandbox::pin()` has pinned the images.
     ///
     /// # Errors
-    /// A host path whose system reads cannot be resolved.
-    pub(crate) fn of_host() -> Result<Self, String> {
+    /// As [`of_home`](Self::of_home): a host whose system reads are malformed
+    /// or cannot be walked.
+    pub(crate) fn of_host() -> Result<Self, grant::freeze::PolicyError> {
         use crate::site::{Silent, site};
 
         let home = site!(Silent::SystemReadsHome, crate::host::home());

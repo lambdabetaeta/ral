@@ -580,8 +580,6 @@ impl GrantStack {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::grant::freeze::Home;
-    use crate::authority::grant::host::{resolve_reads, windows_listed};
     use crate::authority::policy::{Capabilities, ExecDenial, ExecGrant, ExecKey, Program};
     use crate::authority::policy::{Evidence, FsPolicy};
     use crate::path::FrozenPath;
@@ -790,99 +788,42 @@ mod tests {
         }
     }
 
-    /// A baseline entry that resolves through a non-Unicode name is dropped, not
-    /// held as a sibling its lossy form names.  APFS refuses such a name.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// A system read the environment chose malformed refuses the baseline,
+    /// and so the boot, naming the variable, its value and why, with what to
+    /// change.
     #[test]
-    fn a_non_unicode_system_reads_entry_is_dropped() {
-        use std::os::unix::ffi::OsStrExt;
-        let dir = tempfile::tempdir().unwrap();
-        let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"f\xff"));
-        std::fs::create_dir(&odd).unwrap();
-        let fine = dir.path().join("fine");
-        std::fs::create_dir(&fine).unwrap();
-        let baseline = resolve_reads([odd, fine.clone()], None)
-            .unwrap()
-            .into_iter()
-            .collect::<Baseline>();
-        assert_eq!(
-            baseline.allows().collect::<Vec<_>>(),
-            [&FsAllow::Prefix(
-                GrantPath::<Trace>::walk(spelled(&fine)).unwrap()
-            )]
-        );
+    fn a_malformed_system_read_refuses_construction_naming_it() {
+        let value = if cfg!(windows) {
+            r"\\\x\bin"
+        } else {
+            "///x/bin"
+        };
+        let pairs = [("HOMEBREW_PREFIX", value)];
+        let Err(why) = Baseline::of_env(vars(&pairs), None) else {
+            panic!("a malformed system read cannot be held");
+        };
+        let text = why.to_string();
+        for part in [
+            format!(
+                "HOMEBREW_PREFIX is {}, which ral's read floor",
+                crate::path::shown(value)
+            ),
+            "no well-formed UNC".to_owned(),
+            "\nhint: Set HOMEBREW_PREFIX to a well-formed absolute path, or unset it.".to_owned(),
+        ] {
+            assert!(text.contains(&part), "{part}: {text}");
+        }
     }
 
-    /// `baseline` holds exactly the prefixes at `dirs`, each an existing
-    /// directory, in order.
-    fn assert_holds(baseline: &Baseline, dirs: &[&Path]) {
-        let want: Vec<_> = (dirs.iter())
+    /// A baseline of the prefixes at `dirs`, each an existing directory.
+    fn baseline_of(dirs: &[&Path]) -> Baseline {
+        (dirs.iter())
             .map(|d| FsAllow::Prefix(GrantPath::<Trace>::walk(spelled(d)).unwrap()))
-            .collect();
-        assert_eq!(baseline.allows().cloned().collect::<Vec<_>>(), want);
+            .collect()
     }
 
-    /// The root of this host's filesystem, as a baseline spelling.
-    fn host_root() -> PathBuf {
-        PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" })
-    }
-
-    /// A listed directory that is a filesystem root is no baseline and no error,
-    /// as a toolchain row's is not: the root would hold the whole filesystem.
-    #[test]
-    fn a_listed_root_is_dropped_and_an_ordinary_directory_kept() {
-        let (_tmp, root) = tmp();
-        let ordinary = made(&root, "ordinary");
-        let baseline = resolve_reads([host_root(), ordinary.clone()], None)
-            .unwrap()
-            .into_iter()
-            .collect::<Baseline>();
-        assert_holds(&baseline, &[&ordinary]);
-    }
-
-    /// The home, what lies inside it and what it lies inside are the user's
-    /// to grant or the world: a listed directory so placed is dropped, and
-    /// one beside the home is kept.
-    #[test]
-    fn a_listed_directory_in_the_home_or_around_it_is_dropped() {
-        let (_tmp, root) = tmp();
-        let home = made(&root, "h");
-        let (inside, beside) = (made(&home, "inside"), made(&root, "beside"));
-        let held = Home::of(utf8(&home).unwrap()).unwrap().real;
-        assert!(held.is_some(), "an absolute home lies somewhere");
-        let listed = [root, home, inside, beside.clone()];
-        let baseline = resolve_reads(listed, held.as_ref())
-            .unwrap()
-            .into_iter()
-            .collect::<Baseline>();
-        assert_holds(&baseline, &[&beside]);
-    }
-
-    /// An environment that names a root as one of Windows' system directories
-    /// puts no root on the baseline; the variable that is unset lists nothing.
-    #[test]
-    fn a_windows_system_variable_naming_a_root_is_dropped() {
-        let (_tmp, root) = tmp();
-        let programs = made(&root, "programs");
-        let (drive, programs_at) = (
-            utf8(&host_root()).unwrap().to_owned(),
-            utf8(&programs).unwrap(),
-        );
-        let pairs = [
-            ("SystemRoot", drive.as_str()),
-            ("ProgramFiles", programs_at),
-        ];
-        let listed = windows_listed(vars(&pairs));
-        assert_eq!(listed, [drive.as_str(), programs_at, ""]);
-        let baseline = resolve_reads(listed.map(PathBuf::from), None)
-            .unwrap()
-            .into_iter()
-            .collect::<Baseline>();
-        assert_holds(&baseline, &[&programs]);
-    }
-
-    /// The same on Windows, through the baseline of a whole environment: no
-    /// drive root named by a system variable stays, whatever the rows add.
+    /// On Windows, through the baseline of a whole environment: no drive root
+    /// named by a system variable stays, whatever the rows add.
     #[cfg(windows)]
     #[test]
     fn a_drive_root_in_a_windows_system_variable_is_no_system_reads() {
@@ -1053,10 +994,7 @@ mod tests {
             made(&root, "system"),
             made(&root, "other"),
         );
-        let baseline: Baseline = resolve_reads([system.clone()], None)
-            .unwrap()
-            .into_iter()
-            .collect();
+        let baseline = baseline_of(&[&system]);
         let reads = stack([fs_layer(FsPolicy {
             read_prefixes: vec![spelled(&work)],
             ..FsPolicy::default()
@@ -1079,10 +1017,7 @@ mod tests {
         let (_tmp, root) = tmp();
         let system = made(&root, "system");
         std::fs::write(system.join("prog"), "").unwrap();
-        let baseline: Baseline = resolve_reads([system.clone()], None)
-            .unwrap()
-            .into_iter()
-            .collect();
+        let baseline = baseline_of(&[&system]);
         let program = || Program::File {
             located: Box::new(located(system.join("prog"))),
             arg0: system.join("prog"),
@@ -1108,7 +1043,7 @@ mod tests {
         let Err(why) = Baseline::of_home(utf8(&home).ok()) else {
             panic!("a baseline through a link cycle cannot be walked");
         };
-        assert!(why.contains(utf8(&home).unwrap()), "{why}");
+        assert!(why.message.contains(utf8(&home).unwrap()), "{why}");
     }
 
     /// An allowance is held where it was decoded: the link its spelling went

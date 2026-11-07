@@ -57,8 +57,9 @@ the wire carries spellings, never positions or identities.
   everywhere on every host and no foreign spelling folds to it.
 - **A spelling absolute only on another platform** is the *dead grant*:
   `FreezeCtx::walked` answers `None` (`live_absolute`), the key makes no rule and
-  the profile still loads on both. A path the host itself holds is never dead:
-  `host_absolute` refuses it, because a deny that named nothing would fail open.
+  the profile still loads on both. A path the host itself holds or chooses is
+  never dead: `host_absolute`, the one classifier of such paths, refuses it,
+  because a deny that named nothing would fail open.
 
 See [[design/capability-freeze|capability-freeze]] (the decode),
 [[design/grant|grant]], [[invariants/no-grant-spells-every-program|no-grant-spells-every-program]],

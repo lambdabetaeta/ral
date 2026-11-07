@@ -71,7 +71,9 @@ restricts nothing and activates no launch hardening.
   few rows of data (`Location { overrides, defaults }`), checked complete by one
   exhaustive `match`. The rules below are stated here once; the table is the
   data, and no page copies it. `FreezeCtx::selector` dispatches to it, and
-  System-read discovery in `authority::grant` calls the same live expansion over the same rows.
+  system-read discovery walks the same rows, with each platform's listed
+  system reads (`LISTED`, `Location`s too) beside them, through the same
+  walker.
 - **Choose, then keep what exists.** A location's *overrides* are host
   environment variables with an optional subpath (`$CARGO_HOME/bin`), tried in
   order. The first usable one (non-empty and absolute under the host's rules;
@@ -82,6 +84,14 @@ restricts nothing and activates no launch hardening.
   where the manager is, so falling back would grant a directory it disowned. An
   absent manager expands to nothing, never an error. `GOPATH` alone holds a
   list, and only its first entry counts.
+- **One classifier, one walker.** Every chosen directory, a `$PATH` entry
+  included, is held by `host_absolute` and walked by `GrantPath::walked`
+  (`toolchains::walked` for a set of locations). A choice absolute to the OS
+  that `` `absolute `` would refuse (a malformed or mixed two-separator head)
+  is a freeze error naming the variable or default, the selector and the
+  reason, never a silent skip: it is no path a grant can name, and a skip would
+  hide the broken variable. A relative value is no choice at all and is
+  skipped, as above.
 - **Overrides are the host's.** They are read from the host process
   environment, as `path` reads `$PATH`, never from a session's variables and
   never from a tool's own configuration files (cargo's `install.root`, an
@@ -131,9 +141,13 @@ restricts nothing and activates no launch hardening.
   override can still choose one (`HOMEBREW_PREFIX` on a home Linuxbrew), so the
   baseline includes only chosen directories outside the process's home, using
   the host environment rather than a `FreezeCtx`. A home prefix is readable
-  only where granted, including by running. A system-read directory whose walk
-  fails prevents boot and is named in the error; any selected directory naming
-  the world or lying in the home is dropped without error, defaults included.
+  only where granted, including by running. A system-read directory that is
+  malformed (refused by `host_absolute`, the variable that chose it named) or
+  whose walk fails prevents boot, the error carrying its hint to the host's
+  message (`Runtime::bare` answers the `PolicyError`); any selected directory
+  naming the world or lying in the home is dropped without error, defaults
+  included. A system read is what exists, a file included (Linux lists
+  `/etc/passwd`), where a selector keeps directories only.
   System reads are ordinary allowances, rendered frozen, so a redirected root
   shows nothing.
   An exclusion means "not allowed", never "not included": a profile that merely

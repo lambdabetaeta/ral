@@ -777,10 +777,12 @@ argues from.
   ([[design/grant|grant]] §Selectors). An override such as `HOMEBREW_PREFIX` can
   still be the user's, and a child that writes the parent of such a root could
   replace it with a symlink, so the floor renders frozen too and a redirected
-  root shows nothing. What loading needs is not authored, so a floor
-  entry that resolves through a non-Unicode name is dropped, not refused
-  (`freeze_floor`); a place that `PATH` resolved to and that is not Unicode
-  cannot be frozen as an allowance in the first place.
+  root shows nothing. A floor entry is held as every directory the host
+  chooses is (`host_absolute`, then the walk; `toolchains::system_reads_in`):
+  one that is malformed or cannot be walked refuses the boot, naming the
+  variable that chose it, while one naming the world or lying in the home is
+  dropped. A place that `PATH` resolved to and that is not Unicode cannot be
+  frozen as an allowance in the first place.
 - **Windows refuses the universal prefix.** A launch whose fs projection holds
   `Everywhere` in either region is refused before anything is stamped: an
   AppContainer reaches only what is stamped for it, and the root would narrow to

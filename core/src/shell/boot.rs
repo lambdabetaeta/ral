@@ -242,12 +242,15 @@ impl HostSurface {
     /// Core plus this surface, no prelude: the process half of a session.
     ///
     /// # Errors
-    /// [`Runtime::bare`]'s: the host's baseline cannot be resolved.
+    /// [`Runtime::bare`]'s, shown with its hint: the host's baseline cannot
+    /// be resolved.
     ///
     /// # Panics
     /// Panics if a name here collides with a core builtin or repeats.
     pub fn runtime(&self, terminal: TerminalState) -> Result<Runtime, String> {
-        Runtime::bare(terminal).map(|bare| self.install(bare))
+        Runtime::bare(terminal)
+            .map(|bare| self.install(bare))
+            .map_err(|e| e.to_string())
     }
 
     /// `runtime` with core and this surface installed in it.

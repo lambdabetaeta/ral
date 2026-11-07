@@ -148,8 +148,9 @@ function of its layers.**
   `refuse_the_world`, the toolchain floor) on that trace, and keeps it. Every
   kept selector directory, default or override, meets the same root/home/ancestor
   refusal on its followed trace before polarity converts it; an exclusion still
-  keeps its held objects. System-read discovery drops unsafe prefixes instead
-  of refusing them. A grant value that crosses from another host is
+  keeps its held objects. System-read discovery drops prefixes naming the
+  world or the home instead of refusing them; a malformed one refuses the boot.
+  A grant value that crosses from another host is
   resolved by the same decoder, where it arrives. A `GrantLayer`
   keeps its rules and nothing beside them; each spelling is a `GrantPath`:
   as written, and what its walk made of it.

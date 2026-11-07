@@ -66,6 +66,11 @@ walk as it freezes it. In doing so it:
   root, the home or its ancestor, for allowances and exclusions alike. Defaults
   and host overrides share this breadth check; narrow external tool directories
   remain valid ([[design/grant#Selectors, refusals and summaries|selector rules]]);
+- **rejects** a selector directory absolute to the OS that `` `absolute `` would
+  refuse (a `$PATH` entry, or a toolchain override or default, with a malformed
+  or mixed head), naming the variable: `host_absolute` is the one classifier of
+  what the host chooses, the system reads included, where the same refusal
+  stops the boot;
 - **rejects** an anchored place that freezes relative (a relative `HOME` or
   `TMPDIR`) and a `` `home `` or `xdg-*` place where nothing binds `HOME`: no
   base to resolve against, and the escape guard just above is itself stated in

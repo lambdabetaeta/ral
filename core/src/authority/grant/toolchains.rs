@@ -1,26 +1,28 @@
-//! The package managers a `dir` selector names, as one table.
+//! The directories the host chooses: the package managers a `dir` selector
+//! names, as one table, and the system reads beside them.
 //!
-//! A [`Toolchain`] is a set of [`Location`]s.  A location's directories are
-//! chosen from the host environment alone: the first usable [`Override`]
-//! chooses and is all the location has, else every [`Base`] default is
-//! chosen; only directories that exist are kept.  An override naming a
-//! missing directory yields nothing, since the environment disowned the
-//! defaults.  The rules are stated once, in `docs/ral-wiki/design/grant.md`
+//! A [`Toolchain`] is a set of [`Location`]s, and so is [`LISTED`], the
+//! system reads no selector names.  A location's directories are chosen from
+//! the host environment alone: the first usable [`Override`] chooses and is
+//! all the location has, else every [`Base`] default is chosen.  An override
+//! naming a missing directory yields nothing, since the environment disowned
+//! the defaults.  The rules are stated once, in `docs/ral-wiki/design/grant.md`
 //! §Selectors; the table is the data.
 //!
-//! [`chosen`] is pure over an injected environment and home; [`expand_in`]
-//! walks what it chose, refusing every directory that names the world, and
-//! [`expand`] is its live wrapper, which the freeze and host discovery
-//! consume.
+//! [`chosen`] is pure over an injected environment and home.  [`walked`]
+//! holds each chosen directory as [`host_absolute`] does, refusing a malformed
+//! one, and walks it.  A `dir` selector keeps the directories, refusing one
+//! that names the world ([`expand_in`]; [`expand`] is its live wrapper); the
+//! system reads keep what exists outside the world and the home
+//! ([`system_reads_in`]).
 
 use super::Polar;
-use super::freeze::{Home, PolicyError, Selector, refuse_the_world, the_world};
+use super::freeze::{Home, PolicyError, Selector, host_absolute, refuse_the_world, the_world};
 use crate::authority::policy::GrantPath;
-use crate::path::{
-    FrozenPath, Kind, RealPath, Trace, is_absolute, join_slash, path_entries, shown,
-};
+use crate::path::{Kind, RealPath, Trace, is_absolute, join_slash, path_entries, shown};
 use crate::path::{XdgKind, resolve_xdg_in};
-use std::path::PathBuf;
+use crate::text::code;
+use std::path::{Path, PathBuf};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 
 /// A package manager, or `system`: the selector names `dir` takes.
@@ -335,6 +337,93 @@ impl Toolchain {
     }
 }
 
+/// The system reads no selector names, beside the rows of [`SYSTEM_READS`]:
+/// what every program on this platform reads to start.  One may be a file
+/// (`/etc/passwd`).  Every platform's table is taken on every host, so that a
+/// test can judge any.
+const LISTED: &[Location] = if cfg!(windows) {
+    WINDOWS_LISTED
+} else if cfg!(target_os = "linux") {
+    LINUX_LISTED
+} else if cfg!(target_os = "macos") {
+    MACOS_LISTED
+} else {
+    &[]
+};
+
+const LINUX_LISTED: &[Location] = {
+    use Base::Abs;
+    &[loc!(
+        [],
+        [
+            Abs("/bin"),
+            Abs("/usr"),
+            Abs("/lib"),
+            Abs("/lib64"),
+            // `/dev`, `/proc` and `/sys/fs/cgroup` are absent: the envelope
+            // mounts its own.  Of `/etc` and `/sys`, only what dynamic
+            // linking, name resolution, user lookup, toolchain resolution and
+            // hardware sizing need: the rest of `/sys` describes the host, not
+            // the envelope (`class/net` is the mounter's netns whatever
+            // `--unshare-net` did; `class/dmi` and `bus` name the machine).
+            Abs("/sys/devices/system/cpu"),
+            Abs("/sys/kernel/mm/transparent_hugepage"),
+            Abs("/etc/ld.so.conf"),
+            Abs("/etc/ld.so.conf.d"),
+            Abs("/etc/ld.so.cache"),
+            Abs("/etc/resolv.conf"),
+            Abs("/etc/nsswitch.conf"),
+            Abs("/etc/hosts"),
+            Abs("/etc/ssl"),
+            Abs("/etc/ca-certificates"),
+            Abs("/etc/pki"),
+            // getpwuid/getgrgid sit in libc startup paths: without these many
+            // programs cannot even resolve HOME.
+            Abs("/etc/passwd"),
+            Abs("/etc/group"),
+            // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
+            Abs("/etc/alternatives")
+        ]
+    )]
+};
+
+const MACOS_LISTED: &[Location] = {
+    use Base::Abs;
+    &[loc!(
+        [],
+        [
+            Abs("/bin"),
+            Abs("/usr"),
+            // Rosetta's runtime, the loader analogue: no grant should name it.
+            Abs("/Library/Apple/usr"),
+            Abs("/Library/Developer/CommandLineTools"),
+            Abs("/Applications/Xcode.app/Contents/Developer"),
+            Abs("/lib"),
+            Abs("/System"),
+            Abs("/dev"),
+            Abs("/private/var/db/dyld"),
+            // Wholesale: tools read whatever they read (gitconfig, paths.d,
+            // zshenv, nix.conf, …); nothing user-secret sits here unprotected.
+            Abs("/private/etc"),
+            // xcode-select state; denied, build drivers report a broken install.
+            Abs("/private/var/select"),
+            // resolv.conf's target and the mDNSResponder socket.
+            Abs("/private/var/run")
+        ]
+    )]
+};
+
+/// `%SystemRoot%`, `%ProgramFiles%` and `%ProgramFiles(x86)%`: an unset
+/// variable lists nothing.
+const WINDOWS_LISTED: &[Location] = {
+    use Override::Var;
+    &[
+        loc!([Var("SystemRoot", "")], []),
+        loc!([Var("ProgramFiles", "")], []),
+        loc!([Var("ProgramFiles(x86)", "")], []),
+    ]
+};
+
 impl Override {
     fn var(self) -> &'static str {
         let (Self::Var(var, _) | Self::Head(var, _)) = self;
@@ -409,64 +498,85 @@ impl Location {
     }
 }
 
-/// The directories `toolchain` chooses over an injected environment and
+/// The directories `locations` choose over an injected environment and
 /// home, native as the OS takes them, before any is walked.
-pub(super) fn chosen(
-    toolchain: Toolchain,
+pub(super) fn chosen<'a>(
+    locations: impl IntoIterator<Item = &'a Location>,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
 ) -> Vec<Chosen> {
-    (toolchain.locations().iter())
+    (locations.into_iter())
         .flat_map(|l| l.chosen(&env, home))
         .collect()
 }
 
-/// Each directory `toolchain` chooses, walked as `W` walks, beside the
-/// override that chose it; one absent or no directory is dropped.
+/// Each directory `locations` choose, held as [`host_absolute`] holds a path
+/// and walked as `W` walks, beside the override that chose it; one that is
+/// absent is dropped.  `holder` names what would hold it, for a refusal.
 ///
 /// # Errors
-/// A directory whose walk fails, or that no grant can hold.
-fn walked<W: Polar>(
-    toolchain: Toolchain,
+/// A chosen directory [`host_absolute`] refuses, named with what chose it;
+/// one whose walk fails.
+fn walked<'a, W: Polar>(
+    locations: impl IntoIterator<Item = &'a Location>,
+    holder: &str,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&str>,
 ) -> Result<Vec<Found<W>>, PolicyError> {
-    let mut kept = Vec::new();
-    for Chosen { dir, via } in chosen(toolchain, env, home) {
-        let written = FrozenPath::freeze(&dir).map_err(PolicyError::new)?;
-        let walked = GrantPath::<W>::walked(written)?;
-        if walked.real.followed().kind() == Some(Kind::Dir) {
-            kept.push((walked, via));
-        }
-    }
-    Ok(kept)
+    (chosen(locations, env, home).into_iter())
+        .filter_map(|Chosen { dir, via }| {
+            host_absolute(&dir)
+                .map_err(|why| malformed(&dir, via.as_ref(), holder, &why))
+                .and_then(GrantPath::<W>::walked)
+                .map(|w| w.real.followed().kind().is_some().then_some((w, via)))
+                .transpose()
+        })
+        .collect()
+}
+
+/// A chosen `dir` that `holder` cannot hold, [`host_absolute`] having
+/// refused it for `why`: what chose it, and what to change.
+fn malformed(dir: &Path, via: Option<&Via>, holder: &str, why: &PolicyError) -> PolicyError {
+    let (subject, fix) = match via {
+        Some((var, value)) => (
+            format!("{var} is {}", shown(value)),
+            format!("Set {var} to a well-formed absolute path, or unset it."),
+        ),
+        None => (
+            format!("default directory {}", shown(dir)),
+            "Check its HOME/XDG base.".to_owned(),
+        ),
+    };
+    PolicyError::new(format!(
+        "{subject}, which {holder} cannot hold: {}",
+        why.message
+    ))
+    .with_hint(fix)
 }
 
 /// The directories `toolchain` expands to over an injected environment and
-/// home, each walked as polarity `W` walks: any directory that names a
-/// filesystem root, the home or an ancestor of it is refused, and a directory
-/// that is absent or no directory is dropped.  A toolchain that is absent
-/// expands to nothing.
+/// home, each walked as polarity `W` walks: one that is malformed or names a
+/// filesystem root, the home or an ancestor of it is refused, and one that is
+/// absent or no directory is dropped.  A toolchain that is absent expands to
+/// nothing.
 ///
 /// # Errors
-/// A selected directory that names the world; a directory whose walk fails,
-/// or that no grant can hold.
+/// A selected directory that is malformed or names the world; one whose walk
+/// fails, or that no grant can hold.
 pub(crate) fn expand_in<W: Polar>(
     toolchain: Toolchain,
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
 ) -> Result<Vec<GrantPath<W::Grant>>, PolicyError> {
-    walked::<W>(toolchain, env, home.map(|h| h.spelled.as_str()))?
+    let selector = Selector::Toolchain(toolchain);
+    let holder = code(&format!("`dir `{}", selector.name()));
+    let spelled = home.map(|h| h.spelled.as_str());
+    walked::<W>(toolchain.locations(), &holder, env, spelled)?
         .into_iter()
+        .filter(|(dir, _)| dir.real.followed().kind() == Some(Kind::Dir))
         .map(|(dir, via)| {
             let (subject, advice) = provenance(&dir, via);
-            refuse_the_world(
-                Selector::Toolchain(toolchain),
-                &subject,
-                &advice,
-                dir.real.followed(),
-                home,
-            )?;
+            refuse_the_world(selector, &subject, &advice, dir.real.followed(), home)?;
             W::grant(dir)
         })
         .collect()
@@ -513,24 +623,37 @@ pub(crate) fn keeps_system_read(dir: &RealPath, held: Option<&RealPath>) -> bool
     the_world(dir, held).is_none() && held.is_none_or(|h| !h.contains(dir))
 }
 
-/// Resolve toolchain system reads, dropping unsafe prefixes rather than granting them.
+/// The host's system reads over an injected environment and home: what
+/// [`LISTED`] and the rows of [`SYSTEM_READS`] choose.
 ///
 /// # Errors
-/// A directory whose walk fails, or that no grant can hold.
+/// As [`system_reads`].
 pub(crate) fn system_reads_in(
     env: impl Fn(&str) -> Option<String>,
     home: Option<&Home>,
 ) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
+    let rows = SYSTEM_READS.iter().flat_map(|t| t.locations());
+    system_reads(LISTED.iter().chain(rows), env, home)
+}
+
+/// What `locations` choose that exists and [`keeps_system_read`]; the rest is
+/// dropped, never granted.
+///
+/// # Errors
+/// A chosen directory [`host_absolute`] refuses, named with what chose it;
+/// one whose walk fails.
+fn system_reads<'a>(
+    locations: impl IntoIterator<Item = &'a Location>,
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&Home>,
+) -> Result<Vec<GrantPath<Trace>>, PolicyError> {
     let held = home.and_then(|h| h.real.as_ref());
-    let mut kept = Vec::new();
-    for toolchain in SYSTEM_READS {
-        for (dir, _) in walked::<Trace>(toolchain, &env, home.map(|h| h.spelled.as_str()))? {
-            if keeps_system_read(dir.real.real(), held) {
-                kept.push(dir);
-            }
-        }
-    }
-    Ok(kept)
+    let holder = "ral's read floor (the system paths every program may read)";
+    let found = walked::<Trace>(locations, holder, env, home.map(|h| h.spelled.as_str()))?;
+    Ok((found.into_iter())
+        .map(|(dir, _)| dir)
+        .filter(|dir| keeps_system_read(dir.real.real(), held))
+        .collect())
 }
 
 #[cfg(test)]
@@ -552,7 +675,7 @@ mod tests {
         env: impl Fn(&str) -> Option<String>,
         home: Option<&str>,
     ) -> Vec<String> {
-        (chosen(toolchain, env, home).iter())
+        (chosen(toolchain.locations(), env, home).iter())
             .map(|c| spelled(&c.dir).to_owned())
             .collect()
     }
@@ -569,12 +692,46 @@ mod tests {
         Ok(dirs.iter().map(|d| d.written.as_str().to_owned()).collect())
     }
 
-    /// [`system_reads_in`] as the spellings it keeps.
+    /// [`system_reads`] over the rows of [`SYSTEM_READS`], as the spellings
+    /// it keeps.
     #[cfg(unix)]
     fn system_reads_of(env: impl Fn(&str) -> Option<String>, home: &str) -> Vec<String> {
         let home = Home::of(home).unwrap();
-        let dirs = system_reads_in(env, Some(&home)).unwrap();
+        let rows = SYSTEM_READS.iter().flat_map(|t| t.locations());
+        let dirs = system_reads(rows, env, Some(&home)).unwrap();
         dirs.iter().map(|d| d.written.as_str().to_owned()).collect()
+    }
+
+    /// [`system_reads`] over `locations`, as the spellings it keeps.
+    fn kept(locations: &[Location], pairs: &[(&str, &str)], home: Option<&Home>) -> Vec<String> {
+        let dirs = system_reads(locations, env(pairs), home).unwrap();
+        dirs.iter().map(|d| d.written.as_str().to_owned()).collect()
+    }
+
+    /// Four locations, each chosen by its own variable alone: a fixture's
+    /// listed system reads.
+    const PROBE: &[Location] = {
+        use Override::Var;
+        &[
+            loc!([Var("A", "")], []),
+            loc!([Var("B", "")], []),
+            loc!([Var("C", "")], []),
+            loc!([Var("D", "")], []),
+        ]
+    };
+
+    /// The root of this host's filesystem, as a variable spells it.
+    fn host_root() -> &'static str {
+        if cfg!(windows) { r"C:\" } else { "/" }
+    }
+
+    /// A path absolute to the OS that `absolute` refuses: a malformed UNC head.
+    fn malformed_dir() -> &'static str {
+        if cfg!(windows) {
+            r"\\\x\bin"
+        } else {
+            "///x/bin"
+        }
     }
 
     /// A tempdir with `dirs` made beneath it, and its root as the fixtures
@@ -1107,6 +1264,128 @@ mod tests {
         for dir in [&home, &inside, &top] {
             assert!(!keeps_system_read(dir, Some(&home)), "{dir:?}");
         }
+    }
+
+    /// A listed directory that is a filesystem root is no system read and no
+    /// error, as a toolchain row's is not: the root would hold the whole
+    /// filesystem.
+    #[test]
+    fn a_listed_root_is_dropped_and_an_ordinary_directory_kept() {
+        let (tmp, _) = tree(&["ordinary"]);
+        let ordinary = spelled(&tmp.path().join("ordinary")).to_owned();
+        let pairs = [("A", host_root()), ("B", ordinary.as_str())];
+        assert_eq!(kept(PROBE, &pairs, None), [ordinary]);
+    }
+
+    /// The home, what lies inside it and what it lies inside are the user's
+    /// to grant or the world: a listed directory so placed is dropped, and
+    /// one beside the home is kept.
+    #[test]
+    fn a_listed_directory_in_the_home_or_around_it_is_dropped() {
+        let (tmp, top) = tree(&["h/inside", "beside"]);
+        let home_dir = tmp.path().join("h");
+        let (h, inside, beside) = (
+            spelled(&home_dir).to_owned(),
+            spelled(&home_dir.join("inside")).to_owned(),
+            spelled(&tmp.path().join("beside")).to_owned(),
+        );
+        let home = Home::of(&h).unwrap();
+        assert!(home.real.is_some(), "an absolute home lies somewhere");
+        let pairs = [
+            ("A", top.as_str()),
+            ("B", h.as_str()),
+            ("C", inside.as_str()),
+            ("D", beside.as_str()),
+        ];
+        assert_eq!(kept(PROBE, &pairs, Some(&home)), [beside]);
+    }
+
+    /// Windows' system directories are its listed system reads, judged on any
+    /// host: a variable naming a root puts no root among them, and one unset
+    /// lists nothing.
+    #[test]
+    fn a_windows_system_variable_naming_a_root_is_dropped() {
+        let (tmp, _) = tree(&["programs"]);
+        let programs = spelled(&tmp.path().join("programs")).to_owned();
+        let pairs = [
+            ("SystemRoot", host_root()),
+            ("ProgramFiles", programs.as_str()),
+        ];
+        assert_eq!(kept(WINDOWS_LISTED, &pairs, None), [programs]);
+    }
+
+    /// A system read is whatever exists, a file included (`/etc/passwd` is
+    /// one); a `dir` selector keeps only directories.
+    #[test]
+    fn a_system_read_may_be_a_file_and_a_selector_directory_may_not() {
+        let (tmp, _) = tree(&[]);
+        let file = tmp.path().join("passwd");
+        std::fs::write(&file, "").unwrap();
+        let file = spelled(&file).to_owned();
+        assert_eq!(
+            kept(PROBE, &[("A", file.as_str())], None),
+            std::slice::from_ref(&file)
+        );
+        let got = expanded(
+            Toolchain::Rustup,
+            env(&[("RUSTUP_HOME", file.as_str())]),
+            None,
+        );
+        assert_eq!(got.unwrap(), Vec::<String>::new());
+    }
+
+    /// A chosen directory absolute to the OS but one `absolute` refuses is
+    /// held by no selector: the selector refuses, naming the variable, itself
+    /// and why, and says what to change.
+    #[test]
+    fn a_malformed_override_refuses_the_selector_naming_it() {
+        let value = malformed_dir();
+        let err = expanded(Toolchain::Rustup, env(&[("RUSTUP_HOME", value)]), None).unwrap_err();
+        for part in [
+            format!("RUSTUP_HOME is {}, which", shown(value)),
+            "`dir `rustup".to_owned(),
+            "no well-formed UNC".to_owned(),
+        ] {
+            assert!(err.message.contains(&part), "{part}: {}", err.message);
+        }
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Set RUSTUP_HOME to a well-formed absolute path, or unset it.")
+        );
+    }
+
+    /// The same of a default, which names no variable.
+    #[cfg(unix)]
+    #[test]
+    fn a_malformed_default_refuses_naming_the_default() {
+        const MALFORMED: &[Location] = &[loc!([], [Base::Abs("///x/bin")])];
+        let err = walked::<Trace>(MALFORMED, "a fixture", env(&[]), None).unwrap_err();
+        assert!(
+            err.message
+                .starts_with("default directory ///x/bin, which a fixture cannot hold: "),
+            "{}",
+            err.message
+        );
+        assert!(err.hint.is_some_and(|h| h.contains("HOME/XDG")));
+    }
+
+    /// The system reads refuse a malformed choice as a selector does, naming
+    /// the variable and the read floor: no system read is dropped for being
+    /// malformed.
+    #[test]
+    fn a_malformed_system_read_refuses_the_system_reads() {
+        let value = malformed_dir();
+        let err = system_reads(PROBE, env(&[("A", value)]), None).unwrap_err();
+        assert!(
+            err.message
+                .starts_with(&format!("A is {}, which ral's read floor", shown(value))),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Set A to a well-formed absolute path, or unset it.")
+        );
     }
 
     #[cfg(unix)]

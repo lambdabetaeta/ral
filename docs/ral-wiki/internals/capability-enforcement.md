@@ -163,8 +163,10 @@ it on different evidence.** Both read one fold (`authority/policy/fs.rs`). `regi
 for the operation: the allows meet and the exclusions join. A read then joins
 the system reads in `Baseline`, the platform's system paths, after the meet:
 only a `deny` removes them. They are host state, resolved once by
-`authority::grant` where the `Runtime` is built (a host that cannot resolve
-them refuses to boot) and passed to every reader; no stack holds them and no
+`authority::grant` where the `Runtime` is built (a host whose system read is
+malformed or cannot be walked refuses to boot, naming the variable that chose
+it, with the `PolicyError`'s hint) and passed to every reader; no stack holds
+them and no
 wire carries them. No backend carries a system set of
 its own. They differ in *when* the fold runs, and in what an exclusion is
 matched against: ral's own readers match it by position or by the object it was
