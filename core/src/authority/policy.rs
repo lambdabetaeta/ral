@@ -25,8 +25,9 @@ pub(crate) use exec::{Admitted, ExecDenial, ExecRules, Program, Rule, rules};
 pub(crate) use exec::{ExecAllow, ExecDeny, KernelRules};
 #[cfg(unix)]
 pub(crate) use exec::{KernelAllow, Subject};
+pub(crate) use fs::Verdict;
 pub use fs::{Baseline, FsDeny, FsOp, LocateError, ReadRegion, Refused, Ungoverned};
-pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region};
+pub(crate) use fs::{FsAllow, FsLayer, FsRules, region};
 pub(crate) use lattice::Axis;
 pub use lattice::{
     EditorVerb, Evidence, ExecSummary, Extent, Flag, Fragment, FsSummary, Gpu, GrantLayer,

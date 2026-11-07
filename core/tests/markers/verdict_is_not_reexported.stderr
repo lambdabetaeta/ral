@@ -7,8 +7,8 @@ error[E0603]: struct `Verdict` is private
 note: the struct `Verdict` is defined here
  --> src/authority/policy.rs
   |
-  | pub(crate) use fs::{FsAllow, FsLayer, FsRules, Verdict, region, running_region};
-  |                                                ^^^^^^^
+  | pub(crate) use fs::Verdict;
+  |                ^^^^^^^^^^^
 help: import `Verdict` directly
   |
 3 | use ral_core::authority::policy::fs::Verdict;
