@@ -207,17 +207,21 @@ fn spawn_polling_worker(shell: &Shell, cancel_via: impl FnOnce(&ScopeNode)) -> (
     let node = shell.session.root.worker();
     let worker_mooring = Mooring::for_thread(&Mooring::adrift(), node.clone(), None);
     let _join = shell
-        .spawn_thread(worker_mooring, "test-worker", move |_, child| {
-            ready_tx.send(()).unwrap();
-            loop {
-                if let Err(b) = child.poll() {
-                    done_tx.send(b.code()).unwrap();
-                    return;
+        .spawn_worker(
+            worker_mooring,
+            crate::io::Streams::both(|| crate::io::new_buffer().0),
+            move |_, child| {
+                ready_tx.send(()).unwrap();
+                loop {
+                    if let Err(b) = child.poll() {
+                        done_tx.send(b.code()).unwrap();
+                        return;
+                    }
+                    std::thread::yield_now();
                 }
-                std::thread::yield_now();
-            }
-        })
-        .expect("spawn_thread");
+            },
+        )
+        .expect("spawn_worker");
     ready_rx.recv().unwrap();
     cancel_via(&node);
     (done_rx.recv().unwrap(), node)
@@ -232,8 +236,12 @@ fn worker_scope_cancel_stops_the_worker() {
     let sibling = shell.session.root.worker();
     let sibling_mooring = Mooring::for_thread(&Mooring::adrift(), sibling.clone(), None);
     let _idle_join = shell
-        .spawn_thread(sibling_mooring, "test-sibling", |_, _| ())
-        .expect("spawn_thread");
+        .spawn_worker(
+            sibling_mooring,
+            crate::io::Streams::both(|| crate::io::new_buffer().0),
+            |_, _| (),
+        )
+        .expect("spawn_worker");
     let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
         c.cancel(crate::process::CancelCause::Cancelled);
     });
@@ -273,8 +281,12 @@ fn foreground_cancel_spares_worker() {
     let worker_scope = shell.session.root.worker();
     let worker_mooring = Mooring::for_thread(&m, worker_scope.clone(), None);
     let _join = shell
-        .spawn_thread(worker_mooring, "test-worker", |_, _| ())
-        .expect("spawn_thread");
+        .spawn_worker(
+            worker_mooring,
+            crate::io::Streams::both(|| crate::io::new_buffer().0),
+            |_, _| (),
+        )
+        .expect("spawn_worker");
     m.home.cancel(crate::process::CancelCause::Interrupted);
     assert!(
         !worker_scope.is_cancelled(),

@@ -420,7 +420,7 @@ impl CollectState {
         let (tx, rx) = std::sync::mpsc::channel();
         let slot = Slot { ix: 0, tx };
         let watch = slot.watch(child);
-        let group = landing.group(shell.io.stage.as_ref());
+        let group = landing.group(shell.session.stage.as_ref());
         // Not behind an envelope, whose payload leads the group.
         let leads = group
             .owned()

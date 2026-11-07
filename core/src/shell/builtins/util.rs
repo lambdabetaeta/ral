@@ -1,5 +1,6 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
+use crate::io::Source;
 use crate::shell::runtime::{Settled, Shell, Value, sig, sig_hint};
 
 /// Arity floor for a builtin; `name` rides the error text.
@@ -45,33 +46,28 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     Ok(out)
 }
 
-/// The one stdin policy every reading builtin shares: an installed `Source`
-/// (pipeline pipe or `<` redirect) if there is one; else a refusal when startup
-/// stdin was a terminal, since these builtins want bytes and not a prompt; else
-/// the inherited fd 0.  The [`super::codecs`] decoders and [`stdin_lines`]
-/// both drain through here.
+/// The one stdin policy every reading builtin shares: the installed reader
+/// (a pipe, a `<` redirect, or a non-tty fd 0), EOF for `Empty`, and a
+/// refusal for a terminal, since these builtins want bytes and not a prompt.
+/// The [`super::codecs`] decoders and [`stdin_lines`] both drain through
+/// here.
 pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io::BufRead>> {
-    // `Empty` is a deliberate no-input marker: immediate EOF, never the "no
-    // input" error and never a fall-through to fd 0.
-    if matches!(shell.io.stdin, crate::io::Source::Empty) {
-        return Ok(Box::new(std::io::empty()));
-    }
-    if let Some(reader) = shell
-        .io
-        .stdin
-        .reader()
-        .map_err(|e| crate::shell::runtime::Error::io("could not duplicate stdin", &e))?
-    {
-        // Re-scoped to the scope in focus, so a cleanup's reads are masked with it.
-        let reader = reader.interruptible(shell.scope.clone());
-        return Ok(Box::new(std::io::BufReader::new(reader)));
-    }
-    if shell.io.terminal.startup_stdin_tty {
+    if matches!(shell.io.stdin, Source::Terminal) {
         return Err(sig(format!(
             "{name}: no input (pipe bytes or pass a value as argument)"
         )));
     }
-    Ok(Box::new(std::io::stdin().lock()))
+    let Some(reader) = shell
+        .io
+        .stdin
+        .reader()
+        .map_err(|e| crate::shell::runtime::Error::io("could not duplicate stdin", &e))?
+    else {
+        return Ok(Box::new(std::io::empty()));
+    };
+    // Re-scoped to the scope in focus, so a cleanup's reads are masked with it.
+    let reader = reader.interruptible(shell.scope.clone());
+    Ok(Box::new(std::io::BufReader::new(reader)))
 }
 
 /// The one line reader: `reader` a line at a time, each stripped by
@@ -153,5 +149,35 @@ mod stdin_tests {
         // A persistent marker: a second read still sees `Empty`, never
         // collapsing to `Terminal` and its fd-0 fall-through.
         assert!(matches!(shell.io.stdin, Source::Empty));
+    }
+
+    /// `Terminal` means a terminal: a reading builtin refuses it rather than
+    /// wait on a prompt, whatever the startup probe said.
+    #[test]
+    fn a_terminal_source_is_refused() {
+        let mut shell = crate::test_helper::core_shell();
+        shell.io.stdin = Source::Terminal;
+        let Err(refused) = stdin_reader("from-lines", &shell) else {
+            panic!("a terminal stdin must be refused");
+        };
+        assert!(refused.to_string().contains("no input"), "{refused}");
+    }
+
+    /// A non-tty fd 0 reaches a reading builtin as the reader it became.
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_source_is_read() {
+        use std::io::Write;
+        let (r, mut w) = crate::process::cloexec_pipe().expect("data pipe");
+        w.write_all(b"bytes").expect("write");
+        drop(w);
+        let mut shell = crate::test_helper::core_shell();
+        shell.io.stdin = Source::Reader(crate::io::SourceReader::pipe(r));
+        let mut buf = String::new();
+        stdin_reader("test", &shell)
+            .expect("a reader is read")
+            .read_to_string(&mut buf)
+            .expect("read");
+        assert_eq!(buf, "bytes");
     }
 }

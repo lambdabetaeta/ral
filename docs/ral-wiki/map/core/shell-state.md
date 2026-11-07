@@ -146,8 +146,9 @@ context)` pair around every run, so a panicking run
 reports as a failed run instead of corrupting the store; `sig` needs no
 checkpoint, since a run never writes it.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
-  `Shell` carries (as the field `io`): stdin / stdout / stderr, the terminal
-  snapshot, the launch role ([[map/core/io-process|io-process]]). These
+  `Shell` carries (as the field `io`): stdin / stdout / stderr and nothing
+  else ([[map/core/io-process|io-process]]); the terminal snapshot is the
+  `Runtime`'s, and interactivity and stage membership are `SessionState`'s. These
   genuinely change *within* a run — a redirect frame swaps the sinks — so
   they are taken on **loan** and repaid: `shell::run::IoLoan` swaps a fresh `Io` in
   at install and restores the previous one on `Drop`, carrying the two
@@ -452,9 +453,13 @@ carries `TerminalAccess::Denied` — the safe default for a store that is not
 the session's. Each also starts with stdin `Empty`, no hooks and no control
 counters; what rides along is the scope, context, Σ, builtin table, source
 registry, root file, call site and exit hints. The kinds differ only in their
-`Holding` — cancel root and anchor, roster, lease ledger, fixings:
+`Holding` — cancel root and anchor, roster, lease ledger, fixings, and the
+`Seat` each birth states: its `Io`, interactivity and stage membership. A
+worker's seat reads nothing, is not interactive and joins no group, so its
+externals lead sessions of their own; a stage's joins its pipeline's group;
+an aside's writes where its parent does:
 
-- `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
+- `spawn_worker` / `spawn_stage`, over the one `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
   ([[map/core/runtime|shell/exec]]'s `shell/exec/pipeline/thread.rs`) — a pipeline never
   rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
   from the spawning shell's session, built on the spawning thread; the body's

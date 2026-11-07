@@ -23,10 +23,11 @@ The child keeps the process handle, and the spawning thread releases the thread 
 channels ([[map/core/transport|transport]]). Process syscall-site declarations
 live in `process/site.rs`, beside the launch, wait and jail operations they name.
 
-`io/state.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
-interactive / terminal / stage), where `stdout` is wherever the running
-computation writes — a capture buffer, inside a capture — and
-*`stage: Option<Membership>`* — `None` at the top level, the orchestrator;
+`io/state.rs` holds `Io`, the per-`Shell` streams (stdin / stdout / stderr),
+where `stdout` is wherever the running computation writes — a capture buffer,
+inside a capture. The terminal snapshot is the `Runtime`'s; interactivity and
+*`SessionState::stage: Option<Membership>`* are the session's, stated by each
+child's birth — `None` at the top level, the orchestrator;
 `Some` for a stage's own children, carrying the group an external spawned
 anywhere inside that stage must join — at the stage's own root or nested
 arbitrarily deep, thread or process alike — and the stage scope whose causes

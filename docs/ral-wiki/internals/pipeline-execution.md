@@ -127,10 +127,13 @@ is stripped before a child inherits the source, so it is never a child's
 problem. `ByteIn::Parent` at
 stage 0 resolves against the shell's own stdin through `boundary_stdin`, the
 one rule for what a child at the boundary reads, a lone command's included: a
-joined group passes its owner's source through; a startup tty survives only
+joined group passes its owner's source through; the terminal survives only
 where the child's group can read it, ral's own group or one lent the terminal;
 and a group of its own that is not lent it reads `Source::Empty`, never the
-controlling terminal, which `SIGTTIN` would deny it. A thread stage's tty
+controlling terminal, which `SIGTTIN` would deny it. `Source::Terminal`
+means a terminal: a non-tty fd 0 became a `Source::Reader` once, at session
+start (the `Runtime` holds its one close-on-exec dup, and each run's
+inherited stdin is minted from it). A thread stage's tty
 passes as `Source::Terminal`: its externals inherit it and `stdin_reader`
 refuses it, since a thread in the shell process cannot read a tty whose
 foreground is the externals' group.
@@ -314,7 +317,7 @@ once no stage is live, then runs the same `drained` per external
 **A stage thread can itself launch a pipeline, which joins rather than owns.**
 The machine's `Pipeline` arm is `PipeNode`'s only caller and steps identically
 inside a stage thread, so a stage whose body is itself a pipeline launches its
-own nested stages. That nested `PipeNode` reads `shell.io.stage`: for
+own nested stages. That nested `PipeNode` reads `shell.session.stage`: for
 `Some(m)` it builds `PipelineGroup::joining(m)` instead of preparing
 one — no anchor, no foreground claim, and a `Group::Joins(m)` where an owner
 holds `Group::Owns(pgid)`, an anchor's presence being the whole of what

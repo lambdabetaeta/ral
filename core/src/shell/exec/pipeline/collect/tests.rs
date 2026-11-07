@@ -1443,7 +1443,7 @@ fn drive_settles_a_stage_whose_producer_unwound() {
 fn lone_shell(scope: &Scope, stage: Option<Membership>) -> Shell {
     let mut shell = crate::test_helper::core_shell();
     shell.scope = scope.clone();
-    shell.io.stage = stage;
+    shell.session.stage = stage;
     shell
 }
 

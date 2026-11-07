@@ -80,17 +80,17 @@ impl Shell {
 
     /// Terminal state probed once at startup (isatty / ANSI / mode bits).
     pub fn terminal(&self) -> TerminalState {
-        self.io.terminal
+        self.session.runtime.terminal
     }
 
     pub fn is_interactive(&self) -> bool {
-        self.io.interactive
+        self.session.interactive
     }
 
     /// Mark the shell interactive — the REPL sets it at boot so external
     /// commands and prompts behave as a live session.
     pub fn set_interactive(&mut self, interactive: bool) {
-        self.io.interactive = interactive;
+        self.session.interactive = interactive;
     }
 
     /// Every installed builtin's name, for tab completion.

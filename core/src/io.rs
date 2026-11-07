@@ -1,7 +1,6 @@
 //! Shell byte streams and their terminal presentation.
 //!
-//! [`Io`] bundles per-`Shell` streams and cached terminal state. Stream
-//! plumbing sits over [`edge`] / [`source`] / [`sink`]; [`terminal`] gates
+//! [`Io`] bundles a `Shell`'s three streams. Stream plumbing sits over [`edge`] / [`source`] / [`sink`]; [`terminal`] gates
 //! terminal output, using the escape vocabulary in [`ansi`].
 
 pub mod ansi;

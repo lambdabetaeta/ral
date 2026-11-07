@@ -111,11 +111,7 @@ where
     let (handle, permit) = HandleInner::new(id, title.as_str(), node, buffers);
     let receipt = worker_surface.map(|surface| (handle.started, title.clone(), surface));
     shell
-        .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
-            // A worker's stdout is its handle buffer, drained as it settles.
-            child.io.stdout = sinks.stdout;
-            child.io.stderr = sinks.stderr;
-
+        .spawn_worker(worker_mooring, sinks, move |mooring, child| {
             let end = End::of(|| {
                 // A panic drops the owner and stops accepted children (I4, I5).
                 let owner = ScopeOwner::new(BroodOwner::Worker(id));

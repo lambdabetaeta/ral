@@ -3,22 +3,20 @@
 //! already installed on the shell's by `shell::exec::redirect`, and a pipeline
 //! edge is just another source or sink.
 
-use crate::io::{Edge, Io, OutFd, Sink, Source};
+use crate::io::{Edge, OutFd, Sink, Source};
 use crate::process::StdioSpec;
-use crate::shell::runtime::{Error, Settled};
+use crate::shell::runtime::{Error, Settled, Shell};
 use std::sync::Arc;
 
 use super::Pumps;
 
-/// What a child at the boundary reads of `io`'s stdin.  A joined group's
-/// source is its owner's choice and passes through; otherwise a startup tty
-/// survives only where `readable`, in ral's own group or one lent the
-/// terminal, and any other group of its own reads EOF.
-pub(crate) fn boundary_stdin(io: &Io, readable: bool) -> &Source {
-    match &io.stdin {
-        Source::Terminal if io.terminal.startup_stdin_tty && io.stage.is_none() && !readable => {
-            &Source::Empty
-        }
+/// What a child at the boundary reads of `shell`'s stdin.  A joined group's
+/// source is its owner's choice and passes through; otherwise the terminal
+/// survives only where `readable`, in ral's own group or one lent it, and any
+/// other group of its own reads EOF.
+pub(crate) fn boundary_stdin(shell: &Shell, readable: bool) -> &Source {
+    match &shell.io.stdin {
+        Source::Terminal if shell.session.stage.is_none() && !readable => &Source::Empty,
         stdin => stdin,
     }
 }
@@ -120,10 +118,9 @@ mod tests {
     use crate::process::{DurableRoot, Membership, Pgid, Scope, StdioSpec};
     use crate::shell::runtime::Shell;
 
-    /// A startup tty on the shell's stdin.
+    /// The terminal on the shell's stdin.
     fn at_a_tty() -> Shell {
         let mut shell = crate::test_helper::core_shell();
-        shell.io.terminal.startup_stdin_tty = true;
         shell.io.stdin = Source::Terminal;
         shell
     }
@@ -131,10 +128,10 @@ mod tests {
     /// The terminal survives in ral's own group or a lent one, and is EOF to
     /// any other group of its own.
     #[test]
-    fn a_startup_tty_survives_only_where_its_group_can_read_it() {
+    fn the_terminal_survives_only_where_its_group_can_read_it() {
         let shell = at_a_tty();
-        assert!(matches!(boundary_stdin(&shell.io, true), Source::Terminal));
-        assert!(matches!(boundary_stdin(&shell.io, false), Source::Empty));
+        assert!(matches!(boundary_stdin(&shell, true), Source::Terminal));
+        assert!(matches!(boundary_stdin(&shell, false), Source::Empty));
     }
 
     /// A joined group reads what its owner chose, lent or not.
@@ -143,18 +140,21 @@ mod tests {
         let mut shell = at_a_tty();
         let group = Pgid::from_raw(1).expect("1 is positive");
         let stage = Scope::clone(&DurableRoot::default().worker());
-        shell.io.stage = Some(Membership::new(group, stage));
-        assert!(matches!(boundary_stdin(&shell.io, false), Source::Terminal));
+        shell.session.stage = Some(Membership::new(group, stage));
+        assert!(matches!(boundary_stdin(&shell, false), Source::Terminal));
         shell.io.stdin = Source::Empty;
-        assert!(matches!(boundary_stdin(&shell.io, true), Source::Empty));
+        assert!(matches!(boundary_stdin(&shell, true), Source::Empty));
     }
 
-    /// Only a startup tty is withheld: a redirected fd 0 is no terminal.
+    /// Only the terminal is withheld: a non-tty fd 0 is a reader, and
+    /// reaches every group.
+    #[cfg(unix)]
     #[test]
     fn a_non_tty_stdin_reaches_every_group() {
         let mut shell = at_a_tty();
-        shell.io.terminal.startup_stdin_tty = false;
-        assert!(matches!(boundary_stdin(&shell.io, false), Source::Terminal));
+        let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
+        shell.io.stdin = Source::Reader(crate::io::SourceReader::pipe(r));
+        assert!(matches!(boundary_stdin(&shell, false), Source::Reader(_)));
     }
 
     /// The source is authoritative: `Empty` wires `/dev/null` and `Terminal`

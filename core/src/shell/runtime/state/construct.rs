@@ -11,7 +11,7 @@ use crate::authority::grant::freeze::PolicyError;
 use crate::authority::policy::{Baseline, GrantStack};
 use crate::host::EnvVars;
 use crate::io::terminal::TerminalState;
-use crate::io::{Io, Source};
+use crate::io::{Io, Source, SourceReader};
 use crate::path::CwdPath;
 use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::shell::grant::{GrantNarrower, SpawnGrant};
@@ -36,6 +36,10 @@ pub struct Runtime {
     pub(crate) base: Vec<BuiltinEntry>,
     pub(crate) library_docs: HashMap<String, String>,
     pub(crate) terminal: TerminalState,
+    /// fd 0 as the process found it: `Terminal` at a tty, else a reader over
+    /// one close-on-exec duplicate, `Empty` where fd 0 is closed.  Every
+    /// run's inherited stdin is minted from it.
+    stdin: Arc<Source>,
     /// Host system reads and boot-image protection, outside the grant stack.
     baseline: Baseline,
 }
@@ -58,8 +62,21 @@ impl Runtime {
             base: Vec::new(),
             library_docs: HashMap::new(),
             terminal,
+            stdin: Arc::new(fd0(terminal)),
             baseline,
         }
+    }
+
+    /// A run's inherited stdin: the terminal, or a duplicate of fd 0's reader.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the reader fails.
+    pub(crate) fn stdin(&self) -> std::io::Result<Source> {
+        Ok(match &*self.stdin {
+            Source::Terminal => Source::Terminal,
+            Source::Empty => Source::Empty,
+            Source::Reader(r) => Source::Reader(r.try_clone()?),
+        })
     }
 
     /// Host facts supplied to every authority judgment.
@@ -88,6 +105,32 @@ impl Runtime {
     pub fn install_library_docs(&mut self, entries: Vec<(String, String)>) {
         self.library_docs.extend(entries);
     }
+}
+
+/// fd 0 as a [`Source`], once, so `Terminal` means a terminal.
+fn fd0(terminal: TerminalState) -> Source {
+    if terminal.startup_stdin_tty {
+        return Source::Terminal;
+    }
+    dup_stdin().map_or(Source::Empty, |f| Source::Reader(SourceReader::file(f)))
+}
+
+#[cfg(unix)]
+fn dup_stdin() -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsFd;
+    std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(std::fs::File::from)
+}
+
+#[cfg(windows)]
+fn dup_stdin() -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsHandle;
+    std::io::stdin()
+        .as_handle()
+        .try_clone_to_owned()
+        .map(std::fs::File::from)
 }
 
 /// Freshly installed `entries` split by the manifest's two halves: a value
@@ -232,12 +275,12 @@ impl Shell {
             lease,
             retention,
         } = terms;
-        let (stdin, hooks, terminal_lease) = match root {
+        let (hooks, terminal_lease) = match root {
             Some(RootOnly {
                 hooks,
                 terminal_lease,
-            }) => (Source::Terminal, Some(hooks), terminal_lease),
-            None => (Source::Empty, None, None),
+            }) => (Some(hooks), terminal_lease),
+            None => (None, None),
         };
         let durable = DurableRoot::new();
         let workers = Roster::default();
@@ -256,11 +299,7 @@ impl Shell {
             sig,
             context: context
                 .map_handlers(|frames| HandlerStack::over(runtime.base.clone(), frames)),
-            io: Io {
-                stdin,
-                terminal: runtime.terminal,
-                ..Io::default()
-            },
+            io: Io::default(),
             scope: anchor.clone(),
             session: SessionState {
                 anchor,
@@ -274,6 +313,8 @@ impl Shell {
                 terminal_lease,
                 stack_limit,
                 child_limits,
+                interactive: false,
+                stage: None,
                 hooks,
             },
             local: LocalState {
@@ -337,9 +378,23 @@ mod tests {
         assert!(shell.session.hooks.is_some());
         #[cfg(unix)]
         assert!(shell.session.terminal_lease.is_some());
-        assert!(matches!(shell.io.stdin, Source::Terminal));
+        assert!(matches!(shell.io.stdin, Source::Empty));
         assert!(!shell.local.bindings.armed());
         assert_eq!(shell.local.workers.retention(), None);
         assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
+    }
+
+    /// A run's inherited stdin is the terminal only at a tty; any other fd 0
+    /// is a reader, minted afresh per run.
+    #[test]
+    fn fd0_is_the_terminal_only_at_a_tty() {
+        let at_tty = TerminalState {
+            startup_stdin_tty: true,
+            ..TerminalState::default()
+        };
+        assert!(matches!(fd0(at_tty), Source::Terminal));
+        let runtime = Runtime::bare_on(Baseline::default(), TerminalState::default());
+        assert!(matches!(runtime.stdin(), Ok(Source::Reader(_))));
+        assert!(matches!(runtime.stdin(), Ok(Source::Reader(_))));
     }
 }

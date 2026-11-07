@@ -115,10 +115,8 @@ pub(super) fn launch_thread_stage(
         stdin,
         stdout,
         stderr: cx.shell.io.stderr.clone(),
-        interactive: cx.shell.io.interactive,
-        terminal: cx.shell.io.terminal,
-        stage: Some(cx.group.membership(&node)),
     };
+    let membership = cx.group.membership(&node);
 
     let policy = cx.shell.local.audit.active_policy();
     let env = cx.env.clone();
@@ -127,10 +125,9 @@ pub(super) fn launch_thread_stage(
 
     let join = cx
         .shell
-        .spawn_thread(mooring, "ral pipeline stage", move |mooring, child| {
+        .spawn_stage(mooring, io, membership, move |mooring, child| {
             // Armed by the thread it guards: a spawn that fails posts nothing.
             let settle = SettleOnDrop::new(slot);
-            child.io = io;
             child.local.audit.install_active_policy(policy);
             let end = End::of(|| eval(comp, env, mooring, child)).leaving(&child.session.sources);
             settle.send(StageObservation {

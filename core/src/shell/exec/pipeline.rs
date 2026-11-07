@@ -77,7 +77,7 @@ impl PipeNode {
         // Only the loan is placement's, prepared before even the anchor runs:
         // the anchor leads its own group, and a joined group is lent nothing.
         let (_, lending) = super::command::placement(shell, mooring, false);
-        let group = match shell.io.stage.clone() {
+        let group = match shell.session.stage.clone() {
             Some(membership) => PipelineGroup::joining(membership),
             None => PipelineGroup::prepare(tx.clone())?,
         };

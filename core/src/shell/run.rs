@@ -281,7 +281,6 @@ impl Shell {
                 };
                 if hook.policy.aside {
                     let mut aside = self.join_session();
-                    aside.io = build_run(self, None, Source::Empty);
                     return aside.run_built(req, foreground, wall, None, base, body);
                 }
                 self.run_built(req, foreground, wall, None, base, body)
@@ -318,7 +317,17 @@ impl Shell {
             .unzip();
 
         let stdin = match run.stdin {
-            RunStdin::Inherit => Source::Terminal,
+            RunStdin::Inherit => match self.session.runtime.stdin() {
+                Ok(stdin) => stdin,
+                Err(e) => {
+                    return RunReport::Static {
+                        diagnostics: StaticDiagnostics::Host(Error::io(
+                            "could not duplicate the session's stdin",
+                            &e,
+                        )),
+                    };
+                }
+            },
             RunStdin::Empty => Source::Empty,
         };
         let terminal_access = match run.terminal {
@@ -416,9 +425,6 @@ pub(crate) fn build_run(shell: &Shell, sinks: Option<Streams<Sink>>, stdin: Sour
         stdin,
         stdout,
         stderr,
-        interactive: shell.io.interactive,
-        terminal: shell.io.terminal,
-        stage: shell.io.stage.clone(),
     }
 }
 

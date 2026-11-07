@@ -1,10 +1,10 @@
 //! Interpreter state, partitioned by lifetime: the field name *is* the
 //! invariant.  `env` and `context` persist and cross evaluation boundaries
-//! and thread spawns; `io` ([`Io`]) and `scope` belong to one run, swapped in
-//! and restored on teardown by `crate::shell::run::IoLoan`, and within a run by the
-//! frames that swap them; [`SessionState`] survives
-//! every run; [`LocalState`] is host scratch whose members each carry their
-//! own rule.
+//! and thread spawns; `io` ([`Io`], the three streams) and `scope` belong to
+//! one run, swapped in and restored on teardown by
+//! `crate::shell::run::IoLoan`, and within a run by the frames that swap
+//! them; [`SessionState`] survives every run; [`LocalState`] is host scratch
+//! whose members each carry their own rule.
 //!
 //! What a run fixes *once* — where its events go, who answers it, what stops
 //! it, its terminal authority — is not here at all: it is the [`Mooring`] on
@@ -131,6 +131,16 @@ pub struct SessionState {
     pub(crate) stack_limit: usize,
     /// Soft resource ceilings for children; ral keeps its own limits.
     pub(crate) child_limits: crate::process::ChildLimits,
+    /// Running as an interactive REPL, not merely attached to a tty.
+    pub(crate) interactive: bool,
+    /// The pipeline group this shell's externals join, never leading one of
+    /// their own; `None` outside a stage.  It decides pgid placement (a
+    /// standalone external may lead its own group, so a watchdog cancel can
+    /// `kill(-pgid, …)` the whole subtree), and its absence is one conjunct
+    /// of the foreground gate in `shell/exec/command/foreground.rs`; holding
+    /// the session's [`TerminalLease`](crate::process::TerminalLease) is
+    /// another.
+    pub(crate) stage: Option<crate::process::Membership>,
     /// Named run entry points (rc-declared prompt, startup block, plugin
     /// hooks): a namespace apart from both lexical scope and the handler
     /// stack, since hooks are run roots, never commands or variables.  Session
@@ -150,7 +160,7 @@ pub struct LocalState {
     /// through `shell::runtime::audit::fan_out`.
     pub(crate) audit: Audit,
     /// Every worker (`spawn`, `watch`) spawned from this shell.
-    /// [`Shell::spawn_thread`] shares the registry into the worker's own shell,
+    /// `Shell::spawn_thread` shares the registry into the worker's own shell,
     /// so a nested `spawn` registers alongside its parent; a sub-agent fork
     /// starts fresh, one registry per agent.
     pub(crate) workers: Roster,

@@ -279,7 +279,7 @@ Bodies are grouped by concern, one submodule each:
   `Notice::from_surface`). An unarmed registry (the REPL) retains `Ready`
   entries indefinitely; a claimer removes an entry when it transitions to
   `Consumed`, so the sweep only catches `Ready` results nobody claimed. A worker
-  runs its thunk on a fresh `std::thread` via `Shell::spawn_thread`
+  runs its thunk on a fresh `std::thread` via `Shell::spawn_worker`
   ([[map/core/shell-state|shell-state]]), seeded from the parent's session;
   `worker_body` hands the thunk, its capture riding in its closure, straight
   to `machine::apply` with no arguments ([[map/core/evaluator|evaluator]]), deliberately

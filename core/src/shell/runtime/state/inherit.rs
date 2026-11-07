@@ -1,8 +1,9 @@
 //! Moving state from a parent shell into a child computation.
 //!
-//! Spawned thread, pipeline stage and REPL aside share a session's memory, and
+//! Spawned worker, pipeline stage and REPL aside share a session's memory, and
 //! all three are built by the one literal in [`Shell::child`]: a field added to
-//! [`Shell`] cannot reach a child by defaulting.  (A sub-agent is a session of
+//! [`Shell`] cannot reach a child by defaulting, and each birth states its
+//! child's streams and place in a [`Seat`].  (A sub-agent is a session of
 //! its own, built by `Shell::child_of`.)  No child mints a
 //! [`TerminalLease`](crate::process::TerminalLease): the foreground gate wants
 //! the run's access *and* the session's lease, so a fork fails the second half
@@ -11,8 +12,8 @@
 use super::bindings::BindingLedger;
 use super::workers::Roster;
 use super::{LocalState, Mooring, SessionState, Shell};
-use crate::io::{Io, Source};
-use crate::process::{DurableRoot, Scope};
+use crate::io::{Io, Sink, Source, Streams};
+use crate::process::{DurableRoot, Membership, Scope};
 use crate::shell::runtime::{Audit, Cradle};
 use std::sync::Arc;
 
@@ -22,6 +23,14 @@ struct Holding {
     /// The child's session anchor and its current scope: one node at birth.
     scope: Scope,
     workers: Roster,
+    seat: Seat,
+}
+
+/// A child's streams and its place among the session's processes.
+struct Seat {
+    io: Io,
+    interactive: bool,
+    stage: Option<Membership>,
 }
 
 impl Shell {
@@ -31,22 +40,24 @@ impl Shell {
     /// describes as the parent does, and differs from its siblings only in its
     /// [`Holding`].  Everything else is fresh: control counters, since a child
     /// continues no call stack; no hooks, since a worker or a stage dispatches
-    /// none; stdin `Empty`, since a child must not `tcgetpgrp` whoever owns
-    /// the real terminal.
+    /// none.
     fn child(&self, holding: Holding) -> Self {
         let Holding {
             root,
             scope,
             workers,
+            seat:
+                Seat {
+                    io,
+                    interactive,
+                    stage,
+                },
         } = holding;
         Self {
             env: self.env.clone(),
             sig: Arc::clone(&self.sig),
             context: self.context.clone(),
-            io: Io {
-                stdin: Source::Empty,
-                ..Io::default()
-            },
+            io,
             scope: scope.clone(),
             session: SessionState {
                 root,
@@ -60,6 +71,8 @@ impl Shell {
                 terminal_lease: None,
                 stack_limit: self.session.stack_limit,
                 child_limits: self.session.child_limits,
+                interactive,
+                stage,
                 hooks: None,
             },
             local: LocalState {
@@ -81,6 +94,9 @@ impl Shell {
     /// aimed at a command the session was already running is older than every
     /// frame the aside will mint, so the aside can neither absorb it nor keep
     /// it from the run it was aimed at.
+    ///
+    /// It writes where the session does and reads nothing, so it cannot
+    /// `tcgetpgrp` whoever owns the real terminal.
     pub fn join_session(&self) -> Self {
         let root = self.session.root.clone();
         let scope = Scope::clone(&root.worker());
@@ -89,9 +105,70 @@ impl Shell {
             root,
             scope,
             workers: self.local.workers.fresh(),
+            seat: Seat {
+                io: Io {
+                    stdin: Source::Empty,
+                    stdout: self.io.stdout.clone(),
+                    stderr: self.io.stderr.clone(),
+                },
+                interactive: self.session.interactive,
+                stage: self.session.stage.clone(),
+            },
         });
         aside.local.cradle = cradle;
         aside
+    }
+
+    /// A worker's thread: it reads nothing, writes `out`, and joins no
+    /// group, so its externals lead sessions of their own and none can steal
+    /// interactive input.
+    ///
+    /// # Errors
+    /// Returns `Err` if the OS refuses to start the thread.
+    pub(crate) fn spawn_worker<F, R>(
+        &self,
+        mooring: Mooring,
+        out: Streams<Sink>,
+        f: F,
+    ) -> std::io::Result<std::thread::JoinHandle<R>>
+    where
+        F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let Streams { stdout, stderr } = out;
+        let seat = Seat {
+            io: Io {
+                stdin: Source::Empty,
+                stdout,
+                stderr,
+            },
+            interactive: false,
+            stage: None,
+        };
+        self.spawn_thread(mooring, seat, "ral spawn worker", f)
+    }
+
+    /// A pipeline stage's thread, on `io`, its externals joining `membership`.
+    ///
+    /// # Errors
+    /// Returns `Err` if the OS refuses to start the thread.
+    pub(crate) fn spawn_stage<F, R>(
+        &self,
+        mooring: Mooring,
+        io: Io,
+        membership: Membership,
+        f: F,
+    ) -> std::io::Result<std::thread::JoinHandle<R>>
+    where
+        F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let seat = Seat {
+            io,
+            interactive: self.session.interactive,
+            stage: Some(membership),
+        };
+        self.spawn_thread(mooring, seat, "ral pipeline stage", f)
     }
 
     /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
@@ -103,12 +180,10 @@ impl Shell {
     /// registers alongside its parent, and the worker's shell dropping cancels
     /// nothing of the parent's.  The cradle is the parent's too: a stage keeps
     /// it, a worker's base replaces it with its own.
-    ///
-    /// # Errors
-    /// Returns `Err` if the OS refuses to start the thread.
-    pub(crate) fn spawn_thread<F, R>(
+    fn spawn_thread<F, R>(
         &self,
         mooring: Mooring,
+        seat: Seat,
         name: &str,
         f: F,
     ) -> std::io::Result<std::thread::JoinHandle<R>>
@@ -120,6 +195,7 @@ impl Shell {
             root: self.session.root.clone(),
             scope: Scope::clone(&mooring.home),
             workers: self.local.workers.share(),
+            seat,
         });
         let live = self.local.workers.live_ticket();
         let handle = std::thread::Builder::new()
@@ -147,6 +223,13 @@ mod tests {
     use crate::shell::runtime::state::DEFAULT_STACK_LIMIT;
     use crate::shell::runtime::{DefaultPolicy, HookName, HookSig, block_over};
 
+    fn inherited() -> Streams<Sink> {
+        Streams {
+            stdout: Sink::Terminal,
+            stderr: Sink::Stderr,
+        }
+    }
+
     /// Hooks are session state: a worker, a stage and an aside each
     /// start without them, and with an `Empty` stdin, so none can foreground
     /// whoever owns the real terminal.
@@ -167,14 +250,44 @@ mod tests {
         assert!(!aside.has_hook(&HookName::session("prompt")));
         assert!(matches!(aside.io.stdin, crate::io::Source::Empty));
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
                 (
                     child.has_hook(&HookName::session("prompt")),
                     matches!(child.io.stdin, crate::io::Source::Empty),
                 )
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
         assert_eq!(join.join().expect("worker thread"), (false, true));
+    }
+
+    /// A worker's isolation is its birth's, whatever its parent's place: it
+    /// joins no group and is not interactive, so its externals lead sessions
+    /// of their own.  A stage and an aside keep the parent's interactivity.
+    #[test]
+    fn a_worker_is_born_isolated_and_a_stage_joins_its_group() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.set_interactive(true);
+        let group = crate::process::Pgid::from_raw(1).expect("1 is positive");
+        parent.session.stage = Some(Membership::new(group, parent.scope.clone()));
+        let place = |child: &Shell| (child.session.interactive, child.session.stage.is_some());
+
+        let worker = parent
+            .spawn_worker(Mooring::adrift(), inherited(), move |_, child| place(child))
+            .expect("spawn_worker");
+        assert_eq!(worker.join().expect("worker thread"), (false, false));
+
+        let membership = Membership::new(group, parent.scope.clone());
+        let stage = parent
+            .spawn_stage(
+                Mooring::adrift(),
+                Io::default(),
+                membership,
+                move |_, child| place(child),
+            )
+            .expect("spawn_stage");
+        assert_eq!(stage.join().expect("stage thread"), (true, true));
+
+        assert_eq!(place(&parent.join_session()), (true, true));
     }
 
     /// An rc `recursion-limit:` key or a `--recursion-limit` flag configures
@@ -185,10 +298,10 @@ mod tests {
         let mut parent = crate::test_helper::core_shell();
         parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
                 child.session.stack_limit
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
 
         let stack_limit = join.join().expect("worker thread");
         assert_eq!(stack_limit, DEFAULT_STACK_LIMIT + 7);
@@ -208,7 +321,7 @@ mod tests {
         );
         let span = crate::source::Span::new(file, 8, 11);
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", move |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), move |_, child| {
                 crate::shell::runtime::Error {
                     prov: Some(crate::shell::runtime::Prov::Live {
                         name: "fail".into(),
@@ -218,7 +331,7 @@ mod tests {
                 }
                 .render(&child.session.sources, None, child.exit_hints())
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
 
         let rendered = join.join().expect("worker thread");
         assert!(
@@ -243,10 +356,10 @@ mod tests {
         ));
         parent.session.root_file = root_file;
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
                 child.session.root_file
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
 
         let child_root_file = join.join().expect("worker thread");
         assert_eq!(
@@ -263,10 +376,10 @@ mod tests {
             "false 1 hinted\n",
         ));
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
                 Arc::clone(&child.session.exit_hints)
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
 
         let hints = join.join().expect("worker thread");
         assert!(Arc::ptr_eq(&hints, &parent.session.exit_hints));
@@ -281,10 +394,10 @@ mod tests {
         let aside = parent.join_session();
         assert_eq!(aside.scratch(), Some("/the/session/scratch"));
         let join = parent
-            .spawn_thread(Mooring::adrift(), "test-worker", |_, child| {
+            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
                 child.scratch().map(str::to_owned)
             })
-            .expect("spawn_thread");
+            .expect("spawn_worker");
         assert_eq!(
             join.join().expect("worker thread").as_deref(),
             Some("/the/session/scratch")
@@ -316,7 +429,6 @@ mod tests {
     #[test]
     fn live_ticket_outlives_child_and_mooring_teardown_on_return_and_unwind() {
         use crate::data::FOValue;
-        use crate::io::Sink;
         use crate::shell::runtime::EventSink;
         use crate::sync::LockExt as _;
         use std::sync::Mutex;
@@ -388,7 +500,7 @@ mod tests {
             mooring.surface = Some(Arc::new(GatedSurface(mooring_gate)));
 
             let join = parent
-                .spawn_thread(mooring, "test-teardown", move |_, child| {
+                .spawn_worker(mooring, inherited(), move |_, child| {
                     let on_drop = GatedDrop(child_gate);
                     child.io.stdout = Sink::Watch {
                         line: Arc::new(move |_| {
@@ -399,7 +511,7 @@ mod tests {
                     assert!(!should_panic, "simulated completion delivery panic");
                     42usize
                 })
-                .expect("spawn_thread");
+                .expect("spawn_worker");
 
             child_entered
                 .recv_timeout(Duration::from_secs(2))

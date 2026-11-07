@@ -26,7 +26,7 @@ pub(crate) fn placement(
     mooring: &Mooring,
     enveloped: bool,
 ) -> (PgidPolicy, Option<PreparedTerminalLoan>) {
-    if let Some(stage) = shell.io.stage.as_ref() {
+    if let Some(stage) = shell.session.stage.as_ref() {
         return (PgidPolicy::Join(stage.group()), None);
     }
     let foreground = !enveloped
@@ -37,7 +37,7 @@ pub(crate) fn placement(
             PgidPolicy::NewLeader,
             TerminalLoan::prepare(lease, &mooring.home),
         ),
-        None if shell.io.interactive => (PgidPolicy::Inherit, None),
+        None if shell.session.interactive => (PgidPolicy::Inherit, None),
         None => (PgidPolicy::NewSession, None),
     }
 }
@@ -51,9 +51,7 @@ mod tests {
     /// a terminal-launched script.  Stdout defaults to `Sink::Terminal`.
     fn leased_shell() -> (Shell, Mooring) {
         let mut shell = crate::test_helper::core_shell();
-        shell.io.interactive = true;
-        shell.io.terminal.startup_stdin_tty = true;
-        shell.io.terminal.startup_stdout_tty = true;
+        shell.session.interactive = true;
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
         let mooring = Mooring {
             terminal_access: TerminalAccess::Leased,
@@ -92,7 +90,7 @@ mod tests {
     fn a_stages_child_joins_its_group_unlent() {
         let (mut shell, mooring) = leased_shell();
         let group = Pgid::from_raw(1).expect("1 is positive");
-        shell.io.stage = Some(Membership::new(group, shell.scope.clone()));
+        shell.session.stage = Some(Membership::new(group, shell.scope.clone()));
         let (policy, loan) = placement(&shell, &mooring, false);
         assert!(
             matches!(policy, PgidPolicy::Join(g) if g == group),
@@ -135,7 +133,7 @@ mod tests {
     #[cfg(unix)]
     fn a_terminal_scripts_leased_child_foregrounds() {
         let (mut shell, mooring) = leased_shell();
-        shell.io.interactive = false;
+        shell.session.interactive = false;
         assert_foreground(placement(&shell, &mooring, false));
     }
 
@@ -143,7 +141,7 @@ mod tests {
     #[test]
     fn a_headless_captured_child_leads_a_session() {
         let (mut shell, mooring) = leased_shell();
-        shell.io.interactive = false;
+        shell.session.interactive = false;
         captured(&mut shell);
         assert_background(placement(&shell, &mooring, false), false);
     }
