@@ -168,11 +168,21 @@ streams exist ([[invariants/redirects-are-the-three-standard-streams|redirects-a
 
 | stdin | arises from |
 |---|---|
-| the terminal | a run that inherits it, when fd 0 was a terminal at startup and the launch holds a permit to read it |
+| the terminal | a run that inherits it, when fd 0 was a terminal at startup and the child's group can read it |
 | a pipe | the previous pipeline stage |
 | a file | `< f` |
 | a here-string | `<< s`, written into a pipe by a thread |
-| empty (`/dev/null`) | captured runs (exarch), workers, `detach`, a thread stage of a foreground pipeline, a terminal without a permit |
+| empty (`/dev/null`) | captured runs (exarch), workers, `detach`, and a startup terminal the child's group cannot read |
+
+**One rule decides what a child at the boundary reads** (`boundary_stdin`), and
+the child's source is then wired as it stands.
+
+- A group the child joins passes its owner's source through.
+- A startup terminal survives only where the child's group can read it: ral's
+  own group, or one lent the terminal.
+- A group of its own that is not lent the terminal reads EOF.
+- An interactive enveloped child keeps the terminal as stdin, because
+  readability follows the `Inherit` that `placement` asked for.
 
 | stdout / stderr | arises from | the child sees |
 |---|---|---|
@@ -184,7 +194,8 @@ streams exist ([[invariants/redirects-are-the-three-standard-streams|redirects-a
 | a worker buffer | `spawn` / `watch` | a pipe ral pumps |
 
 A pumped stream is not a terminal, so a command whose stdout is captured or
-audited sees no terminal and never takes the foreground.
+audited sees no terminal and takes the foreground only under an explicit loan,
+whose body (`_ed-tui`'s `fzf`) draws on `/dev/tty` whatever its stdout.
 
 ### Authority
 
@@ -220,15 +231,19 @@ stopped with `SIGTTIN`.
 - **A host requests terminal access per run**, `RequestedTerminalAccess`:
   `Leased` for the REPL and batch, `Denied` for exarch. A lease exists only if
   ral owned the foreground at startup.
-- **One decision fixes the process group and the handoff**
-  (`ForegroundDecision`, `core/src/shell/exec/command/foreground.rs`):
+- **One rule fixes the process group and the handoff**, for a standalone command
+  and a pipeline alike (`placement`,
+  `core/src/shell/exec/command/foreground.rs`):
 
   | policy | when | consequence |
   |---|---|---|
-  | `NewLeader` | a lease, stdout the terminal, no pump, no envelope | the terminal is lent to the child's group with `tcsetpgrp`, and taken back at its death |
-  | `NewSession` | a non-interactive run | own session and group, so a teardown reaches the whole tree |
-  | `Join` | inside a pipeline stage | the pipeline's group |
-  | `Inherit` | an interactive run that does not take the foreground | ral's own group |
+  | `Join` | inside a pipeline stage | the stage's group, never lent the terminal |
+  | `NewLeader` | the run holds the lease, stdout is the terminal or the run is an explicit loan, and no envelope | the terminal is lent to the child's group with `tcsetpgrp`, and taken back at its death |
+  | `Inherit` | an interactive run otherwise | ral's own group |
+  | `NewSession` | a non-interactive run otherwise | own session and group, so a teardown reaches the whole tree |
+
+  A pipeline's group is led by its anchor, which takes the `NewLeader` row's
+  loan for the whole group.
 
 - **ral has no job control.** The reaper answers every stop with `SIGCONT`, so
   Ctrl-Z suspends nothing and no stopped job ever exists

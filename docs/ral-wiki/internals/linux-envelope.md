@@ -56,7 +56,7 @@ the filesystem**
   means bwrap died before reporting; an unreadable or malformed one makes
   the spawn kill and reap the envelope, then return an error.
 - **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
-  whatever was asked, and returns the payload's group. `ForegroundDecision`
+  whatever was asked, and returns the payload's group. `placement`
   never hands an envelope the terminal. A pipeline collector addresses each
   confined stage's envelope beside its own group
   ([[internals/pipeline-execution|pipeline execution]]).

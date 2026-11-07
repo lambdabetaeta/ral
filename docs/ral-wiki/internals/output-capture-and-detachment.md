@@ -68,9 +68,9 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   `core/src/shell/exec/pipeline/collect.rs`, [[map/core/runtime|runtime]]). A
   foreground command returns only once every byte the child wrote has been
   copied and the pipe has closed.
-- The join never delays the terminal: a lone command's lent terminal is
-  reclaimed the instant its tenant is dead, before the pumps are joined
-  ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
+- The join never delays the terminal: a lent terminal, a lone command's or a
+  pipeline's, is reclaimed the instant its tenants are dead, before the pumps
+  are joined ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
 - A join under a cause in force kills the owned group once, a slice at a time:
   a survivor holding the pipe ends the join only when its pipe closes. A child
   cut for a dead write, and a collector dropped by an unwind, *detach* their

@@ -66,8 +66,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   (`validate_argv`, the argv shape, read by `prepare` after the 127/126
   verdict), `process.rs` (`prepare`, `start`, `ending`),
   `stdio.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
-  for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once:
-  `ForegroundDecision(PgidPolicy)`, `NewLeader` being exactly the foreground.
+  for [[map/core/builtins|bundled coreutils]]. `foreground.rs` decides once, for a
+  standalone command and a pipeline alike: `placement` returns the `PgidPolicy`
+  and the prepared loan, `NewLeader` being exactly the foreground.
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
     tool, a launch path, or a bare name with its effective `PATH` and
@@ -110,18 +111,22 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     and behaves identically on Windows where no `.exe` exists to spawn
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
-  - `foreground.rs`'s `ForegroundDecision::for_standalone` gates the terminal
-    handoff on a held *terminal lease* (`Shell::terminal_lease` is `Some`) plus
-    top-level launch role and a terminal-bound sink with no shell-side pump, not
-    on REPL interactivity — so a non-interactive script launched at a terminal
-    holds a `Leased` run and foregrounds its interactive children, while an
-    exarch `Denied` tool run cannot construct the handoff at all
+  - `foreground.rs`'s `placement` gates the terminal handoff on a held
+    *terminal lease* (`Shell::terminal_lease` is `Some`), a terminal-bound
+    stdout or an explicit loan, and no envelope, not on REPL interactivity —
+    so a non-interactive script launched at a terminal holds a `Leased` run and
+    foregrounds its interactive children, while an exarch `Denied` tool run
+    cannot construct the handoff at all
     ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
     On every platform it prepares the terminal snapshot before spawn and lends
     it to the resulting group afterwards; both guards restore on failure or
     unwind. Pipeline preparation likewise precedes anchor spawn, and only an
-    owning pipeline (no enclosing stage) prepares: dropping a prepared loan
-    restores the terminal, so a joined pipeline must never hold one.
+    owning pipeline (no enclosing stage) prepares: a stage's child joins its
+    group unlent, since dropping a prepared loan restores the terminal, so a
+    joined pipeline must never hold one. `stdio.rs`'s `boundary_stdin` is the
+    one rule for what a child at the boundary reads: a joined group passes its
+    owner's source through, a startup tty survives only where the child's group
+    can read it, and an unlent owned group reads EOF.
     There is no parking: a stopped standalone child is answered with
     `SIGCONT` inline, by whoever waits on it, the same rule everywhere
     ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
@@ -131,8 +136,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
     the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
     which the standalone command, a direct pipeline stage, and an external a
-    stage thread spawns internally all route; the tty-inherit predicate
-    (`stdio::inherit_tty`) is likewise shared.
+    stage thread spawns internally all route; `wire_stdio` takes the child's
+    `Source` as it stands, so the stdin choice is `boundary_stdin`'s alone.
   - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
@@ -181,9 +186,10 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     — nothing in the pipeline distinguishes a bundled head from a host binary,
     so both classify as `External` carrying the resolved `Head`.
     Value-style composition is evaluator application, never a stage-transport
-    concern. The terminal-ownership decision (`resolve_terminal_plan`)
-    likewise gates on a reachable terminal lease and a terminal-bound final
-    sink, not on a `startup_foreground` predicate.
+    concern. The terminal-ownership decision is `command::placement`, the
+    standalone command's own rule, gating on a reachable terminal lease and a
+    terminal-bound final sink or explicit loan, not on a `startup_foreground`
+    predicate.
   - `pipeline.rs` is the spine: `PipeNode::run` is resolve, group, collector,
     node, then `launch`, one `spawn_stage` per stage pushed onto the collector,
     then, after a `roll_back` if that failed, `join`. `launch.rs` wires one
@@ -290,11 +296,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     second copy of it — but only through the collector's
     `loan: Option<TerminalLoan>`, the one ear for a key: with no loan, or for
     a signal no terminal sends, it is inert; the teardown follows from the
-    current scope read at the next slice. `fold` opens by hearing out every
-    queued report, settles each external under `sent` joined with the cause
-    on the current scope, and the loan drops with the collector, returning
-    the terminal and striking nothing; `holds_terminal`
-    reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
+    current scope read at the next slice. `fold` opens with
+    `CollectState::vacate`: it hears out every queued report, then returns the
+    loan, the terminal back before any pump is joined and nothing struck; only
+    then does it settle each external under `sent` joined with the cause on the
+    current scope. `holds_terminal` reports the loan actually made, which `LaunchCx.holds_terminal` freezes.
     The `Slot` a stage hands its own producers is minted by `launch` from the
     sending half `PipeNode::run` holds and drops once the stages are launched —
     the collector keeps none. Attribution rides the handle:

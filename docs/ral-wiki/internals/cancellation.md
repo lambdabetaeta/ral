@@ -520,8 +520,10 @@ was lent for (`Mooring::home`) as it hears**:
   signal it swallowed raw as `Event::Heard(signal)`, which strikes the node
   and records `pressed`; the teardown follows from the scope read at the next
   slice, which is what lets a shield hold it off. `pressed` is read only to
-  skip a duplicate grace signal, never to attribute a death. The loan's drop
-  restores the terminal and strikes nothing.
+  skip a duplicate grace signal, never to attribute a death. `fold` opens with
+  `CollectState::vacate`, which strikes the last reports and returns the
+  terminal once no stage is live, before any pump is joined, as a lone command
+  does; the reclaim itself strikes nothing.
 
 The node the loan strikes is always the run's own, never the current scope:
 neither a stage's child nor a stage's pipeline is lent, so the strike reaches
