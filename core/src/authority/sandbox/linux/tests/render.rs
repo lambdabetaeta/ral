@@ -759,8 +759,8 @@ fn a_denys_spine_is_bound_onto_itself_between_the_binds_and_the_masks() {
 }
 
 /// A pinned directory turned into a link since the render refuses the
-/// launch in the sentence a linked prefix gets: its pin would show the
-/// link's target on the deny's spine.
+/// launch: its pin would show the link's target on the deny's spine.  It is
+/// pinned, not granted, so the refusal names no grant.
 #[test]
 fn a_pinned_directory_turned_link_refuses_the_launch() {
     let dir = workdir("pin-turned-link");
@@ -779,10 +779,11 @@ fn a_pinned_directory_turned_link_refuses_the_launch() {
     assert_eq!(
         why,
         format!(
-            "sandbox: '{}' was granted by its real path, but it now goes through a symbolic \
-             link; an allowance names what it named when granted. To allow the new target, \
-             grant it where the ceiling is set (in exarch, restart with a grant that names it)",
-            p.display()
+            "sandbox: the directory '{}' is pinned for this launch, but it now reaches '{}' \
+             through a symbolic link, which would be shown at its name; make it a directory \
+             again, or retry once nothing is relinking it",
+            p.display(),
+            elsewhere.display()
         )
     );
     let _ = std::fs::remove_dir_all(&dir);

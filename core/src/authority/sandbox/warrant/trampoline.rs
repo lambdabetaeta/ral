@@ -226,7 +226,7 @@ fn start_tool(
     match unsafe { crate::process::fork() } {
         Ok(crate::process::Forked::Child) => {
             drop((witness, hears));
-            tool_child(tool, args, caught, supervisor, &tells)
+            tool_child(tool, args, caught, supervisor, tells)
         }
         Ok(crate::process::Forked::Parent(pid)) => {
             drop(tells);
@@ -264,19 +264,22 @@ fn supervise(witness: Witness, pid: Pid) -> u8 {
         .unwrap_or(u8::MAX)
 }
 
-/// The forked tool's whole life: it tells whether it [`begin`]s, then runs.
-/// It never returns to the trampoline's frames, by a panic either.
+/// The forked tool's whole life: it tells whether it [`begin`]s, then runs,
+/// holding only what the trampoline's program would.  It never returns to the
+/// trampoline's frames, by a panic either.
 #[cfg(target_os = "linux")]
 fn tool_child(
     tool: &'static str,
     args: Vec<OsString>,
     caught: &[c_int],
     supervisor: Pid,
-    tells: &impl AsFd,
+    tells: os_pipe::PipeWriter,
 ) -> ! {
     use std::io::Write;
     let begun = begin(caught, supervisor);
-    Dawn::tell(tells, &begun);
+    Dawn::tell(&tells, &begun);
+    // No `execve` here closes it on exec.
+    drop(tells);
     if begun.is_err() {
         leave(UNSTARTED);
     }

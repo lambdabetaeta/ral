@@ -1205,20 +1205,18 @@ mod foreground {
         assert!(placed.loan.is_none());
     }
 
-    /// An envelope leads a group of its own, whatever its pipeline's: the
-    /// one place the rule lives, for a lone command and a stage alike.
+    /// An envelope leads a group of its own, whatever its pipeline's.
     #[test]
     fn an_enveloped_member_leads_its_own_group() {
+        let (mut shell, mooring) = leased_shell();
         let group = Pgid::from_raw(1).expect("1 is positive");
-        let stage = Membership::new(group, Scope::clone(&DurableRoot::default().child()));
-        assert!(matches!(
-            member_policy(stage.clone(), true),
-            PgidPolicy::NewLeader
+        shell.session.stage = Some(Membership::new(
+            group,
+            Scope::clone(&DurableRoot::default().child()),
         ));
-        assert!(matches!(
-            member_policy(stage, false),
-            PgidPolicy::Join(m) if m.group() == group
-        ));
+        let placed = placement(&shell, &mooring, true);
+        assert!(matches!(placed.policy, PgidPolicy::NewLeader));
+        assert!(placed.loan.is_none());
     }
 
     #[test]
@@ -1748,11 +1746,7 @@ mod process {
                     prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
                 let shown = prepared.shown.clone();
                 between();
-                let policy = if prepared.launch.enveloped() {
-                    PgidPolicy::NewLeader
-                } else {
-                    PgidPolicy::Inherit
-                };
+                let policy = PgidPolicy::Inherit.unless_enveloped(prepared.launch.enveloped());
                 (shown, start(prepared, policy, &shell.scope))
             })
         }

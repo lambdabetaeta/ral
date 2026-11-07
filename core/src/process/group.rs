@@ -120,6 +120,14 @@ pub(crate) enum PgidPolicy {
     Join(Membership),
 }
 
+impl PgidPolicy {
+    /// `self`, unless an envelope stands between ral and the program: one
+    /// leads a group of its own, the one placement `Launch::spawn` accepts.
+    pub(crate) fn unless_enveloped(self, enveloped: bool) -> Self {
+        if enveloped { Self::NewLeader } else { self }
+    }
+}
+
 /// A pipeline group joined, and the stage scope whose every cause the
 /// group's owner delivers to the whole group.
 #[derive(Clone, Debug)]

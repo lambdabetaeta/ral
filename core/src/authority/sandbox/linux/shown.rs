@@ -69,8 +69,8 @@ impl Bind {
         if real != *name {
             return Err(format!(
                 "sandbox: the directory '{}' is pinned for this launch, but it now reaches '{}' \
-                 through a symbolic link, which would be shown at its name; retry once nothing \
-                 is relinking it",
+                 through a symbolic link, which would be shown at its name; make it a directory \
+                 again, or retry once nothing is relinking it",
                 crate::path::shown(name.as_str()),
                 crate::path::shown(real.as_str())
             ));

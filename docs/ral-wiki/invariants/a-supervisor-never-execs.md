@@ -44,8 +44,10 @@ of the supervisor and of the `SIGSEGV` example below.
   `SIGPIPE`. It is silent, and tells the supervisor whether it began, one
   word on a close-on-exec pipe, before it runs the tool: the supervisor says
   `started` only after that word, and a child that cannot begin is `refused`
-  with its errno, never a tool that `exited 126`. It never returns into the
-  supervisor's frames, by a panic either.
+  with its errno, never a tool that `exited 126`. Having spoken, it closes its
+  end of the pipe: close-on-exec fires only at an `execve`, which a forked tool
+  never makes, so the tool holds stdio and nothing else, as a spawned program
+  does. It never returns into the supervisor's frames, by a panic either.
 - **The trampoline is single-threaded up to that fork.** Its warrant role starts
   no thread, so the forked child may run anything. Landlock's `restrict_self`
   is called without `TSYNC` and so binds only the calling thread; it confines

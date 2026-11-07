@@ -344,7 +344,7 @@ impl Launch {
         let enveloped = self.enveloped();
         assert!(
             !enveloped || matches!(pgid, PgidPolicy::NewLeader),
-            "an envelope leads a group of its own: placement must say NewLeader"
+            "an envelope leads a group of its own: place it by `PgidPolicy::unless_enveloped`"
         );
         let Self {
             mut cmd,
@@ -419,8 +419,8 @@ impl Launch {
         use std::os::unix::process::ExitStatusExt;
         self.stdout(StdioSpec::Piped).stderr(StdioSpec::Piped);
         let unstopped = crate::process::DurableRoot::default().child();
-        let Spawned { mut child, .. } =
-            self.spawn(crate::process::PgidPolicy::Inherit, &unstopped)?;
+        let pgid = crate::process::PgidPolicy::Inherit.unless_enveloped(self.enveloped());
+        let Spawned { mut child, .. } = self.spawn(pgid, &unstopped)?;
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();

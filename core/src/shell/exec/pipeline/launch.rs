@@ -13,7 +13,7 @@ use super::thread::launch_thread_stage;
 use crate::error::io_message;
 use crate::fact::AuditIo;
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{Group, Scope, Spawned};
+use crate::process::{Group, PgidPolicy, Scope, Spawned};
 use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
@@ -134,8 +134,8 @@ fn launch_external_stage_direct(
                 shell,
             )?;
             let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
-            let policy =
-                command::member_policy(group.membership(&shell.scope), prepared.launch.enveloped());
+            let policy = PgidPolicy::Join(group.membership(&shell.scope))
+                .unless_enveloped(prepared.launch.enveloped());
             let started = command::start(prepared, policy, &shell.scope)?;
             Ok((started, pumps))
         })();

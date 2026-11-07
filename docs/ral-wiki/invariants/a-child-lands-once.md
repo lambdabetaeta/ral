@@ -11,9 +11,10 @@ recomputes one. What each landing allows a collector to signal is
 - **Placement is one decision.** `command::placement` yields a `Placement
   { policy, loan, readable }` for a lone command: its group, the terminal
   prepared for it, and whether the terminal may be its stdin. A pipeline's
-  direct stage takes `command::member_policy`, the same rule for a joined
-  group. An envelope leads a group of its own, so both say `NewLeader` for an
-  enveloped launch, and `Launch::spawn` asserts it rather than overriding.
+  direct stage joins its group `PgidPolicy::unless_enveloped`, the rule a
+  stage's placement uses too. An envelope leads a group of its own, so both
+  say `NewLeader` for an enveloped launch, and `Launch::spawn` asserts it
+  rather than overriding.
 - **`spawn_with_pgid` is the one derivation.** A `Join` policy joins, and
   carries its membership into `Joins`; `NewLeader` and `NewSession` own the
   child's own group; `Inherit` shares. An enveloped launch's payload group,

@@ -19,8 +19,8 @@ use crate::io::{Edge, OutFd, Sink, Source, Streams};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::{
-    CancelCause, Launch, Membership, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned,
-    StdioSpec, TerminalLoan, Unstarted, WaitOutcome,
+    CancelCause, Launch, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, StdioSpec,
+    TerminalLoan, Unstarted, WaitOutcome,
 };
 use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::ty::RefusedArg;
@@ -683,16 +683,6 @@ pub(crate) struct Placement {
     pub(crate) readable: bool,
 }
 
-/// A pipeline member's group: its pipeline's, unless an envelope, which leads
-/// one of its own, stands between ral and the program.
-pub(crate) fn member_policy(group: Membership, enveloped: bool) -> PgidPolicy {
-    if enveloped {
-        PgidPolicy::NewLeader
-    } else {
-        PgidPolicy::Join(group)
-    }
-}
-
 /// The one decision of where a child lands and which terminal it is lent.
 ///
 /// A stage's child is a member of the stage's group, whose owner holds any
@@ -713,7 +703,7 @@ pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Pl
     let interactive = shell.session.interactive;
     if let Some(stage) = shell.session.stage.as_ref() {
         return Placement {
-            policy: member_policy(stage.clone(), enveloped),
+            policy: PgidPolicy::Join(stage.clone()).unless_enveloped(enveloped),
             loan: None,
             readable: false,
         };
