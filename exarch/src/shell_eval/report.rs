@@ -52,12 +52,20 @@ pub(crate) fn tool_result(
     workers: &[WorkerRow],
     timeout_secs: u64,
 ) -> ToolResult {
-    let ral_core::Captured { stdout, mut stderr } = ran.captured.take().unwrap_or_default();
+    let captured = ran.captured.take().unwrap_or_default();
+    let notes: String = captured
+        .as_ref()
+        .named()
+        .into_iter()
+        .filter_map(cut_note)
+        .collect();
+    let ral_core::Streams { stdout, mut stderr } = captured.map(|retained| retained.bytes);
     let value = match &ran.ending {
         Ending::Ok(value) => ral_value_to_text(value),
         _ => None,
     };
     let (suffix, exit) = render(&ran, births, audit, workers, timeout_secs);
+    stderr.extend_from_slice(notes.as_bytes());
     stderr.extend_from_slice(suffix.as_bytes());
     ToolResult {
         stdout,
@@ -65,6 +73,19 @@ pub(crate) fn tool_result(
         value,
         exit,
     }
+}
+
+/// What the engine's capture cut from a stream, said where the model reads
+/// it: the bytes carry no marker.
+fn cut_note((stream, retained): (&str, &ral_core::Retained)) -> Option<String> {
+    (!retained.is_whole()).then(|| {
+        format!(
+            "\nral: this call wrote {} bytes to {stream}; only the first {} were kept. \
+             Redirect large output to a file and read a window of it.\n",
+            retained.total,
+            retained.bytes.len()
+        )
+    })
 }
 
 /// Compose a dispatch's ending into the stderr suffix the model reads, and

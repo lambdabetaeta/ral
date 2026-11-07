@@ -13,6 +13,7 @@ mod regime;
 mod sink;
 mod source;
 mod state;
+mod streams;
 pub mod terminal;
 pub use bounded::read_bounded;
 pub(crate) use edge::{Edge, WriteStopped};
@@ -21,8 +22,9 @@ pub(crate) use poll::poll_slice;
 #[cfg(windows)]
 pub(crate) use poll::{aborted, interrupt};
 pub use regime::{RunIo, RunStdin};
-pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Sink, without_terminator};
+pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Retained, Sink, without_terminator};
 pub(crate) use sink::{OutFd, SINK_BUFFER_CAP, new_buffer, tee_with_buffer};
 pub use source::{Source, SourceReader};
+pub use streams::Streams;
 
 pub(crate) use state::Io;

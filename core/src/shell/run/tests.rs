@@ -93,8 +93,8 @@ fn a_last_run_drops_its_loose_workers_endings() {
         else {
             panic!("a loose worker's `{body}` must not end its run");
         };
-        assert_eq!(captured.stdout, b"end\n", "{body}");
-        assert_eq!(captured.stderr.as_slice(), b"", "{body}");
+        assert_eq!(captured.stdout.bytes, b"end\n", "{body}");
+        assert_eq!(captured.stderr.bytes.as_slice(), b"", "{body}");
     }
 }
 
@@ -128,8 +128,8 @@ fn a_run_that_is_not_last_does_not_wait() {
     else {
         panic!("a returning run must succeed");
     };
-    assert_eq!(captured.stdout, b"end\n");
-    assert_eq!(captured.stderr.as_slice(), b"");
+    assert_eq!(captured.stdout.bytes, b"end\n");
+    assert_eq!(captured.stderr.bytes.as_slice(), b"");
 }
 
 #[test]
@@ -307,10 +307,11 @@ fn capture_returns_stdout_bytes() {
         RunReport::Ran { captured, .. } => {
             let captured = captured.expect("Capture must return buffers");
             assert!(
-                String::from_utf8_lossy(&captured.stdout).contains("hi"),
+                String::from_utf8_lossy(&captured.stdout.bytes).contains("hi"),
                 "captured stdout must hold the run's output, got {:?}",
                 captured.stdout
             );
+            assert!(captured.stdout.is_whole(), "{:?}", captured.stdout);
         }
         RunReport::Static { .. } => panic!("`echo hi` must reach evaluation"),
     }
@@ -1419,7 +1420,7 @@ fn ran(runtime: crate::Runtime, run: Run) -> (End, String) {
         RunReport::Ran {
             ending, captured, ..
         } => {
-            let stdout = captured.map(|c| c.stdout).unwrap_or_default();
+            let stdout = captured.map(|c| c.stdout.bytes).unwrap_or_default();
             (ending, String::from_utf8_lossy(&stdout).into_owned())
         }
         RunReport::Static { .. } => panic!("valid source must reach evaluation"),

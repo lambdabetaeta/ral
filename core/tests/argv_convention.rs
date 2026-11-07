@@ -46,7 +46,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
         RunReport::Ran {
             ending, captured, ..
         } => {
-            let stdout = captured.map(|c| c.stdout).unwrap_or_default();
+            let stdout = captured.map(|c| c.stdout.bytes).unwrap_or_default();
             (
                 ending.into_settled(),
                 String::from_utf8(stdout).expect("captured stdout is UTF-8"),

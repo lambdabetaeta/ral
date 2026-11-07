@@ -80,7 +80,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
             ending: ral_core::shell::runtime::End::Ok(Value::Unit),
             captured: Some(captured),
             ..
-        } => serde_json::from_slice(&captured.stdout).expect("`to-json` emits JSON"),
+        } => serde_json::from_slice(&captured.stdout.bytes).expect("`to-json` emits JSON"),
         RunReport::Ran { ending, .. } => {
             panic!("{call} must return a receipt record, got {ending:?}")
         }

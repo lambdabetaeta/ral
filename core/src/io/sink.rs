@@ -5,6 +5,7 @@
 //! one.  The buffer helpers below own the [`ByteBuffer`] idiom for captured
 //! bytes.
 
+use super::Streams;
 use super::edge::{Edge, WriteStopped};
 use crate::process::{CancelCause, Scope, ScopeId, StdioSpec};
 use crate::sync::LockExt as _;
@@ -12,14 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
 
-/// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
-/// marker, so a high-volume capture has to become an explicit redirect.  Two
-/// readings of the one event: a worker keeps the marked prefix, and a
-/// capture whose bytes are about to become a value refuses it
-/// (`shell::exec::capture::with_capture`, and `machine.rs`'s `Frame::Capture` arm).
+/// Cap on `Sink::Buffer` growth: past it bytes are counted and dropped, so a
+/// high-volume capture has to become an explicit redirect.  Each reader of a
+/// [`Retained`] decides what a cut means: a capture about to become a value
+/// refuses it, `await` warns after replaying the prefix, and a host is handed
+/// the total.
 pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
-const SINK_BUFFER_TRUNC_MARKER: &[u8] =
-    b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
 
 /// A bounded prefix and the byte count before retention.
 ///
@@ -27,69 +26,73 @@ const SINK_BUFFER_TRUNC_MARKER: &[u8] =
 /// recorded here and read out of band, once the buffer is complete.
 #[derive(Debug)]
 pub struct CapturedBytes {
-    bytes: Mutex<(Vec<u8>, u64)>,
+    bytes: Mutex<Retained>,
     cap: usize,
-    marker: &'static [u8],
 }
 
 impl Default for CapturedBytes {
     fn default() -> Self {
-        Self::limited(SINK_BUFFER_CAP, SINK_BUFFER_TRUNC_MARKER)
+        Self::new(SINK_BUFFER_CAP)
     }
 }
 
 impl CapturedBytes {
-    fn limited(cap: usize, marker: &'static [u8]) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             bytes: Mutex::default(),
             cap,
-            marker,
         }
     }
 
-    /// Drain the buffer.
-    pub(crate) fn take(&self) -> Vec<u8> {
-        self.take_counted().0
-    }
-
-    pub(crate) fn take_counted(&self) -> (Vec<u8>, u64) {
+    /// Drain the prefix; the total stays.  Read after every writer has
+    /// joined for the final verdict.
+    pub(crate) fn take(&self) -> Retained {
         let mut g = self.bytes.lock_ignore_poison();
-        (std::mem::take(&mut g.0), g.1)
+        Retained {
+            bytes: std::mem::take(&mut g.bytes),
+            total: g.total,
+        }
     }
 
-    /// Whether retention truncated what [`Self::take`] hands back,
-    /// so a caller for whom the bytes *are* a value can refuse them instead of
-    /// binding a prefix. Read after every writer has joined for the final verdict.
-    pub(crate) fn overflowed(&self) -> bool {
-        self.total() > self.cap as u64
-    }
-
-    pub(crate) fn total(&self) -> u64 {
-        self.bytes.lock_ignore_poison().1
-    }
-
-    /// Copy the buffer without draining it, so `poll` can sample a worker
-    /// still running and the eventual [`Self::take`] still sees the whole
-    /// output.  The price is that successive peeks overlap: each is a snapshot
-    /// of everything so far, not a delta.
+    /// Copy the prefix so far without draining it, so `poll` can sample a
+    /// worker still running and the eventual [`Self::take`] still sees the
+    /// whole output.  Successive peeks overlap: each is a snapshot, not a
+    /// delta.
     pub(crate) fn peek(&self) -> Vec<u8> {
-        self.bytes.lock_ignore_poison().0.clone()
+        self.bytes.lock_ignore_poison().bytes.clone()
     }
 
-    /// Count every byte; retain the prefix and at most one marker.
+    /// Count every byte; retain the first `cap`.
     pub(crate) fn append(&self, bytes: &[u8]) {
         let mut g = self.bytes.lock_ignore_poison();
-        g.1 += bytes.len() as u64;
-        let cur = g.0.len();
-        if cur <= self.cap {
-            let keep = bytes.len().min(self.cap - cur);
-            g.0.extend_from_slice(&bytes[..keep]);
-            if keep < bytes.len() {
-                g.0.extend_from_slice(self.marker);
-            }
-        }
+        g.total += bytes.len() as u64;
+        let keep = bytes.len().min(self.cap.saturating_sub(g.bytes.len()));
+        g.bytes.extend_from_slice(&bytes[..keep]);
     }
 }
+
+/// What a capture kept of a stream: an exact prefix, and how many bytes were
+/// written in all.  The prefix is whole iff its length is the total.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retained {
+    pub bytes: Vec<u8>,
+    pub total: u64,
+}
+
+impl Retained {
+    /// The bytes written past the prefix.
+    pub fn dropped(&self) -> u64 {
+        self.total.saturating_sub(self.bytes.len() as u64)
+    }
+
+    pub fn is_whole(&self) -> bool {
+        self.dropped() == 0
+    }
+}
+
+/// The byte streams captured under [`RunIo::Capture`](super::RunIo::Capture), carried onto
+/// the protocol [`Report`](crate::protocol::Report) with their totals.
+pub type Captured = Streams<Retained>;
 
 /// Shared between writers and their eventual reader: writers run on pump and
 /// worker threads, the reader on the eval thread after they join.
@@ -396,7 +399,7 @@ impl Clone for Sink {
 /// are recorded and still seen.  `with_audit_capture` in `shell::exec::capture` is
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink, cap: usize) -> (Sink, ByteBuffer) {
-    let buf = Arc::new(CapturedBytes::limited(cap, &[]));
+    let buf = Arc::new(CapturedBytes::new(cap));
     let sink = Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base));
     (sink, buf)
 }
@@ -424,7 +427,7 @@ pub fn without_terminator(bytes: &[u8]) -> &[u8] {
 mod tests {
     #[cfg(unix)]
     use super::WriteStopped;
-    use super::{CapturedBytes, Edge, OutFd, Sink, without_terminator};
+    use super::{CapturedBytes, Edge, OutFd, Retained, Sink, without_terminator};
     #[cfg(unix)]
     use crate::process::CancelCause;
     use crate::process::DurableRoot;
@@ -439,16 +442,33 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn an_overflow_marker_is_appended_once_and_the_count_keeps_growing() {
-        let buf = CapturedBytes::limited(4, b"[cut]");
+    fn a_full_buffer_keeps_an_exact_prefix_and_counts_the_rest() {
+        let buf = CapturedBytes::new(4);
         buf.append(b"abcd");
-        assert!(!buf.overflowed());
+        assert_eq!(buf.peek(), b"abcd");
         buf.append(b"ef");
         buf.append(b"gh");
-        assert_eq!(buf.total(), 8);
-        assert!(buf.overflowed());
-        assert_eq!(buf.take(), b"abcd[cut]");
-        assert!(buf.overflowed());
+        assert_eq!(buf.peek(), b"abcd", "a peek drains nothing");
+        let cut = buf.take();
+        assert_eq!(
+            cut,
+            Retained {
+                bytes: b"abcd".to_vec(),
+                total: 8
+            }
+        );
+        assert_eq!(cut.dropped(), 4);
+        assert!(!cut.is_whole());
+        let drained = buf.take();
+        assert_eq!((drained.bytes.len(), drained.total), (0, 8));
+    }
+
+    #[test]
+    fn a_buffer_at_its_cap_is_whole() {
+        let buf = CapturedBytes::new(4);
+        buf.append(b"ab");
+        buf.append(b"cd");
+        assert!(buf.take().is_whole());
     }
 
     #[test]
@@ -882,12 +902,4 @@ mod tests {
             assert!(pumped(&tee, fd));
         }
     }
-}
-
-/// The byte streams captured under [`RunIo::Capture`](super::RunIo::Capture), carried verbatim onto
-/// the protocol [`Report`](crate::protocol::Report).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Captured {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
 }

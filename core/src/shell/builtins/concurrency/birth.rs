@@ -3,7 +3,7 @@
 
 use super::join;
 use crate::fact::Worker;
-use crate::io::{Sink, new_buffer};
+use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope, WorkerStop};
 use crate::shell::runtime::{
     Break, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, Error, Escape,
@@ -48,8 +48,6 @@ where
         .reserve(mooring.worker_cap)
         .map_err(|err| sig(format!("{verb}: {err}")))?;
 
-    let (stdout_sink, stdout_buf) = new_buffer();
-    let (stderr_sink, stderr_buf) = new_buffer();
     let cradle = &shell.local.cradle;
     let brood = cradle.brood.clone();
     let node = cradle.under.child();
@@ -75,8 +73,8 @@ where
         let mooring = Mooring::for_thread(mooring, node.clone(), sink);
         (Owner::Session, mooring, surface)
     };
-    let (stdout, stderr) = match watched {
-        None => (stdout_sink, stderr_sink),
+    let (sinks, buffers) = match watched {
+        None => Streams::both(new_buffer).unzip(),
         Some(label) => {
             if mooring.deferred.is_none() {
                 let _ = shell.write_stderr(
@@ -101,18 +99,22 @@ where
                 }
             };
             let err = format!("{label}:err");
-            (watch(label), watch(err))
+            let sinks = Streams {
+                stdout: watch(label),
+                stderr: watch(err),
+            };
+            (sinks, Streams::default())
         }
     };
 
     let id = WorkerId::mint();
-    let (handle, permit) = HandleInner::new(id, title.as_str(), node, stdout_buf, stderr_buf);
+    let (handle, permit) = HandleInner::new(id, title.as_str(), node, buffers);
     let receipt = worker_surface.map(|surface| (handle.started, title.clone(), surface));
     shell
         .spawn_thread(worker_mooring, "ral spawn worker", move |mooring, child| {
             // A worker's stdout is its handle buffer, drained as it settles.
-            child.io.stdout = stdout;
-            child.io.stderr = stderr;
+            child.io.stdout = sinks.stdout;
+            child.io.stderr = sinks.stderr;
 
             let end = End::of(|| {
                 // A panic drops the owner and stops accepted children (I4, I5).

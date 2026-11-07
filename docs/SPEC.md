@@ -2770,11 +2770,15 @@ the bytes to the awaiter's streams (§11.2); `poll` returns them as data, as
 once it is `` `ready ``. When a worker is `` `stopping `` or `` `consumed ``,
 its result has been claimed and no buffered output is retained or exposed.
 
-Each buffer is capped at 16 MiB. At the cap ral appends one truncation marker,
-continues draining the writer, and discards later bytes. Draining continues so
-a chatty child cannot deadlock on a full kernel pipe, while memory remains
-bounded. Redirect high-volume output inside the spawned block when the full
-stream matters:
+Each buffer is capped at 16 MiB. Past the cap ral keeps the exact prefix,
+continues draining the writer, and counts and discards later bytes; no marker
+is written into the stream. Draining continues so a chatty child cannot
+deadlock on a full kernel pipe, while memory remains bounded. `poll` returns
+the kept prefix. A replay (`await`, or a loose worker's at the end) writes it,
+then one note per cut stream to stderr, naming the worker, the bytes written
+and the bytes kept.
+Redirect high-volume output inside the spawned block when the full stream
+matters:
 
 ```ral
 let server = spawn 'docs server' {

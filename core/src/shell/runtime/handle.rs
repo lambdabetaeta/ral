@@ -9,7 +9,7 @@
 use super::flow::End;
 use super::value::Value;
 use crate::fact::{Io, WorkerId};
-use crate::io::ByteBuffer;
+use crate::io::{ByteBuffer, Retained, Streams};
 use crate::process::{CancelCause, ScopeNode};
 use crate::sync::LockExt as _;
 use std::ops::ControlFlow;
@@ -65,7 +65,7 @@ enum HandleState {
     Stopping,
     Ended {
         ended: Stamp,
-        result: Option<CompletedHandle>,
+        result: Option<Box<CompletedHandle>>,
     },
 }
 
@@ -102,11 +102,10 @@ impl<R, L> Sample<R, L> {
     }
 }
 
-/// A finished block's outcome: the bytes it wrote and its ending.
+/// A finished block's outcome: what it wrote and its ending.
 #[derive(Debug, Clone)]
 pub struct CompletedHandle {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+    pub written: Streams<Retained>,
     pub(crate) end: End,
 }
 
@@ -126,8 +125,7 @@ pub struct HandleInner {
     protections: Vec<Arc<crate::ty::Site>>,
     /// Drained when the worker publishes its terminal state.  Empty for a
     /// watched handle, whose lines surface live through `Sink::Watch`.
-    stdout_buf: ByteBuffer,
-    stderr_buf: ByteBuffer,
+    buffers: Streams<ByteBuffer>,
     pub id: WorkerId,
     /// What the work is, for people; nothing looks a worker up by it.
     pub title: String,
@@ -167,14 +165,12 @@ impl HandleInner {
         id: WorkerId,
         title: impl Into<String>,
         cancel: ScopeNode,
-        stdout_buf: ByteBuffer,
-        stderr_buf: ByteBuffer,
+        buffers: Streams<ByteBuffer>,
     ) -> (Self, CompletionPermit) {
         let handle = Self {
             state: Arc::new(Mutex::new(HandleState::Running)),
             protections: Vec::new(),
-            stdout_buf,
-            stderr_buf,
+            buffers,
             id,
             title: title.into(),
             started: Stamp::now(),
@@ -260,7 +256,7 @@ impl HandleInner {
     /// `Ready` once, and copies no bytes for `Stopping` or `Consumed`.
     pub(crate) fn snapshot_io(&self) -> Snapshot<CompletedHandle, Io> {
         self.project(
-            || Io::of(self.stdout_buf.peek(), self.stderr_buf.peek()),
+            || self.buffers.as_ref().map(|buf| buf.peek().into()),
             CompletedHandle::clone,
         )
     }
@@ -271,9 +267,9 @@ impl HandleInner {
         match &mut *state {
             HandleState::Running => Sample::Running(()),
             HandleState::Stopping => Sample::Stopping,
-            HandleState::Ended { result, .. } => {
-                result.take().map_or(Sample::Consumed, Sample::Ready)
-            }
+            HandleState::Ended { result, .. } => result
+                .take()
+                .map_or(Sample::Consumed, |c| Sample::Ready(*c)),
         }
     }
 
@@ -322,14 +318,9 @@ impl HandleInner {
     }
 
     fn install_terminal(&self, mut state: MutexGuard<'_, HandleState>, end: End) -> Stamp {
-        let stdout = self.stdout_buf.take();
-        let stderr = self.stderr_buf.take();
+        let written = self.buffers.as_ref().map(|buf| buf.take());
         let ended = Stamp::now();
-        let completed = CompletedHandle {
-            stdout,
-            stderr,
-            end,
-        };
+        let completed = Box::new(CompletedHandle { written, end });
         let (result, discarded) = match &*state {
             HandleState::Running => (Some(completed), None),
             HandleState::Stopping => (None, Some(completed)),
@@ -373,8 +364,7 @@ pub(crate) fn idle_handle() -> Value {
         WorkerId::mint(),
         "<test>",
         crate::process::DurableRoot::default().worker(),
-        ByteBuffer::default(),
-        ByteBuffer::default(),
+        Streams::default(),
     );
     Value::Handle(Box::new(handle))
 }
@@ -386,16 +376,14 @@ mod tests {
     use std::sync::Barrier;
 
     fn make_handle() -> (HandleInner, CompletionPermit, ByteBuffer, ByteBuffer) {
-        let out = ByteBuffer::default();
-        let err = ByteBuffer::default();
+        let buffers = Streams::<ByteBuffer>::default();
         let (handle, permit) = HandleInner::new(
             WorkerId::mint(),
             "<handle-test>",
             DurableRoot::default().worker(),
-            out.clone(),
-            err.clone(),
+            buffers.clone(),
         );
-        (handle, permit, out, err)
+        (handle, permit, buffers.stdout, buffers.stderr)
     }
 
     #[test]
@@ -424,13 +412,22 @@ mod tests {
         assert!(handle.sample().has_ended());
         assert!(!handle.sample().is_claimed());
         assert_eq!(handle.settled_at(), Some(published_stamp.wall));
-        assert!(out.take().is_empty(), "stdout buffer drained on publish");
-        assert!(err.take().is_empty(), "stderr buffer drained on publish");
+        assert!(
+            out.take().bytes.is_empty(),
+            "stdout buffer drained on publish"
+        );
+        assert!(
+            err.take().bytes.is_empty(),
+            "stderr buffer drained on publish"
+        );
 
         // Record the raw buffer pointers inside Ready before claiming to prove
         // claim_ready moves the Vecs out without cloning.
         let (ready_out_ptr, ready_err_ptr, ready_elapsed) = {
-            let snap = handle.snapshot(|c| (c.stdout.as_ptr(), c.stderr.as_ptr()));
+            let snap = handle.snapshot(|c| {
+                let bytes = c.written.as_ref().map(|r| r.bytes.as_ptr());
+                (bytes.stdout, bytes.stderr)
+            });
             let Sample::Ready((out_ptr, err_ptr)) = snap.state else {
                 panic!("expected Ready");
             };
@@ -448,8 +445,8 @@ mod tests {
         let Sample::Ready(claimed) = handle.claim_ready() else {
             panic!("first claim_ready on Ready must succeed");
         };
-        assert_eq!(claimed.stdout.as_ptr(), ready_out_ptr);
-        assert_eq!(claimed.stderr.as_ptr(), ready_err_ptr);
+        assert_eq!(claimed.written.stdout.bytes.as_ptr(), ready_out_ptr);
+        assert_eq!(claimed.written.stderr.bytes.as_ptr(), ready_err_ptr);
 
         // Subsequent observations and claims see Consumed with the same frozen stamp.
         assert_eq!(handle.sample(), Sample::Consumed);
@@ -492,12 +489,12 @@ mod tests {
         assert!(handle.sample().is_claimed());
         assert_eq!(handle.settled_at(), Some(stamp.wall));
         assert!(
-            out.take().is_empty(),
-            "Stopping -> Consumed must drain stdout_buf"
+            out.take().bytes.is_empty(),
+            "Stopping -> Consumed must drain the stdout buffer"
         );
         assert!(
-            err.take().is_empty(),
-            "Stopping -> Consumed must drain stderr_buf"
+            err.take().bytes.is_empty(),
+            "Stopping -> Consumed must drain the stderr buffer"
         );
         assert!(!handle.claim_and_stop());
         assert!(matches!(handle.claim_ready(), Sample::Consumed));
@@ -577,12 +574,12 @@ mod tests {
         out1.append(b"partial-out");
         err1.append(b"partial-err");
         drop(running_permit);
-        assert_eq!(out1.take(), b"");
-        assert_eq!(err1.take(), b"");
+        assert_eq!(out1.take().bytes, b"");
+        assert_eq!(err1.take().bytes, b"");
         match running.claim_ready() {
             Sample::Ready(c) => {
-                assert_eq!(c.stdout, b"partial-out");
-                assert_eq!(c.stderr, b"partial-err");
+                assert_eq!(c.written.stdout.bytes, b"partial-out");
+                assert_eq!(c.written.stderr.bytes, b"partial-err");
                 assert!(matches!(c.end, End::Panic(ref s) if s.contains("<handle-test>")));
             }
             other => panic!("expected Ready from abandoned Running permit, got {other:?}"),
@@ -595,8 +592,8 @@ mod tests {
         assert!(stopping.claim_and_stop());
         drop(stopping_permit);
         assert_eq!(stopping.sample(), Sample::Consumed);
-        assert_eq!(out2.take(), b"");
-        assert_eq!(err2.take(), b"");
+        assert_eq!(out2.take().bytes, b"");
+        assert_eq!(err2.take().bytes, b"");
     }
 
     #[test]
@@ -604,13 +601,8 @@ mod tests {
         let root = DurableRoot::default();
         let parent = root.worker();
         let child_node = parent.child();
-        let (handle, permit) = HandleInner::new(
-            WorkerId::mint(),
-            "<child>",
-            child_node,
-            ByteBuffer::default(),
-            ByteBuffer::default(),
-        );
+        let (handle, permit) =
+            HandleInner::new(WorkerId::mint(), "<child>", child_node, Streams::default());
         parent.cancel(CancelCause::Cancelled);
         assert!(handle.cancel.is_cancelled());
         // Not directly claimed: still Running, not Stopping.

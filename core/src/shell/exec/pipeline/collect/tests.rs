@@ -707,7 +707,10 @@ fn a_try_in_a_stage_cannot_see_its_reader_gone_stop() {
             captured,
             ..
         } => {
-            let out = captured.expect("a captured run returns buffers").stdout;
+            let out = captured
+                .expect("a captured run returns buffers")
+                .stdout
+                .bytes;
             assert_eq!(String::from_utf8_lossy(&out).lines().count(), 1, "{out:?}");
         }
         _ => panic!("the handler must never run, so the pipeline settles"),

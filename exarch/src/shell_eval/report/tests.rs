@@ -350,3 +350,33 @@ fn only_an_external_failure_carries_the_exit_tip() {
         );
     }
 }
+
+/// A stream the engine's capture cut reaches the model as its prefix, with
+/// ral's note of the total on stderr before the ending; a whole one earns none.
+#[test]
+fn a_cut_stream_is_noted_in_rals_voice() {
+    let retained = |bytes: &[u8], total| ral_core::Retained {
+        bytes: bytes.to_vec(),
+        total,
+    };
+    let ran = Ran {
+        captured: Some(ral_core::Streams {
+            stdout: retained(b"abcd", 10),
+            stderr: retained(b"err\n", 4),
+        }),
+        ..ran(failure("boom"), "error: boom\n")
+    };
+    let result = tool_result(ran, &HashSet::new(), None, &[], 5);
+    assert_eq!(result.stdout, b"abcd");
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let note = "\nral: this call wrote 10 bytes to stdout; only the first 4 were kept.";
+    let (noted, rendered) = (
+        stderr.find(note).expect("the cut is noted"),
+        stderr.find("error: boom").expect("the ending"),
+    );
+    assert!(
+        stderr.starts_with("err\n") && noted < rendered,
+        "{stderr:?}"
+    );
+    assert!(!stderr.contains("to stderr"), "{stderr:?}");
+}

@@ -652,7 +652,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let out = String::from_utf8(buf.take()).expect("help output is UTF-8");
+        let out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(
             !out.contains("Library:"),
             "a bare shell must list no Library section, got:\n{out}"
@@ -670,7 +670,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let help_out = String::from_utf8(buf.take()).expect("help output is UTF-8");
+        let help_out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(
             help_out.contains("Library:") && help_out.contains("frob"),
             "help must list the installed library entry, got:\n{help_out}"
@@ -693,7 +693,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         builtin_help(&[], &mut shell).expect("a buffer sink cannot fail");
-        let help_out = String::from_utf8(buf.take()).expect("help output is UTF-8");
+        let help_out = String::from_utf8(buf.take().bytes).expect("help output is UTF-8");
         assert!(
             help_out.contains("frob the widget.") && !help_out.contains("load-bearing"),
             "help's index row must carry only the lead paragraph, got:\n{help_out}"

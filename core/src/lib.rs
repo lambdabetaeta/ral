@@ -56,7 +56,7 @@ pub mod uutils;
 
 // The host surface. A host imports a run from here; it does not reach the
 // evaluator or syntax layers through the crate root.
-pub use io::{Captured, RunIo, RunStdin};
+pub use io::{Captured, Retained, RunIo, RunStdin, Streams};
 pub use process::RequestedTerminalAccess;
 pub use role::{Invocation, Role, classify};
 pub use shell::boot::HostSurface;

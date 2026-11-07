@@ -43,7 +43,7 @@ fn printed(src: &str) -> String {
             ending
                 .into_settled()
                 .unwrap_or_else(|e| panic!("{src:?} must run: {e:?}"));
-            String::from_utf8(captured.map(|c| c.stdout).unwrap_or_default())
+            String::from_utf8(captured.map(|c| c.stdout.bytes).unwrap_or_default())
                 .expect("captured stdout is UTF-8")
         }
         RunReport::Static { diagnostics, .. } => panic!(

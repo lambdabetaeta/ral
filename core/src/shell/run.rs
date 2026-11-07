@@ -15,7 +15,7 @@
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
 use crate::fact::FailureCode as _;
-use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source};
+use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
 use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
@@ -313,7 +313,9 @@ impl Shell {
             fork,
         } = req;
 
-        let capture = (run.io == RunIo::Capture).then(Capture::default);
+        let (sinks, buffers) = (run.io == RunIo::Capture)
+            .then(|| Streams::both(new_buffer).unzip())
+            .unzip();
 
         let stdin = match run.stdin {
             RunStdin::Inherit => Source::Terminal,
@@ -336,14 +338,14 @@ impl Shell {
             worker_title: run.worker_title,
             terminal_access,
         };
-        let next = build_run(self, capture.as_ref(), stdin);
+        let next = build_run(self, sinks, stdin);
         let result = run_framed(&mooring, self, next, &run, wall, base, body);
 
         RunReport::Ran {
             ending: End::settled(result),
             base: base.clone(),
             compact,
-            captured: capture.map(Capture::finish),
+            captured: buffers.map(|buffers| buffers.map(|buf| buf.take())),
             // Filled in by `enter`, which holds this dispatch's scope.
             trail: Vec::new(),
         }
@@ -401,15 +403,15 @@ impl Drop for IoLoan<'_> {
     }
 }
 
-/// Build the `Io` a run installs, seeded from the ambient `shell`. `stdin` is
-/// installed independently of `capture`, so [`RunIo::Capture`] does not imply
-/// `Source::Terminal`; terminal authority is not here at all, but on the
-/// [`Mooring`] the caller builds separately.
-pub(crate) fn build_run(shell: &Shell, capture: Option<&Capture>, stdin: Source) -> Io {
-    let (stdout, stderr) = capture.map_or_else(
-        || (shell.io.stdout.clone(), shell.io.stderr.clone()),
-        Capture::sinks,
-    );
+/// Build the `Io` a run installs, seeded from the ambient `shell` where
+/// `sinks` is `None`. `stdin` is installed independently of the sinks, so
+/// [`RunIo::Capture`] does not imply `Source::Terminal`; terminal authority is
+/// not here at all, but on the [`Mooring`] the caller builds separately.
+pub(crate) fn build_run(shell: &Shell, sinks: Option<Streams<Sink>>, stdin: Source) -> Io {
+    let Streams { stdout, stderr } = sinks.unwrap_or_else(|| Streams {
+        stdout: shell.io.stdout.clone(),
+        stderr: shell.io.stderr.clone(),
+    });
     Io {
         stdin,
         stdout,
@@ -417,29 +419,6 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<&Capture>, stdin: Source)
         interactive: shell.io.interactive,
         terminal: shell.io.terminal,
         stage: shell.io.stage.clone(),
-    }
-}
-
-/// The buffers a [`RunIo::Capture`] run's sinks fill.
-#[derive(Default)]
-pub(crate) struct Capture {
-    stdout: crate::io::ByteBuffer,
-    stderr: crate::io::ByteBuffer,
-}
-
-impl Capture {
-    fn sinks(&self) -> (Sink, Sink) {
-        (
-            Sink::Buffer(self.stdout.clone()),
-            Sink::Buffer(self.stderr.clone()),
-        )
-    }
-
-    fn finish(self) -> Captured {
-        Captured {
-            stdout: self.stdout.take(),
-            stderr: self.stderr.take(),
-        }
     }
 }
 

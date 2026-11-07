@@ -20,6 +20,7 @@ pub use observation::{
 
 use crate::data::Bytes;
 use crate::data::datum::Datum;
+use crate::io::Streams;
 use crate::record;
 use crate::ty::{Ty, Typed};
 use std::time::SystemTime;
@@ -57,25 +58,12 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 
 /// What a worker wrote while it ran: the streams both of `poll`'s records
 /// carry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Io {
-    pub stdout: Bytes,
-    pub stderr: Bytes,
-}
+pub type Io = Streams<Bytes>;
 
 record!(typed Io {
     stdout: "stdout",
     stderr: "stderr",
 });
-
-impl Io {
-    pub fn of(stdout: impl Into<Bytes>, stderr: impl Into<Bytes>) -> Self {
-        Self {
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        }
-    }
-}
 
 /// What a detach hands back in place of a handle: the survivor's pid and the
 /// description it was born under.

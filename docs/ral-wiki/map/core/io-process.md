@@ -69,13 +69,17 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   so no caller computes inherit-vs-pipe by hand; `same_destination` says whether two sinks deliver to one destination,
   which decides whether a child's stderr may share stdout's descriptor.
   A `ByteBuffer` is `Arc<CapturedBytes>`: the prefix and its total byte count
-  under one mutex, with a retention cap. `overflowed` compares that count
-  against the cap (`take`, `take_counted`, `peek`, `total`, `overflowed` are
-  its readers). `new_buffer` keeps 16 MiB plus a marker; the audit tee retains
-  its caller's smaller prefix without a marker. The write path cannot report
-  the cap — a pump returns `()` from its own thread — so `overflowed` is read
-  once the writers have joined, by whoever means to make the bytes a
-  value ([[design/capture|capture]]).
+  under one mutex, with a retention cap and no marker. Its readers are `take`,
+  which drains the prefix into a `Retained` (prefix and total, whole iff they
+  agree), and `peek`, which copies the prefix without draining (`poll`).
+  `new_buffer` keeps 16 MiB; the audit tee retains its caller's smaller prefix.
+  The write path cannot report the cap — a pump returns `()` from its own
+  thread — so the `Retained` is read once the writers have joined, and each
+  reader decides what a cut means ([[design/capture|capture]]).
+  `streams.rs` — `Streams<T> { stdout, stderr }` with `map`, `as_ref`, `both`,
+  `unzip` and `named`: every per-stream pair (a run's capture, a handle's
+  buffers and `CompletedHandle`, the audit tee, `Captured`, `fact::Io`,
+  `AuditIo`, `Pumps`).
 - `poll.rs` — `poll_slice`, the one sliced fd wait (Unix): wait for readiness
   for at most `POLL_SLICE`, `EINTR` retried against the slice's own deadline.
   A blocked pipe write (`Sink::write_under`) or read (`read_interruptible`)

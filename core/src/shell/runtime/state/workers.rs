@@ -525,7 +525,7 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::ByteBuffer;
+    use crate::io::Streams;
     use crate::process::DurableRoot;
     use crate::shell::runtime::handle::compacting::MIN_SWEEP_AT;
     use crate::shell::runtime::{End, Value};
@@ -535,8 +535,7 @@ mod tests {
             WorkerId(id),
             title,
             DurableRoot::default().worker(),
-            ByteBuffer::default(),
-            ByteBuffer::default(),
+            Streams::default(),
         );
         (handle, move || {
             let _ = permit.finish(End::Ok(Value::Unit));

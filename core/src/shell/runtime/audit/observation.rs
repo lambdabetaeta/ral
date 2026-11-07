@@ -39,6 +39,7 @@ mod tests {
     use crate::data::{Bytes, FOValue};
     use crate::fact::{Act, Check, Decision, Grep, Read, Resource, Worker, Write, WriteOutcome};
     use crate::fact::{AuditIo, Command, CommandOrigin};
+    use crate::io::Retained;
     use crate::ir::WriteMode;
     use crate::shell::runtime::{Map, Value, WorkerId};
     use std::collections::BTreeMap;
@@ -54,6 +55,13 @@ mod tests {
     fn round_trips(what: Observed) {
         let obs = Observation::spanning(site(), 100, 250, Some("alex".into()), what);
         assert_eq!(Observation::decode(&obs.clone().encode()), Ok(obs));
+    }
+
+    fn whole(bytes: &[u8]) -> Retained {
+        Retained {
+            bytes: bytes.to_vec(),
+            total: bytes.len() as u64,
+        }
     }
 
     fn command(origin: CommandOrigin, io: AuditIo, error: Option<&str>) -> Observed {
@@ -74,10 +82,8 @@ mod tests {
             command(
                 CommandOrigin::External,
                 AuditIo {
-                    stdout: b"out".to_vec(),
-                    stderr: b"err".to_vec(),
-                    stdout_total: 3,
-                    stderr_total: 3,
+                    stdout: whole(b"out"),
+                    stderr: whole(b"err"),
                 },
                 Some("spawn failed"),
             ),
@@ -143,8 +149,7 @@ mod tests {
         let Observed::Command(command) = command(
             CommandOrigin::External,
             AuditIo {
-                stdout: vec![0, 128, 255],
-                stdout_total: 3,
+                stdout: whole(&[0, 128, 255]),
                 ..AuditIo::default()
             },
             None,

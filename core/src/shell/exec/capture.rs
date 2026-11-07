@@ -5,7 +5,7 @@
 //! settled where the writer stands, so no byte is ever moved after the fact.
 use super::redirect::Prior;
 use crate::fact::AuditIo;
-use crate::io::{Sink, new_buffer, tee_with_buffer};
+use crate::io::{Retained, Sink, Streams, new_buffer, tee_with_buffer};
 use crate::shell::runtime::Shell;
 use std::mem::replace;
 
@@ -40,16 +40,16 @@ impl Drop for SinkScope<'_> {
 }
 
 /// Swap stdout for an in-memory buffer, run `f`, restore, return
-/// `(result, bytes, overflowed)`.
+/// `(result, retained)`.
 ///
 /// Everything the closure writes drains here.  `try` deliberately captures
 /// nothing; `audit` uses the tee below.
 ///
-/// `overflowed` says the buffer's cap truncated those bytes.  It is the only
-/// report there is: writers reach the buffer from pump threads whose join
-/// discards their value, so nothing on the write path can raise it, and a
-/// caller that means to turn the bytes into a value must consult it here.
-pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>, bool)
+/// A cut prefix is the only report of the buffer's cap: writers reach the
+/// buffer from pump threads whose join discards their value, so nothing on
+/// the write path can raise it, and a caller that means to turn the bytes
+/// into a value must consult [`Retained::is_whole`] here.
+pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Retained)
 where
     F: FnOnce(&mut Shell) -> R,
 {
@@ -57,7 +57,7 @@ where
     let scope = SinkScope::enter(shell, sink, None);
     let result = f(scope.shell);
     drop(scope);
-    (result, buf.take(), buf.overflowed())
+    (result, buf.take())
 }
 
 /// Tee every sink this shell can write into buffers while `f` runs, so
@@ -74,20 +74,17 @@ where
     if !shell.local.audit.captures_bytes() {
         return (f(shell), AuditIo::default());
     }
-    let (out_sink, out_buf) = tee_with_buffer(shell.io.stdout.clone(), AUDIT_BUFFER_CAP);
-    let (err_sink, err_buf) = tee_with_buffer(shell.io.stderr.clone(), AUDIT_BUFFER_CAP);
-    let scope = SinkScope::enter(shell, out_sink, Some(err_sink));
+    let bases = Streams {
+        stdout: shell.io.stdout.clone(),
+        stderr: shell.io.stderr.clone(),
+    };
+    let (sinks, buffers) = bases
+        .map(|base| tee_with_buffer(base, AUDIT_BUFFER_CAP))
+        .unzip();
+    let scope = SinkScope::enter(shell, sinks.stdout, Some(sinks.stderr));
     let result = f(scope.shell);
     drop(scope);
-    let (stdout, stdout_total) = out_buf.take_counted();
-    let (stderr, stderr_total) = err_buf.take_counted();
-    let io = AuditIo {
-        stdout,
-        stderr,
-        stdout_total,
-        stderr_total,
-    };
-    (result, io)
+    (result, buffers.map(|buf| buf.take()))
 }
 
 #[cfg(test)]
@@ -103,7 +100,7 @@ mod tests {
         let stderr = vec![255; AUDIT_BUFFER_CAP + 1];
         let (err_sink, err_buf) = new_buffer();
         shell.io.stderr = err_sink;
-        let ((result, io), captured, overflowed) = with_capture(&mut shell, |shell| {
+        let ((result, io), captured) = with_capture(&mut shell, |shell| {
             with_audit_capture(shell, |shell| {
                 shell.write_stdout(&stdout)?;
                 shell.write_stderr(&stderr)
@@ -111,13 +108,13 @@ mod tests {
         });
         result.unwrap();
         let _trail = shell.local.audit.close(scope);
-        assert!(!overflowed);
-        assert_eq!(captured, stdout);
-        assert_eq!(err_buf.take(), stderr);
-        assert_eq!(io.stdout, stdout[..AUDIT_BUFFER_CAP]);
-        assert_eq!(io.stderr, stderr[..AUDIT_BUFFER_CAP]);
-        assert_eq!(io.stdout_total, stdout.len() as u64);
-        assert_eq!(io.stderr_total, stderr.len() as u64);
+        assert!(captured.is_whole());
+        assert_eq!(captured.bytes, stdout);
+        assert_eq!(err_buf.take().bytes, stderr);
+        assert_eq!(io.stdout.bytes, stdout[..AUDIT_BUFFER_CAP]);
+        assert_eq!(io.stderr.bytes, stderr[..AUDIT_BUFFER_CAP]);
+        assert_eq!(io.stdout.total, stdout.len() as u64);
+        assert_eq!(io.stderr.total, stderr.len() as u64);
     }
 
     #[test]
@@ -131,9 +128,8 @@ mod tests {
         });
         result.unwrap();
         let _trail = shell.local.audit.close(scope);
-        assert_eq!(io.stdout.len(), AUDIT_BUFFER_CAP);
-        assert_eq!(io.stdout_total, AUDIT_BUFFER_CAP as u64);
-        assert_eq!(io.stderr, b"");
-        assert_eq!(io.stderr_total, 0);
+        assert_eq!(io.stdout.bytes.len(), AUDIT_BUFFER_CAP);
+        assert!(io.stdout.is_whole());
+        assert_eq!(io.stderr, Retained::default());
     }
 }

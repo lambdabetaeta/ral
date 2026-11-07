@@ -126,21 +126,22 @@ another worker hangs under that worker): the *handle* is its evidence
 ## A chatty server is bounded, not unbounded
 
 - Ordinary capture and worker buffers are capped at 16 MiB (`SINK_BUFFER_CAP`). Past the cap
-  `CapturedBytes::append` appends a one-line truncation marker and drops the rest — yet the
-  write still returns `Ok` (`core/src/io/sink.rs`).
+  `CapturedBytes::append` counts the bytes and drops them, keeping an exact prefix — yet the
+  write still returns `Ok` (`core/src/io/sink.rs`). No marker enters the stream.
 - So the pump keeps reading and discarding after the cap. A server that spews to
   stdout never fills the kernel pipe — it never blocks on a full pipe — and the
   worker's memory stays bounded at ~16 MiB. The worker path has no unbounded-growth
   failure mode, and no undrained-pipe stall.
-- Truncation with a marker is *this* path's contract, and only this one. A
-  worker's bytes arrive with nobody to refuse them: the pump is a thread whose
-  failure has no one to raise it to, and the buffer has to stay bounded whether
-  or not the handle is ever awaited — so the report travels in band, and
-  `await` hands on a prefix that says where it stopped. Where the bytes *are*
-  the value — `capture` — the buffer is drained by the very step that would
-  bind them, so `Frame::Capture`'s return rule reads `CapturedBytes::overflowed` once
-  the writers have joined and fails, keeping none of it rather than binding a prefix
-  ([[design/capture|capture]]). One overflow predicate, two readings of it.
+- Truncation is reported one way: `take` hands back a `Retained`, the prefix and
+  the total written, whole iff the two agree. The pump is a thread whose failure
+  has no one to raise it to, so the cut cannot be reported on the write path;
+  each reader of the `Retained` decides what it means. Where the bytes *are* the
+  value — `capture` — `Frame::Capture`'s return rule refuses a cut prefix once the
+  writers have joined, keeping none of it ([[design/capture|capture]]). A worker's
+  replay (`await`, or a loose worker's at the end) writes the prefix, then a note
+  on stderr in ral's voice for each cut stream; `poll` shows the prefix. A
+  captured run hands its host the totals on the wire (`Captured =
+  Streams<Retained>`), and exarch says the cut on the model's stderr.
 - Audit tees have their own 1 MiB retention cap. They keep exact prefixes
   without a marker and count every observed byte. Each stream
   pairs its prefix with its total; a larger total means truncation ([[design/audit|audit]]).

@@ -265,8 +265,13 @@ fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
                 ending, captured, ..
             } => {
                 ending.into_settled().expect("`help` must run cleanly");
-                String::from_utf8(captured.expect("Capture io yields captured bytes").stdout)
-                    .expect("help output is UTF-8")
+                String::from_utf8(
+                    captured
+                        .expect("Capture io yields captured bytes")
+                        .stdout
+                        .bytes,
+                )
+                .expect("help output is UTF-8")
             }
             RunReport::Static { .. } => panic!("`help` must compile"),
         }

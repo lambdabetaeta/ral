@@ -984,10 +984,11 @@ impl Machine {
 
             Frame::Capture { prev, buf, span } => {
                 shell.io.stdout = prev;
-                if buf.overflowed() {
-                    Err(Break::from(capture_overflowed()).locate("capture", span, shell))
+                let retained = buf.take();
+                if retained.is_whole() {
+                    Ok(Focus::Return(Terminal::Value(Value::bytes(retained.bytes))))
                 } else {
-                    Ok(Focus::Return(Terminal::Value(Value::bytes(buf.take()))))
+                    Err(Break::from(capture_overflowed()).locate("capture", span, shell))
                 }
             }
 
@@ -1069,9 +1070,10 @@ impl Machine {
 
             Frame::Capture { prev, buf, .. } => {
                 shell.io.stdout = prev;
+                let total = buf.take().total;
                 Err(match s {
-                    Break::Error(e) if buf.total() > 0 => {
-                        Break::Error(e.discarded(u32::try_from(buf.total()).unwrap_or(u32::MAX)))
+                    Break::Error(e) if total > 0 => {
+                        Break::Error(e.discarded(u32::try_from(total).unwrap_or(u32::MAX)))
                     }
                     s => s,
                 })
@@ -1262,6 +1264,7 @@ pub(crate) fn apply(
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::io::Retained;
     use crate::ir::{Name, Phrase};
     use crate::shell::evaluator::{run_source, with_capture};
     use crate::shell::runtime::{Break, Escape, Stop, captured};
@@ -1378,7 +1381,7 @@ mod tests {
     #[test]
     fn a_let_captures_the_command_that_produces_its_value() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source("let x = !{ echo a; echo b }\nreturn $x", shell)
         });
         assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "a\nb"));
@@ -1390,7 +1393,7 @@ mod tests {
     #[test]
     fn a_captured_stand_ins_every_write_is_captured() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "alias curl { |a| echo note; echo body }\nlet x = curl\nreturn $x",
                 shell,
@@ -1405,7 +1408,7 @@ mod tests {
     #[test]
     fn a_failing_capture_writes_nothing_to_the_sink_it_replaced() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "alias boom { |a| echo partial; fail 'x' }\n\
                  let x = boom\nreturn $x",
@@ -1421,7 +1424,7 @@ mod tests {
     #[test]
     fn a_try_around_a_failing_capture_yields_only_the_handlers_value() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "alias boom { |a| echo partial; fail 'x' }\n\
                  let x = try { return !{ echo in | boom } } { |_| return 'handled' }\n\
@@ -1436,7 +1439,7 @@ mod tests {
     #[test]
     fn nested_failing_captures_sum_their_bytes_into_one_note() {
         let mut shell = new_shell();
-        let (result, bytes, _) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "alias boom { |a| echo cde; fail 'x' }\n\
                  let x = !{ echo ab; let y = boom; echo z }\nreturn $x",
@@ -1457,7 +1460,7 @@ mod tests {
     #[test]
     fn discard_and_abandoned_tail_notes_render_in_that_order() {
         let mut shell = new_shell();
-        let (result, bytes, _) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "let x = !{ echo ab; fail 'x'; echo later }; return $x",
                 shell,
@@ -1484,7 +1487,7 @@ mod tests {
     #[test]
     fn an_exit_inside_a_capture_writes_nothing() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
+        let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
                 "alias boom { |a| echo partial; exit 3 }\nlet x = boom\nreturn $x",
                 shell,

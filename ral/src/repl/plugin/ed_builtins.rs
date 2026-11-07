@@ -163,12 +163,12 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         ));
     };
     // A TUI plugin's own screen output, not a value the program binds: the
-    // truncation marker is the whole report a 16 MiB draw deserves.
-    let (result, bytes, _overflowed) = ral_core::shell::evaluator::with_capture(shell, |shell| {
+    // kept prefix is the whole report a 16 MiB draw deserves.
+    let (result, retained) = ral_core::shell::evaluator::with_capture(shell, |shell| {
         ral_core::shell::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
-        Ok(_) => Ok(tui_result(Value::string(captured_line(&bytes)), 0)),
+        Ok(_) => Ok(tui_result(Value::string(captured_line(&retained.bytes)), 0)),
         Err(Break::Error(e)) => Ok(tui_result(
             Value::string(e.describe().into_owned()),
             i64::from(e.failure_code().get()),

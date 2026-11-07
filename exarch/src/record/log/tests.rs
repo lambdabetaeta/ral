@@ -141,8 +141,10 @@ fn a_large_observation_replays_exactly_from_compact_bytes() {
             0,
             CommandOrigin::External,
             AuditIo {
-                stdout: bytes.clone(),
-                stdout_total: 2 * bytes.len() as u64,
+                stdout: ral_core::Retained {
+                    bytes: bytes.clone(),
+                    total: 2 * bytes.len() as u64,
+                },
                 ..AuditIo::default()
             },
             None,

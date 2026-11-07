@@ -323,7 +323,7 @@ mod tests {
     /// produce mixed rows.
     #[test]
     fn worker_row_is_coherent_across_running_stopping_ready_and_consumed() {
-        use crate::io::ByteBuffer;
+        use crate::io::Streams;
         use crate::shell::runtime::{Done, End, HandleInner, Owner, Value, WorkerId};
 
         let mut shell = crate::test_helper::core_shell();
@@ -334,8 +334,7 @@ mod tests {
                 WorkerId(id),
                 title,
                 DurableRoot::default().worker(),
-                ByteBuffer::default(),
-                ByteBuffer::default(),
+                Streams::default(),
             )
         };
 

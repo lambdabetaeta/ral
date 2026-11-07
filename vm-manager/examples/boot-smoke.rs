@@ -212,8 +212,8 @@ fn prove_the_host_can_dial_in(
         match listening.join() {
             Ok(Ok(Report::Ran(Ran { captured, .. }))) => {
                 if let Some(captured) = captured {
-                    print!("{}", String::from_utf8_lossy(&captured.stdout));
-                    let stderr = String::from_utf8_lossy(&captured.stderr);
+                    print!("{}", String::from_utf8_lossy(&captured.stdout.bytes));
+                    let stderr = String::from_utf8_lossy(&captured.stderr.bytes);
                     if !stderr.trim().is_empty() {
                         eprint!("guest stderr: {stderr}");
                     }

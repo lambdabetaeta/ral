@@ -11,6 +11,7 @@
 use super::WorkerId;
 use crate::data::datum::{Datum, field, tag, untag};
 use crate::data::{Bytes, FOValue};
+use crate::io::{Retained, Streams};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
 use crate::ty::{Ty, Typed, closed_record};
@@ -70,13 +71,7 @@ variant!(typed Observed {
 
 /// Bytes captured for one command under `CapturePolicy::Bytes`, and the totals
 /// written; empty and zero otherwise.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AuditIo {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub stdout_total: u64,
-    pub stderr_total: u64,
-}
+pub type AuditIo = Streams<Retained>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
@@ -110,10 +105,10 @@ impl Command {
             argv: std::iter::once(shown.to_string()).chain(args).collect(),
             status,
             origin,
-            stdout: io.stdout.into(),
-            stdout_total: io.stdout_total,
-            stderr: io.stderr.into(),
-            stderr_total: io.stderr_total,
+            stdout: io.stdout.bytes.into(),
+            stdout_total: io.stdout.total,
+            stderr: io.stderr.bytes.into(),
+            stderr_total: io.stderr.total,
             error,
         }
     }

@@ -214,7 +214,7 @@ mod tests {
     use super::super::Sample;
     use super::super::compacting::MIN_SWEEP_AT;
     use super::*;
-    use crate::io::ByteBuffer;
+    use crate::io::Streams;
     use crate::process::DurableRoot;
     use crate::shell::runtime::{CompletionPermit, End, Value};
 
@@ -223,8 +223,7 @@ mod tests {
             WorkerId::mint(),
             "<brood-test>",
             DurableRoot::default().worker(),
-            ByteBuffer::default(),
-            ByteBuffer::default(),
+            Streams::default(),
         )
     }
 

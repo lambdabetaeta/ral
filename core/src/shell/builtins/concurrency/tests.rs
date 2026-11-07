@@ -2,7 +2,7 @@ use super::eliminate::{await_handle, first_ready};
 use super::*;
 use crate::data::FOValue;
 use crate::fact::{ExitCode as _, FailureCode as _};
-use crate::io::new_buffer;
+use crate::io::{ByteBuffer, CapturedBytes, Streams, new_buffer};
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode, WorkerStop};
 use crate::shell::runtime::{
     Break, BroodOwner, BuiltinBody, BuiltinEntry, Cradle, DeferredSink, End, Error, Escape,
@@ -64,16 +64,14 @@ fn spawned(title: &str) -> Birth {
 /// A handle whose worker dropped its completion permit unfinished, modelling a
 /// panic. The buffers are pre-seeded so a ready outcome can be checked for them.
 fn handle_with_panicked_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
-    let (_, out) = new_buffer();
-    let (_, err) = new_buffer();
-    out.append(stdout);
-    err.append(stderr);
+    let buffers = Streams::<ByteBuffer>::default();
+    buffers.stdout.append(stdout);
+    buffers.stderr.append(stderr);
     let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         DurableRoot::default().worker(),
-        out,
-        err,
+        buffers,
     );
     handle
 }
@@ -292,15 +290,12 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 
     // A still-running worker, root-parented as a real `spawn`'s is: its
     // permit stays alive, unfinished.
-    let (_sink, stdout_buf) = new_buffer();
-    let (_sink2, stderr_buf) = new_buffer();
     let worker_scope = shell.session.root.worker();
     let (handle, _permit) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         worker_scope.clone(),
-        stdout_buf,
-        stderr_buf,
+        Streams::default(),
     );
 
     // Cancel the foreground (run deadline / interrupt), not the root.
@@ -320,16 +315,13 @@ fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
 #[test]
 fn first_ready_reraises_mid_wait_cancel_without_claiming_the_worker() {
     let mut shell = crate::test_helper::core_shell();
-    let (_, stdout) = new_buffer();
-    let (_, stderr) = new_buffer();
     let worker_scope = shell.session.root.worker();
     // Retain the unfinished permit so the handle stays running.
     let (handle, _permit) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         worker_scope.clone(),
-        stdout,
-        stderr,
+        Streams::default(),
     );
     let m = Mooring::adrift();
     shell.scope = Scope::clone(&m.home);
@@ -584,7 +576,7 @@ fn run_framed(
             ending, captured, ..
         } => (
             ending.into_settled(),
-            captured.map(|c| c.stdout).unwrap_or_default(),
+            captured.map(|c| c.stdout.bytes).unwrap_or_default(),
         ),
         RunReport::Static { .. } => {
             panic!("well-formed source must run, not fail statically: {src}")
@@ -819,6 +811,46 @@ fn await_raises_a_failed_block_after_replaying() {
     );
     assert_eq!(status(ended.expect_err("the block failed")), 1);
     assert_eq!(String::from_utf8_lossy(&stdout), "partial\n");
+}
+
+/// A stream its buffer cut replays as the prefix kept; `await` then says on
+/// stderr, in ral's voice, how much was written and how much kept.
+#[test]
+fn await_replays_a_cut_stream_then_notes_the_cut() {
+    let mut shell = crate::test_helper::core_shell();
+    let buffers = Streams {
+        stdout: Arc::new(CapturedBytes::new(4)),
+        stderr: ByteBuffer::default(),
+    };
+    buffers.stdout.append(b"abcdefgh");
+    buffers.stderr.append(b"err\n");
+    let (handle, permit) = HandleInner::new(
+        WorkerId::mint(),
+        "<chatty>",
+        DurableRoot::default().worker(),
+        buffers,
+    );
+    permit.finish(End::Ok(Value::Unit));
+    let (out_sink, out) = new_buffer();
+    let (err_sink, err) = new_buffer();
+    shell.io.stdout = out_sink;
+    shell.io.stderr = err_sink;
+    await_handle(&handle, "await", &mut shell).expect("awaited");
+    assert_eq!(out.take().bytes, b"abcd");
+    let err = String::from_utf8(err.take().bytes).unwrap();
+    let (replayed, note) = err.split_at(4);
+    assert_eq!(replayed, "err\n");
+    assert!(
+        note.starts_with(
+            "note: worker '<chatty>' wrote 8 bytes to stdout; only the first 4 were kept."
+        ),
+        "{note}"
+    );
+    assert_eq!(
+        note.matches("note:").count(),
+        1,
+        "a whole stderr earns no note: {note}"
+    );
 }
 
 /// `poll` reports the seconds a block has run on every arm: so far while it
@@ -2300,9 +2332,9 @@ fn an_outside_claim_and_the_parents_join_replay_once() {
     });
     let outside = await_handle(&inner, "await", &mut shell);
     opener.join().unwrap();
-    let by_outside = out.take();
+    let by_outside = out.take().bytes;
     await_handle(&outer, "await", &mut shell).expect("the parent returns");
-    let by_parent = out.take();
+    let by_parent = out.take().bytes;
     match outside {
         Ok(_) => assert_eq!((&by_outside[..], &by_parent[..]), (&b"c"[..], &b""[..])),
         Err(e) => {
@@ -2742,17 +2774,12 @@ fn a_spawn_inside_a_worker_is_not_announced() {
 fn a_brood_prunes_only_a_claimed_and_ended_child() {
     let owner = ScopeOwner::new(BroodOwner::Gather);
     let brood = owner.brood();
-    let (running, _settler) = {
-        let (_, out) = new_buffer();
-        let (_, err) = new_buffer();
-        HandleInner::new(
-            WorkerId::mint(),
-            "<running>",
-            DurableRoot::default().worker(),
-            out,
-            err,
-        )
-    };
+    let (running, _settler) = HandleInner::new(
+        WorkerId::mint(),
+        "<running>",
+        DurableRoot::default().worker(),
+        Streams::default(),
+    );
     let ended = handle_with_panicked_worker(b"", b"");
     for child in [&running, &ended] {
         child.claim_and_stop();

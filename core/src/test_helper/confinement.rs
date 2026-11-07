@@ -70,12 +70,12 @@ impl Output {
         };
         let status = ending.code();
         let captured = captured.expect("an enforcement probe captures its streams");
-        let mut stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
+        let mut stderr = String::from_utf8_lossy(&captured.stderr.bytes).into_owned();
         if let End::Err(error) = ending {
             stderr.push_str(&error.describe());
         }
         Self {
-            stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
+            stdout: String::from_utf8_lossy(&captured.stdout.bytes).into_owned(),
             stderr,
             status: i32::from(status),
         }

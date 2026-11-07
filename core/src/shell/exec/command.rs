@@ -9,7 +9,7 @@
 //! paths resolve, confine, start, wait on and end a call the same way.
 
 use crate::authority::sandbox::Ownership;
-use crate::io::Sink;
+use crate::io::{Sink, Streams};
 use crate::process::{POLL_SLICE, PgidPolicy, Scope};
 use crate::shell::runtime::{Mooring, Settled, Shell, Value};
 
@@ -71,36 +71,29 @@ pub(crate) fn run(
 /// remaining bytes are owed to nobody, and a descendant it missed could hold the
 /// pipe for ever, so that ending detaches, as does every forced end; every
 /// other joins, after the kill that frees the pipe.
-pub(crate) struct Pumps<T = std::thread::JoinHandle<()>> {
-    stdout: Option<T>,
-    stderr: Option<T>,
-}
+pub(crate) struct Pumps<T = std::thread::JoinHandle<()>>(Streams<Option<T>>);
 
 impl<T> Default for Pumps<T> {
     fn default() -> Self {
-        Self {
-            stdout: None,
-            stderr: None,
-        }
+        Self(Streams::both(|| None))
     }
 }
 
 impl Pumps<Sink> {
     pub(crate) const fn new(stdout: Option<Sink>, stderr: Option<Sink>) -> Self {
-        Self { stdout, stderr }
+        Self(Streams { stdout, stderr })
     }
 
     /// Start the planned drainers over `child`'s piped stdout/stderr, each
     /// reading `scope`, the launching computation's current scope.
     pub(crate) fn start(self, child: &mut crate::process::ChildHandle, scope: &Scope) -> Pumps {
-        Pumps {
-            stdout: self
-                .stdout
+        let Streams { stdout, stderr } = self.0;
+        Pumps(Streams {
+            stdout: stdout
                 .and_then(|sink| child.take_stdout().map(|s| sink.pump(s, scope.clone()))),
-            stderr: self
-                .stderr
+            stderr: stderr
                 .and_then(|sink| child.take_stderr().map(|s| sink.pump(s, scope.clone()))),
-        }
+        })
     }
 }
 
@@ -113,7 +106,8 @@ impl Pumps {
     /// otherwise wait for a read end the collector holds until this very stage
     /// files.
     pub(crate) fn join_under(self, scope: &Scope, kill: impl FnOnce()) {
-        let handles: Vec<_> = [self.stdout, self.stderr].into_iter().flatten().collect();
+        let Streams { stdout, stderr } = self.0;
+        let handles: Vec<_> = [stdout, stderr].into_iter().flatten().collect();
         let mut kill = Some(kill);
         while !handles.iter().all(std::thread::JoinHandle::is_finished) {
             if scope.is_cancelled() {

@@ -65,7 +65,7 @@ impl PromptText {
 /// back to its captured stdout, one trailing LF or CRLF trimmed.
 fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
     match (value, captured) {
-        (FOValue::Unit, Some(cap)) => captured_line(&cap.stdout),
+        (FOValue::Unit, Some(cap)) => captured_line(&cap.stdout.bytes),
         (FOValue::Unit, None) => DEFAULT_PROMPT.to_string(),
         (value, _) => Value::from(value).to_string(),
     }

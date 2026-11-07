@@ -15,6 +15,7 @@
 //! the ending; the rest is re-raised as `await` raises it.
 
 use crate::fact::Io;
+use crate::io::{Retained, Streams};
 use crate::shell::runtime::{
     Break, CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value,
     outcome_value, sig, stop_and_drain,
@@ -40,10 +41,28 @@ pub(crate) fn builtin_workers(shell: &Shell) -> Value {
 }
 
 /// Replay what the worker wrote, in the awaiter's own sinks: stdout, then
-/// stderr.  A broken pipe is the stop it always is.
-fn replay(stdout: &[u8], stderr: &[u8], shell: &mut Shell) -> Settled<()> {
-    shell.write_stdout(stdout)?;
-    shell.write_stderr(stderr)
+/// stderr, then a note for each stream its buffer cut.  A broken pipe is the
+/// stop it always is.
+fn replay(handle: &HandleInner, written: &Streams<Retained>, shell: &mut Shell) -> Settled<()> {
+    shell.write_stdout(&written.stdout.bytes)?;
+    shell.write_stderr(&written.stderr.bytes)?;
+    for (stream, retained) in written.as_ref().named() {
+        if !retained.is_whole() {
+            shell.write_stderr(cut_note(&handle.title, stream, retained).as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// ral's own account of a stream the worker's buffer cut.
+fn cut_note(title: &str, stream: &str, retained: &Retained) -> String {
+    format!(
+        "note: worker '{title}' wrote {} bytes to {stream}; only the first {} were kept. \
+         Redirect the stream inside the block to keep all of it: \
+         `spawn {{ cmd > out.log }}`\n",
+        retained.total,
+        retained.bytes.len()
+    )
 }
 
 /// `verb`'s refusal of a handle whose result is gone to another claimer.
@@ -53,7 +72,7 @@ fn already_claimed(verb: &str) -> Break {
 
 /// Exact await of a claimed result: replay, then conclude.
 fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
-    replay(&settle.stdout, &settle.stderr, shell)?;
+    replay(handle, &settle.written, shell)?;
     handle.protect_value(settle.end.into_settled()?, shell)
 }
 
@@ -110,7 +129,7 @@ pub(crate) fn outlive(shell: &mut Shell) -> Settled<()> {
     {
         let handle = entry.handle;
         if let Some((_, settle)) = claim_first(std::slice::from_ref(&handle), shell)? {
-            replay(&settle.stdout, &settle.stderr, shell)?;
+            replay(&handle, &settle.written, shell)?;
         }
     }
     Ok(())
@@ -147,7 +166,8 @@ pub(crate) fn builtin_is_done(args: &[Value]) -> Settled<Value> {
 /// The running bytes are a cumulative, non-destructive snapshot
 /// ([`crate::io::CapturedBytes::peek`]), so a partial poll never steals bytes
 /// the worker's drain as it finishes must still see.  A watched handle's
-/// buffers stay empty, so a poll on one reports no bytes.
+/// buffers stay empty, so a poll on one reports no bytes.  Past the buffer's
+/// cap a poll sees the kept prefix; only `await` says what was cut.
 ///
 /// In `ready`, an ordinary failure or the worker's own stop surfaces as
 /// `` `err ``; an `exit`, a foreign stop and a panic are re-raised, as `await`
@@ -168,7 +188,7 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
                 Ok(Err(e)) => Err(e.record(shell)),
                 Err(halt) => return halt.widen().into_settled(),
             };
-            let io = Io::of(settle.stdout, settle.stderr);
+            let io: Io = settle.written.map(|retained| retained.bytes.into());
             let fields = [
                 ("elapsed", Value::Float(elapsed.into())),
                 ("outcome", outcome_value(outcome)),

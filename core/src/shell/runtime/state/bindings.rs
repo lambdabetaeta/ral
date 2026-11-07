@@ -418,7 +418,7 @@ mod chokepoint_tests {
         }) {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
-                String::from_utf8_lossy(&captured.stderr).into_owned()
+                String::from_utf8_lossy(&captured.stderr.bytes).into_owned()
             }
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
@@ -799,7 +799,7 @@ mod chokepoint_tests {
     /// (`consumed`), at which point pruning drops it.
     #[test]
     fn stopping_handle_pins_name_until_consumed() {
-        use crate::io::ByteBuffer;
+        use crate::io::Streams;
         use crate::process::DurableRoot;
         use crate::shell::runtime::{End, HandleInner, WorkerId};
 
@@ -808,8 +808,7 @@ mod chokepoint_tests {
             WorkerId(99),
             "stopping-pin",
             DurableRoot::default().worker(),
-            ByteBuffer::default(),
-            ByteBuffer::default(),
+            Streams::default(),
         );
         assert!(handle.claim_and_stop());
         assert_eq!(handle.sample(), Sample::Stopping);

@@ -341,7 +341,7 @@ mod tests {
         };
         let error = ending.into_settled().unwrap_err().to_string();
         assert_eq!(error, "the editor failed");
-        let cleanup = String::from_utf8(captured.stderr).unwrap();
+        let cleanup = String::from_utf8(captured.stderr.bytes).unwrap();
         assert!(cleanup.contains("fs write denied by grant"), "{cleanup}");
         assert!(!cleanup.contains("the editor failed"), "{cleanup}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
