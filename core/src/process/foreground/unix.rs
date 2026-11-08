@@ -169,6 +169,13 @@ impl TerminalLoan {
     /// child's last buffered output leaves under the child's own settings:
     /// `Now` would clobber those bytes' line discipline, and `Flush` would
     /// discard input typed during the child's final frame.
+    #[cfg_attr(
+        not(debug_assertions),
+        allow(
+            unused_variables,
+            reason = "`dbg_trace!` discards its arguments in release builds"
+        )
+    )]
     fn restore(&self) {
         let _sigttou = SigttouBlock::new();
         if let Err(err) = rustix::io::retry_on_intr(|| {
