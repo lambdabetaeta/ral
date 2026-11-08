@@ -1,3 +1,4 @@
+// LOCAL PATCH: rustdoc links name the actual EditorStatusLine type.
 use super::EditorStatusLine;
 use ratatui_core::style::{Color, Style};
 use ratatui_widgets::block::Block;
@@ -12,7 +13,7 @@ pub struct EditorTheme<'a> {
     pub selection_style: Style,
     /// The surrounding block
     pub block: Option<Block<'a>>,
-    /// An optional [`StatusLine`] displaying the editor mode
+    /// An optional [`EditorStatusLine`] displaying the editor mode
     pub status_line: Option<EditorStatusLine>,
     /// Style for line numbers (subdued by default)
     pub line_numbers_style: Style,
@@ -143,8 +144,8 @@ impl<'a> EditorTheme<'a> {
         self
     }
 
-    /// This method allows you to customize the style of the [`StatusLine`]
-    /// of the Editor. See [`StatusLine`] on how to modify its appearance.
+    /// This method allows you to customize the style of the [`EditorStatusLine`]
+    /// of the Editor. See [`EditorStatusLine`] on how to modify its appearance.
     /// Use `hide_status_line` to hide the status line.
     ///
     /// # Example

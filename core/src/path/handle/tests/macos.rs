@@ -65,18 +65,13 @@ impl Volume {
 
 impl Drop for Volume {
     fn drop(&mut self) {
-        hdiutil(&[
-            "detach".as_ref(),
-            "-quiet".as_ref(),
-            "-force".as_ref(),
-            self.0.as_os_str(),
-        ]);
+        hdiutil(&["detach".as_ref(), "-force".as_ref(), self.0.as_os_str()]);
     }
 }
 
 fn hdiutil(args: &[&OsStr]) {
     let status = Command::new("hdiutil").args(args).status().unwrap();
-    assert!(status.success(), "hdiutil {args:?}");
+    assert!(status.success(), "hdiutil {args:?}: {status}");
 }
 
 /// A spelling of the name asked, under every fold a filesystem applies, is

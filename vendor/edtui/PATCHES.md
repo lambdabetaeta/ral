@@ -82,6 +82,8 @@ synod's tauri-build leaves a stub `msvcrt.lib` for its static VC runtime.
 `view/syntax_higlighting.rs` uses syntect's built-in theme set rather than an
 omitted binary theme dump; optional syntax-highlighting callers must use those
 names or supply a custom set. The README and crate example name a built-in theme.
+Rustdoc links in `view/{syntax_higlighting,theme}.rs` name the actual theme
+setter and status-line type; the custom syntax setter documents syntax, not themes.
 
 ## License boundary
 
@@ -92,12 +94,12 @@ they are not relicensed by this vendoring patch.
 
 ## Integration
 
-At the workspace root (not changed by this patch):
+`exarch/Cargo.toml` depends directly on this vendored crate:
 
 ```toml
-[patch.crates-io]
-edtui = { path = "vendor/edtui" }
+edtui = { path = "../vendor/edtui", default-features = false, features = ["mouse-support"] }
 ```
 
-The existing edtui version requirement accepts 0.11.7. No direct path dependency
-on edtui-jagged or other crate is required.
+There is no workspace-wide crates.io patch: installing `ral`, which does not
+use edtui, would otherwise warn that the patch is unused. The vendored crate
+remains a workspace member so workspace linting covers it.

@@ -44,7 +44,7 @@ libc       = "0.2"
 nix        = "0.31"
 rustix     = "1"
 clap       = { version = "4", features = ["derive"] }
-base64     = "0.22"
+base64     = "0.23"
 arboard    = { version = "3.6", default-features = false }
 clipboard  = { path = "clipboard" }
 nucleo-matcher = "0.3"
@@ -65,9 +65,6 @@ cap-fs-ext = { version = "4", default-features = false }
 # emitted TypeScript carries the serde tag and casing the JSON actually has,
 # rather than a second spelling of it.
 ts-rs      = "12"
-
-[patch.crates-io]
-edtui = { path = "vendor/edtui" }
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }

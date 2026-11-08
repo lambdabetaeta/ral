@@ -108,15 +108,14 @@ impl SyntaxHighlighter {
     }
 
     /// Set a custom theme. If you would like to use a predefined
-    /// theme use [`theme_by_name`].
+    /// theme use [`Self::theme`].
     #[must_use]
     pub fn custom_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
         self
     }
 
-    /// Set a custom theme. If you would like to use a predefined
-    /// theme use [`theme_by_name`].
+    /// Set a custom syntax reference.
     #[must_use]
     pub fn custom_syntax_ref(mut self, syntax_ref: SyntaxReference) -> Self {
         self.syntax_ref = syntax_ref;
