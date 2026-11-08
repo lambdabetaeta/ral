@@ -480,6 +480,39 @@ fn confined(
     Ok(launch)
 }
 
+/// Pause a real spawn after confinement, just before `CreateProcessW`, and run
+/// `before_create` while its token's SID owners and attribute list are live.
+fn spawn_after_confinement<T: Send>(
+    launch: crate::process::Launch,
+    before_create: impl FnOnce() -> T + Send,
+) -> (Result<crate::process::Spawned, Unstarted>, T) {
+    use crate::process::spawn_lock::test_phase;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(move || {
+            // Disconnect on unwind, so a failed observer cannot leave the
+            // spawn waiting for its release.
+            let release_tx = release_tx;
+            reached_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("spawn reached CreateProcessW");
+            let observed = before_create();
+            release_tx.send(()).expect("release CreateProcessW");
+            observed
+        });
+        test_phase::install(reached_tx, release_rx);
+        let spawned = launch.spawn(
+            crate::process::PgidPolicy::Inherit,
+            &crate::process::DurableRoot::default().child(),
+        );
+        (spawned, observer.join().expect("spawn observer"))
+    })
+}
+
 /// Run `type relative` confined under `projection` from `cwd`, and assert it
 /// reads `secret` exactly when `readable`.
 fn assert_reads(
@@ -495,15 +528,18 @@ fn assert_reads(
 /// Spawn `launch`, a confined file read, and assert it reads `secret` exactly
 /// when `readable`.
 fn assert_launch_reads(launch: crate::process::Launch, relative: &str, readable: bool) {
-    use crate::process::PgidPolicy;
-    use std::io::Read;
-    let mut child = launch
+    let child = launch
         .spawn(
-            PgidPolicy::Inherit,
+            crate::process::PgidPolicy::Inherit,
             &crate::process::DurableRoot::default().child(),
         )
         .unwrap()
         .child;
+    assert_child_reads(child, relative, readable);
+}
+
+fn assert_child_reads(mut child: crate::process::ChildHandle, relative: &str, readable: bool) {
+    use std::io::Read;
     let mut stdout = Vec::new();
     child
         .take_stdout()
@@ -604,13 +640,18 @@ fn an_xdg_config_style_grant_is_carved_and_launches() {
         assert_reads(&carved, &cfg, r"git\config", true);
         assert_reads(&carved, &cfg, "other.txt", true);
 
-        let launch = confined(&carved, &cfg, "type new.txt").unwrap();
-        tree.write(r"cfg\new.txt");
-        assert_launch_reads(launch, "new.txt", false);
+        // Building a Launch does not freeze its token: carving belongs to spawn.
+        let launch = confined(&carved, &cfg, "type before.txt").unwrap();
+        tree.write(r"cfg\before.txt");
+        assert_launch_reads(launch, "before.txt", true);
 
-        let launch = confined(&carved, &cfg, r"type op\session").unwrap();
-        tree.write(r"cfg\op\session");
-        assert_launch_reads(launch, r"op\session", false);
+        for relative in ["new.txt", r"op\session"] {
+            let launch = confined(&carved, &cfg, &format!("type {relative}")).unwrap();
+            let (spawned, ()) = spawn_after_confinement(launch, || {
+                tree.write(&format!(r"cfg\{relative}"));
+            });
+            assert_child_reads(spawned.unwrap().child, relative, false);
+        }
         assert_reads(&carved, &cfg, r"op\session", false);
     });
 }

@@ -1,19 +1,19 @@
-use super::{SessionGuard, Tree, cmd, confined, projection, rules, with_scoped_state};
+use super::{
+    SessionGuard, Tree, cmd, confined, projection, rules, spawn_after_confinement,
+    with_scoped_state,
+};
 use crate::authority::policy::{Baseline, Capabilities, FsPolicy};
 use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
 use crate::path::FrozenPath;
-use crate::process::{Launch, PgidPolicy, Unstarted};
+use crate::process::{PgidPolicy, Unstarted};
 use crate::test_helper::confinement::{Output, admitted, denied};
 use crate::test_helper::{layer, real, stack};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-fn capture(launch: Launch) -> std::io::Result<Output> {
-    let mut child = match launch.spawn(
-        PgidPolicy::Inherit,
-        &crate::process::DurableRoot::default().child(),
-    ) {
+fn capture(spawned: Result<crate::process::Spawned, Unstarted>) -> std::io::Result<Output> {
+    let mut child = match spawned {
         Ok(spawned) => spawned.child,
         Err(Unstarted::Program(e)) => return Err(e),
         Err(Unstarted::Refused(why)) => panic!("the probe was refused: {why}"),
@@ -31,8 +31,15 @@ fn capture(launch: Launch) -> std::io::Result<Output> {
 }
 
 fn run(projection: &SandboxProjection, cwd: &Path, line: &str) -> Output {
-    capture(confined(projection, cwd, line).expect("confine the matrix probe"))
-        .expect("spawn and capture the matrix probe")
+    capture(
+        confined(projection, cwd, line)
+            .expect("confine the matrix probe")
+            .spawn(
+                PgidPolicy::Inherit,
+                &crate::process::DurableRoot::default().child(),
+            ),
+    )
+    .expect("spawn and capture the matrix probe")
 }
 
 #[test]
@@ -193,7 +200,7 @@ fn a_junction_replacing_a_granted_leaf_or_ancestor_refuses_the_next_launch() {
 }
 
 #[test]
-fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
+fn a_spawn_keeps_every_sid_owner_alive_through_teardown() {
     with_scoped_state(|| {
         let _session = SessionGuard;
         let proof = crate::require_confinement!();
@@ -203,9 +210,8 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
         grant.net = None;
         admitted(&proof, &run(&grant, &a, "type ok.txt"), "secret");
 
-        // Include teardown-before-spawn, independent of the race's scheduling.
-        for race in [false, true] {
-            let launch = confined(&grant, &a, "type ok.txt").unwrap();
+        let launch = confined(&grant, &a, "type ok.txt").unwrap();
+        let (spawned, (package, filesystem, network)) = spawn_after_confinement(launch, || {
             let (package, filesystem, network) = {
                 use crate::sync::LockExt as _;
                 let guard = super::super::cell().lock_ignore_poison();
@@ -227,32 +233,21 @@ fn a_staged_spawn_keeps_every_sid_owner_alive_through_teardown() {
                 (package, filesystem, network)
             };
             assert!(!filesystem.is_empty());
-            let out = if race {
-                let (mut start, mut release) = os_pipe::pipe().unwrap();
-                std::thread::scope(|scope| {
-                    let teardown = scope.spawn(move || {
-                        start.read_exact(&mut [0]).unwrap();
-                        super::super::teardown();
-                    });
-                    release.write_all(&[1]).unwrap();
-                    let out = capture(launch);
-                    teardown.join().unwrap();
-                    out
-                })
-            } else {
-                super::super::teardown();
-                capture(launch)
-            };
-            assert!(package.upgrade().is_some(), "launch lost its package SID");
-            assert!(network.upgrade().is_some(), "launch lost its network SIDs");
+            // The actual spawn has minted its token and built its Win32
+            // attribute list. Tear down the session before CreateProcessW
+            // consumes those pointers, not before Launch::spawn confines.
+            super::super::teardown();
+            assert!(package.upgrade().is_some(), "spawn lost its package SID");
+            assert!(network.upgrade().is_some(), "spawn lost its network SIDs");
             assert!(filesystem.iter().all(|sid| sid.upgrade().is_some()));
-            match out {
-                Ok(out) => admitted(&proof, &out, "secret"),
-                Err(error) => assert!(error.raw_os_error().is_some(), "{error}"),
-            }
-            assert!(package.upgrade().is_none());
-            assert!(network.upgrade().is_none());
-            assert!(filesystem.iter().all(|sid| sid.upgrade().is_none()));
+            (package, filesystem, network)
+        });
+        match capture(spawned) {
+            Ok(out) => admitted(&proof, &out, "secret"),
+            Err(error) => assert!(error.raw_os_error().is_some(), "{error}"),
         }
+        assert!(package.upgrade().is_none());
+        assert!(network.upgrade().is_none());
+        assert!(filesystem.iter().all(|sid| sid.upgrade().is_none()));
     });
 }

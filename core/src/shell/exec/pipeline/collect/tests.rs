@@ -2150,7 +2150,11 @@ fn a_pid_no_event_reaches_is_killed_without_a_grace() {
 #[test]
 fn a_lone_externals_windows_job_is_released() {
     let shell = crate::test_helper::core_shell();
-    let mut launch = crate::process::Launch::new("cmd.exe");
+    let cmd =
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+            .join("System32")
+            .join("cmd.exe");
+    let mut launch = crate::process::Launch::new(cmd);
     launch.args(["/c", "exit 0"]);
     let lone = launch
         .spawn(crate::process::PgidPolicy::NewLeader, &shell.scope)

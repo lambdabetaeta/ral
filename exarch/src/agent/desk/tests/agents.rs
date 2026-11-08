@@ -1016,8 +1016,9 @@ fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provi
             ..Tuning::default()
         },
     };
+    // Only model inheritance is under test; loading a host-dependent base is not.
     let script = Script::new()
-        .then(Reply::tool_calls(vec![ral_call("spawn-and-reply", "exarch-agents `start [prompt: #'say hi'#, name: 'switched-helper', type: `amnemon, grant: `confined, model: `inherit]; exarch-agents `reply 'parent done'")]))
+        .then(Reply::tool_calls(vec![ral_call("spawn-and-reply", "exarch-agents `start [prompt: #'say hi'#, name: 'switched-helper', type: `amnemon, grant: `inherit, model: `inherit]; exarch-agents `reply 'parent done'")]))
         .then(Reply::tool_calls(vec![ral_call("child-reply", "exarch-agents `reply 'switched child'")]))
         .then(Reply::text("helper acknowledged"));
     Arc::get_mut(&mut parent.fleet)

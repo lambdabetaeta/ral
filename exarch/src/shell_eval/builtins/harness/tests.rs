@@ -175,6 +175,7 @@ fn misspelled_start_field_errors_statically_naming_the_field() {
     no_children(&session);
 }
 
+// These round trips exercise the agent protocol, not host-dependent base loading.
 fn start_child(session: &mut Agent, name: &str, prompt: &str, command: &str) -> ChildStatus {
     set_provider(
         session,
@@ -186,7 +187,7 @@ fn start_child(session: &mut Agent, name: &str, prompt: &str, command: &str) -> 
     let result = eval(
         session,
         &format!(
-            "exarch-agents `start [prompt: #'{prompt}'#, name: '{name}', type: `amnemon, grant: `read-only, model: `inherit]"
+            "exarch-agents `start [prompt: #'{prompt}'#, name: '{name}', type: `amnemon, grant: `inherit, model: `inherit]"
         ),
     );
     assert!(
