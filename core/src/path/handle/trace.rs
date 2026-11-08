@@ -123,11 +123,10 @@ impl Step {
 /// A position: an absolute path with no link, `.` or `..` in it.
 ///
 /// Each name is spelled as the filesystem stores it.  Made by the walk
-/// ([`Trace::real`]),
-/// and read off the wire — by a hand-written `Deserialize`, or a confined
-/// launch's warrant ([`Self::off_the_wire`]) — through one private
-/// constructor that applies the lexical check (absolute, parsed root, no `.`
-/// or `..`).  No `TryFrom` and no `From`: nothing mints a position from a
+/// ([`Trace::real`]), and read off the wire — by a hand-written `Deserialize`,
+/// or, on Unix, a confined launch's warrant — through one private constructor
+/// ([`Self::parse`]) that applies the lexical check (absolute, parsed root,
+/// no `.` or `..`).  No `TryFrom` and no `From`: nothing mints a position from a
 /// string.  On the wire it is its `OsString`, serde's lossless form, so a
 /// position that is not Unicode crosses whole.  `Eq` and `Ord` compare
 /// stored components on Windows and components elsewhere.

@@ -108,7 +108,7 @@ impl Slots {
             ));
         };
         let (warrant, report) = (slot(warrant)?, slot(report)?);
-        let all = vec![warrant, report];
+        let all = [warrant, report];
         #[cfg(target_os = "linux")]
         let all = all
             .into_iter()
