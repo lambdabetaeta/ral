@@ -177,6 +177,55 @@ fn glob_climbs_only_before_a_wildcard() {
     assert_eq!(shown(&dir.join("deep/dir"), "glob '../*.rs'"), "[../b.rs]");
 }
 
+/// The cwd is a literal directory, including malformed pattern syntax in
+/// its name.  Matches stay sorted and relative; an unmatched pattern is empty.
+#[test]
+fn glob_does_not_parse_the_cwd_as_a_pattern() {
+    let (_tmp, dir) = fixture();
+    std::fs::create_dir(dir.join("audio1")).unwrap();
+    std::fs::write(dir.join("audio1/wrong.txt"), "").unwrap();
+    std::fs::write(dir.join("parent.txt"), "").unwrap();
+    for name in ["audio[1]", "unclosed[", "unclosed{", ".hidden[1]"] {
+        let cwd = dir.join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        for file in ["z.txt", "a.txt", ".hidden.txt"] {
+            std::fs::write(cwd.join(file), "").unwrap();
+        }
+        assert_eq!(shown(&cwd, "glob '*.txt'"), "[a.txt, z.txt]", "{name}");
+        assert_eq!(shown(&cwd, "glob './*.txt'"), "[a.txt, z.txt]", "{name}");
+        assert_eq!(shown(&cwd, "glob '../*.txt'"), "[../parent.txt]", "{name}");
+        assert_eq!(shown(&cwd, "glob '*.absent'"), "[]", "{name}");
+        assert_eq!(shown(&cwd, "glob 'a.txt'"), "[a.txt]", "{name}");
+        assert_eq!(shown(&cwd, "glob '.hidden.txt'"), "[.hidden.txt]", "{name}");
+    }
+}
+
+/// A glob's supplied suffix is still syntax; only the expansion of its
+/// home/XDG prefix is literal.  Sigil-rooted matches keep their absolute shape.
+#[test]
+fn glob_does_not_parse_sigil_expansions_as_patterns() {
+    let (_tmp, dir) = fixture();
+    let base = dir.join("base[1]");
+    std::fs::create_dir(&base).unwrap();
+    for file in ["z.txt", "a.txt", "c.txt", ".hidden.txt"] {
+        std::fs::write(base.join(file), "").unwrap();
+    }
+    std::fs::create_dir(dir.join("base1")).unwrap();
+    std::fs::write(dir.join("base1/wrong.txt"), "").unwrap();
+    for (key, sigil) in [("HOME", "~"), ("XDG_CONFIG_HOME", "xdg:config")] {
+        let body = format!(
+            "within [env: [{key}: '{}']] {{ glob '{sigil}/[az].txt' }}",
+            base.display()
+        );
+        let expected = format!(
+            "[{}, {}]",
+            ral_core::path::shown(base.join("a.txt")),
+            ral_core::path::shown(base.join("z.txt"))
+        );
+        assert_eq!(shown(&dir, &body), expected, "{sigil}");
+    }
+}
+
 /// A deny on a name that is not there refuses the question and the read alike,
 /// so a denied absent name never reads as merely absent: the grant judges the
 /// create-target object the walk finds, and where an intermediate directory is

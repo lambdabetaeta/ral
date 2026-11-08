@@ -3,6 +3,7 @@
 
 mod common;
 
+use ral_core::path::CwdPath;
 use ral_core::protocol::Run;
 use ral_core::shell::run::RunReport;
 use ral_core::source::SourceOrigin;
@@ -21,6 +22,22 @@ fn glob(dir: &std::path::Path, pattern: &str) -> Result<(), String> {
         .into_settled()
         .map(drop)
         .map_err(|b| format!("{b:?}"))
+}
+
+#[test]
+fn a_non_utf8_cwd_stays_native_and_its_matches_can_be_relative_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join(OsStr::from_bytes(b"cwd\xFF[1]"));
+    std::fs::create_dir(&cwd).unwrap();
+    std::fs::write(cwd.join("ok.txt"), "").unwrap();
+    let mut shell = common::fresh_shell();
+    shell.seed_cwd(CwdPath::new(cwd).unwrap());
+    let result = shell
+        .run(Run::captured("glob '*.txt'", SourceOrigin::named("<test>")))
+        .expect_ran()
+        .into_settled()
+        .unwrap();
+    assert_eq!(result.to_string(), "[ok.txt]");
 }
 
 #[test]

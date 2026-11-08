@@ -9,7 +9,6 @@
 
 use crate::error::{Error, io_message};
 use crate::fact::{DirEntry, FileInfo};
-use crate::path::tree::Glob;
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
@@ -113,8 +112,13 @@ fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Val
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
-    let pattern = shell.resolve(raw);
-    let glob = Arc::new(Glob::parse(&pattern).map_err(|e| Error::new(format!("glob: {e}")))?);
+    let glob = Arc::new(
+        shell
+            .context
+            .resolver()
+            .glob(raw)
+            .map_err(|e| Error::new(format!("glob: {e}")))?,
+    );
     let mut walk = shell.admitted_walk(glob.walk(), "glob", raw);
     let mut hits = Vec::new();
     while let Some(entry) = walk.next()? {

@@ -70,7 +70,7 @@ pub(crate) fn linkers(excluded: impl Fn(&Trace) -> bool) -> Vec<RealPath> {
     let scope = crate::process::Scope::clone(&crate::process::DurableRoot::default());
     let found: BTreeSet<RealPath> = PATTERNS
         .iter()
-        .filter_map(|p| crate::path::tree::Glob::parse(&LexicalPath::absolute_str(p)?).ok())
+        .filter_map(|p| crate::path::tree::Glob::absolute(p).ok())
         .map(std::sync::Arc::new)
         .flat_map(|g| {
             g.walk()

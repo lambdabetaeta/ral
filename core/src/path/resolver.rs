@@ -60,6 +60,17 @@ impl<'a> Resolver<'a> {
         LexicalPath::from_lexed(lex::anchor(self.cwd, &PathBuf::from(expanded)))
     }
 
+    /// A glob compiled as written, then anchored by its literal prefix.
+    /// Unlike an ordinary resolved path, a pattern must not acquire syntax
+    /// from the cwd or from expansion of `~` / `xdg:`.
+    ///
+    /// # Errors
+    /// An invalid wildcard, one that matches only hidden names, or `..`
+    /// after a wildcard, which no walked entry carries.
+    pub(crate) fn glob(&self, raw: &str) -> Result<super::tree::Glob, String> {
+        super::tree::Glob::resolve(raw, self)
+    }
+
     /// Stage 2 alone, for a path the host already holds, such as a walked
     /// entry: no sigil may reinterpret it, so a file named `~` is that file,
     /// and no string round trip may rename it.

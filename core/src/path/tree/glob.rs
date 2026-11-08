@@ -1,19 +1,22 @@
 //! Glob patterns: a regular language over path components, and the walk
 //! that enumerates a pattern's candidates.
 //!
+//! Compile the pattern as written, then resolve its leading literal path.
+//! A cwd or expanded sigil is a directory name, never pattern syntax.
+//!
 //! A wildcard never matches a name beginning with `.`; only a literal
 //! component names a dotfile.
 
 use super::Walk;
 use crate::path::site::Silent;
-use crate::path::{LexicalPath, shown};
+use crate::path::{LexicalPath, Resolver, shown, utf8};
 use crate::site::site;
 use globset::{GlobBuilder, GlobMatcher};
 use regex_syntax::ParserBuilder;
 use regex_syntax::hir::literal::Extractor;
 use std::ffi::{OsStr, OsString};
 use std::iter::successors;
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 enum Step {
@@ -29,28 +32,50 @@ pub(crate) struct Glob {
     steps: Vec<Step>,
 }
 
-impl Glob {
-    /// # Errors
-    /// A wildcard component that can match only names beginning with `.`, one
-    /// `globset` rejects, or a `..` after a wildcard, which no walked entry carries.
-    pub(crate) fn parse(pattern: &LexicalPath) -> Result<Self, String> {
-        let (mut root, mut steps) = (PathBuf::new(), Vec::new());
-        for c in site!(Silent::GlobComponents, pattern.as_path() => components()) {
+/// A compiled source pattern, not yet anchored.  Only the text supplied as
+/// the pattern reaches `step`; resolution of `prefix` happens afterwards.
+struct Pattern {
+    prefix: PathBuf,
+    steps: Vec<Step>,
+}
+
+impl Pattern {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let (mut prefix, mut steps) = (PathBuf::new(), Vec::new());
+        let pattern = site!(Silent::GlobComponents, Path::new(raw));
+        for c in site!(Silent::GlobComponents, pattern => components()) {
             if c == Component::ParentDir && !steps.is_empty() {
                 return Err(format!(
-                    "'{}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?",
-                    pattern.shown()
+                    "'{raw}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?"
                 ));
             }
             match step(c)? {
-                Step::Name(name) if steps.is_empty() => root.push(name),
+                Step::Name(name) if steps.is_empty() => prefix.push(name),
                 s => steps.push(s),
             }
         }
-        let root = LexicalPath::absolute(&root).ok_or_else(|| {
+        Ok(Self { prefix, steps })
+    }
+}
+
+impl Glob {
+    /// Compile before resolving: names introduced by cwd anchoring or sigil
+    /// expansion never reach the pattern compiler.
+    pub(in crate::path) fn resolve(raw: &str, resolver: &Resolver<'_>) -> Result<Self, String> {
+        let Pattern { prefix, steps } = Pattern::parse(raw)?;
+        let root =
+            resolver.resolve(utf8(&prefix).expect("components of a UTF-8 pattern are UTF-8"));
+        Ok(Self { root, steps })
+    }
+
+    /// An absolute pattern spelled by the program, with no sigils or cwd.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn absolute(raw: &str) -> Result<Self, String> {
+        let Pattern { prefix, steps } = Pattern::parse(raw)?;
+        let root = LexicalPath::absolute(&prefix).ok_or_else(|| {
             format!(
                 "'{}': a glob walks from an absolute directory",
-                shown(&root)
+                shown(&prefix)
             )
         })?;
         Ok(Self { root, steps })
@@ -114,7 +139,10 @@ impl Glob {
 }
 
 fn step(c: Component<'_>) -> Result<Step, String> {
-    let os = c.as_os_str();
+    // A Windows namespace prefix may contain `?`; it is a root, not a name.
+    let Component::Normal(os) = c else {
+        return Ok(Step::Name(c.as_os_str().to_owned()));
+    };
     let Some(s) =
         site!(Silent::GlobWildcard, os => to_str()).filter(|s| s.contains(['*', '?', '[', '{']))
     else {
@@ -156,7 +184,8 @@ fn hidden(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Glob;
-    use crate::path::LexicalPath;
+    use crate::host::EnvVars;
+    use crate::path::{CwdPath, Resolver};
 
     /// `rest` beneath the host's root: `/rest` or `C:\rest`.
     fn rooted(rest: &str) -> String {
@@ -169,7 +198,80 @@ mod tests {
 
     fn parse(rest: &str) -> Result<Glob, String> {
         let pattern = rooted(rest);
-        Glob::parse(&LexicalPath::absolute(pattern.as_ref()).expect("an absolute pattern"))
+        Glob::absolute(&pattern)
+    }
+
+    #[test]
+    fn the_cwd_is_literal_even_when_its_names_are_pattern_syntax() {
+        let env = EnvVars::new();
+        for directory in [
+            "audio[1]",
+            "star*",
+            "single?",
+            "{a,b}",
+            "unclosed[",
+            "unclosed{",
+            ".hidden[1]",
+        ] {
+            let cwd = CwdPath::new(rooted(directory).into()).unwrap();
+            let resolver = Resolver::at(&env, &cwd);
+            let glob = resolver.glob("*.txt").unwrap();
+            assert_eq!(glob.root, resolver.resolve(""), "{directory}");
+            assert!(glob.matches(&resolver.resolve("a.txt")), "{directory}");
+            assert!(
+                !glob.matches(&resolver.resolve(".hidden.txt")),
+                "{directory}"
+            );
+        }
+    }
+
+    #[test]
+    fn sigil_expansions_are_literal_but_their_suffixes_are_patterns() {
+        let cwd = CwdPath::new(rooted("cwd[1]").into()).unwrap();
+        let home = rooted("home[");
+        let config = rooted("config{");
+        let env = [
+            ("HOME", home.as_str()),
+            ("XDG_CONFIG_HOME", config.as_str()),
+        ]
+        .into_iter()
+        .collect::<EnvVars>();
+        let resolver = Resolver::at(&env, &cwd);
+        for sigil in ["~", "xdg:config"] {
+            let glob = resolver.glob(&format!("{sigil}/[ab]/*.txt")).unwrap();
+            assert_eq!(glob.root, resolver.resolve(sigil));
+            assert!(glob.matches(&resolver.resolve(&format!("{sigil}/a/f.txt"))));
+            assert!(glob.matches(&resolver.resolve(&format!("{sigil}/b/f.txt"))));
+            assert!(!glob.matches(&resolver.resolve(&format!("{sigil}/c/f.txt"))));
+        }
+    }
+
+    #[test]
+    fn brackets_written_in_the_pattern_remain_syntax() {
+        let cwd = CwdPath::new(rooted("cwd[1]").into()).unwrap();
+        let env = EnvVars::new();
+        let resolver = Resolver::at(&env, &cwd);
+        for (pattern, prefix) in [
+            ("[ab]/*.txt".to_owned(), "cwd[1]"),
+            (rooted("cwd[1]/[ab]/*.txt"), "cwd1"),
+        ] {
+            let glob = resolver.glob(&pattern).unwrap();
+            for name in ["a", "b"] {
+                let entry = resolver.resolve(&rooted(&format!("{prefix}/{name}/f.txt")));
+                assert!(glob.matches(&entry), "{pattern}");
+            }
+            let entry = resolver.resolve(&rooted(&format!("{prefix}/c/f.txt")));
+            assert!(!glob.matches(&entry), "{pattern}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_namespace_prefix_is_not_a_wildcard() {
+        let glob = Glob::absolute(r"\\?\C:\work\*.txt").unwrap();
+        let expected = crate::path::LexicalPath::absolute_str(r"\\?\C:\work").unwrap();
+        assert_eq!(glob.root, expected);
+        assert_eq!(glob.steps.len(), 1);
     }
 
     #[test]
