@@ -16,10 +16,11 @@ impl Shell {
     /// cwd-relative entry names where possible; other roots give absolute
     /// ones.  `who` heads a name that no ral string can hold.
     pub fn admitted_walk(&self, walk: Walk, who: &'static str, named: &str) -> AdmittedWalk {
-        // If the cwd cannot be resolved, names stay absolute.
-        let base = (self.context.resolver().is_relative(named))
-            .then(|| self.resolve(".").into_cwd().ok())
-            .flatten();
+        let base = self
+            .context
+            .resolver()
+            .is_relative(named)
+            .then(|| self.context.cwd().clone());
         let region = self.context.grants.read_region(self.baseline());
         AdmittedWalk {
             entries: walk.readable_by(region).entries(self.scope.clone()),
@@ -120,17 +121,30 @@ mod tests {
     #[test]
     fn relative_and_absolute_roots_keep_their_name_shape() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("file"), "").unwrap();
-        let shell = Shell::root(
-            crate::test_helper::core_runtime().into(),
-            CwdPath::new(dir.path().to_owned()).unwrap(),
-        );
-        let root = shell.resolve("file");
-        let absolute = crate::path::shown(root.as_path());
-        for (named, expected) in [("file", "file"), (absolute.as_str(), absolute.as_str())] {
-            let mut walk = shell.admitted_walk(Walk::all(&root), "walk", named);
-            let entry = walk.next().unwrap().unwrap();
-            assert_eq!(walk.name(&entry).unwrap(), expected);
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        for root in [dir.path(), child.as_path()] {
+            std::fs::write(root.join("file"), "").unwrap();
+        }
+        for cwd in [child.clone(), std::fs::canonicalize(&child).unwrap()] {
+            let shell = Shell::root(
+                crate::test_helper::core_runtime().into(),
+                CwdPath::new(cwd).unwrap(),
+            );
+            let root = shell.resolve("file");
+            let absolute = crate::path::shown(root.as_path());
+            for (named, expected) in [
+                ("file", "file"),
+                ("./file", "file"),
+                ("../file", "../file"),
+                ("./../file", "../file"),
+                (absolute.as_str(), absolute.as_str()),
+            ] {
+                let root = shell.resolve(named);
+                let mut walk = shell.admitted_walk(Walk::all(&root), "walk", named);
+                let entry = walk.next().unwrap().unwrap();
+                assert_eq!(walk.name(&entry).unwrap(), expected, "{named}");
+            }
         }
     }
 

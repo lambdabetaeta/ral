@@ -117,7 +117,8 @@ fn runs(rules: &ExecRules, access: &Trace) -> Evidence {
 }
 
 #[cfg(unix)]
-use crate::host::test_support::{with_var, with_vars_cleared};
+use crate::host::test_support::with_var;
+use crate::host::test_support::with_vars_cleared;
 
 /// Clears the `XDG_*_HOME` overrides so `xdg-*` places resolve to the
 /// home-joined defaults, under the synthetic home the escape guard admits.

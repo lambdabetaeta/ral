@@ -122,6 +122,7 @@ impl<'a> Resolver<'a> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::host::test_support::env_guard;
     use std::path::PathBuf;
 

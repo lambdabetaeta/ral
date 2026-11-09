@@ -121,6 +121,7 @@ fn dump_frame(body: &[u8]) -> io::Result<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::host::test_support::with_var;
 
     struct InterruptOnce {

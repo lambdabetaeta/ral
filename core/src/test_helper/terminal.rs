@@ -98,7 +98,11 @@ impl PrivatePty {
         if mode == Mode::Controlling {
             // SAFETY: the helper is a new session leader, and this private
             // slave is not another session's controlling terminal.
-            if unsafe { libc::ioctl(pty.slave.as_raw_fd(), libc::TIOCSCTTY, 0) } < 0 {
+            #[allow(
+                clippy::useless_conversion,
+                reason = "ioctl request types differ across Unix targets"
+            )]
+            if unsafe { libc::ioctl(pty.slave.as_raw_fd(), libc::TIOCSCTTY.into(), 0) } < 0 {
                 return Err(io::Error::last_os_error());
             }
         }

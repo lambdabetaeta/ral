@@ -176,7 +176,16 @@ impl LexicalPath {
     /// name more, and no resolution.
     #[must_use]
     pub(crate) fn join(&self, name: &EntryName) -> Self {
-        Self::from_lexed(self.0.join(name.as_os_str()))
+        // PathBuf::push folds dots in verbatim Windows paths.
+        let mut path = self.0.as_os_str().to_os_string();
+        if !path
+            .as_encoded_bytes()
+            .ends_with(std::path::MAIN_SEPARATOR_STR.as_bytes())
+        {
+            path.push(std::path::MAIN_SEPARATOR_STR);
+        }
+        path.push(name.as_os_str());
+        Self::from_lexed(path.into())
     }
 
     /// This path, [folded](Self::folded), as a working directory, for `cd`,
@@ -440,6 +449,27 @@ mod tests {
         );
         assert_ne!(raw, lossy);
         assert_eq!(raw.name(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_lexical_join_preserves_verbatim_dot_components() {
+        use super::{EntryName, LexicalPath};
+        use std::ffi::OsStr;
+
+        let name = EntryName::parse(OsStr::new("leaf")).unwrap();
+        for (parent, expected) in [
+            (r"\\?\C:\work\.", r"\\?\C:\work\.\leaf"),
+            (r"\\?\C:\work\..", r"\\?\C:\work\..\leaf"),
+            (
+                r"\\?\UNC\server\share\work\..",
+                r"\\?\UNC\server\share\work\..\leaf",
+            ),
+            (r"\\?\C:\", r"\\?\C:\leaf"),
+        ] {
+            let joined = LexicalPath::absolute_str(parent).unwrap().join(&name);
+            assert_eq!(joined.as_path().as_os_str(), OsStr::new(expected));
+        }
     }
 
     /// An unpaired surrogate orders apart from the U+FFFD spelling it

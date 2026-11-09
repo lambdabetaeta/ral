@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e3fbc84
-generated_at_date: 2026-11-07
+generated_at_commit: f048608d
+generated_at_date: 2026-11-09
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -433,14 +433,18 @@ predicate; link following) and which region it may read (`readable_by`), judges
 every directory it enters, every file it reads for its own guidance and every
 entry it yields against it, polls the cancel scope at each entry, and yields
 `WalkEntry { shown, depth, found }`, which tells a pruning from a refusal from an
-entry unseen. The root comes first and is filtered by nothing. `Entries`
-yields `Result<WalkEntry, process::Cancellation>`; `WalkEntry::name` takes an
-optional cwd base and returns `Result<String, String>`, with no runtime types.
+entry unseen. The root comes first and is filtered by nothing. Entries append
+through `LexicalPath::join`, preserving the parent's spelling, including dots
+in Windows verbatim paths; `PathBuf::join` would normalize those away.
+`Entries` yields `Result<WalkEntry, process::Cancellation>`; `WalkEntry::name`
+takes an optional cwd base and returns `Result<String, String>`, with no runtime
+types. Relative names omit a leading `.` component but retain `..`.
 A name reads back as itself: one a sigil would claim is spelled `./~/x`
 (`sigil::literal_relative`), and one no ral string can hold is refused when asked
 for. `Shell::admitted_walk` (`shell/runtime/walk.rs`) wraps this as `AdmittedWalk`:
 selects the live region, scope and name base (`Resolver::is_relative`: a
-cwd-relative root gives cwd-relative names where possible, any other absolute
+cwd-relative root uses the existing `Context::cwd` directly, not a resolved
+`cwd/.`, giving cwd-relative names where possible; other roots give absolute
 ones), skips unseen entries, and converts cancellation to a non-catchable stop
 and naming failures to contextual errors. `glob` and exarch's
 `grep-files`, `grep-hidden`, `find-files` and `explore-dir` use that adapter.

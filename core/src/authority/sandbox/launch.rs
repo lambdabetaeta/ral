@@ -665,7 +665,7 @@ mod tests {
 
         let denied = std::env::temp_dir().join(format!("ral_denied_bun_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&denied);
-        let denied_s = denied.to_string_lossy().into_owned();
+        let denied_s = denied.to_string_lossy();
         let bad = macos_sandboxed_command(
             &proj,
             &image(Program::Tool("mkdir")),

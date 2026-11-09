@@ -309,6 +309,7 @@ mod tests {
     #[cfg(unix)]
     use ral_core::authority::policy::FsOp;
     use ral_core::data::FOValue;
+    #[cfg(unix)]
     use ral_core::environ::EnvVars;
     #[cfg(unix)]
     use ral_core::path::{LexicalPath, Reading};

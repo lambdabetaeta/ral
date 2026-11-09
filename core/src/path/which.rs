@@ -333,7 +333,7 @@ pub fn path_entries(path_value: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 }
 
 /// The resolver's fallback when `%PATHEXT%` is unset;
-/// [`WINDOWS_EXEC_EXTENSIONS`](crate::path::WINDOWS_EXEC_EXTENSIONS) is its
+/// [`WINDOWS_EXEC_EXTENSIONS`](super::lex::WINDOWS_EXEC_EXTENSIONS) is its
 /// stripped twin, the agreement pinned below.
 #[cfg(windows)]
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
@@ -570,7 +570,7 @@ mod memo_tests {
 mod windows_tests {
     use super::*;
     use crate::host::test_support::with_var;
-    use crate::path::WINDOWS_EXEC_EXTENSIONS;
+    use crate::path::lex::WINDOWS_EXEC_EXTENSIONS;
 
     /// `%PATHEXT%`'s fallback and the name-key strip list are twin copies of
     /// one fact; they may only drift together.

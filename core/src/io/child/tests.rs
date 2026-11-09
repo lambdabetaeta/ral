@@ -105,7 +105,11 @@ fn merged_child_streams_reach_the_same_reader_on_each_platform() {
     #[cfg(unix)]
     launch.args(["-c", "printf 'OUT\\n'; printf 'ERR\\n' >&2"]);
     #[cfg(windows)]
-    let mut launch = Launch::new("cmd.exe");
+    let mut launch = Launch::new(
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+            .join("System32")
+            .join("cmd.exe"),
+    );
     #[cfg(windows)]
     launch.args(["/d", "/c", "echo OUT&echo ERR 1>&2"]);
 

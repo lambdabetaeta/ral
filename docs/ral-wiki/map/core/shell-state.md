@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f26144e0
+generated_at_commit: f048608d
 generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -102,7 +102,8 @@ fact data are reached through their owning modules.
 - `walk.rs` — `AdmittedWalk` and `Shell::admitted_walk`: the live stack's
   `ReadRegion` and current cancel scope handed to `path::tree::Walk`; unseen
   entries skipped, domain cancellation converted to `Break`, and unnameable
-  entries raised with the caller's name.
+  entries raised with the caller's name. Relative requests take their naming
+  base directly from `Context::cwd`, preserving its exact path spelling.
 
 ## Capabilities
 

@@ -735,7 +735,8 @@ mod vet {
         );
         shell
             .context
-            .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
+            .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()))
+            .unwrap();
 
         let command = Command::from_name(&CommandName::Bare(name.into()), &shell.context);
         let e = refused(command, &mut shell);

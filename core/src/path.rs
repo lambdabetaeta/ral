@@ -102,7 +102,7 @@ pub use lex::{
     relative_key, spelled_parent, strip_appended_suffix, utf8, with_appended_suffix,
 };
 #[cfg(windows)]
-pub(crate) use lex::{WINDOWS_EXEC_EXTENSIONS, is_batch_image, is_volume_guid};
+pub(crate) use lex::{is_batch_image, is_volume_guid};
 pub use namespace::{EnginePath, GuestPath};
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;

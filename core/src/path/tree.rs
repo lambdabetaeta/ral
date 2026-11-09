@@ -207,6 +207,7 @@ impl WalkEntry {
         let rel = base
             .and_then(|base| site!(Silent::WalkedRelative, path => strip_prefix(base)).ok())
             .unwrap_or(path);
+        let rel = site!(Silent::WalkedRelative, rel => strip_prefix(".")).unwrap_or(rel);
         let text = site!(Silent::Unnameable, rel => to_str());
         text.map(|_| literal_relative(&shown(rel)))
             .ok_or_else(|| unnameable(rel))
@@ -359,7 +360,7 @@ impl Entries {
     fn step(&mut self, item: Item) -> Result<Option<WalkEntry>, Cancellation> {
         let Item { name, seen } = item;
         let top = self.stack.last().expect("an entry belongs to a directory");
-        let (shown, depth) = (child(&top.shown, &name), top.depth + 1);
+        let (shown, depth) = (top.shown.join(&name), top.depth + 1);
         let (stat, id) = match seen {
             Ok(seen) => seen,
             Err(e) => {
@@ -648,11 +649,6 @@ fn normals(path: &Path) -> Vec<OsString> {
             _ => None,
         })
         .collect()
-}
-
-/// `parent`'s entry `name`, as the walk names it.
-fn child(parent: &LexicalPath, name: &EntryName) -> LexicalPath {
-    LexicalPath::from_lexed(parent.as_path().join(name.as_os_str()))
 }
 
 /// Hidden: a leading dot, and on Windows the hidden attribute.

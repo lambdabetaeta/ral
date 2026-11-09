@@ -36,7 +36,7 @@ mod windows;
 #[cfg(windows)]
 use windows::gesture_signal;
 #[cfg(windows)]
-pub(crate) use windows::{KILL, grace_signal};
+pub(crate) use windows::{KILL, gesture, grace_signal};
 #[cfg(windows)]
 pub use windows::{install_handlers, install_interrupt_handler};
 
