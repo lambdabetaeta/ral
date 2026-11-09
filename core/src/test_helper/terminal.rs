@@ -147,7 +147,15 @@ pub(crate) fn assert_modes(actual: &Termios, expected: &Termios) {
     assert_eq!(actual.input_modes, expected.input_modes);
     assert_eq!(actual.output_modes, expected.output_modes);
     assert_eq!(actual.control_modes, expected.control_modes);
-    assert_eq!(actual.local_modes, expected.local_modes);
+    // XNU sets PENDIN when restoring ICANON; it is pending input state.
+    #[cfg(target_os = "macos")]
+    let transient = LocalModes::PENDIN;
+    #[cfg(not(target_os = "macos"))]
+    let transient = LocalModes::empty();
+    assert_eq!(
+        actual.local_modes & !transient,
+        expected.local_modes & !transient
+    );
     for code in [
         Code::VINTR,
         Code::VQUIT,

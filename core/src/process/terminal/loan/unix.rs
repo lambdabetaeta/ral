@@ -25,7 +25,10 @@ impl Saved {
 }
 
 pub(super) fn hand_over(leader: Pgid) -> io::Result<()> {
-    rustix::termios::tcsetpgrp(rustix::stdio::stdin(), leader.as_pid()).map_err(Into::into)
+    rustix::termios::tcsetpgrp(rustix::stdio::stdin(), leader.as_pid())?;
+    // A pre-handoff tty access can stop descendants as well as the leader.
+    leader.signal_group(crate::process::Signal::new(libc::SIGCONT));
+    Ok(())
 }
 
 impl Drop for Saved {

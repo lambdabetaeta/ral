@@ -1554,7 +1554,7 @@ fn unconfined(spawned: Spawned, name: &str, drains: Drains) -> Started {
 fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
     for owns_payload in [false, true] {
         let mut child = spawned(
-            &mut std::process::Command::new("/bin/true"),
+            std::process::Command::new("/bin/sh").args(["-c", "exit 0"]),
             &crate::process::Placement::NewLeader,
         );
         let payload = child.group.owned().unwrap();

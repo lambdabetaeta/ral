@@ -1,5 +1,5 @@
 ---
-verified_at_commit: f26144e0
+verified_at_commit: e04cf89b
 verified_at_date: 2026-11-09
 anchors: [StartFailure, StartFailure::settle, PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalHold, PreparedTerminalLoan, PreparedTerminalLoan::lend, GroupOwner, Shell::group_owner, Placement, Placement::command, Placement::input, TerminalInput, Source::offered, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, TerminalAccess::reach, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
@@ -253,6 +253,11 @@ cases: `start` for a stage, `run` (which titles the terminal between the two)
 for a standalone command. The pumps start before the spawn, so `Started::register`
 (`pipeline/collect.rs`) only subscribes to the reaper, in one place; it addresses an envelope
 separately only when the collector does not already own its payload's group.
+A direct terminal tenant receives foreground ownership followed by a
+whole-group `SIGCONT`. Terminal access before handoff can stop the leader and
+its descendants; the reaper watches the leader, not every descendant, so
+resuming the leader alone cannot complete the handoff.
+
 A standalone command's `Started::collect`, beside it, takes the opaque
 `Spawned.terminal` established by `Launch::spawn` and builds
 `CollectState::lone` (slot 0, no thread stage, so no cleanup grace to grant). It runs the same `drive` as any pipeline, then `settle_lone` settles it

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f26144e0
+generated_at_commit: e04cf89b
 generated_at_date: 2026-11-09
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -287,7 +287,9 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
     `TerminalHold` exposes only empty `Default`, `hear`, `pressed` and
     consuming `reclaim`; its representation and `TerminalLoan` are private.
   - `terminal/loan/unix.rs` — private saved foreground and termios, captured
-    independently. Drop restores the foreground as found, then modes with
+    independently. Handoff sets the foreground, then resumes the whole group:
+    pre-handoff terminal access can stop descendants the reaper does not watch.
+    Drop restores the foreground as found, then modes with
     `Drain`, under SIGTTOU blocking. A non-controlling tty can still save modes.
     Restoration failures are traced, not returned.
   - `terminal/loan/windows.rs` — infallible capture of any available standard

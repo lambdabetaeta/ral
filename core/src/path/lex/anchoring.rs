@@ -93,19 +93,25 @@ fn volume(cwd: &CwdPath) -> &[u8] {
     .expect("CwdPath is on a drive or a share under Windows rules")
 }
 
-/// `base`, then `rest`, a separator of the host's between them unless one
-/// already stands there or `rest` is empty.
+/// `base`, then `rest`, with native separators in the relative suffix.
+/// A verbatim base must not turn the suffix's `/` separators into name bytes.
 fn joined(base: &[u8], rest: &[u8]) -> PathBuf {
     let is_separator = |b: Option<&u8>| b.is_some_and(|&b| is_sep_byte(PathRules::HOST, b));
     let mut out = base.to_vec();
     if !rest.is_empty() && !is_separator(base.last()) && !is_separator(rest.first()) {
         out.push(PathRules::HOST.separator());
     }
-    out.extend_from_slice(rest);
+    out.extend(rest.iter().map(|&b| {
+        if is_sep_byte(PathRules::HOST, b) {
+            PathRules::HOST.separator()
+        } else {
+            b
+        }
+    }));
     // SAFETY: `base` and `rest` are each a whole encoded path or a run of one
     // cut at an ASCII byte, which cannot land inside a multi-byte
-    // UTF-8/WTF-8 sequence; and an ASCII separator stands at the seam,
-    // ending `base`, opening `rest` or put between them, unless `rest` is
+    // UTF-8/WTF-8 sequence; only ASCII separators are respelled. A separator
+    // ends `base`, opens `rest` or is put between them, unless `rest` is
     // empty, so no surrogate half meets another, and `out` is encoded as
     // validly as its parts.
     PathBuf::from(unsafe { OsStr::from_encoded_bytes_unchecked(&out) })

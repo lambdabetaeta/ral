@@ -117,6 +117,47 @@ fn a_successful_loan_restores_a_foreground_other_than_the_helpers_group() {
 }
 
 #[test]
+fn handoff_resumes_a_group_stopped_before_it_received_the_terminal() {
+    terminal::isolated(
+        "process::terminal::loan::tests::unix::handoff_resumes_a_group_stopped_before_it_received_the_terminal",
+        Mode::Controlling,
+        |pty| {
+            use rustix::process::{WaitId, WaitIdOptions, waitid};
+            use std::time::{Duration, Instant};
+
+            let home = DurableRoot::default().child();
+            let prepared = prepared(&home);
+            let terminal;
+            let (mut child, mut checkpoint) = ModeChild::spawn(
+                pty,
+                "set -e; (kill -STOP 0; printf R) & wait; IFS= read -r release <&1",
+            );
+            let deadline = Instant::now() + terminal::WAIT;
+            loop {
+                if waitid(
+                    WaitId::Pid(child.group.as_pid()),
+                    WaitIdOptions::STOPPED | WaitIdOptions::NOHANG,
+                )
+                .unwrap()
+                .is_some()
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "child group never stopped");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            terminal = prepared
+                .lend(child.group)
+                .unwrap_or_else(|(_, error)| panic!("real handoff refused: {error}"));
+            checkpoint.expect(b'R').unwrap();
+            child.stop();
+            terminal.reclaim(None);
+            assert_eq!(home.cause(), None);
+        },
+    );
+}
+
+#[test]
 fn a_refused_handoff_keeps_modes_guarded_until_after_the_child_is_reaped() {
     terminal::isolated(
         "process::terminal::loan::tests::unix::a_refused_handoff_keeps_modes_guarded_until_after_the_child_is_reaped",

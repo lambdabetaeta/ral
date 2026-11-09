@@ -171,6 +171,39 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn relative_separators_do_not_become_verbatim_name_bytes() {
+        let env = EnvVars::new();
+        for (base, relative, expected) in [
+            (r"C:\work", "./file", r"C:\work\.\file"),
+            (r"\\?\C:\work", "./file", r"\\?\C:\work\.\file"),
+            (r"\\?\C:\work", "./../file", r"\\?\C:\work\.\..\file"),
+            (r"\\?\C:\work", "C:dir/file/", r"\\?\C:\work\dir\file\"),
+            (r"\\?\C:\work", "/dir/file", r"\\?\C:\dir\file"),
+            (
+                r"\\?\UNC\server\share\work",
+                "dir/file",
+                r"\\?\UNC\server\share\work\dir\file",
+            ),
+        ] {
+            let base = cwd(base);
+            let resolved = Resolver::at(&env, &base).resolve(relative);
+            assert_eq!(resolved.as_path().as_os_str(), expected, "{relative}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_absolute_verbatim_path_keeps_its_separators_and_dots() {
+        let env = EnvVars::new();
+        let base = elsewhere();
+        let resolver = Resolver::at(&env, &base);
+        for path in [r"\\?\C:\work\./file", r"\\?\UNC\server\share\work\../file"] {
+            assert_eq!(resolver.resolve(path).as_path().as_os_str(), path);
+        }
+    }
+
     /// A working directory is absolute and, under Windows rules, on a drive
     /// or a share: a malformed or mixed head is none, since a name joined
     /// past it could assemble a share it never named.
