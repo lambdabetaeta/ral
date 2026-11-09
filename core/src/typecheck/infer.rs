@@ -1201,16 +1201,19 @@ impl Inferencer<'_> {
     fn gate_arg(&mut self, ty: &Ty, boundary: ArgvBoundary<'_>) {
         // The head decides the verdict; the message shows the whole type.
         let head = self.ctx.unifier.resolve_ty(ty);
-        let refusal = RefusedArg::of_ty(&head);
+        let Some(refused) = RefusedArg::of_ty(&head) else {
+            return;
+        };
         let command = match boundary {
-            ArgvBoundary::Exec(command) if refusal.is_some() => command,
-            ArgvBoundary::InShell(command) if refusal == Some(RefusedArg::Unit) => command,
-            _ => return,
+            ArgvBoundary::Exec(command) => command,
+            ArgvBoundary::InShell(command) if refused == RefusedArg::Unit => command,
+            ArgvBoundary::InShell(_) => return,
         };
         let ty = self.ctx.unifier.apply_ty(&head);
         self.ctx.diagnose(TypeErrorKind::ExecArgNotText {
             command: command.to_string(),
             ty,
+            refused,
         });
     }
 

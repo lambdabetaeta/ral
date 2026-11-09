@@ -1,6 +1,6 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
-use crate::error::{Error, io_message};
+use crate::error::Error;
 use crate::io::Source;
 use crate::shell::runtime::{Settled, Shell, Value};
 
@@ -63,7 +63,7 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
         .io
         .stdin
         .reader()
-        .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?
+        .map_err(|e| Error::io("could not duplicate stdin", &e))?
     else {
         return Ok(Box::new(std::io::empty()));
     };

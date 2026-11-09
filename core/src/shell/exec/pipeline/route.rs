@@ -2,7 +2,6 @@
 //! [`StageRoute`].  The parent's own duplicate of a non-final read end
 //! ([`HeldEdge`]) keeps EPIPE off every writer: the sentinel hears it instead.
 
-use crate::error::io_message;
 use crate::io::Edge;
 use crate::shell::runtime::{Error, Settled};
 use std::cell::Cell;
@@ -44,13 +43,10 @@ pub(super) struct StageRoute {
 }
 
 fn open_edge() -> Settled<(ByteOut, ByteIn)> {
-    let (r, w) = crate::process::cloexec_pipe().map_err(|e| Error::new(io_message("pipe", &e)))?;
+    let (r, w) = crate::process::cloexec_pipe().map_err(|e| Error::io("pipe", &e))?;
     let held = HeldEdge {
         edge: Edge::new(),
-        reader: Arc::new(
-            r.try_clone()
-                .map_err(|e| Error::new(io_message("pipe", &e)))?,
-        ),
+        reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
         listening: Cell::default(),
     };
     Ok((ByteOut::Downstream { writer: w, held }, ByteIn::Upstream(r)))

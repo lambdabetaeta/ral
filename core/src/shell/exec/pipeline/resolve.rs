@@ -2,7 +2,7 @@
 //! created and no pipe opened; launch reads everything this phase produces.
 
 use super::super::command::{Command, Request};
-use super::super::dispatch;
+use super::super::resolve::Resolution;
 use super::StageEval;
 use crate::ir::{Comp, CompKind};
 use crate::shell::runtime::{Break, Env, Settled, Shell, Value};
@@ -31,9 +31,7 @@ fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Se
     let CompKind::Exec(exec) = &stage.item else {
         return Ok(StageLaunch::Thread);
     };
-    let dispatch::Resolution::External(command) =
-        dispatch::resolve_command_word(&exec.head, env, shell)
-    else {
+    let Resolution::External(command) = Resolution::of(&exec.head, env, shell) else {
         return Ok(StageLaunch::Thread);
     };
     if !exec.redirects.is_empty() || shell.local.audit.captures_bytes() {

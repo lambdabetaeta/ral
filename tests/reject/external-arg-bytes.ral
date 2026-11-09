@@ -1,6 +1,6 @@
 # codes: T0057
 # status: 1
 # at: 6:44
-# contains: to external command '/bin/echo'
+# contains: as an argument to `/bin/echo`
 # contains: to-bytes
 let b = !{echo hi | from-bytes}; /bin/echo $b

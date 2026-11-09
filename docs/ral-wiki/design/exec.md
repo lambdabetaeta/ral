@@ -92,8 +92,8 @@ writes are not the result: they go to the sinks in the context.
 
 **A head's spelling decides whether it is looked up or goes straight to the
 operation.** The classification is in `core/src/shell/exec/command.rs`
-(`Command`, `Request`) and `core/src/shell/exec/dispatch.rs` (`resolve`,
-`resolve_command_word`); `docs/SPEC.md` §6.2–§6.3 is normative.
+(`Command`, `Request`) and `core/src/shell/exec/resolve.rs`
+(`Resolution::of`); `docs/SPEC.md` §6.2–§6.3 is normative.
 
 | Head | Example | Consults | Reaches |
 |---|---|---|---|

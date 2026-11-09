@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 1dc7c6e7
 generated_at_date: 2026-11-01
-covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/dispatch.rs, core/src/path/handle.rs, core/src/path/handle/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/exec/redirect/scope.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
+covers_paths: [core/src/fact/observation.rs, exarch/src/tui/group.rs, core/src/shell/runtime/audit/fan_out.rs, core/src/shell/evaluator/call.rs, core/src/shell/exec/resolve.rs, core/src/path/handle.rs, core/src/path/handle/, core/src/shell/runtime/state/checks.rs, core/src/shell/exec/redirect.rs, core/src/shell/exec/command.rs, core/src/shell/exec/pipeline/collect.rs, core/src/shell/runtime/state/mod.rs, core/src/shell/runtime/mooring.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/agent/desk.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/stream.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, core/src/path/tree.rs, clippy.toml, lint/site.rs, core/tests/sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -72,13 +72,12 @@ observation at all, so it pays for neither the `epoch_us()` syscall nor the
 an external's dispatch, a redirect, a birth — and never per builtin
 application, which is no observation at all.
 
-- **Redirects** open through `open_write`, `open_read` and `install_stdin_redirect`
-  (`shell/exec/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
+- **Redirects** open through `open_targets` (`shell/exec/redirect.rs`). A **read** (`< file`, fd 0) emits eagerly
   when the file opens — `Observed::Read { path }`, no outcome — so it precedes
-  the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as an
-  `OpenedWrite` — `Atomic`, staged beside a regular file, or `Stream` — that
-  `RedirectState` (`shell/exec/redirect/scope.rs`) holds as a `WriteIntent` and
-  reports when the frame settles (`settle`), with the outcome the site alone
+  the body it feeds. A **write** (`>`/`>>`/`>~`, fd 1/2) opens as a
+  `PendingWrite` — its `WriteHandle` `Atomic`, staged beside a regular file,
+  or `Stream` — that `RedirectState` holds and reports when the frame settles
+  (`PendingWrite::settle`), with the outcome the site alone
   can know: an atomic `>` is `committed` (body ok, commit succeeded),
   `aborted` (the body did not reach the commit) or `failed` (commit failed);
   a stream — `>>`, `>~`, any `2>` — committed each byte as it landed and is

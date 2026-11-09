@@ -6,7 +6,6 @@
 use crate::authority::guard::{Denial, check_device_name, check_flag, fs_denial};
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
-use crate::error::io_message;
 use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
 use crate::path::{Kind, is_loop};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
@@ -81,7 +80,7 @@ impl Shell {
     }
 
     fn walk_failure(path: &LexicalPath, e: &io::Error) -> Break {
-        Error::new(io_message(path.shown(), e)).into()
+        Error::io(path.shown(), e).into()
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and

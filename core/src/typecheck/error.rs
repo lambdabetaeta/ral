@@ -4,7 +4,7 @@
 use super::contract::Vocab;
 use crate::ir::BinaryOp;
 use crate::source::Span;
-use crate::ty::{CompTy, Kind, Label, Ty};
+use crate::ty::{CompTy, Kind, Label, RefusedArg, Ty};
 
 /// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
@@ -311,6 +311,7 @@ pub enum TypeErrorKind {
     ExecArgNotText {
         command: String,
         ty: Ty,
+        refused: RefusedArg,
     },
     /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
     MalformedAlias {

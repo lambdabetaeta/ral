@@ -42,7 +42,8 @@ impl Prepared {
     fn detach(self, scope: &Scope) -> Settled<u32> {
         let Self {
             mut launch,
-            diagnosis,
+            confinement,
+            program,
         } = self;
         launch
             .stdin(StdioSpec::Null)
@@ -50,12 +51,12 @@ impl Prepared {
             .stderr(StdioSpec::Null);
         match launch
             .spawn_detached(scope)
-            .map_err(|why| diagnosis.explain_start(why))?
+            .map_err(|why| program.unstarted(why, &confinement))?
         {
             Survivor::Named(pid) => Ok(pid),
             Survivor::Unnamed(why) => Err(Error::new(format!(
-                "detach: '{}' is running, but its pid is unknown ({why})",
-                diagnosis.shown
+                "detach: '{}' is running, but its pid is unknown: {why}",
+                program.shown
             ))
             .into()),
         }

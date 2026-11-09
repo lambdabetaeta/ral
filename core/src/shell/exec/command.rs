@@ -6,18 +6,23 @@
 //! 4. [`Command::prepare`] builds the launch ([`Prepared`]).
 //! 5. [`Prepared::start`] spawns the child ([`Started`]).
 //! 6. The caller collects the child, and [`ending`] reads its exit.
+//!
+//! [`Command::run`] takes an admitted command alone through steps 4–6. A
+//! pipeline stage and `detach` take those steps their own way.
 
 use super::job_control::Placement;
+use super::redirect::with_redirects;
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
-use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
+use crate::authority::policy::{self, Admitted, Baseline, GrantStack};
 use crate::authority::sandbox::{Confinement, Image, Ownership};
-use crate::error::{Error, io_message};
+use crate::error::Error;
 use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::child::{Connection, Drains};
-use crate::ir::CommandName;
+use crate::ir::{CommandName, Redirects};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
-use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell, Value};
+use crate::source::Span;
 use crate::ty::RefusedArg;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -38,6 +43,7 @@ pub(in crate::shell) use detach::detach;
 pub(crate) struct Command<S> {
     /// The name used in messages.
     pub(crate) shown: String,
+    origin: Origin,
     state: S,
 }
 
@@ -62,16 +68,22 @@ pub(crate) enum Request {
     Search { path: Option<String>, cwd: CwdPath },
 }
 
+impl Request {
+    /// How the program this request looks up was named.
+    fn origin(&self) -> Origin {
+        match self {
+            Self::Tool(_) | Self::Search { .. } => Origin::Bare,
+            Self::Path(_) | Self::NoHome => Origin::Path,
+        }
+    }
+}
+
 /// The program found, or why none was.
 pub(crate) type Lookup = Result<Admitted, LookupFailure>;
 
 /// Why lookup failed.
 pub(crate) enum LookupFailure {
-    /// No such program. On Windows, may suggest an extension, e.g. `.exe`.
-    NotFound {
-        suggested_extension: Option<&'static str>,
-    },
-    NotRunnable(NotRunnable),
+    Missing(Missing),
     /// A grant refused the program at `at`.
     Refused {
         at: String,
@@ -79,83 +91,157 @@ pub(crate) enum LookupFailure {
     },
 }
 
+/// No program runs under the name. Reported once the run has begun.
+pub(crate) enum Missing {
+    /// Nothing is there. On Windows, may suggest an extension, e.g. `.exe`.
+    NotFound {
+        suggested_extension: Option<&'static str>,
+    },
+    /// A `~` path, but there is no home directory.
+    NoHome,
+    /// Something is there, but it cannot run.
+    NotRunnable(NotRunnable),
+}
+
 impl LookupFailure {
-    const ABSENT: Self = Self::NotFound {
+    const ABSENT: Self = Self::Missing(Missing::NotFound {
         suggested_extension: None,
-    };
+    });
+
+    /// Nothing is there.
+    fn is_absent(&self) -> bool {
+        matches!(self, Self::Missing(Missing::NotFound { .. }))
+    }
+}
+
+impl From<Missing> for LookupFailure {
+    fn from(missing: Missing) -> Self {
+        Self::Missing(missing)
+    }
+}
+
+impl Missing {
+    /// What is there is no program at all: a directory, or a file that is
+    /// not executable.
+    pub(crate) fn names_no_program(&self) -> bool {
+        matches!(
+            self,
+            Self::NotRunnable(NotRunnable {
+                why: Unrunnable::Directory | Unrunnable::NotExecutable,
+                ..
+            })
+        )
+    }
+
+    /// The error reporting this for the command `shown`.
+    fn into_error(self, shown: &str) -> Error {
+        match self {
+            Self::NotFound {
+                suggested_extension,
+            } => Error::new(Reason::process(shown, Failure::NotFound)).with_hints(
+                suggested_extension.map(|ext| format!("did you mean '{shown}.{ext}'?")),
+            ),
+            Self::NoHome => Error::new(Reason::process(shown, Failure::NotFound))
+                .with_hint("no home directory is set"),
+            Self::NotRunnable(details) => {
+                Error::new(Reason::process(shown, Failure::NotRunnable(details)))
+            }
+        }
+    }
 }
 
 impl Command<Request> {
     /// Record what to look up.
     pub(crate) fn from_name(name: &CommandName, ctx: &Context) -> Self {
-        match name {
-            CommandName::Bare(bare) => Self {
-                shown: bare.to_string(),
-                state: crate::uutils::bundled_name(OsStr::new(bare.as_ref())).map_or_else(
+        let (shown, state) = match name {
+            CommandName::Bare(bare) => (
+                bare.to_string(),
+                crate::uutils::bundled_name(OsStr::new(bare.as_ref())).map_or_else(
                     || Request::Search {
                         path: ctx.env_overrides().get_or_host("PATH"),
                         cwd: ctx.cwd().clone(),
                     },
                     Request::Tool,
                 ),
-            },
-            CommandName::Path(path) => Self {
-                shown: path.clone(),
-                state: Request::Path(ctx.resolver().for_launch(path)),
-            },
+            ),
+            CommandName::Path(path) => {
+                (path.clone(), Request::Path(ctx.resolver().for_launch(path)))
+            }
             CommandName::TildePath(path) => match ctx.home() {
-                Some(home) => Self {
-                    shown: path.shown(&home),
-                    state: Request::Path(ctx.resolver().for_launch(path.expand(&home))),
-                },
-                None => Self {
-                    shown: path.to_literal(),
-                    state: Request::NoHome,
-                },
+                Some(home) => (
+                    path.shown(&home),
+                    Request::Path(ctx.resolver().for_launch(path.expand(&home))),
+                ),
+                None => (path.to_literal(), Request::NoHome),
             },
+        };
+        Self {
+            shown,
+            origin: state.origin(),
+            state,
         }
     }
 
     /// Find the program and check that the grants let it run. Reports
     /// nothing.
     pub(crate) fn lookup(self, grants: &GrantStack, baseline: &Baseline) -> Command<Lookup> {
-        let Self { shown, state } = self;
+        let Self {
+            shown,
+            origin,
+            state,
+        } = self;
         let state = match state {
-            Request::Tool(tool) => check_exec(grants, baseline, &shown, Program::Tool(tool))
-                .map_err(|denial| LookupFailure::Refused {
-                    at: shown.clone(),
-                    denial,
-                }),
+            Request::Tool(tool) => {
+                check_exec(grants, baseline, &shown, policy::Program::Tool(tool)).map_err(
+                    |denial| LookupFailure::Refused {
+                        at: shown.clone(),
+                        denial,
+                    },
+                )
+            }
             Request::Path(file) => lookup_path(file, &shown, grants, baseline),
-            Request::NoHome => Err(LookupFailure::ABSENT),
+            Request::NoHome => Err(Missing::NoHome.into()),
             Request::Search { path, cwd } => {
                 path::search(&shown, path.as_deref(), Some(&cwd), |file| {
-                    try_file(file, Origin::Searched, &shown, grants, baseline)
+                    try_file(file, Origin::Bare, &shown, grants, baseline)
                         .map_or_else(ControlFlow::Continue, ControlFlow::Break)
                 })
                 .map_err(|failures| search_error(failures, &shown))
             }
         };
-        Command { shown, state }
+        Command {
+            shown,
+            origin,
+            state,
+        }
     }
 }
 
-/// Where a file's path came from.
-#[derive(Clone, Copy)]
+/// How the user named a program.
+#[derive(Debug, Clone, Copy)]
 enum Origin {
-    /// The user typed it.
-    Typed,
-    /// A PATH search built it from a bare name.
-    Searched,
+    /// By a path.
+    Path,
+    /// By a bare name: a bundled tool, or a PATH search.
+    Bare,
 }
 
 impl Origin {
-    /// The name to show when the file cannot run.
+    /// Where the program `shown` was found, at `arg0`: the path as typed, or
+    /// the one a search built from a bare name.
     fn found(self, shown: &str, arg0: &Path) -> String {
         match self {
-            Self::Typed => shown.to_owned(),
-            Self::Searched => path::shown(arg0),
+            Self::Path => shown.to_owned(),
+            Self::Bare => path::shown(arg0),
         }
+    }
+
+    /// The program `shown`, found at `arg0`, cannot run for `why`.
+    fn not_runnable(self, shown: &str, arg0: &Path, why: Unrunnable) -> Missing {
+        Missing::NotRunnable(NotRunnable {
+            found: self.found(shown, arg0),
+            why,
+        })
     }
 
     /// Why a non-executable object of `kind` cannot run. `None` means
@@ -163,9 +249,9 @@ impl Origin {
     fn unrunnable(self, kind: Option<Kind>) -> Option<Unrunnable> {
         match (self, kind?) {
             (_, Kind::File) => Some(Unrunnable::NotExecutable),
-            (Self::Searched, _) => None,
-            (Self::Typed, Kind::Dir) => Some(Unrunnable::Directory),
-            (Self::Typed, _) => Some(Unrunnable::NotExecutable),
+            (Self::Bare, _) => None,
+            (Self::Path, Kind::Dir) => Some(Unrunnable::Directory),
+            (Self::Path, _) => Some(Unrunnable::NotExecutable),
         }
     }
 }
@@ -176,18 +262,19 @@ fn lookup_path(file: PathBuf, shown: &str, grants: &GrantStack, baseline: &Basel
     #[cfg(windows)]
     let stem = file.clone();
     let lookup = Candidate::walk(file).map_or(Err(LookupFailure::ABSENT), |file| {
-        try_file(file, Origin::Typed, shown, grants, baseline)
+        try_file(file, Origin::Path, shown, grants, baseline)
     });
     #[cfg(windows)]
-    if matches!(lookup, Err(LookupFailure::NotFound { .. })) {
+    if lookup.as_ref().is_err_and(LookupFailure::is_absent) {
         let suggested_extension = path::with_exec_extensions(&stem).find_map(|(ext, file)| {
-            try_file(file, Origin::Typed, shown, grants, baseline)
+            try_file(file, Origin::Path, shown, grants, baseline)
                 .is_ok()
                 .then_some(ext)
         });
-        return Err(LookupFailure::NotFound {
+        return Err(Missing::NotFound {
             suggested_extension,
-        });
+        }
+        .into());
     }
     lookup
 }
@@ -218,10 +305,9 @@ fn try_file(
             }
             return Err(match error.kind() {
                 ErrorKind::NotFound | ErrorKind::NotADirectory => LookupFailure::ABSENT,
-                _ => LookupFailure::NotRunnable(NotRunnable {
-                    found: origin.found(shown, &arg0),
-                    why: Unrunnable::from_io(&error),
-                }),
+                _ => origin
+                    .not_runnable(shown, &arg0, Unrunnable::from_io(&error))
+                    .into(),
             });
         }
     };
@@ -229,45 +315,38 @@ fn try_file(
         grants,
         baseline,
         shown,
-        Program::File {
+        policy::Program::File {
             arg0,
             located: Box::new(located),
         },
     )
     .map_err(|denial| LookupFailure::Refused { at, denial })?;
     // A handle can only be inspected once the grants have accepted it.
-    let unrunnable = match admitted.program() {
-        Program::File { arg0, located } if !located.is_executable() => {
-            Some(match origin.unrunnable(located.trace().kind()) {
-                Some(why) => LookupFailure::NotRunnable(NotRunnable {
-                    found: origin.found(shown, arg0),
-                    why,
-                }),
-                None => LookupFailure::ABSENT,
-            })
-        }
-        _ => None,
-    };
-    unrunnable.map_or(Ok(admitted), Err)
+    if let policy::Program::File { arg0, located } = admitted.program()
+        && !located.is_executable()
+    {
+        return Err(origin
+            .unrunnable(located.trace().kind())
+            .map_or(LookupFailure::ABSENT, |why| {
+                origin.not_runnable(shown, arg0, why).into()
+            }));
+    }
+    Ok(admitted)
 }
 
 /// Pick the error for a failed PATH search: the first one that is not
-/// "missing". If every file was missing or simply not allowed, the refusal
+/// "absent". If every file was absent or simply not allowed, the refusal
 /// gets a hint that no allowed PATH directory has the program.
 fn search_error(failures: Vec<LookupFailure>, shown: &str) -> LookupFailure {
-    let nowhere = failures.iter().all(|failure| match failure {
-        LookupFailure::NotFound { .. } => true,
-        LookupFailure::NotRunnable(_) => false,
-        LookupFailure::Refused { denial, .. } => denial.missing_allowance,
+    let nowhere = failures.iter().all(|failure| {
+        failure.is_absent()
+            || matches!(failure, LookupFailure::Refused { denial, .. } if denial.missing_allowance)
     });
-    match failures
-        .into_iter()
-        .find(|failure| !matches!(failure, LookupFailure::NotFound { .. }))
-    {
+    match failures.into_iter().find(|failure| !failure.is_absent()) {
         None => LookupFailure::ABSENT,
         Some(LookupFailure::Refused { at, mut denial }) if nowhere => {
             denial.error = denial.error.with_hint(format!(
-                "'{shown}' is no program in any PATH directory the grant runs from"
+                "'{shown}' is not in any PATH directory the grant allows"
             ));
             LookupFailure::Refused { at, denial }
         }
@@ -280,35 +359,31 @@ fn search_error(failures: Vec<LookupFailure>, shown: &str) -> LookupFailure {
 impl Command<Lookup> {
     /// Report a refusal at once.
     ///
-    /// Other errors (not found, not runnable) are kept, and `prepare`
-    /// reports them. By then the command's audit record has started and its
-    /// redirects are open. These errors also beat bad arguments.
+    /// A missing program is kept, and `prepare` reports it. By then the
+    /// command's audit record has started and its redirects are open. It
+    /// also beats bad arguments.
     pub(crate) fn admit(
         self,
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Command<Result<Admitted, Error>>> {
-        let Self { shown, state } = self;
+        let Self {
+            shown,
+            origin,
+            state,
+        } = self;
         let state = match state {
             Ok(admitted) => Ok(admitted),
-            Err(LookupFailure::NotFound {
-                suggested_extension,
-            }) => {
-                let error = Error::new(Reason::process(&shown, Failure::NotFound));
-                Err(match suggested_extension {
-                    Some(ext) => error.with_hint(format!("did you mean '{shown}.{ext}'?")),
-                    None => error,
-                })
-            }
-            Err(LookupFailure::NotRunnable(details)) => Err(Error::new(Reason::process(
-                &shown,
-                Failure::NotRunnable(details),
-            ))),
+            Err(LookupFailure::Missing(missing)) => Err(missing.into_error(&shown)),
             Err(LookupFailure::Refused { denial, .. }) => {
                 return Err(shell.exec_refused(*denial, mooring));
             }
         };
-        Ok(Command { shown, state })
+        Ok(Command {
+            shown,
+            origin,
+            state,
+        })
     }
 }
 
@@ -330,7 +405,11 @@ impl Command<Result<Admitted, Error>> {
         ownership: Ownership,
         shell: &Shell,
     ) -> Settled<Prepared> {
-        let Self { shown, state } = self;
+        let Self {
+            shown,
+            origin,
+            state,
+        } = self;
         let admitted = state?;
         let args = check_argv(&shown, args)?;
         let confinement = Confinement::of(&shell.context.grants, shell.baseline(), &admitted);
@@ -354,11 +433,12 @@ impl Command<Result<Admitted, Error>> {
         confinement.apply_guest_jail(&mut launch, ownership, shell.context.grants.net())?;
         Ok(Prepared {
             launch,
-            diagnosis: Diagnosis {
+            confinement,
+            program: Program {
                 shown,
+                origin,
                 image,
                 interpreter,
-                confinement,
             },
         })
     }
@@ -366,16 +446,12 @@ impl Command<Result<Admitted, Error>> {
 
 /// Turn the arguments into strings. Refuse values an external cannot take;
 /// the type checker does the same, but cannot always know the type.
-fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Settled<Vec<Cow<'a, str>>> {
+fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Error> {
     args.iter()
         .map(|arg| {
             if let Some(refused) = arg.heads().first().copied().and_then(RefusedArg::of_head) {
-                return Err(Error::new(format!(
-                    "cannot pass {} to external command '{cmd}'",
-                    arg.type_name()
-                ))
-                .with_hint(refused.remedy(cmd))
-                .into());
+                return Err(Error::new(RefusedArg::headline(cmd, arg.type_name()))
+                    .with_hint(refused.remedy(cmd)));
             }
             Ok(match arg {
                 Value::String(text) => Cow::Borrowed(text.as_ref()),
@@ -390,7 +466,8 @@ fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Settled<Vec<Cow<'a, str>>> {
 /// A launch, ready except for its streams.
 pub(crate) struct Prepared {
     launch: Launch,
-    diagnosis: Diagnosis,
+    confinement: Confinement,
+    program: Program,
 }
 
 impl Prepared {
@@ -402,8 +479,10 @@ impl Prepared {
             &shell.io.stdout,
             &shell.io.stderr,
         )
-        .map_err(connection_error)?;
-        announce_title(&self.diagnosis.shown, shell);
+        .map_err(|e| self.connection_error(&e))?;
+        if shell.is_interactive() {
+            shell.terminal().set_title(&self.program.shown);
+        }
         // Kernel denials logged from here on may belong to this command.
         let since = Instant::now();
         self.start(io, placement.policy(), &shell.scope)?
@@ -422,38 +501,26 @@ impl Prepared {
     pub(crate) fn start(self, io: Connection, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
         let Self {
             mut launch,
-            diagnosis,
+            confinement,
+            program,
         } = self;
-        let drains = io.install(&mut launch).start(scope).map_err(|e| {
-            Error::new(io_message(
-                format!("could not start output drains for '{}'", diagnosis.shown),
-                &e,
-            ))
-        })?;
+        let drains = (io.install(&mut launch).start(scope))
+            .map_err(|e| program.io_error("start output drains", &e))?;
         let spawned = launch
             .spawn(pgid, scope)
-            .map_err(|why| diagnosis.explain_start(why))?;
-        let denial_pids = diagnosis.denial_pids(&spawned);
+            .map_err(|why| program.unstarted(why, &confinement))?;
+        let denial_pids = confinement.denial_pids(&spawned);
         Ok(Started {
-            shown: diagnosis.shown,
+            shown: program.shown,
             spawned,
             denial_pids,
             drains,
         })
     }
-}
 
-#[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
-pub(super) fn connection_error(e: std::io::Error) -> Error {
-    Error::new(io_message("could not connect command streams", &e))
-}
-
-/// Set the terminal title to the command, if allowed.
-fn announce_title(cmd: &str, shell: &Shell) {
-    if shell.is_interactive() && shell.terminal().ui_controls_ok() {
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
-        let _ = std::io::stdout().flush();
+    /// The error for streams that could not be connected to this command.
+    pub(super) fn connection_error(&self, e: &std::io::Error) -> Error {
+        self.program.io_error("connect standard streams", e)
     }
 }
 
@@ -470,99 +537,79 @@ pub(crate) struct Started {
 
 // ── Failure to start ────────────────────────────────────────────────────
 
-/// What we need to explain a failed start.
-struct Diagnosis {
+/// The program a launch starts, named as lookup named it. It outlives the
+/// launch, which spawning consumes, to explain a failed start.
+struct Program {
     shown: String,
+    origin: Origin,
     image: Image,
     /// The `#!` interpreter, read before the file handle was closed.
     interpreter: Option<PathBuf>,
-    confinement: Confinement,
 }
 
-impl Diagnosis {
+impl Program {
     /// Pass refusals and stops through. Explain the program's own `execve`
-    /// error.
-    fn explain_start(&self, why: Unstarted) -> Break {
+    /// error under `confinement`.
+    fn unstarted(&self, why: Unstarted, confinement: &Confinement) -> Break {
         match why {
             Unstarted::Refused(refusal) => refusal.into(),
             Unstarted::Stopped(stop) => stop.into(),
-            Unstarted::Program(e) => explain_exec_error(
-                &e,
-                &self.image,
-                self.interpreter.as_deref(),
-                || self.interpreter_hint(),
+            Unstarted::Program(e) => self
+                .exec_error(&e, || {
+                    let interpreter = self.interpreter.as_deref()?;
+                    confinement.interpreter_hint(interpreter)
+                })
+                .into(),
+        }
+    }
+
+    /// The I/O failure to `what` for this program.
+    fn io_error(&self, what: &str, e: &std::io::Error) -> Error {
+        Error::io(format!("{}: could not {what}", self.shown), e)
+    }
+
+    /// Where the program was found, as lookup names it.
+    fn found(&self) -> String {
+        match &self.image {
+            Image::File { arg0, .. } => self.origin.found(&self.shown, arg0),
+            Image::Tool(_) => self.shown.clone(),
+        }
+    }
+
+    /// Explain why `execve` of this program failed with `e`.
+    ///
+    /// A sandbox that hides the interpreter gives EACCES or ENOENT, so
+    /// `hint` is only called for those. Otherwise, ENOENT for a file that
+    /// still exists means its interpreter or loader is missing.
+    fn exec_error(&self, e: &std::io::Error, hint: impl FnOnce() -> Option<String>) -> Error {
+        use crate::site::{Silent, site};
+        use std::io::ErrorKind::{NotFound, PermissionDenied};
+        let failed = |why| {
+            let found = self.found();
+            Error::new(Reason::process(
                 &self.shown,
-            )
-            .into(),
-        }
-    }
-
-    /// A hint if the sandbox hides the program's interpreter.
-    #[cfg(unix)]
-    fn interpreter_hint(&self) -> Option<String> {
-        let interpreter = self.interpreter.as_deref()?;
-        self.confinement.interpreter_hint(interpreter)
-    }
-
-    #[cfg(windows)]
-    #[allow(clippy::unused_self, reason = "Windows programs name no interpreter")]
-    fn interpreter_hint(&self) -> Option<String> {
-        None
-    }
-
-    /// The PIDs to look for in the kernel's sandbox-denial log: the child's,
-    /// or inside an envelope, the payload's host PIDs. Taken at spawn, while
-    /// the processes are still alive.
-    fn denial_pids(&self, spawned: &Spawned) -> Option<HashSet<u32>> {
-        if !self.confinement.is_confined() {
-            return None;
-        }
-        #[cfg(target_os = "linux")]
-        if let crate::process::Group::Enveloped(payload) = &spawned.group {
-            return Some(crate::authority::sandbox::payload_pids(*payload));
-        }
-        Some(HashSet::from([spawned.child.id()]))
-    }
-}
-
-/// Explain why `execve` of `image` failed with `e`.
-///
-/// A sandbox that hides the interpreter gives EACCES or ENOENT, so `hint`
-/// is only called for those. Otherwise, ENOENT for a file that still exists
-/// means its interpreter or loader is missing.
-fn explain_exec_error(
-    e: &std::io::Error,
-    image: &Image,
-    interpreter: Option<&Path>,
-    hint: impl FnOnce() -> Option<String>,
-    program: &str,
-) -> Error {
-    use crate::site::{Silent, site};
-    use std::io::ErrorKind::{NotFound, PermissionDenied};
-    let failed = |why| {
-        Error::new(Reason::process(
-            program,
-            Failure::not_runnable(program, why),
-        ))
-    };
-    let denied = matches!(e.kind(), PermissionDenied | NotFound)
-        .then(hint)
-        .flatten();
-    match (denied, e.kind(), image) {
-        (Some(hint), ..) => failed(Unrunnable::PermissionDenied).with_hint(hint),
-        (None, NotFound, Image::File { real, .. })
-            if site!(
-                Silent::SpawnedImageStat,
-                std::fs::symlink_metadata(real.as_path())
-            )
-            .is_ok() =>
-        {
-            failed(Unrunnable::MissingInterpreter(
-                interpreter.map(crate::path::shown),
+                Failure::not_runnable(found, why),
             ))
+        };
+        let denied = matches!(e.kind(), PermissionDenied | NotFound)
+            .then(hint)
+            .flatten();
+        match (denied, e.kind(), &self.image) {
+            (Some(hint), ..) => failed(Unrunnable::PermissionDenied).with_hint(hint),
+            (None, NotFound, Image::File { real, .. })
+                if site!(
+                    Silent::SpawnedImageStat,
+                    std::fs::symlink_metadata(real.as_path())
+                )
+                .is_ok() =>
+            {
+                failed(Unrunnable::MissingInterpreter(
+                    self.interpreter.as_deref().map(crate::path::shown),
+                ))
+            }
+            (None, NotFound, _) => Error::new(Reason::process(&self.shown, Failure::NotFound)),
+            (None, ..) => failed(Unrunnable::from_io(e)),
         }
-        (None, NotFound, _) => Error::new(Reason::process(program, Failure::NotFound)),
-        (None, ..) => failed(Unrunnable::from_io(e)),
     }
 }
 
@@ -595,20 +642,57 @@ fn exit_error(
     denial_pids: Option<&HashSet<u32>>,
     since: Instant,
 ) -> Error {
-    let Some(pids) = denial_pids else {
-        return Error::new(Reason::process(name, failure));
-    };
-    let exited = match failure {
-        Failure::Exited(n) => Some(n),
-        _ => None,
-    };
-    let hint = crate::authority::sandbox::denial_hint(pids, since, exited);
-    #[cfg(target_os = "macos")]
-    let hint = hint.or_else(|| exited.and_then(crate::process::limits::failure_hint));
-    let error = Error::new(Reason::process(name, failure));
-    match hint {
-        Some(hint) => error.with_hint(hint),
-        None => error,
+    let hint = denial_pids.and_then(|pids| {
+        let exited = match failure {
+            Failure::Exited(n) => Some(n),
+            _ => None,
+        };
+        crate::authority::sandbox::denial_hint(pids, since, exited)
+            .or_else(|| exited.and_then(crate::process::limits::failure_hint))
+    });
+    Error::new(Reason::process(name, failure)).with_hints(hint)
+}
+
+// ── Running alone ───────────────────────────────────────────────────────
+
+impl Command<Result<Admitted, Error>> {
+    /// Run as the `Exec` rule's external: in a frame of its own at `span`,
+    /// recorded, under `redirects`, on the shell's streams, and waited for.
+    pub(crate) fn run(
+        self,
+        args: &[Value],
+        redirects: &Redirects<String>,
+        span: Option<Span>,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Value> {
+        let origin = CommandOrigin::External;
+        self.with_record(args, origin, span, mooring, shell, |command, shell| {
+            with_redirects(redirects, span, mooring, shell, |shell| {
+                command
+                    .prepare(args, Ownership::Kept, shell)?
+                    .run(mooring, shell)
+            })
+        })
+    }
+}
+
+impl Shell {
+    /// `^program args…`, for a host holding no syntax: no handlers, no
+    /// redirects, no span.
+    ///
+    /// # Errors
+    /// Admission, argument, launch, child failure or cancellation.
+    pub fn run_external(
+        &mut self,
+        program: &str,
+        args: &[Value],
+        mooring: &Mooring,
+    ) -> Settled<Value> {
+        Command::from_name(&CommandName::of(program), &self.context)
+            .lookup(&self.context.grants, self.baseline())
+            .admit(mooring, self)?
+            .run(args, &Redirects::default(), None, mooring, self)
     }
 }
 

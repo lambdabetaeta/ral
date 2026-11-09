@@ -10,7 +10,7 @@
 //! untouched.  Unloading is the exact inverse.
 
 use ral_core::data::datum::Datum as _;
-use ral_core::error::{Error, io_message};
+use ral_core::error::Error;
 use ral_core::path::{Judged, Located, Reading};
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, FrameHandle, HookName, HookSig, Map, Mooring,
@@ -63,8 +63,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
         .map_err(|e| Error::new(e.to_string()))?;
     let read = located.read().and_then(std::io::read_to_string);
     drop(located);
-    let source =
-        read.map_err(|e| Error::new(io_message(ral_core::path::shown(file.path()), &e)))?;
+    let source = read.map_err(|e| Error::io(ral_core::path::shown(file.path()), &e))?;
     Ok((file, ral_core::source::normalize_source_text(source)))
 }
 

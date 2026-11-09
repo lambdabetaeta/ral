@@ -32,6 +32,26 @@ mod request {
         assert_eq!(command.shown, "/tmp/home/.local/bin/claude");
     }
 
+    /// A `~` path with no home directory is not found, and says why.
+    #[test]
+    fn a_tilde_path_with_no_home_is_not_found_for_want_of_one() {
+        let command = Command {
+            shown: "~/bin/tool".to_owned(),
+            origin: Origin::Path,
+            state: Request::NoHome,
+        }
+        .lookup(&GrantStack::root(), &Baseline::default());
+        let Err(LookupFailure::Missing(missing @ Missing::NoHome)) = command.state else {
+            panic!("a `~` path with no home has no program");
+        };
+        let error = missing.into_error(&command.shown);
+        assert_eq!(
+            error.reason,
+            crate::fact::Reason::process("~/bin/tool", crate::fact::Failure::NotFound)
+        );
+        assert_eq!(error.hints(), [Box::from("no home directory is set")]);
+    }
+
     /// A context whose sole grant layer is `exec`.
     fn under(exec: ExecGrant) -> Context {
         let mut grants = GrantStack::root();
@@ -48,10 +68,12 @@ mod request {
 
     fn file_of(command: &Command<Lookup>) -> (&Path, &crate::path::RealPath) {
         match command.state.as_ref().map(Admitted::program) {
-            Ok(Program::File { arg0, located }) => (arg0, located.real()),
+            Ok(policy::Program::File { arg0, located }) => (arg0, located.real()),
             Ok(other) => panic!("expected a host file, got {other:?}"),
-            Err(LookupFailure::NotFound { .. }) => panic!("expected a host file, found none"),
-            Err(LookupFailure::NotRunnable(details)) => {
+            Err(LookupFailure::Missing(Missing::NotFound { .. } | Missing::NoHome)) => {
+                panic!("expected a host file, found none")
+            }
+            Err(LookupFailure::Missing(Missing::NotRunnable(details))) => {
                 panic!("expected a host file, got {details:?}");
             }
             Err(LookupFailure::Refused { at, denial }) => {
@@ -122,9 +144,9 @@ mod request {
         let command = looked_up(Command::from_name(&path_name(&path), &shell.context));
         assert!(matches!(
             command.state,
-            Err(LookupFailure::NotFound {
+            Err(LookupFailure::Missing(Missing::NotFound {
                 suggested_extension: None,
-            })
+            }))
         ));
     }
 
@@ -140,9 +162,9 @@ mod request {
         let command = looked_up(Command::from_name(&CommandName::Path(path), &shell.context));
         assert!(matches!(
             command.state,
-            Err(LookupFailure::NotFound {
+            Err(LookupFailure::Missing(Missing::NotFound {
                 suggested_extension: None,
-            })
+            }))
         ));
     }
 
@@ -276,10 +298,10 @@ mod request {
         let first = lookup([absent.as_path(), admitted.as_path(), denied.as_path()]);
         assert!(matches!(
             first.state,
-            Err(LookupFailure::NotRunnable(NotRunnable {
+            Err(LookupFailure::Missing(Missing::NotRunnable(NotRunnable {
                 found,
                 why: Unrunnable::NotExecutable,
-            })) if found == path::shown(&plain)
+            }))) if found == path::shown(&plain)
         ));
     }
 
@@ -341,9 +363,9 @@ mod request {
         ));
         assert!(matches!(
             command.state,
-            Err(LookupFailure::NotFound {
+            Err(LookupFailure::Missing(Missing::NotFound {
                 suggested_extension: None,
-            })
+            }))
         ));
     }
 
@@ -369,10 +391,10 @@ mod request {
         ));
         assert!(matches!(
             command.state,
-            Err(LookupFailure::NotRunnable(NotRunnable {
+            Err(LookupFailure::Missing(Missing::NotRunnable(NotRunnable {
                 found,
                 why: Unrunnable::NotExecutable,
-            })) if found == path::shown(&file)
+            }))) if found == path::shown(&file)
         ));
     }
 
@@ -397,7 +419,7 @@ mod request {
                 &CommandName::Path(shown.into()),
                 &shell.context,
             ));
-            let Err(LookupFailure::NotRunnable(details)) = command.state else {
+            let Err(LookupFailure::Missing(Missing::NotRunnable(details))) = command.state else {
                 panic!("{shown} cannot run");
             };
             assert_eq!(details.found, shown);
@@ -608,7 +630,7 @@ mod request {
     }
 
     #[cfg(unix)]
-    impl Program {
+    impl policy::Program {
         /// The present file `path` names, walked but unjudged.
         pub(crate) fn file(path: PathBuf) -> Option<Self> {
             let Candidate { arg0, walked, .. } = Candidate::walk(path)?;
@@ -625,7 +647,7 @@ mod request {
 mod vet {
     use super::super::*;
     use crate::authority::policy::{
-        Admitted, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
+        Admitted, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer,
     };
     use crate::fact::{Check, FailureCode as _, Observed, Resource};
     use crate::ir::CommandName;
@@ -770,7 +792,7 @@ mod vet {
             .expect("an unrestricted shell admits the command");
         assert!(matches!(
             command.state.as_ref().map(Admitted::program),
-            Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
+            Ok(policy::Program::File { arg0, .. }) if *arg0 == bin.join(&name)
         ));
         command
             .prepare(&[], Ownership::Kept, &shell)
@@ -798,7 +820,7 @@ mod vet {
 
         let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
         let plan = plan(command, &mut shell).expect("bundled name must not 127");
-        assert_eq!(plan.diagnosis.shown, "ls");
+        assert_eq!(plan.program.shown, "ls");
     }
 
     /// The 126 case of an explicit path: a file lacking `+x`, or a directory,
@@ -900,7 +922,7 @@ mod vet {
             };
             assert_eq!(
                 &**bare,
-                format!("'{name}' is no program in any PATH directory the grant runs from")
+                format!("'{name}' is not in any PATH directory the grant allows")
             );
             assert_ne!(grant, bare);
             assert!(!grant.contains("#'") && !bare.contains("#'"), "{e:?}");
@@ -1686,11 +1708,11 @@ mod process {
 
     #[cfg(unix)]
     mod exec_error_tests {
-        use super::explain_exec_error;
+        use super::{Origin, Program};
         use crate::authority::sandbox::Image;
         use crate::fact::{Failure, Reason, Unrunnable};
         use std::io::{Error, ErrorKind};
-        use std::path::Path;
+        use std::path::{Path, PathBuf};
 
         fn not_runnable(why: Unrunnable) -> Reason {
             Reason::process("run", Failure::not_runnable("run", why))
@@ -1703,10 +1725,20 @@ mod process {
             }
         }
 
-        /// `e` starting `image`, whose `#!` named `interpreter` when it was
-        /// built, under no sandbox that withholds anything.
+        /// `run`, typed as a path, from `image`, whose `#!` named
+        /// `interpreter` when it was built.
+        fn run(image: &Image, interpreter: Option<&str>) -> Program {
+            Program {
+                shown: "run".into(),
+                origin: Origin::Path,
+                image: image.clone(),
+                interpreter: interpreter.map(PathBuf::from),
+            }
+        }
+
+        /// `e` starting `image`, under no sandbox that withholds anything.
         fn unwithheld(e: &Error, image: &Image, interpreter: Option<&str>) -> Reason {
-            explain_exec_error(e, image, interpreter.map(Path::new), || None, "run").reason
+            run(image, interpreter).exec_error(e, || None).reason
         }
 
         fn enoent(image: &Image, interpreter: Option<&str>) -> Reason {
@@ -1770,19 +1802,15 @@ mod process {
             let dir = tempfile::tempdir().unwrap();
             let script = dir.path().join("run");
             std::fs::write(&script, "#!/opt/x/bin/python3\n").unwrap();
-            let image = file(crate::test_helper::real(&script));
-            let interpreter = Some(Path::new("/opt/x/bin/python3"));
+            let program = run(
+                &file(crate::test_helper::real(&script)),
+                Some("/opt/x/bin/python3"),
+            );
             let hint = "its interpreter /opt/x/bin/python3 is not admitted by the grant";
             let withheld = || Some(hint.to_owned());
 
             for errno in [libc::ENOENT, libc::EACCES] {
-                let denied = explain_exec_error(
-                    &Error::from_raw_os_error(errno),
-                    &image,
-                    interpreter,
-                    withheld,
-                    "run",
-                );
+                let denied = program.exec_error(&Error::from_raw_os_error(errno), withheld);
                 assert_eq!(
                     denied.reason,
                     not_runnable(Unrunnable::PermissionDenied),
@@ -1790,13 +1818,7 @@ mod process {
                 );
                 assert_eq!(denied.hints().first().map(|h| &**h), Some(hint), "{errno}");
             }
-            let missing = explain_exec_error(
-                &Error::from_raw_os_error(libc::ENOENT),
-                &image,
-                interpreter,
-                || None,
-                "run",
-            );
+            let missing = program.exec_error(&Error::from_raw_os_error(libc::ENOENT), || None);
             assert_eq!(
                 missing.reason,
                 not_runnable(Unrunnable::MissingInterpreter(Some(
@@ -1805,18 +1827,48 @@ mod process {
             );
             assert!(missing.hints().is_empty(), "{:?}", missing.hints());
             let e2big = Error::from_raw_os_error(libc::E2BIG);
-            let other = explain_exec_error(
-                &e2big,
-                &image,
-                interpreter,
-                || panic!("only a denial or an absence asks for the verdict"),
-                "run",
-            );
+            let other = program.exec_error(&e2big, || {
+                panic!("only a denial or an absence asks for the verdict")
+            });
             assert_eq!(
                 other.reason,
                 not_runnable(Unrunnable::Io(e2big.to_string()))
             );
             assert!(other.hints().is_empty(), "{:?}", other.hints());
+        }
+
+        /// A program found by a PATH search is named where the search found
+        /// it, as lookup names it, and a missing interpreter is reported there.
+        #[test]
+        fn a_searched_program_fails_at_the_path_it_was_found_at() {
+            let dir = tempfile::tempdir().unwrap();
+            let script = dir.path().join("run");
+            std::fs::write(&script, "#!/no/such/interpreter\n").unwrap();
+            let program = Program {
+                shown: "run".into(),
+                origin: Origin::Bare,
+                image: Image::File {
+                    real: crate::test_helper::real(&script),
+                    arg0: script.clone(),
+                },
+                interpreter: Some("/no/such/interpreter".into()),
+            };
+            let found = crate::path::shown(&script);
+            let error = program.exec_error(&Error::from(ErrorKind::NotFound), || None);
+            assert_eq!(
+                error.reason,
+                Reason::process(
+                    "run",
+                    Failure::not_runnable(
+                        found.clone(),
+                        Unrunnable::MissingInterpreter(Some("/no/such/interpreter".into()))
+                    )
+                )
+            );
+            assert_eq!(
+                error.describe(),
+                format!("run: {found}: its interpreter /no/such/interpreter does not exist")
+            );
         }
     }
 
@@ -1873,7 +1925,7 @@ mod process {
                 let prepared = command
                     .prepare(&[], Ownership::Kept, shell)
                     .expect("the launch builds");
-                let shown = prepared.diagnosis.shown.clone();
+                let shown = prepared.program.shown.clone();
                 let pgid = PgidPolicy::Inherit.unless_enveloped(prepared.enveloped());
                 between();
                 (
@@ -1969,5 +2021,115 @@ mod process {
             );
             assert!(!hint.contains("/usr/bin/false"), "{hint}");
         }
+    }
+}
+
+#[cfg(unix)]
+mod alone {
+    use super::super::*;
+    use crate::authority::policy::{Capabilities, ExecGrant};
+    use crate::fact::ExitCode as _;
+    use crate::shell::runtime::{CapturePolicy, Observed, Prov};
+    use crate::source::CallSite;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A shell whose `PATH` is a directory holding `on-path`, which exits 9
+    /// unless its first argument is `one argument`, and with its second
+    /// otherwise.
+    fn on_path() -> (tempfile::TempDir, Shell) {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = tmp.path().join("on-path");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n[ \"$1\" = 'one argument' ] || exit 9\nexit \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        shell.seed_cwd(CwdPath::new(tmp.path().to_path_buf()).unwrap());
+        shell
+            .context
+            .set_env_var("PATH", tmp.path().to_str().unwrap())
+            .unwrap();
+        (tmp, shell)
+    }
+
+    #[test]
+    fn a_bare_name_and_a_path_both_run_with_argv_intact() {
+        let (_tmp, mut shell) = on_path();
+        for program in ["on-path", "./on-path"] {
+            for code in [0, 7] {
+                let result = shell.run_external(
+                    program,
+                    &[
+                        Value::string("one argument"),
+                        Value::string(code.to_string()),
+                    ],
+                    &Mooring::adrift(),
+                );
+                if code == 0 {
+                    assert!(matches!(result, Ok(Value::Unit)), "{result:?}");
+                } else {
+                    assert_eq!(result.unwrap_err().code(), code);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_record_names_the_program_and_sites_the_visible_register() {
+        let (_tmp, mut shell) = on_path();
+        let wrapper = Prov::Resolved(Box::new((
+            "wrapper".into(),
+            CallSite {
+                script: "wrapper.ral".into(),
+                line: 2,
+                col: 3,
+            },
+        )));
+        let _site = shell.local.audit.enter_site(wrapper);
+        let scope = shell.local.audit.open(CapturePolicy::Off);
+        let result = shell.run_external(
+            "on-path",
+            &[Value::string("one argument"), Value::string("7")],
+            &Mooring::adrift(),
+        );
+        let Err(Break::Error(error)) = result else {
+            panic!("the child exits 7")
+        };
+        assert!(
+            error.prov.is_none(),
+            "an outer visible frame may still claim it"
+        );
+        let trail = shell.local.audit.close(scope);
+        let [observation] = trail.as_slice() else {
+            panic!("one command observation")
+        };
+        let Observed::Command(command) = &observation.what else {
+            panic!("the external command")
+        };
+        assert_eq!(
+            command.error.as_deref(),
+            Some("on-path: exited with status 7")
+        );
+        assert_eq!(observation.site, shell.call_site());
+    }
+
+    #[test]
+    fn an_empty_exec_grant_refuses_before_running() {
+        let (_tmp, mut shell) = on_path();
+        shell
+            .context
+            .grants
+            .push(crate::test_helper::layer(Capabilities {
+                exec: Some(ExecGrant::default()),
+                ..Capabilities::default()
+            }));
+        let result = shell.run_external(
+            "on-path",
+            &[Value::string("one argument"), Value::string("0")],
+            &Mooring::adrift(),
+        );
+        assert!(result.is_err());
     }
 }

@@ -1,5 +1,5 @@
 # codes: T0057
 # status: 1
 # at: 5:41
-# contains: to external command '/bin/echo'
+# contains: as an argument to `/bin/echo`
 let k = 'a'; let m = [$k: 2]; /bin/echo $m

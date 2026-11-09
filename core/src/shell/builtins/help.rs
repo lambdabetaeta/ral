@@ -474,7 +474,7 @@ impl fmt::Display for Where {
 /// first is what runs, the rest are shadowed.  That tail is the whole answer
 /// `which` cannot give — a PATH binary this name will never reach.
 ///
-/// Bare-head order (`dispatch::resolve_command_word`'s): session, prelude, the value
+/// Bare-head order (`resolve::Resolution::of`'s): session, prelude, the value
 /// half of the manifest (a native — the env hit), then the handler stack, then
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
@@ -532,7 +532,7 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
             Program::File { arg0, .. } => Where::Path(arg0.clone()),
             Program::Tool(_) => Where::Bundled,
         }),
-        Err(LookupFailure::NotFound { .. } | LookupFailure::NotRunnable(_)) => {}
+        Err(LookupFailure::Missing(_)) => {}
         Err(LookupFailure::Refused { at, .. }) => sites.push(Where::DeniedByGrant(at.clone())),
     }
     sites

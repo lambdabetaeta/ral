@@ -1440,7 +1440,7 @@ shape, so nothing is started:
 
 ```ral
 let r = [a: 1]
-cat $r                        # error: cannot pass [a: Integer] to external command 'cat'
+cat $r                        # error: cannot pass [a: Integer] as an argument to `cat`
 ```
 
 Where the type does not state it — a parameter, or a value decoded at run time —

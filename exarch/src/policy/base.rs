@@ -316,19 +316,16 @@ mod tests {
             Some(Net::Offline),
             "confined must have net off"
         );
-        let bundled: Vec<Target> = ral_core::uutils::bundled_tools()
-            .into_iter()
-            .map(name_key)
-            .collect();
+        let bundleable: Vec<Target> = ral_core::uutils::bundleable_tools().map(name_key).collect();
         let allows = exec_of(&layer).allow;
         let host_named: Vec<&Target> = (allows.iter())
             .filter(|key| matches!(key, Target::File(_) | Target::Name(_)))
-            .filter(|key| !bundled.contains(key))
+            .filter(|key| !bundleable.contains(key))
             .collect();
         assert!(
             host_named.is_empty(),
             "confined names host binaries {host_named:?}; the build jail admits those by \
-             directory prefix, and only the bundled tools (which have no path) are listed"
+             directory prefix, and only tools ral bundles (which have no path) are listed"
         );
         for prefix in reads(&fs_of(&layer)) {
             assert!(

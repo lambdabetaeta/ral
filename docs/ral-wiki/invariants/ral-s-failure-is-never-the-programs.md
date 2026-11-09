@@ -31,9 +31,9 @@ This page is the one home of that claim.
   it, so it is never stopped there
   ([[design/exec#Modes|exec]]).
 
-**One conversion.** `Diagnosis::explain_start` (`core/src/shell/exec/command.rs`) is the one
+**One conversion.** `Program::unstarted` (`core/src/shell/exec/command.rs`) is the one
 place an `Unstarted` becomes the run's error: `Refused` and `Stopped` pass
-through, and `Program` goes through `explain_exec_error`, which also adds, under an
+through, and `Program` goes through `Program::exec_error`, which also adds, under an
 active sandbox, the hint that a script's `#!` interpreter is withheld.
 
 **Why.** An error blames a subject: `prog: permission denied` accuses `prog`.

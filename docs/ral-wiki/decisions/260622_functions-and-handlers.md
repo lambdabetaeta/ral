@@ -26,7 +26,7 @@ convention, the word "alias" is redundant and is retired everywhere.
   `Fun(String, Fun(List α, B))` — the shape that lets it monitor every call
   (`{ |name args| echo "$name called with ...$args" }`). That is the runtime
   calling convention (`run_handler`,
-  [`core/src/runtime/command_call.rs`](../../../core/src/shell/exec/dispatch.rs));
+  [`core/src/runtime/command_call.rs`](../../../core/src/shell/exec/resolve.rs));
   the typechecker does not yet pin it (see *Known weaknesses*).
 
 Variable arity is therefore a *surface* phenomenon — a handler invoked `g a b c`

@@ -139,20 +139,10 @@ impl TypeErrorKind {
                      which only a command, an external, or a handler has"
                 )
             }
-            // The wording `shell::exec::command::check_argv` uses at the spawn, the
-            // refusal being the same refusal one step earlier.
-            Self::ExecArgNotText {
-                command,
-                ty: Ty::Unit,
-            } => {
-                format!("`()` is nothing, so `{command}` has no word to take from it")
-            }
-            Self::ExecArgNotText { command, ty } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                format!(
-                    "cannot pass {} to external command '{command}'",
-                    fmt_ty_ctx(ty, &ctx)
-                )
+            // The refusal `shell::exec::command::check_argv` raises at the
+            // spawn, one step earlier.
+            Self::ExecArgNotText { command, ty, .. } => {
+                RefusedArg::headline(command, fmt_ty_ctx(ty, &FmtCtx::for_value_types(&[ty])))
             }
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
@@ -648,7 +638,7 @@ fn concerns_unit(kind: &TypeErrorKind) -> bool {
         TypeErrorKind::TyMismatch { expected, actual } => {
             **expected == Ty::Unit || **actual == Ty::Unit
         }
-        TypeErrorKind::ExecArgNotText { ty, .. } => *ty == Ty::Unit,
+        TypeErrorKind::ExecArgNotText { refused, .. } => *refused == RefusedArg::Unit,
         _ => false,
     }
 }
@@ -794,9 +784,9 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         )),
         // The remedy is the shape's own, and the shape's own is where the
         // spawn-time refusal reads it too.
-        TypeErrorKind::ExecArgNotText { command, ty } => {
-            RefusedArg::of_ty(ty).map(|refusal| refusal.remedy(command))
-        }
+        TypeErrorKind::ExecArgNotText {
+            command, refused, ..
+        } => Some(refused.remedy(command)),
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
         }

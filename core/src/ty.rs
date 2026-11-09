@@ -12,7 +12,7 @@ mod scheme;
 mod site;
 mod typed;
 
-pub(crate) use exec_arg::RefusedArg;
+pub use exec_arg::RefusedArg;
 pub use fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_ty_ctx};
 pub(crate) use kind::Head;
 pub use kind::Kind;

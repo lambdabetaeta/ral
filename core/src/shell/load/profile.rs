@@ -11,7 +11,6 @@ use std::path::Path;
 
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::{Fragment, GrantLayer};
-use crate::error::io_message;
 use crate::path::Reading;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
@@ -64,7 +63,7 @@ pub fn load_capabilities_from_path(
     let file = SourceFile::new(located.real().as_path().to_path_buf())
         .map_err(|e| Error::new(e.to_string()).with_context("capability file"))?;
     let source = (located.read().and_then(std::io::read_to_string))
-        .map_err(|e| Error::new(io_message(rp.shown(), &e)).with_context("capability file"))?;
+        .map_err(|e| Error::io(rp.shown(), &e).with_context("capability file"))?;
     let source = crate::source::normalize_source_text(source);
     load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)
 }

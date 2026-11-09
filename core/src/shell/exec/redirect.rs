@@ -1,92 +1,427 @@
-//! Redirects: the entries that open a target (the atomic `>` recipe, the
-//! `< file` handoff into `shell.io.stdin`), and the [`scope`] that installs a
-//! redirect list around a body and settles it.
+//! Redirects: open a redirect list's targets, install them over the shell's
+//! streams, run a body, then restore the streams and settle the writes.
 //!
-//! No open lives here.  Every one goes through [`Shell::locate`] into
-//! `path::walk`, so the object authorised is the object the handle then
-//! names — the open never re-walks a string the guard has already judged.
-
-pub(crate) mod scope;
+//! [`RedirectState`] is the one interpreter of a redirect list.  The machine
+//! holds it in `Frame::Redirect`; [`with_redirects`] brackets a synchronous
+//! call with it.
+//!
+//! Redirects replace the shell's `Sink`s and `Source`, never the process's
+//! fds: libtest, the REPL frontend and sibling ral threads share those.
+//!
+//! Every target is opened through [`Shell::locate`], so the handle names the
+//! object the grant judged, and paths resolve against the shell's scoped cwd.
 
 use crate::authority::policy::FsOp;
-use crate::error::io_message;
-use crate::fact::Read;
-use crate::io::{Sink, Source};
-use crate::ir::{StdinSource, WriteMode};
-use crate::path::Kind;
-use crate::path::{Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing};
-use crate::shell::runtime::{Error, Mooring, Observed, Settled, Shell};
+use crate::fact::{Read, Write};
+use crate::io::{IoPatch, Sink, Source, SourceReader};
+use crate::ir::{Redirects, StderrTarget, StdinSource, WriteMode};
+use crate::path::{
+    Kind, Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing, open_discard,
+};
+use crate::shell::runtime::{Bytes, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
+use crate::source::Span;
 use std::fs::File;
-use std::io::{self, Read as _, Seek as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
 
-/// `name`'s I/O failure as an error.
-fn failed(name: &str) -> impl Fn(io::Error) -> Error + '_ {
-    move |e| Error::new(io_message(name, &e))
+/// Run `body` under `redirects`.  Its writes commit if it returns and abort
+/// if it breaks; a panic restores the streams and drops the writes.
+///
+/// An external runs this inside `Command::with_record`'s audit capture, so
+/// redirected bytes stay out of the `Command` record.
+pub(crate) fn with_redirects(
+    redirects: &Redirects<String>,
+    span: Option<Span>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+    body: impl FnOnce(&mut Shell) -> Settled<Value>,
+) -> Settled<Value> {
+    if redirects.is_empty() {
+        return body(shell);
+    }
+    let state = RedirectState::install(redirects, span, mooring, shell)?;
+    match catch_unwind(AssertUnwindSafe(|| body(shell))) {
+        Ok(Ok(value)) => state.commit(mooring, shell).map(|()| value),
+        // The body's break takes precedence over anything settling reports.
+        Ok(Err(b)) => {
+            state.abort(mooring, shell);
+            Err(b)
+        }
+        Err(payload) => {
+            state.abandon(shell);
+            resume_unwind(payload)
+        }
+    }
 }
 
-/// Cap on the bytes a preview reads, so a large file is never pulled into
-/// memory whole to show a change.
-const PREVIEW_CAP: u64 = 64 * 1024;
+/// An installed redirect.  It borrows nothing, so the machine can hold it
+/// across steps, and it must be ended explicitly by `commit`, `abort` or
+/// `abandon`.
+pub(crate) struct RedirectState {
+    /// The streams the redirect replaced.
+    prior: IoPatch,
+    writes: Vec<PendingWrite>,
+    /// The redirect's site, which every observation it makes carries.
+    span: Option<Span>,
+}
 
-/// A write redirect's target as opened, held until its frame settles so the
-/// frame can report what the write did to it.  No `Located` remains: the
-/// object is the handles.
-pub(crate) enum OpenedWrite {
-    /// `>` onto a regular file, staged beside it until commit; dropped, the
-    /// staging file is unlinked.
+impl RedirectState {
+    /// Open every target, then install them.  If an open fails, nothing is
+    /// installed and the writes already opened are aborted.
+    pub(crate) fn install(
+        redirects: &Redirects<String>,
+        span: Option<Span>,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Self> {
+        shell.at_site("redirect", span, |shell| {
+            let mut writes = Vec::new();
+            match open_targets(redirects, mooring, shell, &mut writes) {
+                Ok(patch) => Ok(Self {
+                    prior: shell.io.swap(patch),
+                    writes,
+                    span,
+                }),
+                Err(b) => {
+                    abort_writes(writes, mooring, shell);
+                    Err(b.locate("redirect", span, shell))
+                }
+            }
+        })
+    }
+
+    /// Restore the streams, then publish every write.  Returns the first
+    /// publish failure.
+    pub(crate) fn commit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
+        let Self {
+            prior,
+            writes,
+            span,
+        } = self;
+        restore_streams(prior, shell);
+        shell.at_site("redirect", span, |shell| {
+            commit_writes(writes, mooring, shell).map_err(|b| b.locate("redirect", span, shell))
+        })
+    }
+
+    /// Restore the streams, then abort every write.
+    pub(crate) fn abort(self, mooring: &Mooring, shell: &mut Shell) {
+        let Self {
+            prior,
+            writes,
+            span,
+        } = self;
+        restore_streams(prior, shell);
+        shell.at_site("redirect", span, |shell| {
+            abort_writes(writes, mooring, shell);
+        });
+    }
+
+    /// For a panic: restore the streams and drop the writes unobserved.
+    /// Dropping an atomic write unlinks its staging file.
+    pub(crate) fn abandon(self, shell: &mut Shell) {
+        restore_streams(self.prior, shell);
+    }
+}
+
+/// Swap the prior streams back, then flush the redirect's own sinks so their
+/// buffered bytes land, and drop them, closing their handles before the
+/// writes settle.
+fn restore_streams(prior: IoPatch, shell: &mut Shell) {
+    let own = shell.io.swap(prior);
+    for mut sink in [own.stdout, own.stderr].into_iter().flatten() {
+        let _ = sink.flush();
+    }
+}
+
+/// Publish every write, settling each even after one fails.  Returns the
+/// first failure.
+fn commit_writes(writes: Vec<PendingWrite>, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
+    let mut first_failure = Ok(());
+    for write in writes {
+        let settled = write.settle(Fate::Commit, mooring, shell);
+        first_failure = first_failure.and(settled);
+    }
+    first_failure
+}
+
+/// Abort every write.  Aborting publishes nothing, so it cannot fail.
+fn abort_writes(writes: Vec<PendingWrite>, mooring: &Mooring, shell: &mut Shell) {
+    for write in writes {
+        let aborted = write.settle(Fate::Abort, mooring, shell);
+        debug_assert!(aborted.is_ok(), "an abort publishes nothing");
+    }
+}
+
+// ── Opening ─────────────────────────────────────────────────────────────
+
+/// Open the targets of `redirects` as the streams to install, in the order
+/// stdin, stdout, stderr, so the audit trail is the same for a block and an
+/// external.  Each write opened is pushed onto `writes`, including those
+/// opened before a later open fails.
+fn open_targets(
+    redirects: &Redirects<String>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+    writes: &mut Vec<PendingWrite>,
+) -> Settled<IoPatch> {
+    let stdin = (redirects.stdin.as_ref())
+        .map(|stdin| open_stdin_source(stdin, mooring, shell))
+        .transpose()?;
+    let stdout = (redirects.stdout.as_ref())
+        .map(|(mode, path)| open_output_sink(path, *mode, mooring, shell, writes))
+        .transpose()?;
+    let stderr = match &redirects.stderr {
+        Some(StderrTarget::File(mode, path)) => {
+            Some(open_output_sink(path, *mode, mooring, shell, writes)?)
+        }
+        // `2>&1`: wherever stdout goes, redirected or not.
+        Some(StderrTarget::Stdout) => {
+            Some(stdout.clone().unwrap_or_else(|| shell.io.stdout.clone()))
+        }
+        None => None,
+    };
+    Ok(IoPatch {
+        stdin,
+        stdout,
+        stderr,
+    })
+}
+
+/// Open `< path` or `<< str` as a source.  A file read is observed here, so
+/// it precedes the body it feeds.
+fn open_stdin_source(
+    stdin: &StdinSource<String>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Source> {
+    let reader = match stdin {
+        StdinSource::File(path) => {
+            let rp = shell.resolve(path);
+            let file = if rp.is_discard() {
+                open_discard()
+            } else {
+                shell.locate::<Reading>(&rp)?.read()
+            }
+            .map_err(io_error(path))?;
+            shell.observe(mooring, Observed::Read(Read { path: path.clone() }));
+            SourceReader::file(file)
+        }
+        StdinSource::Here(word) => {
+            // Whatever its source, the value loses one leading LF or CRLF, so
+            // a multiline string can start on the line after the command.
+            let body = word
+                .strip_prefix("\r\n")
+                .or_else(|| word.strip_prefix('\n'))
+                .unwrap_or(word);
+            SourceReader::from_bytes(body.as_bytes().to_vec()).map_err(io_error("here-string"))?
+        }
+    };
+    Ok(Source::Reader(reader))
+}
+
+/// Open a stdout or stderr target as a sink, pushing its write onto
+/// `writes`.  A failed open is observed here, since it never reaches a
+/// settle.
+fn open_output_sink(
+    path: &str,
+    mode: WriteMode,
+    mooring: &Mooring,
+    shell: &mut Shell,
+    writes: &mut Vec<PendingWrite>,
+) -> Settled<Sink> {
+    let heard = shell.listening(mooring);
+    let (writer, write) = open_write_target(path, mode, heard, shell).inspect_err(|_| {
+        let failed = Write {
+            path: path.to_owned(),
+            mode,
+            outcome: WriteOutcome::Failed,
+            new_bytes: None,
+            old_bytes: None,
+        };
+        shell.observe(mooring, Observed::Write(failed));
+    })?;
+    writes.extend(write);
+    Ok(Sink::File(Arc::new(writer)))
+}
+
+/// Open a write target: the handle to write through, and the write to
+/// settle afterwards, `None` for the discard device.
+///
+/// `>` onto a regular file is staged beside it; everything else streams.  If
+/// `heard`, the before-image is read before a streaming `>` truncates.
+fn open_write_target(
+    path: &str,
+    mode: WriteMode,
+    heard: bool,
+    shell: &mut Shell,
+) -> Settled<(File, Option<PendingWrite>)> {
+    let rp = shell.resolve(path);
+    if rp.is_discard() {
+        return Ok((open_discard().map_err(io_error(path))?, None));
+    }
+    let located = shell.locate::<Writing>(&rp)?;
+    let streaming = match mode {
+        WriteMode::Append => Some(Streaming::Append),
+        WriteMode::Stream => Some(Streaming::Truncate),
+        // A TTY or a FIFO has no inode to rename over.
+        WriteMode::Write => located
+            .stat()
+            .is_some_and(|s| s.kind != Kind::File)
+            .then_some(Streaming::Truncate),
+    };
+    let mut handle = match streaming {
+        Some(access) => {
+            WriteHandle::Stream(located.open_streaming(access).map_err(io_error(path))?)
+        }
+        None => WriteHandle::Atomic(located.stage(Visibility::Public).map_err(io_error(path))?),
+    };
+    let writer = handle.file().try_clone().map_err(io_error(path))?;
+    let before = if heard {
+        handle.before_image(shell)
+    } else {
+        None
+    };
+    if let (WriteHandle::Stream(streamed), Some(Streaming::Truncate)) = (&handle, streaming) {
+        streamed.truncate().map_err(io_error(path))?;
+    }
+    let write = PendingWrite {
+        path: path.to_owned(),
+        mode,
+        handle,
+        before,
+    };
+    Ok((writer, Some(write)))
+}
+
+// ── Settling ────────────────────────────────────────────────────────────
+
+/// How a redirect ends for its writes.
+enum Fate {
+    /// Publish each atomic write onto its target.
+    Commit,
+    /// Drop each atomic write, leaving its target unchanged.
+    Abort,
+}
+
+/// An opened write, kept until the redirect ends so it can be published or
+/// dropped, and reported.
+struct PendingWrite {
+    path: String,
+    mode: WriteMode,
+    handle: WriteHandle,
+    /// The target's content before the write, read only if someone listens.
+    before: Option<Vec<u8>>,
+}
+
+impl PendingWrite {
+    /// Publish or drop the write by `fate`, and observe the outcome.  Fails
+    /// only if publishing fails.
+    fn settle(self, fate: Fate, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
+        let Self {
+            path,
+            mode,
+            mut handle,
+            before,
+        } = self;
+        // Publishing consumes the staged write, so read it first.
+        let after = if shell.listening(mooring) {
+            handle.after_image(shell)
+        } else {
+            None
+        };
+        let (outcome, published) = match (handle, fate) {
+            (WriteHandle::Atomic(_), Fate::Abort) => (WriteOutcome::Aborted, Ok(())),
+            (WriteHandle::Atomic(staged), Fate::Commit) => match staged.publish() {
+                Ok(()) => (WriteOutcome::Committed, Ok(())),
+                Err(e) => (WriteOutcome::Failed, Err(e)),
+            },
+            // A stream's bytes landed as they were written: it cannot abort.
+            (WriteHandle::Stream(_), _) => (WriteOutcome::Committed, Ok(())),
+        };
+        let published = published.map_err(io_error(&path));
+        // A write that did not land changed nothing, so it has no images.
+        let landed = outcome == WriteOutcome::Committed;
+        let image = |bytes: Option<Vec<u8>>| bytes.filter(|_| landed).map(Bytes::from);
+        let write = Write {
+            path,
+            mode,
+            outcome,
+            new_bytes: image(after),
+            old_bytes: image(before),
+        };
+        shell.observe(mooring, Observed::Write(write));
+        Ok(published?)
+    }
+}
+
+/// The handle a write lands through.
+enum WriteHandle {
+    /// `>` onto a regular file: a staging file beside it, renamed over it on
+    /// publish and unlinked on drop.
     Atomic(StagedWrite),
-    /// Every other shape: bytes land as they are written.
+    /// Everything else: bytes land as they are written.
     Stream(Streamed),
 }
 
-impl OpenedWrite {
-    /// What stands at the target before the write, where it is ours to read
-    /// under the live grant: empty for a leaf the write created, `None` for
-    /// an object with no reader.
-    pub(crate) fn before(&mut self, shell: &Shell) -> Option<Vec<u8>> {
+impl WriteHandle {
+    /// The file the writer's handle is cloned from, sharing its offset.
+    fn file(&mut self) -> &mut File {
         match self {
-            Self::Atomic(staged) => {
-                let target = staged.target();
-                admitted(shell, target.trace()).then(|| match target.stat() {
-                    None => Some(Vec::new()),
-                    Some(s) if s.kind == Kind::File => read_capped(&mut target.read().ok()?),
-                    Some(_) => None,
-                })?
-            }
-            Self::Stream(streamed) => admitted(shell, streamed.trace()).then(|| {
-                if streamed.created() {
-                    Some(Vec::new())
-                } else {
-                    read_capped(streamed.reader()?)
-                }
-            })?,
+            Self::Atomic(staged) => staged.file(),
+            Self::Stream(streamed) => streamed.file(),
         }
     }
 
-    /// What the write leaves standing: what ral wrote, read through the
-    /// staging handle or the stream's own reader.  Never a read of the name,
-    /// which may hold another object by now: on Unix the rename takes the
-    /// sibling's *name*, so what lands at the target is not this write's to
-    /// assert.
-    pub(crate) fn after(&mut self, shell: &Shell) -> Option<Vec<u8>> {
+    /// The target, as the grant judges a read of it.
+    fn trace(&self) -> &Trace {
         match self {
-            Self::Atomic(staged) => read_capped(staged.file()),
-            Self::Stream(streamed) => {
-                admitted(shell, streamed.trace()).then(|| read_capped(streamed.reader()?))?
+            Self::Atomic(staged) => staged.target().trace(),
+            Self::Stream(streamed) => streamed.trace(),
+        }
+    }
+
+    /// The target's content before the write: empty if the write creates
+    /// it, `None` if the grant forbids reading it, it has no reader, or it
+    /// exceeds [`IMAGE_CAP`].
+    fn before_image(&mut self, shell: &Shell) -> Option<Vec<u8>> {
+        if !shell.admits_fs(FsOp::Read, self.trace()) {
+            return None;
+        }
+        match self {
+            Self::Atomic(staged) => match staged.target().stat() {
+                None => Some(Vec::new()),
+                Some(s) if s.kind == Kind::File => read_image(&mut staged.target().read().ok()?),
+                Some(_) => None,
+            },
+            Self::Stream(streamed) if streamed.created() => Some(Vec::new()),
+            Self::Stream(streamed) => read_image(streamed.reader()?),
+        }
+    }
+
+    /// What ral wrote, read through its own handle.  Never read by name: on
+    /// Unix another object may hold the name by now.
+    fn after_image(&mut self, shell: &Shell) -> Option<Vec<u8>> {
+        match self {
+            // The staging file is ral's own; no grant applies to it.
+            Self::Atomic(staged) => read_image(staged.file()),
+            Self::Stream(streamed) if shell.admits_fs(FsOp::Read, streamed.trace()) => {
+                read_image(streamed.reader()?)
             }
+            Self::Stream(_) => None,
         }
     }
 }
 
-/// Whether the live grant lets ral read what `trace` names.
-fn admitted(shell: &Shell, trace: &Trace) -> bool {
-    shell.admits_fs(FsOp::Read, trace)
-}
+/// Cap on an image, so a large file is never read into memory to show a
+/// change.
+const IMAGE_CAP: u64 = 64 * 1024;
 
-/// `file` whole, from its start.  `None` past [`PREVIEW_CAP`], judged on the
-/// open handle so the size read is the size of the bytes read.
-fn read_capped(file: &mut File) -> Option<Vec<u8>> {
-    if file.metadata().ok()?.len() > PREVIEW_CAP {
+/// All of `file` from its start, or `None` if it exceeds [`IMAGE_CAP`].  The
+/// size is read from the open handle, so it is the size of what is read.
+fn read_image(file: &mut File) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > IMAGE_CAP {
         return None;
     }
     file.rewind().ok()?;
@@ -95,157 +430,32 @@ fn read_capped(file: &mut File) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Open a write redirect's target, and the before-image of it where `heard`
-/// asks.  `>` to a regular file is staged, to be committed or dropped once
-/// the writer finishes; every other shape streams, a truncating one only
-/// after its before-image was read.  `None` is the discard device, which no
-/// write changes.  Paths resolve against the shell's scoped cwd, so a
-/// `within [dir: …]` redirect lands right even from a native, where the host
-/// cwd never moves.
-pub(crate) fn open_write(
-    path: &str,
-    mode: WriteMode,
-    heard: bool,
-    shell: &mut Shell,
-) -> Settled<(File, Option<OpenedWrite>, Option<Vec<u8>>)> {
-    let rp = shell.resolve(path);
-    if rp.is_discard() {
-        return Ok((
-            crate::path::open_discard().map_err(failed(path))?,
-            None,
-            None,
-        ));
-    }
-    let target = shell.locate::<Writing>(&rp)?;
-    let streaming = match mode {
-        WriteMode::Append => Some(Streaming::Append),
-        WriteMode::Stream => Some(Streaming::Truncate),
-        // TTYs and named pipes stream: there is no inode to rename.
-        WriteMode::Write => target
-            .stat()
-            .is_some_and(|s| s.kind != Kind::File)
-            .then_some(Streaming::Truncate),
-    };
-    let (file, mut opened) = if let Some(access) = streaming {
-        let mut streamed = target.open_streaming(access).map_err(failed(path))?;
-        let file = streamed.file().try_clone().map_err(failed(path))?;
-        (file, OpenedWrite::Stream(streamed))
-    } else {
-        let mut staged = target.stage(Visibility::Public).map_err(failed(path))?;
-        // The writer's handle shares the staging handle's offset.
-        let file = staged.file().try_clone().map_err(failed(path))?;
-        (file, OpenedWrite::Atomic(staged))
-    };
-    let before = heard.then(|| opened.before(shell)).flatten();
-    if let (OpenedWrite::Stream(streamed), Some(Streaming::Truncate)) = (&opened, streaming) {
-        streamed.truncate().map_err(failed(path))?;
-    }
-    Ok((file, Some(opened), before))
-}
-
-/// Open a `< path` target, against the scoped cwd as [`open_write`] does.
-fn open_read(path: &str, shell: &mut Shell) -> Settled<File> {
-    let rp = shell.resolve(path);
-    let opened = if rp.is_discard() {
-        crate::path::open_discard()
-    } else {
-        shell.locate::<Reading>(&rp)?.read()
-    };
-    Ok(opened.map_err(failed(path))?)
-}
+// ── Host writes ─────────────────────────────────────────────────────────
 
 impl Shell {
-    /// Overwrite `path` through core's whole `>`-redirect recipe —
-    /// symlink-resolved, mode-preserving, fsync-durable — while emitting no io
-    /// event: the entry for a host builtin (exarch's `edit-hash` /
-    /// `edit-replace`) that writes *below* the redirect frame and speaks its
-    /// own surface, so that it shares the recipe instead of forking a weaker
-    /// write that narrows the mode, replaces symlinks, and skips the flush.
+    /// Overwrite `path` exactly as `>` would — following symlinks, keeping
+    /// the mode, syncing before the rename — but observe nothing.  For host
+    /// builtins such as exarch's `edit-hash` and `edit-replace`, which report
+    /// their writes themselves.
     ///
     /// # Errors
-    /// Returns `Err` if the target cannot be opened, the write fails, or the
-    /// atomic commit (rename and fsync) fails.
+    /// The open, the write, or the publish fails.
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> Settled<()> {
-        use std::io::Write as _;
-        let (mut file, opened, _) = open_write(path, WriteMode::Write, false, self)?;
-        file.write_all(bytes).map_err(failed(path))?;
-        drop(file);
-        if let Some(OpenedWrite::Atomic(staged)) = opened {
-            staged.publish().map_err(failed(path))?;
+        let (mut writer, write) = open_write_target(path, WriteMode::Write, false, self)?;
+        writer.write_all(bytes).map_err(io_error(path))?;
+        drop(writer);
+        if let Some(PendingWrite {
+            handle: WriteHandle::Atomic(staged),
+            ..
+        }) = write
+        {
+            staged.publish().map_err(io_error(path))?;
         }
         Ok(())
     }
 }
 
-/// Park the stdin redirect — `< file` or the here-string `<< str` — on
-/// `shell.io.stdin`, returning the `Source` it displaced, `None` when no
-/// stdin redirect is bound.
-///
-/// `<< str` drops one leading newline, so a body may start on the line below
-/// the command, and pushes the payload through a pipe from a detached thread:
-/// a payload past the kernel buffer would otherwise deadlock, and a consumer
-/// that stops reading merely leaves that thread a broken pipe.
-///
-/// Routing through `Source` rather than `dup2` leaves fd 0 untouched, so
-/// `Terminal` keeps meaning the inherited terminal.
-pub(crate) fn install_stdin_redirect(
-    stdin: Option<&StdinSource<String>>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Option<Source>> {
-    let Some(stdin) = stdin else {
-        return Ok(None);
-    };
-    let source = match stdin {
-        StdinSource::File(path) => {
-            let f = open_read(path, shell)?;
-            // First, the READ, recorded eagerly so it precedes the body or
-            // exec it feeds, as in `cat < a`.
-            shell.observe(mooring, Observed::Read(Read { path: path.clone() }));
-            Source::Reader(crate::io::SourceReader::file(f))
-        }
-        StdinSource::Here(word) => {
-            let body = word
-                .strip_prefix("\r\n")
-                .or_else(|| word.strip_prefix('\n'))
-                .unwrap_or(word);
-            let (reader, mut writer) =
-                crate::process::cloexec_pipe().map_err(failed("here-string"))?;
-            let bytes = body.as_bytes().to_vec();
-            std::thread::Builder::new()
-                .name("ral-here-string".into())
-                .spawn(move || {
-                    use std::io::Write;
-                    // A broken pipe is the consumer stopping early, not a fault.
-                    let _ = writer.write_all(&bytes);
-                })
-                .map_err(failed("here-string"))?;
-            Source::Reader(crate::io::SourceReader::pipe(reader))
-        }
-    };
-    Ok(Some(std::mem::replace(&mut shell.io.stdin, source)))
-}
-
-/// The streams a redirect scope displaced, `Some` only where it installed
-/// its own.
-#[derive(Default)]
-pub(super) struct Prior {
-    pub(super) stdin: Option<Source>,
-    pub(super) stdout: Option<Sink>,
-    pub(super) stderr: Option<Sink>,
-}
-
-impl Prior {
-    /// Puts each displaced stream back.
-    pub(super) fn restore(self, shell: &mut Shell) {
-        if let Some(s) = self.stdin {
-            shell.io.stdin = s;
-        }
-        if let Some(s) = self.stdout {
-            shell.io.stdout = s;
-        }
-        if let Some(s) = self.stderr {
-            shell.io.stderr = s;
-        }
-    }
+/// An I/O failure on `name`, as an error.
+fn io_error(name: &str) -> impl Fn(io::Error) -> Error + '_ {
+    move |e| Error::io(name, &e)
 }

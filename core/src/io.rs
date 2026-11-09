@@ -27,4 +27,4 @@ pub(crate) use sink::{SINK_BUFFER_CAP, WriteFault, new_buffer, tee_with_buffer};
 pub use source::{Source, SourceReader};
 pub use streams::Streams;
 
-pub(crate) use state::Io;
+pub(crate) use state::{Io, IoPatch};

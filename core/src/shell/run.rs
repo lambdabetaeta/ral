@@ -13,7 +13,6 @@
 
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
-use crate::error::io_message;
 use crate::fact::FailureCode as _;
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
 use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_lifetime};
@@ -312,10 +311,10 @@ impl Shell {
                 Ok(stdin) => stdin,
                 Err(e) => {
                     return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(Error::new(io_message(
+                        diagnostics: StaticDiagnostics::Host(Error::io(
                             "could not duplicate the session's stdin",
                             &e,
-                        ))),
+                        )),
                     };
                 }
             },

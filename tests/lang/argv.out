@@ -2,9 +2,9 @@ got 1 true
 got 3.5 [a: 1]
 second
 [a: 1] <|x| block> <block> 3.5 [1, 2]
-cannot pass Map to external command 'cat'
-cannot pass Lambda to external command 'cat'
-cannot pass List to external command 'cat'
+cannot pass Map as an argument to `cat`
+cannot pass Lambda as an argument to `cat`
+cannot pass List as an argument to `cat`
 reads its stdin
 mocked hi there
 mocked

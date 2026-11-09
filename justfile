@@ -3,8 +3,11 @@ set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 mod vm 'vm-image/mod.just'
 mod synod 'synod/mod.just'
 
-# One value for every cargo call: a differing RUSTFLAGS rebuilds the whole graph.
-export RUSTFLAGS := env('RUSTFLAGS', '-D warnings')
+# Warnings fail every recipe, rustdoc and clippy included.  Cargo denies them
+# after compiling, so unlike `RUSTFLAGS=-D warnings` this leaves fingerprints
+# alone: a bare `cargo` call reuses the artifacts a recipe built, and the
+# rustflags in a machine's cargo config are not overridden.
+export CARGO_BUILD_WARNINGS := env('CARGO_BUILD_WARNINGS', 'deny')
 
 # What releases ship, so CI compiles what ships.
 features := 'ral/allutils'
@@ -34,15 +37,13 @@ lint:
     cargo clippy --workspace --all-targets --features {{features}} --keep-going
     cargo doc --workspace --no-deps --document-private-items --features {{features}}
 
-# Both Linux arches: the seccomp filter is arch-conditional.
-
 # Clippy, from this host, the platforms it does not build (needs clang, lld, cargo-xwin).
 check $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang' $CC_aarch64_apple_darwin='clang':
     rustup -q target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc
-    cargo clippy -p ral-core --all-targets --target aarch64-unknown-linux-musl
-    cargo clippy -p ral-core --all-targets --target x86_64-unknown-linux-musl
-    cargo clippy -p ral-core -p vm-manager --all-targets --target aarch64-apple-darwin
-    cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc --keep-going
+    cargo clippy -p ral-core -p ral --all-targets --features {{features}} --target aarch64-unknown-linux-musl
+    cargo clippy -p ral-core -p ral --all-targets --features {{features}} --target x86_64-unknown-linux-musl
+    cargo clippy -p ral-core -p ral -p vm-manager --all-targets --features {{features}} --target aarch64-apple-darwin
+    cargo xwin clippy --workspace --all-targets --features {{features}} --target x86_64-pc-windows-msvc --keep-going
 
 # Build the site and the wiki into site/.
 docs: site wiki

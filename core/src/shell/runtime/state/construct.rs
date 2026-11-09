@@ -9,7 +9,6 @@ use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::authority::policy::{Baseline, GrantStack};
 use crate::environ::EnvVars;
-use crate::error::io_message;
 use crate::io::terminal::TerminalState;
 use crate::io::{Io, Source, SourceReader};
 use crate::path::CwdPath;
@@ -55,7 +54,7 @@ impl Runtime {
     pub fn bare(terminal: TerminalState) -> Result<Self, Error> {
         let baseline = Baseline::of_host()?;
         let stdin = fd0(terminal, dup_stdin)
-            .map_err(|e| Error::new(io_message("could not acquire the process's stdin", &e)))?;
+            .map_err(|e| Error::io("could not acquire the process's stdin", &e))?;
         Ok(Self::bare_on(baseline, terminal, stdin))
     }
 

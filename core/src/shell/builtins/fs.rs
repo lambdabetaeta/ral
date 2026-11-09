@@ -7,7 +7,7 @@
 //! wrote there.  `absolute-path` is exempt: lexical, with no filesystem to
 //! gate.
 
-use crate::error::{Error, io_message};
+use crate::error::Error;
 use crate::fact::{DirEntry, FileInfo};
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
@@ -132,7 +132,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
 
 /// Label an `io::Error` with the operation and the path that provoked it.
 fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Error {
-    Error::new(io_message(format!("{ctx}: {}", shown(path)), e))
+    Error::io(format!("{ctx}: {}", shown(path)), e)
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries

@@ -148,6 +148,22 @@ impl Error {
         }
     }
 
+    /// An I/O failure on `what`, in the one phrasing every door shares.
+    ///
+    /// The OS's errors and ral's own say the fixed string for `NotFound` and
+    /// `PermissionDenied`, the same on every host; the exception is the
+    /// directory's refusal of a staged write (`path::directory_refused`),
+    /// whose words say whose refusal it is.
+    pub fn io(what: impl fmt::Display, e: &io::Error) -> Self {
+        use io::ErrorKind::{NotFound, PermissionDenied};
+        Self::new(match e.kind() {
+            NotFound => format!("{what}: no such file or directory"),
+            PermissionDenied if crate::path::directory_refused(e) => format!("{what}: {e}"),
+            PermissionDenied => format!("{what}: permission denied"),
+            _ => format!("{what}: {e}"),
+        })
+    }
+
     /// The failure's own provenance, else the register's frame.
     pub(crate) fn prov_or<'a>(&'a self, register: &'a Prov) -> &'a Prov {
         self.prov.as_ref().unwrap_or(register)
@@ -178,10 +194,15 @@ impl Error {
         self.unwound
     }
 
-    pub fn with_hint(mut self, hint: impl Into<Box<str>>) -> Self {
-        let mut hints = std::mem::take(&mut self.hints).into_vec();
-        hints.push(hint.into());
-        self.hints = hints.into_boxed_slice();
+    pub fn with_hint(self, hint: impl Into<Box<str>>) -> Self {
+        self.with_hints([hint])
+    }
+
+    /// Each of `hints`, in order: an `Option` adds its hint if it has one.
+    pub fn with_hints(mut self, hints: impl IntoIterator<Item: Into<Box<str>>>) -> Self {
+        let mut all = std::mem::take(&mut self.hints).into_vec();
+        all.extend(hints.into_iter().map(Into::into));
+        self.hints = all.into_boxed_slice();
         self
     }
 
@@ -214,22 +235,6 @@ impl Error {
     }
 }
 
-/// An I/O failure on `what`, in the one phrasing every door shares.
-///
-/// The OS's errors and ral's own say the fixed string for `NotFound` and
-/// `PermissionDenied`, the same on every host; the exception is the
-/// directory's refusal of a staged write (`path::directory_refused`),
-/// whose words say whose refusal it is.
-pub fn io_message(what: impl fmt::Display, e: &io::Error) -> String {
-    use io::ErrorKind::{NotFound, PermissionDenied};
-    match e.kind() {
-        NotFound => format!("{what}: no such file or directory"),
-        PermissionDenied if crate::path::directory_refused(e) => format!("{what}: {e}"),
-        PermissionDenied => format!("{what}: permission denied"),
-        _ => format!("{what}: {e}"),
-    }
-}
-
 /// The message line of a report: the context chain, then the record's words.
 pub(crate) fn under_context(context: Option<&str>, message: &str) -> String {
     match context {
@@ -252,7 +257,7 @@ mod tests {
     use std::io::ErrorKind;
 
     fn said(e: &io::Error) -> String {
-        io_message("f", e)
+        Error::io("f", e).describe().into_owned()
     }
 
     /// `NotFound` and `PermissionDenied` say the fixed string, whoever made

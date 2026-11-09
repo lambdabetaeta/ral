@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use crate::fact::{Failure, NotRunnable, Unrunnable};
 use crate::io::{self, Sink};
 use crate::ir::Name;
 use crate::ir::Redirects;
@@ -19,14 +18,15 @@ use crate::ir::{
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
-use crate::shell::exec::dispatch::{self, Resolution};
+use crate::shell::exec::command::LookupFailure;
 use crate::shell::exec::pipeline;
-use crate::shell::exec::redirect::scope::{RedirectState, WriteFate};
+use crate::shell::exec::redirect::RedirectState;
+use crate::shell::exec::resolve::Resolution;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
     Binding, Break, BroodGuard, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle,
-    DisplacedSite, Env, Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, Mooring,
-    Settled, Shell, Signature, TrailScope, Value, report_value,
+    DisplacedSite, Env, Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, HandlerLookup,
+    Mooring, Settled, Shell, Signature, TrailScope, Value, report_value,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -336,16 +336,6 @@ pub(crate) fn close_redirects(
 }
 
 /// A directory or plain file ran as a command.
-fn names_no_program(e: &Error) -> bool {
-    matches!(
-        e.reason.failure(),
-        Some(Failure::NotRunnable(NotRunnable {
-            why: Unrunnable::Directory | Unrunnable::NotExecutable,
-            ..
-        }))
-    )
-}
-
 /// `e`, offering a path head given no arguments as text: it was most likely
 /// meant as such.
 fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[Value]) -> Error {
@@ -534,7 +524,7 @@ impl Machine {
             return Ok(());
         }
         let slot = self.reserve(shell)?;
-        let state = RedirectState::enter(redirs, span, mooring, shell)?;
+        let state = RedirectState::install(redirs, span, mooring, shell)?;
         slot.push(Frame::Redirect(Box::new(state)));
         Ok(())
     }
@@ -884,7 +874,7 @@ impl Machine {
         shell.poll()?;
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
-        match dispatch::resolve_command_word(&exec.head, env, shell) {
+        match Resolution::of(&exec.head, env, shell) {
             Resolution::Env(Value::Native(entry)) if entry.decl.is_boundary() => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 let v = run_boundary(&entry, &argv, exec.site.as_ref(), span, mooring, shell)?;
@@ -900,7 +890,7 @@ impl Machine {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 self.call(v, argv, span, shell)
             }
-            Resolution::Handler { entry, depth } => {
+            Resolution::Handler(HandlerLookup::Frame(entry, depth)) => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 let slot = self.reserve(shell)?;
                 let frame = Box::new(shell.context.handlers.strip_matched(depth));
@@ -908,7 +898,7 @@ impl Machine {
                 let args = render_handler_args(&entry.name, entry.arity, &argv);
                 self.call(entry.thunk.clone(), args, span, shell)
             }
-            Resolution::Base(entry) => {
+            Resolution::Handler(HandlerLookup::Base(entry)) => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
                 // Unlike a handler arm's, a native body's argv is not rendered.
                 let v = entry.framed(span, shell, |shell, frame| {
@@ -918,12 +908,16 @@ impl Machine {
             }
             Resolution::External(command) => {
                 let offer = |e| offer_path_as_text(e, &exec.head, &argv);
+                let command = command.lookup(&shell.context.grants, shell.baseline());
+                let names_no_program = matches!(
+                    command.state(),
+                    Err(LookupFailure::Missing(missing)) if missing.names_no_program()
+                );
                 let command = command
-                    .lookup(&shell.context.grants, shell.baseline())
                     .admit(mooring, shell)
                     .map_err(|b| b.map_error(offer))?
-                    .map_lookup_error(|e| if names_no_program(&e) { offer(e) } else { e });
-                let v = dispatch::run_external(command, &argv, &redirs, span, mooring, shell)?;
+                    .map_lookup_error(|e| if names_no_program { offer(e) } else { e });
+                let v = command.run(&argv, &redirs, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }
@@ -1002,7 +996,7 @@ impl Machine {
             }
 
             Frame::Redirect(state) => {
-                state.leave(WriteFate::Commit, mooring, shell)?;
+                state.commit(mooring, shell)?;
                 Ok(Focus::Return(t))
             }
 
@@ -1096,7 +1090,7 @@ impl Machine {
             }
 
             Frame::Redirect(state) => {
-                let _ = state.leave(WriteFate::Abort, mooring, shell);
+                state.abort(mooring, shell);
                 Err(s)
             }
 

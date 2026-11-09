@@ -1,6 +1,6 @@
 # codes: T0057
 # status: 1
 # at: 6:27
-# contains: to external command '/bin/echo'
+# contains: as an argument to `/bin/echo`
 # contains: to-json
 let r = [a: 1]; /bin/echo $r

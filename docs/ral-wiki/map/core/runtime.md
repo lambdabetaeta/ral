@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6e2995f8
+generated_at_commit: 248aff5c
 generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -14,15 +14,16 @@ per-child confinement choice. It re-enters evaluation only through the
 closures, so the mutual recursion is irreducible, though `shell::exec` names no
 `shell::evaluator` item; the evaluator reaches it at
 `PipeNode::run` and, dispatching an `Exec` node, at
-`dispatch::resolve_command_word` → `run_external`, and the redirect scope
-(`redirect::scope`), which the machine's `Frame::Redirect` enters
+`resolve::Resolution::of` → `Command::run`, and the redirect scope
+(`redirect::RedirectState`), which the machine's `Frame::Redirect` holds
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
-- `dispatch.rs` — `resolve_command_word`, the single site that resolves a
-  head (env → handlers → external), and `run_external`, which runs an
-  admitted external under its redirects. The machine's `Exec` rule runs every other arm itself. There is no builtin arm: a native table entry is
-  an `Env` hit on a native value, and a base-frame row is a `Base` hit on the
-  handler stack's base layer, run by the `Exec` rule with the argv slice
+- `resolve.rs` — `Resolution::of`, the single site that resolves a head
+  (env → handlers → external). The machine's `Exec` rule runs every arm but
+  the external, which `Command::run` (`command.rs`) runs under its redirects.
+  There is no builtin arm: a native table entry is
+  an `Env` hit on a native value, and a base-frame row is a
+  `Handler(HandlerLookup::Base)` hit on the handler stack's base layer, run by the `Exec` rule with the argv slice
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
   `^name` and a path-bearing head are the external directly, consulting
@@ -35,17 +36,19 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   `{ |name args| … }` — with the calling convention fixed by surface position,
   not inferred from a value's runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
-- `redirect.rs` — the functions that open a redirect target (`open_write`,
-  `open_read`, `install_stdin_redirect`, and `Shell::atomic_write`, which
-  every host write below the redirect frame shares), over `path`'s
-  `Located::stage` / `open_streaming` (`StagedWrite`, `Streamed`): staging a
-  write is the path's, judging and committing it the shell's. `redirect/scope.rs` is the
-  `RedirectState` lifecycle (open, route fd 1/2 through the shell's sinks,
-  restore, settle each write) and `with_redirects`.
-- `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
-  that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
-  as a prefix and a byte total, independently of ordinary capture.
-- `dispatch.rs::Shell::run_external` is `^program args…` for a host holding
+- `redirect.rs` — `RedirectState`, the one interpreter of a redirect list:
+  open every target (`open_targets`), install them over the shell's streams
+  with `Io::swap`, and on leaving restore the streams and settle each
+  `PendingWrite` (`commit`, `abort`, `abandon`); `with_redirects` brackets a
+  synchronous call. Write targets open over `path`'s `Located::stage` /
+  `open_streaming` (`StagedWrite`, `Streamed`): staging a write is the
+  path's, judging and committing it the shell's. `Shell::atomic_write` is the
+  same `>` recipe, unobserved, for host writes below the redirect frame.
+- `capture.rs` — `with_capture` and the audit tee, both over one
+  `with_io_patched` bracket that swaps the streams back on return or panic.
+  Audit retains 1 MiB per stream as a prefix and a byte total, independently
+  of ordinary capture.
+- `command.rs::Shell::run_external` is `^program args…` for a host holding
   no syntax: the `Exec` rule's external with no handlers, no redirects and no
   span, never evaluating shell source. The caller supplies its mooring;
   current grants, scope, audit and streams remain in force. The REPL
@@ -55,20 +58,22 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   when nobody listens at launch. `Command::with_record` is the shape that ends
   it before its frame closes: enter the frame, begin the record, tee the
   streams, locate a failure with the visible head and span, end the record.
-  `run_external` and `detach` share it. A failure is a `Reason::process` named
+  `Command::run` and `detach` share it. A failure is a `Reason::process` named
   for the head as dispatched, minted where the child's end is known
-  (`command::ending`, `explain_exec_error`); its text is `Reason::describe`. A direct
+  (`command::ending`, `Program::exec_error`); its text is `Reason::describe`. A direct
   external stage outlives its frame, so it carries a `StageFrame` (its `Prov`
   and its record) from launch through collection, completing errors and stops
   before its settlement ends the record.
 - `command.rs` — one external command, in pipeline order:
   `Command::from_name` records what to look up (`Request`); `lookup` finds
   the program and checks the grants (`Command<Lookup>`), reporting nothing,
-  which is all `help` needs; `admit` reports a refusal and keeps any other
-  lookup error as an `Error` for `prepare`, so the 127/126 verdict is
+  which is all `help` needs; `admit` reports a refusal and keeps a
+  missing program (`Missing`, converted once by `into_error`) as an `Error`
+  for `prepare`, so the 127/126 verdict is
   reported inside the command's record and redirects and beats a bad
   argument. `prepare(args, ownership, shell)` vets argv and builds a
-  `Prepared`: the `Launch` and the `Diagnosis` that explains a failed start.
+  `Prepared`: the `Launch`, its `Confinement`, and the `Program` it starts,
+  which outlives the consumed launch to explain a failed start.
   `Prepared::start` installs an owned `io::child::Connection`, starts the
   drains from their owned readers, then spawns, so a thread creation failure
   leaves no child to tear down; a standalone `run` titles the terminal
@@ -149,7 +154,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     ([[internals/pipeline-execution|pipeline-execution]],
     [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
-    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     `io::child::Connection` binds child streams for standalone commands,
     direct pipeline stages, and externals inside stage threads
     ([[map/core/io-process|io-process]]). Pipeline topology stays in `ByteIn`

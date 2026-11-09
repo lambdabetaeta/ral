@@ -1188,7 +1188,7 @@ fn abstract_stdout_discharge_has_a_fresh_result_grade() {
     );
     has_error(
         "let f = { |t| !$t > out }; let x = f { echo hi }; echo $x",
-        "nothing",
+        "cannot pass Unit as an argument to `echo`",
     );
 }
 

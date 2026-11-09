@@ -39,7 +39,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use crate::authority::policy::FsAllow;
 use crate::authority::sandbox::carve;
 use crate::authority::sandbox::{SandboxProjection, unavailable};
-use crate::error::{Error, io_message};
+use crate::error::Error;
 use crate::path::{Installing, Located, RealPath, Walked, shown};
 use crate::process::Unstarted;
 use crate::process::cancel::Scope;
@@ -110,7 +110,7 @@ impl SessionSandbox {
         let name = profile_name(index);
         self.dacl.record_profile(&name)?;
         let profile = AppContainerProfile::create_or_reuse(&name)
-            .map_err(|e| Error::new(io_message("sandbox: create AppContainer profile", &e)))?;
+            .map_err(|e| Error::io("sandbox: create AppContainer profile", &e))?;
         Ok(vacant.insert(profile).sid())
     }
 }
@@ -123,7 +123,7 @@ fn ensure_network_caps(
 ) -> Result<Arc<CapabilitySids>, Error> {
     if slot.is_none() {
         let caps = CapabilitySids::build()
-            .map_err(|e| Error::new(io_message("sandbox: derive network capability SIDs", &e)))?;
+            .map_err(|e| Error::io("sandbox: derive network capability SIDs", &e))?;
         *slot = Some(Arc::new(caps));
     }
     Ok(Arc::clone(slot.as_ref().expect("network caps built above")))
@@ -363,10 +363,10 @@ fn ensure_grant(
     let name = dacl::fs_capability_name(pin.name(), kind);
     if !fs_cap_sids.contains_key(&name) {
         let sid = OwnedCapabilitySid::from_capability_name(&name)
-            .map_err(|e| Error::new(io_message("sandbox: derive fs capability SID", &e)))?;
+            .map_err(|e| Error::io("sandbox: derive fs capability SID", &e))?;
         let sid_string = sid
             .sid_string()
-            .map_err(|e| Error::new(io_message("sandbox: fs capability SID string", &e)))?;
+            .map_err(|e| Error::io("sandbox: fs capability SID string", &e))?;
         dacl::ensure_frozen_grant(pin, &sid_string, kind, cancel)?;
         fs_cap_sids.insert(name.clone(), Arc::new(sid));
     }

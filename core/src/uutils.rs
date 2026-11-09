@@ -5,19 +5,25 @@
 /// whose `uu_*` crates pull in Unix-only uucore modules and so cannot link
 /// on Windows — and emit the name slices and the dispatch arms from it, so
 /// a tool added to one is added to all.
-#[cfg(feature = "coreutils")]
 macro_rules! declare_coreutils {
     (
         cross: { $($cname:literal => $cmodule:ident),+ $(,)? }
         $(, unix: { $($uname:literal => $umodule:ident),+ $(,)? } )? $(,)?
     ) => {
-        $(use $cmodule;)+
+        $(
+            #[cfg(feature = "coreutils")]
+            use $cmodule;
+        )+
         $($(
             #[cfg(all(unix, feature = "coreutils-unix-only"))]
             use $umodule;
         )+)?
 
+        /// Every coreutils tool some build bundles, whatever this one does.
+        const COREUTILS_NAMES: &[&str] = &[$($cname,)+ $($($uname,)+)?];
+
         /// Every coreutils tool this build can dispatch on this platform.
+        #[cfg(feature = "coreutils")]
         pub(crate) const COREUTILS_TOOLS: &[&str] = &[
             $($cname,)+
             $($(
@@ -33,6 +39,7 @@ macro_rules! declare_coreutils {
             $($( $uname, )+)?
         ];
 
+        #[cfg(feature = "coreutils")]
         pub(crate) fn coreutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
             match tool {
                 $($cname => $cmodule::uumain(args.into_iter()),)+
@@ -46,13 +53,13 @@ macro_rules! declare_coreutils {
     };
 }
 
-/// Bundled diffutils tools, shimmed by `cmp_main` and `diff_main` below.
-#[cfg(feature = "diffutils")]
-pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
+/// The diffutils tools, bundled under the `diffutils` feature and shimmed by
+/// `cmp_main` and `diff_main` below.
+const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 
-/// The bundled ripgrep tool, shimmed by `rg_main` below.
-#[cfg(feature = "ripgrep")]
-pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
+/// The ripgrep tool, bundled under the `ripgrep` feature and shimmed by
+/// `rg_main` below.
+const RIPGREP_TOOLS: &[&str] = &["rg"];
 
 /// The static name of a bundled tool. `command::Command` looks these up as a
 /// `Program::Tool` and skips the PATH probe entirely, so the in-binary
@@ -69,14 +76,8 @@ pub(crate) fn bundled(name: &str, unix_available: bool) -> bool {
     bundled_name(name.as_ref()).is_some() && (unix_available || !unix_only(name))
 }
 
-#[cfg(feature = "coreutils")]
 fn unix_only(name: &str) -> bool {
     COREUTILS_UNIX_ONLY_TOOLS.contains(&name)
-}
-
-#[cfg(not(feature = "coreutils"))]
-fn unix_only(_: &str) -> bool {
-    false
 }
 
 /// Every bundled tool this build dispatches, in one slice.
@@ -101,6 +102,17 @@ pub fn bundled_tools() -> Vec<&'static str> {
     #[cfg(feature = "ripgrep")]
     names.extend_from_slice(RIPGREP_TOOLS);
     names
+}
+
+/// Every tool some build of ral bundles, whatever this build does.
+///
+/// A profile may name these outright in every build. Where this build does
+/// not bundle one, its name admits the host binary found on PATH.
+pub fn bundleable_tools() -> impl Iterator<Item = &'static str> {
+    [COREUTILS_NAMES, DIFFUTILS_TOOLS, RIPGREP_TOOLS]
+        .into_iter()
+        .flatten()
+        .copied()
 }
 
 /// Restore SIGPIPE to `SIG_DFL`, once per binary at startup.
@@ -215,7 +227,6 @@ fn rg_main<I: Iterator<Item = std::ffi::OsString>>(mut args: I) -> i32 {
     i32::from(ral_ripgrep_core::run_cli(args))
 }
 
-#[cfg(feature = "coreutils")]
 declare_coreutils! {
     cross: {
         "ls" => uu_ls,

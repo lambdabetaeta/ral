@@ -66,17 +66,25 @@ pub(super) fn unbudgeted(why: impl std::fmt::Display) -> Error {
     ))
 }
 
-#[cfg(target_os = "macos")]
+/// Advice for a grant-confined command that exited with `code`: on macOS,
+/// status 128 may be a fork the process limit refused. Other platforms
+/// impose no such limit at launch, and have nothing to say.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(unused_variables, reason = "only macOS sets this limit at launch")
+)]
 pub(crate) fn failure_hint(code: i32) -> Option<String> {
-    (code == 128).then(|| {
-        format!(
+    #[cfg(target_os = "macos")]
+    if code == 128 {
+        return Some(format!(
             "this command ran with a process limit: your process count at launch plus \
          {ACTIVE_PROCESS_CAP}, capped by the system maximum. Exit status 128 can accompany \
          a refused fork, but does not prove one. If the command reported that it could not \
          fork, reduce concurrent processes and retry; widening fs or exec grants does not \
          raise this limit."
-        )
-    })
+        ));
+    }
+    None
 }
 
 #[cfg(unix)]

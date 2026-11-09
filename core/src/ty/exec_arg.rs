@@ -9,7 +9,8 @@
 //! Stated once, as a verdict on a [`Head`], and read from both sides of that
 //! boundary.  The checker maps an argument's *type* into this set before the
 //! spawn (the argv rule in `typecheck::infer`) and `shell::exec::command::check_argv` maps
-//! the *value* at the spawn, through `Value::heads`.  The one match is
+//! the *value* at the spawn, through `Value::heads`.  Both say the same
+//! [`RefusedArg::headline`] and [`RefusedArg::remedy`].  The one match is
 //! wildcard-free on purpose: a new head has to be given a verdict, so the
 //! static gate and its runtime backstop cannot disagree about one argument.
 
@@ -17,7 +18,7 @@ use super::{Head, Ty};
 
 /// A shape the exec boundary refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefusedArg {
+pub enum RefusedArg {
     /// Nothing: there is no word to pass, and no text to print.
     Unit,
     /// Several arguments in the costume of one.
@@ -53,6 +54,12 @@ impl RefusedArg {
     /// nothing rather than guessing at one.
     pub(crate) fn of_ty(ty: &Ty) -> Option<Self> {
         Head::of(ty).and_then(Self::of_head)
+    }
+
+    /// The refusal of an argument, `shown` as its type, passed to `cmd`.
+    /// One sentence wherever the refusal was raised, as with [`Self::remedy`].
+    pub(crate) fn headline(cmd: &str, shown: impl std::fmt::Display) -> String {
+        format!("cannot pass {shown} as an argument to `{cmd}`")
     }
 
     /// How to lower this shape into arguments `cmd` can receive.  One sentence

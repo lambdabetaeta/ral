@@ -184,10 +184,10 @@ impl Process {
                     Unrunnable::Directory => format!("{at} is a directory, not a command"),
                     Unrunnable::NotExecutable => format!("{at} is a file, not an executable"),
                     Unrunnable::MissingInterpreter(Some(interpreter)) => {
-                        format!("{program}: its interpreter {interpreter} does not exist")
+                        format!("{at}: its interpreter {interpreter} does not exist")
                     }
                     Unrunnable::MissingInterpreter(None) => {
-                        format!("{program}: the interpreter or loader it names does not exist")
+                        format!("{at}: the interpreter or loader it names does not exist")
                     }
                     Unrunnable::Io(message) => format!("{at}: {message}"),
                 }

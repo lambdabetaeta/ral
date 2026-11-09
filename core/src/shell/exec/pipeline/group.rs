@@ -10,7 +10,6 @@
 //! Windows a group a pipeline or a lone external owns is a `Job`.
 
 use super::collect::Event;
-use crate::error::io_message;
 use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
 use crate::shell::runtime::{Break, Error, Settled};
 use std::sync::mpsc::Sender;
@@ -143,7 +142,7 @@ fn anchor_death(_: crate::process::WaitOutcome) -> Event {
 
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
 fn anchor_error(e: std::io::Error) -> Error {
-    Error::new(io_message("pipeline anchor", &e))
+    Error::io("pipeline anchor", &e)
 }
 
 /// `Child::drop` neither kills nor reaps, so a child not handed on goes here.
@@ -208,9 +207,7 @@ impl AnchorProcess {
             });
             if let Err(e) = readiness {
                 discard(&mut child);
-                return Err(
-                    Error::new(io_message("pipeline anchor did not become ready", &e)).into(),
-                );
+                return Err(Error::io("pipeline anchor did not become ready", &e).into());
             }
             let report_tx = tx.clone();
             let reporter = std::thread::Builder::new()

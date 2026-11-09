@@ -1,6 +1,6 @@
 # codes: T0057
 # status: 1
 # at: 6:6
-# contains: `()` is nothing, so `echo` has no word to take from it
+# contains: cannot pass Unit as an argument to `echo`
 let out = cd /tmp
 echo $out

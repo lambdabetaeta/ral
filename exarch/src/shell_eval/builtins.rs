@@ -7,7 +7,7 @@ use crate::skill::{self, Judge as _};
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
-use ral_core::error::{Error, io_message};
+use ral_core::error::Error;
 use ral_core::fact::{Grep, Read};
 use ral_core::path::tree::Walk;
 use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
@@ -706,12 +706,12 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, St
                  `to-string BODY > path` writes a new one."
             ))
         } else {
-            Error::new(io_message(format!("{tool}: cannot read {path}"), &e))
+            Error::io(format!("{tool}: cannot read {path}"), &e)
         }
     })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .map_err(|e| Error::new(io_message(format!("{tool}: cannot read {path}"), &e)))?;
+        .map_err(|e| Error::io(format!("{tool}: cannot read {path}"), &e))?;
     let eol = Eol::of(&bytes);
     let body = String::from_utf8(bytes).map_err(|_| {
         Error::new(format!(

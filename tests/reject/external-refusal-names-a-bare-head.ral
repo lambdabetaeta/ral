@@ -1,5 +1,5 @@
 # codes: T0057
 # status: 1
 # at: 5:21
-# contains: to external command 'mycmd'
+# contains: as an argument to `mycmd`
 let xs = [1]; mycmd $xs

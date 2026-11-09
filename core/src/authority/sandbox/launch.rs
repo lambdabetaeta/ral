@@ -32,11 +32,10 @@ use crate::path::{CwdPath, RealPath};
 #[cfg(unix)]
 use crate::process::report::Report;
 use std::borrow::Cow;
+use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::fd::AsFd;
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
@@ -119,14 +118,32 @@ impl Confinement {
         Ok(())
     }
 
-    #[cfg(unix)]
+    /// The hint for a script whose `#!` `interpreter` this sandbox withholds.
+    #[cfg_attr(
+        not(unix),
+        allow(unused_variables, reason = "Windows programs name no interpreter")
+    )]
     pub(crate) fn interpreter_hint(&self, interpreter: &Path) -> Option<String> {
         match self {
+            #[cfg(unix)]
             Self::Projected(projection) => super::interpreter_hint(projection, interpreter),
-            Self::Unconfined => None,
-            #[cfg(seccomp)]
-            Self::Guest(_) => None,
+            _ => None,
         }
+    }
+
+    /// The PIDs to look for in the kernel's sandbox-denial log, or `None`
+    /// when nothing confines `spawned`: the child's, or inside an envelope,
+    /// the payload's host PIDs. Taken at spawn, while the processes are
+    /// still alive.
+    pub(crate) fn denial_pids(&self, spawned: &crate::process::Spawned) -> Option<HashSet<u32>> {
+        if !self.is_confined() {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        if let crate::process::Group::Enveloped(payload) = &spawned.group {
+            return Some(super::payload_pids(*payload));
+        }
+        Some(HashSet::from([spawned.child.id()]))
     }
 }
 

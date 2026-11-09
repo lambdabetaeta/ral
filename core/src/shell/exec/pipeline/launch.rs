@@ -1,7 +1,6 @@
 //! Launch phase: wire one stage's byte endpoints and start it — a ral-written
 //! thread, or a direct external spawned into the pipeline's process group.
 
-use super::super::command;
 use super::super::command::{Command, Request};
 use super::super::job_control::TerminalInput;
 use super::super::record::CommandRecord;
@@ -12,7 +11,6 @@ use super::route::{ByteIn, ByteOut, HeldEdge, StageRoute};
 use super::stage::{LiveExternal, StageFrame, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::authority::sandbox::Ownership;
-use crate::error::io_message;
 use crate::fact::AuditIo;
 use crate::io::child::Connection;
 use crate::io::{Source, SourceReader};
@@ -38,7 +36,7 @@ pub(super) fn stage_stdin(
                 Source::Terminal => return Ok(Source::Terminal),
                 Source::Reader(r) => r
                     .try_clone()
-                    .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
+                    .map_err(|e| Error::io("could not duplicate stdin", &e))?,
             }
         }
     };
@@ -129,8 +127,8 @@ fn launch_external_stage_direct(
             };
             let pgid = PgidPolicy::Join(group.membership(&shell.scope))
                 .unless_enveloped(command.enveloped());
-            let started =
-                command.start(io.map_err(command::connection_error)?, pgid, &shell.scope)?;
+            let io = io.map_err(|e| command.connection_error(&e))?;
+            let started = command.start(io, pgid, &shell.scope)?;
             let stage = started.register(slot, group.group().owned());
             Ok((stage, held))
         })();

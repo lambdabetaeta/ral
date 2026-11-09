@@ -9,7 +9,7 @@ anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_b
 [[design/effects-handlers|The effects design]] states the discipline — handlers
 are deep, self-masking, and there is no `resume`. This is the runtime mechanism
 that realises it, in `HandlerStack` (`shell/runtime/handler.rs`) and the dispatch in
-`shell/exec/dispatch.rs`.
+`shell/exec/resolve.rs`.
 
 **The stack is what a head reaches when the env does not hold the name.**
 Resolution is env → handlers → external, so a lexical binding — the prelude and

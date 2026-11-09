@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: 248aff5c
 generated_at_date: 2026-11-07
 covers_paths: [core/src/error.rs, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
@@ -31,7 +31,7 @@ saturating `discarded` byte count). Its optional parts are boxed because an
 clippy's `result_large_err` threshold. `Error::new` takes anything that is a
 `Reason`; `with_hint` appends, `with_context` prepends, and `Display` is the
 context chain followed by `Reason::describe`. Rendering is not here: it lives in
-`shell/runtime/error.rs`, below. The wording of an I/O failure is `io_message`,
+`shell/runtime/error.rs`, below. The wording of an I/O failure is `Error::io`,
 the one phrasing every door shares, which says the same fixed string for
 `NotFound` and `PermissionDenied` on every host.
 

@@ -11,8 +11,7 @@ use std::os::windows::io::OwnedHandle as Owned;
 
 /// Where a stage's byte input comes from.
 ///
-/// A `<file` redirect is parked here by `install_stdin_redirect` rather than
-/// `dup2`'d onto fd 0, and a session's non-tty fd 0 is a `Reader` from the
+/// A `<` or `<<` redirect is installed here rather than `dup2`'d onto fd 0, and a session's non-tty fd 0 is a `Reader` from the
 /// start: `Terminal` always means a terminal on the inherited fd 0.  `Empty`
 /// denies byte input without denying foreground authority: immediate EOF for
 /// readers, `/dev/null` for a child, never `Terminal`'s fall-through to fd 0.
@@ -64,6 +63,24 @@ impl SourceReader {
 
     pub(crate) fn file(file: File) -> Self {
         Self { file, scope: None }
+    }
+
+    /// A reader of `bytes`, written into a pipe by a thread of its own so
+    /// that more than the pipe buffer holds cannot deadlock.  If the reader
+    /// stops early, the thread gets a broken pipe and exits.
+    ///
+    /// # Errors
+    /// Returns `Err` if the pipe or the thread cannot be created.
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> io::Result<Self> {
+        use std::io::Write as _;
+        let (reader, mut writer) = crate::process::cloexec_pipe()?;
+        std::thread::Builder::new()
+            .name("ral-bytes-source".into())
+            .spawn(move || {
+                // A broken pipe means the reader stopped early, which is fine.
+                let _ = writer.write_all(&bytes);
+            })?;
+        Ok(Self::pipe(reader))
     }
 
     /// This reader as one that ends as EOF once `scope` carries a cause; a

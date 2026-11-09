@@ -71,20 +71,14 @@ fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
     }
 }
 
-/// Write the terminal title escape (`ral: <cwd>`) to stdout.
+/// Title the terminal `ral: <cwd>`.
 ///
 /// Presentation-layer side effect, separate from the semantic prompt
 /// computation in [`render`], so the title updates whether or not the user
-/// changes the prompt.  No-op on terminals that can't render OSC titles.
+/// changes the prompt.
 pub(super) fn write_terminal_title(terminal: &ral_core::io::terminal::TerminalState, cwd: &str) {
-    if !terminal.ui_controls_ok() {
-        return;
-    }
-    use std::io::Write;
     let cwd = if cwd.is_empty() { "?" } else { cwd };
-    let _ = std::io::stdout()
-        .write_all(ral_core::io::ansi::osc_set_title(&format!("ral: {cwd}")).as_bytes());
-    let _ = std::io::stdout().flush();
+    terminal.set_title(&format!("ral: {cwd}"));
 }
 
 /// Run the registered `Session/"prompt"` hook, fold plugin `prompt` hooks

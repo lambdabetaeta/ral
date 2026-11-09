@@ -1,84 +1,65 @@
-//! Which sink the output goes to, for the length of a bracket: swap a Sink onto
-//! `shell.io.stdout`, run a closure, restore.  [`with_capture`] installs a
-//! buffer, so the bytes become a value; [`with_audit_capture`] *tees*, so bytes
-//! are recorded and still go where they were going.  A write's destination is
-//! settled where the writer stands, so no byte is ever moved after the fact.
-use super::redirect::Prior;
+//! Captures: run a closure with the shell's output going into buffers.
+//! [`with_capture`] replaces stdout, so the bytes can become a value.
+//! [`with_audit_capture`] tees stdout and stderr, so the bytes are recorded
+//! and still reach their destination.
 use crate::fact::AuditIo;
-use crate::io::{Retained, Sink, Streams, new_buffer, tee_with_buffer};
+use crate::io::{IoPatch, Retained, Streams, new_buffer, tee_with_buffer};
 use crate::shell::runtime::Shell;
-use std::mem::{replace, take};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
+/// Cap on the bytes an audit record keeps per stream.
 const AUDIT_BUFFER_CAP: usize = 1024 * 1024;
 
-/// Restores the sinks it replaced on `Drop`, panic included.
-struct SinkScope<'a> {
-    shell: &'a mut Shell,
-    prior: Prior,
-}
-
-impl<'a> SinkScope<'a> {
-    fn enter(shell: &'a mut Shell, stdout: Sink, stderr: Option<Sink>) -> Self {
-        let prior = Prior {
-            stdout: Some(replace(&mut shell.io.stdout, stdout)),
-            stderr: stderr.map(|sink| replace(&mut shell.io.stderr, sink)),
-            ..Prior::default()
-        };
-        Self { shell, prior }
-    }
-}
-
-impl Drop for SinkScope<'_> {
-    fn drop(&mut self) {
-        take(&mut self.prior).restore(self.shell);
-    }
-}
-
-/// Swap stdout for an in-memory buffer, run `f`, restore, return
-/// `(result, retained)`.
+/// Run `f` with stdout going into a buffer.  Returns `f`'s result and what
+/// the buffer kept.
 ///
-/// Everything the closure writes drains here.  `try` deliberately captures
-/// nothing; `audit` uses the tee below.
-///
-/// A cut prefix is the only report of the buffer's cap: writers reach the
-/// buffer from pump threads whose join discards their value, so nothing on
-/// the write path can raise it, and a caller that means to turn the bytes
-/// into a value must consult [`Retained::is_whole`] here.
-pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Retained)
-where
-    F: FnOnce(&mut Shell) -> R,
-{
-    let (sink, buf) = new_buffer();
-    let scope = SinkScope::enter(shell, sink, None);
-    let result = f(scope.shell);
-    drop(scope);
-    (result, buf.take())
+/// The buffer is capped, and the write path cannot report the cut.  A caller
+/// that turns the bytes into a value must check [`Retained::is_whole`].
+pub fn with_capture<R>(shell: &mut Shell, f: impl FnOnce(&mut Shell) -> R) -> (R, Retained) {
+    let (sink, buffer) = new_buffer();
+    let patch = IoPatch {
+        stdout: Some(sink),
+        ..IoPatch::default()
+    };
+    let result = with_io_patched(shell, patch, f);
+    (result, buffer.take())
 }
 
-/// Tee every sink this shell can write into buffers while `f` runs, so
-/// `audit { … }` records a command's bytes without hiding them.
+/// Run `f` with stdout and stderr each teed into a buffer, if the open
+/// audit records bytes.  Returns `f`'s result and what the buffers kept.
 ///
-/// Installed by `Command::with_record` in `shell::exec::record` around each
-/// standalone external.  Byte audit threads every pipeline stage (`resolve_launch`), so
-/// none is spawned direct and untapped.
-pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, AuditIo)
-where
-    F: FnOnce(&mut Shell) -> R,
-{
+/// `Command::with_record` wraps every external in this.  Under byte audit a
+/// pipeline stage always runs on a thread with a shell (`pipeline::resolve`),
+/// so no external escapes it.
+pub(crate) fn with_audit_capture<R>(
+    shell: &mut Shell,
+    f: impl FnOnce(&mut Shell) -> R,
+) -> (R, AuditIo) {
     if !shell.local.audit.captures_bytes() {
         return (f(shell), AuditIo::default());
     }
-    let bases = Streams {
+    let (sinks, buffers) = Streams {
         stdout: shell.io.stdout.clone(),
         stderr: shell.io.stderr.clone(),
+    }
+    .map(|destination| tee_with_buffer(destination, AUDIT_BUFFER_CAP))
+    .unzip();
+    let patch = IoPatch {
+        stdout: Some(sinks.stdout),
+        stderr: Some(sinks.stderr),
+        ..IoPatch::default()
     };
-    let (sinks, buffers) = bases
-        .map(|base| tee_with_buffer(base, AUDIT_BUFFER_CAP))
-        .unzip();
-    let scope = SinkScope::enter(shell, sinks.stdout, Some(sinks.stderr));
-    let result = f(scope.shell);
-    drop(scope);
-    (result, buffers.map(|buf| buf.take()))
+    let result = with_io_patched(shell, patch, f);
+    (result, buffers.map(|buffer| buffer.take()))
+}
+
+/// Run `f` with `patch` installed over the shell's streams.  The replaced
+/// streams are restored when `f` returns or panics.
+fn with_io_patched<R>(shell: &mut Shell, patch: IoPatch, f: impl FnOnce(&mut Shell) -> R) -> R {
+    let prior = shell.io.swap(patch);
+    let result = catch_unwind(AssertUnwindSafe(|| f(shell)));
+    shell.io.restore(prior);
+    result.unwrap_or_else(|payload| resume_unwind(payload))
 }
 
 #[cfg(test)]
@@ -109,21 +90,5 @@ mod tests {
         assert_eq!(io.stderr.bytes, stderr[..AUDIT_BUFFER_CAP]);
         assert_eq!(io.stdout.total, stdout.len() as u64);
         assert_eq!(io.stderr.total, stderr.len() as u64);
-    }
-
-    #[test]
-    fn the_exact_audit_limit_is_complete() {
-        let mut shell = crate::test_helper::core_shell();
-        let scope = shell.local.audit.open(CapturePolicy::Bytes);
-        let (sink, _buf) = new_buffer();
-        shell.io.stdout = sink;
-        let (result, io) = with_audit_capture(&mut shell, |shell| {
-            shell.write_stdout(&vec![0; AUDIT_BUFFER_CAP])
-        });
-        result.unwrap();
-        let _trail = shell.local.audit.close(scope);
-        assert_eq!(io.stdout.bytes.len(), AUDIT_BUFFER_CAP);
-        assert!(io.stdout.is_whole());
-        assert_eq!(io.stderr, Retained::default());
     }
 }

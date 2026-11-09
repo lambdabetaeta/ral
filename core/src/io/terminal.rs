@@ -198,6 +198,18 @@ impl TerminalState {
         self.ui_controls_ok() && self.hyperlinks()
     }
 
+    /// Set the terminal's title to `title`, where control sequences may be
+    /// written.
+    pub fn set_title(&self, title: &str) {
+        if !self.ui_controls_ok() {
+            return;
+        }
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(super::ansi::osc_set_title(title).as_bytes());
+        let _ = stdout.flush();
+    }
+
     /// OSC 52 clipboard writes may be emitted.
     pub fn ui_clipboard_write_ok(&self) -> bool {
         self.ui_controls_ok() && self.clipboard_write()

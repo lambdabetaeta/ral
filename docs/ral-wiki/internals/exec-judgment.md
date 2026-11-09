@@ -1,6 +1,6 @@
 ---
 generated_at_commit: 3e3fbc84
-verified_at_commit: 257c6c00
+verified_at_commit: 248aff5c
 verified_at_date: 2026-11-09
 anchors: [Command, Request, LookupFailure, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Command::from_name, Command::lookup, Command::admit, settle, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
@@ -64,7 +64,7 @@ launch for a direct pipeline stage and `detach`.
   candidate's failure names the file the walk was reaching, so a `PATH`
   entry ral may not search reads as that refusal, not as absence.
 - **A refused bare name reveals nothing about the candidates' kinds.** The
-  hint `'{name}' is no program in any PATH directory the grant runs from` is
+  hint `'{name}' is not in any PATH directory the grant allows` is
   added (`settle`) only when every candidate was absent or refused for a
   missing allowance alone, which places it outside the grant. An exclusion's
   refusal carries the exclusion's hint alone: it is no evidence of absence.
