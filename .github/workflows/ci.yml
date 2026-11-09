@@ -1,5 +1,5 @@
 name: CI
-# Every platform runs the same `just lint test`; one more job runs the
+# Every platform runs the same `just lint test test-types`; one more job runs the
 # platform-independent `just docs ui` once.
 on:
   push:
@@ -69,6 +69,7 @@ jobs:
 
       - run: just lint
       - run: just test
+      - run: just test-types
 
   common:
     runs-on: ubuntu-latest

@@ -12,11 +12,12 @@
 //! the OS sandbox side, which exist where a renderer holds a position: not on
 //! macOS.
 //!
-//! After a deliberate change to a diagnostic, regenerate the `.stderr` files
-//! with `TRYBUILD=overwrite cargo test -p ral-core --test markers` and read
-//! the diff.
+//! Run these compiler checks with `just test-types`, separately from runtime
+//! tests. After a deliberate change to a diagnostic, regenerate the `.stderr`
+//! files with `TRYBUILD=overwrite just test-types` and read the diff.
 
 #[test]
+#[ignore = "compiler checks: run just test-types"]
 fn the_markers_refuse_what_they_have_not_vouched_for() {
     let cases = trybuild::TestCases::new();
     cases.compile_fail("tests/markers/*.rs");

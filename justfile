@@ -20,9 +20,13 @@ default:
 build:
     cargo build --workspace --all-targets --features {{features}} --keep-going
 
-# Run the workspace test suite; ral/tests/ runs the `ral` binary `build` refreshes.
+# Run runtime tests; ral/tests/ runs the `ral` binary `build` refreshes.
 test: build
     cargo test --workspace --features {{features}},ral-core/test-util,exarch/test-util --no-fail-fast
+
+# Check the authority API's compile-time guarantees (separate compiler invocations).
+test-types:
+    cargo test --workspace --test markers --features {{features}},ral-core/test-util,exarch/test-util -- --ignored
 
 # Rustfmt, clippy and rustdoc's link checks, for this host's platform.
 lint:
@@ -65,7 +69,7 @@ wiki *args:
     bash scripts/wiki/build.sh {{args}}
 
 # Everything GitHub CI runs that this host can.
-ci: lint test docs ui
+ci: lint test test-types docs ui
 
 # Run recipes in the Linux container, e.g. `just box lint test`.
 [unix]
