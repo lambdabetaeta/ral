@@ -1156,9 +1156,10 @@ mod vet {
 }
 
 mod stdio {
-    use super::super::boundary_stdin;
     use crate::io::Source;
     use crate::process::{DurableRoot, Membership, Pgid, Scope, StdioSpec};
+    use crate::shell::exec::job_control::{Placement, TerminalInput};
+    use crate::shell::runtime::Mooring;
     use crate::shell::runtime::Shell;
 
     /// The terminal on the shell's stdin.
@@ -1173,8 +1174,14 @@ mod stdio {
     #[test]
     fn the_terminal_survives_only_where_its_group_can_read_it() {
         let shell = at_a_tty();
-        assert!(matches!(boundary_stdin(&shell, true), Source::Terminal));
-        assert!(matches!(boundary_stdin(&shell, false), Source::Empty));
+        assert!(matches!(
+            TerminalInput::Retain.stdin(&shell.io.stdin),
+            Source::Terminal
+        ));
+        assert!(matches!(
+            TerminalInput::Withhold.stdin(&shell.io.stdin),
+            Source::Empty
+        ));
     }
 
     /// A joined group reads what its owner chose, lent or not.
@@ -1184,9 +1191,11 @@ mod stdio {
         let group = Pgid::from_raw(1).expect("1 is positive");
         let stage = Scope::clone(&DurableRoot::default().child());
         shell.session.stage = Some(Membership::new(group, stage));
-        assert!(matches!(boundary_stdin(&shell, false), Source::Terminal));
+        let placed = Placement::for_command(&shell, &Mooring::adrift(), false);
+        assert!(matches!(placed, Placement::Joined(_)));
+        assert!(matches!(placed.stdin(&shell.io.stdin), Source::Terminal));
         shell.io.stdin = Source::Empty;
-        assert!(matches!(boundary_stdin(&shell, true), Source::Empty));
+        assert!(matches!(placed.stdin(&shell.io.stdin), Source::Empty));
     }
 
     /// Only the terminal is withheld: a non-tty fd 0 is a reader, and
@@ -1197,7 +1206,10 @@ mod stdio {
         let mut shell = at_a_tty();
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         shell.io.stdin = Source::Reader(crate::io::SourceReader::pipe(r));
-        assert!(matches!(boundary_stdin(&shell, false), Source::Reader(_)));
+        assert!(matches!(
+            TerminalInput::Withhold.stdin(&shell.io.stdin),
+            Source::Reader(_)
+        ));
     }
 
     /// The source is authoritative: `Empty` wires `/dev/null` and `Terminal`
@@ -1231,7 +1243,10 @@ mod stdio {
 
 mod foreground {
     use super::super::*;
+    use crate::io::Source;
     use crate::process::{DurableRoot, Membership, Pgid, Scope, TerminalLease};
+    use crate::shell::exec::job_control::TerminalInput;
+    use crate::shell::runtime::TerminalAccess;
 
     /// A session owning a terminal lease plus a `Leased` mooring: the REPL, or
     /// a terminal-launched script.  Stdout defaults to `Sink::Stdout`.
@@ -1255,28 +1270,25 @@ mod foreground {
     /// Never foreground: no loan, and the group `interactive` leaves it in,
     /// where only an interactive run's terminal is readable.
     fn assert_background(placed: &Placement, interactive: bool) {
-        let policy = &placed.policy;
-        assert!(placed.loan.is_none(), "a background child is lent nothing");
+        let policy = placed.policy();
         if interactive {
+            assert!(matches!(placed, Placement::Inherit));
             assert!(matches!(policy, PgidPolicy::Inherit), "{policy:?}");
         } else {
+            assert!(matches!(placed, Placement::Headless));
             assert!(matches!(policy, PgidPolicy::NewSession), "{policy:?}");
         }
-        assert_eq!(placed.readable, interactive);
+        assert_eq!(
+            matches!(placed.stdin(&Source::Terminal), Source::Terminal),
+            interactive
+        );
     }
 
     #[cfg(unix)]
     fn assert_foreground(placed: &Placement) {
-        assert!(
-            matches!(placed.policy, PgidPolicy::NewLeader),
-            "{:?}",
-            placed.policy
-        );
-        assert!(
-            placed.loan.is_some(),
-            "a foreground child is lent the terminal"
-        );
-        assert!(placed.readable, "a lent child reads the terminal");
+        assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
+        assert!(matches!(placed, Placement::Foreground(_)));
+        assert!(matches!(placed.stdin(&Source::Terminal), Source::Terminal));
     }
 
     /// A joined group is never lent: dropping a loan restores the terminal,
@@ -1286,13 +1298,10 @@ mod foreground {
         let (mut shell, mooring) = leased_shell();
         let group = Pgid::from_raw(1).expect("1 is positive");
         shell.session.stage = Some(Membership::new(group, shell.scope.clone()));
-        let placed = placement(&shell, &mooring, false);
-        assert!(
-            matches!(&placed.policy, PgidPolicy::Join(m) if m.group() == group),
-            "{:?}",
-            placed.policy
-        );
-        assert!(placed.loan.is_none());
+        let placed = Placement::for_command(&shell, &mooring, false);
+        assert!(matches!(&placed, Placement::Joined(m) if m.group() == group));
+        assert!(matches!(placed.policy(), PgidPolicy::Join(m) if m.group() == group));
+        assert!(placed.into_loan().is_none());
     }
 
     /// An envelope leads a group of its own, whatever its pipeline's.
@@ -1304,16 +1313,27 @@ mod foreground {
             group,
             Scope::clone(&DurableRoot::default().child()),
         ));
-        let placed = placement(&shell, &mooring, true);
-        assert!(matches!(placed.policy, PgidPolicy::NewLeader));
-        assert!(placed.loan.is_none());
+        for interactive in [true, false] {
+            shell.session.interactive = interactive;
+            let placed = Placement::for_command(&shell, &mooring, true);
+            assert!(matches!(
+                placed,
+                Placement::Unloaned {
+                    terminal_input: TerminalInput::Retain
+                }
+            ));
+            assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
+            assert!(matches!(placed.stdin(&Source::Terminal), Source::Terminal));
+            assert!(matches!(placed.stdin(&Source::Empty), Source::Empty));
+            assert!(placed.into_loan().is_none());
+        }
     }
 
     #[test]
     #[cfg(unix)]
     fn a_leased_terminal_bound_child_foregrounds() {
         let (shell, mooring) = leased_shell();
-        assert_foreground(&placement(&shell, &mooring, false));
+        assert_foreground(&Placement::for_command(&shell, &mooring, false));
     }
 
     /// A capture's sink is a buffer, not the terminal, so it must not steal the
@@ -1322,7 +1342,7 @@ mod foreground {
     fn a_leased_captured_child_stays_in_the_background() {
         let (mut shell, mooring) = leased_shell();
         captured(&mut shell);
-        assert_background(&placement(&shell, &mooring, false), true);
+        assert_background(&Placement::for_command(&shell, &mooring, false), true);
     }
 
     /// The loan foregrounds despite the buffer sink, a lone command as a
@@ -1334,7 +1354,7 @@ mod foreground {
         let (mut shell, mut mooring) = leased_shell();
         captured(&mut shell);
         mooring.terminal_access = TerminalAccess::ExplicitLoan;
-        assert_foreground(&placement(&shell, &mooring, false));
+        assert_foreground(&Placement::for_command(&shell, &mooring, false));
     }
 
     /// A terminal-launched script holds `Leased` exactly like the REPL: gating on
@@ -1344,7 +1364,7 @@ mod foreground {
     fn a_terminal_scripts_leased_child_foregrounds() {
         let (mut shell, mooring) = leased_shell();
         shell.session.interactive = false;
-        assert_foreground(&placement(&shell, &mooring, false));
+        assert_foreground(&Placement::for_command(&shell, &mooring, false));
     }
 
     /// A headless background child leads a session of its own.
@@ -1353,7 +1373,7 @@ mod foreground {
         let (mut shell, mooring) = leased_shell();
         shell.session.interactive = false;
         captured(&mut shell);
-        assert_background(&placement(&shell, &mooring, false), false);
+        assert_background(&Placement::for_command(&shell, &mooring, false), false);
     }
 
     /// Its session has no controlling terminal: lent nothing, led as a group
@@ -1362,10 +1382,12 @@ mod foreground {
     fn an_enveloped_child_is_never_lent_the_terminal() {
         let (mut shell, mut mooring) = leased_shell();
         let enveloped = |shell: &Shell, mooring: &Mooring| {
-            let placed = placement(shell, mooring, true);
-            assert!(matches!(placed.policy, PgidPolicy::NewLeader));
-            assert!(placed.loan.is_none());
-            placed.readable
+            let placed = Placement::for_command(shell, mooring, true);
+            assert!(matches!(placed, Placement::Unloaned { .. }));
+            assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
+            let retained = matches!(placed.stdin(&Source::Terminal), Source::Terminal);
+            assert!(placed.into_loan().is_none());
+            retained
         };
         assert!(enveloped(&shell, &mooring));
         mooring.terminal_access = TerminalAccess::ExplicitLoan;
@@ -1414,7 +1436,7 @@ mod foreground {
             shell.session.terminal_lease.is_some(),
             "session owns a lease"
         );
-        assert_background(&placement(&shell, &mooring, false), true);
+        assert_background(&Placement::for_command(&shell, &mooring, false), true);
     }
 
     /// A launch that never owned the terminal foreground (backgrounded `ral … &`,
@@ -1423,7 +1445,7 @@ mod foreground {
     fn no_lease_never_foregrounds() {
         let (mut shell, mooring) = leased_shell();
         shell.session.terminal_lease = None;
-        assert_background(&placement(&shell, &mooring, false), true);
+        assert_background(&Placement::for_command(&shell, &mooring, false), true);
     }
 }
 

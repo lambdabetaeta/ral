@@ -3,6 +3,7 @@
 
 use super::super::command;
 use super::super::command::{Command, Request};
+use super::super::job_control::TerminalInput;
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
@@ -29,13 +30,15 @@ pub(super) fn stage_stdin(
 ) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => SourceReader::pipe(r),
-        ByteIn::Parent => match command::boundary_stdin(shell, holds_terminal) {
-            Source::Empty => return Ok(Source::Empty),
-            Source::Terminal => return Ok(Source::Terminal),
-            Source::Reader(r) => r
-                .try_clone()
-                .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
-        },
+        ByteIn::Parent => {
+            match TerminalInput::for_pipeline(shell, holds_terminal).stdin(&shell.io.stdin) {
+                Source::Empty => return Ok(Source::Empty),
+                Source::Terminal => return Ok(Source::Terminal),
+                Source::Reader(r) => r
+                    .try_clone()
+                    .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
+            }
+        }
     };
     Ok(Source::Reader(reader.interruptible(scope.clone())))
 }
@@ -113,7 +116,9 @@ fn launch_external_stage_direct(
                     upstream = Source::Reader(SourceReader::pipe(r));
                     &upstream
                 }
-                ByteIn::Parent => command::boundary_stdin(shell, holds_terminal),
+                ByteIn::Parent => {
+                    TerminalInput::for_pipeline(shell, holds_terminal).stdin(&shell.io.stdin)
+                }
             };
             // Admission is over: borrow parent destinations only now.
             let (io, held) = match stdout {
@@ -163,8 +168,8 @@ fn launch_external_stage_direct(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::job_control::Placement;
     use super::*;
-    use crate::process::PgidPolicy;
 
     #[test]
     fn the_terminal_reaches_a_thread_stage_only_when_the_group_holds_it() {
@@ -201,14 +206,17 @@ mod tests {
             let group = crate::process::Pgid::from_raw(1).expect("1 is positive");
             shell.io.stdin = given;
             shell.session.stage = Some(crate::process::Membership::new(group, Scope::clone(&node)));
-            let placed = command::placement(&shell, &Mooring::adrift(), false);
-            assert!(matches!(placed.policy, PgidPolicy::Join(_)) && placed.loan.is_none());
+            let placed = Placement::for_command(&shell, &Mooring::adrift(), false);
+            assert!(matches!(placed, Placement::Joined(_)));
             // Joined, the lone child and the nested stage read the same source,
             // whatever their group could read.
-            for readable in [true, false] {
-                assert!(expected(command::boundary_stdin(&shell, readable)));
-                let nested =
-                    stage_stdin(ByteIn::Parent, &shell, &node, readable).expect("stage_stdin");
+            assert!(expected(placed.stdin(&shell.io.stdin)));
+            for holds_terminal in [true, false] {
+                assert!(expected(
+                    TerminalInput::for_pipeline(&shell, holds_terminal).stdin(&shell.io.stdin)
+                ));
+                let nested = stage_stdin(ByteIn::Parent, &shell, &node, holds_terminal)
+                    .expect("stage_stdin");
                 assert!(expected(&nested));
             }
         }

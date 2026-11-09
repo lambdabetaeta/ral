@@ -369,9 +369,14 @@ mod tests {
         let conf = conf.as_bytes();
         let big = vec![b'a'; CAP];
         let control = framed(&[MAGIC, conf, b"file", b"/bin/sh", b"sh", b"1", b"x"]);
-        let tool = framed(&[MAGIC, conf, b"tool", b"ls", b"0"]);
-        for bytes in [&control, &tool] {
-            assert!(Warrant::decode(bytes).is_ok(), "the control must decode");
+        assert!(Warrant::decode(&control).is_ok(), "the control must decode");
+        #[cfg(feature = "coreutils")]
+        {
+            let tool = framed(&[MAGIC, conf, b"tool", b"ls", b"0"]);
+            assert!(
+                Warrant::decode(&tool).is_ok(),
+                "the tool control must decode"
+            );
         }
         let file = |program: &[u8], argc: &[u8], args: &[&[u8]]| {
             let head = [MAGIC, conf, b"file", program, b"sh", argc];
@@ -428,6 +433,7 @@ mod tests {
                     MAGIC, conf, b"file", b"/bin/sh", b"sh", b"", b"", b"1", b"x",
                 ]),
             ),
+            #[cfg(feature = "coreutils")]
             (
                 "a tool with an argv[0]",
                 framed(&[MAGIC, conf, b"tool", b"ls", b"ls", b"0"]),

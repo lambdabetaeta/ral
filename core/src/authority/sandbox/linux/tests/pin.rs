@@ -57,6 +57,7 @@ fn a_denys_spine_cannot_be_moved_and_its_entries_stay_writable() {
 
 /// ral's own `mv` and `rm` run confined like any program, so the spine holds
 /// them too.
+#[cfg(feature = "coreutils")]
 #[cfg_attr(
     ctor_without_argv,
     ignore = "a test binary serves bundled tools before main, where musl gives std no argv"

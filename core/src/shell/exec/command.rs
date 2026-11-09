@@ -10,20 +10,17 @@
 //! Spawning produces [`Started`], collected either alone or by a pipeline. Both
 //! use [`ending`] to interpret the child's result.
 
+use super::job_control::Placement;
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::authority::sandbox::{Confinement, Image, Ownership};
 use crate::error::{Error, io_message};
 use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::child::{Connection, PendingDrains};
-use crate::io::{Sink, Source};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
-use crate::process::{
-    CancelCause, Launch, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, TerminalLoan, Unstarted,
-    WaitOutcome,
-};
-use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
+use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
+use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, Value};
 use crate::ty::RefusedArg;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -480,13 +477,9 @@ impl ExternalCommand {
     /// Run and collect a standalone command. Set the terminal title only after
     /// connecting streams; the collector handles the terminal loan.
     pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-        let Placement {
-            policy,
-            loan,
-            readable,
-        } = placement(shell, mooring, self.launch.enveloped());
+        let placement = Placement::for_command(shell, mooring, self.launch.enveloped());
         let io = Connection::new(
-            boundary_stdin(shell, readable),
+            placement.stdin(&shell.io.stdin),
             &shell.io.stdout,
             &shell.io.stderr,
         )
@@ -496,8 +489,8 @@ impl ExternalCommand {
         // Include startup in the interval used to attribute kernel denials.
         let since = Instant::now();
         connected
-            .spawn(policy, &shell.scope)?
-            .collect(loan, since, shell)
+            .spawn(placement.policy(), &shell.scope)?
+            .collect(placement.into_loan(), since, shell)
             .map(|()| Value::Unit)
     }
 
@@ -583,80 +576,9 @@ fn dyld_vars(shell: &Shell) -> impl Iterator<Item = Cow<'_, OsStr>> {
     inherited.chain(overridden)
 }
 
-// Stream routing and terminal access.
-
-/// Replace terminal stdin with EOF when the child cannot read it. Joined
-/// pipeline stages retain the source selected by their owner; non-terminal
-/// sources are never replaced.
-pub(crate) fn boundary_stdin(shell: &Shell, readable: bool) -> &Source {
-    match &shell.io.stdin {
-        Source::Terminal if shell.session.stage.is_none() && !readable => &Source::Empty,
-        stdin => stdin,
-    }
-}
-
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
 pub(super) fn connection_error(e: std::io::Error) -> Error {
     Error::new(io_message("could not connect command streams", &e))
-}
-
-/// Process-group placement and terminal access for a launch.
-pub(crate) struct Placement {
-    pub(crate) policy: PgidPolicy,
-    /// Prepared before spawning, then assigned to the child's process group.
-    pub(crate) loan: Option<PreparedTerminalLoan>,
-    /// Whether a standalone child may retain terminal stdin.
-    pub(crate) readable: bool,
-}
-
-/// Choose process-group placement and terminal access.
-///
-/// Pipeline children join their stage's group. Standalone commands may receive
-/// the terminal when the caller owns its lease and either writes to terminal
-/// stdout or requests an explicit loan. A terminal-launched script can own a
-/// lease too; `interactive` alone does not determine foreground access.
-///
-/// Envelopes cannot receive a terminal loan: bwrap puts the payload in another
-/// session. Without a loan, interactive commands otherwise inherit ral's group
-/// for Ctrl-C delivery; headless commands get a separate session for teardown.
-pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Placement {
-    let interactive = shell.session.interactive;
-    if let Some(stage) = shell.session.stage.as_ref() {
-        return Placement {
-            policy: PgidPolicy::Join(stage.clone()).unless_enveloped(enveloped),
-            loan: None,
-            readable: false,
-        };
-    }
-    if enveloped {
-        // The payload has no controlling terminal, so reads do not trigger SIGTTIN.
-        return Placement {
-            policy: PgidPolicy::NewLeader,
-            loan: None,
-            readable: interactive,
-        };
-    }
-    let foreground = matches!(shell.io.stdout, Sink::Stdout)
-        || mooring.terminal_access == TerminalAccess::ExplicitLoan;
-    match shell.terminal_lease(mooring).filter(|_| foreground) {
-        Some(lease) => {
-            let loan = TerminalLoan::prepare(lease, &mooring.home);
-            Placement {
-                policy: PgidPolicy::NewLeader,
-                readable: loan.is_some(),
-                loan,
-            }
-        }
-        None => Placement {
-            policy: if interactive {
-                PgidPolicy::Inherit
-            } else {
-                PgidPolicy::NewSession
-            },
-            loan: None,
-            readable: interactive,
-        },
-    }
 }
 
 // Spawn results and failure attribution.

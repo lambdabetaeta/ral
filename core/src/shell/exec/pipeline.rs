@@ -14,6 +14,7 @@ mod sentinel;
 mod stage;
 mod thread;
 
+use super::job_control::{LoanPreparation, prepare_terminal_loan};
 use crate::ir::{Argv, Comp};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
@@ -71,15 +72,16 @@ impl PipeNode {
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        // Only the loan is placement's, prepared before even the anchor runs:
-        // the anchor leads its own group, and a joined group is lent nothing.
-        let super::command::Placement { loan: lending, .. } =
-            super::command::placement(shell, mooring, false);
+        // Prepare before even the anchor runs; a joined group is lent nothing.
+        let lending = prepare_terminal_loan(shell, mooring);
         let group = match shell.session.stage.clone() {
             Some(membership) => PipelineGroup::joining(membership),
             None => PipelineGroup::prepare(tx.clone())?,
         };
-        let loan = lending.and_then(|loan| loan.lend(group.leader_pgid().as_raw()));
+        let loan = match lending {
+            LoanPreparation::Prepared(loan) => loan.lend(group.leader_pgid().as_raw()),
+            LoanPreparation::NotEligible | LoanPreparation::Unavailable => None,
+        };
 
         let collect = CollectState::new(
             rx,
