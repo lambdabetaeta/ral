@@ -223,7 +223,7 @@ function of its layers.**
 
 **A program is judged as a `Located`, its `#!` line read through that handle,
 and it is started by its real name on every platform.** The `Located` has one
-owner at a time: `Head::admit` walks a candidate (a `PATH` search walks each
+owner at a time: `Command::lookup` walks a candidate (a `PATH` search walks each
 once, `which::search`) and moves its `Located` into the `Admitted`; `launch` takes the `Admitted` and drops the `Located`, so no
 judged program or directory handle survives into the run. Landlock rules only allow and cannot
 require the judged object, and a handle kept through the run would hold the

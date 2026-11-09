@@ -117,7 +117,7 @@ fn runs(rules: &ExecRules, access: &Trace) -> Evidence {
 }
 
 #[cfg(unix)]
-use crate::host::env::test_support::{with_var, with_vars_cleared};
+use crate::host::test_support::{with_var, with_vars_cleared};
 
 /// Clears the `XDG_*_HOME` overrides so `xdg-*` places resolve to the
 /// home-joined defaults, under the synthetic home the escape guard admits.
@@ -644,7 +644,7 @@ fn decode_errors_when_there_is_no_home() {
         "fs",
         map(vec![("read", Value::list(vec![tagged("home", "x")]))]),
     )]);
-    crate::host::env::test_support::with_vars_cleared(&crate::host::HOME_VARS, || {
+    with_vars_cleared(&crate::host::HOME_VARS, || {
         for ctx in [test_ctx(""), no_home_ctx()] {
             let err = decode_capability_map(&v, "test", &ctx)
                 .unwrap_err()
@@ -767,14 +767,14 @@ fn decode_accepts_verb_lists_offline_and_withheld() {
 
 fn test_ctx(home: &str) -> FreezeCtx {
     FreezeCtx::at(
-        std::iter::once(("HOME", home)).collect::<crate::host::EnvVars>(),
+        EnvVars::from_pairs([("HOME", home)]).unwrap(),
         test_cwd_path(),
     )
 }
 
 /// No `HOME` in the overlay; tests using it clear the host's.
 fn no_home_ctx() -> FreezeCtx {
-    FreezeCtx::at(crate::host::EnvVars::new(), test_cwd_path())
+    FreezeCtx::at(EnvVars::new(), test_cwd_path())
 }
 
 /// The root of the tree [`at`] names places in.
@@ -1032,6 +1032,7 @@ fn an_extension_run_allowance_over_an_omitted_exec_reads_what_it_names() {
 // ── Random policies ───────────────────────────────────────────────────────
 
 use super::exec::tests::Rng;
+use crate::environ::EnvVars;
 
 const LAW_DIRS: [&str; 4] = ["/a", "/a/b", "/z", "/Z"];
 const LAW_NAMES: [&str; 3] = ["x", "ls", "cat"];

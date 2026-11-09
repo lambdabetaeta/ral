@@ -184,7 +184,7 @@ fn hidden(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Glob;
-    use crate::host::EnvVars;
+    use crate::environ::EnvVars;
     use crate::path::{CwdPath, Resolver};
 
     /// `rest` beneath the host's root: `/rest` or `C:\rest`.
@@ -230,12 +230,7 @@ mod tests {
         let cwd = CwdPath::new(rooted("cwd[1]").into()).unwrap();
         let home = rooted("home[");
         let config = rooted("config{");
-        let env = [
-            ("HOME", home.as_str()),
-            ("XDG_CONFIG_HOME", config.as_str()),
-        ]
-        .into_iter()
-        .collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", home), ("XDG_CONFIG_HOME", config)]).unwrap();
         let resolver = Resolver::at(&env, &cwd);
         for sigil in ["~", "xdg:config"] {
             let glob = resolver.glob(&format!("{sigil}/[ab]/*.txt")).unwrap();

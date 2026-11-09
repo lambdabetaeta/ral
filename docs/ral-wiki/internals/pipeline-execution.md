@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 6e2995f8
 verified_at_date: 2026-11-09
-anchors: [PipeNode, PipeNode::run, ExternalCommand::start, ExternalCommand::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, PgidPolicy::unless_enveloped, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
+anchors: [PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, prepare_terminal_loan, Placement, Placement::for_command, PgidPolicy::unless_enveloped, TerminalInput, TerminalInput::for_pipeline, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -36,7 +36,7 @@ resolution, its redirects, and whether a `!{…}` audit captures bytes:
   redirect or a byte-capturing audit rules `Direct` out; the external is then
   spawned from inside that thread instead. The stage's redirects are then interpreted by `RedirectState`, the one
   interpreter a block and a standalone external share; a `Direct` stage has none,
-  and `ExternalCommand::start` connects its stage pipes without reading a
+  and `Prepared::start` connects its stage pipes without reading a
   redirect list.
 
 No type is consulted: a stage's classification cannot depend on what it
@@ -127,8 +127,9 @@ every consumer, a builtin, an external's stdin, a nested stage, receives a
 `dup(2)` — so a stage's stdin outlives every command that reads it; the scope
 is stripped before a child inherits the source, so it is never a child's
 problem. `ByteIn::Parent` at
-stage 0 resolves against the shell's own stdin through `boundary_stdin`, the
-one rule for what a child at the boundary reads, a lone command's included: a
+stage 0 resolves against the shell's own stdin through `TerminalInput::for_pipeline`;
+`TerminalInput` is the one rule for what a child at the boundary reads, a lone
+command's included (selected there by `Placement::stdin`): a
 joined group passes its owner's source through; the terminal survives only
 where the child's group can read it, ral's own group or one lent the terminal;
 and a group of its own that is not lent it reads `Source::Empty`, never the
@@ -158,8 +159,8 @@ a zero readiness byte after installing all signal dispositions; `prepare`
 waits for it before exposing the group. A key on the lent terminal therefore
 cannot race the anchor's handler installation.
 `PipeNode::run` lends the terminal as soon as the group exists, before
-any edge is opened and so before any stage runs — `placement`, the rule a lone
-command is placed by (a `Placement { policy, loan, readable }`), prepares the loan (`TerminalLoan::prepare` borrows the
+any edge is opened and so before any stage runs — `prepare_terminal_loan`, the preparation a lone
+command's `Placement::for_command` makes too, prepares the loan (`TerminalLoan::prepare` borrows the
 `&TerminalLease` and captures the terminal's state before the anchor spawns),
 `PreparedTerminalLoan::lend` hands the foreground to the anchor's pgid, and
 only an owning group is lent anything.
@@ -223,7 +224,7 @@ the anchor's witness, and the ended anchor stays a zombie, unreaped until its
 pump joins make.
 
 **A launch that fails part-way is rolled back, then joined.** The spawn loop
-stops at the first stage it cannot launch — a head `Head::admit` or argument
+stops at the first stage it cannot launch — a head `Command::admit` or argument
 validation refuses, a wiring or spawn that fails, a stop its poll reads — and the stages
 already running are not dropped: `CollectState::roll_back` tears them down with
 `cancel_all`, under the cause in force or else `Cancelled`, as for an `exit` in
@@ -237,10 +238,10 @@ A standalone external enters no `PipeNode`: it supplies its own placement and
 boundary streams, but shares the child execution machinery.
 
 **The collector is every external's one waiter, and a standalone command is
-a pipeline of one.** `ExternalCommand` connects the streams and spawns for both
+a pipeline of one.** `Prepared` connects the streams and spawns for both
 cases: `start` for a stage, `run` (which titles the terminal between the two)
-for a standalone command. `Started::register` (`pipeline/collect.rs`) starts
-the pumps and subscribes to the reaper in one place; it addresses an envelope
+for a standalone command. The pumps start before the spawn, so `Started::register`
+(`pipeline/collect.rs`) only subscribes to the reaper, in one place; it addresses an envelope
 separately only when the collector does not already own its payload's group.
 A standalone command's `Started::collect`, beside it, lends the terminal and
 builds `CollectState::lone` (slot 0, no thread stage, so no cleanup grace to
@@ -254,7 +255,7 @@ nothing else ([[invariants/a-process-group-is-its-owners-to-signal|a-process-gro
 The code facts behind each landing:
 
 - An `Owns` child leads a group of one with no anchor. An enveloped child is
-  placed `NewLeader` (`placement` and `PgidPolicy::unless_enveloped` say so,
+  placed `NewLeader` (`Placement::for_command` and `PgidPolicy::unless_enveloped` say so,
   `Launch::spawn` asserts it): it leads its payload's group, which `Launch::spawn` returns as
   `Group::Enveloped` and which neither bwrap's pid nor the pipeline's group can
   reach.
@@ -420,7 +421,7 @@ Ctrl-Z on `sleep 10 | cat` is invisible: the `TerminalLoan` and the pgid's
 follows a group's grace signal, is a different act, the collector's (below).
 
 **Windows never had a foreground handoff to race and still has none.** There
-is no `tcsetpgrp`: the loan `placement` prepares only saves and restores the
+is no `tcsetpgrp`: the loan `prepare_terminal_loan` prepares only saves and restores the
 console modes, and moves no foreground. The anchor still exists on Windows — it is what
 keys the Job Object in `GROUPS` — but it witnesses nothing there, Windows
 having no group-wide delivery to hear, and it swallows every console event,

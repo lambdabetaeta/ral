@@ -2,7 +2,7 @@
 status: active
 verified_at_commit: 6e2995f8
 verified_at_date: 2026-11-09
-anchors: [Connection, PendingDrains, Drains, ConnectedCommand, Started::register, Launch::dup_stdout_to_stderr]
+anchors: [Connection, PendingDrains, PendingDrains::start, Drains, ConnectedCommand, ConnectedCommand::spawn, Started::register, Launch::dup_stdout_to_stderr]
 ---
 
 # A drain owns its reader
@@ -19,10 +19,12 @@ standard-stream fields.
   boundary from an interior edge. A direct external consumes the writer; a
   thread stage receives a pipe sink carrying its own cancellation identity.
   Command execution has no second representation of that route.
-- **The connected state remains.** A configured launch and its pending drains
-  are held together until spawn. Connection failure releases prepared resources;
-  spawn failure releases unstarted drains. If a drain thread cannot start,
-  registration kills and reaps the child before returning the error.
+- **Drains start before the child.** A configured launch and its pending
+  drains are held together until spawn, which starts the drains first.
+  Connection failure releases prepared resources. A drain thread that cannot
+  start fails the launch with no child to tear down: dropping the launch
+  closes every writer, so the drains already started end at EOF having carried
+  nothing; spawn failure ends them the same way. Registration cannot fail.
 - **Equal destinations share an endpoint.** Both process backends implement
   stderr aliasing the final stdout endpoint, so a merged capture has one reader
   and one drain, including on Windows.

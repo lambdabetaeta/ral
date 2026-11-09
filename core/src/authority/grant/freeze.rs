@@ -46,8 +46,8 @@
 use super::Polar;
 use super::toolchains::{self, Toolchain};
 use crate::authority::policy::{GrantPath, Ungoverned};
+use crate::environ::EnvVars;
 use crate::error::Error;
-use crate::host::EnvVars;
 use crate::path::git::{BadPointer, Pointer, discover_git_dir};
 use crate::path::{
     CwdPath, FrozenPath, GrantRefusal, LeafMode, LexicalPath, PathRules, RealPath, SigilHead,
@@ -869,6 +869,8 @@ fn path_dirs_in<W: Polar>(
 mod tests {
     use super::*;
     use crate::authority::policy::Extent;
+    use crate::host::test_support::with_var;
+    use crate::host::test_support::with_vars_cleared;
     use crate::path::{Excluded, expand_path_prefix, fold_dots};
 
     /// A fixture anchor written `/a/b`, as this host spells an absolute path:
@@ -887,7 +889,7 @@ mod tests {
 
     fn ctx(home: &str, cwd: &str) -> FreezeCtx {
         FreezeCtx::at(
-            std::iter::once(("HOME", native(home).as_str())).collect(),
+            EnvVars::from_pairs([("HOME", native(home))]).unwrap(),
             cwd_at(cwd),
         )
     }
@@ -1115,11 +1117,9 @@ mod tests {
         let link = home.path().join("link");
         std::os::unix::fs::symlink("/etc", &link).unwrap();
         let home_str = home.path().to_string_lossy().into_owned();
-        let err = crate::host::env::test_support::with_var(
-            "XDG_DATA_HOME",
-            Some(&link.to_string_lossy()),
-            || refusal(&xdg(XdgKind::Data, "."), &ctx(&home_str, "/cwd")),
-        );
+        let err = with_var("XDG_DATA_HOME", Some(&link.to_string_lossy()), || {
+            refusal(&xdg(XdgKind::Data, "."), &ctx(&home_str, "/cwd"))
+        });
         assert!(err.contains("outside HOME"), "{err}");
         assert!(
             err.contains("/etc"),
@@ -1138,20 +1138,16 @@ mod tests {
         let data = home.path().join("data");
         std::fs::create_dir(&data).unwrap();
         let home_str = home.path().to_string_lossy().into_owned();
-        crate::host::env::test_support::with_var(
-            "XDG_DATA_HOME",
-            Some(&data.to_string_lossy()),
-            || {
-                let paths = frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
-                let [accepted] = &*paths else {
-                    panic!("one place freezes to one path: {paths:?}")
-                };
-                assert_eq!(
-                    std::fs::canonicalize(accepted).unwrap(),
-                    std::fs::canonicalize(&data).unwrap()
-                );
-            },
-        );
+        with_var("XDG_DATA_HOME", Some(&data.to_string_lossy()), || {
+            let paths = frozen(&[xdg(XdgKind::Data, ".")], &ctx(&home_str, "/cwd")).unwrap();
+            let [accepted] = &*paths else {
+                panic!("one place freezes to one path: {paths:?}")
+            };
+            assert_eq!(
+                std::fs::canonicalize(accepted).unwrap(),
+                std::fs::canonicalize(&data).unwrap()
+            );
+        });
     }
 
     /// The overlay is the environment a freeze reads: its `XDG_CONFIG_HOME`
@@ -1163,9 +1159,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (home, cfg) = (home.path().to_str().unwrap(), home.path().join("cfg"));
         let cfg = cfg.to_str().unwrap();
-        let env = [("HOME", home), ("XDG_CONFIG_HOME", cfg)]
-            .into_iter()
-            .collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", home), ("XDG_CONFIG_HOME", cfg)]).unwrap();
         let ctx = FreezeCtx::at(env, cwd_at("/cwd"));
         let paths = frozen(&[xdg(XdgKind::Config, "probe")], &ctx).unwrap();
         assert_eq!(paths, [format!("{cfg}/probe")]);
@@ -1177,7 +1171,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn freeze_accepts_xdg_under_a_drive_root_home() {
-        crate::host::env::test_support::with_var("XDG_DATA_HOME", None, || {
+        with_var("XDG_DATA_HOME", None, || {
             let paths = frozen(&[xdg(XdgKind::Data, ".")], &ctx(r"C:\", r"C:\cwd")).unwrap();
             let [accepted] = &*paths else {
                 panic!("one place freezes to one path: {paths:?}")
@@ -1203,7 +1197,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn xdg_subpath_cannot_discard_its_base() {
-        crate::host::env::test_support::with_var("XDG_CONFIG_HOME", None, || {
+        with_var("XDG_CONFIG_HOME", None, || {
             let ctx = ctx("/h", "/cwd");
             let err = refusal(&xdg(XdgKind::Config, "/etc"), &ctx);
             assert!(err.contains("absolute"), "{err}");
@@ -1562,7 +1556,7 @@ mod tests {
     #[test]
     fn freeze_rejects_home_relative_places_without_home() {
         let unbound = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"];
-        crate::host::env::test_support::with_vars_cleared(&unbound, || {
+        with_vars_cleared(&unbound, || {
             for place in [
                 Anchor::Home.place(".gitconfig"),
                 xdg(XdgKind::Config, "git"),

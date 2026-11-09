@@ -2,7 +2,10 @@ use super::{FsAllow, ProjectionKey, profile_name, refuse_deny_meeting_grant};
 use crate::authority::policy::{FsDeny, GrantPath};
 use crate::authority::sandbox::FsLists;
 use crate::authority::sandbox::carve::carve;
+use crate::environ::ChildEnv;
 use crate::error::Error;
+use crate::host::test_support::env_guard;
+use crate::host::test_support::with_var;
 use crate::path::{Dir, Excluded, FrozenPath, RealPath, Trace};
 use crate::process::Unstarted;
 use crate::test_helper::{place, real as walked};
@@ -147,7 +150,7 @@ fn a_confined_launch_started_under_a_stop_makes_no_child() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::launch::Confined;
     use crate::process::{CancelCause, DurableRoot, Launch, PgidPolicy};
-    let _env = crate::host::env::test_support::env_guard();
+    let _env = env_guard();
     let root = tempfile::tempdir().unwrap();
     let projection = SandboxProjection {
         fs: FsProjection::Restricted(rules(&[root.path().to_str().unwrap()], &[], &[])),
@@ -175,7 +178,7 @@ fn a_confined_launch_started_under_a_stop_makes_no_child() {
 fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::cancel::DurableRoot;
-    let _env = crate::host::env::test_support::env_guard();
+    let _env = env_guard();
     let root = tempfile::tempdir().unwrap();
     let (granted, outside) = (root.path().join("granted"), root.path().join("outside"));
     std::fs::create_dir(&granted).unwrap();
@@ -261,7 +264,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 /// stamp-store key naming a dead tempdir, inert.
 #[test]
 fn confined_child_writes_inside_the_grant_and_not_outside() {
-    let _env = crate::host::env::test_support::env_guard();
+    let _env = env_guard();
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
     use std::path::Path;
@@ -310,7 +313,11 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     let run_echo_to = |rel: &str| -> WaitOutcome {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
-        launch.current_dir(&granted);
+        launch.situate(ChildEnv {
+            cwd: &granted,
+            set: Vec::new(),
+            unset: Vec::new(),
+        });
         launch.stdin(StdioSpec::Null);
         launch.stdout(StdioSpec::Null);
         launch.stderr(StdioSpec::Null);
@@ -351,11 +358,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
 /// stamps never land in the user's state or in another test's.
 fn with_scoped_state(f: impl FnOnce()) {
     let state = tempfile::tempdir().unwrap();
-    crate::host::env::test_support::with_var(
-        "XDG_STATE_HOME",
-        Some(state.path().to_str().unwrap()),
-        f,
-    );
+    with_var("XDG_STATE_HOME", Some(state.path().to_str().unwrap()), f);
 }
 
 /// The paths beneath `A` that a read grant on `A` reaches, each holding
@@ -467,7 +470,11 @@ fn confined(
     use crate::process::{Launch, StdioSpec};
     let mut launch = Launch::new(cmd());
     launch.args(["/d", "/s", "/c", line]);
-    launch.current_dir(cwd);
+    launch.situate(ChildEnv {
+        cwd,
+        set: Vec::new(),
+        unset: Vec::new(),
+    });
     launch.stdin(StdioSpec::Null);
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
@@ -763,8 +770,12 @@ fn an_image_is_granted_to_its_own_launch_alone() {
                 "authority::sandbox::windows::session::tests::image_read_child",
                 "--nocapture",
             ]);
-            launch.env("RAL_TEST_IMAGE_READ", tree.at(r"B\key.txt"));
-            launch.current_dir(&a);
+            let key = tree.at(r"B\key.txt");
+            launch.situate(ChildEnv {
+                cwd: Path::new(&a),
+                set: vec![("RAL_TEST_IMAGE_READ".as_ref(), key.as_ref())],
+                unset: Vec::new(),
+            });
             launch.stdin(StdioSpec::Null);
             launch.stdout(StdioSpec::Null);
             launch.stderr(StdioSpec::Piped);

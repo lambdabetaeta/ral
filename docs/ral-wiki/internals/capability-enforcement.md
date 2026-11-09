@@ -2,7 +2,7 @@
 generated_at_commit: f1b0a4a4
 verified_at_commit: 257c6c00
 verified_at_date: 2026-11-09
-anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, ExternalCommand::prepare, GuestJail::plan, Launch::apply_guest_jail, Entry::prepare, Entry::enter, GrantStack::net]
+anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, Command::prepare, GuestJail::plan, Launch::apply_guest_jail, Entry::prepare, Entry::enter, GrantStack::net]
 ---
 
 # Capability enforcement: one model, two enforcers
@@ -140,7 +140,7 @@ The [[#Guest jail|guest jail]] is a separate launch branch.
 
 - **Exec.** The guard checks every platform. `authority::guard::check_exec`
   judges the program *before* the spawn and returns `Admitted`.
-  `ExternalCommand::prepare` takes the caller's argv separately. The kernel then holds the same rules
+  `Command::prepare` takes the caller's argv separately. The kernel then holds the same rules
   against programs the child starts itself (`sh -c`, `find -exec`): Seatbelt on
   macOS, Landlock on Linux hosts. Windows has no kernel exec filter
   ([[internals/exec-judgment|exec-judgment]]).
@@ -203,7 +203,7 @@ is stamped.
 A `grant` is a *local* dynamic effect scope: its body evaluates in process, and
 `transport::dispatch` runs it locally. Nested grants compose by intersection on
 the `GrantStack`, which is not a process boundary ([[design/grant|grant]]).
-Confinement happens one level down: when `ExternalCommand::prepare` builds
+Confinement happens one level down: when `Command::prepare` builds
 the launch of an admitted external or bundled child on a host under a
 restrictive projection, it calls `sandboxed_command`, which describes that one
 child's confinement, applied by its spawn
@@ -222,7 +222,7 @@ Two consequences follow:
 
 **A Linux guest engine checks ral-owned effects and direct command admission,
 but does not project per-grant fs or exec rules into its children.**
-`ExternalCommand::prepare` selects the process-global `GuestJail` instead of
+`Command::prepare` selects the process-global `GuestJail` instead of
 `SandboxProjection::of` and `sandboxed_command`, for host-file and bundled-tool
 heads alike.
 

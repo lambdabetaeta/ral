@@ -5,6 +5,7 @@ use super::super::super::trace::{Kind, ObjectId};
 use super::super::resolve::{LeafMode, walk, walk_dir, walk_dir_made, walk_excluded, walk_lenient};
 use super::super::{Access, Dir, Judged, Located, Sharing, Streaming, Visibility, Writing, host};
 use super::{named, writable, writing};
+use crate::environ::EnvVars;
 use crate::path::{LexicalPath, Resolver};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -35,7 +36,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 fn spelled(path: &Path) -> LexicalPath {
     let cwd = crate::test_helper::process_cwd();
-    Resolver::at(&crate::host::EnvVars::new(), &cwd).anchor(path)
+    Resolver::at(&EnvVars::new(), &cwd).anchor(path)
 }
 
 /// `path` walked, and the directory `path` entered, as these tests hold

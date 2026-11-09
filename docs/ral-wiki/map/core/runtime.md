@@ -14,23 +14,23 @@ per-child confinement choice. It re-enters evaluation only through the
 closures, so the mutual recursion is irreducible, though `shell::exec` names no
 `shell::evaluator` item; the evaluator reaches it at
 `PipeNode::run` and, dispatching an `Exec` node, at
-`dispatch::resolve_command_word` → `run_base_frame` / `run_external`, and the redirect scope
+`dispatch::resolve_command_word` → `run_external`, and the redirect scope
 (`redirect::scope`), which the machine's `Frame::Redirect` enters
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `dispatch.rs` — `resolve_command_word`, the single site that resolves a
-  head (env → handlers → external), and the runners
-  (`run_base_frame`, `run_external`) the machine's `Exec` rule then calls for
-  the chosen arm; the evaluator's down-seam for a bare command. There is no builtin arm: a native table entry is
+  head (env → handlers → external), and `run_external`, which runs an
+  admitted external under its redirects. The machine's `Exec` rule runs every other arm itself. There is no builtin arm: a native table entry is
   an `Env` hit on a native value, and a base-frame row is a `Base` hit on the
-  handler stack's base layer, run by `run_base_frame` with the argv slice
+  handler stack's base layer, run by the `Exec` rule with the argv slice
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
-  external-command property**: only the `External` arm admits the head
-  (`Command<Request>::admit`) before its redirects open, refusing it outright,
-  and carries `Command<Checked>` to preparation; the env, base, and handler arms pass through.
+  external-command property**: only the `External` arm looks the head up and
+  admits it (`Command::lookup`, `Command::admit`) before its redirects open,
+  refusing it outright, and carries the admitted `Command` to preparation; the
+  env, base, and handler arms pass through.
   Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
   `{ |name args| … }` — with the calling convention fixed by surface position,
   not inferred from a value's runtime shape
@@ -45,39 +45,43 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
 - `capture.rs` — `with_capture` and the audit tee, both over one `SinkScope`
   that restores the replaced sinks on `Drop`. Audit retains 1 MiB per stream
   as a prefix and a byte total, independently of ordinary capture.
-- `dispatch.rs::Shell::run_external_argv` lets a native hook run a literal
-  program name/path and argv through ordinary admission and execution, skipping
-  environment-head and handler lookup, never evaluating shell source. The
-  caller supplies its mooring; current grants, scope, audit and streams remain
-  in force. The REPL external-editor hook uses this entry.
-- `dispatch.rs` also holds `call_external`, the call of an external: snapshot
-  the audit start, tee its streams, locate a failure with the visible head
-  and span, settle the one `Observed::Command`. A failure is a
-  `Reason::process` named for the head as dispatched, minted where the child's
-  end is known (`command::ending`, `at_spawn`); its text is `Reason::describe`;
-  `audit_start` returns `None` when nobody listens.
-  Direct external stages retain one `Prov` from launch through collection,
-  completing errors and stops before the observation is settled.
-- `command.rs` — `ExternalCommand` owns the admitted program's launch and
-  diagnostic context. `prepare` vets argv and prepares a kept launch's env,
-  cwd, limits and confinement; only `detach` prepares a surrendered one, so no
-  caller names an `Ownership`. Consuming `start` installs an owned
-  `io::child::Connection` into `ConnectedCommand`, which keeps the launch and
-  its `PendingDrains` together until spawn. A standalone `run` titles the
-  terminal after connection. `Started` owns the resulting `Spawned`, `Claim`
-  and pending drains until `collect` or `register` (`pipeline/collect.rs`)
-  consumes it. Registration starts drains from their owned readers; a thread
-  creation failure kills and reaps the unregistered child. No caller reaches
-  into the command's private `Launch` to arrange its setup.
-  `Command<Request>` snapshots lookup inputs; lookup yields `Command<Lookup>`
-  and admission produces `Command<Checked>`. Preparation reads the retained
-  127/126 verdict before validating argv. Building describes and starting acts
+- `dispatch.rs::Shell::run_external` is `^program args…` for a host holding
+  no syntax: the `Exec` rule's external with no handlers, no redirects and no
+  span, never evaluating shell source. The caller supplies its mooring;
+  current grants, scope, audit and streams remain in force. The REPL
+  external-editor hook uses this entry.
+- `record.rs` — `CommandRecord`, an external's one `Observed::Command`, begun
+  from an admitted `Command` and ended once; silent, holding nothing,
+  when nobody listens at launch. `Command::with_record` is the shape that ends
+  it before its frame closes: enter the frame, begin the record, tee the
+  streams, locate a failure with the visible head and span, end the record.
+  `run_external` and `detach` share it. A failure is a `Reason::process` named
+  for the head as dispatched, minted where the child's end is known
+  (`command::ending`, `explain_exec_error`); its text is `Reason::describe`. A direct
+  external stage outlives its frame, so it carries a `StageFrame` (its `Prov`
+  and its record) from launch through collection, completing errors and stops
+  before its settlement ends the record.
+- `command.rs` — one external command, in pipeline order:
+  `Command::from_name` records what to look up (`Request`); `lookup` finds
+  the program and checks the grants (`Command<Lookup>`), reporting nothing,
+  which is all `help` needs; `admit` reports a refusal and keeps any other
+  lookup error as an `Error` for `prepare`, so the 127/126 verdict is
+  reported inside the command's record and redirects and beats a bad
+  argument. `prepare(args, ownership, shell)` vets argv and builds a
+  `Prepared`: the `Launch` and the `Diagnosis` that explains a failed start.
+  `Prepared::start` installs an owned `io::child::Connection`, starts the
+  drains from their owned readers, then spawns, so a thread creation failure
+  leaves no child to tear down; a standalone `run` titles the terminal
+  first. `Started` owns the resulting `Spawned`, its `denial_pids` and the
+  running `Drains` until `collect` or `register` (`pipeline/collect.rs`)
+  consumes it; registration cannot fail. Building describes and starting acts
   ([[design/exec|exec]]). `uutils.rs`
-  holds [[map/core/builtins|bundled coreutils]]. `placement` decides once, for a
-  standalone command and a pipeline alike: it returns a
-  `Placement { policy, loan, readable }`: the `PgidPolicy`, the prepared loan,
-  and whether the terminal may be the child's stdin; `NewLeader` is exactly
-  the foreground.
+  holds [[map/core/builtins|bundled coreutils]]. `job_control.rs` places a
+  standalone command once: `Placement::for_command` picks one of `Joined`,
+  `Foreground` (holding the prepared loan), `Inherit`, `Headless` or
+  `Unloaned`, from which its `PgidPolicy` and whether the terminal may be its
+  stdin follow. A pipeline shares its loan preparation,
+  `prepare_terminal_loan`, and its stdin rule, `TerminalInput`.
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Command::from_name` snapshots a `Request` without I/O: a
     bundled tool, a launch path, or a bare name with its effective `PATH` and
@@ -93,14 +97,15 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     judged program by its real path, the shown spelling as `argv[0]`
     ([[internals/exec-judgment|exec-judgment]]).
   - **The argv-shape step is one refused set read at two moments.**
-    `reject_exec_arg` (from `validate_argv`) maps each argument's head (`Value::heads`) through
+    `check_argv` maps each argument's head (`Value::heads`) through
     `RefusedArg::of_head` (`core/src/ty/exec_arg.rs`) and carries the shape's own `remedy`; the
     checker maps the argument's *type* through `RefusedArg::of_ty` before the
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
   - `command/detach.rs` checks detach permission and then uses the same
-    command admission and preparation (`Command<Checked>::detach`) up to the one act that differs:
+    command lookup, admission and preparation (`Ownership::Surrendered`) up to
+    the one act that differs, `Prepared::detach`, private to that file:
     the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
@@ -121,7 +126,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     and behaves identically on Windows where no `.exe` exists to spawn
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
-  - `placement` gates the terminal handoff on a held
+  - `prepare_terminal_loan` gates the terminal handoff on a held
     *terminal lease* (`Shell::terminal_lease` is `Some`), a terminal-bound
     stdout or an explicit loan, and no envelope, not on REPL interactivity —
     so a non-interactive script launched at a terminal holds a `Leased` run and
@@ -133,8 +138,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     unwind. Pipeline preparation likewise precedes anchor spawn, and only an
     owning pipeline (no enclosing stage) prepares: a stage's child joins its
     group unlent, since dropping a prepared loan restores the terminal, so a
-    joined pipeline must never hold one. `boundary_stdin` is the
-    one rule for what a child at the boundary reads: a joined group passes its
+    joined pipeline must never hold one. `TerminalInput` is the
+    one rule for what a child at the boundary reads (`Placement::stdin` for a
+    lone command, `TerminalInput::for_pipeline` for a pipeline's): a joined group passes its
     owner's source through, a startup tty survives only where the child's group
     can read it, and an unlent owned group reads EOF.
     `Started::collect` kills and collects a child whose terminal handover
@@ -151,7 +157,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     `Connection::to_pipe`, while a thread stage makes its own `Sink::Pipe`.
     Parent destinations are borrowed after admission; owned pipe writers move.
     Connection takes the selected `Source` as it stands, so terminal stdin
-    permission remains `boundary_stdin`'s alone.
+    permission remains `TerminalInput`'s alone.
   - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
@@ -185,14 +191,14 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     redirects, and whether a `!{…}` audit captures bytes, so launch reads a
     decision rather than re-deriving a dispatch gate. A stage with redirects is
     a `Thread` stage run through `RedirectState`; a `Direct` stage has none,
-    and `ExternalCommand::start` wires its stage pipes without interpreting a redirect
+    and `Prepared::start` wires its stage pipes without interpreting a redirect
     list. **Nothing about a stage's value enters that decision**: a stage's
     dispatch may not depend on what its neighbours return, or the choice would
     stop being observationally transparent. A `Direct` stage is a process in
     the group; a `Thread` stage is an OS thread whose `Shell` starts from the
     parent's session, and only an external it spawns, at any nesting depth, is
     a process. A bundled (uutils) head routes `Direct` like any external, its
-    `ral --ral-bundled-tool` child the image chosen by `ExternalCommand::prepare`.
+    `ral --ral-bundled-tool` child the image chosen by `Command::prepare`.
     Ordinary application and bind do not enter this runtime.
   - `route.rs`'s `open_stage_routes` allocates every interior edge as an
     operating-system byte pipe from **stage position alone** — the zip of
@@ -207,9 +213,9 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   - `pipeline.rs` is the spine: `PipeNode::run` is resolve, group, collector,
     `launch`, one `spawn_stage` per stage pushed onto the collector, then,
     after a `roll_back` if that failed, `join`. Only an owning pipeline (no
-    enclosing stage) prepares and lends a `TerminalLoan`; `placement` is asked
-    only for that loan. `launch.rs` wires one stage's byte endpoints
-    (`stage_stdin` for a thread, `ExternalCommand::start` for a process) and dispatches it on its
+    enclosing stage) prepares and lends a `TerminalLoan`; `prepare_terminal_loan` is
+    asked only for that loan. `launch.rs` wires one stage's byte endpoints
+    (`stage_stdin` for a thread, `Prepared::start` for a process) and dispatches it on its
     frozen `StageLaunch` (`spawn_stage`, which resolves the stage's stdout
     once for either kind, and `launch_external_stage_direct`); `LaunchCx`
     carries what both read, `holds_terminal` among it.
@@ -305,7 +311,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   RAL-owned effects are decided in process by `authority::guard::check_*`
   ([[map/core/capabilities|capabilities]]), and child-owned effects are
   kernel-backed at *external dispatch*: when a projection is active,
-  `ExternalCommand::prepare` obtains a confined `process::Launch` via
+  `Command::prepare` obtains a confined `process::Launch` via
   `sandboxed_command` — per-command Seatbelt /
   bwrap confinement on Unix; on Windows the LowBox token of the
   projection's own AppContainer profile, carrying the per-path fs

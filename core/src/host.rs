@@ -5,7 +5,8 @@
 //! [`crate::shell::boot`] boots a `Shell` *in* a host process; this only reports on
 //! one.  The free functions read no language state: a `within [env: …]` overlay
 //! never applies, and code holding a shell threads its overlay through
-//! [`EnvVars::home`] instead.  This module takes
+//! [`EnvVars::home`](crate::environ::EnvVars::home) instead; ral's rules over
+//! these facts are [`crate::environ`]'s.  This module takes
 //! from the crate only the pure rules of [`crate::path`] and the site
 //! vocabulary, so the host's facts are read here and only here: [`var`],
 //! [`var_os`], [`vars_os`] and [`temp_dir`] are the one reader of the host
@@ -15,11 +16,12 @@
 //! Substituting one would spend the caller's only chance to say something
 //! true, and every caller has a different true thing to say.
 
-pub(crate) mod env;
 #[cfg(unix)]
 pub mod login_env;
 mod site;
-pub use env::{EnvVars, EnvVarsIter};
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+pub(crate) mod test_support;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -156,7 +158,7 @@ pub(crate) fn user_cache_dir() -> Option<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::host::env::test_support::{with_var, with_vars_cleared};
+    use crate::host::test_support::{with_var, with_vars_cleared};
 
     #[test]
     fn the_host_environment_is_read_here_as_text_and_as_the_os_holds_it() {

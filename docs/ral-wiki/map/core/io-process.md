@@ -52,7 +52,7 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   a builtin, an external's stdin, a nested stage — a duplicate, the scope left
   behind when a child inherits it, so a stage's
   stdin outlives every command that reads it. `Empty` is also what a child in
-  a group of its own that cannot read the terminal gets (`boundary_stdin`), and
+  a group of its own that cannot read the terminal gets (`TerminalInput`), and
   what an exarch tool run installs (`RunStdin::Empty`) so a tool command can
   never steal the TUI's terminal; it is kept distinct from `Terminal` precisely
   so denial of byte input and denial of foreground stay separate effects. A

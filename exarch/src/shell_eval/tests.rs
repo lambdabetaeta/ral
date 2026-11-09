@@ -2041,6 +2041,7 @@ mod self_layer {
     use super::*;
     use ral_core::authority::policy::GrantStack;
     use ral_core::data::FOValue;
+    use ral_core::environ::EnvVars;
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -2157,7 +2158,7 @@ mod self_layer {
         let parent = reasonable(&f);
         let scratch = f.cwd.join("scratch");
         let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(
-            ral_core::host::EnvVars::new(),
+            EnvVars::new(),
             ral_core::path::CwdPath::new(f.cwd.clone()).expect("the fixture cwd is absolute"),
         )
         .with_scratch(Some(scratch.to_string_lossy()));

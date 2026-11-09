@@ -10,8 +10,6 @@
 mod fan_out;
 mod observation;
 
-pub(crate) use fan_out::AuditStart;
-
 use super::{Prov, Value, outcome_value};
 use crate::fact::{ErrorRecord, Observation};
 use crate::source::CallSite;

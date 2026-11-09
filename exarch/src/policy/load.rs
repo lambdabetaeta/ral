@@ -8,6 +8,7 @@ use ral_core::error::Error;
 use ral_core::shell::runtime::{Break, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
+use ral_core::environ::EnvVars;
 use ral_core::path;
 
 /// Read a capabilities profile from `path` as a resolved [`GrantLayer`].
@@ -53,7 +54,7 @@ pub(super) fn load<T>(flag: &str, read: impl FnOnce() -> Result<T, Break>) -> Re
 /// Anchor `p`, a path the host was handed on the command line, at `cwd`
 /// unless it is already absolute: see [`path::Resolver::anchor`].
 pub(super) fn absolute_in(cwd: &path::CwdPath, p: &Path) -> PathBuf {
-    path::Resolver::at(&ral_core::host::EnvVars::new(), cwd)
+    path::Resolver::at(&EnvVars::new(), cwd)
         .anchor(p)
         .into_inner()
 }

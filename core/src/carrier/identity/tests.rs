@@ -473,6 +473,7 @@ mod teardown_tests {
 mod probe_tests {
     use super::*;
     use crate::carrier::testkit::{BARE, attach, boot, boot_at, eval};
+    use crate::environ::EnvVars;
     use crate::protocol::probe::PathEntry;
     use crate::source::SourceOrigin;
 
@@ -598,7 +599,7 @@ mod probe_tests {
         let attach = Attach::root(
             attach(&BARE).engine,
             Root::new(EnginePath::Host(std::env::temp_dir()))
-                .with_env(vec![("PROBE_TEST_VAR".into(), "42".into())]),
+                .with_env(EnvVars::from_pairs([("PROBE_TEST_VAR", "42")]).unwrap()),
         );
         let transport = boot_at(&BARE, &attach);
         assert_eq!(transport.env_var("PROBE_TEST_VAR_ABSENT"), Ok(None));

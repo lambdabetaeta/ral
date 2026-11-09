@@ -85,8 +85,8 @@ impl Site for Silent {}
 #[derive(Clone, Copy)]
 pub(in crate::process) enum Surface {
     /// The external exec image, built at ral's owned launch boundary.  It
-    /// raises an exec card: `finish_command` builds the exec observation,
-    /// wrapping the whole dispatch, with the resolved argv and status.
+    /// raises an exec card: its `CommandRecord`, begun before and ended
+    /// after the launch, carries the rendered argv and status.
     ProcessLaunch,
 }
 

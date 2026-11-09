@@ -136,8 +136,8 @@ argument as readily as a builtin's, and one application path serves both
 share, `List String` inside and bytes at the OS call — and their schemes are
 seeded into the checker's env at boot, so a base frame is looked up as a handler
 is ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-`detach` refuses a head a handler intercepts: a handler runs inside this
-session, so nothing could be detached.
+`detach` starts its command as a program, as `^command` would: a handler
+or base frame runs inside this session, so neither is consulted.
 
 Each codec being its own entry rather than one polymorphic `decode` / `encode`
 is what lets `from-json < file` dispatch straight through the command arm with

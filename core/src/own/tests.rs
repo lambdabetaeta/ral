@@ -51,7 +51,7 @@ fn open_update_reads_writes_and_syncs_without_creating_truncating_or_appending()
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use crate::host::env::test_support::with_var;
+    use crate::host::test_support::with_var;
     use crate::path;
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 

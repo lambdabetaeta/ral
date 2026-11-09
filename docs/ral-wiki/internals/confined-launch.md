@@ -2,7 +2,7 @@
 generated_at_commit: 3e3fbc84
 verified_at_commit: 257c6c00
 verified_at_date: 2026-11-09
-anchors: [sandboxed_command, ExternalCommand::prepare, ChildSetup::install, Entry::prepare, Entry::enter, EnvelopeStreams::capture, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+anchors: [sandboxed_command, Command::prepare, ChildSetup::install, Entry::prepare, Entry::enter, EnvelopeStreams::capture, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -13,7 +13,7 @@ instead: the utility and its descendants keep the jail and VM perimeter, but
 receive no per-grant fs/exec projection. Seccomp and, when requested, offline
 network namespaces still apply there.
 
-When `ExternalCommand::prepare` (`shell/exec/command.rs`) builds the launch of
+When `Command::prepare` (`shell/exec/command.rs`) builds the launch of
 an admitted external or bundled child on a host under a restrictive
 projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which describes that one child's

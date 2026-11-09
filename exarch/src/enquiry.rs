@@ -1289,6 +1289,7 @@ impl Datum for TranscriptPart {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::environ::EnvVars;
 
     /// `encode` then `decode` is the identity, read back through `encode`
     /// since a request holds types that compare no other way.
@@ -1690,9 +1691,8 @@ mod tests {
     #[test]
     fn every_grant_base_resolves_to_a_bake_in_base() {
         let cwd = ral_core::path::CwdPath::new(std::env::current_dir().unwrap()).unwrap();
-        let ctx =
-            ral_core::authority::grant::freeze::FreezeCtx::at(ral_core::host::EnvVars::new(), cwd)
-                .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
+        let ctx = ral_core::authority::grant::freeze::FreezeCtx::at(EnvVars::new(), cwd)
+            .with_scratch(Some(std::env::temp_dir().to_string_lossy()));
         for label in crate::policy::spawn_bases() {
             crate::policy::base_layer(label, &ctx)
                 .unwrap_or_else(|e| panic!("grant `{label} must name a bake-in base: {e}"));

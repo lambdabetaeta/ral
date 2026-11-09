@@ -1,8 +1,7 @@
 //! The collector's handle onto one running stage: its process or thread, the
 //! parent's hold on its outbound edge, and the cancel this collector sent it.
 
-#[cfg(test)]
-use super::super::command;
+use super::super::record::CommandRecord;
 use super::collect::{Settlement, Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
@@ -12,7 +11,7 @@ use crate::io::child::Drains;
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
 use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
-use crate::shell::runtime::{AuditStart, Prov};
+use crate::shell::runtime::Prov;
 use std::sync::Arc;
 
 pub(super) struct StageHandle {
@@ -50,13 +49,11 @@ pub(super) struct Drain {
     pub(super) drains: Drains,
 }
 
-/// What a pipeline stage's settlement owes its audit: the site that claims
-/// its failure, and, if anyone listened at launch, where its record starts
-/// and the argv as vetted for exec, spelled as a standalone dispatch would.
-pub(super) struct StageAudit {
+/// A stage's launch frame, outlived: the site that claims the stage's
+/// failure, and the record its settlement ends.
+pub(super) struct StageFrame {
     pub(super) prov: Prov,
-    pub(super) start: Option<AuditStart>,
-    pub(super) args: Vec<String>,
+    pub(super) record: CommandRecord,
 }
 
 pub(super) enum StageKind {
@@ -181,8 +178,8 @@ impl StageHandle {
                     },
                     settlement: Settlement {
                         name: "test".to_string(),
-                        audit: None,
-                        claim: command::Claim::Unconfined,
+                        frame: None,
+                        denial_pids: None,
                     },
                 },
             }),
@@ -213,8 +210,8 @@ impl StageHandle {
                     },
                     settlement: Settlement {
                         name: "fake".to_string(),
-                        audit: None,
-                        claim: command::Claim::Unconfined,
+                        frame: None,
+                        denial_pids: None,
                     },
                 },
             }),

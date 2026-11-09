@@ -2433,7 +2433,7 @@ The singular `handler` field is a catch-all and must be a function of two parame
 
 The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
 
-`detach` refuses a handled head: a handler runs inside this session, so nothing can be detached. To stub `detach`, stand in for `detach` itself; to run the real program, write `^name`.
+`detach` never consults handlers: its command is always a program (§11.5). To stub `detach`, stand in for `detach` itself.
 
 Handlers are command operations, not first-class names. They are invoked in command position and cannot be fetched with `$name`.
 
@@ -3262,9 +3262,8 @@ let receipt = detach 'local documentation server' python -m http.server 8000
 echo $receipt[pid]
 ```
 
-A handler runs inside the session, so a head a handler intercepts — by an arm
-for it, or by the catch-all — cannot be detached, and `detach` refuses it. The
-same holds for a base frame such as `echo`. `^name` runs the real program.
+The command is always a program, as `^command` would be: handlers and base
+frames such as `echo` are not consulted, since they run inside the session.
 
 The description must be a non-empty, single-line `String`. The result is:
 

@@ -2,6 +2,7 @@
 
 pub mod confinement;
 
+use crate::environ::EnvVars;
 use std::time::{Duration, Instant};
 
 /// Unix process-control fixtures bypass bundled tools, which musl cannot serve before `main`.
@@ -62,7 +63,7 @@ pub fn decoded(
     crate::shell::grant::decode_grant(
         caps.value().as_ref(),
         "test grant",
-        &crate::authority::grant::freeze::FreezeCtx::at(crate::host::EnvVars::new(), process_cwd()),
+        &crate::authority::grant::freeze::FreezeCtx::at(EnvVars::new(), process_cwd()),
     )
 }
 

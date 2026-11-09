@@ -2,6 +2,7 @@
 //! those share.
 
 use ral_core::Shell;
+use ral_core::environ::EnvVars;
 #[cfg(any(test, feature = "test-util"))]
 use ral_core::own::TestDir;
 use ral_core::own::{Entry, OwnDir, OwnError};
@@ -80,7 +81,7 @@ pub struct Scratch {
     /// names: both settled once at creation, since each fails only for a
     /// directory that is not Unicode, which nothing later should have to ask.
     spelling: String,
-    env: Vec<(String, String)>,
+    env: EnvVars,
     #[cfg_attr(
         not(any(test, feature = "test-util")),
         expect(
@@ -290,16 +291,14 @@ impl Scratch {
     /// test double mirrors this call and a second site would drift from it.
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_into(&self, shell: &mut Shell) {
-        for (name, value) in self.env() {
-            seed_var(shell, &name, &value);
-        }
+        seed_vars(shell, &self.env);
     }
 
     /// What this scratch names to the agent: [`SCRATCH_VAR`], the
     /// [`TOOL_HOMES`] and [`CONFINED_TOOL_SETTINGS`], as the pairs an `Attach`
     /// names.
-    pub fn env(&self) -> Vec<(String, String)> {
-        self.env.clone()
+    pub fn env(&self) -> &EnvVars {
+        &self.env
     }
 }
 
@@ -309,7 +308,7 @@ impl Scratch {
 /// # Errors
 /// [`NotUtf8`] when `dir` is not Unicode: an environment value is text, and a
 /// lossy one would name a different directory.
-fn scratch_env(dir: &Path) -> Result<Vec<(String, String)>, NotUtf8> {
+fn scratch_env(dir: &Path) -> Result<EnvVars, NotUtf8> {
     let text = |path: &Path| ral_core::path::utf8(path).map(str::to_owned);
     env_under(text(dir)?, |sub| text(&join_slash(dir, sub)))
 }
@@ -318,7 +317,7 @@ fn scratch_env(dir: &Path) -> Result<Vec<(String, String)>, NotUtf8> {
 ///
 /// `dir` is the guest's path, which the host cannot hold as a `PathBuf`, so
 /// every home joins under it as the guest joins, with `/`, whatever the host.
-pub(crate) fn guest_scratch_env(dir: &GuestPath) -> Vec<(String, String)> {
+pub(crate) fn guest_scratch_env(dir: &GuestPath) -> EnvVars {
     let Ok(env) = env_under(dir.as_str().to_owned(), |sub| {
         Ok::<_, Infallible>(dir.join(sub).as_str().to_owned())
     });
@@ -328,20 +327,24 @@ pub(crate) fn guest_scratch_env(dir: &GuestPath) -> Vec<(String, String)> {
 /// The scratch var, the tool homes under it, and the confined tool settings,
 /// for a scratch spelled `scratch` whose subdirectories `under` spells, or
 /// fails to spell: one table for a host's own [`Scratch`] and for a guest's.
+///
+/// # Panics
+/// Never: the table names no reserved variable.
 fn env_under<E>(
     scratch: String,
     under: impl Fn(&'static str) -> Result<String, E>,
-) -> Result<Vec<(String, String)>, E> {
+) -> Result<EnvVars, E> {
     let homes = TOOL_HOMES
         .iter()
         .map(|(var, home)| home.value(&under).map(|value| ((*var).to_string(), value)));
     let settings = CONFINED_TOOL_SETTINGS
         .iter()
         .map(|(var, value)| Ok(((*var).to_string(), (*value).to_string())));
-    std::iter::once(Ok((SCRATCH_VAR.to_owned(), scratch)))
+    let pairs = std::iter::once(Ok((SCRATCH_VAR.to_owned(), scratch)))
         .chain(homes)
         .chain(settings)
-        .collect()
+        .collect::<Result<Vec<_>, E>>()?;
+    Ok(EnvVars::from_pairs(pairs).expect("the scratch table names no reserved variable"))
 }
 
 /// A lock file made now under a fresh name, and held.  Another session's
@@ -615,11 +618,17 @@ fn stamp_from_secs(secs: u64) -> String {
     )
 }
 
-/// Seed `name` into `shell` twice over: an environment variable, so spawned
-/// children inherit it, and a scope binding, so `$name` resolves in ral source.
-pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
-    shell.set_env_var(name, value);
-    shell.set_var(name.into(), ral_core::shell::runtime::Value::string(value));
+/// Seed `vars` into `shell` twice over: as environment variables, so spawned
+/// children inherit them, and as scope bindings, so `$name` resolves in ral
+/// source.
+pub(crate) fn seed_vars(shell: &mut Shell, vars: &EnvVars) {
+    shell.overlay_env(vars);
+    for (name, value) in vars {
+        shell.set_var(
+            name.clone(),
+            ral_core::shell::runtime::Value::string(value.as_str()),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -641,12 +650,8 @@ mod tests {
         // Every value is native, as the child reads it back: on Windows the
         // subdirectories join with `\`.
         let native = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        assert_eq!(env[0], (SCRATCH_VAR.to_owned(), native(dir)));
-        let get = |name: &str| {
-            env.iter()
-                .find(|(var, _)| var == name)
-                .map(|(_, v)| v.clone())
-        };
+        let get = |name: &str| env.get(name).cloned();
+        assert_eq!(get(SCRATCH_VAR), Some(native(dir)));
         assert_eq!(get("XDG_CACHE_HOME"), Some(native(&dir.join("xdg-cache"))));
         assert_eq!(get("TMPDIR"), Some(native(&dir.join("tmp"))));
         assert_eq!(
@@ -666,14 +671,10 @@ mod tests {
     fn guest_scratch_env_joins_with_slash_on_every_host() {
         let env = guest_scratch_env(&GuestPath::from_static("/tmp"));
         assert_eq!(
-            env.len(),
+            env.iter().count(),
             1 + TOOL_HOMES.len() + CONFINED_TOOL_SETTINGS.len()
         );
-        let get = |name: &str| {
-            env.iter()
-                .find(|(var, _)| var == name)
-                .map(|(_, v)| v.as_str())
-        };
+        let get = |name: &str| env.get(name).map(String::as_str);
         assert_eq!(get(SCRATCH_VAR), Some("/tmp"));
         assert_eq!(get("TMPDIR"), Some("/tmp/tmp"));
         assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/xdg-cache"));
@@ -685,7 +686,9 @@ mod tests {
     fn an_inherited_maven_args_is_replaced() {
         let scratch = Scratch::for_test(EXARCH, "maven-args").expect("test scratch");
         let mut shell = crate::boot::test_shell();
-        shell.set_env_var("MAVEN_ARGS", "-Dmaven.repo.local=/home/u/.m2 -T4");
+        shell
+            .set_env_var("MAVEN_ARGS", "-Dmaven.repo.local=/home/u/.m2 -T4")
+            .unwrap();
         scratch.install_into(&mut shell);
         assert_eq!(
             shell.env_var("MAVEN_ARGS"),

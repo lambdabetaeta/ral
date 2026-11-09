@@ -4,12 +4,14 @@
 use super::super::command;
 use super::super::command::{Command, Request};
 use super::super::job_control::TerminalInput;
+use super::super::record::CommandRecord;
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
 use super::route::{ByteIn, ByteOut, HeldEdge, StageRoute};
-use super::stage::{LiveExternal, StageAudit, StageHandle, StageKind};
+use super::stage::{LiveExternal, StageFrame, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
+use crate::authority::sandbox::Ownership;
 use crate::error::io_message;
 use crate::fact::AuditIo;
 use crate::io::child::Connection;
@@ -94,22 +96,16 @@ fn launch_external_stage_direct(
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<(LiveExternal, Option<HeldEdge>)> {
-    let name = command.shown.clone();
     let mooring = cx.mooring;
     let group = cx.group;
     let holds_terminal = cx.holds_terminal;
-    cx.shell.at_site(name.clone(), span, |shell| {
-        let audit_start = shell.audit_start(mooring);
-        let command = command.admit(mooring, shell)?;
-        // Render audit values before any child exists, and only if somebody
-        // will consume them. The command independently vets its exec argv.
-        let audit_args = if audit_start.is_some() {
-            Value::render_argv(args)
-        } else {
-            Vec::new()
-        };
+    cx.shell.at_site(command.shown.clone(), span, |shell| {
+        let command = command
+            .lookup(&shell.context.grants, shell.baseline())
+            .admit(mooring, shell)?;
+        let record = CommandRecord::begin(&command, args, CommandOrigin::External, mooring, shell);
         let launched = (|| -> Settled<_> {
-            let command = command.prepare(args, shell)?;
+            let command = command.prepare(args, Ownership::Kept, shell)?;
             let upstream;
             let stdin = match stdin {
                 ByteIn::Upstream(r) => {
@@ -131,35 +127,21 @@ fn launch_external_stage_direct(
                     Some(held),
                 ),
             };
-            let started = command.start(
-                io.map_err(command::connection_error)?,
-                PgidPolicy::Join(group.membership(&shell.scope)),
-                &shell.scope,
-            )?;
-            let stage = started.register(slot, group.group().owned(), &shell.scope)?;
+            let pgid = PgidPolicy::Join(group.membership(&shell.scope))
+                .unless_enveloped(command.enveloped());
+            let started =
+                command.start(io.map_err(command::connection_error)?, pgid, &shell.scope)?;
+            let stage = started.register(slot, group.group().owned());
             Ok((stage, held))
         })();
         match launched {
             Ok((mut stage, held)) => {
-                stage.end.settlement.audit = Some(Box::new(StageAudit {
-                    prov: shell.local.audit.call_site().clone(),
-                    start: audit_start,
-                    args: audit_args,
-                }));
+                let prov = shell.local.audit.call_site().clone();
+                stage.end.settlement.frame = Some(Box::new(StageFrame { prov, record }));
                 Ok((stage, held))
             }
             Err(broke) => {
-                if let Some(start) = &audit_start {
-                    let obs = shell.command_observation(
-                        start,
-                        &name,
-                        audit_args,
-                        CommandOrigin::External,
-                        Some(&broke),
-                        AuditIo::default(),
-                    );
-                    shell.observe_stamped(Some(mooring), obs);
-                }
+                record.close(Some(&broke), AuditIo::default(), mooring, shell);
                 Err(broke)
             }
         }

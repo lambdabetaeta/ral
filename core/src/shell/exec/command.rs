@@ -1,14 +1,11 @@
-//! External command lookup, preparation, and execution.
+//! Running an external command.
 //!
-//! [`Command<Request>`] snapshots the lookup context. Lookup returns a program
-//! or a structured failure; admission handles policy refusals and produces
-//! [`Command<Checked>`]. Ordinary lookup errors remain deferred until preparation,
-//! where they take precedence over invalid arguments.
-//!
-//! Preparation builds an [`ExternalCommand`]. Connecting its streams consumes it
-//! into a [`ConnectedCommand`], which owns the launch and its pump plan together.
-//! Spawning produces [`Started`], collected either alone or by a pipeline. Both
-//! use [`ending`] to interpret the child's result.
+//! 1. [`Command::from_name`] records what to look up.
+//! 2. [`Command::lookup`] finds the program and checks the grants.
+//! 3. [`Command::admit`] reports a refusal. Other lookup errors wait for step 4.
+//! 4. [`Command::prepare`] builds the launch ([`Prepared`]).
+//! 5. [`Prepared::start`] spawns the child ([`Started`]).
+//! 6. The caller collects the child, and [`ending`] reads its exit.
 
 use super::job_control::Placement;
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
@@ -16,7 +13,7 @@ use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::authority::sandbox::{Confinement, Image, Ownership};
 use crate::error::{Error, io_message};
 use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
-use crate::io::child::{Connection, PendingDrains};
+use crate::io::child::{Connection, Drains};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
@@ -30,100 +27,97 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[cfg(unix)]
-use crate::process::{StdioSpec, group::Survivor};
-
-// The detached-launch method is private. Other execution modules must use
-// this child module's operation, which checks permission before calling it.
+// The `detach` builtin, and the detached spawn only it may perform.
 #[cfg(unix)]
 mod detach;
 #[cfg(unix)]
 pub(in crate::shell) use detach::detach;
 
-// Lookup and admission states.
-
-/// A command name paired with its current state. Only admission constructs
-/// [`Checked`], the state required for preparation.
+/// A command name, and how far it has got.
 #[derive(Debug)]
 pub(crate) struct Command<S> {
-    /// Diagnostic name. Explicit paths retain the user's spelling.
+    /// The name used in messages.
     pub(crate) shown: String,
     state: S,
 }
 
-/// Lookup inputs captured without filesystem access.
-#[derive(Debug)]
-pub(crate) enum Request {
-    Tool(&'static str),
-    /// An anchored path, or `None` for a tilde path without a home directory.
-    Path(Option<PathBuf>),
-    /// A bare name uses the PATH and cwd from dispatch, not later shell state.
-    Search {
-        path: Option<String>,
-        cwd: CwdPath,
-    },
+impl<S> Command<S> {
+    pub(crate) fn state(&self) -> &S {
+        &self.state
+    }
 }
 
-/// The selected runnable program, or the lookup failure to report.
+// ── Lookup ──────────────────────────────────────────────────────────────
+
+/// What to look up. Taken at dispatch; nothing touches the disk yet.
+#[derive(Debug)]
+pub(crate) enum Request {
+    /// A tool built into ral.
+    Tool(&'static str),
+    /// A path, made absolute against the cwd.
+    Path(PathBuf),
+    /// A `~` path, but there is no home directory.
+    NoHome,
+    /// A bare name, searched for in PATH. PATH and cwd are copied now.
+    Search { path: Option<String>, cwd: CwdPath },
+}
+
+/// The program found, or why none was.
 pub(crate) type Lookup = Result<Admitted, LookupFailure>;
 
-/// Lookup retains failure data rather than inspecting rendered errors.
-/// Policy refusals remain separate because admission must record them.
+/// Why lookup failed.
 pub(crate) enum LookupFailure {
+    /// No such program. On Windows, may suggest an extension, e.g. `.exe`.
     NotFound {
         suggested_extension: Option<&'static str>,
     },
     NotRunnable(NotRunnable),
+    /// A grant refused the program at `at`.
     Refused {
         at: String,
         denial: Box<Denial>,
     },
 }
 
-/// Admission has handled policy refusals. An ordinary error is retained so
-/// preparation reports it before checking arguments.
-#[derive(Debug)]
-pub(crate) struct Checked {
-    program: Result<Admitted, Error>,
+impl LookupFailure {
+    const ABSENT: Self = Self::NotFound {
+        suggested_extension: None,
+    };
 }
 
-// Capture, lookup, and admission.
-
 impl Command<Request> {
-    /// Capture the command name and its lookup context without filesystem access.
+    /// Record what to look up.
     pub(crate) fn from_name(name: &CommandName, ctx: &Context) -> Self {
         match name {
-            CommandName::Bare(bare) => {
-                let shown = bare.to_string();
-                let state = crate::uutils::bundled_name(std::ffi::OsStr::new(bare.as_ref()))
-                    .map_or_else(
-                        || Request::Search {
-                            path: ctx.env_overrides().get_or_host("PATH"),
-                            cwd: ctx.cwd().clone(),
-                        },
-                        Request::Tool,
-                    );
-                Self { shown, state }
-            }
+            CommandName::Bare(bare) => Self {
+                shown: bare.to_string(),
+                state: crate::uutils::bundled_name(OsStr::new(bare.as_ref())).map_or_else(
+                    || Request::Search {
+                        path: ctx.env_overrides().get_or_host("PATH"),
+                        cwd: ctx.cwd().clone(),
+                    },
+                    Request::Tool,
+                ),
+            },
             CommandName::Path(path) => Self {
                 shown: path.clone(),
-                state: Request::Path(Some(ctx.resolver().for_launch(path))),
+                state: Request::Path(ctx.resolver().for_launch(path)),
             },
             CommandName::TildePath(path) => match ctx.home() {
                 Some(home) => Self {
                     shown: path.shown(&home),
-                    state: Request::Path(Some(ctx.resolver().for_launch(path.expand(&home)))),
+                    state: Request::Path(ctx.resolver().for_launch(path.expand(&home))),
                 },
                 None => Self {
                     shown: path.to_literal(),
-                    state: Request::Path(None),
+                    state: Request::NoHome,
                 },
             },
         }
     }
 
-    /// Find an admitted runnable program. If none exists, report the first
-    /// non-absence failure in PATH order.
+    /// Find the program and check that the grants let it run. Reports
+    /// nothing.
     pub(crate) fn lookup(self, grants: &GrantStack, baseline: &Baseline) -> Command<Lookup> {
         let Self { shown, state } = self;
         let state = match state {
@@ -132,60 +126,170 @@ impl Command<Request> {
                     at: shown.clone(),
                     denial,
                 }),
-            Request::Path(Some(file)) => {
-                #[cfg(windows)]
-                let file_for_hint = file.clone();
-                match probe(file, CandidateKind::Path, &shown, grants, baseline) {
-                    #[cfg(windows)]
-                    Err(LookupFailure::NotFound { .. }) => {
-                        let suggested_extension =
-                            path::WINDOWS_EXEC_EXTENSIONS.iter().copied().find(|ext| {
-                                probe(
-                                    path::with_appended_suffix(&file_for_hint, ext),
-                                    CandidateKind::Path,
-                                    &shown,
-                                    grants,
-                                    baseline,
-                                )
-                                .is_ok()
-                            });
-                        Err(LookupFailure::NotFound {
-                            suggested_extension,
-                        })
-                    }
-                    lookup => lookup,
-                }
+            Request::Path(file) => lookup_path(file, &shown, grants, baseline),
+            Request::NoHome => Err(LookupFailure::ABSENT),
+            Request::Search { path, cwd } => {
+                path::search(&shown, path.as_deref(), Some(&cwd), |file| {
+                    try_file(file, Origin::Searched, &shown, grants, baseline)
+                        .map_or_else(ControlFlow::Continue, ControlFlow::Break)
+                })
+                .map_err(|failures| search_error(failures, &shown))
             }
-            Request::Search { path, cwd } => settle(
-                path::search(
-                    &shown,
-                    path.as_deref(),
-                    Some(&cwd),
-                    |candidate| match judge(
-                        candidate,
-                        CandidateKind::Search,
-                        &shown,
-                        grants,
-                        baseline,
-                    ) {
-                        Ok(admitted) => ControlFlow::Break(admitted),
-                        Err(failure) => ControlFlow::Continue(failure),
-                    },
-                ),
-                &shown,
-            ),
-            Request::Path(None) => Err(LookupFailure::NotFound {
-                suggested_extension: None,
-            }),
         };
         Command { shown, state }
     }
+}
 
-    /// Apply the current grants. Record policy refusals immediately; convert
-    /// ordinary lookup failures to errors for preparation to report.
-    pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Command<Checked>> {
-        let Command { shown, state } = self.lookup(&shell.context.grants, shell.baseline());
-        let program = match state {
+/// Where a file's path came from.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// The user typed it.
+    Typed,
+    /// A PATH search built it from a bare name.
+    Searched,
+}
+
+impl Origin {
+    /// The name to show when the file cannot run.
+    fn found(self, shown: &str, arg0: &Path) -> String {
+        match self {
+            Self::Typed => shown.to_owned(),
+            Self::Searched => path::shown(arg0),
+        }
+    }
+
+    /// Why a non-executable object of `kind` cannot run. `None` means
+    /// treat it as missing: a PATH search skips anything that is not a file.
+    fn unrunnable(self, kind: Option<Kind>) -> Option<Unrunnable> {
+        match (self, kind?) {
+            (_, Kind::File) => Some(Unrunnable::NotExecutable),
+            (Self::Searched, _) => None,
+            (Self::Typed, Kind::Dir) => Some(Unrunnable::Directory),
+            (Self::Typed, _) => Some(Unrunnable::NotExecutable),
+        }
+    }
+}
+
+/// Look up a path the user typed. On Windows, if it is missing, suggest an
+/// extension that would find it.
+fn lookup_path(file: PathBuf, shown: &str, grants: &GrantStack, baseline: &Baseline) -> Lookup {
+    #[cfg(windows)]
+    let stem = file.clone();
+    let lookup = Candidate::walk(file).map_or(Err(LookupFailure::ABSENT), |file| {
+        try_file(file, Origin::Typed, shown, grants, baseline)
+    });
+    #[cfg(windows)]
+    if matches!(lookup, Err(LookupFailure::NotFound { .. })) {
+        let suggested_extension = path::with_exec_extensions(&stem).find_map(|(ext, file)| {
+            try_file(file, Origin::Typed, shown, grants, baseline)
+                .is_ok()
+                .then_some(ext)
+        });
+        return Err(LookupFailure::NotFound {
+            suggested_extension,
+        });
+    }
+    lookup
+}
+
+/// Try one walked file as the program: first the grants, then whether it
+/// can run.
+/// The grants go first even if the walk failed, so a refused path never
+/// reveals whether anything is there.
+fn try_file(
+    file: Candidate,
+    origin: Origin,
+    shown: &str,
+    grants: &GrantStack,
+    baseline: &Baseline,
+) -> Lookup {
+    let Candidate {
+        arg0,
+        spelled,
+        walked,
+    } = file;
+    let at = path::shown(&arg0);
+    let located = match walked {
+        Ok(located) => located,
+        Err(error) => {
+            if let Ok(trace) = failure_trace(&spelled, &error) {
+                check_exec_name(grants, baseline, shown, &trace)
+                    .map_err(|denial| LookupFailure::Refused { at, denial })?;
+            }
+            return Err(match error.kind() {
+                ErrorKind::NotFound | ErrorKind::NotADirectory => LookupFailure::ABSENT,
+                _ => LookupFailure::NotRunnable(NotRunnable {
+                    found: origin.found(shown, &arg0),
+                    why: Unrunnable::from_io(&error),
+                }),
+            });
+        }
+    };
+    let admitted = check_exec(
+        grants,
+        baseline,
+        shown,
+        Program::File {
+            arg0,
+            located: Box::new(located),
+        },
+    )
+    .map_err(|denial| LookupFailure::Refused { at, denial })?;
+    // A handle can only be inspected once the grants have accepted it.
+    let unrunnable = match admitted.program() {
+        Program::File { arg0, located } if !located.is_executable() => {
+            Some(match origin.unrunnable(located.trace().kind()) {
+                Some(why) => LookupFailure::NotRunnable(NotRunnable {
+                    found: origin.found(shown, arg0),
+                    why,
+                }),
+                None => LookupFailure::ABSENT,
+            })
+        }
+        _ => None,
+    };
+    unrunnable.map_or(Ok(admitted), Err)
+}
+
+/// Pick the error for a failed PATH search: the first one that is not
+/// "missing". If every file was missing or simply not allowed, the refusal
+/// gets a hint that no allowed PATH directory has the program.
+fn search_error(failures: Vec<LookupFailure>, shown: &str) -> LookupFailure {
+    let nowhere = failures.iter().all(|failure| match failure {
+        LookupFailure::NotFound { .. } => true,
+        LookupFailure::NotRunnable(_) => false,
+        LookupFailure::Refused { denial, .. } => denial.missing_allowance,
+    });
+    match failures
+        .into_iter()
+        .find(|failure| !matches!(failure, LookupFailure::NotFound { .. }))
+    {
+        None => LookupFailure::ABSENT,
+        Some(LookupFailure::Refused { at, mut denial }) if nowhere => {
+            denial.error = denial.error.with_hint(format!(
+                "'{shown}' is no program in any PATH directory the grant runs from"
+            ));
+            LookupFailure::Refused { at, denial }
+        }
+        Some(failure) => failure,
+    }
+}
+
+// ── Admission ───────────────────────────────────────────────────────────
+
+impl Command<Lookup> {
+    /// Report a refusal at once.
+    ///
+    /// Other errors (not found, not runnable) are kept, and `prepare`
+    /// reports them. By then the command's audit record has started and its
+    /// redirects are open. These errors also beat bad arguments.
+    pub(crate) fn admit(
+        self,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Command<Result<Admitted, Error>>> {
+        let Self { shown, state } = self;
+        let state = match state {
             Ok(admitted) => Ok(admitted),
             Err(LookupFailure::NotFound {
                 suggested_extension,
@@ -204,236 +308,42 @@ impl Command<Request> {
                 return Err(shell.exec_refused(*denial, mooring));
             }
         };
-        Ok(Command {
-            shown,
-            state: Checked { program },
-        })
+        Ok(Command { shown, state })
     }
 }
 
-impl Command<Lookup> {
-    /// Return the lookup result without recording refusals, for callers such
-    /// as command inspection.
-    pub(crate) fn into_result(self) -> Lookup {
-        self.state
-    }
-}
+// ── Preparation ─────────────────────────────────────────────────────────
 
-// Candidate selection.
-
-/// Select the first non-absence failure in PATH order. Add the missing-allowance
-/// hint only when every candidate was absent or lacked an allowance. An explicit
-/// exclusion or a non-runnable candidate prevents that hint.
-fn settle(searched: Result<Admitted, Vec<LookupFailure>>, shown: &str) -> Lookup {
-    let failures = match searched {
-        Ok(admitted) => return Ok(admitted),
-        Err(failures) => failures,
-    };
-    let unfound = failures.iter().all(|failure| match failure {
-        LookupFailure::NotFound { .. } => true,
-        LookupFailure::NotRunnable(_) => false,
-        LookupFailure::Refused { denial, .. } => denial.missing_allowance,
-    });
-    match failures
-        .into_iter()
-        .find(|failure| !matches!(failure, LookupFailure::NotFound { .. }))
-    {
-        None => Err(LookupFailure::NotFound {
-            suggested_extension: None,
-        }),
-        Some(LookupFailure::Refused { at, mut denial }) => {
-            if unfound {
-                denial.error = denial.error.with_hint(format!(
-                    "'{shown}' is no program in any PATH directory the grant runs from"
-                ));
-            }
-            Err(LookupFailure::Refused { at, denial })
-        }
-        Some(failure) => Err(failure),
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CandidateKind {
-    Path,
-    Search,
-}
-
-impl CandidateKind {
-    /// Explicit paths report the input spelling; PATH searches report the candidate.
-    fn found(self, shown: &str, arg0: &Path) -> String {
-        match self {
-            Self::Path => shown.to_owned(),
-            Self::Search => path::shown(arg0),
-        }
-    }
-}
-
-fn probe(
-    arg0: PathBuf,
-    candidate_kind: CandidateKind,
-    shown: &str,
-    grants: &GrantStack,
-    baseline: &Baseline,
-) -> Lookup {
-    Candidate::walk(arg0).map_or(
-        Err(LookupFailure::NotFound {
-            suggested_extension: None,
-        }),
-        |candidate| judge(candidate, candidate_kind, shown, grants, baseline),
-    )
-}
-
-/// Check authority before reporting file type or lookup errors. Otherwise
-/// inaccessible paths could reveal whether a program exists.
-fn judge(
-    candidate: Candidate,
-    candidate_kind: CandidateKind,
-    shown: &str,
-    grants: &GrantStack,
-    baseline: &Baseline,
-) -> Lookup {
-    let Candidate {
-        arg0,
-        spelled,
-        walked,
-    } = candidate;
-    let located = match walked {
-        Ok(located) => located,
-        Err(error) => {
-            if let Ok(trace) = failure_trace(&spelled, &error) {
-                check_exec_name(grants, baseline, shown, &trace).map_err(|denial| {
-                    LookupFailure::Refused {
-                        at: path::shown(&arg0),
-                        denial,
-                    }
-                })?;
-            }
-            return Err(match error.kind() {
-                ErrorKind::NotFound | ErrorKind::NotADirectory => LookupFailure::NotFound {
-                    suggested_extension: None,
-                },
-                _ => LookupFailure::NotRunnable(NotRunnable {
-                    found: candidate_kind.found(shown, &arg0),
-                    why: Unrunnable::from_io(&error),
-                }),
-            });
-        }
-    };
-    let at = path::shown(&arg0);
-    let admitted = check_exec(
-        grants,
-        baseline,
-        shown,
-        Program::File {
-            arg0,
-            located: Box::new(located),
-        },
-    )
-    .map_err(|denial| LookupFailure::Refused { at, denial })?;
-    let Program::File { arg0, located } = admitted.program() else {
-        return Ok(admitted);
-    };
-    if located.is_executable() {
-        return Ok(admitted);
-    }
-    let failure = match located.trace().kind() {
-        Some(kind) if matches!(candidate_kind, CandidateKind::Path) || kind == Kind::File => {
-            LookupFailure::NotRunnable(NotRunnable {
-                found: candidate_kind.found(shown, arg0),
-                why: if kind == Kind::Dir {
-                    Unrunnable::Directory
-                } else {
-                    Unrunnable::NotExecutable
-                },
-            })
-        }
-        _ => LookupFailure::NotFound {
-            suggested_extension: None,
-        },
-    };
-    Err(failure)
-}
-
-// Argument validation.
-
-/// Reject unsupported argument shapes, then borrow strings and render other
-/// accepted values. The launch or sandbox payload owns the final argument bytes.
-fn validate_argv<'a>(cmd: &str, args: &'a [Value]) -> Settled<Vec<Cow<'a, str>>> {
-    args.iter()
-        .map(|arg| match reject_exec_arg(cmd, arg) {
-            Some(refusal) => Err(refusal),
-            None => Ok(match arg {
-                Value::String(text) => Cow::Borrowed(text.as_ref()),
-                _ => Cow::Owned(arg.to_string()),
-            }),
-        })
-        .collect()
-}
-
-/// Runtime counterpart of the type checker's [`RefusedArg`] check. Polymorphic
-/// arguments may reach execution without a statically known shape.
-fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
-    let refusal = arg.heads().first().copied().and_then(RefusedArg::of_head)?;
-    Some(
-        Error::new(format!(
-            "cannot pass {} to external command '{cmd}'",
-            arg.type_name()
-        ))
-        .with_hint(refusal.remedy(cmd))
-        .into(),
-    )
-}
-
-// Launch preparation and stream connection.
-
-/// A prepared launch with validated arguments, but no connected shell streams.
-/// It owns the launch data; audit records still use the original argument values.
-pub(crate) struct ExternalCommand {
-    shown: String,
-    launch: Launch,
-    image: Image,
-    /// Interpreter read from the admitted file before releasing its handle.
-    /// Used only to explain startup errors.
-    interpreter: Option<PathBuf>,
-    confinement: Confinement,
-}
-
-/// A configured launch and the drains for exactly that launch.
-struct ConnectedCommand {
-    command: ExternalCommand,
-    drains: PendingDrains,
-}
-
-impl Command<Checked> {
-    /// Attach context to a lookup error without reporting it early.
+impl Command<Result<Admitted, Error>> {
+    /// Change the kept lookup error, if there is one.
     pub(crate) fn map_lookup_error(mut self, map: impl FnOnce(Error) -> Error) -> Self {
-        self.state.program = self.state.program.map_err(map);
+        self.state = self.state.map_err(map);
         self
     }
 
-    /// Prepare a launch whose child the session will own and collect.
-    pub(crate) fn prepare(self, args: &[Value], shell: &Shell) -> Settled<ExternalCommand> {
-        self.prepare_as(args, Ownership::Kept, shell)
-    }
-
-    /// Validate arguments, select confinement, and configure environment and
-    /// limits. Cancellation is checked when starting, not while preparing.
-    fn prepare_as(
+    /// Report the kept lookup error, then any bad argument. Otherwise set up
+    /// the sandbox, environment and limits. `ownership` says whether the
+    /// session keeps the child. Cancellation is checked later, at start.
+    pub(crate) fn prepare(
         self,
         args: &[Value],
         ownership: Ownership,
         shell: &Shell,
-    ) -> Settled<ExternalCommand> {
+    ) -> Settled<Prepared> {
         let Self { shown, state } = self;
-        let admitted = state.program?;
-        let args = validate_argv(&shown, args)?;
+        let admitted = state?;
+        let args = check_argv(&shown, args)?;
         let confinement = Confinement::of(&shell.context.grants, shell.baseline(), &admitted);
         let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
-        // Image conversion releases the judged handles before launch.
         let image = Image::from(admitted);
         let mut launch = confinement.launch(&image, &args, ownership, shell.context.cwd())?;
-        apply_env(&mut launch, shell);
+        // Use the shell's cwd: ral's `cd` never calls `chdir`.
+        launch.situate(
+            shell
+                .context
+                .env_overrides()
+                .for_child(shell.context.cwd(), shell.has_active_capabilities()),
+        );
         #[cfg(unix)]
         launch.limit_session(shell.session.child_limits);
         // Grant limits apply after session limits.
@@ -442,138 +352,95 @@ impl Command<Checked> {
         }
         #[cfg(seccomp)]
         confinement.apply_guest_jail(&mut launch, ownership, shell.context.grants.net())?;
-        Ok(ExternalCommand {
-            shown,
+        Ok(Prepared {
             launch,
-            image,
-            interpreter,
-            confinement,
-        })
-    }
-
-    /// Start a detached process with null streams. Return a survivor rather
-    /// than a session-owned child, so the session cannot collect or kill it.
-    #[cfg(unix)]
-    fn detach(self, args: &[Value], shell: &Shell) -> Settled<Survivor> {
-        let mut command = self.prepare_as(args, Ownership::Surrendered, shell)?;
-        command
-            .launch
-            .stdin(StdioSpec::Null)
-            .stdout(StdioSpec::Null)
-            .stderr(StdioSpec::Null);
-        command.launch.spawn_detached(&shell.scope).map_err(|why| {
-            at_start(
-                why,
-                &command.image,
-                command.interpreter.as_deref(),
-                &command.confinement,
-                &command.shown,
-            )
+            diagnosis: Diagnosis {
+                shown,
+                image,
+                interpreter,
+                confinement,
+            },
         })
     }
 }
 
-impl ExternalCommand {
-    /// Run and collect a standalone command. Set the terminal title only after
-    /// connecting streams; the collector handles the terminal loan.
+/// Turn the arguments into strings. Refuse values an external cannot take;
+/// the type checker does the same, but cannot always know the type.
+fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Settled<Vec<Cow<'a, str>>> {
+    args.iter()
+        .map(|arg| {
+            if let Some(refused) = arg.heads().first().copied().and_then(RefusedArg::of_head) {
+                return Err(Error::new(format!(
+                    "cannot pass {} to external command '{cmd}'",
+                    arg.type_name()
+                ))
+                .with_hint(refused.remedy(cmd))
+                .into());
+            }
+            Ok(match arg {
+                Value::String(text) => Cow::Borrowed(text.as_ref()),
+                _ => Cow::Owned(arg.to_string()),
+            })
+        })
+        .collect()
+}
+
+// ── Starting ────────────────────────────────────────────────────────────
+
+/// A launch, ready except for its streams.
+pub(crate) struct Prepared {
+    launch: Launch,
+    diagnosis: Diagnosis,
+}
+
+impl Prepared {
+    /// Run the command on the shell's streams and wait for it.
     pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-        let placement = Placement::for_command(shell, mooring, self.launch.enveloped());
+        let placement = Placement::for_command(shell, mooring, self.enveloped());
         let io = Connection::new(
             placement.stdin(&shell.io.stdin),
             &shell.io.stdout,
             &shell.io.stderr,
         )
         .map_err(connection_error)?;
-        let connected = self.connect(io);
-        announce_command_title(&connected.command.shown, shell);
-        // Include startup in the interval used to attribute kernel denials.
+        announce_title(&self.diagnosis.shown, shell);
+        // Kernel denials logged from here on may belong to this command.
         let since = Instant::now();
-        connected
-            .spawn(placement.policy(), &shell.scope)?
+        self.start(io, placement.policy(), &shell.scope)?
             .collect(placement.into_loan(), since, shell)
             .map(|()| Value::Unit)
     }
 
-    /// Connect and spawn a pipeline stage. Its caller must register the result
-    /// with the pipeline collector.
+    /// Whether the program runs inside an envelope. If so, place it with
+    /// [`PgidPolicy::unless_enveloped`].
+    pub(crate) fn enveloped(&self) -> bool {
+        self.launch.enveloped()
+    }
+
+    /// Connect the streams, start the output drains, then spawn. If a drain
+    /// fails to start, no child is spawned.
     pub(crate) fn start(self, io: Connection, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-        self.connect(io).spawn(pgid, scope)
-    }
-
-    /// Keep the installed endpoints and their owned readers together.
-    fn connect(mut self, io: Connection) -> ConnectedCommand {
-        let drains = io.install(&mut self.launch);
-        ConnectedCommand {
-            command: self,
-            drains,
-        }
-    }
-}
-
-impl ConnectedCommand {
-    /// Spawn once, transferring the child and its drains to the collector.
-    fn spawn(self, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-        let Self { command, drains } = self;
-        let pgid = pgid.unless_enveloped(command.launch.enveloped());
-        let spawned = command.launch.spawn(pgid, scope).map_err(|why| {
-            at_start(
-                why,
-                &command.image,
-                command.interpreter.as_deref(),
-                &command.confinement,
-                &command.shown,
-            )
+        let Self {
+            mut launch,
+            diagnosis,
+        } = self;
+        let drains = io.install(&mut launch).start(scope).map_err(|e| {
+            Error::new(io_message(
+                format!("could not start output drains for '{}'", diagnosis.shown),
+                &e,
+            ))
         })?;
-        let claim = Claim::of(&command.confinement, &spawned);
+        let spawned = launch
+            .spawn(pgid, scope)
+            .map_err(|why| diagnosis.explain_start(why))?;
+        let denial_pids = diagnosis.denial_pids(&spawned);
         Ok(Started {
-            shown: command.shown,
+            shown: diagnosis.shown,
             spawned,
-            claim,
+            denial_pids,
             drains,
         })
     }
-}
-
-/// Apply the shell environment and cwd. The process cwd is not authoritative:
-/// ral's `cd` changes shell state without calling `chdir`.
-fn apply_env(cmd: &mut Launch, shell: &Shell) {
-    for (k, v) in shell.context.env_overrides() {
-        cmd.env(k, v);
-    }
-    let cwd = shell.context.cwd().as_path();
-    cmd.current_dir(cwd);
-    cmd.env("PWD", cwd);
-    // ral does not track a previous directory; inherited OLDPWD would be stale.
-    cmd.env_remove("OLDPWD");
-    if shell.has_active_capabilities() {
-        // Loader overrides can inject code into an admitted program. On macOS
-        // they could run code in the re-exec before it enters Seatbelt.
-        for var in &["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
-            cmd.env_remove(var);
-        }
-        for var in dyld_vars(shell) {
-            cmd.env_remove(var);
-        }
-    }
-}
-
-/// Loader overrides from both the inherited environment and shell overlays.
-/// Match the entire prefix so newly introduced DYLD variables are also removed.
-/// Inherited names own their snapshot; overlay names borrow the shell.
-fn dyld_vars(shell: &Shell) -> impl Iterator<Item = Cow<'_, OsStr>> {
-    const PREFIX: &str = "DYLD_";
-    let inherited = crate::host::vars_os()
-        .into_iter()
-        .map(|(k, _)| k)
-        .filter(|k| k.as_encoded_bytes().starts_with(PREFIX.as_bytes()))
-        .map(Cow::Owned);
-    let overridden = shell
-        .context
-        .env_overrides()
-        .iter()
-        .filter(|(k, _)| k.starts_with(PREFIX))
-        .map(|(k, _)| Cow::Borrowed(OsStr::new(k)));
-    inherited.chain(overridden)
 }
 
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
@@ -581,79 +448,93 @@ pub(super) fn connection_error(e: std::io::Error) -> Error {
     Error::new(io_message("could not connect command streams", &e))
 }
 
-// Spawn results and failure attribution.
+/// Set the terminal title to the command, if allowed.
+fn announce_title(cmd: &str, shell: &Shell) {
+    if shell.is_interactive() && shell.terminal().ui_controls_ok() {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
+        let _ = std::io::stdout().flush();
+    }
+}
 
-/// A session-owned child awaiting standalone collection or pipeline registration.
-/// Detached launches never produce this type.
+/// A running child, waiting to be collected.
 #[must_use = "collect or register the started command so its child is reaped"]
 pub(crate) struct Started {
     pub(crate) shown: String,
     pub(crate) spawned: Spawned,
-    pub(crate) claim: Claim,
-    pub(super) drains: PendingDrains,
+    /// The PIDs whose kernel sandbox denials belong to this child, or
+    /// `None` if no sandbox confines it.
+    pub(crate) denial_pids: Option<HashSet<u32>>,
+    pub(super) drains: Drains,
 }
 
-/// Host PIDs used to attribute kernel denial messages. Capture them during
-/// startup while the processes are alive, rather than discovering PIDs after exit.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Claim {
-    /// Do not consult sandbox denial logs for this child.
-    Unconfined,
-    /// PIDs captured for a confined launch.
-    Confined(HashSet<u32>),
+// ── Failure to start ────────────────────────────────────────────────────
+
+/// What we need to explain a failed start.
+struct Diagnosis {
+    shown: String,
+    image: Image,
+    /// The `#!` interpreter, read before the file handle was closed.
+    interpreter: Option<PathBuf>,
+    confinement: Confinement,
 }
 
-impl Claim {
-    /// Capture the direct child's PID, or the envelope payload's host PID chain.
-    /// Processes inside the envelope cannot report their host-namespace PIDs.
-    fn of(confinement: &Confinement, spawned: &Spawned) -> Self {
-        if !confinement.is_confined() {
-            return Self::Unconfined;
+impl Diagnosis {
+    /// Pass refusals and stops through. Explain the program's own `execve`
+    /// error.
+    fn explain_start(&self, why: Unstarted) -> Break {
+        match why {
+            Unstarted::Refused(refusal) => refusal.into(),
+            Unstarted::Stopped(stop) => stop.into(),
+            Unstarted::Program(e) => explain_exec_error(
+                &e,
+                &self.image,
+                self.interpreter.as_deref(),
+                || self.interpreter_hint(),
+                &self.shown,
+            )
+            .into(),
+        }
+    }
+
+    /// A hint if the sandbox hides the program's interpreter.
+    #[cfg(unix)]
+    fn interpreter_hint(&self) -> Option<String> {
+        let interpreter = self.interpreter.as_deref()?;
+        self.confinement.interpreter_hint(interpreter)
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::unused_self, reason = "Windows programs name no interpreter")]
+    fn interpreter_hint(&self) -> Option<String> {
+        None
+    }
+
+    /// The PIDs to look for in the kernel's sandbox-denial log: the child's,
+    /// or inside an envelope, the payload's host PIDs. Taken at spawn, while
+    /// the processes are still alive.
+    fn denial_pids(&self, spawned: &Spawned) -> Option<HashSet<u32>> {
+        if !self.confinement.is_confined() {
+            return None;
         }
         #[cfg(target_os = "linux")]
         if let crate::process::Group::Enveloped(payload) = &spawned.group {
-            return Self::Confined(crate::authority::sandbox::payload_pids(*payload));
+            return Some(crate::authority::sandbox::payload_pids(*payload));
         }
-        Self::Confined(HashSet::from([spawned.child.id()]))
+        Some(HashSet::from([spawned.child.id()]))
     }
 }
 
-/// Preserve refusals and cancellation; explain OS startup errors using the
-/// image and interpreter recorded during preparation.
-fn at_start(
-    why: Unstarted,
-    image: &Image,
-    interpreter: Option<&Path>,
-    confinement: &Confinement,
-    shown: &str,
-) -> Break {
-    match why {
-        Unstarted::Refused(refusal) => refusal.into(),
-        Unstarted::Stopped(stop) => stop.into(),
-        Unstarted::Program(e) => {
-            let withheld = || -> Option<String> {
-                #[cfg(unix)]
-                if let Some(interpreter) = interpreter {
-                    return confinement.interpreter_hint(interpreter);
-                }
-                #[cfg(windows)]
-                let _ = confinement;
-                None
-            };
-            at_spawn(&e, image, interpreter, withheld, shown).into()
-        }
-    }
-}
-
-/// Distinguish missing programs from missing or withheld interpreters.
-/// A sandbox may report a withheld interpreter as EACCES or ENOENT. Otherwise,
-/// ENOENT with an existing image indicates a missing interpreter or loader.
-/// Evaluate `withheld` only for errors that can carry that meaning.
-fn at_spawn(
+/// Explain why `execve` of `image` failed with `e`.
+///
+/// A sandbox that hides the interpreter gives EACCES or ENOENT, so `hint`
+/// is only called for those. Otherwise, ENOENT for a file that still exists
+/// means its interpreter or loader is missing.
+fn explain_exec_error(
     e: &std::io::Error,
     image: &Image,
     interpreter: Option<&Path>,
-    withheld: impl FnOnce() -> Option<String>,
+    hint: impl FnOnce() -> Option<String>,
     program: &str,
 ) -> Error {
     use crate::site::{Silent, site};
@@ -665,7 +546,7 @@ fn at_spawn(
         ))
     };
     let denied = matches!(e.kind(), PermissionDenied | NotFound)
-        .then(withheld)
+        .then(hint)
         .flatten();
     match (denied, e.kind(), image) {
         (Some(hint), ..) => failed(Unrunnable::PermissionDenied).with_hint(hint),
@@ -685,17 +566,16 @@ fn at_spawn(
     }
 }
 
-// Completion.
+// ── Ending ──────────────────────────────────────────────────────────────
 
-/// Interpret the child's result. A signal matching the cancellation cause is
-/// cancellation; other failures may include sandbox diagnostics captured since
-/// the launch began.
+/// Turn a child's exit into a result. Killed by our own cancellation means
+/// cancelled; any other failure gets sandbox-denial hints.
 pub(crate) fn ending(
     name: &str,
     outcome: WaitOutcome,
     cause: Option<CancelCause>,
     scope: &Scope,
-    claim: &Claim,
+    denial_pids: Option<&HashSet<u32>>,
     since: Instant,
 ) -> Settled<()> {
     if let Some(cause) = outcome.cancelled_by(cause) {
@@ -703,14 +583,19 @@ pub(crate) fn ending(
     }
     match outcome.failure() {
         None => Ok(()),
-        Some(failure) => Err(with_denials(name, failure, claim, since).into()),
+        Some(failure) => Err(exit_error(name, failure, denial_pids, since).into()),
     }
 }
 
-/// Add kernel denial messages for the launch's recorded PIDs and time interval.
-/// On macOS, resource-limit advice is a fallback. Unconfined launches read no log.
-fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> Error {
-    let Claim::Confined(pids) = claim else {
+/// The error for a failed exit, with a hint from kernel denials logged since
+/// `since`. On macOS, fall back to resource-limit advice.
+fn exit_error(
+    name: &str,
+    failure: Failure,
+    denial_pids: Option<&HashSet<u32>>,
+    since: Instant,
+) -> Error {
+    let Some(pids) = denial_pids else {
         return Error::new(Reason::process(name, failure));
     };
     let exited = match failure {
@@ -724,15 +609,6 @@ fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> 
     match hint {
         Some(hint) => error.with_hint(hint),
         None => error,
-    }
-}
-
-/// Set the terminal title for an interactive command when UI controls are allowed.
-fn announce_command_title(cmd: &str, shell: &Shell) {
-    if shell.is_interactive() && shell.terminal().ui_controls_ok() {
-        use std::io::Write;
-        let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
-        let _ = std::io::stdout().flush();
     }
 }
 

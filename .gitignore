@@ -49,3 +49,4 @@ synod/ui/js/bindings/
 synod/gen/
 /.agents
 /.claude
+/.pi/

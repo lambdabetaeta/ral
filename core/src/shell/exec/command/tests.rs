@@ -8,9 +8,7 @@ mod request {
 
     fn admits_command(ctx: &Context, command: Command<Request>) -> bool {
         !matches!(
-            command
-                .lookup(&ctx.grants, &Baseline::default())
-                .into_result(),
+            command.lookup(&ctx.grants, &Baseline::default()).state,
             Err(LookupFailure::Refused { .. })
         )
     }
@@ -24,7 +22,7 @@ mod request {
     #[test]
     fn a_tilde_path_is_shown_expanded_against_env_home() {
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var("HOME", "/tmp/home");
+        shell.context.set_env_var("HOME", "/tmp/home").unwrap();
         let command = Command::from_name(
             &CommandName::TildePath(crate::path::TildePath {
                 suffix: Some("/.local/bin/claude".into()),
@@ -123,7 +121,7 @@ mod request {
         let path = std::env::temp_dir().join("no-such-dir").join("configure");
         let command = looked_up(Command::from_name(&path_name(&path), &shell.context));
         assert!(matches!(
-            command.into_result(),
+            command.state,
             Err(LookupFailure::NotFound {
                 suggested_extension: None,
             })
@@ -141,7 +139,7 @@ mod request {
         let path = tmp.path().join(name).to_string_lossy().into_owned() + "/";
         let command = looked_up(Command::from_name(&CommandName::Path(path), &shell.context));
         assert!(matches!(
-            command.into_result(),
+            command.state,
             Err(LookupFailure::NotFound {
                 suggested_extension: None,
             })
@@ -154,9 +152,8 @@ mod request {
         let ctx = under(ExecGrant::default());
         for file in [tmp.path().join("missing"), tmp.path().join("absent/tool")] {
             let command = Command::from_name(&path_name(&file), &ctx);
-            let Err(LookupFailure::Refused { at, denial }) = command
-                .lookup(&ctx.grants, &Baseline::default())
-                .into_result()
+            let Err(LookupFailure::Refused { at, denial }) =
+                command.lookup(&ctx.grants, &Baseline::default()).state
             else {
                 panic!("an empty exec allowance refuses even an absent name");
             };
@@ -186,7 +183,7 @@ mod request {
             let Err(LookupFailure::Refused { denial, .. }) =
                 Command::from_name(&path_name(file), &ctx)
                     .lookup(&ctx.grants, &Baseline::default())
-                    .into_result()
+                    .state
             else {
                 panic!("running a read-withheld name is refused");
             };
@@ -237,7 +234,7 @@ mod request {
                 .into_string()
                 .unwrap();
             let mut ctx = under(ExecGrant::of([dir_key(d2.path())], []));
-            ctx.set_env_var("PATH", path.clone());
+            ctx.set_env_var("PATH", path.clone()).unwrap();
             let command = Command::from_name(&CommandName::Bare(name.as_str().into()), &ctx);
             if prime_memo {
                 assert_eq!(
@@ -266,19 +263,19 @@ mod request {
         let lookup = |dirs: [&Path; 3]| {
             let mut ctx = under(ExecGrant::of([dir_key(&admitted)], []));
             let path = std::env::join_paths(dirs).unwrap().into_string().unwrap();
-            ctx.set_env_var("PATH", path);
+            ctx.set_env_var("PATH", path).unwrap();
             Command::from_name(&CommandName::Bare("zzplain".into()), &ctx)
                 .lookup(&ctx.grants, &Baseline::default())
         };
         let Err(LookupFailure::Refused { at, .. }) =
-            lookup([absent.as_path(), denied.as_path(), admitted.as_path()]).into_result()
+            lookup([absent.as_path(), denied.as_path(), admitted.as_path()]).state
         else {
             panic!("the first non-absence is a refusal");
         };
         assert_eq!(at, path::shown(denied.join("zzplain")));
         let first = lookup([absent.as_path(), admitted.as_path(), denied.as_path()]);
         assert!(matches!(
-            first.into_result(),
+            first.state,
             Err(LookupFailure::NotRunnable(NotRunnable {
                 found,
                 why: Unrunnable::NotExecutable,
@@ -299,7 +296,7 @@ mod request {
             .into_string()
             .unwrap();
         let mut ctx = under(ExecGrant::of([dir_key(dirs[2].path())], []));
-        ctx.set_env_var("PATH", path.clone());
+        ctx.set_env_var("PATH", path.clone()).unwrap();
         assert_eq!(
             path::locate(&name, Some(&path), Some(ctx.cwd())),
             Some(dirs[1].path().join(&name)),
@@ -335,14 +332,15 @@ mod request {
         );
         shell
             .context
-            .set_env_var("PATH", elsewhere.path().to_string_lossy().into_owned());
+            .set_env_var("PATH", elsewhere.path().to_string_lossy().into_owned())
+            .unwrap();
 
         let command = looked_up(Command::from_name(
             &CommandName::Bare(name.into()),
             &shell.context,
         ));
         assert!(matches!(
-            command.into_result(),
+            command.state,
             Err(LookupFailure::NotFound {
                 suggested_extension: None,
             })
@@ -362,14 +360,15 @@ mod request {
         let mut shell = crate::test_helper::core_shell();
         shell
             .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
+            .set_env_var("PATH", dir.path().to_string_lossy().into_owned())
+            .unwrap();
 
         let command = looked_up(Command::from_name(
             &CommandName::Bare("zznoexec".into()),
             &shell.context,
         ));
         assert!(matches!(
-            command.into_result(),
+            command.state,
             Err(LookupFailure::NotRunnable(NotRunnable {
                 found,
                 why: Unrunnable::NotExecutable,
@@ -398,7 +397,7 @@ mod request {
                 &CommandName::Path(shown.into()),
                 &shell.context,
             ));
-            let Err(LookupFailure::NotRunnable(details)) = command.into_result() else {
+            let Err(LookupFailure::NotRunnable(details)) = command.state else {
                 panic!("{shown} cannot run");
             };
             assert_eq!(details.found, shown);
@@ -414,7 +413,8 @@ mod request {
         let mut shell = crate::test_helper::core_shell();
         shell
             .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
+            .set_env_var("PATH", dir.path().to_string_lossy().into_owned())
+            .unwrap();
         let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
         assert!(matches!(command.state, Request::Tool(tool) if tool == "ls"));
     }
@@ -427,7 +427,8 @@ mod request {
         let dir = tempfile::tempdir().unwrap();
         let name = plant(dir.path(), "git");
         let mut ctx = under(ExecGrant::of([ExecKey::Name("git".into())], []));
-        ctx.set_env_var("PATH", dir.path().to_string_lossy().into_owned());
+        ctx.set_env_var("PATH", dir.path().to_string_lossy().into_owned())
+            .unwrap();
 
         let command = Command::from_name(&CommandName::Bare("git".into()), &ctx);
         assert_eq!(
@@ -597,7 +598,7 @@ mod request {
             crate::path::CwdPath::new(tmp.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
-        shell.context.set_env_var("PATH", "./bin");
+        shell.context.set_env_var("PATH", "./bin").unwrap();
 
         let command = looked_up(Command::from_name(
             &CommandName::Bare(name.as_str().into()),
@@ -632,35 +633,12 @@ mod vet {
     use crate::shell::runtime::{CapturePolicy, Mooring, Shell};
     use std::path::Path;
 
-    #[test]
-    fn dyld_names_borrow_the_shell_overlay() {
-        let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var("DYLD_INSERT_LIBRARIES", "injected.dylib");
-        shell.context.set_env_var("DYLD_FUTURE_OPTION", "value");
-        shell.context.set_env_var("OTHER_OPTION", "value");
-        let mut borrowed: Vec<_> = dyld_vars(&shell)
-            .filter_map(|name| match name {
-                Cow::Borrowed(name) => Some(name),
-                Cow::Owned(_) => None,
-            })
-            .collect();
-        borrowed.sort_unstable();
-        assert_eq!(
-            borrowed,
-            [
-                OsStr::new("DYLD_FUTURE_OPTION"),
-                OsStr::new("DYLD_INSERT_LIBRARIES")
-            ]
-        );
-    }
-
     /// A command admitted with no surface, then prepared with no argv.
-    fn plan(command: Command<Request>, shell: &mut Shell) -> Settled<ExternalCommand> {
+    fn plan(command: Command<Request>, shell: &mut Shell) -> Settled<Prepared> {
         command
+            .lookup(&shell.context.grants, shell.baseline())
             .admit(&Mooring::adrift(), shell)?
-            .prepare(&[], shell)
+            .prepare(&[], Ownership::Kept, shell)
     }
 
     /// An executable a *bare-name* walk finds in `dir`; off Unix a bare name
@@ -781,20 +759,21 @@ mod vet {
         let elsewhere = tempfile::tempdir().unwrap();
 
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var("PATH", "./bin");
+        shell.context.set_env_var("PATH", "./bin").unwrap();
         shell.seed_cwd(
             crate::path::CwdPath::new(tmp.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
         let command = Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context)
+            .lookup(&shell.context.grants, shell.baseline())
             .admit(&Mooring::adrift(), &mut shell)
             .expect("an unrestricted shell admits the command");
         assert!(matches!(
-            command.state.program.as_ref().map(Admitted::program),
+            command.state.as_ref().map(Admitted::program),
             Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
         ));
         command
-            .prepare(&[], &shell)
+            .prepare(&[], Ownership::Kept, &shell)
             .expect("a resolved name must prepare");
 
         shell.seed_cwd(
@@ -814,11 +793,12 @@ mod vet {
         let mut shell = crate::test_helper::core_shell();
         shell
             .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
+            .set_env_var("PATH", dir.path().to_string_lossy().into_owned())
+            .unwrap();
 
         let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
         let plan = plan(command, &mut shell).expect("bundled name must not 127");
-        assert_eq!(plan.shown, "ls");
+        assert_eq!(plan.diagnosis.shown, "ls");
     }
 
     /// The 126 case of an explicit path: a file lacking `+x`, or a directory,
@@ -894,10 +874,13 @@ mod vet {
             dir
         });
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var(
-            "PATH",
-            std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
-        );
+        shell
+            .context
+            .set_env_var(
+                "PATH",
+                std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
+            )
+            .unwrap();
         for present in [false, true] {
             if present {
                 for dir in &dirs[1..] {
@@ -951,10 +934,13 @@ mod vet {
         ));
         let mut shell = crate::test_helper::core_shell();
         for dirs in [vec![&admitted], vec![&outside, &admitted]] {
-            shell.context.set_env_var(
-                "PATH",
-                std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
-            );
+            shell
+                .context
+                .set_env_var(
+                    "PATH",
+                    std::env::join_paths(&dirs).unwrap().into_string().unwrap(),
+                )
+                .unwrap();
             let e = shell.with_layer(run_from_excluding(&admitted, [excluded.clone()]), |shell| {
                 refused(
                     Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context),
@@ -995,13 +981,16 @@ mod vet {
         let name = plant(&locked, "zzlocked");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var(
-            "PATH",
-            std::env::join_paths([&empty, &locked])
-                .unwrap()
-                .into_string()
-                .unwrap(),
-        );
+        shell
+            .context
+            .set_env_var(
+                "PATH",
+                std::env::join_paths([&empty, &locked])
+                    .unwrap()
+                    .into_string()
+                    .unwrap(),
+            )
+            .unwrap();
         let e = refused(
             Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context),
             &mut shell,
@@ -1044,13 +1033,16 @@ mod vet {
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var(
-            "PATH",
-            std::env::join_paths([d1.path(), d2.path()])
-                .unwrap()
-                .into_string()
-                .unwrap(),
-        );
+        shell
+            .context
+            .set_env_var(
+                "PATH",
+                std::env::join_paths([d1.path(), d2.path()])
+                    .unwrap()
+                    .into_string()
+                    .unwrap(),
+            )
+            .unwrap();
         let command = Command::from_name(
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
@@ -1080,9 +1072,11 @@ mod vet {
                     &CommandName::Path(file.to_string_lossy().into_owned()),
                     &shell.context,
                 )
+                .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant runs this directory");
-                let Err(Break::Error(e)) = command.prepare(&[Value::Unit], shell) else {
+                let Err(Break::Error(e)) = command.prepare(&[Value::Unit], Ownership::Kept, shell)
+                else {
                     panic!("the admitted path cannot be run");
                 };
                 assert_eq!(e.failure_code().get(), code, "{e:?}");
@@ -1102,12 +1096,15 @@ mod vet {
         let mut shell = crate::test_helper::core_shell();
         shell
             .context
-            .set_env_var("PATH", tmp.path().to_string_lossy().into_owned());
+            .set_env_var("PATH", tmp.path().to_string_lossy().into_owned())
+            .unwrap();
         shell.with_layer(run_from(tmp.path()), |shell| {
             let command = Command::from_name(&CommandName::Bare("zzplain".into()), &shell.context)
+                .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the non-executable file");
-            let Err(Break::Error(e)) = command.prepare(&[Value::Unit], shell) else {
+            let Err(Break::Error(e)) = command.prepare(&[Value::Unit], Ownership::Kept, shell)
+            else {
                 panic!("a non-executable candidate cannot be run");
             };
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
@@ -1407,11 +1404,12 @@ mod foreground {
         }
         let (mut shell, mooring) = leased_shell();
         let command = Command::from_name(&CommandName::Path("/bin/sleep".into()), &shell.context)
+            .lookup(&shell.context.grants, shell.baseline())
             .admit(&mooring, &mut shell)
             .expect("an unrestricted shell admits sleep");
         let started = std::time::Instant::now();
         let command = command
-            .prepare(&[Value::string("30")], &shell)
+            .prepare(&[Value::string("30")], Ownership::Kept, &shell)
             .expect("the launch builds");
         let Err(Break::Error(refusal)) = command.run(&mooring, &shell) else {
             panic!("a failed handoff must refuse the command");
@@ -1453,7 +1451,7 @@ mod process {
     use super::super::*;
 
     mod denials {
-        use super::{Claim, with_denials};
+        use super::exit_error;
         use crate::fact::{Failure, Reason};
         use std::time::Instant;
 
@@ -1470,8 +1468,7 @@ mod process {
                 Failure::Exited(i32::MIN),
                 Failure::Signaled(31),
             ] {
-                let error =
-                    with_denials("tool", failure.clone(), &Claim::Unconfined, Instant::now());
+                let error = exit_error("tool", failure.clone(), None, Instant::now());
                 assert_eq!(error.reason, Reason::process("tool", failure));
                 assert!(error.hints().is_empty(), "{:?}", error.hints());
             }
@@ -1485,14 +1482,14 @@ mod process {
         fn a_confined_fork_brake_hint_reads_only_an_exit_status_of_128() {
             let braked = crate::process::limits::failure_hint(128);
             assert!(braked.is_some());
-            let claim = Claim::Confined(std::collections::HashSet::new());
+            let pids = std::collections::HashSet::new();
             for (failure, hint) in [
                 (Failure::Exited(128), braked.as_deref()),
                 (Failure::Exited(384), None),
                 (Failure::Exited(-1), None),
                 (Failure::Signaled(128), None),
             ] {
-                let error = with_denials("tool", failure.clone(), &claim, Instant::now());
+                let error = exit_error("tool", failure.clone(), Some(&pids), Instant::now());
                 assert_eq!(error.reason, Reason::process("tool", failure));
                 assert_eq!(error.hints().first().map(|h| &**h), hint);
             }
@@ -1503,7 +1500,8 @@ mod process {
     /// spelling the user wrote, however the spelling moves in between.
     #[cfg(unix)]
     mod judged_program {
-        use super::{Command, ExternalCommand};
+        use super::{Command, Prepared};
+        use crate::authority::sandbox::Ownership;
         use crate::io::child::Connection;
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
@@ -1539,18 +1537,19 @@ mod process {
             link
         }
 
-        fn judge(shell: &mut Shell, args: &[&str]) -> ExternalCommand {
+        fn judge(shell: &mut Shell, args: &[&str]) -> Prepared {
             let command =
                 Command::from_name(&CommandName::Path("tools/build".into()), &shell.context);
             let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
             command
+                .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("an unrestricted shell admits the file")
-                .prepare(&args, shell)
+                .prepare(&args, Ownership::Kept, shell)
                 .expect("the file can be run")
         }
 
-        fn stdout_of(prepared: ExternalCommand) -> String {
+        fn stdout_of(prepared: Prepared) -> String {
             let out = prepared.launch.output().expect("the file runs");
             String::from_utf8(out.stdout).unwrap()
         }
@@ -1588,13 +1587,15 @@ mod process {
         /// No sandbox confines a start under no grant, so it claims no line.
         #[test]
         fn an_unconfined_start_claims_no_line() {
-            use super::{Claim, Started};
+            use super::Started;
             let (tmp, mut shell) = workdir();
             point_build_at(tmp.path(), &plant(tmp.path(), "a"));
             let prepared = judge(&mut shell, &[]);
             let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
             let Ok(Started {
-                mut spawned, claim, ..
+                mut spawned,
+                denial_pids,
+                ..
             }) = prepared.start(
                 Connection::new(&Source::Empty, &discard, &discard).unwrap(),
                 crate::process::PgidPolicy::Inherit,
@@ -1604,7 +1605,7 @@ mod process {
                 panic!("the file starts");
             };
             let _ = spawned.child.reap();
-            assert_eq!(claim, Claim::Unconfined);
+            assert_eq!(denial_pids, None);
         }
 
         /// The control: the harness tells `a` from `b`, so the next test cannot
@@ -1684,8 +1685,8 @@ mod process {
     }
 
     #[cfg(unix)]
-    mod at_spawn_tests {
-        use super::at_spawn;
+    mod exec_error_tests {
+        use super::explain_exec_error;
         use crate::authority::sandbox::Image;
         use crate::fact::{Failure, Reason, Unrunnable};
         use std::io::{Error, ErrorKind};
@@ -1705,7 +1706,7 @@ mod process {
         /// `e` starting `image`, whose `#!` named `interpreter` when it was
         /// built, under no sandbox that withholds anything.
         fn unwithheld(e: &Error, image: &Image, interpreter: Option<&str>) -> Reason {
-            at_spawn(e, image, interpreter.map(Path::new), || None, "run").reason
+            explain_exec_error(e, image, interpreter.map(Path::new), || None, "run").reason
         }
 
         fn enoent(image: &Image, interpreter: Option<&str>) -> Reason {
@@ -1775,7 +1776,7 @@ mod process {
             let withheld = || Some(hint.to_owned());
 
             for errno in [libc::ENOENT, libc::EACCES] {
-                let denied = at_spawn(
+                let denied = explain_exec_error(
                     &Error::from_raw_os_error(errno),
                     &image,
                     interpreter,
@@ -1789,7 +1790,7 @@ mod process {
                 );
                 assert_eq!(denied.hints().first().map(|h| &**h), Some(hint), "{errno}");
             }
-            let missing = at_spawn(
+            let missing = explain_exec_error(
                 &Error::from_raw_os_error(libc::ENOENT),
                 &image,
                 interpreter,
@@ -1804,7 +1805,7 @@ mod process {
             );
             assert!(missing.hints().is_empty(), "{:?}", missing.hints());
             let e2big = Error::from_raw_os_error(libc::E2BIG);
-            let other = at_spawn(
+            let other = explain_exec_error(
                 &e2big,
                 &image,
                 interpreter,
@@ -1823,8 +1824,9 @@ mod process {
     /// unconfined one is, never a trampoline's exit status.
     #[cfg(target_os = "macos")]
     mod confined_start {
-        use super::{Claim, Command, Started};
+        use super::{Command, Started};
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
+        use crate::authority::sandbox::Ownership;
         use crate::fact::{Failure, Reason, Unrunnable};
         use crate::io::child::Connection;
         use crate::io::{Sink, Source};
@@ -1865,16 +1867,20 @@ mod process {
                     &CommandName::Path(script.to_string_lossy().into_owned()),
                     &shell.context,
                 )
+                .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the script");
-                let prepared = command.prepare(&[], shell).expect("the launch builds");
-                let shown = prepared.shown.clone();
+                let prepared = command
+                    .prepare(&[], Ownership::Kept, shell)
+                    .expect("the launch builds");
+                let shown = prepared.diagnosis.shown.clone();
+                let pgid = PgidPolicy::Inherit.unless_enveloped(prepared.enveloped());
                 between();
                 (
                     shown,
                     prepared.start(
                         Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
-                        PgidPolicy::Inherit,
+                        pgid,
                         &shell.scope,
                     ),
                 )
@@ -1901,17 +1907,16 @@ mod process {
             let (_dir, script) = script("#!/bin/sh\nexit 0\n");
             let (_, settled) = launched(&script, None, || ());
             let Ok(Started {
-                mut spawned, claim, ..
+                mut spawned,
+                denial_pids,
+                ..
             }) = settled
             else {
                 panic!("the confined script starts");
             };
             let pid = spawned.child.id();
             let _ = spawned.child.reap();
-            assert_eq!(
-                claim,
-                Claim::Confined(std::collections::HashSet::from([pid]))
-            );
+            assert_eq!(denial_pids, Some(std::collections::HashSet::from([pid])));
         }
 
         fn not_runnable(shown: &str, why: Unrunnable) -> Reason {

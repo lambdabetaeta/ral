@@ -1,44 +1,42 @@
-//! Command dispatch: resolve a command name, then run the arm.
+//! Command words: what a head names, and how an external one runs.
 //!
-//! Order is env → handlers → external for a bare name; `^name` and an explicit
-//! path are the external directly, consulting neither the env nor the stack.
-//! `evaluator::machine`'s `Exec` rule is the entry that resolves and runs
-//! every arm; pipeline staging reaches `resolve_command_word` directly.
+//! A bare name is looked up in the env, then the handler stack, then `PATH`;
+//! `^name` and a path are always externals. The evaluator's `Exec` rule runs
+//! every arm but the external, which runs here.
 
-use crate::fact::AuditIo;
-use crate::ir::{CommandName, CommandWord};
-use crate::shell::runtime::{
-    AuditStart, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring, Settled,
-    Shell, Value,
-};
-
-use super::capture::with_audit_capture;
-use super::command::{Checked, Command, Request};
+use super::command::{Command, Request};
 use super::redirect::scope::with_redirects;
-use crate::ir::Redirects;
+use crate::authority::policy::Admitted;
+use crate::authority::sandbox::Ownership;
+use crate::error::Error;
+use crate::ir::{CommandName, CommandWord, Redirects};
+use crate::shell::runtime::{
+    BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring, Settled, Shell, Value,
+};
 use crate::source::Span;
 
-// ── Resolution ─────────────────────────────────────────────────────────
-
-/// One arm per place a command name can live.
+/// What a command head names.
 pub(crate) enum Resolution {
     Env(Value),
-    /// `depth` counts handler frames from the top down to the matched one
-    /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
-    /// otherwise set the size of every arm.
+    /// `depth` counts handler frames from the top down to the match,
+    /// inclusive, as `strip_matched` takes it. Boxed to keep the enum small.
     Handler {
         entry: Box<HandlerEntry>,
         depth: usize,
     },
-    /// A base handler frame — a manifest row from the argv half.
+    /// One of ral's own commands, from the base handler frame.
     Base(BuiltinEntry),
     External(Command<Request>),
 }
 
-/// Bare-name lookup: env → handlers → external. The `f` in `f x` is a
-/// lexical name, so `env` — not `shell.env` — is what a bare name
-/// resolves through.  No admission check and no audit.
-pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
+/// Resolve a command head. `env` is the lexical env, not `shell.env`.
+pub(crate) fn resolve_command_word(word: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
+    let name = match word {
+        CommandWord::Name(CommandName::Bare(name)) => name,
+        CommandWord::External(name) | CommandWord::Name(name) => {
+            return Resolution::External(Command::from_name(name, &shell.context));
+        }
+    };
     if let Some(value) = crate::shell::runtime::lookup(name, env, &shell.sig) {
         return Resolution::Env(value.clone());
     }
@@ -46,121 +44,48 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
         Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
         None => Resolution::External(Command::from_name(
-            &CommandName::Bare(name.into()),
+            &CommandName::Bare(name.clone()),
             &shell.context,
         )),
     }
 }
 
-/// Resolve a [`CommandWord`]: a bare name goes through [`resolve`]; `^name`
-/// and an explicit path are the external directly, consulting neither the env
-/// nor the handler stack.
-pub(crate) fn resolve_command_word(word: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
-    match word {
-        CommandWord::Name(CommandName::Bare(s)) => resolve(s, env, shell),
-        CommandWord::External(name) | CommandWord::Name(name) => {
-            Resolution::External(Command::from_name(name, &shell.context))
-        }
-    }
-}
-
-// ── Runners ─────────────────────────────────────────────────────────────
-
 impl Shell {
-    /// Run an external directly from a native body in the current run.
-    ///
-    /// `program` is a bare name or literal path, never source syntax; env and
-    /// handler lookup are skipped. Pass the body's mooring to retain its audit
-    /// and terminal authority. The current grants, scope and streams apply.
+    /// `^program args…`, for a host holding no syntax: no handlers, no
+    /// redirects, no span. Otherwise exactly the `Exec` rule's external.
     ///
     /// # Errors
     /// Admission, argument, launch, child failure or cancellation.
-    pub fn run_external_argv(
+    pub fn run_external(
         &mut self,
         program: &str,
         args: &[Value],
         mooring: &Mooring,
     ) -> Settled<Value> {
-        let command =
-            Command::from_name(&CommandName::of(program), &self.context).admit(mooring, self)?;
+        let command = Command::from_name(&CommandName::of(program), &self.context)
+            .lookup(&self.context.grants, self.baseline())
+            .admit(mooring, self)?;
         run_external(command, args, &Redirects::default(), None, mooring, self)
     }
 }
 
-/// Run a base handler frame directly with the argv slice — no adapter, no
-/// masking: a native body never self-forwards.
-///
-/// The values arrive unrendered, unlike a ral arm's (`render_handler_args`):
-/// a native body renders what it writes and vets what it launches, and the
-/// exec boundary's refusal is a judgement on the value's shape.
-pub(crate) fn run_base_frame(
-    entry: &BuiltinEntry,
-    args: &[Value],
-    span: Option<Span>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    entry.framed(span, shell, |shell, frame| {
-        entry.call_body(frame, args, None, mooring, shell)
-    })
-}
-
-/// An external's door, with its redirects installed inside it.
+/// Run an admitted external under its redirects.
 pub(crate) fn run_external(
-    command: Command<Checked>,
+    command: Command<Result<Admitted, Error>>,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let shown = command.shown.clone();
-    call_external(&shown, args, span, mooring, shell, |shell| {
+    let origin = CommandOrigin::External;
+    command.with_record(args, origin, span, mooring, shell, |command, shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
-            command.prepare(args, shell)?.run(mooring, shell)
+            command
+                .prepare(args, Ownership::Kept, shell)?
+                .run(mooring, shell)
         })
     })
-}
-
-/// An external's door: stamp the start, tee its stdout and stderr through
-/// the capture, name a failure, and settle the one `Command` observation.
-fn call_external(
-    shown: &str,
-    args: &[Value],
-    span: Option<Span>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-    body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Settled<Value> {
-    shell.at_site(shown.to_owned(), span, |shell| {
-        let start = shell.audit_start(mooring);
-        let (result, io) = with_audit_capture(shell, body);
-        let result = result.map_err(|b| b.locate(shown, span, shell));
-        finish_command(shell, mooring, start, shown, args, &result, io);
-        result
-    })
-}
-
-fn finish_command(
-    shell: &mut Shell,
-    mooring: &Mooring,
-    start: Option<AuditStart>,
-    shown: &str,
-    args: &[Value],
-    result: &Settled<Value>,
-    io: AuditIo,
-) {
-    let Some(start) = start else { return };
-    // A stop is recorded too, as a pipeline's external stage records it.
-    let obs = shell.command_observation(
-        &start,
-        shown,
-        Value::render_argv(args),
-        CommandOrigin::External,
-        result.as_ref().err(),
-        io,
-    );
-    shell.observe_stamped(Some(mooring), obs);
 }
 
 #[cfg(all(test, unix))]
@@ -185,7 +110,8 @@ mod tests {
         shell.seed_cwd(crate::path::CwdPath::new(tmp.path().to_path_buf()).unwrap());
         shell
             .context
-            .set_env_var("PATH", tmp.path().to_str().unwrap());
+            .set_env_var("PATH", tmp.path().to_str().unwrap())
+            .unwrap();
         (tmp, shell)
     }
 
@@ -194,7 +120,7 @@ mod tests {
         let (_tmp, mut shell) = external();
         for program in ["native-external", "./native-external"] {
             for code in [0, 7] {
-                let result = shell.run_external_argv(
+                let result = shell.run_external(
                     program,
                     &[
                         Value::string("one argument"),
@@ -227,7 +153,7 @@ mod tests {
             .local
             .audit
             .open(crate::shell::runtime::CapturePolicy::Off);
-        let result = shell.run_external_argv(
+        let result = shell.run_external(
             "native-external",
             &[Value::string("one argument"), Value::string("7")],
             &Mooring::adrift(),
@@ -263,7 +189,7 @@ mod tests {
                 exec: Some(ExecGrant::default()),
                 ..Capabilities::default()
             }));
-        let result = shell.run_external_argv(
+        let result = shell.run_external(
             "native-external",
             &[Value::string("one argument"), Value::string("0")],
             &Mooring::adrift(),

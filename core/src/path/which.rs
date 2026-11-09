@@ -22,7 +22,7 @@ use super::lex::{anchor_on, fold_dots};
 #[cfg(windows)]
 use super::site::Silent;
 use super::{CwdPath, LeafMode, LexicalPath, Located, walk};
-use crate::host::EnvVars;
+use crate::environ::EnvVars;
 #[cfg(windows)]
 use crate::site::site;
 
@@ -381,6 +381,17 @@ fn windows_command_candidates(base: &Path, suffixes: &[String]) -> Vec<PathBuf> 
     out
 }
 
+/// `file` with each executable extension added, walked. Used to suggest the
+/// extension a user left off a path that names nothing.
+#[cfg(windows)]
+pub(crate) fn with_exec_extensions(file: &Path) -> impl Iterator<Item = (&'static str, Candidate)> {
+    super::lex::WINDOWS_EXEC_EXTENSIONS
+        .iter()
+        .filter_map(|&ext| {
+            Candidate::walk(super::lex::with_appended_suffix(file, ext)).map(|found| (ext, found))
+        })
+}
+
 /// The memo's tests, on every platform — separate from the walk's `tests`
 /// below only because those are written against Unix permission bits.
 #[cfg(test)]
@@ -533,16 +544,17 @@ mod memo_tests {
     #[cfg(windows)]
     #[test]
     fn a_changed_pathext_re_probes() {
+        use crate::host::test_support::with_var;
         let _guard = cache_guard();
         let tmp = tempfile::tempdir().unwrap();
         make_executable(&tmp.path().join("runme.bat"));
         let path_value = as_path_value(tmp.path());
 
         // No `forget` between the two: `%PATHEXT%` is in the key itself.
-        let without = crate::host::env::test_support::with_var("PATHEXT", Some(".EXE"), || {
+        let without = with_var("PATHEXT", Some(".EXE"), || {
             locate("runme", Some(&path_value), None)
         });
-        let with = crate::host::env::test_support::with_var("PATHEXT", Some(".BAT"), || {
+        let with = with_var("PATHEXT", Some(".BAT"), || {
             locate("runme", Some(&path_value), None)
         });
         assert_eq!(without, None);
@@ -557,6 +569,7 @@ mod memo_tests {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod windows_tests {
     use super::*;
+    use crate::host::test_support::with_var;
     use crate::path::WINDOWS_EXEC_EXTENSIONS;
 
     /// `%PATHEXT%`'s fallback and the name-key strip list are twin copies of
@@ -595,7 +608,7 @@ mod windows_tests {
         std::fs::write(tmp.path().join("build.exe"), b"MZ").unwrap();
         let path_value = tmp.path().to_str().unwrap().to_owned();
 
-        crate::host::env::test_support::with_var("PATHEXT", Some(".EXE"), || {
+        with_var("PATHEXT", Some(".EXE"), || {
             assert_eq!(
                 locate("build.ps1", Some(&path_value), None),
                 None,
@@ -702,7 +715,7 @@ mod tests {
     fn ral_path_entries_split_the_overlays_list_dropping_empties() {
         let dirs = [PathBuf::from("/x"), PathBuf::from("/y")];
         let joined = std::env::join_paths(["", "/x", "", "/y"]).unwrap();
-        let env = EnvVars::from_iter([("RAL_PATH", joined.to_str().unwrap())]);
+        let env = EnvVars::from_pairs([("RAL_PATH", joined.to_str().unwrap())]).unwrap();
         assert_eq!(ral_path_entries(&env), dirs);
     }
 

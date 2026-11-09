@@ -12,7 +12,7 @@ use gray_matter::engine::YAML;
 use ral_core::Shell;
 use ral_core::authority::policy::LocateError;
 use ral_core::authority::policy::{Baseline, GrantStack};
-use ral_core::host::EnvVars;
+use ral_core::environ::EnvVars;
 use ral_core::path::{
     CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
 };

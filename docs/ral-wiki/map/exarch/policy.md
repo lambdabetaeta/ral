@@ -163,7 +163,7 @@ and macOS; on Windows the prompt says it stays in reach); `reasonable` and
 `dangerous` leave it.
 
 **Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
-— coreutils, and diffutils/ripgrep under their features). `Head::resolve` makes
+— coreutils, and diffutils/ripgrep under their features). `Command::from_name` makes
 those a `Program::Tool` and skips the `PATH` walk entirely, so they reach the
 in-process guard as a tool with no place on disk: a directory prefix cannot
 match one, and silence denies it. That is why `read-only`, `edit-only`,

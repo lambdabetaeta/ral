@@ -2,7 +2,7 @@
 status: active
 generated_at_commit: f1b0a4a4
 verified_at_commit: 257c6c00
-anchors: [Program, Head, ExternalCommand::prepare, Warrant, Confined, Slot, build, admit_exec, Binds]
+anchors: [Program, Command, Command::prepare, Warrant, Confined, Slot, build, admit_exec, Binds]
 ---
 
 # The image is not pinned
@@ -176,7 +176,7 @@ What the kernel now reports:
 ## Where
 
 `core/src/authority/policy/exec.rs` (`Program`), `core/src/path/forms.rs`,
-`core/src/shell/exec/command.rs` (`Head`, `ExternalCommand::prepare`),
+`core/src/shell/exec/command.rs` (`Command`, `Command::prepare`),
 `core/src/process/launch.rs` (`Launch::new`), `core/src/authority/sandbox/launch.rs`,
 `core/src/authority/sandbox/warrant.rs` (`Confined`, `Warrant::confine`),
 `core/src/authority/sandbox/warrant/handoff.rs` (`Slot`),

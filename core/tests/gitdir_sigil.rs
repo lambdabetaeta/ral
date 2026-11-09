@@ -13,8 +13,8 @@
 //! rather than a wider grant.
 
 use ral_core::authority::grant::freeze::{Anchor, FreezeCtx};
+use ral_core::environ::EnvVars;
 use ral_core::error::Error;
-use ral_core::host::EnvVars;
 use ral_core::path::CwdPath;
 use std::path::{Path, PathBuf};
 

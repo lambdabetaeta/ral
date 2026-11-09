@@ -535,6 +535,7 @@ pub(super) fn parse_at(text: &str, cursor: usize) -> Option<CommandAt> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::environ::EnvVars;
 
     use ral_core::carrier::IdentityTransport;
     use ral_core::path::EnginePath;
@@ -606,7 +607,7 @@ mod tests {
                 EnginePath::Host(cwd.into()),
             ),
             ral_core::protocol::Root::new(EnginePath::Host(cwd.into()))
-                .with_env(vec![("PATH".into(), path.into())]),
+                .with_env(EnvVars::from_pairs([("PATH", path)]).unwrap()),
         );
         let runtime = ral_core::HostSurface::default()
             .runtime(ral_core::io::terminal::TerminalState::default())

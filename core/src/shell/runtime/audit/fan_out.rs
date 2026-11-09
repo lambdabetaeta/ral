@@ -10,18 +10,8 @@
 //! With nobody listening the recorders are no-ops, so a site can call them
 //! unconditionally.
 
-use super::epoch_us;
-use crate::fact::{AuditIo, Check, Command, ExitCode, Observation, Observed};
-use crate::shell::runtime::{Break, CommandOrigin, Mooring, Shell};
-use crate::source::CallSite;
-
-/// Where a command was called from and when it began: the two halves of an
-/// observation's stamp, paired so the dispatch site carries one local.
-#[derive(Clone, Debug)]
-pub(crate) struct AuditStart {
-    pub site: CallSite,
-    pub(crate) time: i64,
-}
+use crate::fact::{Check, Observation, Observed};
+use crate::shell::runtime::{Mooring, Shell};
 
 impl Shell {
     /// `what`, stamped now at the current dispatch site and principal.  `pub`
@@ -65,45 +55,6 @@ impl Shell {
             let obs = self.observation(what);
             self.observe_stamped(Some(mooring), obs);
         }
-    }
-
-    /// With nobody listening, no stamp, clone, or clock read.
-    pub(crate) fn audit_start(&self, mooring: &Mooring) -> Option<AuditStart> {
-        self.listening(mooring).then(|| AuditStart {
-            site: self.call_site(),
-            time: epoch_us(),
-        })
-    }
-
-    /// The one `Command` record of an external launched at `start` and ended
-    /// as `broke`: status 0 when it did not.  Built whether or not it is
-    /// emitted; the caller routes it through [`Self::observe_stamped`].
-    pub(crate) fn command_observation(
-        &self,
-        start: &AuditStart,
-        shown: &str,
-        args: Vec<String>,
-        origin: CommandOrigin,
-        broke: Option<&Break>,
-        io: AuditIo,
-    ) -> Observation {
-        Observation::spanning(
-            start.site.clone(),
-            start.time,
-            epoch_us(),
-            self.context.principal(),
-            Observed::Command(Command::new(
-                shown,
-                args,
-                broke.map_or(0, ExitCode::code),
-                origin,
-                io,
-                broke.map(|b| match b {
-                    Break::Error(e) => e.describe().into_owned(),
-                    Break::Escape(e) => e.to_string(),
-                }),
-            )),
-        )
     }
 
     /// Record a check worth reporting: a refusal, or a deputy admitted but

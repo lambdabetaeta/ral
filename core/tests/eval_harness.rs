@@ -30,7 +30,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<V
 /// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
 fn eval_on_path(input: &str, path: &str) -> ral_core::shell::runtime::Settled<Value> {
     let mut shell = common::prelude_shell();
-    shell.set_env_var("PATH", path);
+    shell.set_env_var("PATH", path).unwrap();
     run_on(&mut shell, input)
 }
 
@@ -78,7 +78,7 @@ fn try_error_record_carries_the_script() {
 #[test]
 fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = common::prelude_shell();
-    shell.set_env_var("RAL_TEST_ENV", "override");
+    shell.set_env_var("RAL_TEST_ENV", "override").unwrap();
     let result = run_on(&mut shell, "return !{env}[RAL_TEST_ENV]").expect("evaluate env");
     assert_eq!(result, Value::string("override"));
 }

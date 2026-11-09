@@ -21,8 +21,8 @@ use load::{absolute_in, load_capabilities_ral, load_fragment_ral};
 use ral_core::authority::grant::freeze::{FreezeCtx, Place, host_absolute};
 use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
 use ral_core::authority::policy::{GrantLayer, GrantStack};
+use ral_core::environ::EnvVars;
 use ral_core::error::Error;
-use ral_core::host::EnvVars;
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::CwdPath;
 use ral_core::shell::grant::decode_fragment;
@@ -486,7 +486,8 @@ mod tests {
             .into_iter()
             .chain(xdg);
         let cwd = CwdPath::new(PathBuf::from("/fixture/work")).expect("an absolute cwd");
-        let ctx = FreezeCtx::at(env.collect(), cwd).with_scratch(Some("/fixture/scratch"));
+        let ctx = FreezeCtx::at(EnvVars::from_pairs(env).unwrap(), cwd)
+            .with_scratch(Some("/fixture/scratch"));
         let credential = PathBuf::from("/fixture/home/.local/state/exarch/credentials.json");
         let own = Path::new("/fixture/bin/exarch");
         let Invocation { stack, .. } =

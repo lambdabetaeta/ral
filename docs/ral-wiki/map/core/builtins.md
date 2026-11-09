@@ -346,7 +346,7 @@ Bodies are grouped by concern, one submodule each:
   whole resolution chain, so `explain`
   also names what a name shadows, a PATH binary included, which is the
   question `which` answers wrongly for every name ral provides. The command
-  head is judged as a launch would be (`Head::select` under the live grant
+  head is judged as a launch would be (`Command::lookup` under the live grant
   stack): a bundled tool reads `bundled`, a refused head `denied by grant`
   naming the path as requested;
 - `print.rs` — the shell's runtime values as a `Printable` view onto the one

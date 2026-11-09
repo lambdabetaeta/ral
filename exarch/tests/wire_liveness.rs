@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 mod test_helper;
 
 use ral_core::carrier::{Host, Transport, WireTransport, dispatch_to_report};
+use ral_core::environ::EnvVars;
 use ral_core::fact::ExitCode as _;
 use ral_core::path::EnginePath;
 use ral_core::protocol::channel::Liveness;
@@ -63,10 +64,13 @@ fn attach(transport: &WireTransport) -> tempfile::TempDir {
             exarch::INSTALLERS[0].tag,
             EnginePath::Host(dir.path().to_path_buf()),
         ),
-        Root::new(EnginePath::Host(dir.path().to_path_buf())).with_env(vec![(
-            exarch::app::SCRATCH_VAR.to_owned(),
-            dir.path().to_string_lossy().into_owned(),
-        )]),
+        Root::new(EnginePath::Host(dir.path().to_path_buf())).with_env(
+            EnvVars::from_pairs([(
+                exarch::app::SCRATCH_VAR.to_owned(),
+                dir.path().to_string_lossy().into_owned(),
+            )])
+            .unwrap(),
+        ),
     );
     transport.attach(attach);
     transport

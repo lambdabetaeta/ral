@@ -1,6 +1,6 @@
 use super::*;
 use crate::carrier::{Transport as _, WireTransport, dispatch_to_report};
-use crate::host::env::test_support::env_guard;
+use crate::host::test_support::env_guard;
 use crate::path::EnginePath;
 use crate::process::cancel::REQUEST_SERIAL;
 use crate::process::{CancelCause, DurableRoot};

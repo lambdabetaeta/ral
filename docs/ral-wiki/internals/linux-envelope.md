@@ -63,9 +63,9 @@ the filesystem**
   within microseconds of its start, and every descendant born later, go
   unclaimed
   ([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]).
-- **Process groups.** `Launch::spawn` makes an enveloped launch `NewLeader`
-  whatever was asked, and returns the payload's group. `placement`
-  never hands an envelope the terminal. A pipeline collector addresses each
+- **Process groups.** `Launch::spawn` accepts an enveloped launch only as
+  `NewLeader` (`PgidPolicy::unless_enveloped`), and returns the payload's group.
+  `Placement::for_command` never hands an envelope the terminal. A pipeline collector addresses each
   confined stage's envelope beside its own group
   ([[internals/pipeline-execution|pipeline execution]]).
 

@@ -11,7 +11,7 @@ use super::super::resolve::{
 };
 use super::super::{Access, Dir, Judged, Leaf, Located, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
-use crate::host::EnvVars;
+use crate::environ::EnvVars;
 use crate::path::{CwdPath, LexicalPath, Resolver, shown};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

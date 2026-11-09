@@ -766,7 +766,7 @@ mod wire_desk_tests {
 mod engine_session_tests {
     use super::*;
     use crate::fact::ExitCode as _;
-    use crate::host::env::test_support::env_guard;
+    use crate::host::test_support::env_guard;
     use crate::path::EnginePath;
     use crate::process::CancelCause;
     use crate::process::cancel::REQUEST_SERIAL;

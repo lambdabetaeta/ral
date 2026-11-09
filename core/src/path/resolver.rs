@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{CwdPath, LexicalPath, NotACwd, lex, sigil};
-use crate::host::EnvVars;
+use crate::environ::EnvVars;
 
 /// Anchor a host-held path against the process's working directory, without expanding sigils.
 ///
@@ -122,6 +122,7 @@ impl<'a> Resolver<'a> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::host::test_support::env_guard;
     use std::path::PathBuf;
 
     fn cwd(path: &str) -> CwdPath {
@@ -143,7 +144,7 @@ mod tests {
     #[test]
     fn resolve_expands_tilde_and_normalises() {
         let elsewhere = elsewhere();
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
         let r = Resolver::at(&env, &elsewhere);
         assert_eq!(
             r.resolve("~/foo/./bar/../baz").folded().as_path(),
@@ -161,7 +162,7 @@ mod tests {
         } else {
             "/work/proj"
         });
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
         let r = Resolver::at(&env, &cwd);
         assert_eq!(
             r.resolve("src/lib.rs").as_path(),
@@ -289,11 +290,11 @@ mod tests {
     fn resolve_reads_xdg_with_unset_env() {
         // Held for the whole scope: the suite mutates process env in
         // parallel, and this test's answer depends on XDG_DATA_HOME.
-        let _guard = crate::host::env::test_support::env_guard();
+        let _guard = env_guard();
         let prev = std::env::var_os("XDG_DATA_HOME");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let elsewhere = elsewhere();
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
         let r = Resolver::at(&env, &elsewhere);
         let out = r.resolve("xdg:data/agda");
         match prev {
@@ -308,7 +309,7 @@ mod tests {
     #[test]
     fn ordinary_absolute_path_is_a_fixed_point() {
         let elsewhere = elsewhere();
-        let env = std::iter::once(("HOME", "/h")).collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
         let r = Resolver::at(&env, &elsewhere);
         assert_eq!(
             r.resolve("/etc/hostname").as_path(),

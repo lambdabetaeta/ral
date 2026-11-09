@@ -1,7 +1,7 @@
 # Core's low modules stay below the shell
 
-**Production code in `authority`, `egress`, `fact`, `host`, `io`, `own`, `path` and
-`process` names no path into `shell`.**
+**Production code in `authority`, `egress`, `environ`, `fact`, `host`, `io`, `own`,
+`path` and `process` names no path into `shell`.**
 
 - Lower modules exchange domain data: environment overlays, observations,
   cancellations and authority refusals. The shell interprets them as runtime

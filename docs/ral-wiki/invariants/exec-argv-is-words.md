@@ -22,7 +22,7 @@ not an oversight in either direction:
 **One declaration, two readings.** `RefusedArg`
 (`core/src/ty/exec_arg.rs`) names those shapes (`Unit`, `List`, `Map`, `Block`,
 `Handle`, `Bytes`) by a single wildcard-free match on a `Head`, `of_head`. The
-spawn (`validate_argv`, `core/src/shell/exec/command.rs`) reads it through
+spawn (`check_argv`, `core/src/shell/exec/command.rs`) reads it through
 `Value::heads`, the checker's argv rule (`gate_arg`, `typecheck/infer.rs`)
 through `of_ty`, and
 one `remedy` per shape means a user meeting either refusal meets one language. A

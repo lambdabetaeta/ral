@@ -176,7 +176,7 @@ What builds up the trail is itself scoped:
   `try` costs no more than its own frame: recovering a name from observations
   would guess which was the cause. The record is complete whether or not
   anyone is collecting. Observations read the same total register; with no
-  listeners, `audit_start` returns `None` before observation work
+  listeners, a `CommandRecord` begins silent, before observation work
   ([[decisions/261105_the-error-record|the error record]]);
 - a `grant` has no say. Whenever a trail is open, a capability *denial* is
   recorded as a `` `check `` observation and an allowed check never is: the
@@ -206,9 +206,10 @@ is a trace of the operations performed and the scopes that framed them.
 
 One module owns it all: `core/src/shell/runtime/audit.rs` is the trail (`Audit`, with
 `TrailScope` carrying the capture policy it displaced), `shell/runtime/audit/fan_out.rs` the
-fan-out (`impl Shell { observe, observe_stamped, listening, audit_start,
-record_check }`, and `Shell::observation`, which stamps the call site and
-principal), `shell/runtime/audit/observation.rs` its constructors; the records themselves are
+fan-out (`impl Shell { observe, observe_stamped, listening, record_check }`, and `Shell::observation`, which stamps the call site and
+principal), `shell/runtime/audit/observation.rs` its constructors. The one
+exception is an external's `Command` observation, which spans a launch and so
+lives with it: `shell/exec/record.rs`'s `CommandRecord`. The records themselves are
 `fact::observation`, each a `record!`/`variant!`/`label!` so one declaration
 yields the encoding, its decoder and its ral type. A `Check` is
 `{ resource, fields }` and takes its decision from the resource, so a denied

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU8;
 
 use crate::data::FOValue;
+use crate::environ::EnvVars;
 use crate::error::Error;
 use crate::io::{Captured, RunIo, RunStdin};
 use crate::path::EnginePath;
@@ -24,7 +25,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ pub struct Root {
     /// Empty for none.
     pub grants: crate::authority::policy::GrantStack,
     /// Per-session variables the host seeds into the engine's environment.
-    pub env: Vec<(String, String)>,
+    pub env: EnvVars,
     /// The installer's own settings: its recipe decodes them, and refuses
     /// ill-shaped ones in its own words. Core never reads them.
     pub config: FOValue,
@@ -166,7 +167,7 @@ impl Root {
         Self {
             cwd,
             grants: crate::authority::policy::GrantStack::default(),
-            env: Vec::new(),
+            env: EnvVars::new(),
             config: FOValue::Unit,
         }
     }
@@ -180,7 +181,7 @@ impl Root {
 
     /// Seed these variables into the session's environment.
     #[must_use]
-    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+    pub fn with_env(mut self, env: EnvVars) -> Self {
         self.env = env;
         self
     }

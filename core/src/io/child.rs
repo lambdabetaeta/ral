@@ -79,6 +79,24 @@ impl Connection {
     }
 }
 
+/// Lend the shell's own standard stream, so a child writing to the other
+/// one reaches it directly, as inheritance would.
+#[cfg(unix)]
+fn lend(stream: &impl std::os::fd::AsFd) -> io::Result<StdioSpec> {
+    stream
+        .as_fd()
+        .try_clone_to_owned()
+        .map(StdioSpec::from_owned)
+}
+
+#[cfg(windows)]
+fn lend(stream: &impl std::os::windows::io::AsHandle) -> io::Result<StdioSpec> {
+    stream
+        .as_handle()
+        .try_clone_to_owned()
+        .map(StdioSpec::from_owned)
+}
+
 /// Readers paired with their destinations before any drain thread exists.
 #[derive(Default)]
 pub(crate) struct PendingDrains(Vec<PendingDrain>);
@@ -89,11 +107,14 @@ struct PendingDrain {
 }
 
 impl PendingDrains {
-    /// Inherit the matching standard stream, lend files and pipes, and drain
-    /// all other destinations through an explicitly owned pipe.
+    /// Inherit the matching standard stream, lend the other standard stream,
+    /// files and pipes, and drain all other destinations through an
+    /// explicitly owned pipe.
     fn bind(&mut self, sink: &Sink, fd: OutFd) -> io::Result<StdioSpec> {
         match (sink, fd) {
             (Sink::Stdout, OutFd::Stdout) | (Sink::Stderr, OutFd::Stderr) => Ok(StdioSpec::Inherit),
+            (Sink::Stdout, OutFd::Stderr) => lend(&io::stdout()),
+            (Sink::Stderr, OutFd::Stdout) => lend(&io::stderr()),
             (Sink::File(file), _) => Ok(StdioSpec::from_owned(file.try_clone()?)),
             (Sink::Pipe { writer, .. }, _) => Ok(StdioSpec::from_owned(writer.try_clone()?)),
             _ => {
@@ -107,9 +128,10 @@ impl PendingDrains {
         }
     }
 
-    /// Start every drain under the launching computation's scope. If a thread
-    /// cannot start, already-started drains detach; the caller must tear down
-    /// and reap its child before returning the error.
+    /// Start every drain under the launching computation's scope, before
+    /// its child exists. If a thread cannot start, dropping the launch
+    /// closes every writer: the drains already started end at EOF, having
+    /// carried nothing, and no child is left to tear down.
     pub(crate) fn start(self, scope: &Scope) -> io::Result<Drains> {
         self.0
             .into_iter()

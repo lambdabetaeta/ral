@@ -474,7 +474,7 @@ impl fmt::Display for Where {
 /// first is what runs, the rest are shadowed.  That tail is the whole answer
 /// `which` cannot give — a PATH binary this name will never reach.
 ///
-/// Bare-head order (`dispatch::resolve`'s): session, prelude, the value
+/// Bare-head order (`dispatch::resolve_command_word`'s): session, prelude, the value
 /// half of the manifest (a native — the env hit), then the handler stack, then
 /// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
 /// so it reports as `builtin`, and an arm stacked over it reports separately,
@@ -526,14 +526,14 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     }
     match Command::from_name(&CommandName::of(name), &shell.context)
         .lookup(&shell.context.grants, shell.baseline())
-        .into_result()
+        .state()
     {
         Ok(admitted) => sites.push(match admitted.program() {
             Program::File { arg0, .. } => Where::Path(arg0.clone()),
             Program::Tool(_) => Where::Bundled,
         }),
         Err(LookupFailure::NotFound { .. } | LookupFailure::NotRunnable(_)) => {}
-        Err(LookupFailure::Refused { at, .. }) => sites.push(Where::DeniedByGrant(at)),
+        Err(LookupFailure::Refused { at, .. }) => sites.push(Where::DeniedByGrant(at.clone())),
     }
     sites
 }
@@ -554,7 +554,7 @@ mod tests {
         let candidate = dir.join(name);
         let at = shown(&candidate);
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var("PATH", shown(&dir));
+        shell.context.set_env_var("PATH", shown(&dir)).unwrap();
         let layer = crate::test_helper::layer(Capabilities {
             fs: Some(FsPolicy::default()),
             ..Capabilities::default()
@@ -584,7 +584,10 @@ mod tests {
         let name = "ral-explain-missing.exe";
         let at = shown(root.as_path().join(name));
         let mut shell = crate::test_helper::core_shell();
-        shell.context.set_env_var("PATH", shown(root.as_path()));
+        shell
+            .context
+            .set_env_var("PATH", shown(root.as_path()))
+            .unwrap();
         for name in [name, &at] {
             assert!(locate_all(name, &shell).is_empty(), "{name}");
         }

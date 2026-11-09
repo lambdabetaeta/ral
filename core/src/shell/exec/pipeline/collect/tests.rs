@@ -1,12 +1,16 @@
+use super::super::super::record::CommandRecord;
 use super::super::group::PipelineGroup;
 use super::*;
 use crate::fact::FailureCode as _;
 #[cfg(unix)]
-use crate::io::{Sink, Source, child::Connection};
+use crate::io::{
+    Sink, Source,
+    child::{Connection, Drains},
+};
 #[cfg(unix)]
 use crate::process::Membership;
 use crate::process::{DurableRoot, Scope};
-use crate::shell::runtime::{AuditStart, Error, Escape, Observed, Stop};
+use crate::shell::runtime::{Error, Escape, Observed, Stop};
 use crate::source::{FileId, Span};
 use std::num::NonZeroU8;
 use std::time::Duration;
@@ -19,12 +23,11 @@ fn joining(group: &PipelineGroup) -> crate::process::PgidPolicy {
     )
 }
 
-/// A pipeline stage's audit part, spelling `ls -l`, from `start` if any.
-fn stage_audit(shell: &Shell, start: Option<AuditStart>) -> StageAudit {
-    StageAudit {
+/// A pipeline stage's frame at the current site, keeping `record`.
+fn stage_frame(shell: &Shell, record: CommandRecord) -> StageFrame {
+    StageFrame {
         prov: shell.local.audit.call_site().clone(),
-        start,
-        args: vec!["-l".into()],
+        record,
     }
 }
 
@@ -340,8 +343,8 @@ fn a_dropped_collector_finishes_its_live_stages_jail() {
                 },
                 settlement: Settlement {
                     name: "sleep".to_string(),
-                    audit: None,
-                    claim: Claim::Unconfined,
+                    frame: None,
+                    denial_pids: None,
                 },
             },
         }),
@@ -602,12 +605,12 @@ fn with_no_loan_a_heard_signal_is_inert() {
     );
 }
 
-/// An external stage's settlement carries one `Command` record when its
-/// launch took a start, and none when nobody was listening.
+/// An external stage's settlement ends one `Command` record when somebody
+/// listened at its launch, and none when nobody did.
 #[test]
-fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
+fn a_settled_stage_records_one_command_only_if_it_was_listened_to() {
     let shell = crate::test_helper::core_shell();
-    let settle = |start| {
+    let settle = |record| {
         StageEnd::External {
             end: ExternalEnd {
                 drain: Drain {
@@ -616,8 +619,8 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
                 },
                 settlement: Settlement {
                     name: "ls".to_string(),
-                    audit: Some(Box::new(stage_audit(&shell, start))),
-                    claim: Claim::Unconfined,
+                    frame: Some(Box::new(stage_frame(&shell, record))),
+                    denial_pids: None,
                 },
             },
             outcome: WaitOutcome::Exited(3),
@@ -627,12 +630,8 @@ fn a_settled_stage_records_one_command_only_if_it_took_a_start() {
         .audit
         .into_observations()
     };
-    assert_eq!(settle(None).len(), 0);
-    let start = AuditStart {
-        site: shell.call_site(),
-        time: 7,
-    };
-    let recorded = settle(Some(start));
+    assert_eq!(settle(CommandRecord::silent()).len(), 0);
+    let recorded = settle(CommandRecord::begun_at(7, "ls", &["-l"], &shell));
     let [observation] = recorded.as_slice() else {
         panic!("one record, got {}", recorded.len())
     };
@@ -659,8 +658,8 @@ fn a_stage_dead_of_the_key_is_cancelled_only_if_it_was_pressed() {
             },
             settlement: Settlement {
                 name: "sleep".to_string(),
-                audit: Some(Box::new(stage_audit(&shell, None))),
-                claim: Claim::Unconfined,
+                frame: Some(Box::new(stage_frame(&shell, CommandRecord::silent()))),
+                denial_pids: None,
             },
         },
         outcome: WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGINT)),
@@ -1455,7 +1454,7 @@ fn drive_settles_a_stage_whose_producer_unwound() {
     drop(group);
 }
 
-// ── A lone external: `ExternalCommand::run`'s one child ───────────────────
+// ── A lone external: `Prepared::run`'s one child ───────────────────
 //
 // The collector waits on it as on the one stage of the group it landed in:
 // one it leads (`NewLeader`), a stage's it joined, or ral's own (`Inherit`).
@@ -1479,30 +1478,31 @@ fn spawned(cmd: &mut std::process::Command, policy: crate::process::PgidPolicy) 
     }
 }
 
-/// An explicit capture pipe, connected before spawning rather than recovered
-/// from a child's optional standard streams afterwards.
+/// An explicit capture pipe, connected and drained under `scope` before
+/// spawning, as a launch is.
 #[cfg(unix)]
 fn captured(
     cmd: std::process::Command,
     policy: crate::process::PgidPolicy,
-) -> (Spawned, PendingDrains) {
+    scope: &Scope,
+) -> (Spawned, Drains) {
     let mut launch = crate::process::Launch::from_command(cmd);
     let (sink, _) = crate::io::new_buffer();
     let drains = Connection::new(&Source::Empty, &sink, &Sink::Stderr)
         .expect("connection")
-        .install(&mut launch);
-    let spawned = launch
-        .spawn(policy, &DurableRoot::default().child())
-        .expect("spawn");
+        .install(&mut launch)
+        .start(scope)
+        .expect("drain threads");
+    let spawned = launch.spawn(policy, scope).expect("spawn");
     (spawned, drains)
 }
 
 /// `spawned`, born of an unconfined start: it claims no deny line.
-fn unconfined(spawned: Spawned, name: &str, drains: PendingDrains) -> Started {
+fn unconfined(spawned: Spawned, name: &str, drains: Drains) -> Started {
     Started {
         shown: name.into(),
         spawned,
-        claim: Claim::Unconfined,
+        denial_pids: None,
         drains,
     }
 }
@@ -1512,7 +1512,6 @@ fn unconfined(spawned: Spawned, name: &str, drains: PendingDrains) -> Started {
 #[cfg(unix)]
 #[test]
 fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
-    let scope = DurableRoot::default().child();
     for owns_payload in [false, true] {
         let mut child = spawned(
             &mut std::process::Command::new("/bin/true"),
@@ -1523,9 +1522,8 @@ fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
         // not confinement itself, is the witness here.
         child.group = Group::Enveloped(payload);
         let (tx, rx) = std::sync::mpsc::channel();
-        let stage = unconfined(child, "true", PendingDrains::default())
-            .register(&Slot { ix: 0, tx }, owns_payload.then_some(payload), &scope)
-            .expect("register");
+        let stage = unconfined(child, "true", Drains::default())
+            .register(&Slot { ix: 0, tx }, owns_payload.then_some(payload));
         let ended = rx.recv().expect("the shared registration reports the exit");
         Arc::into_inner(stage.watch)
             .expect("the stage owns its only watch")
@@ -1534,37 +1532,6 @@ fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
         assert!(matches!(ended, Event::Ended(0, WaitOutcome::Exited(0))));
         assert_eq!(stage.payload, (!owns_payload).then_some(payload));
     }
-}
-
-/// A failed drain thread must not leave the already-spawned child alive or
-/// registered with a collector that will never receive its handle.
-#[cfg(unix)]
-#[test]
-fn a_failed_drain_start_kills_and_reaps_the_unregistered_child() {
-    let mut cmd = std::process::Command::new("/bin/sleep");
-    cmd.arg("30");
-    let (spawned, drains) = captured(cmd, crate::process::PgidPolicy::NewLeader);
-    let pid = spawned.child.id().cast_signed();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let failed =
-        unconfined(spawned, "sleep", drains).register_with(&Slot { ix: 0, tx }, None, |_| {
-            Err(std::io::Error::other("thread creation refused"))
-        });
-    assert!(matches!(failed, Err(Break::Error(error))
-        if error.describe().contains("could not start output drains for 'sleep'")));
-    assert!(matches!(
-        rx.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Disconnected)
-    ));
-    let mut status = 0;
-    assert_eq!(
-        unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
 }
 
 /// The lines a trapper appended to `hits`, one per signal it heard.
@@ -1968,12 +1935,10 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
         "-c",
         &format!("sleep 30 & echo $! > {}; exec sleep 30", pidfile.display()),
     ]);
-    let (lone, drains) = captured(cmd, crate::process::PgidPolicy::Inherit);
-
     let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope);
-    let collect = CollectState::lone(unconfined(lone, "sh", drains), None, Instant::now(), &shell)
-        .expect("register");
+    let (lone, drains) = captured(cmd, crate::process::PgidPolicy::Inherit, &shell.scope);
+    let collect = CollectState::lone(unconfined(lone, "sh", drains), None, Instant::now(), &shell);
     let survivor = ready_pid(&pidfile);
 
     let t0 = Instant::now();
@@ -2001,12 +1966,11 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope);
     let mut collect = CollectState::lone(
-        unconfined(lone, "sh", PendingDrains::default()),
+        unconfined(lone, "sh", Drains::default()),
         None,
         Instant::now(),
         &shell,
-    )
-    .expect("register");
+    );
     collect.drive();
     assert!(alive(), "the filed leader must still be a zombie");
 
@@ -2015,19 +1979,13 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     assert!(!alive(), "a settled leader must be reaped");
 }
 
-/// An external is hinted from its own claim, never from a sample of ral's
+/// An external is hinted from its own PIDs, never from a sample of ral's
 /// tree: an `exit 128` that a sandbox confined carries the fork brake's
 /// hint, an unconfined one none, alone or as a pipeline's stage.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_external_is_hinted_from_its_own_claim() {
-    let claim = |confined: bool| {
-        if confined {
-            Claim::Confined(std::collections::HashSet::new())
-        } else {
-            Claim::Unconfined
-        }
-    };
+fn an_external_is_hinted_from_its_own_pids() {
+    let denial_pids = |confined: bool| confined.then(std::collections::HashSet::new);
     let error = |end: End| match end {
         End::Err(error) => error,
         other => panic!("an exit 128 is the command's error: {other:?}"),
@@ -2042,12 +2000,12 @@ fn an_external_is_hinted_from_its_own_claim() {
         let started = Started {
             shown: "sh".into(),
             spawned: spawned(&mut cmd, crate::process::PgidPolicy::NewLeader),
-            claim: claim(confined),
-            drains: PendingDrains::default(),
+            denial_pids: denial_pids(confined),
+            drains: Drains::default(),
         };
         let scope = DurableRoot::default().child();
         let shell = lone_shell(&scope);
-        let mut lone = CollectState::lone(started, None, Instant::now(), &shell).expect("register");
+        let mut lone = CollectState::lone(started, None, Instant::now(), &shell);
         lone.drive();
         let Err(Break::Error(alone)) = lone.settle_lone() else {
             panic!("a lone exit 128 is the command's error");
@@ -2066,8 +2024,8 @@ fn an_external_is_hinted_from_its_own_claim() {
                 },
                 settlement: Settlement {
                     name: "sh".into(),
-                    audit: Some(Box::new(stage_audit(&shell, None))),
-                    claim: claim(confined),
+                    frame: Some(Box::new(stage_frame(&shell, CommandRecord::silent()))),
+                    denial_pids: denial_pids(confined),
                 },
             },
             outcome: WaitOutcome::Exited(128),
@@ -2092,7 +2050,7 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
     let shell = lone_shell(&frame);
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", "sleep 5 & kill -INT $$"]);
-    let (lone, drains) = captured(cmd, crate::process::PgidPolicy::NewLeader);
+    let (lone, drains) = captured(cmd, crate::process::PgidPolicy::NewLeader, &shell.scope);
     let loan = crate::process::TerminalLoan::for_test(&frame);
 
     let t0 = Instant::now();
@@ -2101,8 +2059,7 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
         Some(loan),
         Instant::now(),
         &shell,
-    )
-    .expect("register");
+    );
     collect.drive();
     let settled = collect.settle_lone();
 
@@ -2141,8 +2098,7 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
     );
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.args(["-c", "sleep 30 &"]);
-    let (Spawned { child, .. }, pending) = captured(cmd, joining(&group));
-    let drains = pending.start(&shell.scope).expect("drain threads");
+    let (Spawned { child, .. }, drains) = captured(cmd, joining(&group), &shell.scope);
     let slot = Slot { ix: 0, tx };
     let stage = LiveExternal {
         watch: slot.watch(child),
@@ -2151,8 +2107,8 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
             drain: Drain { jail: None, drains },
             settlement: Settlement {
                 name: "sh".into(),
-                audit: Some(Box::new(stage_audit(&shell, None))),
-                claim: Claim::Unconfined,
+                frame: Some(Box::new(stage_frame(&shell, CommandRecord::silent()))),
+                denial_pids: None,
             },
         },
     };
@@ -2226,8 +2182,7 @@ fn a_lone_externals_windows_job_is_released() {
     };
     assert!(crate::process::group::is_known_group(leader.as_raw()));
 
-    let settled =
-        unconfined(lone, "cmd", PendingDrains::default()).collect(None, Instant::now(), &shell);
+    let settled = unconfined(lone, "cmd", Drains::default()).collect(None, Instant::now(), &shell);
 
     assert!(settled.is_ok(), "{settled:?}");
     assert!(!crate::process::group::is_known_group(leader.as_raw()));

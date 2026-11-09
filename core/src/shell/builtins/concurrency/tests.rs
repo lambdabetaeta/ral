@@ -1147,47 +1147,21 @@ fn detach_rejects_an_illegible_description() {
     assert_eq!(status(multiline), 1);
 }
 
-/// A head a handler intercepts is refused, per name and by catch-all alike:
-/// a handler runs inside this session, so nothing could be detached.  A stub
-/// stands in for `detach` itself.
+/// The command is always a program: handlers and base frames are skipped.
 #[cfg(unix)]
 #[test]
-fn detach_refuses_a_head_a_handler_intercepts() {
+fn detach_starts_the_program_past_handlers_and_base_frames() {
     let mut shell = detach_test_shell();
     for src in [
-        r#"within [handlers: [my-server: { |args| echo ...$args }]] { detach "a server" my-server up now }"#,
-        r#"within [handler: { |n _a| echo $n }] { detach "a server" my-server }"#,
+        r#"within [handlers: [true: { |args| echo ...$args }]] { detach "x" true }"#,
+        r#"within [handler: { |n _a| echo $n }] { detach "x" true }"#,
+        r#"detach "x" echo hi"#,
     ] {
-        let err = run_captured(&mut shell, src, None)
+        let born = run_captured(&mut shell, src, None)
             .0
-            .expect_err("a handled head is no program to detach");
-        let Break::Error(e) = err else {
-            panic!("an error expected, got {err:?}");
-        };
-        assert!(
-            e.describe().contains("`my-server` is handled here"),
-            "{}",
-            e.describe()
-        );
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        assert!(expect_map(&born).contains_key("pid"), "{src}");
     }
-}
-
-/// A base frame's name is ral's own and runs inside this session: refused.
-#[cfg(unix)]
-#[test]
-fn detach_refuses_a_base_frames_name() {
-    let mut shell = detach_test_shell();
-    let err = run_captured(&mut shell, r#"detach "a server" echo hi"#, None)
-        .0
-        .expect_err("a base frame is no program to detach");
-    let Break::Error(e) = err else {
-        panic!("an error expected, got {err:?}");
-    };
-    assert!(
-        e.describe().contains("`echo` is ral's own"),
-        "{}",
-        e.describe()
-    );
 }
 
 /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.

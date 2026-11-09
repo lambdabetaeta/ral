@@ -6,7 +6,7 @@ pub mod host;
 use crate::policy::Invocation;
 use crate::skill::{self, Boot};
 use ral_core::authority::policy::{Baseline, LocateError};
-use ral_core::host::EnvVars;
+use ral_core::environ::EnvVars;
 use ral_core::path::CwdPath;
 use ral_core::protocol::probe::Grants;
 use std::fmt::Write;

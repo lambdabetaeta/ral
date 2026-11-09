@@ -9,10 +9,11 @@ use regex::Regex;
 use std::path::{Path, PathBuf};
 
 /// The modules below the shell; `data` is theirs too (`data::print`).
-const BELOW_SHELL: [&str; 9] = [
+const BELOW_SHELL: [&str; 10] = [
     "authority",
     "data",
     "egress",
+    "environ",
     "fact",
     "host",
     "io",

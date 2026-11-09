@@ -138,6 +138,7 @@ pub fn apply_session_profiles(
 mod tests {
     use super::*;
     use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
+    use crate::environ::EnvVars;
 
     fn shell() -> Shell {
         crate::test_helper::core_shell()
@@ -146,7 +147,7 @@ mod tests {
     fn ctx() -> FreezeCtx {
         let home = crate::test_helper::Tree::nowhere().at("/h");
         FreezeCtx::at(
-            std::iter::once(("HOME", home.as_str())).collect::<crate::host::EnvVars>(),
+            EnvVars::from_pairs([("HOME", home)]).unwrap(),
             crate::test_helper::process_cwd(),
         )
     }
@@ -360,7 +361,8 @@ mod tests {
         let mut shell = shell();
         shell
             .context
-            .set_env_var("HOME", home.path().to_string_lossy().into_owned());
+            .set_env_var("HOME", home.path().to_string_lossy().into_owned())
+            .unwrap();
         apply_session_profiles(&Mooring::adrift(), &mut shell, &[profile_path]).unwrap();
 
         let expected = home.path().join("data");

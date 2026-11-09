@@ -92,7 +92,7 @@ writes are not the result: they go to the sinks in the context.
 
 **A head's spelling decides whether it is looked up or goes straight to the
 operation.** The classification is in `core/src/shell/exec/command.rs`
-(`Head`, `Target`) and `core/src/shell/exec/dispatch.rs` (`resolve`,
+(`Command`, `Request`) and `core/src/shell/exec/dispatch.rs` (`resolve`,
 `resolve_command_word`); `docs/SPEC.md` §6.2–§6.3 is normative.
 
 | Head | Example | Consults | Reaches |
@@ -117,7 +117,7 @@ operation.** The classification is in `core/src/shell/exec/command.rs`
   it shares an external's pipes, failures, audit and confinement
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]],
   [[invariants/single-binary|single-binary]]).
-- **`Head::shown` is the spelling every report uses**: as written, with a `~`
+- **`Command::shown` is the spelling every report uses**: as written, with a `~`
   head expanded. It becomes `program` in a process failure and the first
   element of an audited `argv`.
 - **On Windows** a bare search appends each `%PATHEXT%` suffix, read from the
@@ -144,7 +144,7 @@ externals the arm runs.
 - **Values that are not words are refused at the boundary**: `()`, a list, a
   map or record, a block, a handle, bytes. One declaration (`RefusedArg`) is
   read by the checker on concrete types and again by `prepare`, through
-  `validate_argv`, on the values, so the two refusals speak one language ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
+  `check_argv`, on the values, so the two refusals speak one language ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - **Arguments play no part in authority.** An admitted program runs with any
   arguments.
 
@@ -159,6 +159,8 @@ externals the arm runs.
   search reads the overridden `PATH`, relative entries anchored at the cwd.
   Under any active grant the dynamic-loader variables (`LD_PRELOAD`,
   `LD_AUDIT`, `LD_LIBRARY_PATH`, every `DYLD_*`) are stripped.
+- Both rules are `EnvVars::for_child` (`core/src/environ.rs`); preparation
+  applies its `ChildEnv` with `Launch::situate`.
 
 ### Standard streams
 
@@ -174,15 +176,15 @@ streams exist ([[invariants/redirects-are-the-three-standard-streams|redirects-a
 | a here-string | `<< s`, written into a pipe by a thread |
 | empty (`/dev/null`) | captured runs (exarch), workers, `detach`, and a startup terminal the child's group cannot read |
 
-**One rule decides what a child at the boundary reads** (`boundary_stdin`), and
+**One rule decides what a child at the boundary reads** (`TerminalInput`), and
 the child's source is then wired as it stands.
 
 - A group the child joins passes its owner's source through.
 - A startup terminal survives only where the child's group can read it: ral's
   own group, or one lent the terminal.
 - A group of its own that is not lent the terminal reads EOF.
-- An interactive enveloped child keeps the terminal as stdin: `placement`
-  decides `readable` with the policy, and an envelope's session has no
+- An interactive enveloped child keeps the terminal as stdin: `Placement::for_command`
+  retains its terminal input with the policy, and an envelope's session has no
   controlling terminal to stop a read.
 
 | stdout / stderr | arises from | the child sees |
@@ -203,7 +205,7 @@ whose body (`_ed-tui`'s `fzf`) draws on `/dev/tty` whatever its stdout.
 **A head is judged before it is looked at, and ral runs exactly the program
 the judgment admits** ([[internals/exec-judgment|exec-judgment]]).
 
-- `Head::admit` walks each candidate and judges the object it reaches, by real
+- `Command::lookup` walks each candidate and judges the object it reaches, by real
   path with links followed, under the grant stack: running needs both exec and
   read authority ([[design/authority-tables|authority-tables]],
   [[internals/path-judgment|path-judgment]], `docs/SPEC.md` §12.3).
@@ -233,8 +235,8 @@ stopped with `SIGTTIN`.
   `Leased` for the REPL and batch, `Denied` for exarch. A lease exists only if
   ral owned the foreground at startup.
 - **One rule fixes the process group and the handoff**, for a standalone command
-  and a pipeline alike (`placement`,
-  `core/src/shell/exec/command.rs`):
+  and a pipeline alike (`Placement::for_command` and `prepare_terminal_loan`,
+  `core/src/shell/exec/job_control.rs`):
 
   | policy | when | consequence |
   |---|---|---|
@@ -262,7 +264,7 @@ stopped with `SIGTTIN`.
 ## Modes
 
 **Every mode performs the same operation; modes differ only in the context
-they wire around it.** Each runs the same three stages of `ExternalCommand`
+they wire around it.** Each runs the same three stages of `Prepared`
 (`core/src/shell/exec/command.rs`): `prepare`, a start that connects the
 streams the mode supplies and spawns (`start`, or `detach` for a survivor),
 and `ending`
@@ -288,8 +290,8 @@ and `ending`
   exec-readiness mark
   ([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
 
-- **A plain command.** Dispatch admits; `ExternalCommand::prepare` validates
-  argv and builds the launch; `ExternalCommand::run` connects its streams,
+- **A plain command.** Dispatch admits; `Command::prepare` validates
+  argv and builds the launch; `Prepared::run` connects its streams,
   titles the terminal and spawns. `Started::collect` uses the shared pipeline
   collector to wait, join pumps and classify the child's end through `ending`.
 - **A pipeline stage.** Only an external is a process; every other stage is a
@@ -324,7 +326,8 @@ and `ending`
   surrenders ownership, so the process outlives the session
   (`core/src/shell/exec/command.rs`, `docs/SPEC.md` §11.5).
 - **A host hook.** The REPL's external editor runs `$VISUAL`/`$EDITOR`
-  through `Shell::run_external_argv`, which skips bindings and handlers.
+  through `Shell::run_external`, `^program args…` for a host holding no
+  syntax, which skips bindings and handlers.
   Every other hook, prompt, plugin event or keybinding reaches exec only by
   evaluating ral code, and so through a plain command or a stage.
 
@@ -425,7 +428,7 @@ success.
 ### Found before the spawn, or by it
 
 **Most failures are found by the probe, before any process exists**
-(`Head::select` in `command.rs`). A *walk* is the component-by-component
+(`Command::lookup` in `command.rs`). A *walk* is the component-by-component
 resolution of a path that the judgment also reads.
 
 - **The probe** reports absence as `not-found`; at a path head, a directory as
@@ -438,7 +441,7 @@ resolution of a path that the judgment also reads.
   every `PATH` candidate, the first that was refused, not executable or
   whose walk failed says why, else `not-found`.
 - **The spawn** reports what the program's own `execve` met, and the image
-  says what it means (`at_spawn`). `EACCES` is
+  says what it means (`explain_exec_error`). `EACCES` is
   `permission-denied`; everything else but `ENOENT` is `io`. **`ENOENT` for a
   file still at its real path is `missing-interpreter`**, naming the `#!`
   interpreter read when the launch was built, or the loader a native image

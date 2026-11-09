@@ -910,12 +910,16 @@ impl Machine {
             }
             Resolution::Base(entry) => {
                 self.push_redirect(&redirs, span, mooring, shell)?;
-                let v = dispatch::run_base_frame(&entry, &argv, span, mooring, shell)?;
+                // Unlike a handler arm's, a native body's argv is not rendered.
+                let v = entry.framed(span, shell, |shell, frame| {
+                    entry.call_body(frame, &argv, None, mooring, shell)
+                })?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
             Resolution::External(command) => {
                 let offer = |e| offer_path_as_text(e, &exec.head, &argv);
                 let command = command
+                    .lookup(&shell.context.grants, shell.baseline())
                     .admit(mooring, shell)
                     .map_err(|b| b.map_error(offer))?
                     .map_lookup_error(|e| if names_no_program(&e) { offer(e) } else { e });

@@ -88,7 +88,7 @@ fn with_wire_desk<R>(
 /// The parent's bequest as a wire engine seals it, carrying `PARENT_MARK=1`.
 fn parent_seal() -> Sealed {
     let mut shell = crate::boot::test_shell();
-    shell.set_env_var("PARENT_MARK", "1");
+    shell.set_env_var("PARENT_MARK", "1").unwrap();
     seal(&shell.bequeath(ral_core::SpawnGrant::Inherit)).expect("a bequest seals")
 }
 

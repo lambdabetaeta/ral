@@ -467,6 +467,7 @@ mod tests {
     #[cfg(unix)]
     use crate::authority::policy::{Baseline, ExecDenial, Program, Withheld};
     use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
+    use crate::environ::EnvVars;
     use crate::path::utf8;
     #[cfg(unix)]
     use crate::test_helper::{located, stack, trace};
@@ -509,7 +510,7 @@ mod tests {
             ("/h", "/work")
         };
         FreezeCtx::at(
-            std::iter::once(("HOME", home)).collect::<crate::host::EnvVars>(),
+            EnvVars::from_pairs([("HOME", home)]).unwrap(),
             crate::path::CwdPath::new(cwd.into()).expect("a fixture cwd is absolute"),
         )
     }
@@ -699,7 +700,7 @@ mod tests {
         let on = |path: &std::path::Path| {
             let env = [("HOME", "/h"), ("PATH", utf8(path).unwrap())];
             let cwd = crate::path::CwdPath::new(root.clone()).unwrap();
-            FreezeCtx::at(env.into_iter().collect::<crate::host::EnvVars>(), cwd)
+            FreezeCtx::at(EnvVars::from_pairs(env).unwrap(), cwd)
         };
         let layer = decode_capability_map(
             &rec(&[(
@@ -1084,10 +1085,12 @@ mod tests {
         root: &std::path::Path,
         extra: &[(&str, &std::path::Path)],
     ) -> FreezeCtx {
-        let env = std::iter::once(("HOME", home))
-            .chain(extra.iter().copied())
-            .map(|(k, v)| (k, utf8(v).unwrap()))
-            .collect::<crate::host::EnvVars>();
+        let env = EnvVars::from_pairs(
+            std::iter::once(("HOME", home))
+                .chain(extra.iter().copied())
+                .map(|(k, v)| (k, utf8(v).unwrap())),
+        )
+        .unwrap();
         FreezeCtx::at(env, crate::path::CwdPath::new(root.to_path_buf()).unwrap())
     }
 

@@ -8,6 +8,7 @@
 // so each diffs against the one it was taken from.
 
 use super::*;
+use crate::host::test_support::with_var;
 use crate::process::cancel::{CancelCause, DurableRoot};
 use std::fs;
 use std::path::Path;
@@ -38,7 +39,7 @@ const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
 pub(super) fn with_scoped_state_dir<R>(f: impl FnOnce() -> R) -> R {
     let scratch = tempfile::tempdir().unwrap();
     let state_home = scratch.path().to_string_lossy().into_owned();
-    crate::host::env::test_support::with_var("XDG_STATE_HOME", Some(&state_home), f)
+    with_var("XDG_STATE_HOME", Some(&state_home), f)
 }
 
 /// `path`'s real path: the spelling a frozen allowance holds.

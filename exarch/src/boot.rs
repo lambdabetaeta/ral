@@ -2,10 +2,11 @@
 //! Nothing here runs per exchange — per-session disk state is
 //! [`crate::record::AgentLog`].
 
-use crate::app::{SCRATCH_VAR, seed_var};
+use crate::app::{SCRATCH_VAR, seed_vars};
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::data::FOValue;
+use ral_core::environ::EnvVars;
 use ral_core::error::Error;
 use ral_core::io::terminal::TerminalState;
 use ral_core::protocol::{EngineSpec, Root};
@@ -58,7 +59,7 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
 /// # Panics
 /// Panics if the embedded agent library fails to load.
 pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
-    let Some((_, scratch)) = root.env.iter().find(|(name, _)| name == SCRATCH_VAR) else {
+    let Some(scratch) = root.env.get(SCRATCH_VAR) else {
         return Err(Error::new(format!(
             "the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
         ))
@@ -69,7 +70,7 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
         // Freeze against the receiving root's env without moving its seeds
         // ahead of the library or changing when the session ledgers arm.
         let mut env = shell.env_overrides().clone();
-        env.extend(root.env.iter().cloned());
+        env.overlay(&root.env);
         let layer = shell
             .decode_grant_with_env(&root.config, "the root's ceiling", env)
             .map_err(|e| e.with_context("exarch engine"))?;
@@ -81,9 +82,7 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     shell.set_exit_hints(ral_core::shell::runtime::ExitHints::from_text(
         include_str!("../../data/exit-hints.txt"),
     ));
-    for (name, value) in &root.env {
-        seed_var(shell, name, value);
-    }
+    seed_vars(shell, &root.env);
     shell_eval::arm_session_ledgers(shell);
     Ok(())
 }
@@ -92,8 +91,9 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
 /// TTY, so these only have to beat config that *forces* colour;
 /// [`crate::agent::digest`]'s strip covers the tools that honour neither.
 pub(crate) fn seed_no_color(shell: &mut Shell) {
-    shell.set_env_var("NO_COLOR", "1");
-    shell.set_env_var("CLICOLOR_FORCE", "0");
+    let no_color = EnvVars::from_pairs([("NO_COLOR", "1"), ("CLICOLOR_FORCE", "0")])
+        .expect("neither name is reserved");
+    shell.overlay_env(&no_color);
 }
 
 #[cfg(all(test, unix))]
@@ -108,6 +108,7 @@ pub(crate) use testkit::{test_shell, test_transport, test_transport_under};
 mod testkit {
     use super::{SCRATCH_VAR, builtins, engine_root, engine_runtime};
     use ral_core::Shell;
+    use ral_core::environ::EnvVars;
     use ral_core::protocol::{EngineSpec, Root};
 
     /// The engine and root a test attaches, the root naming the scratch.
@@ -118,12 +119,15 @@ mod testkit {
                 builtins::INSTALLER_TAG,
                 ral_core::path::EnginePath::Host(temp.clone()),
             ),
-            Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(vec![(
-                SCRATCH_VAR.to_owned(),
-                ral_core::path::utf8(&temp)
-                    .expect("a temp dir is Unicode")
-                    .to_owned(),
-            )]),
+            Root::new(ral_core::path::EnginePath::Host(temp.clone())).with_env(
+                EnvVars::from_pairs([(
+                    SCRATCH_VAR.to_owned(),
+                    ral_core::path::utf8(&temp)
+                        .expect("a temp dir is Unicode")
+                        .to_owned(),
+                )])
+                .unwrap(),
+            ),
         )
     }
 
@@ -168,6 +172,7 @@ mod tests {
     use ral_core::authority::grant::freeze::Anchor;
     use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
     use ral_core::authority::policy::FsOp;
+    use ral_core::environ::EnvVars;
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
 
@@ -204,11 +209,11 @@ mod tests {
             ral_core::test_helper::process_cwd(),
         );
         let root = Root::new(EnginePath::Host(scratch.clone()))
-            .with_env(vec![(SCRATCH_VAR.to_owned(), named.to_owned())]);
+            .with_env(EnvVars::from_pairs([(SCRATCH_VAR, named)]).unwrap());
         engine_root(&root, &mut shell).expect("the root names a scratch");
         assert_eq!(shell.scratch(), Some(named));
 
-        shell.set_env_var(SCRATCH_VAR, "/elsewhere");
+        shell.set_env_var(SCRATCH_VAR, "/elsewhere").unwrap();
         let frozen = FreezeCtx::at(
             shell.env_overrides().clone(),
             ral_core::path::CwdPath::new(shell.cwd()).expect("the shell's cwd is absolute"),
@@ -234,7 +239,7 @@ mod tests {
         );
         let scratch = ral_core::path::utf8(cwd).expect("a test path is Unicode");
         let root = Root::new(at)
-            .with_env(vec![(SCRATCH_VAR.to_owned(), scratch.to_owned())])
+            .with_env(EnvVars::from_pairs([(SCRATCH_VAR, scratch)]).unwrap())
             .with_config(ceiling.into());
         (shell, root)
     }
@@ -287,7 +292,9 @@ mod tests {
             };
             for (name, dir) in [("HOME", "initial-home"), ("PATH", "initial-bin")] {
                 let path = cwd.join(dir);
-                shell.set_env_var(name, ral_core::path::utf8(&path).expect("a Unicode path"));
+                shell
+                    .set_env_var(name, ral_core::path::utf8(&path).expect("a Unicode path"))
+                    .unwrap();
             }
             engine_root(root, shell)?;
             // Running reads its program. These files are outside both the
@@ -344,11 +351,14 @@ mod tests {
         .into();
         let at = EnginePath::Host(tree.root().to_path_buf());
         let root = Root::new(at.clone())
-            .with_env(vec![
-                (SCRATCH_VAR.into(), tree.at("/scratch")),
-                ("HOME".into(), tree.at("/root-home")),
-                ("PATH".into(), tree.at("/root-bin")),
-            ])
+            .with_env(
+                EnvVars::from_pairs([
+                    (SCRATCH_VAR, tree.at("/scratch")),
+                    ("HOME", tree.at("/root-home")),
+                    ("PATH", tree.at("/root-bin")),
+                ])
+                .unwrap(),
+            )
             .with_config(ceiling.into());
         let transport = IdentityTransport::boot(
             &INSTALLERS,

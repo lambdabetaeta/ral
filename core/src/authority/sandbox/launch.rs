@@ -1,5 +1,5 @@
 //! What a launch runs ([`Image`]), and confining one external or bundled
-//! child under the platform's OS sandbox. `Command<Checked>::prepare` in
+//! child under the platform's OS sandbox. `Command::prepare` in
 //! `shell::exec::command` routes here whenever a projection is
 //! active and no guest jail already confines the child.
 //!
@@ -31,11 +31,7 @@ use crate::error::Error;
 use crate::path::{CwdPath, RealPath};
 #[cfg(unix)]
 use crate::process::report::Report;
-#[cfg(unix)]
-use std::borrow::Borrow;
 use std::borrow::Cow;
-#[cfg(unix)]
-use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::fd::AsFd;
 #[cfg(unix)]
@@ -88,8 +84,8 @@ impl Confinement {
         !matches!(self, Self::Unconfined)
     }
 
-    /// Build the launch. The caller applies environment and resource limits
-    /// before installing any guest jail with `apply_guest_jail`.
+    /// Build the launch, to which the caller adds environment, limits and any
+    /// guest jail, in any order.
     pub(crate) fn launch(
         &self,
         image: &Image,
@@ -263,7 +259,7 @@ fn sandboxed_command(
 /// the trampoline's two slots, and the parent's ends of the report.
 #[cfg(unix)]
 pub(super) fn issue(
-    warrant: &Warrant<impl Borrow<Image>, impl AsRef<OsStr>>,
+    warrant: &Warrant<'_>,
     handoff: &mut Handoff,
 ) -> Result<(Slots, Report), Error> {
     let parcel = warrant.parcel().map_err(Error::new)?;

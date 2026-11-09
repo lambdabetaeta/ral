@@ -57,7 +57,7 @@ The one filter core keeps is its own, and it is the decision rather than a
 flag: a capability *denial* joins the trail whenever one is open, an *allowed*
 check never does, and no `grant` has a dimension to change either — language
 semantics, not presentation ([[design/audit|audit]]). And only an exec refusal
-surfaces a *structured* denial: `Head::admit`
+surfaces a *structured* denial: `Command::admit`
 (`shell/exec/command.rs`) judges the head and `Shell::exec_refused`
 (`shell/runtime/state/checks.rs`) records the refusal against its call's `Mooring`. The
 `fs` checks in `authority/guard/enforce.rs` return domain `Denial`s to the same
@@ -107,18 +107,21 @@ application, which is no observation at all.
   The external / bundled path — one site for both, since a bundled tool is a
   `ral --ral-bundled-tool` child like any host executable
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
-  — emits from `call_external` (`shell/exec/dispatch.rs`), which wraps the whole
-  dispatch and so covers a spawn failure too, since that never reaches
-  `wait()` (the card derives ok/bad from the status directly; a spawn failure
-  carries its failure's code, 127/126/…). `detach` (`shell/exec/command.rs`)
-  is the second site, and the one that surfaces at the spawn rather than the
-  wait: a surrendered process is never waited for, so its observation carries
-  `` origin: `detached `` and status `0` meaning *exec'd*, not *succeeded*. A
-  direct external *pipeline stage* is the third: the collector never enters
-  `call_external`, so its settlement mints the fact itself
-  (`shell/exec/pipeline/collect.rs`). All three assemble their argv through the
-  one constructor, `Command::new`, consuming `fact::AuditIo`'s captured prefixes
-  and totals — the rule that index 0 is the shown name lives there and nowhere else. A **builtin** application
+  — keeps one `CommandRecord` (`shell/exec/record.rs`) per launch, begun once
+  the command is admitted, so a refusal is the grant's `` `check `` alone, and
+  ended once. `Command::with_record` wraps the whole launch and ends the record
+  before its frame closes, so it covers a spawn failure too, since that never
+  reaches `wait()` (the card derives ok/bad from the status directly; a spawn
+  failure carries its failure's code, 127/126/…). `detach`
+  (`shell/exec/command/detach.rs`) shares it, and is the one that surfaces at
+  the spawn rather than the wait: a surrendered process is never waited for, so
+  its observation carries `` origin: `detached `` and status `0` meaning
+  *exec'd*, not *succeeded*. A direct external *pipeline stage* carries its
+  record out of its launch frame in its `StageFrame`, and its settlement ends
+  it (`shell/exec/pipeline/collect.rs`). `CommandRecord::end` is the one
+  builder, and it assembles the argv through `Command::new`, consuming
+  `fact::AuditIo`'s captured prefixes and totals — the rule that index 0 is the
+  shown name lives there and nowhere else. A **builtin** application
   is no command observation at all: its frame (`BuiltinEntry::framed`) stamps nothing
   and tees nothing, and whatever it did to the world arrives from the operation it
   did it through — `edit-hash` as the `` `write `` its `atomic_write`

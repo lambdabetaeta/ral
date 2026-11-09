@@ -2,18 +2,17 @@
 //! `guard`, `audit` — whose machine arms live in `evaluator::machine`:
 //! parsing and installing `within`'s options.
 
-use crate::host::EnvVars;
+use crate::environ::EnvVars;
 use crate::shell::runtime::{
     Error, FrameHandle, HandlerArity, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
     arm_closure, refused_arm,
 };
 
 use crate::path::{CwdPath, Reading};
-use std::collections::HashMap;
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
 pub(crate) struct WithinScope {
-    env_overrides: Option<HashMap<String, String>>,
+    env_overrides: Option<EnvVars>,
     cwd: Option<CwdPath>,
     handlers: Option<(Vec<HandlerEntry>, Option<Value>)>,
 }
@@ -68,7 +67,7 @@ impl WithinScope {
         } = self;
         let saved_env = env_overrides.map(|overrides| {
             let saved = shell.context.env_overrides.clone();
-            shell.context.extend_env(overrides);
+            shell.context.overlay_env(&overrides);
             saved
         });
         let saved_cwd = cwd.map(|dir| shell.enter_cwd(dir));
@@ -82,32 +81,21 @@ impl WithinScope {
     }
 }
 
-/// `env:` — a map of scalar overrides. `PWD` is the working directory and
-/// `OLDPWD` names none, so neither can be set here.
-fn parse_env(v: &Value) -> Settled<HashMap<String, String>> {
-    let overrides = v.as_map("within env")?;
-    for k in overrides.keys() {
-        let why = match k {
-            "PWD" => "is the shell's working directory; use `cd` or `within [dir: …]` to change it",
-            "OLDPWD" => "is never passed to commands: ral keeps no previous directory for `cd -`",
-            _ => continue,
-        };
-        return Err(Error::new(format!("within env: `{k}` {why}")).into());
+/// `env:` — a map of scalar overrides.
+fn parse_env(v: &Value) -> Settled<EnvVars> {
+    let mut env = EnvVars::new();
+    for (name, value) in &v.as_map("within env")? {
+        let text = value.scalar_text().ok_or_else(|| {
+            Error::new(format!(
+                "within env: value for '{name}' must be a scalar (string, int, float, or \
+                 bool), got {}",
+                value.type_name()
+            ))
+        })?;
+        env.insert(name.to_string(), text)
+            .map_err(|reserved| Error::new(format!("within env: {reserved}")))?;
     }
-    overrides
-        .iter()
-        .map(|(name, value)| {
-            let name = name.to_string();
-            let text = value.scalar_text().ok_or_else(|| {
-                Error::new(format!(
-                    "within env: value for '{name}' must be a scalar (string, int, float, or \
-                     bool), got {}",
-                    value.type_name()
-                ))
-            })?;
-            Ok((name, text))
-        })
-        .collect()
+    Ok(env)
 }
 
 /// `dir:` — resolved, permission-checked, and required to exist as a

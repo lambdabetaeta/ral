@@ -52,7 +52,7 @@ impl Engine {
         let attach = Attach::root(
             EngineSpec::new(builtins::INSTALLER_TAG, EnginePath::Host(home.into())),
             Root::new(EnginePath::Host(cwd.into_inner()))
-                .with_env(scratch.env())
+                .with_env(scratch.env().clone())
                 .with_grants(grants),
         )
         .with_terminal(terminal);

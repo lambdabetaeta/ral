@@ -219,6 +219,7 @@ mod tests {
     use super::*;
     use crate::authority::grant::freeze::{Anchor, FreezeCtx};
     use crate::authority::policy::{Flag, FsOp, GrantLayer};
+    use crate::environ::EnvVars;
     use crate::shell::grant::{decode_fragment, decode_grant};
     use crate::test_helper::Tree;
     use strum::VariantArray;
@@ -230,7 +231,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tree = Tree::lay(tmp.path(), ["/work/", "/bin/tool"]);
         let cwd = crate::path::CwdPath::new(tree.path("/work")).unwrap();
-        let ctx = FreezeCtx::at(crate::host::EnvVars::new(), cwd);
+        let ctx = FreezeCtx::at(EnvVars::new(), cwd);
         let tool = Anchor::Absolute.place(tree.at("/bin/tool"));
         let value = GrantValue::from(Axes {
             exec: Some(ExecTable {
@@ -287,7 +288,7 @@ mod tests {
             let (home, path) = (tree.at("/home"), tree.at("/bin"));
             let env = [("HOME", home.as_str()), ("PATH", path.as_str())];
             let cwd = crate::path::CwdPath::new(tree.path("/work")).unwrap();
-            let ctx = FreezeCtx::at(env.into_iter().collect(), cwd)
+            let ctx = FreezeCtx::at(EnvVars::from_pairs(env).unwrap(), cwd)
                 .with_scratch(Some(tree.at("/scratch")));
             Self {
                 _tmp: tmp,

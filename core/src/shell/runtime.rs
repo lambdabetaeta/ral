@@ -19,7 +19,7 @@ mod closure;
 pub use closure::Closure;
 
 // What the exec boundary refuses, declared once for the two sides that read it:
-// the checker before the spawn, `shell::exec::command::validate_argv` at it.
+// the checker before the spawn, `shell::exec::command::check_argv` at it.
 
 mod handler;
 pub use handler::{FrameHandle, HandlerEntry};
@@ -86,10 +86,10 @@ pub use coerce::settings_map;
 pub use state::modules::Modules;
 
 pub mod audit;
+pub(crate) use audit::DisplacedSite;
 pub use audit::{
     Audit, AuditFragment, CapturePolicy, TrailScope, epoch_us, report_envelope, report_value,
 };
-pub(crate) use audit::{AuditStart, DisplacedSite};
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{

@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// re-derived.  Argv is evaluated only on the `Direct` path: a `Thread` stage
 /// re-evaluates its own inside the thread, so doing it here too would run
 /// effectful arguments twice.  Args stay `Value`s so launch-time
-/// `command::validate_argv` applies the same shape rejection single-command exec does.
+/// `command::check_argv` applies the same shape rejection single-command exec does.
 #[derive(Debug)]
 pub(super) enum StageLaunch {
     Direct {

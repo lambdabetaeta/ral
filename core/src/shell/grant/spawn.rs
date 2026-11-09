@@ -76,6 +76,7 @@ impl SpawnGrant {
 mod tests {
     use super::*;
     use crate::authority::policy::{FsAllow, FsOp};
+    use crate::environ::EnvVars;
     use crate::shell::grant::decode_capability_map;
     use crate::shell::runtime::Value;
 
@@ -87,7 +88,7 @@ mod tests {
 
     fn cwd(cwd: &str) -> FreezeCtx {
         FreezeCtx::at(
-            crate::host::EnvVars::new(),
+            EnvVars::new(),
             crate::path::CwdPath::new(cwd.into()).expect("a fixture cwd is absolute"),
         )
     }

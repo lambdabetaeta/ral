@@ -2,13 +2,13 @@
 generated_at_commit: 257c6c00
 verified_at_commit: 257c6c00
 verified_at_date: 2026-11-09
-anchors: [ExternalCommand::prepare, ExternalCommand::start, ExternalCommand::run, ExternalCommand::detach, Started::register, Started::collect, ChildSetup::install, at_start, ending, with_denials, Started, Claim, payload_pids, Unstarted, Spawned, Group, Placement, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, at_spawn, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+anchors: [Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Diagnosis::explain_start, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, explain_exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
 
 **A command owns its preparation and start; a collector owns its running
-child.** `ExternalCommand` in `core/src/shell/exec/command.rs` uses the process
+child.** `Prepared` in `core/src/shell/exec/command.rs` uses the process
 layer in `core/src/process/launch.rs`. Lone commands and direct pipeline
 stages share startup, pump setup, reaper registration and collection. Their
 streams, placement and audit context differ. A detached command shares
@@ -20,12 +20,12 @@ is [[design/exec|exec]]; what a confined launch adds is
 
 | stage | function | it does | its failures leave as |
 |---|---|---|---|
-| prepare | `ExternalCommand::prepare` | reads the head's verdict, vets argv and owns a kept launch, its image, interpreter and confinement context; `detach` alone prepares a surrendered one | the head's verdict; a refused argument; a preparation error |
-| start | `ExternalCommand::start` / `run` / `detach` | consumes the command, connects its streams (a survivor's to null), and spawns under the scope; a kept result owns the child, pumps and claim, a detached result is `Survivor` | `at_start`, the one conversion of `Unstarted`, below |
+| prepare | `Command::prepare` | reads the head's verdict, vets argv and owns the launch, its image, interpreter and confinement context; `detach` alone asks for a surrendered one | the head's verdict; a refused argument; a preparation error |
+| start | `Prepared::start` / `run`, `Prepared::detach` | consumes the command, connects its streams (a survivor's to null), and spawns under the scope; a kept result owns the child, pumps and denial PIDs, a detached result is `Survivor` | `Diagnosis::explain_start`, the one conversion of `Unstarted`, below |
 | ending | `ending` | a death by a signal of a cause in force is that cause's stop; any other end is a process failure (`Reason::process`), with the kernel's account of the deny lines its start claimed | a stop, or a process failure |
 
 - **Every failure of a stage has one home.** Preparation raises its refusals as
-  the `Error`s its building meets; `at_start` is the only place a launch that
+  the `Error`s its building meets; `explain_start` is the only place a launch that
   made no child becomes the run's error; `ending` is the only place a child's
   end does. A fourth way to raise is a defect.
 - **Installation fixes child setup order once.** A launch's child steps are
@@ -58,7 +58,7 @@ Which of the three cases a failure is, and so whom it blames, is
 `Stopped` arises from `Launch::spawn`'s poll, `dacl::cancelled` and
 `Testimony::first`.
 
-- **`Program` is read as the program's.** `at_spawn` turns it into the same
+- **`Program` is read as the program's.** `explain_exec_error` turns it into the same
   process failure the probe reports, with the interpreter hint where it
   applies. `Refused` keeps its own wording (`unprepared`: "ral could not
   prepare the command's process"; "cannot start <launcher>").
@@ -76,12 +76,12 @@ Which of the three cases a failure is, and so whom it blames, is
 ## Which failure reads as what
 
 **The spawn's `errno` says what the OS found; the image says what that means.**
-`at_spawn` reads it against the `Image` the launch was built from.
+`explain_exec_error` reads it against the `Image` the launch was built from.
 
 - **`ENOENT` for an image that still exists on the host is `not-runnable ...
   missing-interpreter`.** The file is there; what it needs is not. The failure
   names the `#!` interpreter read with the image (`interpreter_of`, kept in
-  `ExternalCommand`), never what the file says by the time the kernel refused. A bundled tool, or a file gone
+  `Diagnosis`), never what the file says by the time the kernel refused. A bundled tool, or a file gone
   from its real path, is `not-found`.
 - **Only a permission refusal is `permission-denied`.** `EACCES` at the spawn,
   or a walk, a path head's or a `PATH` candidate's, that fails by a refusal.
@@ -90,7 +90,7 @@ Which of the three cases a failure is, and so whom it blames, is
 - **A confined `EACCES` or `ENOENT` whose interpreter the launch's own
   projection hides is `permission-denied` plus the interpreter hint**, on both
   platforms: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter
-  (`ENOENT`), and the user sees one thing. `ExternalCommand` keeps the launch's own
+  (`ENOENT`), and the user sees one thing. `Diagnosis` keeps the launch's own
   projection, and only on a failure to start is the verdict asked of it
   (`interpreter_hint`): the exec table's, then the read table's, so an
   interpreter excluded, not admitted to run, or outside the read set each
@@ -131,7 +131,7 @@ The records, the socket's discipline and why they hold are
 ## Whose deny lines a failure owns
 
 **A failure owns only the kernel deny lines its start claimed.** `start` takes
-a `Claim` the moment the spawn returns, and `ending` hands `with_denials` the
+its `denial_pids` the moment the spawn returns, and `ending` hands `exit_error` the
 `Failure` itself, never its rendering.
 
 - **Confinement is preparation's fact**: a projection, or the guest jail.
@@ -166,7 +166,7 @@ a `Claim` the moment the spawn returns, and `ending` hands `with_denials` the
 ## Where the child landed
 
 **A child's `Group` is computed once, at its birth, and carried.**
-`placement` decides the policy once, `spawn_with_pgid` returns the group with
+`Placement::for_command` decides the policy once, `spawn_with_pgid` returns the group with
 the child, an envelope's payload group becomes `Enveloped`, and nothing
 downstream recomputes it ([[invariants/a-child-lands-once|a-child-lands-once]]);
 what each landing lets a collector signal is

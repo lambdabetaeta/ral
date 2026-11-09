@@ -111,6 +111,7 @@ mod tests {
     use ral_core::authority::policy::GrantLayer;
     #[cfg(unix)]
     use ral_core::authority::policy::{Capabilities, Fragment, Net};
+    use ral_core::environ::EnvVars;
     #[cfg(unix)]
     use ral_core::path::XdgKind;
     use std::path::PathBuf;
@@ -161,11 +162,8 @@ mod tests {
     fn ctx_at(home: &str, cwd: impl AsRef<std::path::Path>) -> FreezeCtx {
         let cwd = ral_core::path::CwdPath::new(cwd.as_ref().to_path_buf())
             .expect("a fixture cwd is absolute");
-        FreezeCtx::at(
-            std::iter::once(("HOME", home)).collect::<ral_core::host::EnvVars>(),
-            cwd,
-        )
-        .with_scratch(Some(scratch().to_string_lossy()))
+        FreezeCtx::at(EnvVars::from_pairs([("HOME", home)]).unwrap(), cwd)
+            .with_scratch(Some(scratch().to_string_lossy()))
     }
 
     /// Parse *and* freeze a bake-in: the loader resolves places, so a failure

@@ -7,7 +7,7 @@
 //! XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::host`]).
 
-use crate::host::EnvVars;
+use crate::environ::EnvVars;
 use crate::path::basedir::resolve_xdg_in;
 use crate::path::lex::join_relative;
 use crate::path::tilde::TildePath;
@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     fn home(dir: &str) -> EnvVars {
-        std::iter::once(("HOME", dir)).collect()
+        EnvVars::from_pairs([("HOME", dir)]).unwrap()
     }
 
     #[test]
@@ -192,9 +192,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn xdg_subpath_is_appended() {
-        let env = [("HOME", "/h"), ("XDG_CACHE_HOME", "/c")]
-            .into_iter()
-            .collect::<EnvVars>();
+        let env = EnvVars::from_pairs([("HOME", "/h"), ("XDG_CACHE_HOME", "/c")]).unwrap();
         assert_eq!(expand_path_prefix("xdg:cache/foo", &env), "/c/foo");
     }
 

@@ -122,9 +122,7 @@ impl Engine {
                 let mut shell = Shell::root(Arc::clone(&runtime), cwd);
                 crate::shell::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
-                for (name, value) in &root.env {
-                    shell.set_env_var(name, value);
-                }
+                shell.context.overlay_env(&root.env);
                 // Off a wire a hold arrives unheld; held again as a seed's are.
                 let mut grants = root.grants.clone();
                 grants.rehold();

@@ -17,6 +17,7 @@ pub(crate) mod source;
 
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
+use ral_core::environ::Reserved;
 use ral_core::errln;
 use ral_core::error::Error;
 use ral_core::own::{OwnDir, UserFile};
@@ -265,15 +266,12 @@ impl RcPlan {
             rustix::process::umask(mask);
         }
         shell.set_child_limits(self.child_limits);
-        // PWD lives on context.cwd and a copy in env_overrides would shadow it;
-        // ral keeps no OLDPWD.  An rc spreading a parent's environment carries both.
-        for (k, v) in self
-            .env
-            .iter()
-            .filter(|(k, _)| !matches!(*k, "PWD" | "OLDPWD"))
-        {
+        for (k, v) in &self.env {
             let v = v.into_owned();
-            shell.set_env_var(k.to_string(), v.to_string());
+            match shell.set_env_var(k.to_string(), v.to_string()) {
+                // Ignored: an rc copying a parent's environment carries both.
+                Ok(()) | Err(Reserved::Pwd | Reserved::Oldpwd) => {}
+            }
         }
         // Bindings, functions included, are lexical: applyable at the prompt.
         for (k, v) in &self.bindings {

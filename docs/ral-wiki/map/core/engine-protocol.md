@@ -66,7 +66,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 43): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 44): checked at `Attach`; a mismatch refuses.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -92,7 +92,9 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   crate-private, since only the engine's side has the OS a guest path is
   native to. `Attach::new` is a plain root's, at this build's version;
   `Attach::root` pairs an `EngineSpec` with a `Root`, whose `with_env`,
-  `with_grants` and `with_config` edit it; `Attach::child` pairs an
+  `with_grants` and `with_config` edit it. A root's env is an
+  `environ::EnvVars`, so an attach binding `PWD` or `OLDPWD` does not
+  decode; `Attach::child` pairs an
   `EngineSpec` with a seal; `with_terminal` edits either.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,

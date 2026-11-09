@@ -2,7 +2,7 @@
 generated_at_commit: 3e3fbc84
 verified_at_commit: 257c6c00
 verified_at_date: 2026-11-09
-anchors: [Head, Target, Missing, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Head::select, Head::admit, settle, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
+anchors: [Command, Request, LookupFailure, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Command::from_name, Command::lookup, Command::admit, settle, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -15,7 +15,7 @@ of [[internals/capability-enforcement|capability-enforcement]].
 
 ## The head is judged before it is looked at
 
-**`Head::resolve` names candidates without I/O; `Head::admit` walks and judges
+**`Command::from_name` names candidates without I/O; `Command::lookup` walks and judges
 each before asking its kind.** Resolution freezes the shown spelling and a
 `Target`: a bundled tool, a path, or a bare name with the effective `PATH` and
 cwd. Admission is once per launch: at classification for a plain call; at
@@ -145,7 +145,7 @@ cannot run another program.
 ## The kernel holds the same evidence
 
 **Direct admission reads the live stack on every seat.** On hosts,
-`ExternalCommand::prepare` projects that stack, compiling its exec table once
+`Command::prepare` projects that stack, compiling its exec table once
 more; each path admits and
 launches within one machine step, and the stack changes only at `Frame::Grant` and
 `Shell::with_pushed`.

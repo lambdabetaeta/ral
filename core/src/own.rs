@@ -31,7 +31,8 @@ use strum::IntoStaticStr;
 
 use self::site::Silent;
 use crate::authority::policy::Ungoverned;
-use crate::host::{self, EnvVars};
+use crate::environ::EnvVars;
+use crate::host;
 use crate::path::{
     Access, Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading,
     Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,

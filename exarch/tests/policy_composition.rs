@@ -13,6 +13,7 @@ use exarch::app::{EXARCH, SYNOD, Scratch};
 use exarch::policy::{Base, Invocation, for_invocation};
 use ral_core::authority::grant::freeze::Place;
 use ral_core::authority::policy::GrantStack;
+use ral_core::environ::EnvVars;
 use ral_core::error::Error;
 use ral_core::path::XdgKind;
 use ral_core::path::{LeafMode, Reading, Resolver, Writing, locate};
@@ -74,9 +75,7 @@ fn on_path(name: &str) -> String {
         panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
     });
     let cwd = ral_core::test_helper::process_cwd();
-    let object = ral_core::path::RealPath::of(
-        &Resolver::at(&ral_core::host::EnvVars::new(), &cwd).anchor(&hit),
-    );
+    let object = ral_core::path::RealPath::of(&Resolver::at(&EnvVars::new(), &cwd).anchor(&hit));
     ral_core::path::shown(object.expect("a PATH hit exists").as_path())
 }
 

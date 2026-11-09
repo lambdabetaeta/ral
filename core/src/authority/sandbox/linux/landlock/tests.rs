@@ -1,6 +1,7 @@
 use super::*;
 use crate::authority::policy::{ExecAllow, ExecDeny, ExecRules, Extent, GrantPath, Rule};
 use crate::authority::sandbox::{FsLists, FsProjection};
+use crate::environ::EnvVars;
 use crate::path::{Excluded, FrozenPath, render_objects, utf8};
 use crate::test_helper::confinement::skip;
 use crate::test_helper::{Tree, place, real};
@@ -708,10 +709,7 @@ fn a_socket_write_grant_admits_only_its_opened_file() {
             )]),
         )]),
     )]);
-    let ctx = FreezeCtx::at(
-        crate::host::EnvVars::default(),
-        crate::test_helper::process_cwd(),
-    );
+    let ctx = FreezeCtx::at(EnvVars::default(), crate::test_helper::process_cwd());
     let layer = crate::shell::grant::decode_capability_map(&grant, "test", &ctx).unwrap();
     let stack = crate::test_helper::stack([layer]);
     let projection = SandboxProjection::of(&stack, &Baseline::default(), None)

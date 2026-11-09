@@ -39,8 +39,8 @@ use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
 use super::mooring::{Mooring, TerminalAccess, no_desk};
 use crate::authority::policy::GrantStack;
+use crate::environ::EnvVars;
 use crate::error::{Error, FrameName, Prov};
-use crate::host::EnvVars;
 use crate::io::{Io, WriteFault};
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope};
@@ -67,9 +67,8 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Context<H = HandlerStack> {
     // ── attenuable by within / grant ─────────────────────────────────────
-    /// Process env-var overrides set by `within [env: …]`.  `PWD` is
-    /// excluded, living on `cwd` below; `OLDPWD` too, as ral keeps no previous
-    /// directory.
+    /// Process env-var overrides set by `within [env: …]`. `PWD` is `cwd`
+    /// below.
     pub(crate) env_overrides: EnvVars,
     /// The working-directory cell.  A fork copies it; a same-thread body
     /// shares it, so a `cd` there persists unless a `within [dir: …]` around

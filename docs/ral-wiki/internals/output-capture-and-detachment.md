@@ -94,8 +94,8 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   on expiry the child's collector, which reads the scope each slice, tears the
   group down.
 - A headless exarch external leads a session of its own, and so its own
-  process group (`PgidPolicy::NewSession`, chosen by `placement` in
-  `core/src/shell/exec/command.rs`, gated by
+  process group (`PgidPolicy::NewSession`, chosen by `Placement::for_command` in
+  `core/src/shell/exec/job_control.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
   so the cancel SIGTERMs then unconditionally SIGKILLs the *whole group* —
   grandchildren included. Every copy of the write end closes, the pump sees EOF,
@@ -247,9 +247,9 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  `Head::resolve`, `Head::admit`, and the vetting and launch any external is
-  prepared with, surrendered here (`ExternalCommand::detach`,
-  `core/src/shell/exec/command.rs`) — so the grant judges the call
+  `Command::from_name`, `Command::lookup`, `Command::admit`, and the vetting and
+  launch any external is prepared with, surrendered here (`Prepared::detach`,
+  `core/src/shell/exec/command/detach.rs`) — so the grant judges the call
   exactly as it judges any exec and a head a handler in scope intercepts is
   refused, birthing nothing: a handler runs inside this session, so there is
   nothing to detach (to run the real program, `^name`). Only the last act
@@ -281,7 +281,7 @@ of the child's pgid.
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
 - A survivor born under a projection **keeps it for life**. Preparation
   renders the frame's confinement into the launch exactly as for a child the
-  session keeps; `Ownership::Surrendered`, which only `ExternalCommand::detach`
+  session keeps; `Ownership::Surrendered`, which only the `detach` builtin
   asks for, drops only the two ties between the
   session and the envelope — death (`--die-with-parent`, which against a double
   fork would kill the survivor moments after birth or never fire at all) and

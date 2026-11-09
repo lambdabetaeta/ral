@@ -124,5 +124,7 @@ pub use slug::project_slug;
 pub use tilde::{TildePath, abbreviate_home};
 #[cfg(target_os = "linux")]
 pub(crate) use which::locate_in;
+#[cfg(windows)]
+pub(crate) use which::with_exec_extensions;
 pub(crate) use which::{Candidate, search};
 pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};

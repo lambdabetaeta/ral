@@ -121,6 +121,7 @@ fn dump_frame(body: &[u8]) -> io::Result<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::host::test_support::with_var;
 
     struct InterruptOnce {
         bytes: std::io::Cursor<Vec<u8>>,
@@ -246,7 +247,7 @@ mod tests {
 
         let state = OwnDir::for_test("frame-dump").unwrap();
         let base = crate::path::utf8(state.path()).unwrap();
-        let err = crate::host::env::test_support::with_var("XDG_STATE_HOME", Some(base), || {
+        let err = with_var("XDG_STATE_HOME", Some(base), || {
             let mut framed = Vec::new();
             put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
             let mut reader = std::io::Cursor::new(framed);

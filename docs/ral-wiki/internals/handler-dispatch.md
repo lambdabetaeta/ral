@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 96e103a5
 verified_at_date: 2026-11-01
-anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, run_base_frame, render_handler_args, Frame::Unmask, WithinUndo]
+anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, BuiltinEntry::framed, render_handler_args, Frame::Unmask, WithinUndo]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -40,7 +40,7 @@ frames from the top down to and including the match — or a `Base` entry.
 **Each arm runs honestly.** A run-frame hit applies the user thunk under the
 argv-list convention below, masked by depth; a base hit calls the row's Rust
 body directly with the argv slice, with no adapter and no masking, because a
-Rust body never self-forwards (`run_base_frame`). A user frame therefore stacks
+Rust body never self-forwards (`step_exec`'s `Base` arm). A user frame therefore stacks
 *above* a base frame and forwards into it by the same wrap-and-forward idiom
 that reaches an outer handler.
 

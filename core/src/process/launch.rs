@@ -8,6 +8,7 @@
 //! `CreateProcessW` itself, because handle admission and Job Object
 //! membership must be creation-time facts.
 
+use crate::environ::ChildEnv;
 use crate::error::Error;
 #[cfg(unix)]
 use crate::process::report::Testimony;
@@ -337,6 +338,23 @@ impl StdioSpec {
     }
 }
 
+impl Launch {
+    /// Apply `env`: its cwd, then its sets, then its unsets. The one way to
+    /// give a launch a directory or environment, so none bypasses
+    /// [`EnvVars::for_child`](crate::environ::EnvVars::for_child).
+    pub(crate) fn situate(&mut self, env: ChildEnv<'_>) -> &mut Self {
+        let ChildEnv { cwd, set, unset } = env;
+        self.current_dir(cwd);
+        for (key, value) in set {
+            self.env(key, value);
+        }
+        for key in unset {
+            self.env_remove(key);
+        }
+        self
+    }
+}
+
 #[cfg(unix)]
 impl Launch {
     /// Whether an envelope stands between ral and the program, whose payload
@@ -412,17 +430,17 @@ impl Launch {
         self
     }
 
-    pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
+    fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
         self.cmd.env(key, val);
         self
     }
 
-    pub(crate) fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+    fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.cmd.env_remove(key);
         self
     }
 
-    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+    fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
         self.cmd.current_dir(dir.into());
         self
     }
@@ -962,7 +980,7 @@ impl Launch {
         self
     }
 
-    pub fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
+    fn env(&mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> &mut Self {
         self.env.insert(
             env_key(key.as_ref()),
             EnvEdit::Set(val.as_ref().to_os_string()),
@@ -970,12 +988,12 @@ impl Launch {
         self
     }
 
-    pub(crate) fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+    fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.env.insert(env_key(key.as_ref()), EnvEdit::Remove);
         self
     }
 
-    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+    fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
         self.cwd = Some(dir.into());
         self
     }

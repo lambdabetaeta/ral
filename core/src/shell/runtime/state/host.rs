@@ -7,6 +7,8 @@ use super::Mooring;
 use super::Shell;
 use super::TerminalAccess;
 use super::bindings::BindingLease;
+use crate::environ::EnvVars;
+use crate::environ::Reserved;
 use crate::fact::unix_secs;
 use crate::io::terminal::TerminalState;
 use crate::process::{DurableRoot, ScopeNode, TerminalLease};
@@ -231,8 +233,20 @@ impl Shell {
     /// seeds `NO_COLOR` and the like.  `within [env: …]` wants the scoped
     /// [`WithinScope::enter`](crate::shell::evaluator::scope::WithinScope::enter)
     /// instead, whose `WithinUndo` restores on exit.
-    pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
-        self.context.set_env_var(k, v);
+    ///
+    /// # Errors
+    /// `k` is [`Reserved`].
+    pub fn set_env_var(
+        &mut self,
+        k: impl Into<String>,
+        v: impl Into<String>,
+    ) -> Result<(), Reserved> {
+        self.context.set_env_var(k, v)
+    }
+
+    /// Merge `over` into the session's env-var overrides; its bindings win.
+    pub fn overlay_env(&mut self, over: &EnvVars) {
+        self.context.overlay_env(over);
     }
 
     /// Read an env var through the dynamic overlay, falling back to the host
@@ -244,7 +258,7 @@ impl Shell {
 
     /// The dynamic overlay itself, for a host handing it to an overlay-aware
     /// helper (the `RAL_PATH` plugin search) rather than reading one key.
-    pub fn env_overrides(&self) -> &crate::host::EnvVars {
+    pub fn env_overrides(&self) -> &EnvVars {
         self.context.env_overrides()
     }
 }

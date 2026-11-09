@@ -26,7 +26,7 @@ fn descriptor_destinations_need_no_drains() {
 }
 
 #[test]
-fn inheritance_names_the_matching_stream_only() {
+fn standard_streams_need_no_drains() {
     let mut drains = PendingDrains::default();
     assert!(matches!(
         drains.bind(&Sink::Stdout, OutFd::Stdout).unwrap(),
@@ -36,15 +36,13 @@ fn inheritance_names_the_matching_stream_only() {
         drains.bind(&Sink::Stderr, OutFd::Stderr).unwrap(),
         StdioSpec::Inherit
     ));
-    assert!(drains.0.is_empty());
     for (sink, fd) in [(Sink::Stdout, OutFd::Stderr), (Sink::Stderr, OutFd::Stdout)] {
         assert!(matches!(
             drains.bind(&sink, fd).unwrap(),
             StdioSpec::Owned(_)
         ));
-        let drain = drains.0.pop().unwrap();
-        assert!(drain.sink.same_destination(&sink));
     }
+    assert!(drains.0.is_empty());
 }
 
 #[test]

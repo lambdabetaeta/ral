@@ -4,7 +4,7 @@
 //!
 //! The seam with `crate::shell::evaluator` is narrow both ways.  Down, the machine
 //! enters at `pipeline::PipeNode::run`, `dispatch::resolve_command_word`,
-//! `run_base_frame`, `run_external`, and `redirect::scope`.  Up, a stage thread
+//! `dispatch::run_external`, and `redirect::scope`.  Up, a stage thread
 //! re-enters the machine through the `pipeline::StageEval` the evaluator hands
 //! `PipeNode::run`, so the recursion is irreducible but the runtime never
 //! names the evaluator.
@@ -14,6 +14,7 @@ pub(crate) mod command;
 pub(crate) mod dispatch;
 mod job_control;
 pub(crate) mod pipeline;
+mod record;
 pub(crate) mod redirect;
 
 #[cfg(unix)]

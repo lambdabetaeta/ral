@@ -313,6 +313,24 @@ fn a_detach_of_a_missing_program_leaves_one_record_carrying_its_failure() {
     assert!(command.error.is_some(), "{command:?}");
 }
 
+/// A program the grant refuses is its check record alone: nothing was
+/// launched, so no `detach` record claims a birth was attempted.
+#[test]
+fn a_detach_the_grant_refuses_leaves_its_check_and_no_command_record() {
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
+    let mut shell = with_detach();
+    let (result, events) = common::run_recorded(
+        &mut shell,
+        &common::under_grant("detach #'never born'# /bin/sleep 300"),
+        true,
+    );
+    assert!(result.is_err(), "the grant runs only /bin/cat");
+    let commands = common::commands(&events);
+    assert!(commands.is_empty(), "no launch, no record: {commands:?}");
+    let checks = common::facts(&events, "check");
+    assert_eq!(checks.len(), 1, "the refusal is one check: {events:?}");
+}
+
 /// The survivor's three streams are `/dev/null`, never the host's own.  The
 /// birth points them there by handing `Command` its stdio and forking a
 /// second time from a `pre_exec` hook — which works only because `std` dup2s

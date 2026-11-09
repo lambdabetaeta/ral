@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ral_core::carrier::{WireTransport, dispatch_to_report};
+use ral_core::environ::EnvVars;
 use ral_core::path::{EnginePath, GuestPath, shown};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Attach, EngineSpec, Program, Ran, Report, Root, Run};
@@ -175,7 +176,7 @@ fn prove_the_host_can_dial_in(
     let attach = Attach::root(
         EngineSpec::new(INSTALLER_TAG, EnginePath::Guest(scratch.clone())),
         Root::new(EnginePath::Guest(workspace))
-            .with_env(vec![(SCRATCH_VAR.to_string(), scratch.to_string())]),
+            .with_env(EnvVars::from_pairs([(SCRATCH_VAR, scratch.to_string())]).unwrap()),
     );
     transport.attach(attach);
     if let Err(severed) = transport.await_attached() {

@@ -30,7 +30,7 @@ use super::linux::landlock::Landlocked;
 use crate::Role;
 use crate::path::{RealPath, shown};
 use handoff::{close_inherited, unwritable};
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::fd::OwnedFd;
@@ -115,13 +115,13 @@ impl Confinement {
     }
 }
 
-/// The confinement and command encoded for the child. Construction borrows
-/// the image and argument bytes; decoding produces the owned default types.
+/// The confinement, and the image to run inside it. An issued warrant
+/// borrows the launch's image and argv; a received one owns what it decoded.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Warrant<I = Image, A = OsString> {
+pub(super) struct Warrant<'a> {
     confinement: Confinement,
-    image: I,
-    args: Vec<A>,
+    image: Cow<'a, Image>,
+    args: Vec<Cow<'a, OsStr>>,
 }
 
 /// The program, once its confinement is entered: the only thing a received
@@ -131,7 +131,7 @@ pub(super) struct Confined {
     args: Vec<OsString>,
 }
 
-impl<'a> Warrant<&'a Image, &'a OsStr> {
+impl<'a> Warrant<'a> {
     pub(super) fn new(
         confinement: Confinement,
         image: &'a Image,
@@ -139,21 +139,22 @@ impl<'a> Warrant<&'a Image, &'a OsStr> {
     ) -> Self {
         Self {
             confinement,
-            image,
-            args: args.iter().map(|arg| OsStr::new(arg.as_ref())).collect(),
+            image: Cow::Borrowed(image),
+            args: args
+                .iter()
+                .map(|arg| Cow::Borrowed(OsStr::new(arg.as_ref())))
+                .collect(),
         }
     }
-}
 
-impl<I: Borrow<Image>, A: AsRef<OsStr>> Warrant<I, A> {
-    /// Encode directly from the borrowed or owned fields into a sealed parcel.
+    /// This warrant, parcelled for a [`Handoff`].
     pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
         parcel("ral-warrant", &self.encode()?)
             .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
     }
 
     fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match self.image.borrow() {
+        let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match &*self.image {
             Image::File { real, arg0 } => (
                 b"file",
                 real.as_path().as_os_str().as_bytes(),
@@ -167,7 +168,7 @@ impl<I: Borrow<Image>, A: AsRef<OsStr>> Warrant<I, A> {
             .into_iter()
             .chain(arg0)
             .chain([argc.as_bytes()]);
-        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_ref().as_bytes())))?;
+        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_bytes())))?;
         if bytes.len() > CAP {
             return Err(format!(
                 "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
@@ -178,7 +179,7 @@ impl<I: Borrow<Image>, A: AsRef<OsStr>> Warrant<I, A> {
     }
 }
 
-impl Warrant {
+impl Warrant<'static> {
     /// The warrant the launch left at `slots.warrant`, its confinement
     /// entered and every inherited descriptor but the report swept: the
     /// program, and nothing before it.
@@ -191,7 +192,10 @@ impl Warrant {
         #[cfg(target_os = "linux")]
         slots.install_streams()?;
         confinement.enter(slots.report)?;
-        Ok(Confined { image, args })
+        Ok(Confined {
+            image: image.into_owned(),
+            args: args.into_iter().map(Cow::into_owned).collect(),
+        })
     }
 
     /// The warrant the launch left at `at`, which this takes and closes.
@@ -260,7 +264,9 @@ impl Warrant {
         let argc: usize = text(next("argument count")?)?
             .parse()
             .map_err(|e| format!("the warrant's argument count: {e}"))?;
-        let args: Vec<OsString> = fields.map(|arg| OsStr::from_bytes(arg).into()).collect();
+        let args: Vec<_> = fields
+            .map(|arg| Cow::Owned(OsStr::from_bytes(arg).to_owned()))
+            .collect();
         if args.len() != argc {
             return Err(format!(
                 "the warrant counts {argc} arguments but carries {}",
@@ -269,7 +275,7 @@ impl Warrant {
         }
         let warrant = Self {
             confinement,
-            image,
+            image: Cow::Owned(image),
             args,
         };
         if warrant.encode()? != bytes {
@@ -321,14 +327,17 @@ mod tests {
         Confinement::parse(CONFINEMENT).expect("a valid confinement")
     }
 
-    fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant {
+    fn file(real: &[u8], arg0: &[u8], args: &[&[u8]]) -> Warrant<'static> {
         Warrant {
             confinement: confinement(),
-            image: Image::File {
+            image: Cow::Owned(Image::File {
                 real: RealPath::off_the_wire(OsStr::from_bytes(real)).expect("a real path"),
                 arg0: OsStr::from_bytes(arg0).into(),
-            },
-            args: args.iter().map(|a| OsStr::from_bytes(a).into()).collect(),
+            }),
+            args: args
+                .iter()
+                .map(|a| Cow::Owned(OsStr::from_bytes(a).to_owned()))
+                .collect(),
         }
     }
 
@@ -352,7 +361,7 @@ mod tests {
         for tool in crate::uutils::bundled_tools() {
             let warrant = Warrant {
                 confinement: Confinement::parse(NO_CONFINEMENT).expect("a valid confinement"),
-                image: Image::Tool(tool),
+                image: Cow::Owned(Image::Tool(tool)),
                 args: Vec::new(),
             };
             assert_eq!(
@@ -520,7 +529,7 @@ mod tests {
         };
         let mut warrant = file(b"/bin/echo", b"echo", &[b"warrant-arrived"]);
         warrant.confinement = Confinement(super::super::macos::build_profile(&projection).unwrap());
-        let prepare = |warrant: &Warrant| {
+        let prepare = |warrant: &Warrant<'_>| {
             let mut handoff = Handoff::default();
             let (slots, report) = super::super::launch::issue(warrant, &mut handoff)?;
             let own = super::super::reexec::own().unwrap();

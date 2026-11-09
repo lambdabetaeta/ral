@@ -1,4 +1,5 @@
 use super::*;
+use crate::environ::ChildEnv;
 
 /// `sh -c script` confined under `unrestricted()` through the path a
 /// real command takes, `Launch::spawn` and then the collector, the group
@@ -432,11 +433,16 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
         let late = HostPty::open();
         let args = args(&late.name);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (cwd, request) = (crate::test_helper::process_cwd(), probe::request(&args));
         launch
             .stdin(crate::process::StdioSpec::from_owned(
                 late.slave.try_clone().unwrap(),
             ))
-            .env("RAL_TEST_PROBE", probe::request(&args));
+            .situate(ChildEnv {
+                cwd: cwd.as_path(),
+                set: vec![("RAL_TEST_PROBE".as_ref(), request.as_ref())],
+                unset: Vec::new(),
+            });
         launch.output().unwrap().into()
     };
     let control = invoke(&|_| vec!["tty".into()]);
@@ -615,14 +621,13 @@ fn a_confined_payloads_group_exists_when_its_spawn_returns() {
 /// no deny-set confines.
 #[test]
 fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
-    use crate::shell::exec::command::Claim;
     use std::time::Duration;
 
     if envelope_launches(&unrestricted()).is_none() {
         return;
     }
     start_granted("exec sleep 30", |started, shell| {
-        let Claim::Confined(pids) = &started.claim else {
+        let Some(pids) = &started.denial_pids else {
             panic!("a launch under a grant is confined");
         };
         let crate::process::Group::Enveloped(payload) = started.spawned.group else {

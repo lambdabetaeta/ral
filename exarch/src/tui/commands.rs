@@ -20,6 +20,7 @@ use crate::port::{Read, Rewrite};
 use crate::provider::allowance::{Allowance, Consumption, Reading, Scope};
 use crate::record::Memory;
 use jiff::Timestamp;
+use ral_core::environ::EnvVars;
 
 /// A command's trailing argument.
 pub(super) enum Arg {
@@ -286,7 +287,7 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
 /// Resolve a typed `/export` path: expand a `~`/`xdg:` head, then anchor a
 /// still-relative path at the launch `cwd` rather than the process's own.
 pub(super) fn resolve_export_path(arg: &str, cwd: &ral_core::path::CwdPath) -> PathBuf {
-    ral_core::path::Resolver::at(&ral_core::host::EnvVars::new(), cwd)
+    ral_core::path::Resolver::at(&EnvVars::new(), cwd)
         .resolve(arg)
         .into_inner()
 }

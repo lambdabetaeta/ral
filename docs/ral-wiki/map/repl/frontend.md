@@ -111,7 +111,7 @@ The minimal frontend has no corresponding raw-key bindings.
   expansion or evaluation; its errors name the variable. `admit_draft` and
   `read_draft` cap both directions at `MAX_DRAFT_BYTES` (16 MiB) via
   `ral_core::io::read_bounded`; `after_cleanup` never drops a removal failure.
-  `Shell::run_external_argv` invokes the ordinary admitted external-command
+  `Shell::run_external` invokes the ordinary admitted external-command
   path with the hook's mooring, grants, audit and terminal authority.
 - `external_editor.rs::Workspace` owns a private scoped temporary directory
   and exclusively creates `buffer.ral`. Readback re-locates the edited file

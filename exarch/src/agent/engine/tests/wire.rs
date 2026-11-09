@@ -283,7 +283,7 @@ fn wire_engine_clear_answers_a_sentence() {
 #[test]
 fn a_sealed_attach_is_a_child_of_its_parent() {
     let mut parent = crate::boot::test_shell();
-    parent.set_env_var("PARENT_MARK", "1");
+    parent.set_env_var("PARENT_MARK", "1").unwrap();
     let seal = ral_core::seed::seal(&parent.bequeath(ral_core::SpawnGrant::Inherit))
         .expect("a bequest seals");
     let (transport, mut child) = engine_over_socketpair(Liveness::default());

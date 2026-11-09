@@ -77,7 +77,7 @@ fact data are reached through their owning modules.
   the environment to the names its body mentions
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
   `env.rs` — lexical `Env`, ρ alone; process-env overrides are
-  `host::EnvVars` (`core/src/host/env.rs`), not runtime values. A scope entry is
+  `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).

@@ -35,7 +35,7 @@ walk as it freezes it. In doing so it:
 
 - **resolves** every place (`` `cwd ``, `` `home ``, `` `tempdir ``, `` `scratch ``,
   `` `gitdir ``, `` `xdg-* ``, `` `absolute ``) and every selector (`` `path ``, `` `system ``, the package managers)
-  against a `FreezeCtx`, built by `FreezeCtx::at` from owned `host::EnvVars`
+  against a `FreezeCtx`, built by `FreezeCtx::at` from owned `environ::EnvVars`
   and logical cwd. `Shell::freeze_ctx` supplies these and the session's scratch
   at the shell boundary. `` `tempdir `` reads the host's temp dir;
   `` `scratch `` reads the scratch spelling the context carries, and refuses

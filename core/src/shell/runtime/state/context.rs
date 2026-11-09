@@ -2,38 +2,36 @@
 //! `USER`, and the [`Resolver`] bound to the live home/cwd pair.
 //!
 //! [`Context`] is the `Shell::context` field that [`Shell::child`](super::Shell)
-//! clones into a child.  `PWD` stays out of
-//! `env_overrides`; the canonical directory lives on `context.cwd`.
+//! clones into a child.  `PWD` is `context.cwd`, not an override.
 
 use super::Context;
-use crate::host::EnvVars;
+use crate::environ::{EnvVars, Reserved};
 use crate::path::{CwdPath, Resolver};
 use std::path::PathBuf;
 
 impl Context {
-    /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
+    /// Read-only borrow; mutation goes through [`Self::set_env_var`] and
+    /// [`Self::overlay_env`].
     pub fn env_overrides(&self) -> &EnvVars {
         &self.env_overrides
     }
 
-    /// Insert `k → v`.
-    pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
-        self.env_overrides.insert(k.into(), v.into());
+    /// # Errors
+    /// `k` is [`Reserved`].
+    pub fn set_env_var(
+        &mut self,
+        k: impl Into<String>,
+        v: impl Into<String>,
+    ) -> Result<(), Reserved> {
+        self.env_overrides.insert(k.into(), v.into())
     }
 
-    /// Bulk-insert each item.
-    pub(crate) fn extend_env<I, K, V>(&mut self, items: I)
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        for (k, v) in items {
-            self.set_env_var(k, v);
-        }
+    /// Lay `over` on the overrides, its bindings winning.
+    pub(crate) fn overlay_env(&mut self, over: &EnvVars) {
+        self.env_overrides.overlay(over);
     }
 
-    /// Effective `HOME`: [`EnvVars::home`](crate::host::EnvVars::home) over
+    /// Effective `HOME`: [`EnvVars::home`] over
     /// these overrides.
     pub(crate) fn home(&self) -> Option<String> {
         self.env_overrides.home()

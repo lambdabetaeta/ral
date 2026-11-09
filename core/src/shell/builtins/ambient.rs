@@ -1,6 +1,5 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
-use crate::host::EnvVars;
 use crate::shell::runtime::{Error, Mooring, Settled, Shell, Value};
 use crate::ty::Site;
 use std::sync::Arc;
@@ -17,20 +16,14 @@ pub(super) fn home(shell: &Shell) -> Result<Value, Error> {
     Ok(Value::string(crate::path::shown(home)))
 }
 
-/// The host process environment, overlaid with `within [env: …]`.
-/// The host's `PWD` is stale the moment ral `cd`s — the live one is
-/// `context.cwd` — and its `OLDPWD` names the launcher's history, so both are
-/// dropped at the source.
+/// The host environment under the overlay:
+/// [`EnvVars::visible`](crate::environ::EnvVars::visible).
 pub(super) fn env(shell: &Shell) -> Value {
-    let host = EnvVars::host_text().filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"));
-    let overrides = shell
-        .context
-        .env_overrides
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()));
-    // `Map`'s `FromIterator` is last-wins, so the overrides come second.
     Value::Map(
-        host.chain(overrides)
+        shell
+            .context
+            .env_overrides()
+            .visible()
             .map(|(k, v)| (k, Value::string(v)))
             .collect(),
     )
@@ -100,7 +93,7 @@ mod tests {
     #[test]
     fn user_reads_the_override() {
         let mut shell = new_shell();
-        shell.context.set_env_var("USER", "bob");
+        shell.context.set_env_var("USER", "bob").unwrap();
         assert_eq!(user(&shell).unwrap(), Value::string("bob"));
     }
 
@@ -115,7 +108,10 @@ mod tests {
     #[test]
     fn env_reads_the_override() {
         let mut shell = new_shell();
-        shell.context.set_env_var("RAL_AMBIENT_TEST_KEY", "v");
+        shell
+            .context
+            .set_env_var("RAL_AMBIENT_TEST_KEY", "v")
+            .unwrap();
         let Value::Map(m) = env(&shell) else {
             panic!("env must be a Map");
         };

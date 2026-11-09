@@ -157,10 +157,13 @@ fn start_granted<R>(
             &crate::ir::CommandName::Path("/bin/sh".into()),
             &shell.context,
         )
+        .lookup(&shell.context.grants, shell.baseline())
         .admit(&crate::shell::runtime::Mooring::adrift(), shell)
         .expect("the grant admits /bin/sh");
         let args = ["-c", script].map(crate::shell::runtime::Value::string);
-        let command = command.prepare(&args, shell).expect("the launch builds");
+        let command = command
+            .prepare(&args, crate::authority::sandbox::Ownership::Kept, shell)
+            .expect("the launch builds");
         let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
         let started = command
             .start(

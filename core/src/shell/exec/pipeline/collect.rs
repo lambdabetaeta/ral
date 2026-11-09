@@ -5,18 +5,17 @@
 //! folds in launch order.  A lone external is collected as the one stage of
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
-use super::super::command::{self, Claim, Started};
-use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
+use super::super::command::{self, Started};
+use super::stage::{Drain, ExternalEnd, LiveExternal, StageFrame, StageHandle, StageKind};
 use crate::fact::AuditIo;
-use crate::io::child::{Drains, PendingDrains};
 use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, PreparedTerminalLoan, Scope, ScopeId, Spawned,
     TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Error, Mooring, Settled, Shell, Stop, UNREPORTED,
-    Value,
+    AuditFragment, Break, End, Error, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -33,15 +32,16 @@ struct Window<'a> {
 /// What an external's ending reads once its process and pumps are done.
 pub(super) struct Settlement {
     pub(super) name: String,
-    /// Absent for a lone command, whose own door claims and records.
-    pub(super) audit: Option<Box<StageAudit>>,
-    /// The deny lines its failure may claim, as its start knew them.
-    pub(super) claim: Claim,
+    /// Absent for a lone command, whose own frame is still open to claim
+    /// and record when it settles.
+    pub(super) frame: Option<Box<StageFrame>>,
+    /// The PIDs whose sandbox denials belong to it, taken at its start.
+    pub(super) denial_pids: Option<HashSet<u32>>,
 }
 
 impl Settlement {
     /// How the run ended under `cause`; siblings share the window from
-    /// `started`, so only the deny lines the stage's own claim owns are its.
+    /// `started`, so only denials by the stage's own PIDs are its.
     fn ending(
         &self,
         outcome: WaitOutcome,
@@ -53,7 +53,7 @@ impl Settlement {
             outcome,
             cause,
             window.scope,
-            &self.claim,
+            self.denial_pids.as_ref(),
             window.started,
         )
     }
@@ -74,28 +74,21 @@ impl Settlement {
             Some(cause) if sent == Some(cause) => Ok(()),
             _ => self
                 .ending(outcome, cause, window)
-                .map_err(|broke| match &self.audit {
-                    Some(audit) => broke.claimed_by(|| audit.prov.clone()),
+                .map_err(|broke| match &self.frame {
+                    Some(frame) => broke.claimed_by(|| frame.prov.clone()),
                     None => broke,
                 }),
         };
-        let Self { name, audit, .. } = self;
-        // No start: nobody was listening at launch.
-        let fragment = audit
-            .and_then(|audit| {
-                let StageAudit { prov, start, args } = *audit;
-                let mut obs = shell.command_observation(
-                    &start?,
-                    &name,
-                    args,
-                    CommandOrigin::External,
-                    settled.as_ref().err(),
-                    AuditIo::default(),
-                );
-                obs.site = prov.site(&shell.session.sources);
-                Some(AuditFragment::from_observations(vec![obs]))
+        let fragment = self
+            .frame
+            .and_then(|frame| {
+                frame
+                    .record
+                    .end(settled.as_ref().err(), AuditIo::default(), shell)
             })
-            .unwrap_or_else(AuditFragment::empty);
+            .map_or_else(AuditFragment::empty, |observation| {
+                AuditFragment::from_observations(vec![observation])
+            });
         StageObservation {
             end: End::settled(settled.map(|()| Value::Unit)),
             audit: fragment,
@@ -394,7 +387,7 @@ impl CollectState {
         loan: Option<TerminalLoan>,
         since: Instant,
         shell: &Shell,
-    ) -> Settled<Self> {
+    ) -> Self {
         let group = started.spawned.group.clone();
         // A lone leader's zombie pins its group through settlement. An
         // envelope's payload, not its monitor, leads the addressed group.
@@ -403,12 +396,12 @@ impl CollectState {
             .is_some_and(|owned| owned.as_raw() == started.spawned.child.id().cast_signed());
         let (tx, rx) = std::sync::mpsc::channel();
         let slot = Slot { ix: 0, tx };
-        let stage = started.register(&slot, group.owned(), &shell.scope)?;
+        let stage = started.register(&slot, group.owned());
         let pin = leads.then(|| Arc::clone(&stage.watch));
         let mut state = Self::new(rx, group, loan, shell.scope.clone(), Duration::ZERO, since);
         state.pin = pin;
         state.push(StageHandle::new(StageKind::External(stage), None, slot));
-        Ok(state)
+        state
     }
 
     /// Whether the group holds the terminal: the loan actually made, before
@@ -781,71 +774,32 @@ impl CollectState {
 }
 
 impl Started {
-    /// Register any external, lone or pipelined, with the same drains and
-    /// reaper. Address an envelope separately only if its payload is outside
-    /// the collector's owned group; otherwise a cancellation would signal it twice.
-    pub(super) fn register(
-        self,
-        slot: &Slot,
-        collector_owned: Option<Pgid>,
-        scope: &Scope,
-    ) -> Settled<LiveExternal> {
-        self.register_with(slot, collector_owned, |drains| drains.start(scope))
-    }
-
-    /// Keep thread creation injectable so its failure can be checked without
-    /// exhausting the host's thread budget. No child escapes that failure.
-    fn register_with(
-        self,
-        slot: &Slot,
-        collector_owned: Option<Pgid>,
-        start: impl FnOnce(PendingDrains) -> std::io::Result<Drains>,
-    ) -> Settled<LiveExternal> {
+    /// Register any external, lone or pipelined, with the same reaper.
+    /// Address an envelope separately only if its payload is outside the
+    /// collector's owned group; otherwise a cancellation would signal it twice.
+    pub(super) fn register(self, slot: &Slot, collector_owned: Option<Pgid>) -> LiveExternal {
         let Self {
             shown,
-            spawned:
-                Spawned {
-                    mut child,
-                    group: landed,
-                    jail,
-                },
-            claim,
+            spawned: Spawned { child, group, jail },
+            denial_pids,
             drains,
         } = self;
-        let drains = match start(drains) {
-            Ok(drains) => drains,
-            Err(error) => {
-                // No collector owns this child yet. Never return a thread
-                // creation error with a live, unregistered process behind it.
-                if let Some(group) = landed.owned() {
-                    group.kill();
-                }
-                drop(jail);
-                let _ = child.kill();
-                let _ = child.reap();
-                return Err(Error::new(crate::error::io_message(
-                    format!("could not start output drains for '{shown}'"),
-                    &error,
-                ))
-                .into());
-            }
-        };
-        let payload = match landed {
+        let payload = match group {
             Group::Enveloped(payload) if Some(payload) != collector_owned => Some(payload),
             Group::Enveloped(_) | Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
         };
-        Ok(LiveExternal {
+        LiveExternal {
             watch: slot.watch(child),
             payload,
             end: ExternalEnd {
                 drain: Drain { jail, drains },
                 settlement: Settlement {
                     name: shown,
-                    audit: None,
-                    claim,
+                    frame: None,
+                    denial_pids,
                 },
             },
-        })
+        }
     }
 
     /// Lend the terminal, then collect this child in the group it landed in.
@@ -882,7 +836,7 @@ impl Started {
                 }
             }
         };
-        let mut collect = CollectState::lone(self, loan, since, shell)?;
+        let mut collect = CollectState::lone(self, loan, since, shell);
         collect.drive();
         #[cfg(windows)]
         if let Some(job) = job {
@@ -903,10 +857,10 @@ pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<
     let started = Started {
         shown: "test".into(),
         spawned,
-        claim: Claim::Unconfined,
-        drains: PendingDrains::default(),
+        denial_pids: None,
+        drains: crate::io::child::Drains::default(),
     };
-    let mut lone = CollectState::lone(started, None, Instant::now(), shell).expect("register");
+    let mut lone = CollectState::lone(started, None, Instant::now(), shell);
     lone.drive();
     match lone.observed.pop().flatten() {
         Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),

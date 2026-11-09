@@ -251,6 +251,7 @@ record!(PathEntry {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::environ::EnvVars;
 
     /// Every probe survives the frame it rides, payload and all.
     #[test]
@@ -359,10 +360,7 @@ mod tests {
             exec: Some(ExecGrant::of([ExecKey::Dir(dir)], [])),
             ..Capabilities::default()
         };
-        let ctx = FreezeCtx::at(
-            crate::host::EnvVars::new(),
-            crate::test_helper::process_cwd(),
-        );
+        let ctx = FreezeCtx::at(EnvVars::new(), crate::test_helper::process_cwd());
         let fragment = crate::shell::grant::decode_fragment(runs.value().as_ref(), "test", &ctx);
         let runs = GrantLayer::root().extend(fragment.unwrap());
         assert!(!every_verb.is_restrictive() && !runs.is_restrictive());

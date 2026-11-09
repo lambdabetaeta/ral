@@ -241,8 +241,8 @@ fn flush_restore(prior: Prior, shell: &mut Shell) {
 /// the install/teardown pair needs no frame on the machine's own stack — this
 /// is the whole of its panic safety.
 ///
-/// An external runs it inside `call_external`'s audit span, so a redirected
-/// stream's bytes stay out of the `Command` record.
+/// An external runs it inside `Command::with_record`'s capture, so a
+/// redirected stream's bytes stay out of the `Command` record.
 ///
 /// fd 1/2 route through the shell's `Sink`s, never `dup2`: libtest, the
 /// REPL frontend, and sibling ral threads all share the process-global

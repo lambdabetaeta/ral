@@ -149,7 +149,7 @@ impl Workspace {
             .map(|arg| Value::string(arg.as_str()))
             .chain([Value::string(self.path()?)])
             .collect();
-        shell.run_external_argv(program, &args, mooring)?;
+        shell.run_external(program, &args, mooring)?;
         self.readback(shell).map(Value::string)
     }
 

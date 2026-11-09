@@ -100,11 +100,14 @@ The crate splits driving a `Shell` from probing the machine it runs on.
   also the one reader of the host's environment (`var`, `var_os`, `vars_os`,
   `temp_dir`), and of the XDG bases (`xdg`, with the account's home as the
   program's own fallback). `host/login_env.rs` (Unix) writes and reads the
-  POSIX login helper's environment report.
-  `host/env.rs` owns the persistent environment overlay, exported as
-  `host::{EnvVars, EnvVarsIter}`, shared by shell state, paths and launches.
-  Its test-only `host/env/test_support.rs` serialises temporary host-environment
-  mutations. exarch's host snapshot is a formatter over it.
+  POSIX login helper's environment report. Its test-only
+  `host/test_support.rs` serialises temporary host-environment mutations.
+- `environ` holds ral's rules over the host's variables: the overlay
+  `EnvVars`, shared by shell state, paths and grants; the `Reserved` names
+  `PWD` and `OLDPWD`, which no overlay binds and no read returns; the view
+  the `env` builtin shows (`EnvVars::visible`); and `ChildEnv`, a child's cwd
+  and environment edits (`EnvVars::for_child`), which `Launch::situate`
+  applies. exarch's host snapshot is a formatter over `EnvVars`.
 - `fact/fs.rs` owns the typed `DirEntry` and `FileInfo` query records and their
   pure construction from metadata; builtins and the checker share these schemas.
 - `fact/observation.rs` owns observation data, including `AuditIo`, the captured

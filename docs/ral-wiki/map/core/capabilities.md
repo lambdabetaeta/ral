@@ -193,7 +193,7 @@ spawn adapter live in `shell::grant`.
   form the runtime `Baseline`;
 - `freeze.rs` — the one place a grant's `Place` or `Selector` becomes a
   `FrozenPath` (a folded spelling, which `decode` then walks), against one anchor:
-  `FreezeCtx::at` (an owned `host::EnvVars` and `CwdPath`: the `Resolver` pair,
+  `FreezeCtx::at` (an owned `environ::EnvVars` and `CwdPath`: the `Resolver` pair,
   with optional scratch) and its `place` (`None` is a dead grant, an `absolute`
   payload classified on the raw string by `live_absolute` through
   `lex::grant_eligibility` (`EligibleOn` / `GrantRefusal`) over `lex::parse_bytes`:
@@ -406,7 +406,7 @@ named `~` stays that file and a non-UTF-8 name is never renamed by a string
 round trip.
 `path::spelled` anchors a host-held path against the process's cwd with
 `Resolver::anchor`, returning a sentence if that cwd is unavailable.
-A `Resolver` is a `host::EnvVars` and a `CwdPath`: `~` reads `env.home()`, `xdg:`
+A `Resolver` is a `environ::EnvVars` and a `CwdPath`: `~` reads `env.home()`, `xdg:`
 the `XDG_*_HOME` of `env` through `get_or_host`, so a `within [env: …]` overlay
 reaches both. `Resolver::at` builds one for a caller with no shell to mint one; `resolve_in_script` is
 `resolve` for a path written in a ral script, which reads it beside itself:
@@ -581,7 +581,7 @@ records the policy and its limits.
 Inside a *guest*, `ral-guest` starts the engine as
 `--guest-engine <cgroup-root>`, named by `guest_abi::layout::ENGINE_FLAG`.
 The daemon and jail share `layout::EXEC_CONTROLLERS`. The role installs the
-[[map/core/io-process|spawn jail]], so `ExternalCommand::prepare`
+[[map/core/io-process|spawn jail]], so `Command::prepare`
 (`shell/exec/command.rs`) uses it for every command: a bounded fresh
 uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec
 marking above stderr. The daemon disables the user namespaces bwrap needs.
@@ -696,10 +696,10 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the first
   launch that needs it), or the pinned envelope failed to spawn.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
-  image; `ExternalCommand::prepare` reaches it directly when no projection is
+  image; `Command::prepare` reaches it directly when no projection is
   active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher.
-  `ExternalCommand::prepare` (`shell/exec/command.rs`) routes an external or bundled child through here
+  `Command::prepare` (`shell/exec/command.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
   by the real path the guard judged, its spelling as `argv[0]`, or a

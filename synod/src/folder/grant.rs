@@ -309,6 +309,7 @@ mod tests {
     #[cfg(unix)]
     use ral_core::authority::policy::FsOp;
     use ral_core::data::FOValue;
+    use ral_core::environ::EnvVars;
     #[cfg(unix)]
     use ral_core::path::{LexicalPath, Reading};
 
@@ -649,8 +650,8 @@ mod tests {
         }
         let path = ral_core::path::utf8(bin.path()).expect("a Unicode tempdir");
         let cwd = ral_core::path::CwdPath::new(PathBuf::from(guest_abi::layout::WORK)).unwrap();
-        let ctx = FreezeCtx::at(std::iter::once(("PATH", path)).collect(), cwd)
-            .with_scratch(Some(guest_abi::layout::SCRATCH));
+        let env = EnvVars::from_pairs([("PATH", path)]).unwrap();
+        let ctx = FreezeCtx::at(env, cwd).with_scratch(Some(guest_abi::layout::SCRATCH));
         let ceiling = FOValue::from(grant.ceiling());
         let layer = ral_core::shell::grant::decode_grant(&ceiling, "the ceiling", &ctx)
             .expect("the ceiling resolves");

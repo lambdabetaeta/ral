@@ -11,6 +11,7 @@
 //! binary takes `BakedPrelude::runtime` instead.
 
 use crate::authority::policy::Baseline;
+use crate::environ::EnvVars;
 use crate::error::Error;
 use crate::io::Source;
 use crate::io::terminal::TerminalState;
@@ -333,9 +334,12 @@ pub fn boot_shell(
 /// Ral code reads these as `!{env}[KEY]`, so every front end sees one
 /// baseline whoever launched the process.  `SHLVL` is incremented rather than
 /// passed through, as in every other shell.  `PWD` is no variable: it is the
-/// cwd cell, which `apply_env` in `core/src/shell/exec/command.rs`
-/// threads into each child.  A host fact nothing binds stays unbound: seeding
+/// cwd cell, which [`EnvVars::for_child`]
+/// tells each child.  A host fact nothing binds stays unbound: seeding
 /// `HOME=.` once made every `~` in the session mean "here".
+///
+/// # Panics
+/// Never: no seeded name is reserved.
 pub fn seed_host_env(shell: &mut Shell) {
     let user = site!(Silent::HostEnvSeed, crate::host::user());
     let shlvl = crate::host::var("SHLVL")
@@ -377,12 +381,14 @@ pub fn seed_host_env(shell: &mut Shell) {
         ("OS_FAMILY", std::env::consts::FAMILY.to_string()),
         ("SHLVL", shlvl.to_string()),
     ];
-    shell.context.extend_env(
+    let seeded = EnvVars::from_pairs(
         base.into_iter()
             .chain(forwarded)
             .filter_map(|(key, value)| Some((key, value?)))
             .chain(facts),
-    );
+    )
+    .expect("no seeded name is reserved");
+    shell.context.overlay_env(&seeded);
 }
 
 /// The host's `key`, else `default()` where the host binds nothing. A value
@@ -416,13 +422,14 @@ pub fn bake_prelude() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{BakedPrelude, HostSurface, validate_prelude_shape};
+    use crate::host::test_support::with_var;
     use crate::io::terminal::TerminalState;
     use crate::shell::runtime::Runtime;
     use std::sync::Arc;
 
     #[test]
     fn shell_has_no_default() {
-        crate::host::env::test_support::with_var("SHELL", None, || {
+        with_var("SHELL", None, || {
             let mut shell = crate::test_helper::core_shell();
             super::seed_host_env(&mut shell);
             assert!(shell.context.env_overrides.get("SHELL").is_none());

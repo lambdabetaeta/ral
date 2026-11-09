@@ -1,12 +1,12 @@
 //! One external command is one fact, whether it ran alone or as a pipeline
-//! stage.  Both paths mint their `Observed::Command` through
-//! `Shell::command_observation` and both leave the emission to the one
-//! gated recorder, so the two must agree on the argv they spell *and* on whether
-//! anything is emitted at all under a given sink/trail configuration.
+//! stage.  Both paths mint their `Observed::Command` through one
+//! `CommandRecord` and both leave the emission to the one gated recorder, so
+//! the two must agree on the argv they spell *and* on whether anything is
+//! emitted at all under a given sink/trail configuration.
 //!
 //! Every assertion here compares the staged run against the standalone one
-//! rather than against a literal: the test's job is to fail when a fourth
-//! construction site diverges, whatever it spells.
+//! rather than against a literal: the test's job is to fail when either path
+//! diverges, whatever it spells.
 //!
 //! Unix-only: both paths need a real external, and the paths named here are
 //! `/bin`.

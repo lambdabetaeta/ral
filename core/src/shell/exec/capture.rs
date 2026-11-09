@@ -58,8 +58,8 @@ where
 /// Tee every sink this shell can write into buffers while `f` runs, so
 /// `audit { … }` records a command's bytes without hiding them.
 ///
-/// Installed by `call_external` in `shell::exec::dispatch` around each
-/// external.  Byte audit threads every pipeline stage (`resolve_launch`), so
+/// Installed by `Command::with_record` in `shell::exec::record` around each
+/// standalone external.  Byte audit threads every pipeline stage (`resolve_launch`), so
 /// none is spawned direct and untapped.
 pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, AuditIo)
 where

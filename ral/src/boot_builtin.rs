@@ -6,8 +6,8 @@
 use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
+use ral_core::environ::EnvVars;
 use ral_core::error::Error;
-use ral_core::host::EnvVars;
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;

@@ -10,8 +10,8 @@ pub use spawn::{GrantNarrower, SpawnGrant};
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
+use crate::environ::EnvVars;
 use crate::error::Error;
-use crate::host::EnvVars;
 use crate::shell::runtime::Shell;
 
 impl Shell {
@@ -82,10 +82,10 @@ mod tests {
         let home = root.join("home");
         let cwd = root.join("cwd");
         let mut shell = crate::test_helper::core_shell();
-        shell.set_env_var("HOME", home.to_str().unwrap());
+        shell.set_env_var("HOME", home.to_str().unwrap()).unwrap();
         shell.seed_cwd(CwdPath::new(cwd.clone()).unwrap());
         let ctx = shell.freeze_ctx();
-        shell.set_env_var("HOME", root.to_str().unwrap());
+        shell.set_env_var("HOME", root.to_str().unwrap()).unwrap();
         shell.seed_cwd(CwdPath::new(root.to_path_buf()).unwrap());
         for (place, expected) in [
             (Anchor::Home.place("."), home),
