@@ -78,6 +78,16 @@ impl<'a> Resolver<'a> {
         LexicalPath::from_lexed(lex::anchor(self.cwd, path))
     }
 
+    /// Anchor an executable spelling without expanding sigils. On Unix the
+    /// kernel must interpret `..` and trailing `/`, so do not fold them here.
+    /// Windows uses its native anchoring rules, independent of the process cwd.
+    pub(crate) fn for_launch(&self, target: impl AsRef<Path>) -> PathBuf {
+        if cfg!(windows) {
+            return self.anchor(target.as_ref()).into_inner();
+        }
+        self.cwd.as_path().join(target)
+    }
+
     /// [`Self::resolve`] for a path written in the ral script file `script`,
     /// which reads it beside itself: `raw` resolved as [`Self::resolve`]
     /// resolves it, with the directory `script` sits in for the cwd.  A

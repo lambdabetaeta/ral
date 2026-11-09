@@ -51,13 +51,11 @@ pub use projection::{FsLists, FsProjection, SandboxProjection};
 pub(crate) use projection::{RenderedFs, RenderedProjection};
 pub use reexec::pinned_arg0;
 
-// `shell::exec::command::ExternalCommand::prepare` routes an external or
-// bundled child through `sandboxed_command` when a projection is active and
-// no guest jail already confines it; `serve_warrant` is the trampoline's
-// side, entering the confinement before it runs the program.
+// Command preparation selects one confinement mechanism. The trampoline
+// enters the host sandbox through `serve_warrant` before running its payload.
 #[cfg(unix)]
 pub(crate) use carriers::carriers;
-pub(crate) use launch::{Image, Ownership, interpreter_of, sandboxed_command};
+pub(crate) use launch::{Confinement, Image, Ownership, interpreter_of};
 #[cfg(target_os = "macos")]
 pub use macos::ALREADY_PROFILED;
 #[cfg(unix)]

@@ -1,7 +1,7 @@
 //! Pipeline resolve: freeze each stage's launch decision.  No process is
 //! created and no pipe opened; launch reads everything this phase produces.
 
-use super::super::command::Head;
+use super::super::command::{Command, Request};
 use super::super::dispatch;
 use super::StageEval;
 use crate::ir::{Comp, CompKind};
@@ -15,20 +15,23 @@ use std::sync::Arc;
 /// `command::validate_argv` applies the same shape rejection single-command exec does.
 #[derive(Debug)]
 pub(super) enum StageLaunch {
-    Direct { head: Head, args: Vec<Value> },
+    Direct {
+        command: Command<Request>,
+        args: Vec<Value>,
+    },
     Thread,
 }
 
-/// A thread unless the head is an external with no redirect and no
+/// A thread unless the command is an external with no redirect and no
 /// byte-capturing audit in force: a redirect swaps sinks on a shell's `Io`, a
 /// capture tees them, and a direct stage has no shell.  Admission is
-/// `Head::admit`'s at launch, so a head the grant denies still routes through
+/// `Command::admit`'s at launch, so a command the grant denies still routes through
 /// here and refuses as an ordinary error.
 fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Settled<StageLaunch> {
     let CompKind::Exec(exec) = &stage.item else {
         return Ok(StageLaunch::Thread);
     };
-    let dispatch::Resolution::External(head) =
+    let dispatch::Resolution::External(command) =
         dispatch::resolve_command_word(&exec.head, env, shell)
     else {
         return Ok(StageLaunch::Thread);
@@ -37,7 +40,7 @@ fn resolve_launch(stage: &Comp, env: &Env, eval: StageEval, shell: &Shell) -> Se
         return Ok(StageLaunch::Thread);
     }
     Ok(StageLaunch::Direct {
-        head,
+        command,
         args: (eval.close_argv)(&exec.argv, env, &shell.sig).map_err(|error| {
             Break::from(error).locate(&exec.head.name().written(), stage.span, shell)
         })?,

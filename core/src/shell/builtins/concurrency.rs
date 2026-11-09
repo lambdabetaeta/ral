@@ -135,7 +135,7 @@ pub(super) fn builtin_watch(
 /// program is double-forked away and reparented to init, so no eliminator
 /// applies and no teardown here can reach it.  This builtin is the surface
 /// discipline only; resolution, vetting, and the receipt live at the exec
-/// boundary (`shell::exec::command::detach`).
+/// boundary (`shell::exec::detach`).
 #[cfg(unix)]
 pub(super) fn builtin_detach(
     args: &[Value],
@@ -144,5 +144,5 @@ pub(super) fn builtin_detach(
 ) -> Settled<Value> {
     check_arity(args, 2, "detach")?;
     let desc = legible_title(&args[0], "detach")?;
-    crate::shell::exec::command::detach(&desc, &args[1], &args[2..], mooring, shell)
+    crate::shell::exec::detach(&desc, &args[1], &args[2..], mooring, shell)
 }

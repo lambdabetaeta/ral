@@ -913,13 +913,13 @@ impl Machine {
                 let v = dispatch::run_base_frame(&entry, &argv, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
-            Resolution::External(head) => {
+            Resolution::External(command) => {
                 let offer = |e| offer_path_as_text(e, &exec.head, &argv);
-                let mut head = head.admit(mooring, shell).map_err(|b| b.map_error(offer))?;
-                head.program = head
-                    .program
-                    .map_err(|e| if names_no_program(&e) { offer(e) } else { e });
-                let v = dispatch::run_external(head, &argv, &redirs, span, mooring, shell)?;
+                let command = command
+                    .admit(mooring, shell)
+                    .map_err(|b| b.map_error(offer))?
+                    .map_lookup_error(|e| if names_no_program(&e) { offer(e) } else { e });
+                let v = dispatch::run_external(command, &argv, &redirs, span, mooring, shell)?;
                 Ok(Focus::Return(Terminal::Value(v)))
             }
         }

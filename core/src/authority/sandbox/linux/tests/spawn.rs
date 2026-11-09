@@ -15,14 +15,14 @@ fn spawn_confined(
     use crate::process::{Group, PgidPolicy};
     let mut shell = crate::test_helper::core_shell();
     shell.scope = scope.clone();
-    let launch = crate::authority::sandbox::sandboxed_command(
-        &unrestricted(),
-        &Image::of(&sh()),
-        &sh_args(script),
-        Ownership::Kept,
-        shell.context.cwd(),
-    )
-    .expect("build confined launch");
+    let launch = crate::authority::sandbox::Confinement::Projected(Box::new(unrestricted()))
+        .launch(
+            &Image::of(&sh()),
+            &["-c".into(), script.into()],
+            Ownership::Kept,
+            shell.context.cwd(),
+        )
+        .expect("build confined launch");
     let spawned = launch
         .spawn(PgidPolicy::NewLeader, scope)
         .expect("spawn confined sh");
@@ -373,7 +373,7 @@ fn an_owned_stdout_terminal_remains_the_envelopes_console() {
         &env,
         &policy,
         &Image::of(&sh()),
-        &sh_args(script),
+        &["-c".into(), script.into()],
         None,
         Ownership::Kept,
     )
@@ -654,14 +654,17 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
     use crate::process::{PgidPolicy, Spawned};
     envelope_launches(&unrestricted())?;
     let shell = crate::test_helper::core_shell();
-    let mut launch = crate::authority::sandbox::sandboxed_command(
-        &unrestricted(),
-        &Image::of(program),
-        args,
-        Ownership::Kept,
-        shell.context.cwd(),
-    )
-    .expect("build confined launch");
+    let mut launch = crate::authority::sandbox::Confinement::Projected(Box::new(unrestricted()))
+        .launch(
+            &Image::of(program),
+            &args
+                .iter()
+                .map(|arg| arg.as_str().into())
+                .collect::<Vec<_>>(),
+            Ownership::Kept,
+            shell.context.cwd(),
+        )
+        .expect("build confined launch");
     launch.stdin(crate::process::StdioSpec::Null);
     let Spawned { child, .. } = launch
         .spawn(PgidPolicy::NewLeader, &shell.scope)
@@ -755,7 +758,7 @@ fn assert_stream_closure(
                   : > \"$2\"\n\
                   while [ ! -e \"$1\" ]; do sleep 0.01; done\n\
                   exit 139";
-    let args: Vec<String> = prefix
+    let args: Vec<std::borrow::Cow<'_, str>> = prefix
         .iter()
         .copied()
         .chain([
@@ -764,7 +767,7 @@ fn assert_stream_closure(
             ack.to_str().expect("UTF-8 temp path"),
             ready.to_str().expect("UTF-8 temp path"),
         ])
-        .map(String::from)
+        .map(Into::into)
         .collect();
     let (input, stdin) = crate::process::cloexec_pipe().expect("stdin pipe");
     let (stdout, output) = crate::process::cloexec_pipe().expect("stdout pipe");

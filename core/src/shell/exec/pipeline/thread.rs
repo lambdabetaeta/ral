@@ -94,7 +94,7 @@ impl Drop for ThreadStage {
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     stdin: ByteIn,
-    stdout: ChildOut,
+    stdout: ChildOut<&Sink>,
     cx: &LaunchCx<'_>,
     slot: Slot,
 ) -> Settled<ThreadStage> {
@@ -103,7 +103,7 @@ pub(super) fn launch_thread_stage(
     let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
     let stdout = match stdout {
-        ChildOut::Sink(sink) => sink,
+        ChildOut::Sink(sink) => sink.clone(),
         ChildOut::Edge { writer, edge } => Sink::Pipe {
             writer: Arc::new(writer),
             edge,
@@ -270,7 +270,7 @@ mod tests {
             let stage = launch_thread_stage(
                 &compile_one("echo unused"),
                 ByteIn::Parent,
-                ChildOut::Sink(cx.shell.io.stdout.clone()),
+                ChildOut::Sink(&cx.shell.io.stdout),
                 &cx,
                 Slot { ix: 0, tx },
             )

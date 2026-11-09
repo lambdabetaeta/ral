@@ -76,6 +76,18 @@ variant!(typed Unrunnable {
     Io(String): "io",
 });
 
+impl Unrunnable {
+    /// Fallback after lookup or startup has interpreted context-dependent
+    /// failures such as `NotFound`: permission denied is structured, anything
+    /// else retains the OS's own words.
+    pub(crate) fn from_io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            _ => Self::Io(error.to_string()),
+        }
+    }
+}
+
 impl Failure {
     /// `found`, where the program was sought, cannot run for `why`.
     pub(crate) fn not_runnable(found: impl Into<String>, why: Unrunnable) -> Self {

@@ -30,7 +30,7 @@ use super::linux::landlock::Landlocked;
 use crate::Role;
 use crate::path::{RealPath, shown};
 use handoff::{close_inherited, unwritable};
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::fd::OwnedFd;
@@ -115,12 +115,13 @@ impl Confinement {
     }
 }
 
-/// The confinement, and the image to run inside it.
+/// The confinement and command encoded for the child. Construction borrows
+/// the image and argument bytes; decoding produces the owned default types.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Warrant {
+pub(super) struct Warrant<I = Image, A = OsString> {
     confinement: Confinement,
-    image: Image,
-    args: Vec<OsString>,
+    image: I,
+    args: Vec<A>,
 }
 
 /// The program, once its confinement is entered: the only thing a received
@@ -130,15 +131,54 @@ pub(super) struct Confined {
     args: Vec<OsString>,
 }
 
-impl Warrant {
-    pub(super) fn new(confinement: Confinement, image: &Image, args: &[String]) -> Self {
+impl<'a> Warrant<&'a Image, &'a OsStr> {
+    pub(super) fn new(
+        confinement: Confinement,
+        image: &'a Image,
+        args: &'a [Cow<'_, str>],
+    ) -> Self {
         Self {
             confinement,
-            image: image.clone(),
-            args: args.iter().map(OsString::from).collect(),
+            image,
+            args: args.iter().map(|arg| OsStr::new(arg.as_ref())).collect(),
         }
     }
+}
 
+impl<I: Borrow<Image>, A: AsRef<OsStr>> Warrant<I, A> {
+    /// Encode directly from the borrowed or owned fields into a sealed parcel.
+    pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
+        parcel("ral-warrant", &self.encode()?)
+            .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match self.image.borrow() {
+            Image::File { real, arg0 } => (
+                b"file",
+                real.as_path().as_os_str().as_bytes(),
+                Some(arg0.as_os_str().as_bytes()),
+            ),
+            Image::Tool(tool) => (b"tool", tool.as_bytes(), None),
+        };
+        let confinement = self.confinement.spell();
+        let argc = self.args.len().to_string();
+        let head = [MAGIC, confinement.as_bytes(), kind, program]
+            .into_iter()
+            .chain(arg0)
+            .chain([argc.as_bytes()]);
+        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_ref().as_bytes())))?;
+        if bytes.len() > CAP {
+            return Err(format!(
+                "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
+                bytes.len()
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+impl Warrant {
     /// The warrant the launch left at `slots.warrant`, its confinement
     /// entered and every inherited descriptor but the report swept: the
     /// program, and nothing before it.
@@ -152,12 +192,6 @@ impl Warrant {
         slots.install_streams()?;
         confinement.enter(slots.report)?;
         Ok(Confined { image, args })
-    }
-
-    /// This warrant, parcelled for a [`Handoff`].
-    pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
-        parcel("ral-warrant", &self.encode()?)
-            .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
     }
 
     /// The warrant the launch left at `at`, which this takes and closes.
@@ -181,31 +215,6 @@ impl Warrant {
             .read_to_end(&mut bytes)
             .map_err(|e| format!("cannot read the warrant: {e}"))?;
         Self::decode(&bytes)
-    }
-
-    fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match &self.image {
-            Image::File { real, arg0 } => (
-                b"file",
-                real.as_path().as_os_str().as_bytes(),
-                Some(arg0.as_os_str().as_bytes()),
-            ),
-            Image::Tool(tool) => (b"tool", tool.as_bytes(), None),
-        };
-        let confinement = self.confinement.spell();
-        let argc = self.args.len().to_string();
-        let head = [MAGIC, confinement.as_bytes(), kind, program]
-            .into_iter()
-            .chain(arg0)
-            .chain([argc.as_bytes()]);
-        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_bytes())))?;
-        if bytes.len() > CAP {
-            return Err(format!(
-                "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
-                bytes.len()
-            ));
-        }
-        Ok(bytes)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, String> {

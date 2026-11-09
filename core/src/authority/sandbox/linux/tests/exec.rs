@@ -1219,7 +1219,7 @@ fn an_exec_restricting_launch_without_landlock_spawns_nothing() {
         &on(&stand_in(), host),
         &exec_policy(admitting(&[], &[])),
         &Image::of(&admitted(sh)),
-        &["-c".to_string(), "echo RAN".to_string()],
+        &["-c".into(), "echo RAN".into()],
         None,
         Ownership::Kept,
     );
@@ -1245,11 +1245,9 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
         refer_root: false,
         at,
     });
-    let warrant = Warrant::new(
-        Confinement(promise),
-        &Image::of(&admitted(sh)),
-        &["-c".to_string(), "echo RAN".to_string()],
-    );
+    let image = Image::from(admitted(sh));
+    let args = ["-c".into(), "echo RAN".into()];
+    let warrant = Warrant::new(Confinement(promise), &image, &args);
     let mut handoff = Handoff::default();
     let (slots, report) =
         crate::authority::sandbox::launch::issue(&warrant, &mut handoff).expect("issues");

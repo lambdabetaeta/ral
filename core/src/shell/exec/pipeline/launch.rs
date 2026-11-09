@@ -2,7 +2,7 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{ChildOut, ExternalCommand, Head};
+use super::super::command::{ChildOut, Command, Request};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
@@ -52,7 +52,7 @@ pub(super) struct LaunchCx<'a> {
 }
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`], which a direct
-/// stage's head leaves by value: nothing holds the program after it launches.
+/// stage's command leaves by value: nothing holds the program after it launches.
 /// Its stdout is resolved here, once for either kind: an edge's write end and
 /// fate go to the stage, its hold to the stage's handle.
 pub(super) fn spawn_stage(
@@ -64,7 +64,8 @@ pub(super) fn spawn_stage(
 ) -> Settled<StageHandle> {
     let StageRoute { stdin, stdout } = route;
     let (stdout, held) = match stdout {
-        ByteOut::Parent => (ChildOut::Sink(cx.shell.io.stdout.clone()), None),
+        // Admission mutates the shell; borrow its stdout only afterwards.
+        ByteOut::Parent => (ChildOut::Sink(()), None),
         ByteOut::Downstream { writer, held } => {
             let edge = Arc::clone(&held.edge);
             (ChildOut::Edge { writer, edge }, Some(held))
@@ -76,13 +77,18 @@ pub(super) fn spawn_stage(
     };
     let span = stage.span;
     let kind = match launch {
-        StageLaunch::Direct { head, args } => {
-            launch_external_stage_direct(head, &args, span, stdin, stdout, cx, &slot)
+        StageLaunch::Direct { command, args } => {
+            launch_external_stage_direct(command, &args, span, stdin, stdout, cx, &slot)
                 .map(StageKind::External)
         }
-        StageLaunch::Thread => {
-            launch_thread_stage(stage, stdin, stdout, cx, slot.clone()).map(StageKind::Thread)
-        }
+        StageLaunch::Thread => launch_thread_stage(
+            stage,
+            stdin,
+            stdout.map_sink(|()| &cx.shell.io.stdout),
+            cx,
+            slot.clone(),
+        )
+        .map(StageKind::Thread),
     }
     .map_err(|b| b.locate(&name, span, cx.shell))?;
     Ok(StageHandle::new(kind, held, slot))
@@ -90,21 +96,21 @@ pub(super) fn spawn_stage(
 
 /// Spawn an external stage with no thread hosting it.
 fn launch_external_stage_direct(
-    head: Head,
+    command: Command<Request>,
     args: &[Value],
     span: Option<Span>,
     stdin: ByteIn,
-    stdout: ChildOut,
+    stdout: ChildOut<()>,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
 ) -> Settled<LiveExternal> {
-    let name = head.shown.clone();
+    let name = command.shown.clone();
     let mooring = cx.mooring;
     let group = cx.group;
     let holds_terminal = cx.holds_terminal;
     cx.shell.at_site(name.clone(), span, |shell| {
         let audit_start = shell.audit_start(mooring);
-        let head = head.admit(mooring, shell)?;
+        let command = command.admit(mooring, shell)?;
         // Render audit values before any child exists, and only if somebody
         // will consume them. The command independently vets its exec argv.
         let audit_args = if audit_start.is_some() {
@@ -113,7 +119,7 @@ fn launch_external_stage_direct(
             Vec::new()
         };
         let launched = (|| -> Settled<_> {
-            let command = ExternalCommand::prepare(head, args, shell)?;
+            let command = command.prepare(args, shell)?;
             let upstream;
             let stdin = match stdin {
                 ByteIn::Upstream(r) => {
@@ -124,7 +130,7 @@ fn launch_external_stage_direct(
             };
             command.start(
                 stdin,
-                stdout,
+                stdout.map_sink(|()| &shell.io.stdout),
                 &shell.io.stderr,
                 PgidPolicy::Join(group.membership(&shell.scope)),
                 &shell.scope,

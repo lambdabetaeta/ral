@@ -1,5 +1,5 @@
 //! What a launch runs ([`Image`]), and confining one external or bundled
-//! child under the platform's OS sandbox.  `ExternalCommand::prepare` in
+//! child under the platform's OS sandbox. `Command<Checked>::prepare` in
 //! `shell::exec::command` routes here whenever a projection is
 //! active and no guest jail already confines the child.
 //!
@@ -24,18 +24,21 @@ use super::SandboxProjection;
 #[cfg(target_os = "linux")]
 use super::linux::Envelope;
 #[cfg(unix)]
-use super::warrant::{Confinement, Handoff, Slots, Warrant};
+use super::warrant::{Confinement as WarrantConfinement, Handoff, Slots, Warrant};
 use crate::Role;
-#[cfg(all(test, unix))]
-use crate::authority::policy::Baseline;
-use crate::authority::policy::{Admitted, Program};
+use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::error::Error;
 use crate::path::{CwdPath, RealPath};
 #[cfg(unix)]
 use crate::process::report::Report;
 #[cfg(unix)]
+use std::borrow::Borrow;
+use std::borrow::Cow;
+#[cfg(unix)]
+use std::ffi::OsStr;
+#[cfg(unix)]
 use std::os::fd::AsFd;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
@@ -59,6 +62,78 @@ pub(crate) enum Ownership {
     Surrendered,
 }
 
+/// The selected confinement mechanism. A guest jail replaces, rather than
+/// supplements, the host OS sandbox.
+pub(crate) enum Confinement {
+    Unconfined,
+    Projected(Box<SandboxProjection>),
+    #[cfg(seccomp)]
+    Guest(&'static crate::process::jail::GuestJail),
+}
+
+impl Confinement {
+    pub(crate) fn of(grants: &GrantStack, baseline: &Baseline, admitted: &Admitted) -> Self {
+        // Guests disable unprivileged user namespaces, so they cannot nest bwrap.
+        #[cfg(seccomp)]
+        if let Some(jail) = crate::process::jail::guest() {
+            return Self::Guest(jail);
+        }
+        SandboxProjection::of(grants, baseline, Some(admitted))
+            .map_or(Self::Unconfined, |projection| {
+                Self::Projected(Box::new(projection))
+            })
+    }
+
+    pub(crate) fn is_confined(&self) -> bool {
+        !matches!(self, Self::Unconfined)
+    }
+
+    /// Build the launch. The caller applies environment and resource limits
+    /// before installing any guest jail with `apply_guest_jail`.
+    pub(crate) fn launch(
+        &self,
+        image: &Image,
+        args: &[Cow<'_, str>],
+        ownership: Ownership,
+        cwd: &CwdPath,
+    ) -> Result<crate::process::Launch, Error> {
+        match self {
+            Self::Projected(projection) => {
+                sandboxed_command(projection, image, args, ownership, cwd)
+            }
+            Self::Unconfined => image.launch(args),
+            #[cfg(seccomp)]
+            Self::Guest(_) => image.launch(args),
+        }
+    }
+
+    #[cfg(seccomp)]
+    pub(crate) fn apply_guest_jail(
+        &self,
+        launch: &mut crate::process::Launch,
+        ownership: Ownership,
+        net: Option<crate::authority::policy::Net>,
+    ) -> Result<(), Error> {
+        if let Self::Guest(jail) = self {
+            let plan = jail
+                .plan(ownership, net)
+                .map_err(crate::process::jail::refused)?;
+            launch.apply_guest_jail(&plan)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn interpreter_hint(&self, interpreter: &Path) -> Option<String> {
+        match self {
+            Self::Projected(projection) => super::interpreter_hint(projection, interpreter),
+            Self::Unconfined => None,
+            #[cfg(seccomp)]
+            Self::Guest(_) => None,
+        }
+    }
+}
+
 /// What a launch runs: a host file by the real path the guard judged, under
 /// the spelling the user wrote, or a bundled tool, run as ral itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,8 +142,22 @@ pub(crate) enum Image {
     Tool(&'static str),
 }
 
+impl From<Admitted> for Image {
+    /// Consume the admission evidence, releasing its handles before launch.
+    fn from(admitted: Admitted) -> Self {
+        match admitted.into_program() {
+            Program::File { arg0, located } => Self::File {
+                real: located.into_real(),
+                arg0,
+            },
+            Program::Tool(tool) => Self::Tool(tool),
+        }
+    }
+}
+
 impl Image {
-    /// The admitted program's image.
+    /// A snapshot for tests that reuse one admitted program across launches.
+    #[cfg(all(test, unix))]
     pub(crate) fn of(admitted: &Admitted) -> Self {
         match admitted.program() {
             Program::File { arg0, located } => Self::File {
@@ -81,7 +170,7 @@ impl Image {
 
     /// The plain launch of this image with `args`: unconfined, or for
     /// Windows to confine at the spawn.
-    pub(crate) fn launch(&self, args: &[String]) -> Result<crate::process::Launch, Error> {
+    pub(crate) fn launch(&self, args: &[Cow<'_, str>]) -> Result<crate::process::Launch, Error> {
         let mut launch = match self {
             Self::File { real, arg0 } => {
                 let mut launch = crate::process::Launch::new(real.as_path());
@@ -98,7 +187,7 @@ impl Image {
                 launch
             }
         };
-        launch.args(args);
+        launch.args(args.iter().map(AsRef::as_ref));
         Ok(launch)
     }
 }
@@ -138,10 +227,10 @@ pub(crate) fn interpreter_of(admitted: &Admitted) -> Option<PathBuf> {
         reason = "cwd and ownership are consumed by the bwrap argv alone"
     )
 )]
-pub(crate) fn sandboxed_command(
+fn sandboxed_command(
     projection: &SandboxProjection,
     image: &Image,
-    args: &[String],
+    args: &[Cow<'_, str>],
     ownership: Ownership,
     cwd: &CwdPath,
 ) -> Result<crate::process::Launch, Error> {
@@ -173,7 +262,10 @@ pub(crate) fn sandboxed_command(
 /// The warrant lent to `handoff`, and the report socket kept for the child:
 /// the trampoline's two slots, and the parent's ends of the report.
 #[cfg(unix)]
-pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, Report), Error> {
+pub(super) fn issue(
+    warrant: &Warrant<impl Borrow<Image>, impl AsRef<OsStr>>,
+    handoff: &mut Handoff,
+) -> Result<(Slots, Report), Error> {
     let parcel = warrant.parcel().map_err(Error::new)?;
     let warrant_at = handoff.lend(parcel.as_fd()).map_err(Error::new)?;
     let (reader, writer) = crate::process::cloexec_socketpair().map_err(|e| {
@@ -197,7 +289,7 @@ pub(super) fn issue(warrant: &Warrant, handoff: &mut Handoff) -> Result<(Slots, 
 fn linux_sandboxed_command(
     projection: &SandboxProjection,
     image: &Image,
-    args: &[String],
+    args: &[Cow<'_, str>],
     ownership: Ownership,
     cwd: &CwdPath,
 ) -> Result<crate::process::Launch, Error> {
@@ -215,7 +307,7 @@ pub(super) fn enveloped(
     env: &Envelope<'_>,
     projection: &SandboxProjection,
     image: &Image,
-    args: &[String],
+    args: &[Cow<'_, str>],
     chdir: Option<&CwdPath>,
     ownership: Ownership,
 ) -> Result<crate::process::Launch, Error> {
@@ -229,7 +321,7 @@ pub(super) fn enveloped(
         env.host.landlock,
         &mut handoff,
     )?;
-    let warrant = Warrant::new(Confinement(confinement), image, args);
+    let warrant = Warrant::new(WarrantConfinement(confinement), image, args);
     let (slots, report) = issue(&warrant, &mut handoff)?;
     let (cmd, info, stdio) =
         super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
@@ -267,14 +359,14 @@ pub(super) fn bwrapped(
 fn macos_sandboxed_command(
     projection: &SandboxProjection,
     image: &Image,
-    args: &[String],
+    args: &[Cow<'_, str>],
 ) -> Result<crate::process::Launch, Error> {
     let own = super::reexec::own().map_err(Error::new)?;
     own.verify().map_err(Error::new)?;
     let profile = super::macos::build_profile(projection).map_err(Error::new)?;
     let mut handoff = Handoff::default();
     let (slots, report) = issue(
-        &Warrant::new(Confinement(profile), image, args),
+        &Warrant::new(WarrantConfinement(profile), image, args),
         &mut handoff,
     )?;
     Ok(trampoline(own, handoff, slots, report))
@@ -448,7 +540,7 @@ mod tests {
         let ok = macos_sandboxed_command(
             &proj,
             &image(sh()),
-            &["-c".into(), format!("echo x > {allowed_s}")],
+            &["-c".into(), format!("echo x > {allowed_s}").into()],
         )
         .expect("build host command (inside)");
         assert!(run_confined(ok), "write into the write prefix must succeed");
@@ -460,7 +552,7 @@ mod tests {
         let bad = macos_sandboxed_command(
             &proj,
             &image(sh()),
-            &["-c".into(), format!("echo x > {denied_s}")],
+            &["-c".into(), format!("echo x > {denied_s}").into()],
         )
         .expect("build host command (outside)");
         assert!(
@@ -503,7 +595,7 @@ mod tests {
         let cmd = macos_sandboxed_command(
             &write_confined_to(&work.to_string_lossy()),
             &image(judged),
-            &[mark.to_string_lossy().into_owned()],
+            &[mark.to_string_lossy()],
         )
         .expect("build host command");
         assert!(run_confined(cmd), "the judged file must run");
@@ -529,7 +621,7 @@ mod tests {
             &image(Program::file(link.clone()).expect("the link names a program")),
             &[
                 "-c".into(),
-                format!("printf %s \"$0\" > {}", mark.display()),
+                format!("printf %s \"$0\" > {}", mark.display()).into(),
             ],
         )
         .expect("build host command");
@@ -552,8 +644,9 @@ mod tests {
 
         let allowed = work.join("sub");
         let allowed_s = allowed.to_string_lossy().into_owned();
-        let ok = macos_sandboxed_command(&proj, &image(Program::Tool("mkdir")), &[allowed_s])
-            .expect("build bundled command (inside)");
+        let ok =
+            macos_sandboxed_command(&proj, &image(Program::Tool("mkdir")), &[allowed_s.into()])
+                .expect("build bundled command (inside)");
         assert!(run_confined(ok), "mkdir into the write prefix must succeed");
         assert!(allowed.is_dir(), "in-prefix mkdir should have landed");
 
@@ -648,7 +741,7 @@ mod tests {
             let cmd = macos_sandboxed_command(
                 &confined_to(read, &[&mark], &[], every()),
                 &image(sh()),
-                &["-c".into(), line],
+                &["-c".into(), line.into()],
             )
             .expect("build host command");
             run_confined(cmd);
@@ -944,7 +1037,7 @@ mod tests {
             ..SandboxProjection::default()
         };
         let cat = Program::file("/bin/cat".into()).expect("/bin/cat exists");
-        let args = [file.to_string_lossy().into_owned()];
+        let args = [file.to_string_lossy()];
         run_confined(
             macos_sandboxed_command(&projection, &image(cat), &args).expect("build command"),
         )

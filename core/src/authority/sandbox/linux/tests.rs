@@ -145,26 +145,26 @@ fn start_granted<R>(
 ) -> R {
     use crate::io::{Sink, Source};
     use crate::process::PgidPolicy;
-    use crate::shell::exec::command::{ChildOut, ExternalCommand, Head};
+    use crate::shell::exec::command::{ChildOut, Command};
     let mut shell = crate::test_helper::core_shell();
     let layer = crate::test_helper::layer(Capabilities {
         gpu: Some(crate::authority::policy::Gpu::Withheld),
         ..Capabilities::default()
     });
     shell.with_layer(layer, |shell| {
-        let head = Head::resolve(
+        let command = Command::from_name(
             &crate::ir::CommandName::Path("/bin/sh".into()),
             &shell.context,
         )
         .admit(&crate::shell::runtime::Mooring::adrift(), shell)
         .expect("the grant admits /bin/sh");
         let args = ["-c", script].map(crate::shell::runtime::Value::string);
-        let command = ExternalCommand::prepare(head, &args, shell).expect("the launch builds");
+        let command = command.prepare(&args, shell).expect("the launch builds");
         let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
         let started = command
             .start(
                 &Source::Empty,
-                ChildOut::Sink(discard.clone()),
+                ChildOut::Sink(&discard),
                 &discard,
                 PgidPolicy::NewLeader,
                 &shell.scope,
@@ -235,7 +235,10 @@ fn run_after(
         env,
         policy,
         &Image::of(admitted),
-        args,
+        &args
+            .iter()
+            .map(|arg| arg.as_str().into())
+            .collect::<Vec<_>>(),
         None,
         Ownership::Kept,
     )

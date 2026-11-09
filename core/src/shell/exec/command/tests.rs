@@ -1,33 +1,37 @@
 //! The operation's path, tested stage by stage: a submodule per former file.
 
-mod head {
+mod request {
     use super::super::*;
     use crate::authority::policy::{Baseline, Capabilities, ExecGrant, ExecKey, GrantStack};
-    #[cfg(unix)]
-    use crate::fact::NotRunnable;
     use crate::path::FrozenPath;
     use std::path::Path;
 
-    fn admits_head(ctx: &Context, head: Head) -> bool {
-        head.select(&ctx.grants, &Baseline::default()).is_ok()
+    fn admits_command(ctx: &Context, command: Command<Request>) -> bool {
+        !matches!(
+            command
+                .lookup(&ctx.grants, &Baseline::default())
+                .into_result(),
+            Err(LookupFailure::Refused { .. })
+        )
     }
 
-    fn selected(head: Head) -> Head<Admission> {
-        head.select(&GrantStack::root(), &Baseline::default())
-            .unwrap_or_else(|_| panic!("an unrestricted stack admits the head"))
+    fn looked_up(command: Command<Request>) -> Command<Lookup> {
+        let command = command.lookup(&GrantStack::root(), &Baseline::default());
+        assert!(!matches!(command.state, Err(LookupFailure::Refused { .. })));
+        command
     }
 
     #[test]
-    fn a_tilde_head_is_shown_expanded_against_env_home() {
+    fn a_tilde_path_is_shown_expanded_against_env_home() {
         let mut shell = crate::test_helper::core_shell();
         shell.context.set_env_var("HOME", "/tmp/home");
-        let head = Head::resolve(
+        let command = Command::from_name(
             &CommandName::TildePath(crate::path::TildePath {
                 suffix: Some("/.local/bin/claude".into()),
             }),
             &shell.context,
         );
-        assert_eq!(head.shown, "/tmp/home/.local/bin/claude");
+        assert_eq!(command.shown, "/tmp/home/.local/bin/claude");
     }
 
     /// A context whose sole grant layer is `exec`.
@@ -40,22 +44,24 @@ mod head {
         Context::under_grants(grants)
     }
 
-    fn path_head(file: &Path) -> CommandName {
+    fn path_name(file: &Path) -> CommandName {
         CommandName::Path(file.to_string_lossy().into_owned())
     }
 
-    #[cfg(unix)]
-    fn is_not_runnable_at(error: &Error, at: &str) -> bool {
-        matches!(
-            error.reason.failure(),
-            Some(Failure::NotRunnable(NotRunnable { found, .. })) if found == at
-        )
-    }
-
-    fn file_of(head: &Head<Admission>) -> (&Path, &crate::path::RealPath) {
-        match head.program.as_ref().map(Admitted::program) {
+    fn file_of(command: &Command<Lookup>) -> (&Path, &crate::path::RealPath) {
+        match command.state.as_ref().map(Admitted::program) {
             Ok(Program::File { arg0, located }) => (arg0, located.real()),
-            other => panic!("expected a host file, got {other:?}"),
+            Ok(other) => panic!("expected a host file, got {other:?}"),
+            Err(LookupFailure::NotFound { .. }) => panic!("expected a host file, found none"),
+            Err(LookupFailure::NotRunnable(details)) => {
+                panic!("expected a host file, got {details:?}");
+            }
+            Err(LookupFailure::Refused { at, denial }) => {
+                panic!(
+                    "expected a host file, refused {at}: {}",
+                    denial.error.describe()
+                );
+            }
         }
     }
 
@@ -63,10 +69,10 @@ mod head {
         crate::test_helper::trace(path).real().clone()
     }
 
-    /// A path head runs the file it names from the shell's cwd, and is
+    /// An explicit path runs the file it names from the shell's cwd, and is
     /// judged by that file's real path.
     #[test]
-    fn a_relative_path_head_is_the_file_under_the_cwd() {
+    fn a_relative_path_is_the_file_under_the_cwd() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "configure");
         let mut shell = crate::test_helper::core_shell();
@@ -75,11 +81,11 @@ mod head {
                 .expect("a tempdir is a working directory"),
         );
 
-        let head = selected(Head::resolve(
+        let command = looked_up(Command::from_name(
             &CommandName::Path(format!("./{name}")),
             &shell.context,
         ));
-        let (path, real) = file_of(&head);
+        let (path, real) = file_of(&command);
         let file = canonical(&tmp.path().join(&name));
         assert_eq!(real, &file);
         assert_eq!(canonical(path), file);
@@ -102,21 +108,26 @@ mod head {
                 .expect("a tempdir is a working directory"),
         );
 
-        let head = selected(Head::resolve(
+        let command = looked_up(Command::from_name(
             &CommandName::Path("link/../tool".into()),
             &shell.context,
         ));
-        let (path, judged) = file_of(&head);
+        let (path, judged) = file_of(&command);
         assert_eq!(judged, &canonical(&real.join("tool")));
         assert_eq!(path, tmp.path().join("link/../tool"));
     }
 
     #[test]
-    fn a_path_head_naming_no_file_has_no_program() {
+    fn a_path_naming_no_file_has_no_program() {
         let shell = crate::test_helper::core_shell();
-        let head = std::env::temp_dir().join("no-such-dir").join("configure");
-        let head = selected(Head::resolve(&path_head(&head), &shell.context));
-        assert!(head.program.as_ref().is_err_and(is_absent));
+        let path = std::env::temp_dir().join("no-such-dir").join("configure");
+        let command = looked_up(Command::from_name(&path_name(&path), &shell.context));
+        assert!(matches!(
+            command.into_result(),
+            Err(LookupFailure::NotFound {
+                suggested_extension: None,
+            })
+        ));
     }
 
     /// The kernel refuses `file/` with ENOTDIR, so a trailing slash must not
@@ -127,27 +138,35 @@ mod head {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "tool");
         let shell = crate::test_helper::core_shell();
-        let head = tmp.path().join(name).to_string_lossy().into_owned() + "/";
-        let head = selected(Head::resolve(&CommandName::Path(head), &shell.context));
-        assert!(head.program.as_ref().is_err_and(is_absent));
+        let path = tmp.path().join(name).to_string_lossy().into_owned() + "/";
+        let command = looked_up(Command::from_name(&CommandName::Path(path), &shell.context));
+        assert!(matches!(
+            command.into_result(),
+            Err(LookupFailure::NotFound {
+                suggested_extension: None,
+            })
+        ));
     }
 
     #[test]
-    fn an_empty_exec_allow_list_refuses_a_nonexistent_path_head() {
+    fn an_empty_exec_allow_list_refuses_a_nonexistent_path() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = under(ExecGrant::default());
         for file in [tmp.path().join("missing"), tmp.path().join("absent/tool")] {
-            let head = Head::resolve(&path_head(&file), &ctx);
-            let denied = head
-                .select(&ctx.grants, &Baseline::default())
-                .expect_err("an empty exec allowance refuses even an absent name");
-            assert_eq!(denied.at, path::shown(&file));
-            assert!(denied.denial.error.describe().contains("exec `allow` list"));
+            let command = Command::from_name(&path_name(&file), &ctx);
+            let Err(LookupFailure::Refused { at, denial }) = command
+                .lookup(&ctx.grants, &Baseline::default())
+                .into_result()
+            else {
+                panic!("an empty exec allowance refuses even an absent name");
+            };
+            assert_eq!(at, path::shown(&file));
+            assert!(denial.error.describe().contains("exec `allow` list"));
         }
     }
 
     #[test]
-    fn read_withheld_heads_are_refused_like_present_programs() {
+    fn read_withheld_commands_are_refused_like_present_programs() {
         use crate::authority::policy::FsPolicy;
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join(plant(tmp.path(), "zzhidden"));
@@ -164,10 +183,14 @@ mod head {
             },
         )]));
         let denied = |file: &Path| {
-            Head::resolve(&path_head(file), &ctx)
-                .select(&ctx.grants, &Baseline::default())
-                .expect_err("running a read-withheld name is refused")
-                .denial
+            let Err(LookupFailure::Refused { denial, .. }) =
+                Command::from_name(&path_name(file), &ctx)
+                    .lookup(&ctx.grants, &Baseline::default())
+                    .into_result()
+            else {
+                panic!("running a read-withheld name is refused");
+            };
+            denial
         };
         let cases = [
             tmp.path().join("missing.bat"),
@@ -215,17 +238,15 @@ mod head {
                 .unwrap();
             let mut ctx = under(ExecGrant::of([dir_key(d2.path())], []));
             ctx.set_env_var("PATH", path.clone());
-            let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &ctx);
+            let command = Command::from_name(&CommandName::Bare(name.as_str().into()), &ctx);
             if prime_memo {
                 assert_eq!(
                     path::locate(&name, Some(&path), Some(ctx.cwd())),
                     Some(d1.path().join(&name))
                 );
             }
-            let head = head
-                .select(&ctx.grants, &Baseline::default())
-                .unwrap_or_else(|_| panic!("the second PATH candidate is admitted"));
-            assert_eq!(file_of(&head).0, d2.path().join(&name));
+            let command = command.lookup(&ctx.grants, &Baseline::default());
+            assert_eq!(file_of(&command).0, d2.path().join(&name));
         }
     }
 
@@ -242,21 +263,27 @@ mod head {
         std::fs::write(&plain, "").unwrap();
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
         let absent = admitted.join("absent");
-        let select = |dirs: [&Path; 3]| {
+        let lookup = |dirs: [&Path; 3]| {
             let mut ctx = under(ExecGrant::of([dir_key(&admitted)], []));
             let path = std::env::join_paths(dirs).unwrap().into_string().unwrap();
             ctx.set_env_var("PATH", path);
-            Head::resolve(&CommandName::Bare("zzplain".into()), &ctx)
-                .select(&ctx.grants, &Baseline::default())
+            Command::from_name(&CommandName::Bare("zzplain".into()), &ctx)
+                .lookup(&ctx.grants, &Baseline::default())
         };
-        let first = select([absent.as_path(), denied.as_path(), admitted.as_path()])
-            .expect_err("the first non-absence is a refusal");
-        assert_eq!(first.at, path::shown(denied.join("zzplain")));
-        let first = select([absent.as_path(), admitted.as_path(), denied.as_path()])
-            .unwrap_or_else(|_| panic!("the non-executable file precedes the refusal"));
-        assert!(
-            matches!(first.program, Err(error) if is_not_runnable_at(&error, &path::shown(&plain)))
-        );
+        let Err(LookupFailure::Refused { at, .. }) =
+            lookup([absent.as_path(), denied.as_path(), admitted.as_path()]).into_result()
+        else {
+            panic!("the first non-absence is a refusal");
+        };
+        assert_eq!(at, path::shown(denied.join("zzplain")));
+        let first = lookup([absent.as_path(), admitted.as_path(), denied.as_path()]);
+        assert!(matches!(
+            first.into_result(),
+            Err(LookupFailure::NotRunnable(NotRunnable {
+                found,
+                why: Unrunnable::NotExecutable,
+            })) if found == path::shown(&plain)
+        ));
     }
 
     /// Each `PATH` candidate is walked once, the remembered hit included
@@ -286,11 +313,10 @@ mod head {
         let once: usize = dirs.iter().map(walk_of).sum();
 
         let before = steps();
-        let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &ctx)
-            .select(&ctx.grants, &Baseline::default())
-            .unwrap_or_else(|_| panic!("the third PATH candidate is admitted"));
+        let command = Command::from_name(&CommandName::Bare(name.as_str().into()), &ctx)
+            .lookup(&ctx.grants, &Baseline::default());
         assert_eq!(steps() - before, once);
-        assert_eq!(file_of(&head).0, dirs[2].path().join(&name));
+        assert_eq!(file_of(&command).0, dirs[2].path().join(&name));
     }
 
     /// A bare name runs what the walk found, never a same-named file in the
@@ -311,11 +337,16 @@ mod head {
             .context
             .set_env_var("PATH", elsewhere.path().to_string_lossy().into_owned());
 
-        let head = selected(Head::resolve(
+        let command = looked_up(Command::from_name(
             &CommandName::Bare(name.into()),
             &shell.context,
         ));
-        assert!(head.program.as_ref().is_err_and(is_absent));
+        assert!(matches!(
+            command.into_result(),
+            Err(LookupFailure::NotFound {
+                suggested_extension: None,
+            })
+        ));
     }
 
     /// The 126 case, which only a platform with an executable bit has.
@@ -333,13 +364,46 @@ mod head {
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let head = selected(Head::resolve(
+        let command = looked_up(Command::from_name(
             &CommandName::Bare("zznoexec".into()),
             &shell.context,
         ));
-        assert!(
-            matches!(head.program, Err(error) if is_not_runnable_at(&error, &path::shown(&file)))
+        assert!(matches!(
+            command.into_result(),
+            Err(LookupFailure::NotRunnable(NotRunnable {
+                found,
+                why: Unrunnable::NotExecutable,
+            })) if found == path::shown(&file)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_runnable_path_reports_the_typed_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        shell.seed_cwd(
+            crate::path::CwdPath::new(tmp.path().to_path_buf())
+                .expect("a tempdir is a working directory"),
         );
+        for (shown, why) in [
+            ("./plain", Unrunnable::NotExecutable),
+            ("./", Unrunnable::Directory),
+        ] {
+            let command = looked_up(Command::from_name(
+                &CommandName::Path(shown.into()),
+                &shell.context,
+            ));
+            let Err(LookupFailure::NotRunnable(details)) = command.into_result() else {
+                panic!("{shown} cannot run");
+            };
+            assert_eq!(details.found, shown);
+            assert_eq!(details.why, why);
+        }
     }
 
     /// A bundled name is its tool whatever `PATH` holds: no walk is taken.
@@ -351,8 +415,8 @@ mod head {
         shell
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
-        let head = Head::resolve(&CommandName::Bare("ls".into()), &shell.context);
-        assert!(matches!(head.program, Target::Tool(tool) if tool == "ls"));
+        let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
+        assert!(matches!(command.state, Request::Tool(tool) if tool == "ls"));
     }
 
     /// A bare key is the file the host `PATH` finds, so a scoped `PATH` that
@@ -365,16 +429,16 @@ mod head {
         let mut ctx = under(ExecGrant::of([ExecKey::Name("git".into())], []));
         ctx.set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let head = Head::resolve(&CommandName::Bare("git".into()), &ctx);
+        let command = Command::from_name(&CommandName::Bare("git".into()), &ctx);
         assert_eq!(
-            file_of(&selected(Head::resolve(
+            file_of(&looked_up(Command::from_name(
                 &CommandName::Bare("git".into()),
                 &ctx
             )))
             .1,
             &canonical(&dir.path().join(name)),
         );
-        assert!(!admits_head(&ctx, head));
+        assert!(!admits_command(&ctx, command));
     }
 
     /// `bin/bash` real, `planted/b` a symlink to it: the shape the evasion
@@ -396,10 +460,10 @@ mod head {
     }
 
     /// A policy that denies `bash` by bare name yet allows all of its bin
-    /// dir: the file that runs is `bash` whatever the head spelled, so the
+    /// dir: the file that runs is `bash` whatever the command's spelling, so the
     /// veto beats the dir.
     #[test]
-    fn a_bare_deny_beats_the_allow_dir_a_path_head_sits_in() {
+    fn a_bare_deny_beats_the_allow_dir_an_explicit_path_sits_in() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "bash");
         let ctx = under(ExecGrant::of(
@@ -407,20 +471,20 @@ mod head {
             [ExecKey::Name("bash".into())],
         ));
 
-        let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
-        assert!(!admits_head(&ctx, head));
+        let command = Command::from_name(&path_name(&tmp.path().join(name)), &ctx);
+        assert!(!admits_command(&ctx, command));
     }
 
-    /// The mirror: a bare `rg: allow` is the host's `rg`, so a planted path
-    /// head `evil/rg` does not inherit it.
+    /// The mirror: a bare `rg: allow` is the host's `rg`, so a planted
+    /// path `evil/rg` does not inherit it.
     #[test]
-    fn a_bare_allow_does_not_admit_a_planted_path_head() {
+    fn a_bare_allow_does_not_admit_a_planted_path() {
         let tmp = tempfile::tempdir().unwrap();
         let name = plant(tmp.path(), "rg");
         let ctx = under(ExecGrant::of([ExecKey::Name("rg".into())], []));
 
-        let head = Head::resolve(&path_head(&tmp.path().join(name)), &ctx);
-        assert!(!admits_head(&ctx, head));
+        let command = Command::from_name(&path_name(&tmp.path().join(name)), &ctx);
+        assert!(!admits_command(&ctx, command));
     }
 
     /// The symlink half of the deny-by-name evasion: `planted/b` wears a name
@@ -436,12 +500,12 @@ mod head {
             [ExecKey::Name("bash".into())],
         ));
 
-        let head = Head::resolve(&path_head(&link), &ctx);
+        let command = Command::from_name(&path_name(&link), &ctx);
         assert_eq!(
-            file_of(&selected(Head::resolve(&path_head(&link), &ctx))).1,
+            file_of(&looked_up(Command::from_name(&path_name(&link), &ctx))).1,
             &canonical(&bin.join("bash")),
         );
-        assert!(!admits_head(&ctx, head));
+        assert!(!admits_command(&ctx, command));
     }
 
     /// The same link, judged by a denied *region* its program lies in.
@@ -452,8 +516,8 @@ mod head {
         let (bin, planted, link) = planted_symlink(tmp.path());
         let ctx = under(ExecGrant::of([dir_key(&planted)], [dir_key(&bin)]));
 
-        let head = Head::resolve(&path_head(&link), &ctx);
-        assert!(!admits_head(&ctx, head));
+        let command = Command::from_name(&path_name(&link), &ctx);
+        assert!(!admits_command(&ctx, command));
     }
 
     /// A path key names a file, so a link to it runs the admitted file.
@@ -469,8 +533,8 @@ mod head {
             [],
         ));
 
-        let head = Head::resolve(&path_head(&link), &ctx);
-        assert!(admits_head(&ctx, head));
+        let command = Command::from_name(&path_name(&link), &ctx);
+        assert!(admits_command(&ctx, command));
     }
 
     /// Where the scheme stops, pinned rather than left to be rediscovered: a
@@ -494,8 +558,8 @@ mod head {
             [ExecKey::Name("bash".into())],
         ));
 
-        let head = Head::resolve(&path_head(&copy), &ctx);
-        assert!(admits_head(&ctx, head));
+        let command = Command::from_name(&path_name(&copy), &ctx);
+        assert!(admits_command(&ctx, command));
     }
 
     /// An executable a *bare-name* walk finds in `dir`: off Unix a bare name
@@ -535,11 +599,11 @@ mod head {
         );
         shell.context.set_env_var("PATH", "./bin");
 
-        let head = selected(Head::resolve(
+        let command = looked_up(Command::from_name(
             &CommandName::Bare(name.as_str().into()),
             &shell.context,
         ));
-        assert_eq!(file_of(&head).0, bin.join(&name));
+        assert_eq!(file_of(&command).0, bin.join(&name));
     }
 
     #[cfg(unix)]
@@ -568,10 +632,35 @@ mod vet {
     use crate::shell::runtime::{CapturePolicy, Mooring, Shell};
     use std::path::Path;
 
-    /// A head admitted with no surface, then prepared with no argv.
-    fn plan(head: Head, shell: &mut Shell) -> Settled<ExternalCommand> {
-        let head = head.admit(&Mooring::adrift(), shell)?;
-        ExternalCommand::prepare(head, &[], shell)
+    #[test]
+    fn dyld_names_borrow_the_shell_overlay() {
+        let mut shell = crate::test_helper::core_shell();
+        shell
+            .context
+            .set_env_var("DYLD_INSERT_LIBRARIES", "injected.dylib");
+        shell.context.set_env_var("DYLD_FUTURE_OPTION", "value");
+        shell.context.set_env_var("OTHER_OPTION", "value");
+        let mut borrowed: Vec<_> = dyld_vars(&shell)
+            .filter_map(|name| match name {
+                Cow::Borrowed(name) => Some(name),
+                Cow::Owned(_) => None,
+            })
+            .collect();
+        borrowed.sort_unstable();
+        assert_eq!(
+            borrowed,
+            [
+                OsStr::new("DYLD_FUTURE_OPTION"),
+                OsStr::new("DYLD_INSERT_LIBRARIES")
+            ]
+        );
+    }
+
+    /// A command admitted with no surface, then prepared with no argv.
+    fn plan(command: Command<Request>, shell: &mut Shell) -> Settled<ExternalCommand> {
+        command
+            .admit(&Mooring::adrift(), shell)?
+            .prepare(&[], shell)
     }
 
     /// An executable a *bare-name* walk finds in `dir`; off Unix a bare name
@@ -594,9 +683,9 @@ mod vet {
         name
     }
 
-    /// The error `prepare` refuses `head` with.
-    fn refused(head: Head, shell: &mut Shell) -> Error {
-        match plan(head, shell) {
+    /// The error `prepare` refuses `command` with.
+    fn refused(command: Command<Request>, shell: &mut Shell) -> Error {
+        match plan(command, shell) {
             Err(Break::Error(e)) => e,
             Err(other) => panic!("expected a refusal, got {other:?}"),
             Ok(_) => panic!("expected a refusal, got a plan"),
@@ -648,8 +737,8 @@ mod vet {
             .context
             .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
 
-        let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        let e = refused(head, &mut shell);
+        let command = Command::from_name(&CommandName::Bare(name.into()), &shell.context);
+        let e = refused(command, &mut shell);
         assert_eq!(e.failure_code().get(), 127);
         assert!(
             !format!("{e:?}").contains("permission denied"),
@@ -661,7 +750,7 @@ mod vet {
     /// names the file it might have meant.
     #[cfg(windows)]
     #[test]
-    fn an_extensionless_path_head_is_127_with_a_hint() {
+    fn an_extensionless_path_is_127_with_a_hint() {
         let here = tempfile::tempdir().unwrap();
         plant(here.path(), "zztool");
         let mut shell = crate::test_helper::core_shell();
@@ -670,8 +759,8 @@ mod vet {
                 .expect("a tempdir is a working directory"),
         );
 
-        let head = Head::resolve(&CommandName::Path(r".\zztool".into()), &shell.context);
-        let e = refused(head, &mut shell);
+        let command = Command::from_name(&CommandName::Path(r".\zztool".into()), &shell.context);
+        let e = refused(command, &mut shell);
         assert_eq!(e.failure_code().get(), 127);
         assert_eq!(
             e.hints().first().map(|h| &**h),
@@ -697,21 +786,23 @@ mod vet {
             crate::path::CwdPath::new(tmp.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
-        let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context)
+        let command = Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context)
             .admit(&Mooring::adrift(), &mut shell)
-            .expect("an unrestricted shell admits the head");
+            .expect("an unrestricted shell admits the command");
         assert!(matches!(
-            head.program.as_ref().map(Admitted::program),
+            command.state.program.as_ref().map(Admitted::program),
             Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
         ));
-        ExternalCommand::prepare(head, &[], &shell).expect("a resolved name must prepare");
+        command
+            .prepare(&[], &shell)
+            .expect("a resolved name must prepare");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
                 .expect("a tempdir is a working directory"),
         );
-        let head = Head::resolve(&CommandName::Bare(name.into()), &shell.context);
-        assert_eq!(refused(head, &mut shell).failure_code().get(), 127);
+        let command = Command::from_name(&CommandName::Bare(name.into()), &shell.context);
+        assert_eq!(refused(command, &mut shell).failure_code().get(), 127);
     }
 
     /// Bundled names short-circuit the disk probe: `ls` vets on an empty
@@ -725,28 +816,28 @@ mod vet {
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let head = Head::resolve(&CommandName::Bare("ls".into()), &shell.context);
-        let plan = plan(head, &mut shell).expect("bundled name must not 127");
+        let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
+        let plan = plan(command, &mut shell).expect("bundled name must not 127");
         assert_eq!(plan.shown, "ls");
     }
 
-    /// The 126 case of a path head: a file lacking `+x`, or a directory,
+    /// The 126 case of an explicit path: a file lacking `+x`, or a directory,
     /// which only the admitted program is asked about.
     #[cfg(unix)]
     #[test]
-    fn a_path_head_that_cannot_be_run_is_not_executable() {
+    fn a_path_that_cannot_be_run_is_not_executable() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("plain");
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        for head in [file.as_path(), tmp.path()] {
-            let head = Head::resolve(
-                &CommandName::Path(head.to_string_lossy().into_owned()),
+        for path in [file.as_path(), tmp.path()] {
+            let command = Command::from_name(
+                &CommandName::Path(path.to_string_lossy().into_owned()),
                 &shell.context,
             );
-            let e = refused(head, &mut shell);
+            let e = refused(command, &mut shell);
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
             assert!(!e.describe().contains("denied by active grant"), "{e:?}");
         }
@@ -764,11 +855,11 @@ mod vet {
         std::fs::write(&file, "").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        let head = Head::resolve(
+        let command = Command::from_name(
             &CommandName::Path(file.to_string_lossy().into_owned()),
             &shell.context,
         );
-        let e = shell.with_layer(no_exec(), |shell| refused(head, shell));
+        let e = shell.with_layer(no_exec(), |shell| refused(command, shell));
         assert!(e.describe().contains("denied by active grant"), "{e:?}");
     }
 
@@ -776,16 +867,16 @@ mod vet {
     /// the OS words it.
     #[cfg(unix)]
     #[test]
-    fn a_looping_path_head_is_not_reported_as_permission_denied() {
+    fn a_looping_path_is_not_reported_as_permission_denied() {
         let tmp = tempfile::tempdir().unwrap();
         let looping = tmp.path().join("loop");
         std::os::unix::fs::symlink("loop", &looping).unwrap();
         let mut shell = crate::test_helper::core_shell();
-        let head = Head::resolve(
+        let command = Command::from_name(
             &CommandName::Path(looping.to_string_lossy().into_owned()),
             &shell.context,
         );
-        let e = refused(head, &mut shell);
+        let e = refused(command, &mut shell);
         assert_eq!(e.failure_code().get(), 126, "{e:?}");
         assert!(!e.describe().contains("permission denied"), "{e:?}");
     }
@@ -815,8 +906,9 @@ mod vet {
             }
             let (e, trail) = shell.with_layer(run_from(&dirs[0]), |shell| {
                 let scope = shell.local.audit.open(CapturePolicy::Off);
-                let head = Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context);
-                let e = refused(head, shell);
+                let command =
+                    Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context);
+                let e = refused(command, shell);
                 (e, shell.local.audit.close(scope))
             });
             assert!(e.describe().contains("denied by active grant"), "{e:?}");
@@ -865,7 +957,7 @@ mod vet {
             );
             let e = shell.with_layer(run_from_excluding(&admitted, [excluded.clone()]), |shell| {
                 refused(
-                    Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context),
+                    Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context),
                     shell,
                 )
             });
@@ -884,7 +976,7 @@ mod vet {
     }
 
     /// A `PATH` entry the OS refuses to search is reported as that refusal,
-    /// as a path head's is: absence is only what remains when nothing else
+    /// as an explicit path's is: absence is only what remains when nothing else
     /// failed.
     #[cfg(unix)]
     #[test]
@@ -911,7 +1003,7 @@ mod vet {
                 .unwrap(),
         );
         let e = refused(
-            Head::resolve(&CommandName::Bare(name.as_str().into()), &shell.context),
+            Command::from_name(&CommandName::Bare(name.as_str().into()), &shell.context),
             &mut shell,
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -930,17 +1022,17 @@ mod vet {
         assert_eq!(e.describe(), format!("{name}: {found}: permission denied"));
     }
 
-    /// A path head naming no file is a missing command, and the refusal names
+    /// An explicit path naming no file is a missing command, and the refusal names
     /// the path.
     #[test]
-    fn a_path_head_naming_no_file_produces_127() {
+    fn a_path_naming_no_file_produces_127() {
         let mut shell = crate::test_helper::core_shell();
-        let head = std::env::temp_dir().join("no-such-dir").join("tool");
-        let head = Head::resolve(
-            &CommandName::Path(head.to_string_lossy().into_owned()),
+        let path = std::env::temp_dir().join("no-such-dir").join("tool");
+        let command = Command::from_name(
+            &CommandName::Path(path.to_string_lossy().into_owned()),
             &shell.context,
         );
-        let e = refused(head, &mut shell);
+        let e = refused(command, &mut shell);
         assert_eq!(e.failure_code().get(), 127);
         assert!(e.prov.is_none());
         let description = e.describe();
@@ -959,11 +1051,11 @@ mod vet {
                 .into_string()
                 .unwrap(),
         );
-        let head = Head::resolve(
+        let command = Command::from_name(
             &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
             &shell.context,
         );
-        assert_eq!(refused(head, &mut shell).failure_code().get(), 127);
+        assert_eq!(refused(command, &mut shell).failure_code().get(), 127);
     }
 
     #[test]
@@ -984,14 +1076,13 @@ mod vet {
                 #[cfg(unix)]
                 (looping, 126),
             ] {
-                let head = Head::resolve(
+                let command = Command::from_name(
                     &CommandName::Path(file.to_string_lossy().into_owned()),
                     &shell.context,
                 )
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant runs this directory");
-                let Err(Break::Error(e)) = ExternalCommand::prepare(head, &[Value::Unit], shell)
-                else {
+                let Err(Break::Error(e)) = command.prepare(&[Value::Unit], shell) else {
                     panic!("the admitted path cannot be run");
                 };
                 assert_eq!(e.failure_code().get(), code, "{e:?}");
@@ -1013,10 +1104,10 @@ mod vet {
             .context
             .set_env_var("PATH", tmp.path().to_string_lossy().into_owned());
         shell.with_layer(run_from(tmp.path()), |shell| {
-            let head = Head::resolve(&CommandName::Bare("zzplain".into()), &shell.context)
+            let command = Command::from_name(&CommandName::Bare("zzplain".into()), &shell.context)
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the non-executable file");
-            let Err(Break::Error(e)) = ExternalCommand::prepare(head, &[Value::Unit], shell) else {
+            let Err(Break::Error(e)) = command.prepare(&[Value::Unit], shell) else {
                 panic!("a non-executable candidate cannot be run");
             };
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
@@ -1065,7 +1156,7 @@ mod vet {
 }
 
 mod stdio {
-    use super::super::{boundary_stdin, stdin_stdio};
+    use super::super::boundary_stdin;
     use crate::io::Source;
     use crate::process::{DurableRoot, Membership, Pgid, Scope, StdioSpec};
     use crate::shell::runtime::Shell;
@@ -1113,9 +1204,9 @@ mod stdio {
     /// inherits fd 0, whatever fd 0 is.
     #[test]
     fn the_childs_source_decides_its_stdin() {
-        assert!(matches!(stdin_stdio(&Source::Empty), Ok(StdioSpec::Null)));
+        assert!(matches!(Source::Empty.child_stdio(), Ok(StdioSpec::Null)));
         assert!(matches!(
-            stdin_stdio(&Source::Terminal),
+            Source::Terminal.child_stdio(),
             Ok(StdioSpec::Inherit)
         ));
     }
@@ -1130,7 +1221,7 @@ mod stdio {
             SourceReader::pipe(r).interruptible(Scope::clone(&DurableRoot::default())),
         );
 
-        let stdio = stdin_stdio(&stdin).expect("stdin_stdio");
+        let stdio = stdin.child_stdio().expect("child stdin");
         assert!(matches!(stdio, StdioSpec::Owned(_)));
 
         // The source is borrowed, never taken, so it still has a reader.
@@ -1293,11 +1384,12 @@ mod foreground {
             return;
         }
         let (mut shell, mooring) = leased_shell();
-        let head = Head::resolve(&CommandName::Path("/bin/sleep".into()), &shell.context)
+        let command = Command::from_name(&CommandName::Path("/bin/sleep".into()), &shell.context)
             .admit(&mooring, &mut shell)
             .expect("an unrestricted shell admits sleep");
         let started = std::time::Instant::now();
-        let command = ExternalCommand::prepare(head, &[Value::string("30")], &shell)
+        let command = command
+            .prepare(&[Value::string("30")], &shell)
             .expect("the launch builds");
         let Err(Break::Error(refusal)) = command.run(&mooring, &shell) else {
             panic!("a failed handoff must refuse the command");
@@ -1389,7 +1481,7 @@ mod process {
     /// spelling the user wrote, however the spelling moves in between.
     #[cfg(unix)]
     mod judged_program {
-        use super::{ChildOut, ExternalCommand, Head};
+        use super::{ChildOut, Command, ExternalCommand};
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::shell::runtime::{Mooring, Shell, Value};
@@ -1425,12 +1517,14 @@ mod process {
         }
 
         fn judge(shell: &mut Shell, args: &[&str]) -> ExternalCommand {
-            let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
+            let command =
+                Command::from_name(&CommandName::Path("tools/build".into()), &shell.context);
             let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
-            let admitted = head
+            command
                 .admit(&Mooring::adrift(), shell)
-                .expect("an unrestricted shell admits the file");
-            ExternalCommand::prepare(admitted, &args, shell).expect("the file can be run")
+                .expect("an unrestricted shell admits the file")
+                .prepare(&args, shell)
+                .expect("the file can be run")
         }
 
         fn stdout_of(prepared: ExternalCommand) -> String {
@@ -1450,7 +1544,7 @@ mod process {
             let prepared = judge(&mut shell, &[]);
             let started = prepared.start(
                 &Source::Empty,
-                ChildOut::Sink(Sink::Stdout),
+                ChildOut::Sink(&Sink::Stdout),
                 &Sink::Stderr,
                 crate::process::PgidPolicy::Inherit,
                 &shell.scope,
@@ -1482,7 +1576,7 @@ mod process {
                 mut spawned, claim, ..
             }) = prepared.start(
                 &Source::Empty,
-                ChildOut::Sink(discard.clone()),
+                ChildOut::Sink(&discard),
                 &discard,
                 crate::process::PgidPolicy::Inherit,
                 &shell.scope,
@@ -1506,7 +1600,7 @@ mod process {
         }
 
         /// A pipeline's earlier stage may retarget a later one's link after the
-        /// head is resolved and before it launches: the judged `a` still runs.
+        /// command is looked up and before it launches: the judged `a` still runs.
         #[test]
         fn a_link_retargeted_after_judgment_runs_the_file_judged() {
             let (tmp, mut shell) = workdir();
@@ -1710,7 +1804,7 @@ mod process {
     /// unconfined one is, never a trampoline's exit status.
     #[cfg(target_os = "macos")]
     mod confined_start {
-        use super::{ChildOut, Claim, ExternalCommand, Head, Started};
+        use super::{ChildOut, Claim, Command, Started};
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
         use crate::fact::{Failure, Reason, Unrunnable};
         use crate::io::{Sink, Source};
@@ -1747,21 +1841,20 @@ mod process {
                 ..Capabilities::default()
             });
             shell.with_layer(layer, |shell| {
-                let head = Head::resolve(
+                let command = Command::from_name(
                     &CommandName::Path(script.to_string_lossy().into_owned()),
                     &shell.context,
                 )
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the script");
-                let prepared =
-                    ExternalCommand::prepare(head, &[], shell).expect("the launch builds");
+                let prepared = command.prepare(&[], shell).expect("the launch builds");
                 let shown = prepared.shown.clone();
                 between();
                 (
                     shown,
                     prepared.start(
                         &Source::Empty,
-                        ChildOut::Sink(Sink::Stdout),
+                        ChildOut::Sink(&Sink::Stdout),
                         &Sink::Stderr,
                         PgidPolicy::Inherit,
                         &shell.scope,

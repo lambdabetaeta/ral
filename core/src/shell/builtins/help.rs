@@ -10,7 +10,7 @@ use crate::io::terminal;
 use crate::ir::CommandName;
 use crate::path::shown;
 use crate::prelude_manifest::PRELUDE_DOCS;
-use crate::shell::exec::command::Head;
+use crate::shell::exec::command::{Command, LookupFailure};
 use crate::shell::runtime::{Binding, HandlerLookup, Settled, Shell, Value};
 use crate::typecheck::builtin_type_hint;
 use std::fmt::{self, Write};
@@ -524,20 +524,16 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     {
         sites.push(Where::Builtin);
     }
-    match Head::resolve(&CommandName::of(name), &shell.context)
-        .select(&shell.context.grants, shell.baseline())
+    match Command::from_name(&CommandName::of(name), &shell.context)
+        .lookup(&shell.context.grants, shell.baseline())
+        .into_result()
     {
-        Ok(Head {
-            program: Ok(admitted),
-            ..
-        }) => sites.push(match admitted.program() {
+        Ok(admitted) => sites.push(match admitted.program() {
             Program::File { arg0, .. } => Where::Path(arg0.clone()),
             Program::Tool(_) => Where::Bundled,
         }),
-        Ok(Head {
-            program: Err(_), ..
-        }) => {}
-        Err(denied) => sites.push(Where::DeniedByGrant(denied.at)),
+        Err(LookupFailure::NotFound { .. } | LookupFailure::NotRunnable(_)) => {}
+        Err(LookupFailure::Refused { at, .. }) => sites.push(Where::DeniedByGrant(at)),
     }
     sites
 }

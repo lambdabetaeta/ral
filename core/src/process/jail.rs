@@ -14,9 +14,10 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+#[cfg(seccomp)]
+use std::sync::OnceLock;
 #[cfg(not(target_os = "linux"))]
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use crate::authority::policy::Net;
 use crate::authority::sandbox::Ownership;
@@ -43,7 +44,8 @@ impl Default for JailLimits {
     }
 }
 
-static GUEST: OnceLock<Arc<GuestJail>> = OnceLock::new();
+#[cfg(seccomp)]
+static GUEST: OnceLock<GuestJail> = OnceLock::new();
 
 /// Why the guest jail made no child of a launch: nothing ran.
 #[cfg(seccomp)]
@@ -55,7 +57,7 @@ pub(crate) fn refused(why: impl std::fmt::Display) -> crate::error::Error {
 pub(crate) fn install_guest(args: &[OsString]) -> Result<(), String> {
     // SAFETY: geteuid has no preconditions.
     let root = guest_root(args, unsafe { libc::geteuid() })?;
-    GUEST.get_or_init(|| Arc::new(GuestJail::new(root, JailLimits::default())));
+    GUEST.get_or_init(|| GuestJail::new(root, JailLimits::default()));
     Ok(())
 }
 
@@ -80,8 +82,9 @@ fn guest_root(args: &[OsString], euid: u32) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-pub(crate) fn guest() -> Option<Arc<GuestJail>> {
-    GUEST.get().cloned()
+#[cfg(seccomp)]
+pub(crate) fn guest() -> Option<&'static GuestJail> {
+    GUEST.get()
 }
 
 pub(crate) const BASE_UID: u32 = 100_000;
@@ -201,8 +204,7 @@ const GUEST_SEQ_FILE: &str = "/run/ral/jail.seq";
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DETACHED: &str = "detached";
 
-/// The guest-wide jail: one per booted engine, shared by `Arc` across every
-/// fork and worker thread.
+/// The guest-wide jail, installed once per engine and borrowed by its workers.
 ///
 /// `engine_pid` groups a booted engine's own cgroups under one directory —
 /// grouping only, since the sequence file already makes `seq` itself

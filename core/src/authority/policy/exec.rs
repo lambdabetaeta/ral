@@ -37,6 +37,10 @@ impl Admitted {
     pub(crate) fn program(&self) -> &Program<Judged<Reading>> {
         &self.program
     }
+
+    pub(in crate::authority) fn into_program(self) -> Program<Judged<Reading>> {
+        self.program
+    }
 }
 
 /// Why a stack refused a call.

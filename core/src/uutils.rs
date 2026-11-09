@@ -54,7 +54,7 @@ pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 #[cfg(feature = "ripgrep")]
 pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 
-/// The static name of a bundled tool. `command::Head` resolves these to a
+/// The static name of a bundled tool. `command::Command` looks these up as a
 /// `Program::Tool` and skips the PATH probe entirely, so the in-binary
 /// implementation wins over any same-named system binary.
 pub(crate) fn bundled_name(name: &std::ffi::OsStr) -> Option<&'static str> {

@@ -1,18 +1,20 @@
-//! An external command's life: [`Head`] resolves and admits it;
-//! [`ExternalCommand::prepare`] vets its arguments and describes its launch;
-//! [`ExternalCommand::start`] connects its streams and starts it. The resulting
-//! [`Started`] owns the child, pumps and diagnostic context until collection.
+//! External command lookup, preparation, and execution.
 //!
-//! A standalone call uses [`ExternalCommand::run`], which titles the terminal
-//! between connecting and spawning. A direct pipeline stage uses `start`, then
-//! registers with the pipeline's collector instead of waiting alone. Both
-//! settle through [`ending`].
+//! [`Command<Request>`] snapshots the lookup context. Lookup returns a program
+//! or a structured failure; admission handles policy refusals and produces
+//! [`Command<Checked>`]. Ordinary lookup errors remain deferred until preparation,
+//! where they take precedence over invalid arguments.
+//!
+//! Preparation builds an [`ExternalCommand`]. Connecting its streams consumes it
+//! into a [`ConnectedCommand`], which owns the launch and its pump plan together.
+//! Spawning produces [`Started`], collected either alone or by a pipeline. Both
+//! use [`ending`] to interpret the child's result.
 
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
-use crate::authority::sandbox::{Image, Ownership, SandboxProjection};
+use crate::authority::sandbox::{Confinement, Image, Ownership};
 use crate::error::{Error, io_message};
-use crate::fact::{Failure, Reason, Unrunnable};
+use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::{Edge, OutFd, Sink, Source, Streams};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
@@ -22,7 +24,9 @@ use crate::process::{
 };
 use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::ty::RefusedArg;
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -30,117 +34,132 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(unix)]
-use crate::authority::policy::{Flag, ShellVerb};
-#[cfg(unix)]
-use crate::fact::{AuditIo, Receipt};
-#[cfg(unix)]
 use crate::process::group::Survivor;
+
+// The detached-launch method is private. Other execution modules must use
+// this child module's operation, which checks permission before calling it.
 #[cfg(unix)]
-use crate::shell::runtime::{CommandOrigin, HandlerLookup};
+mod detach;
+#[cfg(unix)]
+pub(in crate::shell) use detach::detach;
 
-// ── heads: resolve, admit, probe ──────────────────────────────────────────────
+// Lookup and admission states.
 
-/// A [`Head`] freezes the shown spelling and its [`Target`] without I/O.
-/// [`Head::admit`] judges each candidate before it is looked at, and reads
-/// 127/126 off that judged walk for [`validate_argv`] to report.
+/// A command name paired with its current state. Only admission constructs
+/// [`Checked`], the state required for preparation.
 #[derive(Debug)]
-pub(crate) struct Head<P = Target> {
-    /// A path head is shown as typed, not folded by [`path::shown`].
+pub(crate) struct Command<S> {
+    /// Diagnostic name. Explicit paths retain the user's spelling.
     pub(crate) shown: String,
-    pub(crate) program: P,
+    state: S,
 }
 
-/// An admitted program, or the 127/126 error the judged walk ends in.
-pub(crate) type Admission = Result<Admitted, Error>;
-
+/// Lookup inputs captured without filesystem access.
 #[derive(Debug)]
-pub(crate) enum Target {
+pub(crate) enum Request {
     Tool(&'static str),
-    /// A path head's launch path; `None` where it names none.
+    /// An anchored path, or `None` for a tilde path without a home directory.
     Path(Option<PathBuf>),
-    /// A bare name's `PATH` and cwd, frozen at dispatch.
+    /// A bare name uses the PATH and cwd from dispatch, not later shell state.
     Search {
         path: Option<String>,
         cwd: CwdPath,
     },
 }
 
-pub(crate) struct Denied {
-    pub(crate) at: String,
-    denial: Box<Denial>,
+/// The selected runnable program, or the lookup failure to report.
+pub(crate) type Lookup = Result<Admitted, LookupFailure>;
+
+/// Lookup retains failure data rather than inspecting rendered errors.
+/// Policy refusals remain separate because admission must record them.
+pub(crate) enum LookupFailure {
+    NotFound {
+        suggested_extension: Option<&'static str>,
+    },
+    NotRunnable(NotRunnable),
+    Refused {
+        at: String,
+        denial: Box<Denial>,
+    },
 }
 
-impl Head {
-    /// Freeze `name` against `ctx`, without consulting the disk.
-    pub(crate) fn resolve(name: &CommandName, ctx: &Context) -> Self {
+/// Admission has handled policy refusals. An ordinary error is retained so
+/// preparation reports it before checking arguments.
+#[derive(Debug)]
+pub(crate) struct Checked {
+    program: Result<Admitted, Error>,
+}
+
+// Capture, lookup, and admission.
+
+impl Command<Request> {
+    /// Capture the command name and its lookup context without filesystem access.
+    pub(crate) fn from_name(name: &CommandName, ctx: &Context) -> Self {
         match name {
             CommandName::Bare(bare) => {
                 let shown = bare.to_string();
-                let program = crate::uutils::bundled_name(std::ffi::OsStr::new(bare.as_ref()))
+                let state = crate::uutils::bundled_name(std::ffi::OsStr::new(bare.as_ref()))
                     .map_or_else(
-                        || Target::Search {
+                        || Request::Search {
                             path: ctx.env_overrides().get_or_host("PATH"),
                             cwd: ctx.cwd().clone(),
                         },
-                        Target::Tool,
+                        Request::Tool,
                     );
-                Self { shown, program }
+                Self { shown, state }
             }
             CommandName::Path(path) => Self {
                 shown: path.clone(),
-                program: Target::Path(Some(launch_path(&PathBuf::from(path), ctx))),
+                state: Request::Path(Some(ctx.resolver().for_launch(path))),
             },
             CommandName::TildePath(path) => match ctx.home() {
                 Some(home) => Self {
                     shown: path.shown(&home),
-                    program: Target::Path(Some(launch_path(&path.expand(&home), ctx))),
+                    state: Request::Path(Some(ctx.resolver().for_launch(path.expand(&home)))),
                 },
                 None => Self {
                     shown: path.to_literal(),
-                    program: Target::Path(None),
+                    state: Request::Path(None),
                 },
             },
         }
     }
 
-    /// Select the first admitted program, retaining the first non-absence.
-    pub(crate) fn select(
-        self,
-        grants: &GrantStack,
-        baseline: &Baseline,
-    ) -> Result<Head<Admission>, Denied> {
-        let Self { shown, program } = self;
-        let program = match program {
-            Target::Tool(tool) => check_exec(grants, baseline, &shown, Program::Tool(tool))
-                .map(Ok)
-                .map_err(|denial| Denied {
+    /// Find an admitted runnable program. If none exists, report the first
+    /// non-absence failure in PATH order.
+    pub(crate) fn lookup(self, grants: &GrantStack, baseline: &Baseline) -> Command<Lookup> {
+        let Self { shown, state } = self;
+        let state = match state {
+            Request::Tool(tool) => check_exec(grants, baseline, &shown, Program::Tool(tool))
+                .map_err(|denial| LookupFailure::Refused {
                     at: shown.clone(),
                     denial,
                 }),
-            Target::Path(Some(file)) => {
-                match probe(file.clone(), CandidateKind::Path, &shown, grants, baseline)? {
-                    Err(error) if cfg!(windows) && is_absent(&error) => {
-                        let meant = path::WINDOWS_EXEC_EXTENSIONS.iter().find(|ext| {
-                            matches!(
+            Request::Path(Some(file)) => {
+                #[cfg(windows)]
+                let file_for_hint = file.clone();
+                match probe(file, CandidateKind::Path, &shown, grants, baseline) {
+                    #[cfg(windows)]
+                    Err(LookupFailure::NotFound { .. }) => {
+                        let suggested_extension =
+                            path::WINDOWS_EXEC_EXTENSIONS.iter().copied().find(|ext| {
                                 probe(
-                                    path::with_appended_suffix(&file, ext),
+                                    path::with_appended_suffix(&file_for_hint, ext),
                                     CandidateKind::Path,
                                     &shown,
                                     grants,
                                     baseline,
-                                ),
-                                Ok(Ok(_))
-                            )
-                        });
-                        Ok(Err(match meant {
-                            Some(ext) => error.with_hint(format!("did you mean '{shown}.{ext}'?")),
-                            None => error,
-                        }))
+                                )
+                                .is_ok()
+                            });
+                        Err(LookupFailure::NotFound {
+                            suggested_extension,
+                        })
                     }
-                    admission => Ok(admission),
+                    lookup => lookup,
                 }
             }
-            Target::Search { path, cwd } => settle(
+            Request::Search { path, cwd } => settle(
                 path::search(
                     &shown,
                     path.as_deref(),
@@ -152,55 +171,88 @@ impl Head {
                         grants,
                         baseline,
                     ) {
-                        Ok(Ok(admitted)) => ControlFlow::Break(admitted),
-                        Ok(Err(error)) => ControlFlow::Continue(Ok(error)),
-                        Err(denied) => ControlFlow::Continue(Err(denied)),
+                        Ok(admitted) => ControlFlow::Break(admitted),
+                        Err(failure) => ControlFlow::Continue(failure),
                     },
                 ),
                 &shown,
             ),
-            Target::Path(None) => Ok(Err(not_found(&shown))),
-        }?;
-        Ok(Head { shown, program })
+            Request::Path(None) => Err(LookupFailure::NotFound {
+                suggested_extension: None,
+            }),
+        };
+        Command { shown, state }
     }
 
-    /// Select under the live stack, recording a refusal against `mooring`.
-    pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Head<Admission>> {
-        self.select(&shell.context.grants, shell.baseline())
-            .map_err(|Denied { denial, .. }| shell.exec_refused(*denial, mooring))
+    /// Apply the current grants. Record policy refusals immediately; convert
+    /// ordinary lookup failures to errors for preparation to report.
+    pub(crate) fn admit(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Command<Checked>> {
+        let Command { shown, state } = self.lookup(&shell.context.grants, shell.baseline());
+        let program = match state {
+            Ok(admitted) => Ok(admitted),
+            Err(LookupFailure::NotFound {
+                suggested_extension,
+            }) => {
+                let error = Error::new(Reason::process(&shown, Failure::NotFound));
+                Err(match suggested_extension {
+                    Some(ext) => error.with_hint(format!("did you mean '{shown}.{ext}'?")),
+                    None => error,
+                })
+            }
+            Err(LookupFailure::NotRunnable(details)) => Err(Error::new(Reason::process(
+                &shown,
+                Failure::NotRunnable(details),
+            ))),
+            Err(LookupFailure::Refused { denial, .. }) => {
+                return Err(shell.exec_refused(*denial, mooring));
+            }
+        };
+        Ok(Command {
+            shown,
+            state: Checked { program },
+        })
     }
 }
 
-/// The searched program; failing every candidate, the first failure other
-/// than absence, in `PATH` order.  A refusal says the name is no program
-/// where the grant runs from only if each candidate was absent or outside
-/// the grant's allowances: an exclusion's refusal is no evidence of absence.
-fn settle(
-    searched: Result<Admitted, Vec<Result<Error, Denied>>>,
-    shown: &str,
-) -> Result<Admission, Denied> {
+impl Command<Lookup> {
+    /// Return the lookup result without recording refusals, for callers such
+    /// as command inspection.
+    pub(crate) fn into_result(self) -> Lookup {
+        self.state
+    }
+}
+
+// Candidate selection.
+
+/// Select the first non-absence failure in PATH order. Add the missing-allowance
+/// hint only when every candidate was absent or lacked an allowance. An explicit
+/// exclusion or a non-runnable candidate prevents that hint.
+fn settle(searched: Result<Admitted, Vec<LookupFailure>>, shown: &str) -> Lookup {
     let failures = match searched {
-        Ok(admitted) => return Ok(Ok(admitted)),
+        Ok(admitted) => return Ok(admitted),
         Err(failures) => failures,
     };
     let unfound = failures.iter().all(|failure| match failure {
-        Ok(error) => is_absent(error),
-        Err(denied) => denied.denial.missing_allowance,
+        LookupFailure::NotFound { .. } => true,
+        LookupFailure::NotRunnable(_) => false,
+        LookupFailure::Refused { denial, .. } => denial.missing_allowance,
     });
     match failures
         .into_iter()
-        .find(|failure| !failure.as_ref().is_ok_and(is_absent))
+        .find(|failure| !matches!(failure, LookupFailure::NotFound { .. }))
     {
-        None => Ok(Err(not_found(shown))),
-        Some(Ok(error)) => Ok(Err(error)),
-        Some(Err(mut denied)) => {
+        None => Err(LookupFailure::NotFound {
+            suggested_extension: None,
+        }),
+        Some(LookupFailure::Refused { at, mut denial }) => {
             if unfound {
-                denied.denial.error = denied.denial.error.with_hint(format!(
+                denial.error = denial.error.with_hint(format!(
                     "'{shown}' is no program in any PATH directory the grant runs from"
                 ));
             }
-            Err(denied)
+            Err(LookupFailure::Refused { at, denial })
         }
+        Some(failure) => Err(failure),
     }
 }
 
@@ -210,28 +262,40 @@ enum CandidateKind {
     Search,
 }
 
-/// `arg0` walked, then judged.
+impl CandidateKind {
+    /// Explicit paths report the input spelling; PATH searches report the candidate.
+    fn found(self, shown: &str, arg0: &Path) -> String {
+        match self {
+            Self::Path => shown.to_owned(),
+            Self::Search => path::shown(arg0),
+        }
+    }
+}
+
 fn probe(
     arg0: PathBuf,
     candidate_kind: CandidateKind,
     shown: &str,
     grants: &GrantStack,
     baseline: &Baseline,
-) -> Result<Admission, Denied> {
-    Candidate::walk(arg0).map_or_else(
-        || Ok(Err(not_found(shown))),
+) -> Lookup {
+    Candidate::walk(arg0).map_or(
+        Err(LookupFailure::NotFound {
+            suggested_extension: None,
+        }),
         |candidate| judge(candidate, candidate_kind, shown, grants, baseline),
     )
 }
 
-/// A walked candidate judged before its kind or error is looked at.
+/// Check authority before reporting file type or lookup errors. Otherwise
+/// inaccessible paths could reveal whether a program exists.
 fn judge(
     candidate: Candidate,
     candidate_kind: CandidateKind,
     shown: &str,
     grants: &GrantStack,
     baseline: &Baseline,
-) -> Result<Admission, Denied> {
+) -> Lookup {
     let Candidate {
         arg0,
         spelled,
@@ -241,15 +305,22 @@ fn judge(
         Ok(located) => located,
         Err(error) => {
             if let Ok(trace) = failure_trace(&spelled, &error) {
-                check_exec_name(grants, baseline, shown, &trace).map_err(|denial| Denied {
-                    at: path::shown(&arg0),
-                    denial,
+                check_exec_name(grants, baseline, shown, &trace).map_err(|denial| {
+                    LookupFailure::Refused {
+                        at: path::shown(&arg0),
+                        denial,
+                    }
                 })?;
             }
-            return Ok(Err(match error.kind() {
-                ErrorKind::NotFound | ErrorKind::NotADirectory => not_found(shown),
-                _ => unstartable(candidate_kind, shown, &arg0, unrunnable(&error)),
-            }));
+            return Err(match error.kind() {
+                ErrorKind::NotFound | ErrorKind::NotADirectory => LookupFailure::NotFound {
+                    suggested_extension: None,
+                },
+                _ => LookupFailure::NotRunnable(NotRunnable {
+                    found: candidate_kind.found(shown, &arg0),
+                    why: Unrunnable::from_io(&error),
+                }),
+            });
         }
     };
     let at = path::shown(&arg0);
@@ -262,89 +333,49 @@ fn judge(
             located: Box::new(located),
         },
     )
-    .map_err(|denial| Denied { at, denial })?;
+    .map_err(|denial| LookupFailure::Refused { at, denial })?;
     let Program::File { arg0, located } = admitted.program() else {
-        return Ok(Ok(admitted));
+        return Ok(admitted);
     };
     if located.is_executable() {
-        return Ok(Ok(admitted));
+        return Ok(admitted);
     }
-    let error = match located.trace().kind() {
+    let failure = match located.trace().kind() {
         Some(kind) if matches!(candidate_kind, CandidateKind::Path) || kind == Kind::File => {
-            unstartable(
-                candidate_kind,
-                shown,
-                arg0,
-                if kind == Kind::Dir {
+            LookupFailure::NotRunnable(NotRunnable {
+                found: candidate_kind.found(shown, arg0),
+                why: if kind == Kind::Dir {
                     Unrunnable::Directory
                 } else {
                     Unrunnable::NotExecutable
                 },
-            )
+            })
         }
-        _ => not_found(shown),
+        _ => LookupFailure::NotFound {
+            suggested_extension: None,
+        },
     };
-    Ok(Err(error))
+    Err(failure)
 }
 
-fn not_found(shown: &str) -> Error {
-    Error::new(Reason::process(shown, Failure::NotFound))
-}
+// Argument validation.
 
-fn is_absent(error: &Error) -> bool {
-    matches!(error.reason.failure(), Some(Failure::NotFound))
-}
-
-/// `arg0`, where the walk stopped, cannot run for `why`.  A path head
-/// reports the name typed, a bare name the file the `PATH` walk found.
-fn unstartable(kind: CandidateKind, shown: &str, arg0: &Path, why: Unrunnable) -> Error {
-    let found = match kind {
-        CandidateKind::Path => shown.to_owned(),
-        CandidateKind::Search => path::shown(arg0),
-    };
-    Error::new(Reason::process(shown, Failure::not_runnable(found, why)))
-}
-
-/// What an `io::Error` met launching a program means: a refusal is
-/// permission denied, anything else is the OS's own words.
-fn unrunnable(e: &std::io::Error) -> Unrunnable {
-    match e.kind() {
-        ErrorKind::PermissionDenied => Unrunnable::PermissionDenied,
-        _ => Unrunnable::Io(e.to_string()),
-    }
-}
-
-/// Where the launcher's child finds `target`, a path head's native file:
-/// anchored at the cwd it starts in, never read for a sigil again.  Off
-/// Windows as written, the kernel walking it: a fold would judge a
-/// different file than a `..` after a link, or a trailing `/`, reaches.
-/// Win32 folds `..` lexically itself, and an absolute path keeps
-/// `CreateProcessW` off the process cwd.
-fn launch_path(target: &Path, ctx: &Context) -> PathBuf {
-    if cfg!(windows) {
-        return ctx.resolver().anchor(target).into_inner();
-    }
-    ctx.launch_cwd().join(target)
-}
-
-// ── vet ───────────────────────────────────────────────────────────────────────
-
-/// Stringify `args`, refusing any shape the syscall boundary cannot carry.
-fn validate_argv(cmd: &str, args: &[Value]) -> Settled<Vec<String>> {
+/// Reject unsupported argument shapes, then borrow strings and render other
+/// accepted values. The launch or sandbox payload owns the final argument bytes.
+fn validate_argv<'a>(cmd: &str, args: &'a [Value]) -> Settled<Vec<Cow<'a, str>>> {
     args.iter()
         .map(|arg| match reject_exec_arg(cmd, arg) {
             Some(refusal) => Err(refusal),
-            None => Ok(arg.to_string()),
+            None => Ok(match arg {
+                Value::String(text) => Cow::Borrowed(text.as_ref()),
+                _ => Cow::Owned(arg.to_string()),
+            }),
         })
         .collect()
 }
 
-/// Per-argument shape gate: nothing [`RefusedArg`] names can reach `execve(2)`,
-/// so each refusal carries the idiom that lowers it.
-///
-/// The refused set is shared with the checker, which raises the same refusal as
-/// a static error wherever an argument's type is concrete.  This is the backstop
-/// for what polymorphism hid from it — a `$x` whose shape only the run knows.
+/// Runtime counterpart of the type checker's [`RefusedArg`] check. Polymorphic
+/// arguments may reach execution without a statically known shape.
 fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
     let refusal = arg.heads().first().copied().and_then(RefusedArg::of_head)?;
     Some(
@@ -357,163 +388,77 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
     )
 }
 
-// ── prepare ───────────────────────────────────────────────────────────────────
+// Launch preparation and stream connection.
 
-/// A vetted call built into its launch, not yet started. `shown` is the
-/// diagnostic name; the launch owns the vetted argv. Audit boundaries render
-/// their original values, just as they do when preparation fails.
+/// A prepared launch with validated arguments, but no connected shell streams.
+/// It owns the launch data; audit records still use the original argument values.
 pub(crate) struct ExternalCommand {
     shown: String,
     launch: Launch,
     image: Image,
-    /// The `#!` interpreter `image` names, read with it: the parent's alone,
-    /// to word a failure to start it.
+    /// Interpreter read from the admitted file before releasing its handle.
+    /// Used only to explain startup errors.
     interpreter: Option<PathBuf>,
-    /// The launch's own sandbox, where it has one.
-    #[cfg(unix)]
-    projection: Option<SandboxProjection>,
-    /// Whether an OS sandbox or the guest jail confines the child.
-    confined: bool,
+    confinement: Confinement,
 }
 
-impl ExternalCommand {
-    /// Prepare a kept launch, whose child the session owns. Only `detach`
-    /// surrenders one.
-    pub(crate) fn prepare(head: Head<Admission>, args: &[Value], shell: &Shell) -> Settled<Self> {
-        Self::prepare_as(head, args, Ownership::Kept, shell)
+/// A configured launch and the pumps for exactly that launch.
+struct ConnectedCommand {
+    command: ExternalCommand,
+    pumps: Pumps<Sink>,
+}
+
+impl Command<Checked> {
+    /// Attach context to a lookup error without reporting it early.
+    pub(crate) fn map_lookup_error(mut self, map: impl FnOnce(Error) -> Error) -> Self {
+        self.state.program = self.state.program.map_err(map);
+        self
     }
 
-    /// Read the admission verdict, vet argv, and prepare the launch under
-    /// the shell's environment, cwd and limits. Keep the image, never the
-    /// judged object. Preparation does not poll: stopping belongs to start.
+    /// Prepare a launch whose child the session will own and collect.
+    pub(crate) fn prepare(self, args: &[Value], shell: &Shell) -> Settled<ExternalCommand> {
+        self.prepare_as(args, Ownership::Kept, shell)
+    }
+
+    /// Validate arguments, select confinement, and configure environment and
+    /// limits. Cancellation is checked when starting, not while preparing.
     fn prepare_as(
-        head: Head<Admission>,
+        self,
         args: &[Value],
         ownership: Ownership,
         shell: &Shell,
-    ) -> Settled<Self> {
-        let Head { shown, program } = head;
-        let admitted = program?;
+    ) -> Settled<ExternalCommand> {
+        let Self { shown, state } = self;
+        let admitted = state.program?;
         let args = validate_argv(&shown, args)?;
-        // A guest jail is already the guest's sandbox: bwrap needs unprivileged
-        // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
-        // The in-process guard in `Head::admit` runs either way.
-        let jail = crate::process::jail::guest();
-        let projection = jail
-            .is_none()
-            .then(|| {
-                SandboxProjection::of(&shell.context.grants, shell.baseline(), Some(&admitted))
-            })
-            .flatten();
-        let confined = projection.is_some() || jail.is_some();
-        let image = Image::of(&admitted);
+        let confinement = Confinement::of(&shell.context.grants, shell.baseline(), &admitted);
         let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
-        // The judged object and its directory handle end here: a launch holds a
-        // name, never the object it was admitted for.
-        drop(admitted);
-        // A `grant` body evaluates in this process unconfined; spawned children
-        // are the only thing an OS sandbox reaches, and this is where it does.
-        let mut launch = match projection.as_ref() {
-            Some(projection) => crate::authority::sandbox::sandboxed_command(
-                projection,
-                &image,
-                &args,
-                ownership,
-                shell.context.cwd(),
-            )?,
-            None => image.launch(&args)?,
-        };
+        // Image conversion releases the judged handles before launch.
+        let image = Image::from(admitted);
+        let mut launch = confinement.launch(&image, &args, ownership, shell.context.cwd())?;
         apply_env(&mut launch, shell);
         #[cfg(unix)]
         launch.limit_session(shell.session.child_limits);
-        // Installation applies the grant's limits after the session's, regardless
-        // of configuration order.
+        // Grant limits apply after session limits.
         if shell.has_active_capabilities() {
             launch.limit_resources()?;
         }
         #[cfg(seccomp)]
-        if let Some(jail) = jail {
-            let plan = jail
-                .plan(ownership, shell.context.grants.net())
-                .map_err(crate::process::jail::refused)?;
-            launch.apply_guest_jail(&plan)?;
-        }
-        Ok(Self {
+        confinement.apply_guest_jail(&mut launch, ownership, shell.context.grants.net())?;
+        Ok(ExternalCommand {
             shown,
             launch,
             image,
             interpreter,
-            #[cfg(unix)]
-            projection,
-            confined,
+            confinement,
         })
     }
 
-    /// Run a standalone command through the same connection, spawn and
-    /// collector as a pipeline stage, titling the terminal once its streams
-    /// are connected. The terminal loan is settled by the child's collector.
-    pub(crate) fn run(mut self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-        let Placement {
-            policy,
-            loan,
-            readable,
-        } = placement(shell, mooring, self.launch.enveloped());
-        let pumps = self.connect_streams(
-            boundary_stdin(shell, readable),
-            ChildOut::Sink(shell.io.stdout.clone()),
-            &shell.io.stderr,
-        )?;
-        announce_command_title(&self.shown, shell);
-        // Denial attribution must include every kernel deny during startup.
-        let since = Instant::now();
-        self.spawn(pumps, policy, &shell.scope)?
-            .collect(loan, since, shell)
-            .map(|()| Value::Unit)
-    }
-
-    /// Connect every stream, then spawn: the child together with the pumps
-    /// and diagnostics its collector needs.
-    pub(crate) fn start(
-        mut self,
-        stdin: &Source,
-        stdout: ChildOut,
-        stderr: &Sink,
-        pgid: PgidPolicy,
-        scope: &Scope,
-    ) -> Settled<Started> {
-        let pumps = self.connect_streams(stdin, stdout, stderr)?;
-        self.spawn(pumps, pgid, scope)
-    }
-
-    /// Spawn into `pgid`, an envelope into a group of its own, and claim
-    /// what was born. `pumps` are the connected streams'.
-    fn spawn(self, pumps: Pumps<Sink>, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-        let pgid = pgid.unless_enveloped(self.launch.enveloped());
-        let spawned = self.launch.spawn(pgid, scope).map_err(|why| {
-            at_start(
-                why,
-                &self.image,
-                self.interpreter.as_deref(),
-                #[cfg(unix)]
-                self.projection.as_ref(),
-                &self.shown,
-            )
-        })?;
-        let claim = Claim::of(self.confined, &spawned);
-        Ok(Started {
-            shown: self.shown,
-            spawned,
-            claim,
-            pumps,
-        })
-    }
-
-    /// Prepare a surrendered launch and start it detached, with independent
-    /// streams. No kept-child result or teardown authority is manufactured
-    /// for a survivor.
+    /// Start a detached process with null streams. Return a survivor rather
+    /// than a session-owned child, so the session cannot collect or kill it.
     #[cfg(unix)]
-    fn detach(head: Head<Admission>, args: &[Value], shell: &Shell) -> Settled<Survivor> {
-        let mut command = Self::prepare_as(head, args, Ownership::Surrendered, shell)?;
+    fn detach(self, args: &[Value], shell: &Shell) -> Settled<Survivor> {
+        let mut command = self.prepare_as(args, Ownership::Surrendered, shell)?;
         command
             .launch
             .stdin(StdioSpec::Null)
@@ -524,61 +469,123 @@ impl ExternalCommand {
                 why,
                 &command.image,
                 command.interpreter.as_deref(),
-                command.projection.as_ref(),
+                &command.confinement,
                 &command.shown,
             )
         })
     }
+}
 
-    /// Hand OS-backed streams directly to the child; retain pump destinations
-    /// for the remaining streams. A shared output destination requests one
-    /// stderr merge, which Launch installs only after configuration is done.
-    fn connect_streams(
-        &mut self,
+impl ExternalCommand {
+    /// Run and collect a standalone command. Set the terminal title only after
+    /// connecting streams; the collector handles the terminal loan.
+    pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+        let Placement {
+            policy,
+            loan,
+            readable,
+        } = placement(shell, mooring, self.launch.enveloped());
+        let connected = self.connect(
+            boundary_stdin(shell, readable),
+            ChildOut::Sink(&shell.io.stdout),
+            &shell.io.stderr,
+        )?;
+        announce_command_title(&connected.command.shown, shell);
+        // Include startup in the interval used to attribute kernel denials.
+        let since = Instant::now();
+        connected
+            .spawn(policy, &shell.scope)?
+            .collect(loan, since, shell)
+            .map(|()| Value::Unit)
+    }
+
+    /// Connect and spawn a pipeline stage. Its caller must register the result
+    /// with the pipeline collector.
+    pub(crate) fn start(
+        self,
         stdin: &Source,
-        stdout: ChildOut,
+        stdout: ChildOut<&Sink>,
         stderr: &Sink,
-    ) -> Settled<Pumps<Sink>> {
-        self.launch.stdin(stdin_stdio(stdin)?);
+        pgid: PgidPolicy,
+        scope: &Scope,
+    ) -> Settled<Started> {
+        self.connect(stdin, stdout, stderr)?.spawn(pgid, scope)
+    }
+
+    /// Use descriptors for OS-backed streams and pumps for other destinations.
+    /// Merge stderr when both outputs share a destination; Launch applies that
+    /// merge after stdout configuration is complete.
+    fn connect(
+        mut self,
+        stdin: &Source,
+        stdout: ChildOut<&Sink>,
+        stderr: &Sink,
+    ) -> Settled<ConnectedCommand> {
+        self.launch.stdin(
+            stdin
+                .child_stdio()
+                .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
+        );
         let (out, out_pump, joined) = match stdout {
             ChildOut::Sink(sink) => {
                 let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe_error)?;
-                (out, pump, stderr.same_destination(&sink).then_some(sink))
+                (out, pump, stderr.same_destination(sink).then_some(sink))
             }
             ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
         };
         self.launch.stdout(out);
         let err_pump = if let Some(sink) = joined {
-            join_stderr(&mut self.launch, &sink)?
+            join_stderr(&mut self.launch, sink)?
         } else {
             let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe_error)?;
             self.launch.stderr(err);
             pump
         };
-        Ok(Pumps::new(out_pump, err_pump))
+        Ok(ConnectedCommand {
+            command: self,
+            pumps: Pumps::new(out_pump, err_pump),
+        })
     }
 }
 
-/// Thread the shell's env overrides, logical cwd and `PWD` into the
-/// child; strip dynamic-loader overrides under an active grant.  `current_dir`
-/// is set unconditionally because `cd` moves shell state and leaves the process
-/// cwd alone, so an inherited `getcwd(3)` would be the wrong directory.
+impl ConnectedCommand {
+    /// Spawn once, transferring the child and its pump plan to the collector.
+    fn spawn(self, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
+        let Self { command, pumps } = self;
+        let pgid = pgid.unless_enveloped(command.launch.enveloped());
+        let spawned = command.launch.spawn(pgid, scope).map_err(|why| {
+            at_start(
+                why,
+                &command.image,
+                command.interpreter.as_deref(),
+                &command.confinement,
+                &command.shown,
+            )
+        })?;
+        let claim = Claim::of(&command.confinement, &spawned);
+        Ok(Started {
+            shown: command.shown,
+            spawned,
+            claim,
+            pumps,
+        })
+    }
+}
+
+/// Apply the shell environment and cwd. The process cwd is not authoritative:
+/// ral's `cd` changes shell state without calling `chdir`.
 fn apply_env(cmd: &mut Launch, shell: &Shell) {
     for (k, v) in shell.context.env_overrides() {
         cmd.env(k, v);
     }
-    let cwd = shell.cwd();
-    cmd.current_dir(&cwd);
-    cmd.env("PWD", &cwd);
-    // ral keeps no previous directory; an inherited `OLDPWD` names the
-    // launcher's, and would mislead a `cd -` inside the child.
+    let cwd = shell.context.cwd().as_path();
+    cmd.current_dir(cwd);
+    cmd.env("PWD", cwd);
+    // ral does not track a previous directory; inherited OLDPWD would be stale.
     cmd.env_remove("OLDPWD");
     if shell.has_active_capabilities() {
-        // A loader hook makes an admitted binary run someone else's code, so
-        // the grant's judgment about which program may run would mean nothing.
-        // On macOS the stakes are higher still: a sandboxed external is a
-        // re-exec of ral itself, and dyld honours these before `main` runs, so
-        // an injected dylib would execute before the child enters Seatbelt.
+        // Loader overrides can inject code into an admitted program. On macOS
+        // they could run code in the re-exec before it enters Seatbelt.
         for var in &["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
             cmd.env_remove(var);
         }
@@ -588,37 +595,30 @@ fn apply_env(cmd: &mut Launch, shell: &Shell) {
     }
 }
 
-/// Every `DYLD_`-prefixed name the child would otherwise see, from this
-/// process's environment and from the shell's own overrides.  The whole prefix
-/// rather than dyld's current list: the loader owns that namespace, and a name
-/// added by a future dyld must not become a hole.
-fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
+/// Loader overrides from both the inherited environment and shell overlays.
+/// Match the entire prefix so newly introduced DYLD variables are also removed.
+/// Inherited names own their snapshot; overlay names borrow the shell.
+fn dyld_vars(shell: &Shell) -> impl Iterator<Item = Cow<'_, OsStr>> {
     const PREFIX: &str = "DYLD_";
     let inherited = crate::host::vars_os()
         .into_iter()
         .map(|(k, _)| k)
-        .filter(|k| k.as_encoded_bytes().starts_with(PREFIX.as_bytes()));
+        .filter(|k| k.as_encoded_bytes().starts_with(PREFIX.as_bytes()))
+        .map(Cow::Owned);
     let overridden = shell
         .context
         .env_overrides()
         .iter()
         .filter(|(k, _)| k.starts_with(PREFIX))
-        .map(|(k, _)| std::ffi::OsString::from(k));
-    inherited.chain(overridden).collect()
+        .map(|(k, _)| Cow::Borrowed(OsStr::new(k)));
+    inherited.chain(overridden)
 }
 
-// ── wiring and placement ──────────────────────────────────────────────────────
+// Stream routing and terminal access.
 
-// Stdio routing for a spawned external child: wire stdin, stdout and stderr
-// into the `Launch` from sources and sinks.  The call's redirects are
-// already installed on the shell's by `shell::exec::redirect`, and a pipeline
-// edge is just another source or sink.  A standalone external and a
-// pipeline's group are placed by the one rule, `placement`.
-
-/// What a child at the boundary reads of `shell`'s stdin.  A joined group's
-/// source is its owner's choice and passes through; otherwise the terminal
-/// survives only where `readable`, in ral's own group or one lent it, and any
-/// other group of its own reads EOF.
+/// Replace terminal stdin with EOF when the child cannot read it. Joined
+/// pipeline stages retain the source selected by their owner; non-terminal
+/// sources are never replaced.
 pub(crate) fn boundary_stdin(shell: &Shell, readable: bool) -> &Source {
     match &shell.io.stdin {
         Source::Terminal if shell.session.stage.is_none() && !readable => &Source::Empty,
@@ -626,27 +626,25 @@ pub(crate) fn boundary_stdin(shell: &Shell, readable: bool) -> &Source {
     }
 }
 
-/// Where a child's or a stage's stdout goes: a ral sink, or a pipeline edge
-/// handed over whole, its write end and its fate.
-pub(crate) enum ChildOut {
-    Sink(Sink),
+/// A stage's output destination or an owned downstream pipe. `S` is `&Sink`
+/// during wiring, or `()` while a pipeline defers borrowing the parent sink
+/// until admission has finished mutating the shell.
+pub(crate) enum ChildOut<S> {
+    Sink(S),
     Edge {
         writer: os_pipe::PipeWriter,
         edge: Arc<Edge>,
     },
 }
 
-/// The child's stdin is its source: `Empty` is `/dev/null`, a reader a
-/// duplicate of it, and `Terminal` ral's own fd 0.
-fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
-    Ok(match stdin {
-        Source::Empty => StdioSpec::Null,
-        Source::Terminal => StdioSpec::Inherit,
-        Source::Reader(r) => r
-            .try_clone()
-            .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?
-            .into(),
-    })
+impl<S> ChildOut<S> {
+    /// Resolve an existing destination without duplicating an owned pipe.
+    pub(super) fn map_sink<T>(self, map: impl FnOnce(S) -> T) -> ChildOut<T> {
+        match self {
+            Self::Sink(sink) => ChildOut::Sink(map(sink)),
+            Self::Edge { writer, edge } => ChildOut::Edge { writer, edge },
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
@@ -664,9 +662,7 @@ fn join_stderr(command: &mut Launch, _stdout: &Sink) -> Settled<Option<Sink>> {
 #[cfg(windows)]
 fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
     let (stdio, pump) = if matches!(stdout, Sink::Stdout) {
-        // The child inherits our fd 1, so clone fd 1 — not fd 2 — for its
-        // stderr.  The bare inherit would hand it fd 2, routing diagnostics
-        // straight past `2>&1`.
+        // Inherit would select fd 2. Duplicate fd 1 instead to implement 2>&1.
         use std::os::windows::io::AsHandle;
         let owned = std::io::stdout()
             .as_handle()
@@ -680,12 +676,10 @@ fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
     Ok(pump)
 }
 
-/// A child's stdout/stderr pumps: planned as the [`Sink`] each drains into,
-/// `None` where that fd is inherited or wired straight to an OS pipe, then
-/// started as the drainer threads over the child's pipes.  A reader-gone kill's
-/// remaining bytes are owed to nobody, and a descendant it missed could hold the
-/// pipe for ever, so that ending detaches, as does every forced end; every
-/// other joins, after the kill that frees the pipe.
+/// Output pumps, represented by destinations before starting and join handles
+/// afterwards. `None` means the stream uses a descriptor directly. Dropping
+/// running pumps detaches them; collectors do this on forced termination to
+/// avoid waiting indefinitely for descendants that still hold a pipe.
 pub(crate) struct Pumps<T = std::thread::JoinHandle<()>>(Streams<Option<T>>);
 
 impl<T> Default for Pumps<T> {
@@ -699,8 +693,7 @@ impl Pumps<Sink> {
         Self(Streams { stdout, stderr })
     }
 
-    /// Start the planned drainers over `child`'s piped stdout/stderr, each
-    /// reading `scope`, the launching computation's current scope.
+    /// Start output drainers using the command's cancellation scope.
     pub(crate) fn start(self, child: &mut crate::process::ChildHandle, scope: &Scope) -> Pumps {
         let Streams { stdout, stderr } = self.0;
         Pumps(Streams {
@@ -713,59 +706,53 @@ impl Pumps<Sink> {
 }
 
 impl Pumps {
-    /// Join both drainers a slice at a time; dropping `self` instead detaches
-    /// them.  On a cause in force on `scope`, `kill` once: a pump a leader's
-    /// survivor holds open ends only when the survivor's pipe closes.  On
-    /// Windows, where a pipe write cannot be polled, the pumps are interrupted
-    /// every slice too: one blocked on an edge a teardown left undrained would
-    /// otherwise wait for a read end the collector holds until this very stage
-    /// files.
+    /// Wait for both drainers. On cancellation, call `kill` once to close pipes
+    /// held by the child or its descendants. Windows also needs repeated I/O
+    /// interruption: a drainer may be blocked writing to an undrained pipeline
+    /// edge whose read end the collector still holds.
     pub(crate) fn join_under(self, scope: &Scope, kill: impl FnOnce()) {
         let Streams { stdout, stderr } = self.0;
-        let handles: Vec<_> = [stdout, stderr].into_iter().flatten().collect();
+        let handles = [stdout, stderr];
         let mut kill = Some(kill);
-        while !handles.iter().all(std::thread::JoinHandle::is_finished) {
+        while !handles
+            .iter()
+            .flatten()
+            .all(std::thread::JoinHandle::is_finished)
+        {
             if scope.is_cancelled() {
                 if let Some(kill) = kill.take() {
                     kill();
                 }
                 #[cfg(windows)]
-                handles.iter().for_each(crate::io::interrupt);
+                handles.iter().flatten().for_each(crate::io::interrupt);
             }
             std::thread::sleep(POLL_SLICE);
         }
-        for jh in handles {
+        for jh in handles.into_iter().flatten() {
             let _ = jh.join();
         }
     }
 }
 
-/// Where a lone command's child lands.
+/// Process-group placement and terminal access for a launch.
 pub(crate) struct Placement {
     pub(crate) policy: PgidPolicy,
-    /// Prepared before the spawn; lent the child's group once it exists.
+    /// Prepared before spawning, then assigned to the child's process group.
     pub(crate) loan: Option<PreparedTerminalLoan>,
-    /// Whether the terminal may be the child's stdin: it sits in ral's own
-    /// group or in one the loan lends it.
+    /// Whether a standalone child may retain terminal stdin.
     pub(crate) readable: bool,
 }
 
-/// The one decision of where a child lands and which terminal it is lent.
+/// Choose process-group placement and terminal access.
 ///
-/// A stage's child is a member of the stage's group, whose owner holds any
-/// loan.  Otherwise it takes the foreground, leading a group lent the
-/// terminal, iff the run holds the session's terminal lease, its stdout is
-/// terminal-bound or the run was lent the terminal explicitly, and it is not
-/// `enveloped`: bwrap's `--new-session` puts a payload where `tcsetpgrp`
-/// cannot name it, so an envelope leads a group of its own, unlent.
+/// Pipeline children join their stage's group. Standalone commands may receive
+/// the terminal when the caller owns its lease and either writes to terminal
+/// stdout or requests an explicit loan. A terminal-launched script can own a
+/// lease too; `interactive` alone does not determine foreground access.
 ///
-/// The lease, not `interactive`, says who owns the terminal: a script
-/// launched at one foregrounds its children as the REPL does.  An explicit
-/// loan's body (`_ed-tui`'s `fzf`) draws on `/dev/tty` whatever its stdout.
-///
-/// A headless child leads a session of its own, so a cancel kills its whole
-/// subtree and nothing in it can signal the tty's owner; an interactive one
-/// stays in ral's group, where the terminal's Ctrl-C reaches it.
+/// Envelopes cannot receive a terminal loan: bwrap puts the payload in another
+/// session. Without a loan, interactive commands otherwise inherit ral's group
+/// for Ctrl-C delivery; headless commands get a separate session for teardown.
 pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Placement {
     let interactive = shell.session.interactive;
     if let Some(stage) = shell.session.stage.as_ref() {
@@ -776,7 +763,7 @@ pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Pl
         };
     }
     if enveloped {
-        // A session of its own has no controlling terminal to stop a read.
+        // The payload has no controlling terminal, so reads do not trigger SIGTTIN.
         return Placement {
             policy: PgidPolicy::NewLeader,
             loan: None,
@@ -806,10 +793,10 @@ pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Pl
     }
 }
 
-// ── start ─────────────────────────────────────────────────────────────────────
+// Spawn results and failure attribution.
 
-/// A kept child with everything its collector needs. Consumed by lone
-/// collection or pipeline registration, never returned for a detached launch.
+/// A session-owned child awaiting standalone collection or pipeline registration.
+/// Detached launches never produce this type.
 #[must_use = "collect or register the started command so its child is reaped"]
 pub(crate) struct Started {
     pub(crate) shown: String,
@@ -818,24 +805,21 @@ pub(crate) struct Started {
     pub(super) pumps: Pumps<Sink>,
 }
 
-/// The host pids whose kernel deny lines a child's failure owns.  A line
-/// carries only the pid it denied, so each pid here was read while its
-/// process lived: what died before, or was born after, goes unclaimed.
+/// Host PIDs used to attribute kernel denial messages. Capture them during
+/// startup while the processes are alive, rather than discovering PIDs after exit.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Claim {
-    /// No sandbox confined the child: no line is its.
+    /// Do not consult sandbox denial logs for this child.
     Unconfined,
-    /// A confined child's pids, as the spawn knew them.
+    /// PIDs captured for a confined launch.
     Confined(HashSet<u32>),
 }
 
 impl Claim {
-    /// What a launch confined as `confined` claims of `spawned`, taken the
-    /// moment it started: a direct child, its own pid; an enveloped one, the
-    /// envelope's chain while its program runs, whose host pids no process
-    /// inside the namespace can see.
-    fn of(confined: bool, spawned: &Spawned) -> Self {
-        if !confined {
+    /// Capture the direct child's PID, or the envelope payload's host PID chain.
+    /// Processes inside the envelope cannot report their host-namespace PIDs.
+    fn of(confinement: &Confinement, spawned: &Spawned) -> Self {
+        if !confinement.is_confined() {
             return Self::Unconfined;
         }
         #[cfg(target_os = "linux")]
@@ -846,13 +830,13 @@ impl Claim {
     }
 }
 
-/// Translate startup failure using the image and interpreter judged before
-/// spawn. This is error interpretation only; it never starts a process.
+/// Preserve refusals and cancellation; explain OS startup errors using the
+/// image and interpreter recorded during preparation.
 fn at_start(
     why: Unstarted,
     image: &Image,
     interpreter: Option<&Path>,
-    #[cfg(unix)] projection: Option<&SandboxProjection>,
+    confinement: &Confinement,
     shown: &str,
 ) -> Break {
     match why {
@@ -861,9 +845,11 @@ fn at_start(
         Unstarted::Program(e) => {
             let withheld = || -> Option<String> {
                 #[cfg(unix)]
-                if let (Some(projection), Some(interpreter)) = (projection, interpreter) {
-                    return crate::authority::sandbox::interpreter_hint(projection, interpreter);
+                if let Some(interpreter) = interpreter {
+                    return confinement.interpreter_hint(interpreter);
                 }
+                #[cfg(windows)]
+                let _ = confinement;
                 None
             };
             at_spawn(&e, image, interpreter, withheld, shown).into()
@@ -871,12 +857,10 @@ fn at_start(
     }
 }
 
-/// What `program`'s failure to start `image`, whose `#!` names `interpreter`,
-/// means.  A script whose interpreter its sandbox withholds, as `withheld`
-/// words it, is denied permission whether Seatbelt refused the exec or bwrap
-/// hid the interpreter (`ENOENT`).  Otherwise `ENOENT` for a file still at
-/// its real path is its missing interpreter or loader, and for one gone, or a
-/// bundled tool, `program` not found.
+/// Distinguish missing programs from missing or withheld interpreters.
+/// A sandbox may report a withheld interpreter as EACCES or ENOENT. Otherwise,
+/// ENOENT with an existing image indicates a missing interpreter or loader.
+/// Evaluate `withheld` only for errors that can carry that meaning.
 fn at_spawn(
     e: &std::io::Error,
     image: &Image,
@@ -909,16 +893,15 @@ fn at_spawn(
             ))
         }
         (None, NotFound, _) => Error::new(Reason::process(program, Failure::NotFound)),
-        (None, ..) => failed(unrunnable(e)),
+        (None, ..) => failed(Unrunnable::from_io(e)),
     }
 }
 
-// ── the ending ────────────────────────────────────────────────────────────────
+// Completion.
 
-/// How the run ended, from how its child did: a death by one of `cause`'s
-/// signals is that cause's stop, success nothing, and any other end the
-/// command's failure, with the kernel's account of the lines `claim` owns
-/// since `since`.
+/// Interpret the child's result. A signal matching the cancellation cause is
+/// cancellation; other failures may include sandbox diagnostics captured since
+/// the launch began.
 pub(crate) fn ending(
     name: &str,
     outcome: WaitOutcome,
@@ -936,10 +919,8 @@ pub(crate) fn ending(
     }
 }
 
-/// `name`'s `failure` as its error, with, where a sandbox confined it, the
-/// kernel's account: the deny lines since `since` that `claim` owns, else,
-/// on macOS, the fork brake's for an exit status of 128.  An unconfined
-/// failure reads no log.
+/// Add kernel denial messages for the launch's recorded PIDs and time interval.
+/// On macOS, resource-limit advice is a fallback. Unconfined launches read no log.
 fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> Error {
     let Claim::Confined(pids) = claim else {
         return Error::new(Reason::process(name, failure));
@@ -958,89 +939,13 @@ fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> 
     }
 }
 
-/// Announce the running command via the terminal title (OSC 0).
+/// Set the terminal title for an interactive command when UI controls are allowed.
 fn announce_command_title(cmd: &str, shell: &Shell) {
     if shell.is_interactive() && shell.terminal().ui_controls_ok() {
         use std::io::Write;
         let _ = std::io::stdout().write_all(crate::io::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
     }
-}
-
-// ── detach ────────────────────────────────────────────────────────────────────
-
-/// `detach <desc> <cmd> <args…>`: the double-forked survivor is nobody's to
-/// signal, await or reap, so the result is a `{pid, desc}` receipt, and a
-/// head a handler answers, which would run inside this session, is refused.
-#[cfg(unix)]
-pub(crate) fn detach(
-    desc: &str,
-    head: &Value,
-    argv: &[Value],
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let name = CommandName::of(&head.to_string());
-    if let CommandName::Bare(bare) = &name {
-        // Every pass of the stack: a catch-all intercepts as a per-name does.
-        match shell.lookup_handler(bare) {
-            Some(HandlerLookup::Frame(..)) => {
-                return Err(Error::new(format!(
-                    "detach: `{bare}` is handled here (by an arm for it, or by the catch-all) \
-                     and a handler runs inside this session, so nothing can be detached. To \
-                     stub `detach`, stand in for `detach` itself; to run the real program, \
-                     `^{bare}`"
-                ))
-                .into());
-            }
-            Some(HandlerLookup::Base(_)) => {
-                return Err(Error::new(format!(
-                    "detach: `{bare}` is ral's own, and runs inside this session; nothing \
-                     can be detached"
-                ))
-                .into());
-            }
-            None => {}
-        }
-    }
-    let head = Head::resolve(&name, &shell.context);
-    let shown = head.shown.clone();
-    let start = shell.audit_start(mooring);
-    let launched = (|| -> Settled<Survivor> {
-        shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
-        // The grant's verdict on the program, then existence (127/126) and argv
-        // shape: the same judgments an ordinary external passes, so a bundled
-        // uutils tool falls out as its own image with no special case here.  The
-        // survivor outlives this run, but its start is under this run's scope:
-        // a stop before the fork makes no survivor; one while its trampoline
-        // is silent leaves it.
-        let head = head.admit(mooring, shell)?;
-        ExternalCommand::detach(head, argv, shell)
-    })();
-    let result = launched.and_then(|survivor| match survivor {
-        Survivor::Named(pid) => Ok(Value::from_datum(Receipt {
-            pid,
-            desc: desc.into(),
-        })),
-        Survivor::Unnamed(why) => {
-            let lost = Error::new(format!(
-                "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
-            ));
-            Err(lost.into())
-        }
-    });
-    if let Some(start) = &start {
-        let obs = shell.command_observation(
-            start,
-            &shown,
-            Value::render_argv(argv),
-            CommandOrigin::Detached,
-            result.as_ref().err(),
-            AuditIo::default(),
-        );
-        shell.observe_stamped(Some(mooring), obs);
-    }
-    result
 }
 
 #[cfg(test)]

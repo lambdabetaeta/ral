@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 
-use crate::process::Scope;
+use crate::process::{Scope, StdioSpec};
 #[cfg(unix)]
 use std::os::fd::OwnedFd as Owned;
 #[cfg(windows)]
@@ -30,6 +30,19 @@ pub struct SourceReader {
 }
 
 impl Source {
+    /// Configure a child's stdin. Readers lend a duplicate of their descriptor;
+    /// the source and its cancellation scope remain with the parent.
+    ///
+    /// # Errors
+    /// Returns `Err` if duplicating the descriptor fails.
+    pub(crate) fn child_stdio(&self) -> io::Result<StdioSpec> {
+        match self {
+            Self::Empty => Ok(StdioSpec::Null),
+            Self::Terminal => Ok(StdioSpec::Inherit),
+            Self::Reader(reader) => reader.file.try_clone().map(StdioSpec::from_owned),
+        }
+    }
+
     /// A duplicate of the pipe or file behind this source; `None` for the
     /// fd-less markers.  Consumers never take a source: a stage's stdin
     /// outlives every command that reads it, as a shared fd 0 would.

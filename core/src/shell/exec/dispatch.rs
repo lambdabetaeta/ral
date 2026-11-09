@@ -1,7 +1,7 @@
-//! Command dispatch: resolve a head, then run the arm.
+//! Command dispatch: resolve a command name, then run the arm.
 //!
-//! Order is env → handlers → external for a bare name; `^name` and a path
-//! head are the external directly, consulting neither the env nor the stack.
+//! Order is env → handlers → external for a bare name; `^name` and an explicit
+//! path are the external directly, consulting neither the env nor the stack.
 //! `evaluator::machine`'s `Exec` rule is the entry that resolves and runs
 //! every arm; pipeline staging reaches `resolve_command_word` directly.
 
@@ -13,7 +13,7 @@ use crate::shell::runtime::{
 };
 
 use super::capture::with_audit_capture;
-use super::command::{self, Admission, Head};
+use super::command::{Checked, Command, Request};
 use super::redirect::scope::with_redirects;
 use crate::ir::Redirects;
 use crate::source::Span;
@@ -32,10 +32,10 @@ pub(crate) enum Resolution {
     },
     /// A base handler frame — a manifest row from the argv half.
     Base(BuiltinEntry),
-    External(Head),
+    External(Command<Request>),
 }
 
-/// Bare-name lookup: env → handlers → external.  A head like `f x` is a
+/// Bare-name lookup: env → handlers → external. The `f` in `f x` is a
 /// lexical name, so `env` — not `shell.env` — is what a bare name
 /// resolves through.  No admission check and no audit.
 pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
@@ -45,7 +45,7 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
     match shell.lookup_handler(name) {
         Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
-        None => Resolution::External(Head::resolve(
+        None => Resolution::External(Command::from_name(
             &CommandName::Bare(name.into()),
             &shell.context,
         )),
@@ -53,13 +53,13 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
 }
 
 /// Resolve a [`CommandWord`]: a bare name goes through [`resolve`]; `^name`
-/// and a path head are the external directly, consulting neither the env nor
-/// the handler stack.
-pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
-    match head {
+/// and an explicit path are the external directly, consulting neither the env
+/// nor the handler stack.
+pub(crate) fn resolve_command_word(word: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
+    match word {
         CommandWord::Name(CommandName::Bare(s)) => resolve(s, env, shell),
         CommandWord::External(name) | CommandWord::Name(name) => {
-            Resolution::External(Head::resolve(name, &shell.context))
+            Resolution::External(Command::from_name(name, &shell.context))
         }
     }
 }
@@ -81,8 +81,9 @@ impl Shell {
         args: &[Value],
         mooring: &Mooring,
     ) -> Settled<Value> {
-        let head = Head::resolve(&CommandName::of(program), &self.context).admit(mooring, self)?;
-        run_external(head, args, &Redirects::default(), None, mooring, self)
+        let command =
+            Command::from_name(&CommandName::of(program), &self.context).admit(mooring, self)?;
+        run_external(command, args, &Redirects::default(), None, mooring, self)
     }
 }
 
@@ -106,17 +107,17 @@ pub(crate) fn run_base_frame(
 
 /// An external's door, with its redirects installed inside it.
 pub(crate) fn run_external(
-    head: Head<Admission>,
+    command: Command<Checked>,
     args: &[Value],
     redirects: &Redirects<String>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let shown = head.shown.clone();
+    let shown = command.shown.clone();
     call_external(&shown, args, span, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
-            command::ExternalCommand::prepare(head, args, shell)?.run(mooring, shell)
+            command.prepare(args, shell)?.run(mooring, shell)
         })
     })
 }
@@ -189,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn native_external_resolves_bare_and_path_heads_and_preserves_argv() {
+    fn native_external_resolves_bare_names_and_paths_and_preserves_argv() {
         let (_tmp, mut shell) = external();
         for program in ["native-external", "./native-external"] {
             for code in [0, 7] {

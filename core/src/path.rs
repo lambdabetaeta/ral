@@ -94,15 +94,15 @@ pub(crate) use identity::{Depth, Subject, command_name_key};
 #[cfg(test)]
 pub(crate) use lex::fold_dots;
 pub(crate) use lex::{
-    GrantRefusal, SubpathRefusal, WINDOWS_EXEC_EXTENSIONS, classify_subpath, grant_eligibility,
-    has_drive, names_a_path, names_a_path_for, relative_suffix, windows_components,
+    GrantRefusal, SubpathRefusal, classify_subpath, grant_eligibility, has_drive, names_a_path,
+    names_a_path_for, relative_suffix, windows_components,
 };
 pub use lex::{
     NotUtf8, basename, descendant, extension, file_name, is_absolute, join_slash, key_within,
     relative_key, spelled_parent, strip_appended_suffix, utf8, with_appended_suffix,
 };
 #[cfg(windows)]
-pub(crate) use lex::{is_batch_image, is_volume_guid};
+pub(crate) use lex::{WINDOWS_EXEC_EXTENSIONS, is_batch_image, is_volume_guid};
 pub use namespace::{EnginePath, GuestPath};
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;

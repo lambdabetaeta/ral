@@ -14,3 +14,6 @@ pub(crate) mod command;
 pub(crate) mod dispatch;
 pub(crate) mod pipeline;
 pub(crate) mod redirect;
+
+#[cfg(unix)]
+pub(in crate::shell) use command::detach;

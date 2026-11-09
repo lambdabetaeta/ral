@@ -466,6 +466,12 @@ impl<A: Authority> Located<A> {
         self.trace.real()
     }
 
+    /// Consume the located object, releasing its handles and retaining only
+    /// the resolved name. This name does not carry the object's authority.
+    pub(crate) fn into_real(self) -> RealPath {
+        self.trace.into_real()
+    }
+
     /// Where a link at the spelling's last name led, as its target spelled it;
     /// `None` where that name was no link, or was not followed.
     pub(crate) fn linked_to(&self) -> Option<&Path> {
