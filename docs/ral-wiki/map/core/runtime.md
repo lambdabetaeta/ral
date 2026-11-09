@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 257c6c00
+generated_at_commit: 6e2995f8
 generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -29,8 +29,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm admits the head
-  (`Head::admit`) before its redirects open, refusing it outright, and carries
-  `Head<Admission>` to `ExternalCommand::prepare`; the env, base, and handler arms pass through.
+  (`Command<Request>::admit`) before its redirects open, refusing it outright,
+  and carries `Command<Checked>` to preparation; the env, base, and handler arms pass through.
   Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
   `{ |name args| … }` — with the calling convention fixed by surface position,
   not inferred from a value's runtime shape
@@ -61,16 +61,16 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
 - `command.rs` — `ExternalCommand` owns the admitted program's launch and
   diagnostic context. `prepare` vets argv and prepares a kept launch's env,
   cwd, limits and confinement; only `detach` prepares a surrendered one, so no
-  caller names an `Ownership`. Consuming `start` is the private
-  `connect_streams` followed by the private `spawn`; a standalone `run` titles
-  the terminal between the two. `Started` owns the resulting `Spawned`,
-  `Claim` and `Pumps<Sink>` until `collect` or `register`
-  (`pipeline/collect.rs`) consumes it.
-  `connect_streams` hands a `>` file directly to the child and requests
-  `2>&1` when the output sinks share a destination. No caller reaches into
-  the command's private `Launch` to arrange its setup.
-  `Head { shown, program }` holds a frozen `Target` until `Head::admit`
-  supplies `Admission = Result<Admitted, Error>`; preparation reads that
+  caller names an `Ownership`. Consuming `start` installs an owned
+  `io::child::Connection` into `ConnectedCommand`, which keeps the launch and
+  its `PendingDrains` together until spawn. A standalone `run` titles the
+  terminal after connection. `Started` owns the resulting `Spawned`, `Claim`
+  and pending drains until `collect` or `register` (`pipeline/collect.rs`)
+  consumes it. Registration starts drains from their owned readers; a thread
+  creation failure kills and reaps the unregistered child. No caller reaches
+  into the command's private `Launch` to arrange its setup.
+  `Command<Request>` snapshots lookup inputs; lookup yields `Command<Lookup>`
+  and admission produces `Command<Checked>`. Preparation reads the retained
   127/126 verdict before validating argv. Building describes and starting acts
   ([[design/exec|exec]]). `uutils.rs`
   holds [[map/core/builtins|bundled coreutils]]. `placement` decides once, for a
@@ -79,16 +79,15 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   and whether the terminal may be the child's stdin; `NewLeader` is exactly
   the foreground.
   - **The program and the 126/127 verdict come from the judged candidate
-    fold's walk.** `Head::resolve` freezes a `Target` without I/O: a bundled
-    tool, a launch path, or a bare name with its effective `PATH` and
-    `Context::cwd`. For a bare name, `Head::select` folds the `PATH`
+    fold's walk.** `Command::from_name` snapshots a `Request` without I/O: a
+    bundled tool, a launch path, or a bare name with its effective `PATH` and
+    `Context::cwd`. For a bare name, `Command::lookup` folds the `PATH`
     candidates in order through `path::search`, which walks each once and
-    hands the judgment a `Candidate`; the memo's remembered program is walked
-    first, its verdict keeping its place. Each candidate's object, absent leaf or
+    hands the judgment a `Candidate`. Each candidate's object, absent leaf or
     `failure_trace` is judged before its kind or error is disclosed. The first
     admitted program runs; otherwise the first refusal or 126 says why, and
-    only absence yields 127. `Head::admit` records a selected refusal through
-    `Shell::exec_refused`; `prepare` reads the head's `Admission` without probing again. A path
+    only absence yields 127. `Command::admit` records a selected refusal through
+    `Shell::exec_refused`; `prepare` reads the checked result without probing again. A path
     head's native target — as written, or expanded by `TildePath::expand` —
     is anchored at the launch cwd with only `.` folded; the launcher runs the
     judged program by its real path, the shown spelling as `argv[0]`
@@ -100,8 +99,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `detach` is that same machinery — `Head`, `Head::admit`, the shared
-    preparation (`ExternalCommand::detach`) — up to the one act that differs:
+  - `command/detach.rs` checks detach permission and then uses the same
+    command admission and preparation (`Command<Checked>::detach`) up to the one act that differs:
     the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
@@ -145,14 +144,14 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
     ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::scope::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
-    Child stdio routing — how a spawned child's fd 1 or fd 2 reaches its
-    sink — is one decision, `Sink::child_stdio(fd)`, yielding the `StdioSpec`
-    and the sink to pump, if any ([[map/core/io-process|io-process]]), through
-    which the standalone command, a direct pipeline stage, and an external a
-    stage thread spawns internally all route; a pipeline edge
-    (`ChildOut::Edge`) is handed over whole and needs no decision.
-    `connect_streams` takes the child's `Source` as it stands, so the stdin choice
-    is `boundary_stdin`'s alone.
+    `io::child::Connection` binds child streams for standalone commands,
+    direct pipeline stages, and externals inside stage threads
+    ([[map/core/io-process|io-process]]). Pipeline topology stays in `ByteIn`
+    and `ByteOut`: a direct stage consumes its downstream writer through
+    `Connection::to_pipe`, while a thread stage makes its own `Sink::Pipe`.
+    Parent destinations are borrowed after admission; owned pipe writers move.
+    Connection takes the selected `Source` as it stands, so terminal stdin
+    permission remains `boundary_stdin`'s alone.
   - The read redirect (`< file`), the write redirect (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec (Host
     and `BundledTool` completion) each build an `Observation`
@@ -182,7 +181,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   pipeline stage, and settles it with `settle_lone`; both live beside
   `CollectState` in `collect.rs`.
   - `resolve.rs` freezes each stage's launch decision once as `StageLaunch`
-    (`Direct { head, args }` | `Thread`) from the head's resolution, its
+    (`Direct { command, args }` | `Thread`) from the head's resolution, its
     redirects, and whether a `!{…}` audit captures bytes, so launch reads a
     decision rather than re-deriving a dispatch gate. A stage with redirects is
     a `Thread` stage run through `RedirectState`; a `Direct` stage has none,

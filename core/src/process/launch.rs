@@ -234,6 +234,7 @@ pub(crate) struct Launch {
     stdin: StdioSpec,
     stdout: StdioSpec,
     stderr: StdioSpec,
+    stderr_to_stdout: bool,
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
     confined: Option<Confined>,
@@ -308,6 +309,7 @@ enum EnvEdit {
 pub(crate) enum StdioSpec {
     Inherit,
     Null,
+    #[cfg(test)]
     Piped,
     Owned(OwnedStdio),
 }
@@ -323,6 +325,7 @@ impl StdioSpec {
         match self {
             Self::Inherit => std::process::Stdio::inherit(),
             Self::Null => std::process::Stdio::null(),
+            #[cfg(test)]
             Self::Piped => std::process::Stdio::piped(),
             Self::Owned(fd) => fd.into(),
         }
@@ -900,6 +903,7 @@ impl Launch {
             stdin: StdioSpec::Inherit,
             stdout: StdioSpec::Inherit,
             stderr: StdioSpec::Inherit,
+            stderr_to_stdout: false,
             creation_flags: 0,
             admitted_handles: Vec::new(),
             confined: None,
@@ -989,6 +993,11 @@ impl Launch {
     pub fn stderr(&mut self, stdio: StdioSpec) -> &mut Self {
         self.stderr = stdio;
         self
+    }
+
+    /// Alias the final stdout handle when lowering standard streams.
+    pub(crate) fn dup_stdout_to_stderr(&mut self) {
+        self.stderr_to_stdout = true;
     }
 
     /// Run under the `AppContainer` token `confined` describes, which the
@@ -1219,7 +1228,9 @@ mod windows {
         process: OwnedHandle,
         thread: OwnedHandle,
         pid: u32,
+        #[cfg(test)]
         stdout: Option<std::fs::File>,
+        #[cfg(test)]
         stderr: Option<std::fs::File>,
     }
 
@@ -1253,7 +1264,9 @@ mod windows {
             ChildHandle::from_windows_raw(RawChild::new(
                 self.process,
                 self.pid,
+                #[cfg(test)]
                 self.stdout,
+                #[cfg(test)]
                 self.stderr,
             ))
         }
@@ -1270,16 +1283,27 @@ mod windows {
             Stream::Stdin,
         )
         .map_err(unprepared)?;
-        let mut stdout = ChildStdio::lower(
+        let stdout = ChildStdio::lower(
             std::mem::replace(&mut launch.stdout, StdioSpec::Null),
             Stream::Stdout,
         )
         .map_err(unprepared)?;
-        let mut stderr = ChildStdio::lower(
-            std::mem::replace(&mut launch.stderr, StdioSpec::Null),
-            Stream::Stderr,
-        )
-        .map_err(unprepared)?;
+        let stderr_spec = std::mem::replace(&mut launch.stderr, StdioSpec::Null);
+        let stderr = if launch.stderr_to_stdout {
+            drop(stderr_spec);
+            // stdout owns this handle until CreateProcessW returns. The
+            // inheritance list below admits the shared handle only once.
+            ChildStdio {
+                child: stdout.child,
+                #[cfg(test)]
+                parent_stdout: None,
+                #[cfg(test)]
+                parent_stderr: None,
+                _owned_child: None,
+            }
+        } else {
+            ChildStdio::lower(stderr_spec, Stream::Stderr).map_err(unprepared)?
+        };
 
         let mut inherited = vec![stdin.child, stdout.child, stderr.child];
         inherited.extend(launch.admitted_handles.iter().map(|h| *h as HANDLE));
@@ -1377,8 +1401,10 @@ mod windows {
             process: unsafe { OwnedHandle::from_raw_handle(pi.hProcess) },
             thread: unsafe { OwnedHandle::from_raw_handle(pi.hThread) },
             pid: pi.dwProcessId,
-            stdout: stdout.parent_stdout.take(),
-            stderr: stderr.parent_stderr.take(),
+            #[cfg(test)]
+            stdout: stdout.parent_stdout,
+            #[cfg(test)]
+            stderr: stderr.parent_stderr,
         })
     }
 
@@ -1411,7 +1437,9 @@ mod windows {
 
     struct ChildStdio {
         child: HANDLE,
+        #[cfg(test)]
         parent_stdout: Option<std::fs::File>,
+        #[cfg(test)]
         parent_stderr: Option<std::fs::File>,
         _owned_child: Option<OwnedHandle>,
     }
@@ -1442,18 +1470,23 @@ mod windows {
                     }
                     Ok(Self {
                         child: handle,
+                        #[cfg(test)]
                         parent_stdout: None,
+                        #[cfg(test)]
                         parent_stderr: None,
                         _owned_child: None,
                     })
                 }
                 StdioSpec::Null => Self::null(),
+                #[cfg(test)]
                 StdioSpec::Piped => Self::piped(stream),
                 StdioSpec::Owned(handle) => {
                     let raw = handle.as_raw_handle() as HANDLE;
                     Ok(Self {
                         child: raw,
+                        #[cfg(test)]
                         parent_stdout: None,
+                        #[cfg(test)]
                         parent_stderr: None,
                         _owned_child: Some(handle),
                     })
@@ -1466,12 +1499,15 @@ mod windows {
             let raw = handle.as_raw_handle() as HANDLE;
             Ok(Self {
                 child: raw,
+                #[cfg(test)]
                 parent_stdout: None,
+                #[cfg(test)]
                 parent_stderr: None,
                 _owned_child: Some(handle),
             })
         }
 
+        #[cfg(test)]
         fn piped(stream: Stream) -> io::Result<Self> {
             let (reader, writer) = crate::process::cloexec_pipe()?;
             match stream {
@@ -1508,14 +1544,17 @@ mod windows {
         }
     }
 
+    #[cfg(test)]
     fn pipe_reader_to_owned(reader: os_pipe::PipeReader) -> OwnedHandle {
         OwnedHandle::from(reader)
     }
 
+    #[cfg(test)]
     fn pipe_writer_to_owned(writer: os_pipe::PipeWriter) -> OwnedHandle {
         OwnedHandle::from(writer)
     }
 
+    #[cfg(test)]
     fn pipe_reader_to_file(reader: os_pipe::PipeReader) -> std::fs::File {
         std::fs::File::from(OwnedHandle::from(reader))
     }
@@ -1678,7 +1717,9 @@ mod windows {
     pub(crate) struct RawChild {
         process: OwnedHandle,
         pid: u32,
+        #[cfg(test)]
         stdout: Option<std::fs::File>,
+        #[cfg(test)]
         stderr: Option<std::fs::File>,
     }
 
@@ -1686,13 +1727,15 @@ mod windows {
         pub(crate) fn new(
             process: OwnedHandle,
             pid: u32,
-            stdout: Option<std::fs::File>,
-            stderr: Option<std::fs::File>,
+            #[cfg(test)] stdout: Option<std::fs::File>,
+            #[cfg(test)] stderr: Option<std::fs::File>,
         ) -> Self {
             Self {
                 process,
                 pid,
+                #[cfg(test)]
                 stdout,
+                #[cfg(test)]
                 stderr,
             }
         }
@@ -1718,12 +1761,14 @@ mod windows {
             Ok(())
         }
 
+        #[cfg(test)]
         pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
             self.stdout
                 .take()
                 .map(|stdout| Box::new(stdout) as Box<dyn std::io::Read + Send>)
         }
 
+        #[cfg(test)]
         pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
             self.stderr
                 .take()

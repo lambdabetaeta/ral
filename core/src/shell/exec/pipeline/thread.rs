@@ -2,10 +2,9 @@
 //! pipeline's process group with whatever externals it spawns.
 //! [`ThreadStage`] is the collector's handle onto the running thread.
 
-use super::super::command::ChildOut;
 use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
-use super::route::ByteIn;
+use super::route::{ByteIn, ByteOut, HeldEdge};
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::process::{CancelCause, POLL_SLICE, ScopeId, ScopeNode};
@@ -94,21 +93,24 @@ impl Drop for ThreadStage {
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     stdin: ByteIn,
-    stdout: ChildOut<&Sink>,
+    stdout: ByteOut,
     cx: &LaunchCx<'_>,
     slot: Slot,
-) -> Settled<ThreadStage> {
+) -> Settled<(ThreadStage, Option<HeldEdge>)> {
     let node = cx.shell.scope.child();
     let stdin = super::launch::stage_stdin(stdin, cx.shell, &node, cx.holds_terminal)?;
     let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
-    let stdout = match stdout {
-        ChildOut::Sink(sink) => sink.clone(),
-        ChildOut::Edge { writer, edge } => Sink::Pipe {
-            writer: Arc::new(writer),
-            edge,
-            stage: node.id(),
-        },
+    let (stdout, held) = match stdout {
+        ByteOut::Parent => (cx.shell.io.stdout.clone(), None),
+        ByteOut::Downstream { writer, held } => (
+            Sink::Pipe {
+                writer: Arc::new(writer),
+                edge: Arc::clone(&held.edge),
+                stage: node.id(),
+            },
+            Some(held),
+        ),
     };
 
     let io = Io {
@@ -139,10 +141,13 @@ pub(super) fn launch_thread_stage(
             });
         })?;
 
-    Ok(ThreadStage {
-        join: Some(join),
-        home: node,
-    })
+    Ok((
+        ThreadStage {
+            join: Some(join),
+            home: node,
+        },
+        held,
+    ))
 }
 
 #[cfg(all(test, unix))]
@@ -173,6 +178,17 @@ mod tests {
         PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns")
     }
 
+    fn downstream(writer: os_pipe::PipeWriter, reader: &os_pipe::PipeReader) -> ByteOut {
+        ByteOut::Downstream {
+            writer,
+            held: HeldEdge {
+                edge: Edge::new(),
+                reader: Arc::new(reader.try_clone().expect("hold")),
+                listening: std::cell::Cell::default(),
+            },
+        }
+    }
+
     #[test]
     fn a_stage_writes_into_a_sink_pipe_and_finishes() {
         let mut shell = crate::test_helper::core_shell();
@@ -190,13 +206,10 @@ mod tests {
             holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let _handle = launch_thread_stage(
+        let (_handle, _held) = launch_thread_stage(
             &stage,
             ByteIn::Parent,
-            ChildOut::Edge {
-                writer,
-                edge: Edge::new(),
-            },
+            downstream(writer, &reader),
             &cx,
             Slot { ix: 0, tx },
         )
@@ -267,10 +280,10 @@ mod tests {
                 holds_terminal: false,
             };
             let (tx, rx) = std::sync::mpsc::channel();
-            let stage = launch_thread_stage(
+            let (stage, _held) = launch_thread_stage(
                 &compile_one("echo unused"),
                 ByteIn::Parent,
-                ChildOut::Sink(&cx.shell.io.stdout),
+                ByteOut::Parent,
                 &cx,
                 Slot { ix: 0, tx },
             )
@@ -311,7 +324,7 @@ mod tests {
         // A self-recursive, argument-incrementing call with no base case:
         // nothing but a cancel ends it.
         let stage = compile_one("!{ let go = { |n| go $[$n + 1] }; go 0 }");
-        let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
+        let (reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
             mooring: &mooring,
@@ -322,13 +335,10 @@ mod tests {
             holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = launch_thread_stage(
+        let (handle, _held) = launch_thread_stage(
             &stage,
             ByteIn::Parent,
-            ChildOut::Edge {
-                writer,
-                edge: Edge::new(),
-            },
+            downstream(writer, &reader),
             &cx,
             Slot { ix: 0, tx },
         )
@@ -364,7 +374,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         let env = shell.env.clone();
         let group = prepared_group();
-        let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
+        let (reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
             mooring: &mooring,
@@ -381,13 +391,10 @@ mod tests {
             holds_terminal: false,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let stage = launch_thread_stage(
+        let (stage, _held) = launch_thread_stage(
             &compile_one("echo unused"),
             ByteIn::Parent,
-            ChildOut::Edge {
-                writer,
-                edge: Edge::new(),
-            },
+            downstream(writer, &reader),
             &cx,
             Slot { ix: 0, tx },
         )

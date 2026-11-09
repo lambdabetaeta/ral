@@ -1,16 +1,15 @@
 //! Byte output for a pipeline stage.
 //!
-//! [`Sink`] is the single shape every writer routes through, and
-//! [`Sink::child_stdio`] the one decision of how a child's output fd reaches
-//! one.  The buffer helpers below own the [`ByteBuffer`] idiom for captured
-//! bytes.
+//! [`Sink`] is the single shape every writer routes through. Child descriptor
+//! connection and output drains belong to [`super::child`]; the buffer helpers
+//! below own the [`ByteBuffer`] idiom for captured bytes.
 
 use super::Streams;
 use super::edge::Edge;
-use crate::process::{CancelCause, Cancellation, Scope, ScopeId, StdioSpec};
+use crate::process::{CancelCause, Cancellation, Scope, ScopeId};
 use crate::sync::LockExt as _;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 /// Cap on `Sink::Buffer` growth: past it bytes are counted and dropped, so a
@@ -100,13 +99,6 @@ pub type ByteBuffer = Arc<CapturedBytes>;
 
 /// What a `Sink::Watch` hands each whole line of its stream.
 pub type LineFn = Arc<dyn Fn(&[u8]) + Send + Sync>;
-
-/// A child's output fd: 1 or 2.
-#[derive(Clone, Copy)]
-pub(crate) enum OutFd {
-    Stdout,
-    Stderr,
-}
 
 /// Where a pipeline stage's byte output goes.
 pub enum Sink {
@@ -253,23 +245,6 @@ impl Sink {
         }
     }
 
-    /// How a child's `fd` writes into this sink, and the sink to pump it
-    /// into after spawn: it inherits iff this sink is the inherited `fd`; a
-    /// `File` or `Pipe` is handed over; anything else is piped and pumped.
-    ///
-    /// # Errors
-    /// Returns `Err` if duplicating the handed-over fd fails.
-    pub(crate) fn child_stdio(&self, fd: OutFd) -> io::Result<(StdioSpec, Option<Self>)> {
-        Ok(match (self, fd) {
-            (Self::Stdout, OutFd::Stdout) | (Self::Stderr, OutFd::Stderr) => {
-                (StdioSpec::Inherit, None)
-            }
-            (Self::File(f), _) => (StdioSpec::from_owned(f.try_clone()?), None),
-            (Self::Pipe { writer, .. }, _) => (StdioSpec::from_owned(writer.try_clone()?), None),
-            _ => (StdioSpec::Piped, Some(self.clone())),
-        })
-    }
-
     /// Do both sinks deliver to one destination?  Decides whether a child's
     /// two streams may share a single descriptor.
     pub(crate) fn same_destination(&self, other: &Self) -> bool {
@@ -354,38 +329,6 @@ impl Sink {
             _ => false,
         }
     }
-
-    /// Spawn a thread draining `reader` into this sink, flushing its tail at
-    /// EOF; a capture buffer is complete only once the handle is joined.  The
-    /// drain outlives any write failure or stop — a child must never find the
-    /// pipe it writes into closed under it, and a dead edge still needs the
-    /// bytes to land for the sentinel to hear them.  Writes read `scope`, the
-    /// launching computation's current scope, so a pump blocked on a full edge
-    /// whose reader a teardown killed ends within a slice (on Windows, of
-    /// `Pumps::join_under`'s interrupt).
-    pub(crate) fn pump(
-        self,
-        mut reader: impl Read + Send + 'static,
-        scope: Scope,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let mut sink = self;
-            let mut buf = [0u8; 8 * 1024];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let _ = sink.write_under(&scope, &buf[..n]);
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    #[cfg(windows)]
-                    Err(e) if super::aborted(&e) => {}
-                    Err(_) => break,
-                }
-            }
-            sink.flush_pending();
-        })
-    }
 }
 
 impl Clone for Sink {
@@ -449,7 +392,9 @@ pub fn without_terminator(bytes: &[u8]) -> &[u8] {
 mod tests {
     #[cfg(unix)]
     use super::WriteFault;
-    use super::{CapturedBytes, Edge, OutFd, Retained, Sink, without_terminator};
+    use super::{CapturedBytes, Edge, Retained, Sink, without_terminator};
+    #[cfg(unix)]
+    use crate::io::{Source, child::Connection};
     #[cfg(unix)]
     use crate::process::CancelCause;
     use crate::process::DurableRoot;
@@ -633,37 +578,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_pump_blocked_on_a_full_edge_ends_once_its_scope_is_cancelled() {
-        let (node, scope) = (
-            DurableRoot::default().child(),
-            DurableRoot::default().child(),
-        );
-        let (_edge_reader, sink, _edge, writer) = pipe_sink(&node);
-        fill(&writer);
-        let (source, mut feed) = crate::process::cloexec_pipe().expect("source");
-        let feeder =
-            std::thread::spawn(move || feed.write_all(&vec![b'x'; 1 << 20]).expect("feed"));
-        let pump = sink.pump(source, Scope::clone(&scope));
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(
-            !pump.is_finished(),
-            "the pump should be blocked on the full edge"
-        );
-        scope.cancel(CancelCause::Interrupted);
-        let start = Instant::now();
-        while !pump.is_finished() {
-            assert!(
-                start.elapsed() < crate::test_helper::NEVER_RETURNS,
-                "the pump outlived its scope"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        pump.join().expect("pump");
-        feeder.join().expect("the source drained to EOF");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn a_write_under_a_shield_waits() {
         let node = DurableRoot::default().child();
         let (mut reader, mut sink, _edge, writer) = pipe_sink(&node);
@@ -732,12 +646,12 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().child().id(),
         };
-        let (stdio, pump) = sink.child_stdio(OutFd::Stdout).expect("stdio");
-        assert!(pump.is_none());
+        let io = Connection::new(&Source::Empty, &sink, &Sink::Stderr).expect("stdio");
         drop(sink);
 
         let mut launch = crate::process::Launch::new("/bin/echo");
-        launch.arg("hi").stdout(stdio);
+        launch.arg("hi");
+        let _drains = io.install(&mut launch);
         let mut child = launch
             .spawn(
                 crate::process::PgidPolicy::Inherit,
@@ -765,10 +679,11 @@ mod tests {
             edge: Edge::new(),
             stage: DurableRoot::default().child().id(),
         };
-        let (stdio, _) = sink.child_stdio(OutFd::Stdout).expect("stdio");
+        let io = Connection::new(&Source::Empty, &sink, &Sink::Stderr).expect("stdio");
 
         let mut launch = crate::process::Launch::new("/bin/echo");
-        launch.arg("hi").stdout(stdio);
+        launch.arg("hi");
+        let _drains = io.install(&mut launch);
         let mut child = launch
             .spawn(
                 crate::process::PgidPolicy::Inherit,
@@ -905,45 +820,6 @@ mod tests {
         // The pending buffer was taken before the callback, so a second flush is a no-op.
         sink.flush_pending();
         assert_eq!(*seen.lock().unwrap(), [b"tail".to_vec()]);
-    }
-
-    #[test]
-    fn a_file_is_handed_to_either_fd_with_no_pump() {
-        use crate::process::StdioSpec;
-        let file = file_sink();
-        for fd in [OutFd::Stdout, OutFd::Stderr] {
-            let (stdio, pump) = file.child_stdio(fd).expect("stdio");
-            assert!(pump.is_none());
-            assert!(!matches!(
-                stdio,
-                StdioSpec::Inherit | StdioSpec::Null | StdioSpec::Piped
-            ));
-        }
-    }
-
-    /// A child inherits only the fd its sink is; any other sink but a file or
-    /// pipe is pumped into from a pipe.
-    #[test]
-    fn a_child_inherits_only_the_fd_its_sink_is() {
-        use crate::process::StdioSpec;
-        let inherits =
-            |sink: &Sink, fd| matches!(sink.child_stdio(fd), Ok((StdioSpec::Inherit, None)));
-        let pumped = |sink: &Sink, fd| {
-            matches!(
-                sink.child_stdio(fd),
-                Ok((StdioSpec::Piped, Some(pump))) if pump.same_destination(sink)
-            )
-        };
-        assert!(inherits(&Sink::Stdout, OutFd::Stdout));
-        assert!(inherits(&Sink::Stderr, OutFd::Stderr));
-        assert!(pumped(&Sink::Stdout, OutFd::Stderr));
-        assert!(pumped(&Sink::Stderr, OutFd::Stdout));
-        let (buffer, _) = super::new_buffer();
-        let tee = Sink::Tee(Box::new(buffer.clone()), Box::new(Sink::Stdout));
-        for fd in [OutFd::Stdout, OutFd::Stderr] {
-            assert!(pumped(&buffer, fd));
-            assert!(pumped(&tee, fd));
-        }
     }
 
     /// Block a write of one chunk on a pipe already holding a prefix's worth,

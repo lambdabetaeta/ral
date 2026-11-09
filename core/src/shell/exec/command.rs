@@ -15,12 +15,13 @@ use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::authority::sandbox::{Confinement, Image, Ownership};
 use crate::error::{Error, io_message};
 use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
-use crate::io::{Edge, OutFd, Sink, Source, Streams};
+use crate::io::child::{Connection, PendingDrains};
+use crate::io::{Sink, Source};
 use crate::ir::CommandName;
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::{
-    CancelCause, Launch, POLL_SLICE, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, StdioSpec,
-    TerminalLoan, Unstarted, WaitOutcome,
+    CancelCause, Launch, PgidPolicy, PreparedTerminalLoan, Scope, Spawned, TerminalLoan, Unstarted,
+    WaitOutcome,
 };
 use crate::shell::runtime::{Break, Context, Mooring, Settled, Shell, TerminalAccess, Value};
 use crate::ty::RefusedArg;
@@ -30,11 +31,10 @@ use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(unix)]
-use crate::process::group::Survivor;
+use crate::process::{StdioSpec, group::Survivor};
 
 // The detached-launch method is private. Other execution modules must use
 // this child module's operation, which checks permission before calling it.
@@ -402,10 +402,10 @@ pub(crate) struct ExternalCommand {
     confinement: Confinement,
 }
 
-/// A configured launch and the pumps for exactly that launch.
+/// A configured launch and the drains for exactly that launch.
 struct ConnectedCommand {
     command: ExternalCommand,
-    pumps: Pumps<Sink>,
+    drains: PendingDrains,
 }
 
 impl Command<Checked> {
@@ -485,11 +485,13 @@ impl ExternalCommand {
             loan,
             readable,
         } = placement(shell, mooring, self.launch.enveloped());
-        let connected = self.connect(
+        let io = Connection::new(
             boundary_stdin(shell, readable),
-            ChildOut::Sink(&shell.io.stdout),
+            &shell.io.stdout,
             &shell.io.stderr,
-        )?;
+        )
+        .map_err(connection_error)?;
+        let connected = self.connect(io);
         announce_command_title(&connected.command.shown, shell);
         // Include startup in the interval used to attribute kernel denials.
         let since = Instant::now();
@@ -501,57 +503,24 @@ impl ExternalCommand {
 
     /// Connect and spawn a pipeline stage. Its caller must register the result
     /// with the pipeline collector.
-    pub(crate) fn start(
-        self,
-        stdin: &Source,
-        stdout: ChildOut<&Sink>,
-        stderr: &Sink,
-        pgid: PgidPolicy,
-        scope: &Scope,
-    ) -> Settled<Started> {
-        self.connect(stdin, stdout, stderr)?.spawn(pgid, scope)
+    pub(crate) fn start(self, io: Connection, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
+        self.connect(io).spawn(pgid, scope)
     }
 
-    /// Use descriptors for OS-backed streams and pumps for other destinations.
-    /// Merge stderr when both outputs share a destination; Launch applies that
-    /// merge after stdout configuration is complete.
-    fn connect(
-        mut self,
-        stdin: &Source,
-        stdout: ChildOut<&Sink>,
-        stderr: &Sink,
-    ) -> Settled<ConnectedCommand> {
-        self.launch.stdin(
-            stdin
-                .child_stdio()
-                .map_err(|e| Error::new(io_message("could not duplicate stdin", &e)))?,
-        );
-        let (out, out_pump, joined) = match stdout {
-            ChildOut::Sink(sink) => {
-                let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe_error)?;
-                (out, pump, stderr.same_destination(sink).then_some(sink))
-            }
-            ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
-        };
-        self.launch.stdout(out);
-        let err_pump = if let Some(sink) = joined {
-            join_stderr(&mut self.launch, sink)?
-        } else {
-            let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe_error)?;
-            self.launch.stderr(err);
-            pump
-        };
-        Ok(ConnectedCommand {
+    /// Keep the installed endpoints and their owned readers together.
+    fn connect(mut self, io: Connection) -> ConnectedCommand {
+        let drains = io.install(&mut self.launch);
+        ConnectedCommand {
             command: self,
-            pumps: Pumps::new(out_pump, err_pump),
-        })
+            drains,
+        }
     }
 }
 
 impl ConnectedCommand {
-    /// Spawn once, transferring the child and its pump plan to the collector.
+    /// Spawn once, transferring the child and its drains to the collector.
     fn spawn(self, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-        let Self { command, pumps } = self;
+        let Self { command, drains } = self;
         let pgid = pgid.unless_enveloped(command.launch.enveloped());
         let spawned = command.launch.spawn(pgid, scope).map_err(|why| {
             at_start(
@@ -567,7 +536,7 @@ impl ConnectedCommand {
             shown: command.shown,
             spawned,
             claim,
-            pumps,
+            drains,
         })
     }
 }
@@ -626,112 +595,9 @@ pub(crate) fn boundary_stdin(shell: &Shell, readable: bool) -> &Source {
     }
 }
 
-/// A stage's output destination or an owned downstream pipe. `S` is `&Sink`
-/// during wiring, or `()` while a pipeline defers borrowing the parent sink
-/// until admission has finished mutating the shell.
-pub(crate) enum ChildOut<S> {
-    Sink(S),
-    Edge {
-        writer: os_pipe::PipeWriter,
-        edge: Arc<Edge>,
-    },
-}
-
-impl<S> ChildOut<S> {
-    /// Resolve an existing destination without duplicating an owned pipe.
-    pub(super) fn map_sink<T>(self, map: impl FnOnce(S) -> T) -> ChildOut<T> {
-        match self {
-            Self::Sink(sink) => ChildOut::Sink(map(sink)),
-            Self::Edge { writer, edge } => ChildOut::Edge { writer, edge },
-        }
-    }
-}
-
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
-fn pipe_error(e: std::io::Error) -> Error {
-    Error::new(io_message("pipe", &e))
-}
-
-#[cfg(unix)]
-#[allow(clippy::unnecessary_wraps, reason = "the Windows twin can fail")]
-fn join_stderr(command: &mut Launch, _stdout: &Sink) -> Settled<Option<Sink>> {
-    command.dup_stdout_to_stderr();
-    Ok(None)
-}
-
-#[cfg(windows)]
-fn join_stderr(command: &mut Launch, stdout: &Sink) -> Settled<Option<Sink>> {
-    let (stdio, pump) = if matches!(stdout, Sink::Stdout) {
-        // Inherit would select fd 2. Duplicate fd 1 instead to implement 2>&1.
-        use std::os::windows::io::AsHandle;
-        let owned = std::io::stdout()
-            .as_handle()
-            .try_clone_to_owned()
-            .map_err(pipe_error)?;
-        (StdioSpec::from_owned(owned), None)
-    } else {
-        stdout.child_stdio(OutFd::Stderr).map_err(pipe_error)?
-    };
-    command.stderr(stdio);
-    Ok(pump)
-}
-
-/// Output pumps, represented by destinations before starting and join handles
-/// afterwards. `None` means the stream uses a descriptor directly. Dropping
-/// running pumps detaches them; collectors do this on forced termination to
-/// avoid waiting indefinitely for descendants that still hold a pipe.
-pub(crate) struct Pumps<T = std::thread::JoinHandle<()>>(Streams<Option<T>>);
-
-impl<T> Default for Pumps<T> {
-    fn default() -> Self {
-        Self(Streams::both(|| None))
-    }
-}
-
-impl Pumps<Sink> {
-    pub(crate) const fn new(stdout: Option<Sink>, stderr: Option<Sink>) -> Self {
-        Self(Streams { stdout, stderr })
-    }
-
-    /// Start output drainers using the command's cancellation scope.
-    pub(crate) fn start(self, child: &mut crate::process::ChildHandle, scope: &Scope) -> Pumps {
-        let Streams { stdout, stderr } = self.0;
-        Pumps(Streams {
-            stdout: stdout
-                .and_then(|sink| child.take_stdout().map(|s| sink.pump(s, scope.clone()))),
-            stderr: stderr
-                .and_then(|sink| child.take_stderr().map(|s| sink.pump(s, scope.clone()))),
-        })
-    }
-}
-
-impl Pumps {
-    /// Wait for both drainers. On cancellation, call `kill` once to close pipes
-    /// held by the child or its descendants. Windows also needs repeated I/O
-    /// interruption: a drainer may be blocked writing to an undrained pipeline
-    /// edge whose read end the collector still holds.
-    pub(crate) fn join_under(self, scope: &Scope, kill: impl FnOnce()) {
-        let Streams { stdout, stderr } = self.0;
-        let handles = [stdout, stderr];
-        let mut kill = Some(kill);
-        while !handles
-            .iter()
-            .flatten()
-            .all(std::thread::JoinHandle::is_finished)
-        {
-            if scope.is_cancelled() {
-                if let Some(kill) = kill.take() {
-                    kill();
-                }
-                #[cfg(windows)]
-                handles.iter().flatten().for_each(crate::io::interrupt);
-            }
-            std::thread::sleep(POLL_SLICE);
-        }
-        for jh in handles.into_iter().flatten() {
-            let _ = jh.join();
-        }
-    }
+pub(super) fn connection_error(e: std::io::Error) -> Error {
+    Error::new(io_message("could not connect command streams", &e))
 }
 
 /// Process-group placement and terminal access for a launch.
@@ -802,7 +668,7 @@ pub(crate) struct Started {
     pub(crate) shown: String,
     pub(crate) spawned: Spawned,
     pub(crate) claim: Claim,
-    pub(super) pumps: Pumps<Sink>,
+    pub(super) drains: PendingDrains,
 }
 
 /// Host PIDs used to attribute kernel denial messages. Capture them during

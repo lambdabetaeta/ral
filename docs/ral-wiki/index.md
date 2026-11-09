@@ -374,6 +374,8 @@ Newest last; the page carries the full reasoning.
 - *active* — [[decisions/261105_the-error-record|the error record]] — **`[reason, frame, site]` is the closed failure value, with one reason and total provenance from the visible continuation.** `fail` takes text, `raise` trusts and preserves a record, `describe` supplies one wording; process codes are reason projections and unwind facts are report-only. Supersedes part of [[decisions/260830_status-is-the-outcome|status-is-the-outcome]].
 - *active* — [[decisions/261107_the-trampoline-is-a-supervisor|the-trampoline-is-a-supervisor]] — on Linux the `ral --warrant` trampoline inside the envelope spawns the program (or forks the bundled tool), waits and reports its exact wait status, since bwrap folds a signal death into exit `128 + n`; macOS keeps `execve` in place; a confined program that cannot start is `not-found` or `not-runnable`, never `exited 127`.
 
+- *active* — [[decisions/261109_a-drain-owns-its-reader|a-drain-owns-its-reader]] — child-stream connection owns every drain's reader before spawn, borrows shell destinations, consumes downstream writers, and keeps the configured launch and pending drains together; pipeline topology stays local, and merged outputs share one endpoint on both platforms.
+
 ## related/ — comparison to existing work
 
 ral read against the literature; durable on the external work, keyed to ral's

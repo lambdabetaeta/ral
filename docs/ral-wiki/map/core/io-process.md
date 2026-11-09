@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e3fbc84
-generated_at_date: 2026-11-07
+generated_at_commit: 6e2995f8
+generated_at_date: 2026-11-09
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -58,17 +58,15 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   so denial of byte input and denial of foreground stay separate effects. A
   thread stage 0 at a terminal keeps `Terminal`: its externals inherit it, and
   a reading builtin refuses it with `no input` (`stdin_reader`).
-- `sink.rs` — `Sink`, byte output and child stdio routing (`child_stdio`):
+- `sink.rs` — `Sink`, byte output and destination identity:
   stdout, stderr, redirect file, in-memory `ByteBuffer` capture, tee, a
   watched worker's line surface (`Watch`, each whole line handed to a line
   function the builtin builds around `WatchEvent`, so `io` knows no deferred
   sink), a stage thread's pipe edge (`Sink::Pipe { writer, edge, stage }`,
   `stage` naming the writing stage's node for its reader-gone stop; the scope
-  a write polls is handed in, `write_under`). `child_stdio(fd)` is the one
-  (stdio, pump) decision: a child inherits iff the sink is the inherited `fd`,
-  a `File` or `Pipe` hands over its fd, and anything else is piped and pumped,
-  so no caller computes inherit-vs-pipe by hand; `same_destination` says whether two sinks deliver to one destination,
-  which decides whether a child's stderr may share stdout's descriptor.
+  a write polls is handed in, `write_under`). `same_destination` says whether
+  two sinks deliver to one destination, deciding whether a child's stderr may
+  share stdout's descriptor.
   A `ByteBuffer` is `Arc<CapturedBytes>`: the prefix and its total byte count
   under one mutex, with a retention cap and no marker. Its readers are `take`,
   which drains the prefix into a `Retained` (prefix and total, whole iff they
@@ -80,7 +78,16 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   `streams.rs` — `Streams<T> { stdout, stderr }` with `map`, `as_ref`, `both`,
   `unzip` and `named`: every per-stream pair (a run's capture, a handle's
   buffers and `CompletedHandle`, the audit tee, `Captured`, `fact::Io`,
-  `AuditIo`, `Pumps`).
+  `AuditIo`).
+- `child.rs` — `Connection` borrows shell sources and sinks, or consumes a
+  downstream writer through `to_pipe`. `Source::child_stdio` lends stdin;
+  output binding inherits matching standard streams, lends files and pipes,
+  and allocates a reader/writer pair for every drain. `install` moves child
+  endpoints to `Launch`; `PendingDrains` retains each reader with its sink.
+  `start` produces `Drains` without inspecting a child. Shared destinations
+  use one binding and `Launch::dup_stdout_to_stderr` on Unix and Windows.
+  `Drains::join_under` waits explicitly; dropping drains detaches them.
+  See [[decisions/261109_a-drain-owns-its-reader|a-drain-owns-its-reader]].
 - `poll.rs` — `poll_slice`, the one sliced fd wait (Unix): wait for readiness
   for at most `POLL_SLICE`, `EINTR` retried against the slice's own deadline.
   A blocked pipe write (`Sink::write_under`) or read (`read_interruptible`)
@@ -88,7 +95,7 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   striking a scope, never by waking it. Windows cannot poll an anonymous
   pipe: the thread waiting on the blocked one aborts its call (`interrupt`,
   `CancelSynchronousIo`), the collector a thread stage's and
-  `Pumps::join_under` a pump's, and the aborted read or write (`aborted`)
+  `Drains::join_under` a pump's, and the aborted read or write (`aborted`)
   re-reads its scope and, under a shield, retries; an aborted write is never
   retried, since its delivered prefix is unknown (a stop under a cause, an
   error under a shield). Writes go a 4 KiB chunk at a time, so the

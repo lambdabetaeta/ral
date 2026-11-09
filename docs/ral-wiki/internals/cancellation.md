@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 257c6c00
+verified_at_commit: 6e2995f8
 verified_at_date: 2026-11-09
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
@@ -303,7 +303,7 @@ the scope; wait at most `POLL_SLICE`, 10 ms), the read first so an
 always-ready stream still polls once per chunk: a pipe write
 (`Sink::write_under`) and read (`read_interruptible`), a child's wait (the
 collector's `recv`, every external's one waiter) and its pumps' drain
-(`Pumps::join_under`), the enquiry park, and the
+(`Drains::join_under`), the enquiry park, and the
 `await`/`race`/`first-settled` sweep (`first_ready`, which polls the caller's
 scope at the start of the sweep before inspecting any handle, so a pending
 cancellation is never lost to an already-`ready` worker). The slice is the sampling period, not an end-to-end bound: the

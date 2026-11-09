@@ -2,15 +2,16 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{ChildOut, Command, Request};
+use super::super::command::{Command, Request};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
-use super::route::{ByteIn, ByteOut, StageRoute};
+use super::route::{ByteIn, ByteOut, HeldEdge, StageRoute};
 use super::stage::{LiveExternal, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::error::io_message;
 use crate::fact::AuditIo;
+use crate::io::child::Connection;
 use crate::io::{Source, SourceReader};
 use crate::process::{PgidPolicy, Scope};
 use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
@@ -53,8 +54,8 @@ pub(super) struct LaunchCx<'a> {
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`], which a direct
 /// stage's command leaves by value: nothing holds the program after it launches.
-/// Its stdout is resolved here, once for either kind: an edge's write end and
-/// fate go to the stage, its hold to the stage's handle.
+/// Each launch consumes its route: an edge's writer goes to the process or
+/// thread, its hold returns to the stage's handle.
 pub(super) fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
     launch: StageLaunch,
@@ -63,32 +64,18 @@ pub(super) fn spawn_stage(
     slot: Slot,
 ) -> Settled<StageHandle> {
     let StageRoute { stdin, stdout } = route;
-    let (stdout, held) = match stdout {
-        // Admission mutates the shell; borrow its stdout only afterwards.
-        ByteOut::Parent => (ChildOut::Sink(()), None),
-        ByteOut::Downstream { writer, held } => {
-            let edge = Arc::clone(&held.edge);
-            (ChildOut::Edge { writer, edge }, Some(held))
-        }
-    };
     let name = match &stage.item {
         crate::ir::CompKind::Exec(exec) => exec.head.name().written(),
         _ => "pipeline".into(),
     };
     let span = stage.span;
-    let kind = match launch {
+    let (kind, held) = match launch {
         StageLaunch::Direct { command, args } => {
             launch_external_stage_direct(command, &args, span, stdin, stdout, cx, &slot)
-                .map(StageKind::External)
+                .map(|(stage, held)| (StageKind::External(stage), held))
         }
-        StageLaunch::Thread => launch_thread_stage(
-            stage,
-            stdin,
-            stdout.map_sink(|()| &cx.shell.io.stdout),
-            cx,
-            slot.clone(),
-        )
-        .map(StageKind::Thread),
+        StageLaunch::Thread => launch_thread_stage(stage, stdin, stdout, cx, slot.clone())
+            .map(|(stage, held)| (StageKind::Thread(stage), held)),
     }
     .map_err(|b| b.locate(&name, span, cx.shell))?;
     Ok(StageHandle::new(kind, held, slot))
@@ -100,10 +87,10 @@ fn launch_external_stage_direct(
     args: &[Value],
     span: Option<Span>,
     stdin: ByteIn,
-    stdout: ChildOut<()>,
+    stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
-) -> Settled<LiveExternal> {
+) -> Settled<(LiveExternal, Option<HeldEdge>)> {
     let name = command.shown.clone();
     let mooring = cx.mooring;
     let group = cx.group;
@@ -128,16 +115,34 @@ fn launch_external_stage_direct(
                 }
                 ByteIn::Parent => command::boundary_stdin(shell, holds_terminal),
             };
-            command.start(
-                stdin,
-                stdout.map_sink(|()| &shell.io.stdout),
-                &shell.io.stderr,
+            // Admission is over: borrow parent destinations only now.
+            let (io, held) = match stdout {
+                ByteOut::Parent => (
+                    Connection::new(stdin, &shell.io.stdout, &shell.io.stderr),
+                    None,
+                ),
+                ByteOut::Downstream { writer, held } => (
+                    Connection::to_pipe(stdin, writer, &shell.io.stderr),
+                    Some(held),
+                ),
+            };
+            let started = command.start(
+                io.map_err(command::connection_error)?,
                 PgidPolicy::Join(group.membership(&shell.scope)),
                 &shell.scope,
-            )
+            )?;
+            let stage = started.register(slot, group.group().owned(), &shell.scope)?;
+            Ok((stage, held))
         })();
-        let started = match launched {
-            Ok(started) => started,
+        match launched {
+            Ok((mut stage, held)) => {
+                stage.end.settlement.audit = Some(Box::new(StageAudit {
+                    prov: shell.local.audit.call_site().clone(),
+                    start: audit_start,
+                    args: audit_args,
+                }));
+                Ok((stage, held))
+            }
             Err(broke) => {
                 if let Some(start) = &audit_start {
                     let obs = shell.command_observation(
@@ -150,15 +155,9 @@ fn launch_external_stage_direct(
                     );
                     shell.observe_stamped(Some(mooring), obs);
                 }
-                return Err(broke);
+                Err(broke)
             }
-        };
-        let audit = StageAudit {
-            prov: shell.local.audit.call_site().clone(),
-            start: audit_start,
-            args: audit_args,
-        };
-        Ok(started.register(slot, group.group().owned(), Some(audit), &shell.scope))
+        }
     })
 }
 

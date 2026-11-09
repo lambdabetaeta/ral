@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 257c6c00
+verified_at_commit: 6e2995f8
 verified_at_date: 2026-11-09
-anchors: [PipeNode, PipeNode::run, ExternalCommand::start, ExternalCommand::run, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, PgidPolicy::unless_enveloped, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
+anchors: [PipeNode, PipeNode::run, ExternalCommand::start, ExternalCommand::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, PgidPolicy::unless_enveloped, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -26,7 +26,7 @@ compose values in the machine and do not enter this pipeline runtime.
 the single launch decision, reading the head's
 resolution, its redirects, and whether a `!{…}` audit captures bytes:
 
-- `Direct { head, args }` — an external command or bundled tool spawned
+- `Direct { command, args }` — an external command or bundled tool spawned
   straight into the group as its own process, no ral in front of it; the
   resolved head and its already-closed argument values are all launch
   needs, and only this arm evaluates argv here, a `Thread` stage evaluating
@@ -99,17 +99,19 @@ the edge dead. Neither endpoint of a pipe promises traffic, so a producer
 with nothing left to write for is the ordinary case, not an error path.
 
 **Bytes reach a stage thread through `Sink::Pipe` and a scoped
-`SourceReader`.** `spawn_stage` resolves a stage's stdout once, for either
-kind: `ByteOut::Downstream { writer, held }` gives the edge's write end and
-fate to the stage (`ChildOut::Edge`) and its hold to the stage's handle. A
+`SourceReader`.** Each launch consumes its pipeline-local `ByteOut`.
+`ByteOut::Downstream { writer, held }` transfers the write end to the stage
+and returns the hold to the collector's stage handle. A
 `Thread` stage writes the edge as `Sink::Pipe { writer, edge, stage }`, its
 `stdout`, so a discarded statement's bytes go down the wire like every other
 byte it writes. `stage` is the stage's *name*, for its reader-gone stop; the
 scope a write polls is the writer's own current scope, handed in at the write
 (`Sink::write_under`), so a cleanup's write is masked with its shield. A
 `Direct` stage has no node to name, so it never holds a `Sink::Pipe`: its
-child is handed the write end whole, and the sentinel, not the fate, hears
-its writes.
+child is handed the write end whole through `Connection::to_pipe`, and the
+sentinel, not the fate, hears its writes. A connection borrows parent streams
+only after admission; every output drain owns its reader before spawn, and
+registration starts it without inspecting the child's stream fields.
 A final stage has no edge, so `ByteOut::Parent` takes the parent's `stdout`:
 under `!{ … | … }` that is a capture buffer, and the final stage writes into it
 ([[design/capture|capture]]).
@@ -369,7 +371,7 @@ pipeline's, both `cancel_all` — the kill is outright. The kill addresses the s
 pid alone, so a descendant the stage forked outlives it and may still hold
 the pipe a pump of that stage reads; an external ended for a dead write
 therefore *detaches* its pumps rather than joining them
-(`command::Pumps::join_under`, skipped in `StageEnd::settle` from the
+(`io::child::Drains::join_under`, skipped in `StageEnd::settle` from the
 `sent` the filed handle carried onto its `StageEnd`) — its remaining bytes are
 owed to nobody, and the join would otherwise wait on the descendant. Every
 other external settlement joins its pumps a slice at a time and, on a cause in

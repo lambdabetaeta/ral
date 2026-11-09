@@ -93,6 +93,7 @@ impl ChildHandle {
         }
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         match &mut self.repr {
             ChildRepr::Std(child) => child
@@ -104,6 +105,7 @@ impl ChildHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         match &mut self.repr {
             ChildRepr::Std(child) => child

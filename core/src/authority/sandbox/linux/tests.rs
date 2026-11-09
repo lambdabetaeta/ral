@@ -143,9 +143,10 @@ fn start_granted<R>(
     script: &str,
     then: impl FnOnce(crate::shell::exec::command::Started, &crate::shell::runtime::Shell) -> R,
 ) -> R {
+    use crate::io::child::Connection;
     use crate::io::{Sink, Source};
     use crate::process::PgidPolicy;
-    use crate::shell::exec::command::{ChildOut, Command};
+    use crate::shell::exec::command::Command;
     let mut shell = crate::test_helper::core_shell();
     let layer = crate::test_helper::layer(Capabilities {
         gpu: Some(crate::authority::policy::Gpu::Withheld),
@@ -163,9 +164,7 @@ fn start_granted<R>(
         let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
         let started = command
             .start(
-                &Source::Empty,
-                ChildOut::Sink(&discard),
-                &discard,
+                Connection::new(&Source::Empty, &discard, &discard).unwrap(),
                 PgidPolicy::NewLeader,
                 &shell.scope,
             )

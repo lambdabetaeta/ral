@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 257c6c00
-verified_at_commit: 257c6c00
+generated_at_commit: 6e2995f8
+verified_at_commit: 6e2995f8
 verified_at_date: 2026-11-09
-anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, Started::collect, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, ExternalCommand::detach, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
+anchors: [Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, drained, Started::collect, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
 # Output capture and detachment
@@ -59,8 +59,13 @@ right-hand side, so everything the block writes is the value unless an inner
 
 A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-process|io-process]].
 
-- `Sink::pump` spawns a thread running `io::copy(child_pipe, sink)` until the pipe
-  reaches end-of-file (`core/src/io/sink.rs`).
+- `io::child::Connection` allocates each drain pipe before spawn. Installation
+  gives its writer to the launch; `PendingDrains` owns the reader and sink.
+  Starting drains creates threads without taking any endpoint from the child.
+  Each drain reads to EOF even after destination writes fail, and then flushes
+  its watch tail (`core/src/io/child.rs`). Shared stdout/stderr destinations
+  have one pipe and one drain on both platforms
+  ([[decisions/261109_a-drain-owns-its-reader|a-drain-owns-its-reader]]).
 - The pump is joined *after* the child is waited, and after the kill: the
   collector, every external's one waiter, files the child's end, and its
   settlement then finishes the guest jail, joins the pump handles under the
@@ -82,7 +87,7 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 
 ## A never-closing pipe stalls the foreground to the wall
 
-- A server holds its stdout open for its whole life, so the pump's `io::copy`
+- A server holds its stdout open for its whole life, so the drain's read loop
   never sees EOF and the foreground command blocks indefinitely.
 - The release is the *foreground deadline*. exarch arms a 30 s wall as a
   disarmable entry on the shared `process::deadline` scheduler (deadlines-as-data);

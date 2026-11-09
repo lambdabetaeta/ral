@@ -1481,7 +1481,8 @@ mod process {
     /// spelling the user wrote, however the spelling moves in between.
     #[cfg(unix)]
     mod judged_program {
-        use super::{ChildOut, Command, ExternalCommand};
+        use super::{Command, ExternalCommand};
+        use crate::io::child::Connection;
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::shell::runtime::{Mooring, Shell, Value};
@@ -1543,9 +1544,7 @@ mod process {
             shell.scope = crate::process::Scope::clone(&stopped);
             let prepared = judge(&mut shell, &[]);
             let started = prepared.start(
-                &Source::Empty,
-                ChildOut::Sink(&Sink::Stdout),
-                &Sink::Stderr,
+                Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
                 crate::process::PgidPolicy::Inherit,
                 &shell.scope,
             );
@@ -1575,9 +1574,7 @@ mod process {
             let Ok(Started {
                 mut spawned, claim, ..
             }) = prepared.start(
-                &Source::Empty,
-                ChildOut::Sink(&discard),
-                &discard,
+                Connection::new(&Source::Empty, &discard, &discard).unwrap(),
                 crate::process::PgidPolicy::Inherit,
                 &shell.scope,
             )
@@ -1804,9 +1801,10 @@ mod process {
     /// unconfined one is, never a trampoline's exit status.
     #[cfg(target_os = "macos")]
     mod confined_start {
-        use super::{ChildOut, Claim, Command, Started};
+        use super::{Claim, Command, Started};
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
         use crate::fact::{Failure, Reason, Unrunnable};
+        use crate::io::child::Connection;
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::path::FrozenPath;
@@ -1853,9 +1851,7 @@ mod process {
                 (
                     shown,
                     prepared.start(
-                        &Source::Empty,
-                        ChildOut::Sink(&Sink::Stdout),
-                        &Sink::Stderr,
+                        Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
                         PgidPolicy::Inherit,
                         &shell.scope,
                     ),

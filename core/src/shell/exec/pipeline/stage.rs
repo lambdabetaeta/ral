@@ -1,11 +1,13 @@
 //! The collector's handle onto one running stage: its process or thread, the
 //! parent's hold on its outbound edge, and the cancel this collector sent it.
 
+#[cfg(test)]
 use super::super::command;
 use super::collect::{Settlement, Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
 use super::thread::ThreadStage;
+use crate::io::child::Drains;
 #[cfg(test)]
 use crate::process::Scope;
 use crate::process::jail::JailCgroup;
@@ -45,7 +47,7 @@ pub(super) struct ExternalEnd {
 pub(super) struct Drain {
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<JailCgroup>,
-    pub(super) pumps: command::Pumps,
+    pub(super) drains: Drains,
 }
 
 /// What a pipeline stage's settlement owes its audit: the site that claims
@@ -175,7 +177,7 @@ impl StageHandle {
                 end: ExternalEnd {
                     drain: Drain {
                         jail: None,
-                        pumps: command::Pumps::default(),
+                        drains: Drains::default(),
                     },
                     settlement: Settlement {
                         name: "test".to_string(),
@@ -207,7 +209,7 @@ impl StageHandle {
                 end: ExternalEnd {
                     drain: Drain {
                         jail: None,
-                        pumps: command::Pumps::default(),
+                        drains: Drains::default(),
                     },
                     settlement: Settlement {
                         name: "fake".to_string(),

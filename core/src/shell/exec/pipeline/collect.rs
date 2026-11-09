@@ -8,6 +8,7 @@
 use super::super::command::{self, Claim, Started};
 use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use crate::fact::AuditIo;
+use crate::io::child::{Drains, PendingDrains};
 use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, PreparedTerminalLoan, Scope, ScopeId, Spawned,
     TerminalLoan, WaitOutcome, Watch,
@@ -140,13 +141,13 @@ impl StageEnd {
 /// is stronger: a reader-gone stop this collector did not send attributes
 /// nothing.
 fn drained(
-    Drain { jail, pumps }: Drain,
+    Drain { jail, drains }: Drain,
     sent: Option<CancelCause>,
     Window { scope, owned, .. }: Window<'_>,
 ) -> Option<CancelCause> {
     drop(jail);
     if sent != Some(CancelCause::ReaderGone) {
-        pumps.join_under(scope, || owned.into_iter().for_each(Pgid::kill));
+        drains.join_under(scope, || owned.into_iter().for_each(Pgid::kill));
     }
     sent.max(scope.cause().filter(|c| *c != CancelCause::ReaderGone))
 }
@@ -393,7 +394,7 @@ impl CollectState {
         loan: Option<TerminalLoan>,
         since: Instant,
         shell: &Shell,
-    ) -> Self {
+    ) -> Settled<Self> {
         let group = started.spawned.group.clone();
         // A lone leader's zombie pins its group through settlement. An
         // envelope's payload, not its monitor, leads the addressed group.
@@ -402,12 +403,12 @@ impl CollectState {
             .is_some_and(|owned| owned.as_raw() == started.spawned.child.id().cast_signed());
         let (tx, rx) = std::sync::mpsc::channel();
         let slot = Slot { ix: 0, tx };
-        let stage = started.register(&slot, group.owned(), None, &shell.scope);
+        let stage = started.register(&slot, group.owned(), &shell.scope)?;
         let pin = leads.then(|| Arc::clone(&stage.watch));
         let mut state = Self::new(rx, group, loan, shell.scope.clone(), Duration::ZERO, since);
         state.pin = pin;
         state.push(StageHandle::new(StageKind::External(stage), None, slot));
-        state
+        Ok(state)
     }
 
     /// Whether the group holds the terminal: the loan actually made, before
@@ -780,16 +781,26 @@ impl CollectState {
 }
 
 impl Started {
-    /// Register any external, lone or pipelined, with the same pumps and
+    /// Register any external, lone or pipelined, with the same drains and
     /// reaper. Address an envelope separately only if its payload is outside
     /// the collector's owned group; otherwise a cancellation would signal it twice.
     pub(super) fn register(
         self,
         slot: &Slot,
         collector_owned: Option<Pgid>,
-        audit: Option<StageAudit>,
         scope: &Scope,
-    ) -> LiveExternal {
+    ) -> Settled<LiveExternal> {
+        self.register_with(slot, collector_owned, |drains| drains.start(scope))
+    }
+
+    /// Keep thread creation injectable so its failure can be checked without
+    /// exhausting the host's thread budget. No child escapes that failure.
+    fn register_with(
+        self,
+        slot: &Slot,
+        collector_owned: Option<Pgid>,
+        start: impl FnOnce(PendingDrains) -> std::io::Result<Drains>,
+    ) -> Settled<LiveExternal> {
         let Self {
             shown,
             spawned:
@@ -799,25 +810,42 @@ impl Started {
                     jail,
                 },
             claim,
-            pumps,
+            drains,
         } = self;
-        let pumps = pumps.start(&mut child, scope);
+        let drains = match start(drains) {
+            Ok(drains) => drains,
+            Err(error) => {
+                // No collector owns this child yet. Never return a thread
+                // creation error with a live, unregistered process behind it.
+                if let Some(group) = landed.owned() {
+                    group.kill();
+                }
+                drop(jail);
+                let _ = child.kill();
+                let _ = child.reap();
+                return Err(Error::new(crate::error::io_message(
+                    format!("could not start output drains for '{shown}'"),
+                    &error,
+                ))
+                .into());
+            }
+        };
         let payload = match landed {
             Group::Enveloped(payload) if Some(payload) != collector_owned => Some(payload),
             Group::Enveloped(_) | Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
         };
-        LiveExternal {
+        Ok(LiveExternal {
             watch: slot.watch(child),
             payload,
             end: ExternalEnd {
-                drain: Drain { jail, pumps },
+                drain: Drain { jail, drains },
                 settlement: Settlement {
                     name: shown,
-                    audit: audit.map(Box::new),
+                    audit: None,
                     claim,
                 },
             },
-        }
+        })
     }
 
     /// Lend the terminal, then collect this child in the group it landed in.
@@ -854,7 +882,7 @@ impl Started {
                 }
             }
         };
-        let mut collect = CollectState::lone(self, loan, since, shell);
+        let mut collect = CollectState::lone(self, loan, since, shell)?;
         collect.drive();
         #[cfg(windows)]
         if let Some(job) = job {
@@ -876,9 +904,9 @@ pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<
         shown: "test".into(),
         spawned,
         claim: Claim::Unconfined,
-        pumps: command::Pumps::default(),
+        drains: PendingDrains::default(),
     };
-    let mut lone = CollectState::lone(started, None, Instant::now(), shell);
+    let mut lone = CollectState::lone(started, None, Instant::now(), shell).expect("register");
     lone.drive();
     match lone.observed.pop().flatten() {
         Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),

@@ -5,6 +5,7 @@
 
 pub mod ansi;
 mod bounded;
+pub(crate) mod child;
 mod edge;
 pub(crate) mod frame;
 mod poll;
@@ -22,7 +23,7 @@ pub(crate) use poll::poll_slice;
 pub(crate) use poll::{aborted, interrupt};
 pub use regime::{RunIo, RunStdin};
 pub use sink::{ByteBuffer, Captured, CapturedBytes, LineFn, Retained, Sink, without_terminator};
-pub(crate) use sink::{OutFd, SINK_BUFFER_CAP, WriteFault, new_buffer, tee_with_buffer};
+pub(crate) use sink::{SINK_BUFFER_CAP, WriteFault, new_buffer, tee_with_buffer};
 pub use source::{Source, SourceReader};
 pub use streams::Streams;
 
