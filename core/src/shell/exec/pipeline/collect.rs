@@ -5,15 +5,16 @@
 //! folds in launch order.  A lone external is collected as the one stage of
 //! its group, and settled as a command ends ([`CollectState::settle_lone`]).
 
-use super::super::command::{self, Born, Claim};
+use super::super::command::{self, Claim, Started};
 use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
 use crate::fact::AuditIo;
-use crate::io::Sink;
 use crate::process::{
-    CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalLoan, WaitOutcome, Watch,
+    CancelCause, Group, POLL_SLICE, Pgid, PreparedTerminalLoan, Scope, ScopeId, Spawned,
+    TerminalLoan, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, CommandOrigin, End, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
+    AuditFragment, Break, CommandOrigin, End, Error, Mooring, Settled, Shell, Stop, UNREPORTED,
+    Value,
 };
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -384,57 +385,26 @@ impl CollectState {
         }
     }
 
-    /// A collector over the one external [`command::run`] spawned, in the
-    /// group it landed in: one it leads, with no anchor; its enclosing
+    /// A collector over a standalone command's one child ([`Started::collect`]),
+    /// in the group it landed in: one it leads, with no anchor; its enclosing
     /// stage's; or ral's own.  It has no thread stage to grant a grace.
     pub(super) fn lone(
-        born: Born,
-        pumps: command::Pumps<Sink>,
+        started: Started,
         loan: Option<TerminalLoan>,
-        name: String,
-        started: Instant,
+        since: Instant,
         shell: &Shell,
     ) -> Self {
-        let Born {
-            spawned:
-                Spawned {
-                    mut child,
-                    group,
-                    jail,
-                },
-            claim,
-        } = born;
-        let pid = child.id();
-        let pumps = pumps.start(&mut child, &shell.scope);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let slot = Slot { ix: 0, tx };
-        let watch = slot.watch(child);
-        // Not behind an envelope, whose payload leads the group.
+        let group = started.spawned.group.clone();
+        // A lone leader's zombie pins its group through settlement. An
+        // envelope's payload, not its monitor, leads the addressed group.
         let leads = group
             .owned()
-            .is_some_and(|owned| owned.as_raw() == pid.cast_signed());
-        let pin = leads.then(|| Arc::clone(&watch));
-        let stage = LiveExternal {
-            watch,
-            // Its group is its collector's own.
-            payload: None,
-            end: ExternalEnd {
-                drain: Drain { jail, pumps },
-                settlement: Settlement {
-                    name,
-                    audit: None,
-                    claim,
-                },
-            },
-        };
-        let mut state = Self::new(
-            rx,
-            group,
-            loan,
-            shell.scope.clone(),
-            Duration::ZERO,
-            started,
-        );
+            .is_some_and(|owned| owned.as_raw() == started.spawned.child.id().cast_signed());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slot = Slot { ix: 0, tx };
+        let stage = started.register(&slot, group.owned(), None, &shell.scope);
+        let pin = leads.then(|| Arc::clone(&stage.watch));
+        let mut state = Self::new(rx, group, loan, shell.scope.clone(), Duration::ZERO, since);
         state.pin = pin;
         state.push(StageHandle::new(StageKind::External(stage), None, slot));
         state
@@ -809,16 +779,106 @@ impl CollectState {
     }
 }
 
+impl Started {
+    /// Register any external, lone or pipelined, with the same pumps and
+    /// reaper. Address an envelope separately only if its payload is outside
+    /// the collector's owned group; otherwise a cancellation would signal it twice.
+    pub(super) fn register(
+        self,
+        slot: &Slot,
+        collector_owned: Option<Pgid>,
+        audit: Option<StageAudit>,
+        scope: &Scope,
+    ) -> LiveExternal {
+        let Self {
+            shown,
+            spawned:
+                Spawned {
+                    mut child,
+                    group: landed,
+                    jail,
+                },
+            claim,
+            pumps,
+        } = self;
+        let pumps = pumps.start(&mut child, scope);
+        let payload = match landed {
+            Group::Enveloped(payload) if Some(payload) != collector_owned => Some(payload),
+            Group::Enveloped(_) | Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
+        };
+        LiveExternal {
+            watch: slot.watch(child),
+            payload,
+            end: ExternalEnd {
+                drain: Drain { jail, pumps },
+                settlement: Settlement {
+                    name: shown,
+                    audit: audit.map(Box::new),
+                    claim,
+                },
+            },
+        }
+    }
+
+    /// Lend the terminal, then collect this child in the group it landed in.
+    /// Even a refused loan goes through collection: no live child can escape
+    /// on that error path. The terminal returns before pump joins (on Windows,
+    /// once the job is empty, including its descendants).
+    pub(crate) fn collect(
+        self,
+        lending: Option<PreparedTerminalLoan>,
+        since: Instant,
+        shell: &Shell,
+    ) -> Settled<()> {
+        // Declared first, so an unwind kills before it releases.
+        #[cfg(windows)]
+        let job = match self.spawned.group {
+            Group::Owns(leader) => Some(super::group::Job::owning(leader)),
+            Group::Enveloped(_) | Group::Joins(_) | Group::Shares => None,
+        };
+        let (loan, refusal) = match lending {
+            None => (None, None),
+            Some(lending) => {
+                if let Some(loan) = lending.lend(self.spawned.child.id().cast_signed()) {
+                    (Some(loan), None)
+                } else {
+                    if let Some(group) = self.spawned.group.owned() {
+                        group.kill();
+                    }
+                    let refusal = Error::new(format!(
+                        "could not hand the terminal to '{}': tcsetpgrp refused its process group; the \
+                         command was killed before it could stop on a terminal read",
+                        self.shown
+                    ));
+                    (None, Some(refusal))
+                }
+            }
+        };
+        let mut collect = CollectState::lone(self, loan, since, shell);
+        collect.drive();
+        #[cfg(windows)]
+        if let Some(job) = job {
+            job.drain(&shell.scope);
+        }
+        let settled = collect.settle_lone();
+        match refusal {
+            Some(refusal) => Err(refusal.into()),
+            None => settled,
+        }
+    }
+}
+
 /// What the collector waits a lone external out to before it settles it: its
 /// raw end, and the cause it sent.
 #[cfg(all(test, unix))]
 pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<CancelCause>) {
-    let pumps = command::Pumps::default();
-    let born = Born {
+    let started = Started {
+        shown: "test".into(),
         spawned,
         claim: Claim::Unconfined,
+        pumps: command::Pumps::default(),
     };
-    let mut lone = CollectState::lone(born, pumps, None, "test".into(), Instant::now(), shell);
+    let mut lone = CollectState::lone(started, None, Instant::now(), shell);
     lone.drive();
     match lone.observed.pop().flatten() {
         Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),

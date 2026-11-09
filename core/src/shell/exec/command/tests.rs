@@ -562,7 +562,6 @@ mod vet {
     use crate::authority::policy::{
         Admitted, Capabilities, ExecGrant, ExecKey, FsPolicy, GrantLayer, Program,
     };
-    use crate::authority::sandbox::Ownership;
     use crate::fact::{Check, FailureCode as _, Observed, Resource};
     use crate::ir::CommandName;
     use crate::path::FrozenPath;
@@ -570,9 +569,9 @@ mod vet {
     use std::path::Path;
 
     /// A head admitted with no surface, then prepared with no argv.
-    fn plan(head: Head, shell: &mut Shell) -> Settled<Prepared> {
+    fn plan(head: Head, shell: &mut Shell) -> Settled<ExternalCommand> {
         let head = head.admit(&Mooring::adrift(), shell)?;
-        prepare(head, &[], Ownership::Kept, shell)
+        ExternalCommand::prepare(head, &[], shell)
     }
 
     /// An executable a *bare-name* walk finds in `dir`; off Unix a bare name
@@ -705,7 +704,7 @@ mod vet {
             head.program.as_ref().map(Admitted::program),
             Ok(Program::File { arg0, .. }) if *arg0 == bin.join(&name)
         ));
-        prepare(head, &[], Ownership::Kept, &shell).expect("a resolved name must prepare");
+        ExternalCommand::prepare(head, &[], &shell).expect("a resolved name must prepare");
 
         shell.seed_cwd(
             crate::path::CwdPath::new(elsewhere.path().to_path_buf())
@@ -991,7 +990,7 @@ mod vet {
                 )
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant runs this directory");
-                let Err(Break::Error(e)) = prepare(head, &[Value::Unit], Ownership::Kept, shell)
+                let Err(Break::Error(e)) = ExternalCommand::prepare(head, &[Value::Unit], shell)
                 else {
                     panic!("the admitted path cannot be run");
                 };
@@ -1017,7 +1016,7 @@ mod vet {
             let head = Head::resolve(&CommandName::Bare("zzplain".into()), &shell.context)
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the non-executable file");
-            let Err(Break::Error(e)) = prepare(head, &[Value::Unit], Ownership::Kept, shell) else {
+            let Err(Break::Error(e)) = ExternalCommand::prepare(head, &[Value::Unit], shell) else {
                 panic!("a non-executable candidate cannot be run");
             };
             assert_eq!(e.failure_code().get(), 126, "{e:?}");
@@ -1298,7 +1297,9 @@ mod foreground {
             .admit(&mooring, &mut shell)
             .expect("an unrestricted shell admits sleep");
         let started = std::time::Instant::now();
-        let Err(Break::Error(refusal)) = run(head, &[Value::string("30")], &mooring, &shell) else {
+        let command = ExternalCommand::prepare(head, &[Value::string("30")], &shell)
+            .expect("the launch builds");
+        let Err(Break::Error(refusal)) = command.run(&mooring, &shell) else {
             panic!("a failed handoff must refuse the command");
         };
         assert!(
@@ -1388,8 +1389,8 @@ mod process {
     /// spelling the user wrote, however the spelling moves in between.
     #[cfg(unix)]
     mod judged_program {
-        use super::{Head, Prepared, prepare};
-        use crate::authority::sandbox::Ownership;
+        use super::{ChildOut, ExternalCommand, Head};
+        use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::shell::runtime::{Mooring, Shell, Value};
         use std::os::unix::fs::{PermissionsExt, symlink};
@@ -1423,16 +1424,16 @@ mod process {
             link
         }
 
-        fn judge(shell: &mut Shell, args: &[&str]) -> Prepared {
+        fn judge(shell: &mut Shell, args: &[&str]) -> ExternalCommand {
             let head = Head::resolve(&CommandName::Path("tools/build".into()), &shell.context);
             let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
             let admitted = head
                 .admit(&Mooring::adrift(), shell)
                 .expect("an unrestricted shell admits the file");
-            prepare(admitted, &args, Ownership::Kept, shell).expect("the file can be run")
+            ExternalCommand::prepare(admitted, &args, shell).expect("the file can be run")
         }
 
-        fn stdout_of(prepared: Prepared) -> String {
+        fn stdout_of(prepared: ExternalCommand) -> String {
             let out = prepared.launch.output().expect("the file runs");
             String::from_utf8(out.stdout).unwrap()
         }
@@ -1441,14 +1442,19 @@ mod process {
         /// start sees it, and is the run's stop with no child.
         #[test]
         fn a_stop_is_the_starts_and_never_the_builds() {
-            use super::start;
             let (tmp, mut shell) = workdir();
             point_build_at(tmp.path(), &plant(tmp.path(), "a"));
             let stopped = crate::process::DurableRoot::default().child();
             stopped.cancel(crate::process::CancelCause::Cancelled);
             shell.scope = crate::process::Scope::clone(&stopped);
             let prepared = judge(&mut shell, &[]);
-            let started = start(prepared, crate::process::PgidPolicy::Inherit, &shell.scope);
+            let started = prepared.start(
+                &Source::Empty,
+                ChildOut::Sink(Sink::Stdout),
+                &Sink::Stderr,
+                crate::process::PgidPolicy::Inherit,
+                &shell.scope,
+            );
             assert!(
                 matches!(
                     started,
@@ -1467,15 +1473,20 @@ mod process {
         /// No sandbox confines a start under no grant, so it claims no line.
         #[test]
         fn an_unconfined_start_claims_no_line() {
-            use super::{Born, Claim, Started, start};
+            use super::{Claim, Started};
             let (tmp, mut shell) = workdir();
             point_build_at(tmp.path(), &plant(tmp.path(), "a"));
-            let mut prepared = judge(&mut shell, &[]);
-            prepared.launch.stdout(crate::process::StdioSpec::Null);
+            let prepared = judge(&mut shell, &[]);
+            let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
             let Ok(Started {
-                born: Born { mut spawned, claim },
-                ..
-            }) = start(prepared, crate::process::PgidPolicy::Inherit, &shell.scope)
+                mut spawned, claim, ..
+            }) = prepared.start(
+                &Source::Empty,
+                ChildOut::Sink(discard.clone()),
+                &discard,
+                crate::process::PgidPolicy::Inherit,
+                &shell.scope,
+            )
             else {
                 panic!("the file starts");
             };
@@ -1699,10 +1710,10 @@ mod process {
     /// unconfined one is, never a trampoline's exit status.
     #[cfg(target_os = "macos")]
     mod confined_start {
-        use super::{Born, Claim, Head, Started, prepare, start};
+        use super::{ChildOut, Claim, ExternalCommand, Head, Started};
         use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, FsPolicy};
-        use crate::authority::sandbox::Ownership;
         use crate::fact::{Failure, Reason, Unrunnable};
+        use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::path::FrozenPath;
         use crate::process::PgidPolicy;
@@ -1743,11 +1754,19 @@ mod process {
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the script");
                 let prepared =
-                    prepare(head, &[], Ownership::Kept, shell).expect("the launch builds");
+                    ExternalCommand::prepare(head, &[], shell).expect("the launch builds");
                 let shown = prepared.shown.clone();
                 between();
-                let policy = PgidPolicy::Inherit.unless_enveloped(prepared.launch.enveloped());
-                (shown, start(prepared, policy, &shell.scope))
+                (
+                    shown,
+                    prepared.start(
+                        &Source::Empty,
+                        ChildOut::Sink(Sink::Stdout),
+                        &Sink::Stderr,
+                        PgidPolicy::Inherit,
+                        &shell.scope,
+                    ),
+                )
             })
         }
 
@@ -1771,8 +1790,7 @@ mod process {
             let (_dir, script) = script("#!/bin/sh\nexit 0\n");
             let (_, settled) = launched(&script, None, || ());
             let Ok(Started {
-                born: Born { mut spawned, claim },
-                ..
+                mut spawned, claim, ..
             }) = settled
             else {
                 panic!("the confined script starts");

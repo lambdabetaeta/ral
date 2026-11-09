@@ -1,5 +1,9 @@
 //! The owned process-launch value, built once and handed over once.
 //!
+//! Preparation owns the choices and resources; `ChildSetup::install` fixes
+//! their child-side order; spawning releases child-only descriptors before
+//! hearing the payload. No configuration method registers a launch-owned hook.
+//!
 //! Unix lowers it back to `std::process::Command`; Windows drives
 //! `CreateProcessW` itself, because handle admission and Job Object
 //! membership must be creation-time facts.
@@ -28,12 +32,74 @@ pub(crate) use windows::RawChild;
 
 #[cfg(unix)]
 pub(crate) struct Launch {
-    pub(super) cmd: std::process::Command,
+    cmd: std::process::Command,
+    pub(super) setup: ChildSetup,
     /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
     confined: Option<Confined>,
+    /// The envelope's own stderr, which the parent reads back.
     #[cfg(target_os = "linux")]
-    envelope_stdio: Option<EnvelopeCapture>,
+    diagnostics: Option<std::fs::File>,
+}
+
+/// The child's steps between fork and exec, prepared in the parent. The
+/// order they are configured in is irrelevant: [`ChildSetup::install`] fixes
+/// it once.
+#[cfg(unix)]
+#[derive(Default)]
+pub(super) struct ChildSetup {
+    stderr_to_stdout: bool,
+    #[cfg(target_os = "linux")]
+    streams: Option<EnvelopeStreams>,
+    pub(super) session_limits: crate::process::ChildLimits,
+    pub(super) grant_limits: Option<crate::process::limits::GrantLimits>,
+    #[cfg(seccomp)]
+    guest_jail: Option<crate::process::jail::linux::Entry>,
+}
+
+#[cfg(unix)]
+impl ChildSetup {
+    /// Register the child's one hook, in its one order. The incoming
+    /// command's descriptor handoff runs first; the spawn appends placement,
+    /// signal reset and the final exec-readiness mark. The hook owns every
+    /// descriptor it uses, so they live until the command is dropped.
+    fn install(self, cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        let Self {
+            stderr_to_stdout,
+            #[cfg(target_os = "linux")]
+            streams,
+            session_limits,
+            grant_limits,
+            #[cfg(seccomp)]
+            guest_jail,
+        } = self;
+        // SAFETY: all resources were prepared in the parent. The hook runs
+        // only in the forked child, before exec, as `capture` requires; it
+        // makes only async-signal-safe syscalls and neither allocates nor
+        // locks. `std` has installed stdio. Merge before capture, capture before a
+        // low RLIMIT_NOFILE, mandatory restrictions after session limits.
+        unsafe {
+            cmd.pre_exec(move || {
+                if stderr_to_stdout && libc::dup2(1, 2) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(streams) = &streams {
+                    streams.capture()?;
+                }
+                session_limits.apply()?;
+                if let Some(limits) = grant_limits {
+                    limits.apply()?;
+                }
+                #[cfg(seccomp)]
+                if let Some(jail) = &guest_jail {
+                    jail.enter()?;
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -63,61 +129,49 @@ pub(crate) struct EnvelopeStdio {
     pub(crate) diagnostics: std::fs::File,
 }
 
-/// The installed hook's one remaining choice. Shared only with the hook,
-/// so setting 2>&1 after limits are registered still takes effect before
-/// those limits: dup2 into a high slot must precede a low `RLIMIT_NOFILE`.
+/// The child-side part of [`EnvelopeStdio`]: the payload's reserved slots and
+/// the envelope's own endpoints.
 #[cfg(target_os = "linux")]
-struct EnvelopeCapture {
-    stderr_to_stdout: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    diagnostics: std::fs::File,
+struct EnvelopeStreams {
+    payload: [std::os::fd::OwnedFd; 3],
+    null: std::os::fd::OwnedFd,
+    error: std::os::fd::OwnedFd,
 }
 
 #[cfg(target_os = "linux")]
-impl EnvelopeStdio {
-    fn install(self, cmd: &mut std::process::Command) -> EnvelopeCapture {
+impl EnvelopeStreams {
+    /// Save the final payload streams, then give the envelope its own
+    /// endpoints. Only dup2/ioctl: no allocation or locks after fork.
+    ///
+    /// # Safety
+    /// Only in the forked child, between fork and exec: it replaces fds 0–2
+    /// and the reserved slots, which it only borrows.
+    unsafe fn capture(&self) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
-        use std::os::unix::process::CommandExt;
-        let Self {
-            payload,
-            null,
-            error,
-            diagnostics,
-        } = self;
-        let stderr_to_stdout = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let merge = stderr_to_stdout.clone();
-        // SAFETY: only a lock-free atomic load, dup2 and ioctl. `std` has
-        // installed stdio; this hook is registered before resource limits.
+        // SAFETY: every target is a reserved slot or a standard stream of
+        // this child, never an exec-error pipe.
         unsafe {
-            cmd.pre_exec(move || {
-                if merge.load(std::sync::atomic::Ordering::Relaxed) && libc::dup2(1, 2) < 0 {
+            for (source, target) in [0, 1, 2].into_iter().zip(&self.payload) {
+                if libc::dup2(source, target.as_raw_fd()) < 0 {
+                    // A closed inherited stream refuses preparation. An absent
+                    // slot is not a marker: bwrap could reuse it.
                     return Err(std::io::Error::last_os_error());
                 }
-                for (source, target) in [0, 1, 2].into_iter().zip(&payload) {
-                    if libc::dup2(source, target.as_raw_fd()) < 0 {
-                        // A closed inherited stream refuses preparation. An
-                        // absent slot is not a marker: bwrap could reuse it.
-                        return Err(std::io::Error::last_os_error());
-                    }
+            }
+            // bwrap discovers the host tty from its actual stdout and binds it
+            // as /dev/console. Tty lifetime is shared; pipe EOF/EPIPE is not.
+            let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+            let tty_stdout = libc::ioctl(1, libc::TCGETS, termios.as_mut_ptr()) == 0;
+            let sources = [&self.null, &self.null, &self.error];
+            for (target, source) in [0, 1, 2].into_iter().zip(sources) {
+                if target == 1 && tty_stdout {
+                    continue;
                 }
-                // bwrap discovers the host tty from its actual stdout and
-                // binds it as /dev/console. Keep that tty, never a pipe: tty
-                // lifetime is intentionally shared; pipe EOF/EPIPE is not.
-                let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
-                let tty_stdout = libc::ioctl(1, libc::TCGETS, termios.as_mut_ptr()) == 0;
-                for (target, source) in [0, 1, 2].into_iter().zip([&null, &null, &error]) {
-                    if target == 1 && tty_stdout {
-                        continue;
-                    }
-                    if libc::dup2(source.as_raw_fd(), target) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
+                if libc::dup2(source.as_raw_fd(), target) < 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
-                Ok(())
-            });
-        }
-        EnvelopeCapture {
-            stderr_to_stdout,
-            diagnostics,
+            }
+            Ok(())
         }
     }
 }
@@ -295,25 +349,37 @@ impl Launch {
         Self::from_command(cmd)
     }
 
-    /// Adopt an existing `Command`.  Set stdio and redirections on the
+    /// Adopt an existing `Command`. Set stdio and redirections on the
     /// returned `Launch`, never on the incoming one: `std` exposes no stdio
-    /// getters, so the Windows arm cannot carry them across.
+    /// getters, so the Windows arm cannot carry them across. Existing hooks
+    /// (the descriptor handoff) precede [`ChildSetup::install`]; configure
+    /// limits and redirections through `Launch`, not through incoming hooks.
     pub fn from_command(cmd: std::process::Command) -> Self {
         Self {
             cmd,
+            setup: ChildSetup::default(),
             jail: None,
             confined: None,
             #[cfg(target_os = "linux")]
-            envelope_stdio: None,
+            diagnostics: None,
         }
     }
 
-    /// Register capture immediately after the handoff, before callers add
-    /// resource-limit hooks. `std` installs the final stdio before any hook;
-    /// `dup_stdout_to_stderr` supplies the final merge choice to this hook.
+    /// Retain the reserved slots; installation captures the final stdio.
     #[cfg(target_os = "linux")]
     pub(crate) fn envelope_stdio(&mut self, stdio: EnvelopeStdio) {
-        self.envelope_stdio = Some(stdio.install(&mut self.cmd));
+        let EnvelopeStdio {
+            payload,
+            null,
+            error,
+            diagnostics,
+        } = stdio;
+        self.setup.streams = Some(EnvelopeStreams {
+            payload,
+            null,
+            error,
+        });
+        self.diagnostics = Some(diagnostics);
     }
 
     /// Run under the trampoline `confined` describes.
@@ -374,25 +440,10 @@ impl Launch {
     }
 
     pub(crate) fn dup_stdout_to_stderr(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Some(capture) = &self.envelope_stdio {
-            capture
-                .stderr_to_stdout
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            return;
-        }
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            self.cmd.pre_exec(|| {
-                if libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        self.setup.stderr_to_stdout = true;
     }
 
-    /// Prepare the cgroup and register confinement before the spawn hooks.
+    /// Prepare the cgroup and confinement without installing child actions.
     ///
     /// # Errors
     /// Seccomp compilation or any cgroup setup error.
@@ -401,14 +452,29 @@ impl Launch {
         &mut self,
         plan: &crate::process::jail::JailPlan,
     ) -> Result<(), Error> {
-        let deny = crate::authority::sandbox::Filter::ENVELOPE
-            .programs()
-            .map_err(crate::process::jail::refused)?;
-        let (cgroup, procs) =
-            crate::process::jail::linux::prepare(plan).map_err(crate::process::jail::refused)?;
-        crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs, deny);
+        let (cgroup, entry) = crate::process::jail::linux::Entry::prepare(plan)?;
         self.jail = cgroup;
+        self.setup.guest_jail = Some(entry);
         Ok(())
+    }
+
+    /// The command with its setup installed, and its jail cgroup, for a test
+    /// that probes the child after that setup.
+    #[cfg(all(test, seccomp))]
+    pub(super) fn installed(
+        self,
+    ) -> (
+        std::process::Command,
+        Option<crate::process::jail::JailCgroup>,
+    ) {
+        let Self {
+            mut cmd,
+            setup,
+            jail,
+            ..
+        } = self;
+        setup.install(&mut cmd);
+        (cmd, jail)
     }
 
     /// Spawn into `pgid` under `scope`, and on a confined launch read what
@@ -434,17 +500,17 @@ impl Launch {
             !enveloped || matches!(pgid, PgidPolicy::NewLeader),
             "an envelope leads a group of its own: place it by `PgidPolicy::unless_enveloped`"
         );
+        scope.poll()?;
         let Self {
             mut cmd,
+            setup,
             jail,
             confined,
             #[cfg(target_os = "linux")]
-            envelope_stdio,
+            diagnostics,
         } = self;
-        scope.poll()?;
-        #[cfg(target_os = "linux")]
-        let diagnostics = envelope_stdio.map(|capture| capture.diagnostics);
-        let ((child, group), confined) = fork(&mut cmd, confined, |cmd| {
+        setup.install(&mut cmd);
+        let ((child, group), confined) = fork(cmd, confined, |cmd| {
             crate::process::spawn_with_pgid(cmd, pgid)
         })?;
         let mut child = crate::process::ChildHandle::from_std(child);
@@ -482,19 +548,19 @@ impl Launch {
     ) -> Result<crate::process::group::Survivor, Unstarted> {
         let Self {
             mut cmd,
+            setup,
             jail,
             confined,
             #[cfg(target_os = "linux")]
-            envelope_stdio,
+            diagnostics,
         } = self;
         assert!(
             jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
         scope.poll()?;
-        #[cfg(target_os = "linux")]
-        let diagnostics = envelope_stdio.map(|capture| capture.diagnostics);
-        let (survivor, confined) = fork(&mut cmd, confined, crate::process::group::spawn_detached)?;
+        setup.install(&mut cmd);
+        let (survivor, confined) = fork(cmd, confined, crate::process::group::spawn_detached)?;
         if let Some(confined) = confined {
             let launcher = confined.launcher();
             let Confined { mut report, .. } = confined;
@@ -553,14 +619,16 @@ impl Launch {
     }
 }
 
-/// Fork `cmd` by `spawn`, the report's writer held across it.
+/// Fork, then release the parent's child-only descriptors before hearing
+/// the payload. The report's writer must remain open across the fork only.
 #[cfg(unix)]
 fn fork<T>(
-    cmd: &mut std::process::Command,
+    mut cmd: std::process::Command,
     confined: Option<Confined>,
     spawn: impl FnOnce(&mut std::process::Command) -> Result<T, crate::process::SpawnError>,
 ) -> Result<(T, Option<Confined<Testimony>>), Unstarted> {
-    let forked = spawn(cmd);
+    let forked = spawn(&mut cmd);
+    drop(cmd);
     let confined = confined.map(Confined::forked);
     match forked {
         Ok(born) => Ok((born, confined)),
@@ -681,6 +749,58 @@ mod tests {
             Pgid::from_raw(i32::MAX).expect("positive"),
             Scope::clone(&unstopped()),
         ))
+    }
+
+    #[test]
+    fn stderr_merge_uses_the_final_stdout() {
+        let mut launch = Launch::new("/bin/sh");
+        launch.dup_stdout_to_stderr();
+        launch.args(["-c", "printf OUT; printf ERR >&2"]);
+        // output() supplies the streams after the merge was configured.
+        let output = launch.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"OUTERR");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+
+    #[test]
+    fn grant_limits_win_even_when_configured_before_session_limits() {
+        use rustix::process::{Resource, getrlimit};
+        let core_bytes = getrlimit(Resource::Core).maximum.unwrap_or(1024).min(1024);
+        if core_bytes == 0 {
+            return; // This host already forbids core dumps; it cannot witness precedence.
+        }
+        let mut launch = Launch::new("/bin/sh");
+        launch.args(["-c", "ulimit -Sc; ulimit -Hc"]);
+        launch.limit_resources().unwrap();
+        launch.limit_session(crate::process::ChildLimits {
+            core_bytes: Some(core_bytes),
+            ..Default::default()
+        });
+        let output = launch.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"0\n0\n");
+    }
+
+    #[test]
+    fn detached_launches_install_the_same_merge_and_limits() {
+        use crate::process::StdioSpec;
+        use std::io::Read;
+        let (mut reader, writer) = crate::process::cloexec_pipe().unwrap();
+        let mut launch = Launch::new("/bin/sh");
+        launch.args(["-c", "ulimit -n >&2"]);
+        launch.limit_session(crate::process::ChildLimits {
+            open_files: Some(64),
+            ..Default::default()
+        });
+        launch.dup_stdout_to_stderr();
+        launch.stdin(StdioSpec::Null);
+        launch.stdout(StdioSpec::from_owned(writer));
+        launch.stderr(StdioSpec::Null);
+        launch.spawn_detached(&unstopped()).unwrap();
+        let mut output = String::new();
+        reader.read_to_string(&mut output).unwrap();
+        assert_eq!(output, "64\n");
     }
 
     /// ral's own step failing refuses the launch; the `execve` failing is

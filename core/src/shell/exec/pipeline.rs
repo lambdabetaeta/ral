@@ -1,8 +1,8 @@
 //! Pipeline execution engine.  `resolve` freezes each stage's launch
 //! decision, `launch` places every stage in one process group, `join` folds
 //! their observations into one value.  Its collector is every external's one
-//! waiter: [`join_lone`] waits on a lone command's child as on the one stage
-//! of the group it landed in.
+//! waiter: [`Started::collect`](super::command::Started::collect) waits on a
+//! lone command's child as on the one stage of the group it landed in.
 
 pub(crate) mod anchor;
 mod collect;
@@ -14,10 +14,7 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use super::command::Born;
-use crate::io::Sink;
 use crate::ir::{Argv, Comp};
-use crate::process::TerminalLoan;
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -126,35 +123,6 @@ impl PipeNode {
         drop(group);
         value
     }
-}
-
-/// Wait on the one child [`command::run`](super::command::run) spawned, in
-/// the group it landed in, and settle it as a command ends.  The terminal
-/// comes back the instant it is dead, before its pumps are joined; on
-/// Windows only once its job is empty, its descendants included.
-pub(crate) fn join_lone(
-    born: Born,
-    pumps: super::command::Pumps<Sink>,
-    loan: Option<TerminalLoan>,
-    name: String,
-    started: Instant,
-    shell: &Shell,
-) -> Settled<()> {
-    // Declared first, so an unwind kills before it releases.
-    #[cfg(windows)]
-    let job = match born.spawned.group {
-        crate::process::Group::Owns(leader) => Some(group::Job::owning(leader)),
-        crate::process::Group::Enveloped(_)
-        | crate::process::Group::Joins(_)
-        | crate::process::Group::Shares => None,
-    };
-    let mut collect = CollectState::lone(born, pumps, loan, name, started, shell);
-    collect.drive();
-    #[cfg(windows)]
-    if let Some(job) = job {
-        job.drain(&shell.scope);
-    }
-    collect.settle_lone()
 }
 
 /// Spawn each stage in turn onto `collect`, stopping at the first that fails.

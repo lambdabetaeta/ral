@@ -391,7 +391,7 @@ mod tests {
                 cgroup: root.path().join(format!("{ownership:?}")),
                 limits: JailLimits::default(),
             };
-            assert!(linux::prepare(&plan).is_err());
+            assert!(linux::prepare_cgroup(&plan).is_err());
             assert_eq!(
                 std::fs::read_to_string(plan.cgroup.join("memory.max")).unwrap(),
                 plan.limits.memory_max.to_string(),

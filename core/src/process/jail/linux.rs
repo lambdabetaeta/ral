@@ -140,7 +140,7 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
-pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(Option<JailCgroup>, OwnedFd)> {
+pub(super) fn prepare_cgroup(plan: &JailPlan) -> io::Result<(Option<JailCgroup>, OwnedFd)> {
     make_delegated(&plan.cgroup)?;
     let cgroup = match plan.ownership {
         Ownership::Kept => Some(JailCgroup {
@@ -201,48 +201,61 @@ fn write_pid(fd: RawFd, pid: libc::pid_t) -> io::Result<()> {
     Ok(())
 }
 
-/// Place the child in its cgroup and drop it to the plan's uid/gid before
-/// `NO_NEW_PRIVS` forbids regaining any of it.  `setresgid` comes
-/// first: a process cannot change its gid once its uid is unprivileged.
-///
-/// # Safety
-/// The closure runs between `fork` and `exec`, so every step is
-/// async-signal-safe, allocates nothing, and takes no lock.
+/// Everything needed to enter a jail, prepared before fork.
 #[cfg(seccomp)]
-pub(crate) fn install_pre_exec(
-    cmd: &mut std::process::Command,
-    plan: &JailPlan,
+pub(in crate::process) struct Entry {
+    uid: libc::uid_t,
+    net: Option<Net>,
     cgroup_procs: OwnedFd,
     deny: &'static Programs,
-) {
-    use std::os::unix::process::CommandExt;
-    let uid = plan.seq.uid();
-    let gid = uid;
-    let net = plan.net;
-    let procs_fd = cgroup_procs.as_raw_fd();
-    unsafe {
-        cmd.pre_exec(move || {
-            let _keep_open = &cgroup_procs;
-            write_pid(procs_fd, libc::getpid())?;
-            match net {
+}
+
+#[cfg(seccomp)]
+impl Entry {
+    pub(in crate::process) fn prepare(
+        plan: &JailPlan,
+    ) -> Result<(Option<JailCgroup>, Self), crate::error::Error> {
+        let deny = crate::authority::sandbox::Filter::ENVELOPE
+            .programs()
+            .map_err(super::refused)?;
+        let (cgroup, cgroup_procs) = prepare_cgroup(plan).map_err(super::refused)?;
+        Ok((
+            cgroup,
+            Self {
+                uid: plan.seq.uid(),
+                net: plan.net,
+                cgroup_procs,
+                deny,
+            },
+        ))
+    }
+
+    /// Join the cgroup, isolate the network, drop identity, then confine.
+    /// Gid precedes uid: an unprivileged process cannot change its gid.
+    /// Only async-signal-safe work; no allocation or locks after fork.
+    pub(in crate::process) fn enter(&self) -> io::Result<()> {
+        // SAFETY: each syscall uses live owned descriptors or stack data.
+        unsafe {
+            write_pid(self.cgroup_procs.as_raw_fd(), libc::getpid())?;
+            match self.net {
                 Some(Net::Offline) => isolate_network()?,
                 None => (),
             }
             if libc::setgroups(0, std::ptr::null()) < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::setresgid(gid, gid, gid) < 0 {
+            if libc::setresgid(self.uid, self.uid, self.uid) < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::setresuid(uid, uid, uid) < 0 {
+            if libc::setresuid(self.uid, self.uid, self.uid) < 0 {
                 return Err(io::Error::last_os_error());
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
             mark_descriptors()?;
-            deny.install()
-        });
+            self.deny.install()
+        }
     }
 }
 
@@ -490,7 +503,7 @@ mod tests {
                 cgroup: path.join("detached"),
                 limits: JailLimits::default(),
             };
-            drop(prepare(&shared).unwrap());
+            drop(prepare_cgroup(&shared).unwrap());
             let _shared_cleanup = JailCgroup::at(shared.cgroup.clone());
 
             struct Member(std::process::Child);
@@ -533,7 +546,7 @@ mod tests {
 
             shared.limits.cpu_quota_pct = 0;
             assert_eq!(
-                prepare(&shared).err().unwrap().raw_os_error(),
+                prepare_cgroup(&shared).err().unwrap().raw_os_error(),
                 Some(libc::EINVAL),
                 "zero CPU quota must fail after earlier setup succeeds"
             );
@@ -563,7 +576,7 @@ mod tests {
             };
             kept.limits.cpu_quota_pct = 0;
             assert_eq!(
-                prepare(&kept).err().unwrap().raw_os_error(),
+                prepare_cgroup(&kept).err().unwrap().raw_os_error(),
                 Some(libc::EINVAL)
             );
             assert!(
@@ -632,9 +645,10 @@ mod tests {
             };
             let mut launch = crate::process::Launch::new("/bin/true");
             launch.apply_guest_jail(&plan).unwrap();
-            // SAFETY: the probe only makes raw syscalls after the jail's hook.
+            let (mut cmd, _jail) = launch.installed();
+            // SAFETY: the probe only makes raw syscalls after the installed setup.
             unsafe {
-                launch.cmd.pre_exec(move || {
+                cmd.pre_exec(move || {
                     if libc::getuid() != plan.seq.uid() {
                         return Err(io::Error::from_raw_os_error(libc::EINVAL));
                     }
@@ -648,7 +662,7 @@ mod tests {
                     Ok(())
                 });
             }
-            assert!(launch.cmd.spawn().unwrap().wait().unwrap().success());
+            assert!(cmd.spawn().unwrap().wait().unwrap().success());
         }
     }
 }

@@ -128,8 +128,8 @@ mod tests {
         let run = |limit| {
             let mut cmd = Launch::new("/bin/sh");
             cmd.args(["-c", "/usr/bin/true; exit $?"]);
-            cmd.limit_forks(limit);
-            cmd.cmd.output().unwrap()
+            cmd.setup.grant_limits = Some(crate::process::limits::GrantLimits { forks: limit });
+            cmd.output().unwrap()
         };
         let allowed = run(limit().unwrap());
         assert!(allowed.status.success(), "{allowed:?}");

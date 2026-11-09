@@ -1,8 +1,8 @@
 ---
 generated_at_commit: 3e3fbc84
-verified_at_commit: 2793e544
-verified_at_date: 2026-11-07
-anchors: [sandboxed_command, build_launch, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+verified_at_commit: 257c6c00
+verified_at_date: 2026-11-09
+anchors: [sandboxed_command, ExternalCommand::prepare, ChildSetup::install, Entry::prepare, Entry::enter, EnvelopeStreams::capture, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -13,22 +13,25 @@ instead: the utility and its descendants keep the jail and VM perimeter, but
 receive no per-grant fs/exec projection. Seccomp and, when requested, offline
 network namespaces still apply there.
 
-When `prepare` builds the launch of an admitted external or bundled child
-(`build_launch`, `shell/exec/command.rs`) on a host under a restrictive
+When `ExternalCommand::prepare` (`shell/exec/command.rs`) builds the launch of
+an admitted external or bundled child on a host under a restrictive
 projection, it calls `sandboxed_command`
 (`authority/sandbox/launch.rs`), which describes that one child's
 confinement. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
 **Building describes; the spawn confines** ([[design/exec|exec]]). Everything
-that may be stopped runs in `Launch::spawn` (`spawn_detached`), under the scope
-`start` hands it; the build waits on nothing a stop must end.
+that may be stopped runs in `Launch::spawn` (`spawn_detached`), under the
+run's scope; the build waits on nothing a stop must end.
 
 - **Unix builds** render the projection, open the binds, create the Landlock
-  ruleset, seal the warrant, open the report socket and register the `pre_exec`
-  hooks: descriptors of this process, and hooks in their fixed order. A guest
-  jail instead creates its cgroup and registers its hook in that order. The
-  linker glob is a bounded walk of a handful of library directories and polls
+  ruleset, seal the warrant, open the report socket and register the descriptor
+  handoff's `pre_exec` hook. The launch's own child steps are data, its
+  `ChildSetup`: the spawn installs them as one hook after the handoff's, in one
+  order whatever order they were configured in (`ChildSetup::install`). A guest
+  jail instead creates its cgroup and opens its `cgroup.procs`
+  (`Entry::prepare`), and enters it as that hook's last step (`Entry::enter`).
+  The linker glob is a bounded walk of a handful of library directories and polls
   nothing; the bwrap host probe runs its bwrap children once per process and
   caches the answer. The spawn forks, then waits for the first word.
 - **Windows builds** a `Confined` that only describes the token: the
@@ -39,11 +42,11 @@ that may be stopped runs in `Launch::spawn` (`spawn_detached`), under the scope
   and between directories of each proof; a stamp's own Win32 propagation
   runs to its end.
 
-On Unix, `build_launch` registers the session's `ChildLimits` hook immediately
-after `apply_env`, before `limit_resources`. `pre_exec` hooks run in registration
-order: session limits set only the soft ceiling, preserving the hard ceiling;
-a grant sets soft and hard together afterward and therefore wins. ral's own
-resource limits never change.
+On Unix, preparation records the session's `ChildLimits` and, under a grant,
+the mandatory limits of `limit_resources`. `ChildSetup::install` applies them
+in one order: session limits set only the soft ceiling, preserving the hard
+ceiling; a grant's set soft and hard together afterward and therefore win.
+ral's own resource limits never change.
 The grant's limit is part of the launch, applied inside the platform's spawn
 ([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
 
@@ -101,15 +104,16 @@ socket, on which the trampoline says what became of the program
   report's and marks that one close-on-exec, so the program inherits none, and a
   `Kept` launch's read of `--info-fd` ends: the payload's group exists.
 - **Payload pipe lifetime belongs to the payload, not its envelope.**
-  `EnvelopeStdio` captures the resolved standard descriptors after stdio setup,
-  before resource-limit hooks can lower `RLIMIT_NOFILE` below the reserved slots.
-  The launch's final stderr-merge choice is applied by that same capture hook,
-  even when selected after limits were registered. Kept and detached launches
-  use the same ordering. bwrap gets
+  `EnvelopeStreams::capture` saves the resolved standard descriptors in the
+  reserved slots after stdio setup and the stderr merge, and before the
+  session's limits can lower `RLIMIT_NOFILE` below those slots
+  (`ChildSetup::install`). Kept and detached launches install the same hook.
+  bwrap gets
   independent null input/output and diagnostic stderr; its monitor and init
   close the high payload slots. Only the trampoline installs them at 0–2,
   before confinement's sweep, then releases its own copies after starting the
-  program. The parent's consuming launch releases its copies before returning.
+  program. The parent releases its copies with the command, right after the
+  fork and before it hears the trampoline.
   Early EOF/EPIPE therefore does not wait for the envelope's exit.
 - **A selected stdout tty is the deliberate exception.** bwrap retains that
   tty to discover and bind `/dev/console`; the payload receives the same tty.

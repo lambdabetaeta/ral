@@ -2,18 +2,17 @@
 //! thread, or a direct external spawned into the pipeline's process group.
 
 use super::super::command;
-use super::super::command::{Born, ChildOut, Head, Started};
-use super::collect::Settlement;
+use super::super::command::{ChildOut, ExternalCommand, Head};
 use super::collect::Slot;
 use super::group::PipelineGroup;
 use super::resolve::StageLaunch;
 use super::route::{ByteIn, ByteOut, StageRoute};
-use super::stage::{Drain, ExternalEnd, LiveExternal, StageAudit, StageHandle, StageKind};
+use super::stage::{LiveExternal, StageAudit, StageHandle, StageKind};
 use super::thread::launch_thread_stage;
 use crate::error::io_message;
 use crate::fact::AuditIo;
-use crate::io::{Sink, Source, SourceReader};
-use crate::process::{Group, PgidPolicy, Scope, Spawned};
+use crate::io::{Source, SourceReader};
+use crate::process::{PgidPolicy, Scope};
 use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
@@ -38,26 +37,6 @@ pub(super) fn stage_stdin(
         },
     };
     Ok(Source::Reader(reader.interruptible(scope.clone())))
-}
-
-/// Wire a direct external stage: its upstream pipe end is the source
-/// `wire_stdio` sees, the parent's stdin filling the boundary edge.
-fn wire_stage(
-    cmd: &mut crate::process::Launch,
-    stdin: ByteIn,
-    stdout: ChildOut,
-    holds_terminal: bool,
-    shell: &Shell,
-) -> Settled<command::Pumps<Sink>> {
-    let upstream;
-    let stdin = match stdin {
-        ByteIn::Upstream(r) => {
-            upstream = Source::Reader(SourceReader::pipe(r));
-            &upstream
-        }
-        ByteIn::Parent => command::boundary_stdin(shell, holds_terminal),
-    };
-    command::wire_stdio(cmd, stdin, stdout, &shell.io.stderr)
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -126,67 +105,54 @@ fn launch_external_stage_direct(
     cx.shell.at_site(name.clone(), span, |shell| {
         let audit_start = shell.audit_start(mooring);
         let head = head.admit(mooring, shell)?;
-        let launched = (|| -> Settled<_> {
-            let mut prepared = command::prepare(
-                head,
-                args,
-                crate::authority::sandbox::Ownership::Kept,
-                shell,
-            )?;
-            let pumps = wire_stage(&mut prepared.launch, stdin, stdout, holds_terminal, shell)?;
-            let policy = PgidPolicy::Join(group.membership(&shell.scope))
-                .unless_enveloped(prepared.launch.enveloped());
-            let started = command::start(prepared, policy, &shell.scope)?;
-            Ok((started, pumps))
-        })();
-        let (started, pumps) = launched.inspect_err(|broke| {
-            if let Some(start) = &audit_start {
-                let obs = shell.command_observation(
-                    start,
-                    &name,
-                    Value::render_argv(args),
-                    CommandOrigin::External,
-                    Some(broke),
-                    AuditIo::default(),
-                );
-                shell.observe_stamped(Some(mooring), obs);
-            }
-        })?;
-        let Started {
-            shown,
-            args,
-            born:
-                Born {
-                    spawned:
-                        Spawned {
-                            mut child,
-                            group: landed,
-                            jail,
-                        },
-                    claim,
-                },
-        } = started;
-        let pumps = pumps.start(&mut child, &shell.scope);
-        let payload = match landed {
-            Group::Enveloped(payload) => Some(payload),
-            Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
+        // Render audit values before any child exists, and only if somebody
+        // will consume them. The command independently vets its exec argv.
+        let audit_args = if audit_start.is_some() {
+            Value::render_argv(args)
+        } else {
+            Vec::new()
         };
-        Ok(LiveExternal {
-            watch: slot.watch(child),
-            payload,
-            end: ExternalEnd {
-                drain: Drain { jail, pumps },
-                settlement: Settlement {
-                    name: shown,
-                    audit: Some(Box::new(StageAudit {
-                        prov: shell.local.audit.call_site().clone(),
-                        start: audit_start,
-                        args,
-                    })),
-                    claim,
-                },
-            },
-        })
+        let launched = (|| -> Settled<_> {
+            let command = ExternalCommand::prepare(head, args, shell)?;
+            let upstream;
+            let stdin = match stdin {
+                ByteIn::Upstream(r) => {
+                    upstream = Source::Reader(SourceReader::pipe(r));
+                    &upstream
+                }
+                ByteIn::Parent => command::boundary_stdin(shell, holds_terminal),
+            };
+            command.start(
+                stdin,
+                stdout,
+                &shell.io.stderr,
+                PgidPolicy::Join(group.membership(&shell.scope)),
+                &shell.scope,
+            )
+        })();
+        let started = match launched {
+            Ok(started) => started,
+            Err(broke) => {
+                if let Some(start) = &audit_start {
+                    let obs = shell.command_observation(
+                        start,
+                        &name,
+                        audit_args,
+                        CommandOrigin::External,
+                        Some(&broke),
+                        AuditIo::default(),
+                    );
+                    shell.observe_stamped(Some(mooring), obs);
+                }
+                return Err(broke);
+            }
+        };
+        let audit = StageAudit {
+            prov: shell.local.audit.call_site().clone(),
+            start: audit_start,
+            args: audit_args,
+        };
+        Ok(started.register(slot, group.group().owned(), Some(audit), &shell.scope))
     })
 }
 

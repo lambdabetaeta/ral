@@ -143,8 +143,9 @@ fn start_granted<R>(
     script: &str,
     then: impl FnOnce(crate::shell::exec::command::Started, &crate::shell::runtime::Shell) -> R,
 ) -> R {
-    use crate::process::{PgidPolicy, StdioSpec};
-    use crate::shell::exec::command::{Head, prepare, start};
+    use crate::io::{Sink, Source};
+    use crate::process::PgidPolicy;
+    use crate::shell::exec::command::{ChildOut, ExternalCommand, Head};
     let mut shell = crate::test_helper::core_shell();
     let layer = crate::test_helper::layer(Capabilities {
         gpu: Some(crate::authority::policy::Gpu::Withheld),
@@ -158,13 +159,16 @@ fn start_granted<R>(
         .admit(&crate::shell::runtime::Mooring::adrift(), shell)
         .expect("the grant admits /bin/sh");
         let args = ["-c", script].map(crate::shell::runtime::Value::string);
-        let mut prepared = prepare(head, &args, Ownership::Kept, shell).expect("the launch builds");
-        prepared
-            .launch
-            .stdin(StdioSpec::Null)
-            .stdout(StdioSpec::Null)
-            .stderr(StdioSpec::Null);
-        let started = start(prepared, PgidPolicy::NewLeader, &shell.scope)
+        let command = ExternalCommand::prepare(head, &args, shell).expect("the launch builds");
+        let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
+        let started = command
+            .start(
+                &Source::Empty,
+                ChildOut::Sink(discard.clone()),
+                &discard,
+                PgidPolicy::NewLeader,
+                &shell.scope,
+            )
             .unwrap_or_else(|broke| panic!("the confined sh must start: {broke:?}"));
         then(started, shell)
     })

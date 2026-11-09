@@ -9,7 +9,7 @@
 
 use super::Walk;
 use crate::path::site::Silent;
-use crate::path::{LexicalPath, Resolver, shown, utf8};
+use crate::path::{LexicalPath, Resolver, utf8};
 use crate::site::site;
 use globset::{GlobBuilder, GlobMatcher};
 use regex_syntax::ParserBuilder;
@@ -75,7 +75,7 @@ impl Glob {
         let root = LexicalPath::absolute(&prefix).ok_or_else(|| {
             format!(
                 "'{}': a glob walks from an absolute directory",
-                shown(&prefix)
+                crate::path::shown(&prefix)
             )
         })?;
         Ok(Self { root, steps })

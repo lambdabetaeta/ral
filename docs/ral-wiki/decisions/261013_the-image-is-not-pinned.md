@@ -1,8 +1,8 @@
 ---
 status: active
 generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-anchors: [Program, Head, build_launch, Warrant, Confined, Slot, build, admit_exec, Binds]
+verified_at_commit: 257c6c00
+anchors: [Program, Head, ExternalCommand::prepare, Warrant, Confined, Slot, build, admit_exec, Binds]
 ---
 
 # The image is not pinned
@@ -176,12 +176,12 @@ What the kernel now reports:
 ## Where
 
 `core/src/authority/policy/exec.rs` (`Program`), `core/src/path/forms.rs`,
-`core/src/shell/exec/command/{head,process}.rs` (`Program::file`, `build_launch`),
+`core/src/shell/exec/command.rs` (`Head`, `ExternalCommand::prepare`),
 `core/src/process/launch.rs` (`Launch::new`), `core/src/authority/sandbox/launch.rs`,
 `core/src/authority/sandbox/warrant.rs` (`Confined`, `Warrant::confine`),
 `core/src/authority/sandbox/warrant/handoff.rs` (`Slot`),
 `core/src/authority/sandbox/carriers.rs`, `core/src/authority/sandbox/linux.rs`,
 `core/src/authority/sandbox/linux/shown.rs` (`Binds::open`),
 `core/src/authority/sandbox/linux/landlock.rs` (`build`, `admit_exec`); tests in
-`core/src/shell/exec/command/process.rs` (`judged_program`),
+`core/src/shell/exec/command/tests.rs` (`Program::file`, `judged_program`),
 `core/src/authority/sandbox/linux.rs` and `ral/tests/script_name.rs`.

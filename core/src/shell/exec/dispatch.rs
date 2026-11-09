@@ -116,7 +116,7 @@ pub(crate) fn run_external(
     let shown = head.shown.clone();
     call_external(&shown, args, span, mooring, shell, |shell| {
         with_redirects(redirects, span, mooring, shell, |shell| {
-            command::run(head, args, mooring, shell)
+            command::ExternalCommand::prepare(head, args, shell)?.run(mooring, shell)
         })
     })
 }

@@ -519,7 +519,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn envelope_stream_capture_precedes_low_nofile_but_obeys_late_redirection() {
+    fn envelope_capture_uses_final_redirections_before_low_nofile() {
         use crate::process::{Launch, StdioSpec};
         let mut handoff = Handoff::default();
         let (stdio, [_, output, error]) = handoff.streams().expect("reserve stream slots");
@@ -533,15 +533,15 @@ mod tests {
         ]);
         handoff.install(&mut cmd);
         let mut launch = Launch::from_command(cmd);
-        launch.envelope_stdio(stdio);
         launch.stdin(StdioSpec::Null);
-        // Production registers limits before wire_stdio chooses 2>&1. The
-        // high slots must be filled while dup2 can still target them.
+        // Deliberately configure capture last. Installation must merge and
+        // fill the high slots before lowering the descriptor limit.
         launch.limit_session(crate::process::ChildLimits {
             open_files: Some(64),
             ..Default::default()
         });
         launch.dup_stdout_to_stderr();
+        launch.envelope_stdio(stdio);
         let output = launch.output().expect("spawn the envelope stand-in");
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"OUTERR");

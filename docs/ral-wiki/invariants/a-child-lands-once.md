@@ -29,7 +29,7 @@ recomputes one. What each landing allows a collector to signal is
   child is spawned before its group can be lent the terminal; if `tcsetpgrp`
   then fails it sits outside the foreground, where its first tty read stops it
   for ever. It is killed and settled, and the refusal is the command's verdict
-  (`unlent`). A pipeline lends before any stage exists, so its stages read
+  (`Started::collect`). A pipeline lends before any stage exists, so its stages read
   `holds_terminal` after the lend and never meet this.
 
 **Why.** Who may signal what is the safety of every teardown: a kill aimed at a

@@ -262,9 +262,10 @@ stopped with `SIGTTIN`.
 ## Modes
 
 **Every mode performs the same operation; modes differ only in the context
-they wire around it.** Each runs the same three stages, `prepare`, `start` (or
-`start_detached`) and `ending` (`core/src/shell/exec/command.rs`), and
-wires its own streams between the first two
+they wire around it.** Each runs the same three stages of `ExternalCommand`
+(`core/src/shell/exec/command.rs`): `prepare`, a start that connects the
+streams the mode supplies and spawns (`start`, or `detach` for a survivor),
+and `ending`
 ([[internals/an-external-end-to-end|an-external-end-to-end]]).
 
 - **Building a launch only describes it; starting it acts.** `prepare` waits
@@ -280,15 +281,17 @@ wires its own streams between the first two
   exit as the program's. So `start` is the one place a launch is stopped or
   fails as a program
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
-  The order of the process limit (macOS alone has one), the `pre_exec` hooks,
-  the report socket and the warrant is fixed at build and unchanged by the
-  spawn
+  The resources, report socket and warrant are prepared before the spawn,
+  and the child's own steps are data until it: the spawn installs them as one
+  hook in one order (stderr merge, stream capture, limits, confinement), after
+  the descriptor handoff and before its own placement, signal reset and
+  exec-readiness mark
   ([[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]]).
 
-- **A plain command.** Dispatch admits; `prepare` validates the argv and
-  builds the launch; the command wires the streams and decides the group; `start` spawns;
-  it waits, joins the pumps and `ending` classifies how the child ended
-  (`command::run`).
+- **A plain command.** Dispatch admits; `ExternalCommand::prepare` validates
+  argv and builds the launch; `ExternalCommand::run` connects its streams,
+  titles the terminal and spawns. `Started::collect` uses the shared pipeline
+  collector to wait, join pumps and classify the child's end through `ending`.
 - **A pipeline stage.** Only an external is a process; every other stage is a
   thread of ral's own process
   ([[decisions/260902_stages-are-threads|stages-are-threads]],

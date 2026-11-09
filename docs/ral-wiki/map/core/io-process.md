@@ -282,7 +282,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   cap respects the inherited hard limit, and
   `limits::failure_hint` offers a conditional process-limit explanation for
   status 128 when no kernel denial was attributed.
-  `Launch::limit_resources` arms the pre-exec half; on Windows the Job Object
+  `Launch::limit_resources` arms the pre-exec half, which `ChildSetup::install`
+  applies after the session's limits; on Windows the Job Object
   cap is set at the launch boundary (`launched`, `set_active_process_limit`),
   on the child's group's job or a job made for it alone. A budget that cannot
   be armed is an `Err`, never a warning: on macOS the launch is refused at
@@ -301,7 +302,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   and the `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
   no wait, and no `JailCgroup` comes back — shared membership never owns one (below). Unix
-  lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
+  lowers to `std::process::Command`: its `ChildSetup` (stderr merge, payload
+  capture, limits, guest-jail entry) becomes one `pre_exec` hook, in one order,
+  ahead of the pgid/fd discipline, and the command is dropped right after the
+  fork, releasing child-only descriptors before the trampoline is heard;
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
   attribute a confined spawn attaches (its projection's AppContainer SID and
@@ -359,8 +363,10 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   stderr with `close_range(CLOSE_RANGE_CLOEXEC)`, then the envelope's
   [[decisions/260906_seccomp-is-a-typed-deny-set|seccomp deny-set]];
   kill-whole via `cgroup.kill`, and `EBUSY`-polled removal.
-  `Launch::apply_guest_jail` resolves the programs before preparation; the
-  pre-exec hook neither allocates nor locks, and any failure refuses launch.
+  `Launch::apply_guest_jail` resolves the programs and opens `cgroup.procs`
+  before the fork (`Entry::prepare`); `Entry::enter`, the last step of the
+  launch's one pre-exec hook, neither allocates nor locks, and any failure
+  refuses launch.
   The offline-network test probes user then network namespace creation before
   checking isolation; it skips when unprivileged user namespaces are refused
   or granted without capabilities, as AppArmor can enforce.
@@ -377,7 +383,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   down, one level ahead of each mkdir. A parent that will not delegate is
   refused outright rather than tolerated: a jail whose limits cannot be
   written must not run the command uncapped instead. `JailPlan` carries
-  `Ownership`: after delegation and before fallible setup, `prepare` constructs
+  `Ownership`: after delegation and before fallible setup, `prepare_cgroup` constructs
   `Some(JailCgroup)` only for a kept command. Dropping it kills whatever is left
   (`cgroup.kill`) and removes its leaf, so a setup, wiring or spawn failure,
   pipeline rollback or settled child finishes it once. `Launch` and an external

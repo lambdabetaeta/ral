@@ -1,5 +1,5 @@
 //! What a launch runs ([`Image`]), and confining one external or bundled
-//! child under the platform's OS sandbox.  `build_launch` in
+//! child under the platform's OS sandbox.  `ExternalCommand::prepare` in
 //! `shell::exec::command` routes here whenever a projection is
 //! active and no guest jail already confines the child.
 //!

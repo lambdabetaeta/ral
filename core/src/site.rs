@@ -80,7 +80,7 @@ pub(crate) enum Silent {
     /// The `Command` for a boot-pinned sandbox binary (the ral re-exec for
     /// helpers and bundled tools, the bwrap envelope), built over the pin's
     /// exec path.  It raises no card: an infrastructure spawn, not a model
-    /// exec image, which surfaces at `command::run`.
+    /// exec image, which surfaces at `ExternalCommand::run`.
     #[cfg(unix)]
     PinnedExec,
     /// The `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary,
@@ -92,7 +92,7 @@ pub(crate) enum Silent {
     /// The `Command` of the ral re-exec for helper subprocesses (the pipeline
     /// anchor, the bundled-tool multicall), built over the live `current_exe`
     /// when no boot pin exists.  It raises no card: an infrastructure spawn,
-    /// not a model exec image, which surfaces at `command::run`.
+    /// not a model exec image, which surfaces at `ExternalCommand::run`.
     #[cfg(unix)]
     SelfReexec,
     /// A boot-time sandbox binary (ral itself, the bwrap envelope), opened to

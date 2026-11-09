@@ -1453,7 +1453,7 @@ fn drive_settles_a_stage_whose_producer_unwound() {
     drop(group);
 }
 
-// ── A lone external: `command::run`'s one child ───────────────────────────
+// ── A lone external: `ExternalCommand::run`'s one child ───────────────────
 //
 // The collector waits on it as on the one stage of the group it landed in:
 // one it leads (`NewLeader`), a stage's it joined, or ral's own (`Inherit`).
@@ -1478,10 +1478,44 @@ fn spawned(cmd: &mut std::process::Command, policy: crate::process::PgidPolicy) 
 }
 
 /// `spawned`, born of an unconfined start: it claims no deny line.
-fn unconfined(spawned: Spawned) -> Born {
-    Born {
+fn unconfined(spawned: Spawned, name: &str, pumps: command::Pumps<crate::io::Sink>) -> Started {
+    Started {
+        shown: name.into(),
         spawned,
         claim: Claim::Unconfined,
+        pumps,
+    }
+}
+
+/// Lone and pipeline registration differ only in whether the collector
+/// already owns the payload's group. Never address that group twice.
+#[cfg(unix)]
+#[test]
+fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
+    let scope = DurableRoot::default().child();
+    for owns_payload in [false, true] {
+        let mut child = spawned(
+            &mut std::process::Command::new("/bin/true"),
+            crate::process::PgidPolicy::NewLeader,
+        );
+        let payload = child.group.owned().unwrap();
+        // This child stands in for the payload; the addressing relation,
+        // not confinement itself, is the witness here.
+        child.group = Group::Enveloped(payload);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stage = unconfined(child, "true", command::Pumps::default()).register(
+            &Slot { ix: 0, tx },
+            owns_payload.then_some(payload),
+            None,
+            &scope,
+        );
+        let ended = rx.recv().expect("the shared registration reports the exit");
+        Arc::into_inner(stage.watch)
+            .expect("the stage owns its only watch")
+            .reap()
+            .expect("reap the reported child");
+        assert!(matches!(ended, Event::Ended(0, WaitOutcome::Exited(0))));
+        assert_eq!(stage.payload, (!owns_payload).then_some(payload));
     }
 }
 
@@ -1893,14 +1927,7 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
     let shell = lone_shell(&scope);
     let (sink, _bytes) = crate::io::new_buffer();
     let pumps = command::Pumps::new(Some(sink), None);
-    let collect = CollectState::lone(
-        unconfined(lone),
-        pumps,
-        None,
-        "sh".into(),
-        Instant::now(),
-        &shell,
-    );
+    let collect = CollectState::lone(unconfined(lone, "sh", pumps), None, Instant::now(), &shell);
     let survivor = ready_pid(&pidfile);
 
     let t0 = Instant::now();
@@ -1928,14 +1955,8 @@ fn a_lone_leader_is_reaped_only_once_settled() {
     let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope);
     let pumps = command::Pumps::default();
-    let mut collect = CollectState::lone(
-        unconfined(lone),
-        pumps,
-        None,
-        "sh".into(),
-        Instant::now(),
-        &shell,
-    );
+    let mut collect =
+        CollectState::lone(unconfined(lone, "sh", pumps), None, Instant::now(), &shell);
     collect.drive();
     assert!(alive(), "the filed leader must still be a zombie");
 
@@ -1968,20 +1989,15 @@ fn an_external_is_hinted_from_its_own_claim() {
 
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", "exit 128"]);
-        let born = Born {
+        let started = Started {
+            shown: "sh".into(),
             spawned: spawned(&mut cmd, crate::process::PgidPolicy::NewLeader),
             claim: claim(confined),
+            pumps: command::Pumps::default(),
         };
         let scope = DurableRoot::default().child();
         let shell = lone_shell(&scope);
-        let mut lone = CollectState::lone(
-            born,
-            command::Pumps::default(),
-            None,
-            "sh".into(),
-            Instant::now(),
-            &shell,
-        );
+        let mut lone = CollectState::lone(started, None, Instant::now(), &shell);
         lone.drive();
         let Err(Break::Error(alone)) = lone.settle_lone() else {
             panic!("a lone exit 128 is the command's error");
@@ -2033,14 +2049,14 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
     let loan = crate::process::TerminalLoan::for_test(&frame);
 
     let t0 = Instant::now();
-    let settled = super::super::join_lone(
-        unconfined(lone),
-        pumps,
+    let mut collect = CollectState::lone(
+        unconfined(lone, "sh", pumps),
         Some(loan),
-        "sh".into(),
         Instant::now(),
         &shell,
     );
+    collect.drive();
+    let settled = collect.settle_lone();
 
     assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     assert_eq!(frame.cause(), Some(CancelCause::Interrupted));
@@ -2164,14 +2180,8 @@ fn a_lone_externals_windows_job_is_released() {
     };
     assert!(crate::process::group::is_known_group(leader.as_raw()));
 
-    let settled = super::super::join_lone(
-        unconfined(lone),
-        command::Pumps::default(),
-        None,
-        "cmd".into(),
-        Instant::now(),
-        &shell,
-    );
+    let settled =
+        unconfined(lone, "cmd", command::Pumps::default()).collect(None, Instant::now(), &shell);
 
     assert!(settled.is_ok(), "{settled:?}");
     assert!(!crate::process::group::is_known_group(leader.as_raw()));

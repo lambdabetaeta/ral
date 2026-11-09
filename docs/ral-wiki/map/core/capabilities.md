@@ -581,7 +581,7 @@ records the policy and its limits.
 Inside a *guest*, `ral-guest` starts the engine as
 `--guest-engine <cgroup-root>`, named by `guest_abi::layout::ENGINE_FLAG`.
 The daemon and jail share `layout::EXEC_CONTROLLERS`. The role installs the
-[[map/core/io-process|spawn jail]], so `build_launch`
+[[map/core/io-process|spawn jail]], so `ExternalCommand::prepare`
 (`shell/exec/command.rs`) uses it for every command: a bounded fresh
 uid and per-exec cgroup, the envelope's seccomp deny-set, and close-on-exec
 marking above stderr. The daemon disables the user namespaces bwrap needs.
@@ -696,9 +696,10 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the first
   launch that needs it), or the pinned envelope failed to spawn.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
-  image; `build_launch` reaches it directly when no projection is active.
-- `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_launch`
-  (`shell/exec/command.rs`) routes an external or bundled child through here
+  image; `ExternalCommand::prepare` reaches it directly when no projection is
+  active.
+- `launch.rs` (`sandboxed_command`) — the per-command launcher.
+  `ExternalCommand::prepare` (`shell/exec/command.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
   by the real path the guard judged, its spelling as `argv[0]`, or a
@@ -741,7 +742,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   payload's copy of its writer, whose sweep ends the parent's read once
   the payload's group exists, the Landlock ruleset, ral's pin, the
   trampoline bwrap execs, the seccomp programs (sealed memfds) and one
-  mount handle per bind. The child's one `pre_exec` only clears
+  mount handle per bind. The handoff's one `pre_exec` only clears
   close-on-exec: nothing is `dup2`'d, so no descriptor it still uses
   (`std`'s exec-error pipe, `detach`'s handshake) can be displaced. Each
   number is named as data: to bwrap in its options, the ruleset's in the

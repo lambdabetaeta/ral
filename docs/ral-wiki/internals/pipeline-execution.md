@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 3e3fbc84
-verified_at_date: 2026-11-07
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, PgidPolicy::unless_enveloped, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, join_lone, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
+verified_at_commit: 257c6c00
+verified_at_date: 2026-11-09
+anchors: [PipeNode, PipeNode::run, ExternalCommand::start, ExternalCommand::run, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Pumps::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, placement, Placement, PgidPolicy::unless_enveloped, boundary_stdin, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -10,11 +10,10 @@ anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLau
 edge is an operating-system pipe from the left stage's stdout to the right
 stage's stdin, alike for every pair; only the final stage may report a value.
 The machine's `CompKind::Pipeline` arm
-([[internals/evaluator-machine|the evaluator machine]]) reduces a single-stage
-form to its inner closure and hands a multi-stage form to `PipeNode::run`, in
-the same rule — no frame is pushed, since nothing
-runs beneath the node — resolve, launch, join (drive then fold) are the
-spine below.
+([[internals/evaluator-machine|the evaluator machine]]) hands every form, a
+single stage included, to `PipeNode::run` in one rule — no frame is pushed,
+since nothing runs beneath the node — and resolve, launch, join (drive then
+fold) are the spine below.
 A stage's own stack is empty by construction: **no stage runs in the parent, so
 none can be in tail position, and no frame ever crosses into a stage** — only
 ⟨comp, captured env⟩ rides along, the environment being the pipeline node's own
@@ -37,7 +36,8 @@ resolution, its redirects, and whether a `!{…}` audit captures bytes:
   redirect or a byte-capturing audit rules `Direct` out; the external is then
   spawned from inside that thread instead. The stage's redirects are then interpreted by `RedirectState`, the one
   interpreter a block and a standalone external share; a `Direct` stage has none,
-  and `wire_stdio` wires its stage pipes without reading a redirect list.
+  and `ExternalCommand::start` connects its stage pipes without reading a
+  redirect list.
 
 No type is consulted: a stage's classification cannot depend on what it
 returns, because the choice must be observationally transparent. A final stage
@@ -231,17 +231,19 @@ struck on the run's node, where `try` cannot absorb it. The launch's failure is
 the verdict, whatever the fold found: the fold's own fallback is the rollback's
 stop, and what the started stages did raced it.
 
-A single-stage pipeline never reaches `PipeNode::run`: the machine's
-`Pipeline` arm reduces it to its inner closure inline. An external that
-closure runs still reaches the collector, as a pipeline of one (next).
+A standalone external enters no `PipeNode`: it supplies its own placement and
+boundary streams, but shares the child execution machinery.
 
 **The collector is every external's one waiter, and a standalone command is
-a pipeline of one.** `command::run` places the child by `placement` as a
-pipeline's group is, spawns it, lends the terminal and
-hands both to `pipeline::join_lone`, which builds a collector over that one
-external (`CollectState::lone`: slot 0, no thread stage, so no cleanup grace to
-grant) and runs the same `drive` as any pipeline; `CollectState::settle_lone`
-then settles it as a command ends. No other wait on an external exists: the
+a pipeline of one.** `ExternalCommand` connects the streams and spawns for both
+cases: `start` for a stage, `run` (which titles the terminal between the two)
+for a standalone command. `Started::register` (`pipeline/collect.rs`) starts
+the pumps and subscribes to the reaper in one place; it addresses an envelope
+separately only when the collector does not already own its payload's group.
+A standalone command's `Started::collect`, beside it, lends the terminal and
+builds `CollectState::lone` (slot 0, no thread stage, so no cleanup grace to
+grant). It runs the same `drive` as any pipeline, then `settle_lone` settles it
+as a command ends. No other wait on an external exists: the
 reaper's `Watch` posts its exit as `Event::Ended` and one `cancel_all` tears it
 down, whether the child is a stage, a stage's own child, or a bare command.
 **Where the child landed (`Group`, from the `PgidPolicy` it was spawned under)
@@ -283,7 +285,8 @@ Behind an envelope the payload leads the group and the child is only its
 monitor, so there is no pin once the monitor ends.
 
 **A lone command settles in one order, and the terminal comes first.**
-`join_lone` is `drive`, then `settle_lone`:
+`Started::collect` always reaches `drive`, then `settle_lone`, even after
+killing a child whose terminal loan was refused:
 
 1. `drive` returns once the child's end is filed; on Windows `Job::drain` has
    first waited for every member of the job to leave (below);
@@ -426,10 +429,10 @@ create → assign → resume path.
 
 **On Windows a group is one owned `Job` value.** The Job Object and its `GROUPS`
 entry are held by exactly one `Job` (`pipeline/group.rs`): `PipelineGroup`'s for
-an owning pipeline, `join_lone`'s for a lone `Owns` child. Its `Drop` releases
+an owning pipeline, `Started::collect`'s for a lone `Owns` child. Its `Drop` releases
 both, killing whatever member is left; `Job::drain` waits, a slice at a time,
 for every member to leave the job, a leader's descendants included, and kills
-the job once if a cause is in force on the scope. `join_lone` declares the job
+the job once if a cause is in force on the scope. `Started::collect` declares the job
 before its collector, so an unwind kills before it releases, and drains it
 between `drive` and `settle_lone`, so a lone command's settlement begins only
 with its job empty. A pid address gets no Ctrl-Break: it is killed at once.

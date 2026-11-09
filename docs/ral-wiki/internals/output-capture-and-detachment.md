@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-verified_at_date: 2026-11-07
-anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, join_lone, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
+generated_at_commit: 257c6c00
+verified_at_commit: 257c6c00
+verified_at_date: 2026-11-09
+anchors: [Sink::pump, SINK_BUFFER_CAP, Pumps::join_under, drained, Started::collect, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, ExternalCommand::detach, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
 # Output capture and detachment
@@ -242,8 +242,9 @@ that up — the thing to escape is not the session but the parent's *observation
 of the child's pgid.
 
 - Everything up to the birth is the ordinary external-command machinery —
-  `Head::resolve`, `Head::admit`, `prepare` (the vetting and the launch)
-  (`core/src/shell/exec/command.rs`), so the grant judges the call
+  `Head::resolve`, `Head::admit`, and the vetting and launch any external is
+  prepared with, surrendered here (`ExternalCommand::detach`,
+  `core/src/shell/exec/command.rs`) — so the grant judges the call
   exactly as it judges any exec and a head a handler in scope intercepts is
   refused, birthing nothing: a handler runs inside this session, so there is
   nothing to detach (to run the real program, `^name`). Only the last act
@@ -273,9 +274,10 @@ of the child's pgid.
   (`GrantStack::permits(Flag::Shell(ShellVerb::Detach))`) and answered as
   a refusal, a `shell` list without `` `detach ``
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
-- A survivor born under a projection **keeps it for life**. `build_launch`
+- A survivor born under a projection **keeps it for life**. Preparation
   renders the frame's confinement into the launch exactly as for a child the
-  session keeps; `Ownership::Surrendered` drops only the two ties between the
+  session keeps; `Ownership::Surrendered`, which only `ExternalCommand::detach`
+  asks for, drops only the two ties between the
   session and the envelope — death (`--die-with-parent`, which against a double
   fork would kill the survivor moments after birth or never fire at all) and
   address (`--info-fd`, there being no session left to address it). The

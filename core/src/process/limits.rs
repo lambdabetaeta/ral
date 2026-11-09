@@ -80,36 +80,53 @@ pub(crate) fn failure_hint(code: i32) -> Option<String> {
 }
 
 #[cfg(unix)]
-impl Launch {
-    /// Set session soft limits, preserving the child's hard limits.
-    pub(crate) fn limit_session(&mut self, mut limits: ChildLimits) {
+impl ChildLimits {
+    /// Apply the session's soft limits in the child, preserving hard limits.
+    /// Only getrlimit/setrlimit: no allocation or locks after fork.
+    pub(super) fn apply(mut self) -> io::Result<()> {
         use rustix::process::{getrlimit, setrlimit};
-        use std::os::unix::process::CommandExt;
-        let limits = ChildLimit::ALL.map(|limit| (limit.resource, *(limit.slot)(&mut limits)));
-        if limits.iter().all(|(_, value)| value.is_none()) {
-            return;
+        for limit in ChildLimit::ALL {
+            if let Some(value) = *(limit.slot)(&mut self) {
+                let mut current = getrlimit(limit.resource);
+                current.current = Some(value);
+                setrlimit(limit.resource, current)?;
+            }
         }
-        // SAFETY: getrlimit and setrlimit are async-signal-safe.
-        unsafe {
-            self.cmd.pre_exec(move || {
-                for (resource, value) in limits {
-                    if let Some(value) = value {
-                        let mut limit = getrlimit(resource);
-                        limit.current = Some(value);
-                        setrlimit(resource, limit)?;
-                    }
-                }
-                Ok(())
-            });
-        }
+        Ok(())
+    }
+}
+
+/// Mandatory grant limits, with the process budget measured in the parent.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(super) struct GrantLimits {
+    #[cfg(target_os = "macos")]
+    pub(super) forks: libc::rlim_t,
+}
+
+#[cfg(unix)]
+impl GrantLimits {
+    /// Apply after session limits, so the mandatory ceilings win.
+    /// Only setrlimit: no allocation or locks after fork.
+    #[cfg_attr(not(target_os = "macos"), allow(clippy::unused_self))]
+    pub(super) fn apply(self) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        set_limit(Resource::Nproc, self.forks)?;
+        set_limit(Resource::Core, 0)
+    }
+}
+
+#[cfg(unix)]
+impl Launch {
+    /// Describe session soft limits; installation always precedes grant limits.
+    pub(crate) fn limit_session(&mut self, limits: ChildLimits) {
+        self.setup.session_limits = limits;
     }
 
-    /// Limit the child's resources in one `pre_exec`: no core dumps and, on
-    /// macOS, a fork brake.  Darwin counts processes per real UID but compares
-    /// the count with the *forking* process's own `RLIMIT_NPROC`, so lowering
-    /// it in the child refuses its descendants' forks and no other process of
-    /// the user's.  The budget is measured here, in the parent: the hook itself
-    /// only calls `setrlimit`.
+    /// Prepare mandatory limits: no core dumps and, on macOS, a fork brake.
+    /// Darwin compares the user's process count with the *forking* process's
+    /// own `RLIMIT_NPROC`, so this caps its descendants, not the parent's.
+    /// Measure the budget here; only setrlimit runs in the child.
     ///
     /// # Errors
     /// macOS: the budget cannot be measured.
@@ -121,26 +138,12 @@ impl Launch {
         )
     )]
     pub(crate) fn limit_resources(&mut self) -> Result<(), Error> {
-        #[cfg(target_os = "macos")]
-        self.limit_forks(
-            fork_brake::limit()
+        self.setup.grant_limits = Some(GrantLimits {
+            #[cfg(target_os = "macos")]
+            forks: fork_brake::limit()
                 .map_err(|e| unbudgeted(format_args!("cannot count your processes: {e}")))?,
-        );
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            self.cmd
-                .pre_exec(|| set_limit(rustix::process::Resource::Core, 0));
-        }
+        });
         Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn limit_forks(&mut self, limit: libc::rlim_t) {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            self.cmd
-                .pre_exec(move || set_limit(rustix::process::Resource::Nproc, limit));
-        }
     }
 }
 

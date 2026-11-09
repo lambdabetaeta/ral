@@ -17,9 +17,10 @@ already says which.
 - **The closure owns the socket.** The pre-exec closure is `move`, so the fd it
   writes is valid for as long as the `Command` lives, whenever and however
   often it is run. Nothing it writes to can have been closed or reused behind it.
-- **The mark is the last step.** Hooks run in registration order, so a caller's
-  own (rlimits, the guest jail, `2>&1`) precede the placement, the signal reset
-  and the caller's `after` hook, which precede the mark. A step added later
+- **The mark is the last step.** Hooks run in registration order, so the
+  launch's own (its one `ChildSetup` hook: `2>&1`, rlimits, the guest jail)
+  precede the placement, the signal reset and the caller's `after` hook, which
+  precede the mark. A step added later
   than the mark would be blamed on the program.
 - **On `detach`, the grandchild writes the mark and the intermediate never
   does.** The hook forks; the intermediate writes the grandchild's pid and

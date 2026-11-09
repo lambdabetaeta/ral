@@ -49,9 +49,10 @@ pub(crate) enum SpawnError {
 /// and rests on its `pre_exec`.  The [`Group`] returned is the whole
 /// registration: what addresses the child from now on.
 ///
-/// `pre_exec` closures run in registration order, so a caller's own hooks
-/// (rlimits, the guest jail, `2>&1`) run before this one, whose last step
-/// marks the child cleared for `execve`.
+/// The incoming command's descriptor handoff, then the launch's one installed
+/// setup (stderr merge, payload capture, limits, confinement), precede this
+/// hook. Here placement and signal reset precede any detached fork; only then
+/// is the child cleared for exec.
 ///
 /// # Errors
 /// [`SpawnError::Exec`] if the `execve` fails; [`SpawnError::Prepare`] if

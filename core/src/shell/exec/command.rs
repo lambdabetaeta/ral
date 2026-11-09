@@ -1,14 +1,12 @@
-//! The external arm of command dispatch — `dispatch` picks it over env and
-//! handler.  An external's life, read top to bottom: its head is resolved,
-//! admitted and probed; its argv is vetted; [`prepare`] builds the launch; the
-//! child's streams are wired and its group placed; [`start`] spawns it; the
-//! pipeline collector, every external's one waiter, waits on it; [`ending`]
-//! reads how it ended.  Each stage raises its failures one way.
+//! An external command's life: [`Head`] resolves and admits it;
+//! [`ExternalCommand::prepare`] vets its arguments and describes its launch;
+//! [`ExternalCommand::start`] connects its streams and starts it. The resulting
+//! [`Started`] owns the child, pumps and diagnostic context until collection.
 //!
-//! Pipeline stages never reach [`run`] — they take
-//! [`super::pipeline::PipeNode::run`] — but a direct stage shares
-//! [`prepare`], [`start`], the collector and [`ending`] with it, so both
-//! paths resolve, confine, start, wait on and end a call the same way.
+//! A standalone call uses [`ExternalCommand::run`], which titles the terminal
+//! between connecting and spawning. A direct pipeline stage uses `start`, then
+//! registers with the pipeline's collector instead of waiting alone. Both
+//! settle through [`ending`].
 
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
@@ -361,12 +359,12 @@ fn reject_exec_arg(cmd: &str, arg: &Value) -> Option<Break> {
 
 // ── prepare ───────────────────────────────────────────────────────────────────
 
-/// A vetted call built into its launch, not yet started.  `shown` is the
-/// name diagnostics and audit report; the launch runs `image` with `args`.
-pub(crate) struct Prepared {
+/// A vetted call built into its launch, not yet started. `shown` is the
+/// diagnostic name; the launch owns the vetted argv. Audit boundaries render
+/// their original values, just as they do when preparation fails.
+pub(crate) struct ExternalCommand {
     shown: String,
-    args: Vec<String>,
-    pub(crate) launch: Launch,
+    launch: Launch,
     image: Image,
     /// The `#!` interpreter `image` names, read with it: the parent's alone,
     /// to word a failure to start it.
@@ -378,81 +376,187 @@ pub(crate) struct Prepared {
     confined: bool,
 }
 
-/// Read `head`'s verdict, vet `args`, and build the launch under
-/// `ownership`.
-pub(crate) fn prepare(
-    head: Head<Admission>,
-    args: &[Value],
-    ownership: Ownership,
-    shell: &Shell,
-) -> Settled<Prepared> {
-    let Head { shown, program } = head;
-    let admitted = program?;
-    let args = validate_argv(&shown, args)?;
-    Ok(build_launch(shown, admitted, args, ownership, shell)?)
-}
+impl ExternalCommand {
+    /// Prepare a kept launch, whose child the session owns. Only `detach`
+    /// surrenders one.
+    pub(crate) fn prepare(head: Head<Admission>, args: &[Value], shell: &Shell) -> Settled<Self> {
+        Self::prepare_as(head, args, Ownership::Kept, shell)
+    }
 
-/// Build `admitted`'s launch with `args` under `ownership` and the shell's
-/// scoped env, cwd and limits; the launch keeps its [`Image`], never the
-/// judged program.  Building waits on nothing a stop must end: what may be
-/// stopped is [`start`]'s.
-fn build_launch(
-    shown: String,
-    admitted: Admitted,
-    args: Vec<String>,
-    ownership: Ownership,
-    shell: &Shell,
-) -> Result<Prepared, Error> {
-    // A guest jail is already the guest's sandbox: bwrap needs unprivileged
-    // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
-    // The in-process guard in `Head::admit` runs either way.
-    let jail = crate::process::jail::guest();
-    let projection = jail
-        .is_none()
-        .then(|| SandboxProjection::of(&shell.context.grants, shell.baseline(), Some(&admitted)))
-        .flatten();
-    let confined = projection.is_some() || jail.is_some();
-    let image = Image::of(&admitted);
-    let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
-    // The judged object and its directory handle end here: a launch holds a
-    // name, never the object it was admitted for.
-    drop(admitted);
-    // A `grant` body evaluates in this process unconfined; spawned children
-    // are the only thing an OS sandbox reaches, and this is where it does.
-    let mut launch = match projection.as_ref() {
-        Some(projection) => crate::authority::sandbox::sandboxed_command(
-            projection,
-            &image,
-            &args,
-            ownership,
-            shell.context.cwd(),
-        )?,
-        None => image.launch(&args)?,
-    };
-    apply_env(&mut launch, shell);
-    #[cfg(unix)]
-    launch.limit_session(shell.session.child_limits);
-    // Hooks run in order: a grant's limits apply last and win.
-    if shell.has_active_capabilities() {
-        launch.limit_resources()?;
-    }
-    #[cfg(seccomp)]
-    if let Some(jail) = jail {
-        let plan = jail
-            .plan(ownership, shell.context.grants.net())
-            .map_err(crate::process::jail::refused)?;
-        launch.apply_guest_jail(&plan)?;
-    }
-    Ok(Prepared {
-        shown,
-        args,
-        launch,
-        image,
-        interpreter,
+    /// Read the admission verdict, vet argv, and prepare the launch under
+    /// the shell's environment, cwd and limits. Keep the image, never the
+    /// judged object. Preparation does not poll: stopping belongs to start.
+    fn prepare_as(
+        head: Head<Admission>,
+        args: &[Value],
+        ownership: Ownership,
+        shell: &Shell,
+    ) -> Settled<Self> {
+        let Head { shown, program } = head;
+        let admitted = program?;
+        let args = validate_argv(&shown, args)?;
+        // A guest jail is already the guest's sandbox: bwrap needs unprivileged
+        // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
+        // The in-process guard in `Head::admit` runs either way.
+        let jail = crate::process::jail::guest();
+        let projection = jail
+            .is_none()
+            .then(|| {
+                SandboxProjection::of(&shell.context.grants, shell.baseline(), Some(&admitted))
+            })
+            .flatten();
+        let confined = projection.is_some() || jail.is_some();
+        let image = Image::of(&admitted);
+        let interpreter = crate::authority::sandbox::interpreter_of(&admitted);
+        // The judged object and its directory handle end here: a launch holds a
+        // name, never the object it was admitted for.
+        drop(admitted);
+        // A `grant` body evaluates in this process unconfined; spawned children
+        // are the only thing an OS sandbox reaches, and this is where it does.
+        let mut launch = match projection.as_ref() {
+            Some(projection) => crate::authority::sandbox::sandboxed_command(
+                projection,
+                &image,
+                &args,
+                ownership,
+                shell.context.cwd(),
+            )?,
+            None => image.launch(&args)?,
+        };
+        apply_env(&mut launch, shell);
         #[cfg(unix)]
-        projection,
-        confined,
-    })
+        launch.limit_session(shell.session.child_limits);
+        // Installation applies the grant's limits after the session's, regardless
+        // of configuration order.
+        if shell.has_active_capabilities() {
+            launch.limit_resources()?;
+        }
+        #[cfg(seccomp)]
+        if let Some(jail) = jail {
+            let plan = jail
+                .plan(ownership, shell.context.grants.net())
+                .map_err(crate::process::jail::refused)?;
+            launch.apply_guest_jail(&plan)?;
+        }
+        Ok(Self {
+            shown,
+            launch,
+            image,
+            interpreter,
+            #[cfg(unix)]
+            projection,
+            confined,
+        })
+    }
+
+    /// Run a standalone command through the same connection, spawn and
+    /// collector as a pipeline stage, titling the terminal once its streams
+    /// are connected. The terminal loan is settled by the child's collector.
+    pub(crate) fn run(mut self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+        let Placement {
+            policy,
+            loan,
+            readable,
+        } = placement(shell, mooring, self.launch.enveloped());
+        let pumps = self.connect_streams(
+            boundary_stdin(shell, readable),
+            ChildOut::Sink(shell.io.stdout.clone()),
+            &shell.io.stderr,
+        )?;
+        announce_command_title(&self.shown, shell);
+        // Denial attribution must include every kernel deny during startup.
+        let since = Instant::now();
+        self.spawn(pumps, policy, &shell.scope)?
+            .collect(loan, since, shell)
+            .map(|()| Value::Unit)
+    }
+
+    /// Connect every stream, then spawn: the child together with the pumps
+    /// and diagnostics its collector needs.
+    pub(crate) fn start(
+        mut self,
+        stdin: &Source,
+        stdout: ChildOut,
+        stderr: &Sink,
+        pgid: PgidPolicy,
+        scope: &Scope,
+    ) -> Settled<Started> {
+        let pumps = self.connect_streams(stdin, stdout, stderr)?;
+        self.spawn(pumps, pgid, scope)
+    }
+
+    /// Spawn into `pgid`, an envelope into a group of its own, and claim
+    /// what was born. `pumps` are the connected streams'.
+    fn spawn(self, pumps: Pumps<Sink>, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
+        let pgid = pgid.unless_enveloped(self.launch.enveloped());
+        let spawned = self.launch.spawn(pgid, scope).map_err(|why| {
+            at_start(
+                why,
+                &self.image,
+                self.interpreter.as_deref(),
+                #[cfg(unix)]
+                self.projection.as_ref(),
+                &self.shown,
+            )
+        })?;
+        let claim = Claim::of(self.confined, &spawned);
+        Ok(Started {
+            shown: self.shown,
+            spawned,
+            claim,
+            pumps,
+        })
+    }
+
+    /// Prepare a surrendered launch and start it detached, with independent
+    /// streams. No kept-child result or teardown authority is manufactured
+    /// for a survivor.
+    #[cfg(unix)]
+    fn detach(head: Head<Admission>, args: &[Value], shell: &Shell) -> Settled<Survivor> {
+        let mut command = Self::prepare_as(head, args, Ownership::Surrendered, shell)?;
+        command
+            .launch
+            .stdin(StdioSpec::Null)
+            .stdout(StdioSpec::Null)
+            .stderr(StdioSpec::Null);
+        command.launch.spawn_detached(&shell.scope).map_err(|why| {
+            at_start(
+                why,
+                &command.image,
+                command.interpreter.as_deref(),
+                command.projection.as_ref(),
+                &command.shown,
+            )
+        })
+    }
+
+    /// Hand OS-backed streams directly to the child; retain pump destinations
+    /// for the remaining streams. A shared output destination requests one
+    /// stderr merge, which Launch installs only after configuration is done.
+    fn connect_streams(
+        &mut self,
+        stdin: &Source,
+        stdout: ChildOut,
+        stderr: &Sink,
+    ) -> Settled<Pumps<Sink>> {
+        self.launch.stdin(stdin_stdio(stdin)?);
+        let (out, out_pump, joined) = match stdout {
+            ChildOut::Sink(sink) => {
+                let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe_error)?;
+                (out, pump, stderr.same_destination(&sink).then_some(sink))
+            }
+            ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
+        };
+        self.launch.stdout(out);
+        let err_pump = if let Some(sink) = joined {
+            join_stderr(&mut self.launch, &sink)?
+        } else {
+            let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe_error)?;
+            self.launch.stderr(err);
+            pump
+        };
+        Ok(Pumps::new(out_pump, err_pump))
+    }
 }
 
 /// Thread the shell's env overrides, logical cwd and `PWD` into the
@@ -548,43 +652,6 @@ fn stdin_stdio(stdin: &Source) -> Settled<StdioSpec> {
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
 fn pipe_error(e: std::io::Error) -> Error {
     Error::new(io_message("pipe", &e))
-}
-
-/// Wire the child's stdin, stdout and stderr, returning the sinks its piped
-/// fds must be pumped into.  A `File` or `Pipe` sink is handed to the child
-/// directly; an edge's fate is dropped, the sentinel hearing the child's
-/// writes in its place.
-///
-/// The one platform split: when both output streams share a destination, Unix
-/// registers a `pre_exec` `dup2` that runs after the kernel wired fd 1, so
-/// fd 2 follows fd 1 wherever it went; Windows, having no `pre_exec`, hands
-/// the child a second handle to that destination.
-///
-/// Audit capture belongs elsewhere: it tees the shell's own sinks at dispatch
-/// level in `shell::exec::capture::with_audit_capture`.
-pub(crate) fn wire_stdio(
-    command: &mut Launch,
-    stdin: &Source,
-    stdout: ChildOut,
-    stderr: &Sink,
-) -> Settled<Pumps<Sink>> {
-    command.stdin(stdin_stdio(stdin)?);
-    let (out, out_pump, joined) = match stdout {
-        ChildOut::Sink(sink) => {
-            let (out, pump) = sink.child_stdio(OutFd::Stdout).map_err(pipe_error)?;
-            (out, pump, stderr.same_destination(&sink).then_some(sink))
-        }
-        ChildOut::Edge { writer, .. } => (StdioSpec::from_owned(writer), None, None),
-    };
-    command.stdout(out);
-    let err_pump = if let Some(sink) = joined {
-        join_stderr(command, &sink)?
-    } else {
-        let (err, pump) = stderr.child_stdio(OutFd::Stderr).map_err(pipe_error)?;
-        command.stderr(err);
-        pump
-    };
-    Ok(Pumps::new(out_pump, err_pump))
 }
 
 #[cfg(unix)]
@@ -741,17 +808,14 @@ pub(crate) fn placement(shell: &Shell, mooring: &Mooring, enveloped: bool) -> Pl
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
-/// A started call: its name and args, and what was born of it.
-pub(crate) struct Started<T = Born> {
+/// A kept child with everything its collector needs. Consumed by lone
+/// collection or pipeline registration, never returned for a detached launch.
+#[must_use = "collect or register the started command so its child is reaped"]
+pub(crate) struct Started {
     pub(crate) shown: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) born: T,
-}
-
-/// A kept child, and the deny lines its failure may claim.
-pub(crate) struct Born {
     pub(crate) spawned: Spawned,
     pub(crate) claim: Claim,
+    pub(super) pumps: Pumps<Sink>,
 }
 
 /// The host pids whose kernel deny lines a child's failure owns.  A line
@@ -782,55 +846,27 @@ impl Claim {
     }
 }
 
-/// Start `prepared` in `pgid` under `scope`, and claim what it bore.  The
-/// one place a launch is stopped or fails as a program: its confinement is
-/// applied, and its first word awaited, here.
-pub(crate) fn start(prepared: Prepared, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
-    let confined = prepared.confined;
-    started(prepared, |launch| {
-        let spawned = launch.spawn(pgid, scope)?;
-        let claim = Claim::of(confined, &spawned);
-        Ok(Born { spawned, claim })
-    })
-}
-
-/// Start `prepared` detached under `scope`, a survivor nothing here can
-/// name again.
-#[cfg(unix)]
-fn start_detached(prepared: Prepared, scope: &Scope) -> Settled<Started<Survivor>> {
-    started(prepared, |launch| launch.spawn_detached(scope))
-}
-
-/// `prepared`'s launch, spent by `spawn`.
-fn started<T>(
-    prepared: Prepared,
-    spawn: impl FnOnce(Launch) -> Result<T, Unstarted>,
-) -> Settled<Started<T>> {
-    let Prepared {
-        shown,
-        args,
-        launch,
-        image,
-        interpreter,
-        #[cfg(unix)]
-        projection,
-        ..
-    } = prepared;
-    match spawn(launch) {
-        Ok(born) => Ok(Started { shown, args, born }),
-        Err(Unstarted::Refused(refusal)) => Err(refusal.into()),
-        Err(Unstarted::Stopped(stop)) => Err(stop.into()),
-        // The program's own failure, as the same process failure the head's
-        // probe reports.
-        Err(Unstarted::Program(e)) => {
+/// Translate startup failure using the image and interpreter judged before
+/// spawn. This is error interpretation only; it never starts a process.
+fn at_start(
+    why: Unstarted,
+    image: &Image,
+    interpreter: Option<&Path>,
+    #[cfg(unix)] projection: Option<&SandboxProjection>,
+    shown: &str,
+) -> Break {
+    match why {
+        Unstarted::Refused(refusal) => refusal.into(),
+        Unstarted::Stopped(stop) => stop.into(),
+        Unstarted::Program(e) => {
             let withheld = || -> Option<String> {
                 #[cfg(unix)]
-                if let (Some(projection), Some(interpreter)) = (&projection, &interpreter) {
+                if let (Some(projection), Some(interpreter)) = (projection, interpreter) {
                     return crate::authority::sandbox::interpreter_hint(projection, interpreter);
                 }
                 None
             };
-            Err(at_spawn(&e, &image, interpreter.as_deref(), withheld, &shown).into())
+            at_spawn(&e, image, interpreter, withheld, shown).into()
         }
     }
 }
@@ -922,66 +958,6 @@ fn with_denials(name: &str, failure: Failure, claim: &Claim, since: Instant) -> 
     }
 }
 
-// ── run ───────────────────────────────────────────────────────────────────────
-
-/// Runs a standalone external call from vetting to reap.  A bundled
-/// coreutils/diffutils/ripgrep head takes the same path as any host
-/// executable: its image is `ral --ral-bundled-tool <tool>`.
-pub(crate) fn run(
-    head: Head<Admission>,
-    args: &[Value],
-    mooring: &Mooring,
-    shell: &Shell,
-) -> Settled<Value> {
-    let mut prepared = prepare(head, args, Ownership::Kept, shell)?;
-    let Placement {
-        policy,
-        loan: lending,
-        readable,
-    } = placement(shell, mooring, prepared.launch.enveloped());
-    let pumps = wire_stdio(
-        &mut prepared.launch,
-        boundary_stdin(shell, readable),
-        ChildOut::Sink(shell.io.stdout.clone()),
-        &shell.io.stderr,
-    )?;
-
-    announce_command_title(&prepared.shown, shell);
-
-    // Before the spawn, so a kernel deny the child logs falls inside the
-    // window `denial_hint` reads back.
-    let started = Instant::now();
-    let Started { shown, born, .. } = start(prepared, policy, &shell.scope)?;
-    // Its `Drop` restores ral's pgid on every path out of here, sparing the
-    // next REPL tty read an EIO from a background pgroup.
-    let loan = match lending {
-        None => None,
-        Some(lending) => match lending.lend(born.spawned.child.id().cast_signed()) {
-            Some(loan) => Some(loan),
-            None => return Err(unlent(born, pumps, shown, started, shell)),
-        },
-    };
-
-    // Nothing fallible may run between `start` and here: until the collector
-    // holds it the bare child leaks on an early return.
-    super::pipeline::join_lone(born, pumps, loan, shown, started, shell).map(|()| Value::Unit)
-}
-
-/// A child whose terminal handoff failed is outside the foreground, where
-/// its tty read stops it for good: killed and settled, and the refusal is the
-/// verdict.  A stop in force stays so for the run's next poll.
-fn unlent(born: Born, pumps: Pumps<Sink>, shown: String, started: Instant, shell: &Shell) -> Break {
-    if let Some(group) = born.spawned.group.owned() {
-        group.kill();
-    }
-    let refusal = Error::new(format!(
-        "could not hand the terminal to '{shown}': tcsetpgrp refused its process group; the \
-         command was killed before it could stop on a terminal read"
-    ));
-    let _ = super::pipeline::join_lone(born, pumps, None, shown, started, shell);
-    refusal.into()
-}
-
 /// Announce the running command via the terminal title (OSC 0).
 fn announce_command_title(cmd: &str, shell: &Shell) {
     if shell.is_interactive() && shell.terminal().ui_controls_ok() {
@@ -1030,7 +1006,7 @@ pub(crate) fn detach(
     let head = Head::resolve(&name, &shell.context);
     let shown = head.shown.clone();
     let start = shell.audit_start(mooring);
-    let launched = (|| -> Settled<Started<Survivor>> {
+    let launched = (|| -> Settled<Survivor> {
         shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
         // The grant's verdict on the program, then existence (127/126) and argv
         // shape: the same judgments an ordinary external passes, so a bundled
@@ -1039,44 +1015,25 @@ pub(crate) fn detach(
         // a stop before the fork makes no survivor; one while its trampoline
         // is silent leaves it.
         let head = head.admit(mooring, shell)?;
-        let mut prepared = prepare(head, argv, Ownership::Surrendered, shell)?;
-        prepared
-            .launch
-            .stdin(StdioSpec::Null)
-            .stdout(StdioSpec::Null)
-            .stderr(StdioSpec::Null);
-        start_detached(prepared, &shell.scope)
+        ExternalCommand::detach(head, argv, shell)
     })();
-    let (shown, args, result) = match launched {
-        Ok(Started {
-            shown,
-            args,
-            born: Survivor::Named(pid),
-        }) => (
-            shown,
-            args,
-            Ok(Value::from_datum(Receipt {
-                pid,
-                desc: desc.into(),
-            })),
-        ),
-        Ok(Started {
-            shown,
-            args,
-            born: Survivor::Unnamed(why),
-        }) => {
+    let result = launched.and_then(|survivor| match survivor {
+        Survivor::Named(pid) => Ok(Value::from_datum(Receipt {
+            pid,
+            desc: desc.into(),
+        })),
+        Survivor::Unnamed(why) => {
             let lost = Error::new(format!(
                 "detach: '{shown}' was started and is running, but its pid was lost ({why}); it cannot be stopped by pid"
             ));
-            (shown, args, Err(lost.into()))
+            Err(lost.into())
         }
-        Err(broke) => (shown, Value::render_argv(argv), Err(broke)),
-    };
+    });
     if let Some(start) = &start {
         let obs = shell.command_observation(
             start,
             &shown,
-            args,
+            Value::render_argv(argv),
             CommandOrigin::Detached,
             result.as_ref().err(),
             AuditIo::default(),
