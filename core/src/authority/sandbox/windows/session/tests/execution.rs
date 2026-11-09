@@ -5,7 +5,7 @@ use super::{
 use crate::authority::policy::{Baseline, Capabilities, FsPolicy};
 use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
 use crate::path::FrozenPath;
-use crate::process::{PgidPolicy, Unstarted};
+use crate::process::{Placement, Unstarted};
 use crate::test_helper::confinement::{Output, admitted, denied};
 use crate::test_helper::{layer, real, stack};
 use std::io::Read;
@@ -35,7 +35,7 @@ fn run(projection: &SandboxProjection, cwd: &Path, line: &str) -> Output {
         confined(projection, cwd, line)
             .expect("confine the matrix probe")
             .spawn(
-                PgidPolicy::Inherit,
+                Placement::Inherit,
                 &crate::process::DurableRoot::default().child(),
             ),
     )

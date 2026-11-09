@@ -6,11 +6,14 @@
 //! signal the tty delivers to the group reaches it only as the anchor's
 //! `Event::Heard` — the kernel having already given that signal to every
 //! other member — which only the pipeline's
-//! [`TerminalLoan`](crate::process::TerminalLoan) reads as a key.  On
+//! terminal hold reads as a key.  On
 //! Windows a group a pipeline or a lone external owns is a `Job`.
 
 use super::collect::Event;
-use crate::process::{Group, Membership, Pgid, PgidPolicy, Scope, Spawned, Unstarted};
+use crate::process::{
+    Group, Membership, Pgid, Placement, PreparedTerminalLoan, Scope, Spawned, TerminalHold,
+    TerminalInput, Unstarted,
+};
 use crate::shell::runtime::{Break, Error, Settled};
 use std::sync::mpsc::Sender;
 
@@ -34,13 +37,32 @@ pub(super) enum PipelineGroup {
 impl PipelineGroup {
     /// An owning group: the anchor, spawned and witnessed at once, so no
     /// signal it swallows can land before someone is reading for it.
-    pub(super) fn prepare(tx: Sender<Event>) -> Settled<Self> {
+    pub(super) fn prepare(
+        tx: Sender<Event>,
+        prepared: Option<PreparedTerminalLoan>,
+    ) -> Settled<(Self, TerminalHold, TerminalInput)> {
+        // spawn returns only after the anchor's handlers and readiness byte.
         let anchor = AnchorProcess::spawn(tx)?;
-        Ok(Self::Owns {
+        let (terminal, input) = match prepared {
+            None => (TerminalHold::default(), TerminalInput::Withheld),
+            Some(prepared) => match prepared.lend(anchor.pgid) {
+                Ok(terminal) => (terminal, TerminalInput::Readable),
+                Err((prepared, error)) => {
+                    crate::dbg_trace!("pipeline terminal handoff", "{error}");
+                    // Only the anchor exists: it reads its release pipe and
+                    // reports signals, never changes modes. No stage needs
+                    // tearing down before this restoration and fallback.
+                    drop(prepared);
+                    (TerminalHold::default(), TerminalInput::Withheld)
+                }
+            },
+        };
+        let group = Self::Owns {
             #[cfg(windows)]
             job: Job::owning(anchor.pgid),
             anchor,
-        })
+        };
+        Ok((group, terminal, input))
     }
 
     pub(super) const fn joining(membership: Membership) -> Self {
@@ -61,13 +83,6 @@ impl PipelineGroup {
         match self {
             Self::Owns { anchor, .. } => Group::Owns(anchor.pgid),
             Self::Joins(membership) => Group::Joins(membership.clone()),
-        }
-    }
-
-    pub(super) fn leader_pgid(&self) -> Pgid {
-        match self {
-            Self::Owns { anchor, .. } => anchor.pgid,
-            Self::Joins(membership) => membership.group(),
         }
     }
 
@@ -179,13 +194,13 @@ impl AnchorProcess {
         let unstoppable = crate::process::DurableRoot::default().child();
         let Spawned {
             mut child, group, ..
-        } = cmd.spawn(PgidPolicy::NewLeader, &unstoppable).map_err(
-            |unstarted| match unstarted {
+        } = cmd
+            .spawn(Placement::NewLeader, &unstoppable)
+            .map_err(|unstarted| match unstarted {
                 Unstarted::Program(e) => Break::from(anchor_error(e)),
                 Unstarted::Refused(refusal) => Break::from(refusal),
                 Unstarted::Stopped(stop) => Break::from(stop),
-            },
-        )?;
+            })?;
         let Group::Owns(pgid) = group else {
             discard(&mut child);
             return Err(Error::new("pipeline anchor: failed to establish a process group").into());
@@ -279,14 +294,63 @@ mod tests {
     /// An owning group whose channel nobody reads — enough for every test
     /// that only wants a real pgid.
     fn prepared() -> PipelineGroup {
-        PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns")
+        PipelineGroup::prepare(std::sync::mpsc::channel().0, None)
+            .expect("anchor spawns")
+            .0
+    }
+
+    /// Anchor readiness settles the loan before any stage exists.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_anchor_handoff_selects_withheld_before_stage_launch() {
+        use crate::io::Source;
+        use crate::process::{TerminalAccess, TerminalLease};
+        use crate::test_helper::terminal::{self, Mode};
+        use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
+
+        terminal::isolated(
+            "shell::exec::pipeline::group::tests::a_refused_anchor_handoff_selects_withheld_before_stage_launch",
+            Mode::NonControlling,
+            |pty| {
+                let mut shell = crate::test_helper::core_shell();
+                shell.io.stdin = Source::Terminal;
+                let home = DurableRoot::default().child();
+                let lease = TerminalLease::mint_at_startup(true).expect("lease");
+                let permit = TerminalAccess::Leased
+                    .reach(Some(&lease), &home, true)
+                    .expect("permit");
+                let before = tcgetattr(pty.slave()).expect("original modes");
+                let prepared = PreparedTerminalLoan::capture(permit);
+                let mut changed = before.clone();
+                changed.local_modes.toggle(LocalModes::ECHO);
+                tcsetattr(pty.slave(), OptionalActions::Now, &changed)
+                    .expect("change modes while preparation holds them");
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (mut group, terminal, input) = PipelineGroup::prepare(tx, Some(prepared))
+                    .expect("anchor readiness and refused handoff settle");
+                assert!(matches!(input, TerminalInput::Withheld));
+                assert_eq!(terminal.pressed(), None);
+                terminal::assert_modes(&tcgetattr(pty.slave()).expect("restored modes"), &before);
+                assert!(rx.try_recv().is_err(), "readiness is not a stage event");
+                let stdin = super::super::launch::stage_stdin(
+                    super::super::route::ByteIn::Parent,
+                    &shell,
+                    &home,
+                    input,
+                )
+                .expect("first thread stage input");
+                assert!(matches!(stdin, Source::Empty));
+                group.end_anchor();
+                drop(terminal);
+                drop(group);
+            },
+        );
     }
 
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
         let group = prepared();
         assert!(matches!(group.group(), Group::Owns(_)));
-        assert!(group.leader_pgid().as_raw() > 0);
     }
 
     /// An owner pairs its leader with the scope it is given; a joiner hands
@@ -294,14 +358,15 @@ mod tests {
     #[test]
     fn a_nested_stage_answers_to_the_outermost_owners_stage() {
         let owner = prepared();
+        let leader = owner.group().owned().expect("owning group");
         let outer = DurableRoot::default().child();
         let membership = owner.membership(&outer);
-        assert_eq!(membership.group(), owner.leader_pgid());
+        assert_eq!(membership.group(), leader);
 
         let joiner = PipelineGroup::joining(membership);
         let inner = DurableRoot::default().child();
         let nested = joiner.membership(&inner);
-        assert_eq!(nested.group(), owner.leader_pgid());
+        assert_eq!(nested.group(), leader);
         #[cfg(unix)]
         {
             outer.cancel(CancelCause::Interrupted);
@@ -323,7 +388,7 @@ mod tests {
     #[test]
     fn an_ended_anchor_pins_its_group_until_the_group_drops() {
         let mut group = prepared();
-        let leader = group.leader_pgid().as_raw();
+        let leader = group.group().owned().expect("owning group").as_raw();
         group.end_anchor();
         assert_eq!(
             unsafe { libc::kill(leader, 0) },
@@ -342,7 +407,7 @@ mod tests {
     #[test]
     fn a_completed_group_releases_its_windows_job() {
         let group = prepared();
-        let leader = group.leader_pgid().as_raw();
+        let leader = group.group().owned().expect("owning group").as_raw();
         assert!(crate::process::group::is_known_group(leader));
         drop(group);
         assert!(!crate::process::group::is_known_group(leader));
@@ -362,10 +427,12 @@ mod tests {
     #[test]
     fn a_signalled_anchor_reports_the_signal_and_lives_on() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let group = PipelineGroup::prepare(tx).expect("anchor spawns");
+        let (group, _, _) = PipelineGroup::prepare(tx, None).expect("anchor spawns");
         for signal in [libc::SIGINT, libc::SIGTERM] {
             group
-                .leader_pgid()
+                .group()
+                .owned()
+                .expect("owning group")
                 .signal_group(crate::process::Signal::new(signal));
             match heard_within_2s(&rx) {
                 Some(n) if n == signal => {}

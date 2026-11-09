@@ -654,7 +654,7 @@ mod tests {
         let _drains = io.install(&mut launch);
         let mut child = launch
             .spawn(
-                crate::process::PgidPolicy::Inherit,
+                crate::process::Placement::Inherit,
                 &DurableRoot::default().child(),
             )
             .expect("spawn")
@@ -686,7 +686,7 @@ mod tests {
         let _drains = io.install(&mut launch);
         let mut child = launch
             .spawn(
-                crate::process::PgidPolicy::Inherit,
+                crate::process::Placement::Inherit,
                 &DurableRoot::default().child(),
             )
             .expect("spawn")

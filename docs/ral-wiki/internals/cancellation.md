@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6e2995f8
+verified_at_commit: f26144e0
 verified_at_date: 2026-11-09
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalLoan, TerminalLoan::hear, TerminalLoan::reclaim, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
 # Cancellation
@@ -526,11 +526,12 @@ SIGSEGV under any cause stays `Signal`.
 **Only a terminal ral lent can report a key pressed on it.** A key is what a
 terminal sends: the `GESTURES` table in `process/signal/unix.rs` — SIGINT →
 `Interrupted`, SIGQUIT → `Aborted`, SIGHUP → `Terminated`; no terminal sends
-SIGTERM. Its reader `gesture` is read only by the `TerminalLoan` (`process/foreground/unix.rs`), the one
-lending of the session's `TerminalLease` to a group, for a run. While it is
-lent the key reaches the tenant's group and never ral, so the loan hears it
-back from the tenant — `TerminalLoan::hear` — and **strikes it on the node it
-was lent for (`Mooring::home`) as it hears**:
+SIGTERM. `KeyAttribution` (`process/terminal/keys.rs`) reads `gesture` inside
+the private terminal module. Only an established loan owns this attribution;
+callers carry an opaque `TerminalHold` and invoke `hear` or consuming
+`reclaim`, never extracting saved state or the key state. While lent, the key
+reaches the tenant's group and never ral, so the loan hears it back and
+**strikes it on the node it was lent for (`Mooring::home`) as it hears**:
 
 - a **lone command** is heard at `reclaim`, the instant it is dead and before
   its pumps are joined ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]),
@@ -556,11 +557,11 @@ collector reads its scope as the reaper posts its death, racing the strike.
 Lose the race and the stage reads `` `signaled 2 `` — a failure ranking under
 the stop the run's own poll then raises, so the run stops either way.
 
-A key ral's own frontend re-creates onto a lent group
-(`interrupt_foreground_child`) is heard like the kernel's: it is the user's.
-Without a loan — exarch, a capture, a stage thread, a worker's pipeline — a
-heard signal is inert, so `try` stays total over everything else a child can
-do, a child that kills itself with SIGINT included.
+An enveloped tenant holds only restoration responsibility, not an established
+loan: its `TerminalHold` restores modes without hearing or attributing keys.
+Without a loan — exarch, a capture without explicit access, a stage thread,
+a worker's pipeline — a heard signal is inert, so `try` stays total over
+everything else a child can do, a child that kills itself with SIGINT included.
 
 Two shapes were rejected
 ([[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]]):
@@ -576,8 +577,10 @@ that and the console's `STATUS_CONTROL_C_EXIT` and nothing else. The latter
 is what Ctrl-C and Ctrl-Break both leave, so it is every graceful cause's —
 a `TimedOut` teardown reads `timed out`, never an exit status — and with no
 such cause in force it is displayed as "ended by Ctrl-C". A console is never
-lent: the Windows `TerminalLoan` is uninhabited. A cancelled child carries no
-hint.
+transferred: a Windows loan saves available console modes and restores them
+on drop, but `gesture` returns `None`, because ral already hears Ctrl-C itself.
+`gesture_signal(Interrupted)` still names the console death status; the two
+functions are not inverses on Windows. A cancelled child carries no hint.
 
 ## The gestures, per host
 
@@ -589,7 +592,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer; nothing is in flight, so nothing is sent; no signal |
 | **Ctrl-C** | ral REPL, idle minimal prompt | canonical tty → SIGINT → `Interrupt` | the tty drops the partial line; the changed prompt epoch wakes a fresh prompt immediately and discards continuation input too; `request_interrupt()` is forwarded, but every later dispatch is born after it, so it strikes none |
 | **Ctrl-`\`** | ral REPL, terminal not lent | SIGQUIT → `Abort` | `request_root_cancel(Aborted)`, forwarded as `Control::End(Aborted)` — reaps foreground *and* every worker, latching if idle; the REPL loop observes the sticky root and exits |
-| **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the `TerminalLoan` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupted` / `Aborted` / `Terminated` on the run's node as it hears: the job is stopped, `try` never sees it, the session lives |
+| **Ctrl-C / Ctrl-`\` / hangup** | any ral host, terminal lent to a command or pipeline | tty → the tenant's group (a hangup also reaches ral, as session leader) | the lent `TerminalHold` hears it from the tenant — its death, or the anchor's `Heard` — and strikes `Interrupted` / `Aborted` / `Terminated` on the run's node as it hears: the job is stopped, `try` never sees it, the session lives |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `Shutdown` | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `Shutdown` | `request_root_cancel(Terminated)`, forwarded as `Control::End(Terminated)` — foreground and workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Ctrl-Break** | ral on a Windows console | console event → the `ctrlc` handler | `request_interrupt()`, forwarded as `Control::Strike(_, Interrupted)`, + ladder `+1`; third event `ExitProcess`es with 130. No console event is sent to any group: the struck run's teardown breaks the groups it owns, and a worker's are never reached |

@@ -213,7 +213,7 @@ fn key(sig: libc::c_int) -> Option<Ambient> {
 }
 
 /// The key `signal` is, read only by
-/// [`TerminalLoan::hear`](crate::process::TerminalLoan::hear): nothing but
+/// [`TerminalHold::hear`](crate::process::TerminalHold::hear): nothing but
 /// a terminal ral lent can report one.
 pub(crate) fn gesture(signal: Signal) -> Option<CancelCause> {
     key(signal.number()).map(Ambient::cause)

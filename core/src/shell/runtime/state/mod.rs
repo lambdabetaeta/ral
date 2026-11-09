@@ -37,7 +37,7 @@ use super::audit::{Audit, DisplacedSite};
 use super::env::Env;
 use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
-use super::mooring::{Mooring, TerminalAccess, no_desk};
+use super::mooring::{Mooring, no_desk};
 use crate::authority::policy::GrantStack;
 use crate::environ::EnvVars;
 use crate::error::{Error, FrameName, Prov};
@@ -121,7 +121,7 @@ pub struct SessionState {
     /// Minted once from the startup `tcgetpgrp == getpgrp` predicate: `Some`
     /// when ral owns the controlling terminal's foreground, `None` when piped,
     /// backgrounded, tty-less, or off Unix.  Lent — never moved or cloned — to
-    /// the handoff, and only when the run's [`TerminalAccess`] permits.
+    /// the handoff, and only when the run's [`TerminalAccess`](crate::process::TerminalAccess) permits.
     pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
     /// The machine's stack cap: no push takes `stack.len()` past
     /// `stack_limit`.  Counts machine frames, not host stack frames;

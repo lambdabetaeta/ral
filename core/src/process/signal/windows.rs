@@ -60,7 +60,29 @@ pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
     }
 }
 
+/// Every console process hears Ctrl-C itself, including ral: a tenant's death
+/// reports no key that ral has not already heard. Unlike Unix, this is not
+/// the inverse of `gesture_signal`.
+pub(crate) fn gesture(_signal: Signal) -> Option<CancelCause> {
+    None
+}
+
 /// The death status a console's Ctrl-C leaves, standing for the interrupt.
 pub(crate) fn gesture_signal(cause: CancelCause) -> Option<Signal> {
     (cause == CancelCause::Interrupted).then_some(CONSOLE_EVENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_console_interrupt_death_is_not_a_reported_key() {
+        assert_eq!(
+            gesture_signal(CancelCause::Interrupted),
+            Some(CONSOLE_EVENT)
+        );
+        assert_eq!(gesture(CONSOLE_EVENT), None);
+        assert_eq!(gesture(KILL), None);
+    }
 }

@@ -12,7 +12,7 @@
 //! (`shell::exec::pipeline::group`), a pipeline's or a lone external's;
 //! pipeline stages borrow the pipeline's.
 
-use super::{Group, Membership, Pgid, PgidPolicy};
+use super::{Group, Membership, Pgid, Placement};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
@@ -158,10 +158,12 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `DuplicateHandle` on purpose: see the comment there"
     )]
-    pub(super) fn prepare(policy: &super::PgidPolicy) -> std::io::Result<PreparedGroup> {
-        match policy {
-            super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
-            super::PgidPolicy::NewLeader | super::PgidPolicy::NewSession => {
+    pub(super) fn prepare(placement: &super::Placement) -> std::io::Result<PreparedGroup> {
+        match placement {
+            super::Placement::Inherit => Ok(PreparedGroup::None),
+            super::Placement::NewLeader
+            | super::Placement::NewSession
+            | super::Placement::Tenant(_) => {
                 let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
@@ -179,7 +181,7 @@ mod win_groups {
                     completion_port,
                 })
             }
-            super::PgidPolicy::Join(membership) => {
+            super::Placement::Join(membership) => {
                 let leader = membership.group().as_raw();
                 // `state.job` is the registry's, not ours: the lock is all that
                 // keeps `release` from closing it before the `DuplicateHandle`.
@@ -560,8 +562,8 @@ pub(crate) fn is_known_group(leader: i32) -> bool {
 
 pub(crate) type PreparedGroup = win_groups::PreparedGroup;
 
-pub(crate) fn prepare_group(policy: &PgidPolicy) -> std::io::Result<PreparedGroup> {
-    win_groups::prepare(policy)
+pub(crate) fn prepare_group(placement: &Placement) -> std::io::Result<PreparedGroup> {
+    win_groups::prepare(placement)
 }
 
 pub(crate) fn prepared_job(prepared: &PreparedGroup) -> Option<HANDLE> {

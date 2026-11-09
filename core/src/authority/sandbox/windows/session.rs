@@ -255,6 +255,7 @@ pub(crate) fn confine(
         write: as_paths(&write),
         deny: denied.iter().map(|p| p.as_path().to_path_buf()).collect(),
     })?;
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "sandbox-win",
         "confine: profile ensured in {:?} (read={} write={} deny={})",
@@ -312,6 +313,7 @@ pub(crate) fn confine(
             names.insert(ensure_grant(fs_cap_sids, &pin, kind, cancel)?);
         }
     }
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "sandbox-win",
         "confine: {} fs capability/ies, {} first ensured this session, in {:?}",
@@ -339,12 +341,14 @@ pub(crate) fn confine(
             dacl::ensure_unreachable(denied, &access, cancel)?;
         }
     }
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "sandbox-win",
         "confine: {} exclusion(s) proven unreachable in {:?}",
         lists.deny.len(),
         t_deny.elapsed(),
     );
+    #[cfg(debug_assertions)]
     crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
     Ok(SecurityCapabilitiesAttr::new(
         profile_sid,
@@ -486,6 +490,7 @@ pub(crate) fn teardown() {
             }
         }
     }
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "sandbox-win",
         "teardown: profiles deleted in {:?}",

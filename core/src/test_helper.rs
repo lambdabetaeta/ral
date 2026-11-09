@@ -1,6 +1,10 @@
 //! Helpers shared by core's tests and by hosts' tests under `test-util`.
 
 pub mod confinement;
+#[cfg(test)]
+pub(crate) mod subprocess;
+#[cfg(all(test, unix))]
+pub(crate) mod terminal;
 
 use crate::environ::EnvVars;
 use std::time::{Duration, Instant};

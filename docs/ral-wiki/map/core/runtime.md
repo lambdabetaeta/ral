@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 248aff5c
+generated_at_commit: f26144e0
 generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -76,17 +76,17 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   which outlives the consumed launch to explain a failed start.
   `Prepared::start` installs an owned `io::child::Connection`, starts the
   drains from their owned readers, then spawns, so a thread creation failure
-  leaves no child to tear down; a standalone `run` titles the terminal
-  first. `Started` owns the resulting `Spawned`, its `denial_pids` and the
+  leaves no child to tear down. A spawn failure returns `StartFailure`, owning
+  its `Program::unstarted` reason and drains. A standalone `run` titles the
+  terminal first and settles a failed start before propagating its reason;
+  `PipeNode::finish` rolls back and joins before settling those drains, even
+  when no stage registered. `Started` owns the resulting `Spawned`, its `denial_pids` and the
   running `Drains` until `collect` or `register` (`pipeline/collect.rs`)
   consumes it; registration cannot fail. Building describes and starting acts
   ([[design/exec|exec]]). `uutils.rs`
-  holds [[map/core/builtins|bundled coreutils]]. `job_control.rs` places a
-  standalone command once: `Placement::for_command` picks one of `Joined`,
-  `Foreground` (holding the prepared loan), `Inherit`, `Headless` or
-  `Unloaned`, from which its `PgidPolicy` and whether the terminal may be its
-  stdin follow. A pipeline shares its loan preparation,
-  `prepare_terminal_loan`, and its stdin rule, `TerminalInput`.
+  holds [[map/core/builtins|bundled coreutils]]. The process-layer
+  `Placement::command(shell.group_owner(mooring))` selects the request once;
+  `Source::offered(placement.input())` wires terminal stdin before start.
   - **The program and the 126/127 verdict come from the judged candidate
     fold's walk.** `Command::from_name` snapshots a `Request` without I/O: a
     bundled tool, a launch path, or a bare name with its effective `PATH` and
@@ -131,26 +131,21 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     and behaves identically on Windows where no `.exe` exists to spawn
     ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
     [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
-  - `prepare_terminal_loan` gates the terminal handoff on a held
-    *terminal lease* (`Shell::terminal_lease` is `Some`), a terminal-bound
-    stdout or an explicit loan, and no envelope, not on REPL interactivity —
-    so a non-interactive script launched at a terminal holds a `Leased` run and
-    foregrounds its interactive children, while an exarch `Denied` tool run
-    cannot construct the handoff at all
-    ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
-    On every platform it prepares the terminal snapshot before spawn and lends
-    it to the resulting group afterwards; both guards restore on failure or
-    unwind. Pipeline preparation likewise precedes anchor spawn, and only an
-    owning pipeline (no enclosing stage) prepares: a stage's child joins its
-    group unlent, since dropping a prepared loan restores the terminal, so a
-    joined pipeline must never hold one. `TerminalInput` is the
-    one rule for what a child at the boundary reads (`Placement::stdin` for a
-    lone command, `TerminalInput::for_pipeline` for a pipeline's): a joined group passes its
-    owner's source through, a startup tty survives only where the child's group
-    can read it, and an unlent owned group reads EOF.
-    `Started::collect` kills and collects a child whose terminal handover
-    fails; the refusal is the verdict. There is no parking: the reaper
-    answers any stop with `SIGCONT`
+  - **Terminal authority is reached once.** `Shell::group_owner` returns a
+    stage membership without a permit, or session facts gated by
+    `TerminalAccess::reach`: access, a session lease, and terminal-bound stdout
+    (unless `ExplicitLoan`). `Placement::command` maps a stage to `Join`, a
+    permitted session to `Tenant`, and an unpermitted session to `Inherit`
+    when interactive or `NewSession` otherwise. Capture precedes spawn.
+    `Placement::input` permits `Inherit`, `Join` and `Tenant`, withholding
+    `NewLeader` and `NewSession`. Enveloping changes only the actual landing:
+    `Launch::spawn` alone enforces `NewLeader`; an eligible envelope retains
+    readable stdin and a restoration-only hold, even in a script.
+    The direct tenant handoff belongs to `Launch::spawn`, not collection.
+    Refusal kills the group while its leader pins the ID, kills/reaps the child,
+    restores state, and releases the jail; the caller then settles the
+    `StartFailure` drains with no later numeric-ID kill before returning the
+    refusal. There is no parking: the reaper answers any stop with `SIGCONT`
     ([[internals/pipeline-execution|pipeline-execution]],
     [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
   - Redirects install on the handler arm
@@ -218,12 +213,16 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   - `pipeline.rs` is the spine: `PipeNode::run` is resolve, group, collector,
     `launch`, one `spawn_stage` per stage pushed onto the collector, then,
     after a `roll_back` if that failed, `join`. Only an owning pipeline (no
-    enclosing stage) prepares and lends a `TerminalLoan`; `prepare_terminal_loan` is
-    asked only for that loan. `launch.rs` wires one stage's byte endpoints
+    enclosing stage) captures a permitted preparation before anchor spawn.
+    `PipelineGroup::prepare` returns the group, opaque `TerminalHold` and
+    `TerminalInput` chosen after readiness and handoff; a nested pipeline joins
+    with readable input and an empty hold. `launch.rs` wires one stage's byte
+    endpoints
     (`stage_stdin` for a thread, `Prepared::start` for a process) and dispatches it on its
     frozen `StageLaunch` (`spawn_stage`, which resolves the stage's stdout
     once for either kind, and `launch_external_stage_direct`); `LaunchCx`
-    carries what both read, `holds_terminal` among it.
+    carries what both read, `input: TerminalInput` among it; stages never
+    inspect the hold.
   - `stage.rs` holds `StageHandle`, which dispatches `cancel`/`cut`/`watch`/
     `listen` over its two kinds, `External(LiveExternal)`/`Thread(ThreadStage)`.
     `cancel` records the cause on its own `sent`, joined by `max`, and tells a
@@ -246,7 +245,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     `SIGTSTP`/`SIGTTIN`/`SIGTTOU` and immune to termination signals) on every
     platform before any stage exists. On Unix it waits for a zero readiness
     byte after the handlers are installed, and starts its witness in the same
-    act: a report reader blocking to EOF on the anchor's stdout, posting
+    act. Only then does `prepare` lend to the anchor: success selects readable
+    input, no preparation or refusal selects withheld input. Refusal restores
+    immediately because only the anchor exists, reading its release pipe and
+    reporting signals without changing modes; no stage needs teardown yet.
+    The witness is a report reader blocking to EOF on the anchor's stdout, posting
     `Event::Heard(signal)` raw per swallowed signal, and the anchor's own
     `Watch` posting `Event::AnchorDied`. `group()` answers `Group::Owns` for an
     owner and `Group::Joins(membership)` for a joiner, which lends no terminal
@@ -255,7 +258,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     carries: an owner's leader paired with the stage's scope, or a joiner's
     own. `AnchorProcess::end` closes the release pipe and joins the report
     reader; dropping the anchor reaps it. The group's verbs are lifecycle only —
-    `prepare`/`joining`, `group`, `membership`, `leader_pgid`, `end_anchor`,
+    `prepare`/`joining`, `group`, `membership`, `end_anchor`,
     `Drop`: signalling and killing belong to the collector, which holds the
     live stages ([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
     On Windows an owned group also holds a `Job`.
@@ -285,7 +288,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     live() { recv; step; run }`, with no interval and no backoff. Completion is
     not an effect: the pipeline is finished exactly when no stage handle is
     left. A `Heard` key strikes the run's node and records `pressed`, but only
-    through the collector's `loan: Option<TerminalLoan>`, the one ear for a key.
+    through the collector's opaque `terminal: TerminalHold`, never by matching
+    its representation. Only a lent hold attributes a key.
     `cancel_all(cause)` is the teardown, in the order its home page fixes;
     `CollectState::drop` writes `Terminated` on every live thread stage and
     kills whenever it is dropped with a stage still unobserved. `fold` opens
@@ -304,7 +308,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   - `anchor.rs` is the hidden `--ral-pipeline-anchor` child's entrypoint
     (`Role::PipelineAnchor`; a bundled tool's `Role::BundledTool` is launched
     beside it by `authority::sandbox::reexec::launch`). On Windows every
-    external a stage thread spawns still resolves `PgidPolicy::Join` against
+    external a stage thread spawns still resolves `Placement::Join` against
     the anchor's registered Job Object, assigned at creation under the
     suspended create → assign → resume path
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).

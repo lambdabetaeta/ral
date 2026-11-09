@@ -494,6 +494,7 @@ impl App {
         f: impl FnOnce(&mut Scrollback) -> R,
     ) -> Option<R> {
         let Some(sb) = self.tabs.scrollback_mut(id) else {
+            #[cfg(debug_assertions)]
             ral_core::dbg_trace!(
                 "tui",
                 "scrollback event DROPPED: no scrollback for id={id}; known={:?}",

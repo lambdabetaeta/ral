@@ -60,7 +60,7 @@ fn an_unreadable_info_record_refuses_the_spawn() {
 
 #[test]
 fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
-    use crate::process::{Launch, PgidPolicy};
+    use crate::process::{Launch, Placement};
     use std::sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -94,7 +94,7 @@ fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
         }),
     });
     let Err(crate::process::Unstarted::Refused(why)) = launch.spawn(
-        PgidPolicy::NewLeader,
+        Placement::NewLeader,
         &crate::process::DurableRoot::default().child(),
     ) else {
         panic!("spawn must refuse");

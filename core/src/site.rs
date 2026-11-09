@@ -135,7 +135,7 @@ pub(crate) enum Silent {
     /// The engine's exit once `engine_session` returns.  Its teardown settle
     /// is the shutdown: it cancels the durable root and waits the worker out
     /// before returning.  An engine's stdio is `/dev/null`, so its session
-    /// mints no `TerminalLease` and no `TerminalLoan` can exist to strand.  It
+    /// mints no `TerminalLease` and no terminal hold can exist to strand.  It
     /// raises no card: nothing a model named is touched.
     #[cfg(unix)]
     EngineSessionExit,

@@ -41,7 +41,7 @@ fn only_create_process_s_failure_is_the_program_s() {
     let refused = |launch: Launch| {
         matches!(
             launch.spawn(
-                PgidPolicy::Inherit,
+                Placement::Inherit,
                 &crate::process::DurableRoot::default().child()
             ),
             Err(Unstarted::Refused(_))
@@ -53,7 +53,7 @@ fn only_create_process_s_failure_is_the_program_s() {
     assert!(refused(nul));
     assert!(matches!(
         Launch::new(r"C:\ral-no-such-dir\tool.exe").spawn(
-            PgidPolicy::Inherit,
+            Placement::Inherit,
             &crate::process::DurableRoot::default().child()
         ),
         Err(Unstarted::Program(_))

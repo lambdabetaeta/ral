@@ -8,29 +8,36 @@ collector holds: nothing converts between a landing and a group, and nothing
 recomputes one. What each landing allows a collector to signal is
 [[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]].
 
-- **Placement is one decision.** `command::placement` yields a `Placement
-  { policy, loan, readable }` for a lone command: its group, the terminal
-  prepared for it, and whether the terminal may be its stdin. A pipeline's
-  direct stage joins its group `PgidPolicy::unless_enveloped`, the rule a
-  stage's placement uses too. An envelope leads a group of its own, so both
-  say `NewLeader` for an enveloped launch, and `Launch::spawn` asserts it
-  rather than overriding.
-- **`spawn_with_pgid` is the one derivation.** A `Join` policy joins, and
-  carries its membership into `Joins`; `NewLeader` and `NewSession` own the
-  child's own group; `Inherit` shares. An enveloped launch's payload group,
-  named once it exists, becomes `Enveloped` (the envelope's own group where it
-  names none); Windows' spawn returns its own.
+- **Requested placement is one decision.** `Shell::group_owner` supplies stage
+  membership or session permission and interactivity. `Placement::command`
+  selects `Join`, `Tenant`, `Inherit` or `NewSession`; `Placement::input`
+  determines terminal stdin from the request. A pipeline selects its input
+  once from its anchor handoff result and stores it for every stage.
+- **The spawn owns envelope placement.** `Launch::spawn` steps an envelope
+  `NewLeader` whatever was requested. A requested `Tenant` retains readable
+  stdin and an opaque restoration-only hold, not a handoff or key attribution.
+- **`spawn_with_pgid` is the one derivation.** `Join` carries its membership
+  into `Joins`; `NewLeader`, `NewSession` and direct `Tenant` own the child's
+  group; `Inherit` shares. An envelope's payload group, named once it exists,
+  becomes `Enveloped` (the envelope's own group where it names none); Windows'
+  spawn returns its own. `Tenant` lowers only to the fresh-leader step, but
+  `Pgid` itself proves positivity only: freshness and same-session placement
+  remain handoff call-site preconditions, not typed provenance guarantees.
 - **A launch is spent by its spawn.** `Launch::spawn` and `spawn_detached`
   take the launch by value, so a second spawn is unwritable. The spawn moves
   the confinement out of the launch, so a second spawn on the same `Command`
   would find none, and would read bwrap's exit as the program's; the `pre_exec`
   hooks, likewise, cannot be applied twice.
-- **A failed handoff of the terminal kills the child.** A lone `NewLeader`
-  child is spawned before its group can be lent the terminal; if `tcsetpgrp`
-  then fails it sits outside the foreground, where its first tty read stops it
-  for ever. It is killed and settled, and the refusal is the command's verdict
-  (`Started::collect`). A pipeline lends before any stage exists, so its stages read
-  `holds_terminal` after the lend and never meet this.
+- **A failed command handoff retains its guard through teardown.**
+  `Launch::spawn` kills the owned group while its leader still pins the ID,
+  kills/reaps the child, restores saved state, then releases the jail.
+  `Prepared::start` returns a `StartFailure` owning its reason and drains,
+  naming the handoff and OS error without claiming the command never ran.
+  The caller settles before reporting; a pipeline first rolls back and joins
+  so a joined child's descendants cannot block owner teardown. Settlement
+  never kills by group ID after reap. A pipeline instead lends before any stage exists:
+  its mode-inert anchor needs no teardown before restoration on refusal, and
+  the pipeline proceeds with terminal input withheld.
 
 **Why.** Who may signal what is the safety of every teardown: a kill aimed at a
 group the child does not lead hits a stranger, and one aimed at a pid the child

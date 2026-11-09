@@ -194,10 +194,10 @@ pub(crate) struct Confined {
     pub(crate) image: Option<crate::path::RealPath>,
 }
 
-/// Why a launch made no child: the program's own failure to become a
-/// process, something that is never the program's fault, or the run's stop
-/// before the child existed or while a confined launch waited to hear its
-/// program start.
+/// Why a launch returned no child: the program's own failure to become a
+/// process, a refused launch step (possibly after the program ran), or the
+/// run's stop before the child existed or while a confined launch waited
+/// to hear its program start. Any child created is torn down before return.
 #[derive(Debug)]
 pub(crate) enum Unstarted {
     Program(std::io::Error),
@@ -221,6 +221,7 @@ impl From<crate::process::Cancellation> for Unstarted {
 pub(crate) struct Spawned {
     pub(crate) child: crate::process::ChildHandle,
     pub(crate) group: crate::process::Group,
+    pub(crate) terminal: crate::process::TerminalHold,
     /// The guest jail's cgroup, whatever `apply_guest_jail` staged.
     pub(crate) jail: Option<crate::process::jail::JailCgroup>,
 }
@@ -498,12 +499,11 @@ impl Launch {
         (cmd, jail)
     }
 
-    /// Spawn into `pgid` under `scope`, and on a confined launch read what
-    /// its trampoline says of the start: the child, where it landed, and
-    /// whatever jail cgroup `apply_guest_jail` staged.  An enveloped launch
-    /// is placed `NewLeader` (asserted): the envelope process is nobody's to
-    /// address, and its payload's group, named once it exists, is where the
-    /// child lands.
+    /// Spawn with `placement` under `scope`, and on a confined launch read
+    /// what its trampoline says of the start. An envelope always leads its
+    /// own group; its payload's group, named once it exists, is where the
+    /// child lands. A tenant hands over the terminal only to its fresh
+    /// leader, or retains a restoration-only guard for an envelope.
     ///
     /// # Errors
     /// [`Unstarted`]: the program's own `execve`; a refusal for the fork,
@@ -512,15 +512,11 @@ impl Launch {
     /// trampoline spoke.  Any child is then killed and reaped.
     pub(crate) fn spawn(
         self,
-        pgid: crate::process::PgidPolicy,
+        placement: crate::process::Placement,
         scope: &crate::process::Scope,
     ) -> Result<Spawned, Unstarted> {
-        use crate::process::{Group, PgidPolicy};
+        use crate::process::{Group, Placement, TerminalHold};
         let enveloped = self.enveloped();
-        assert!(
-            !enveloped || matches!(pgid, PgidPolicy::NewLeader),
-            "an envelope leads a group of its own: place it by `PgidPolicy::unless_enveloped`"
-        );
         scope.poll()?;
         let Self {
             mut cmd,
@@ -532,7 +528,12 @@ impl Launch {
         } = self;
         setup.install(&mut cmd);
         let ((child, group), confined) = fork(cmd, confined, |cmd| {
-            crate::process::spawn_with_pgid(cmd, pgid)
+            let placement = if enveloped {
+                &Placement::NewLeader
+            } else {
+                &placement
+            };
+            crate::process::spawn_with_pgid(cmd, placement)
         })?;
         let mut child = crate::process::ChildHandle::from_std(child);
         #[cfg(target_os = "linux")]
@@ -540,13 +541,52 @@ impl Launch {
         let payload = match confined.map(|confined| confined.hear(&mut child, scope)) {
             None => None,
             Some(Ok(payload)) => payload,
-            Some(Err(unstarted)) => return Err(discarded(child, unstarted)),
+            Some(Err(unstarted)) => {
+                let why = discarded(child, &group, unstarted);
+                // A refused launch may already have changed terminal modes.
+                drop(placement);
+                drop(jail);
+                return Err(why);
+            }
         };
         let group = match group {
             Group::Owns(envelope) if enveloped => Group::Enveloped(payload.unwrap_or(envelope)),
             group => group,
         };
-        Ok(Spawned { child, group, jail })
+        let terminal = match placement {
+            Placement::Tenant(prepared) if enveloped => prepared.guard(),
+            Placement::Tenant(prepared) => {
+                // Tenant lowered to setpgid(0, 0): this child's pid is a fresh
+                // leader in ral's session, never a joined or enveloped group.
+                let leader = crate::process::Pgid::from_raw(
+                    i32::try_from(child.id()).expect("a child pid fits in i32"),
+                )
+                .expect("a child pid is positive");
+                match prepared.lend(leader) {
+                    Ok(terminal) => terminal,
+                    Err((prepared, error)) => {
+                        let why = discarded(
+                            child,
+                            &group,
+                            Unstarted::Refused(Error::io(
+                                "could not hand over the terminal to the command's process group",
+                                &error,
+                            )),
+                        );
+                        drop(prepared);
+                        drop(jail);
+                        return Err(why);
+                    }
+                }
+            }
+            _ => TerminalHold::default(),
+        };
+        Ok(Spawned {
+            child,
+            group,
+            terminal,
+            jail,
+        })
     }
 
     /// Spawn *detached* by double fork: the survivor is this process's
@@ -612,8 +652,8 @@ impl Launch {
         use std::os::unix::process::ExitStatusExt;
         self.stdout(StdioSpec::Piped).stderr(StdioSpec::Piped);
         let unstopped = crate::process::DurableRoot::default().child();
-        let pgid = crate::process::PgidPolicy::Inherit.unless_enveloped(self.enveloped());
-        let Spawned { mut child, .. } = self.spawn(pgid, &unstopped)?;
+        let Spawned { mut child, .. } =
+            self.spawn(crate::process::Placement::Inherit, &unstopped)?;
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
@@ -745,28 +785,42 @@ fn unprepared(why: impl std::fmt::Display) -> Unstarted {
     )))
 }
 
-/// `child`, killed and reaped, for `why` it must not run.
-#[cfg(unix)]
-fn discarded(mut child: crate::process::ChildHandle, why: Unstarted) -> Unstarted {
+/// Kill the owned group before reaping: the unreaped leader pins its ID.
+/// Never retain that numeric group ID for a later drain-join kill callback.
+fn discarded(
+    mut child: crate::process::ChildHandle,
+    group: &crate::process::Group,
+    why: Unstarted,
+) -> Unstarted {
+    if let Some(group) = group.owned() {
+        group.kill();
+    }
     let _ = child.kill();
     let _ = child.reap();
+    #[cfg(windows)]
+    if let Some(group) = group.owned() {
+        crate::process::release_win_group(group.as_raw());
+    }
     why
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+#[path = "launch/terminal_tests.rs"]
+mod terminal_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::{Launch, Unstarted};
-    use crate::process::{
-        CancelCause, DurableRoot, Membership, Pgid, PgidPolicy, Scope, ScopeNode,
-    };
+    use crate::process::{CancelCause, DurableRoot, Membership, Pgid, Placement, Scope, ScopeNode};
 
     fn unstopped() -> ScopeNode {
         DurableRoot::default().child()
     }
 
     /// A group nobody leads: no pid reaches `i32::MAX`.
-    fn nobody() -> PgidPolicy {
-        PgidPolicy::Join(Membership::new(
+    fn nobody() -> Placement {
+        Placement::Join(Membership::new(
             Pgid::from_raw(i32::MAX).expect("positive"),
             Scope::clone(&unstopped()),
         ))
@@ -835,7 +889,7 @@ mod tests {
         assert!(why.describe().contains("could not prepare"), "{why}");
 
         let missing =
-            Launch::new("ral-no-such-program-exists").spawn(PgidPolicy::Inherit, &unstopped());
+            Launch::new("ral-no-such-program-exists").spawn(Placement::Inherit, &unstopped());
         assert!(
             matches!(&missing, Err(Unstarted::Program(e)) if e.kind() == std::io::ErrorKind::NotFound),
             "{:?}",
@@ -864,7 +918,7 @@ mod tests {
         assert!(why.describe().contains("could not prepare"), "{why}");
 
         let missing =
-            confined("ral-no-such-program-exists").spawn(PgidPolicy::Inherit, &unstopped());
+            confined("ral-no-such-program-exists").spawn(Placement::Inherit, &unstopped());
         let Err(Unstarted::Refused(why)) = missing else {
             panic!(
                 "a launcher that cannot start is unavailable: {:?}",
@@ -879,6 +933,39 @@ mod tests {
         );
     }
 
+    /// A synthetic envelope report isolates placement from backend support;
+    /// actual envelope mode restoration is a separate PTY regression.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_envelope_leads_its_own_group_even_when_asked_to_inherit_or_join() {
+        for placement in [Placement::Inherit, nobody()] {
+            let (reader, writer) = crate::process::cloexec_socketpair().expect("socketpair");
+            let witness = crate::process::report::Witness::new(
+                writer.try_clone().expect("clone report writer").into(),
+            )
+            .expect("a report is a socket");
+            drop(witness.started());
+            let mut launch = Launch::new("/bin/sh");
+            launch.args(["-c", "exit 0"]);
+            launch.confine(super::Confined {
+                report: crate::process::report::Report::new(reader, writer.into()),
+                envelope: Some(super::Envelope {
+                    program: "/bin/sh",
+                    payload_pgid: None,
+                }),
+            });
+            let mut spawned = launch.spawn(placement, &unstopped()).unwrap();
+            let pid = spawned.child.id();
+            let status = spawned.child.reap().expect("reap envelope");
+            assert!(status.success(), "{status:?}");
+            assert!(matches!(
+                spawned.group,
+                crate::process::Group::Enveloped(group)
+                    if group.as_raw() == i32::try_from(pid).unwrap()
+            ));
+        }
+    }
+
     /// A stop in force when a launch starts is the run's stop, and no child
     /// is made, confined or not.
     #[test]
@@ -886,7 +973,7 @@ mod tests {
         let stopped = unstopped();
         stopped.cancel(CancelCause::Cancelled);
         for launch in [Launch::new("/bin/sh"), confined("/bin/sh")] {
-            let spawned = launch.spawn(PgidPolicy::Inherit, &stopped);
+            let spawned = launch.spawn(Placement::Inherit, &stopped);
             assert!(
                 matches!(spawned, Err(Unstarted::Stopped(_))),
                 "{:?}",
@@ -904,13 +991,6 @@ mod tests {
 
 #[cfg(windows)]
 impl Launch {
-    /// Windows has no envelope: confinement is creation-time state on the
-    /// target itself.
-    #[allow(clippy::unused_self, reason = "one signature with the Unix arm")]
-    pub(crate) const fn enveloped(&self) -> bool {
-        false
-    }
-
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
             program: program.as_ref().to_os_string(),
@@ -1037,13 +1117,9 @@ impl Launch {
     /// handle admission, or a Job Object that cannot take the child or its
     /// process budget; or a stop on `scope` before, during or after the
     /// confinement, short of `CreateProcessW`.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the Unix arm moves the policy into its spawn; both arms present one signature"
-    )]
     pub(crate) fn spawn(
         mut self,
-        pgid: crate::process::PgidPolicy,
+        placement: crate::process::Placement,
         scope: &crate::process::Scope,
     ) -> Result<Spawned, Unstarted> {
         scope.poll()?;
@@ -1059,9 +1135,35 @@ impl Launch {
             })
             .transpose()?;
         scope.poll()?;
-        windows::spawn(&mut self, &pgid, caps.as_ref()).map(|(child, group)| Spawned {
+        let (child, group) = windows::spawn(&mut self, &placement, caps.as_ref())?;
+        let terminal = match placement {
+            crate::process::Placement::Tenant(prepared) => {
+                let leader = crate::process::Pgid::from_raw(
+                    i32::try_from(child.id()).expect("a child pid fits in i32"),
+                )
+                .expect("a child pid is positive");
+                match prepared.lend(leader) {
+                    Ok(terminal) => terminal,
+                    Err((prepared, error)) => {
+                        let why = discarded(
+                            child,
+                            &group,
+                            Unstarted::Refused(Error::io(
+                                "could not hand over the terminal to the command's process group",
+                                &error,
+                            )),
+                        );
+                        drop(prepared);
+                        return Err(why);
+                    }
+                }
+            }
+            _ => crate::process::TerminalHold::default(),
+        };
+        Ok(Spawned {
             child,
             group,
+            terminal,
             jail: None,
         })
     }
@@ -1153,7 +1255,7 @@ mod windows {
     };
     use crate::error::Error;
     use crate::process::outcome::KILL_EXIT_CODE;
-    use crate::process::{ChildHandle, PgidPolicy};
+    use crate::process::{ChildHandle, Placement};
     use std::ffi::{OsStr, OsString};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -1181,13 +1283,13 @@ mod windows {
 
     pub(super) fn spawn(
         launch: &mut Launch,
-        policy: &PgidPolicy,
+        placement: &Placement,
         caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<(ChildHandle, crate::process::Group), Unstarted> {
         reject_batch(&launch.program)?;
-        let prepared = crate::process::group::prepare_group(policy)
+        let prepared = crate::process::group::prepare_group(placement)
             .map_err(|e| Error::new(format!("cannot prepare the child's Job Object: {e}")))?;
-        match launched(launch, policy, &prepared, caps) {
+        match launched(launch, placement, &prepared, caps) {
             Ok(child) => {
                 let group = crate::process::group::register_prepared_group(prepared, &child);
                 Ok((child, group))
@@ -1203,7 +1305,7 @@ mod windows {
     /// group's, or one made for it alone to carry a grant's process budget.
     fn launched(
         launch: &mut Launch,
-        policy: &PgidPolicy,
+        placement: &Placement,
         prepared: &crate::process::group::PreparedGroup,
         caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<ChildHandle, Unstarted> {
@@ -1222,7 +1324,7 @@ mod windows {
                 crate::process::limits::unbudgeted("cannot cap the child's Job Object").into(),
             );
         }
-        let created = spawn_inner(launch, policy, job.is_some(), caps)?;
+        let created = spawn_inner(launch, placement, job.is_some(), caps)?;
         if let Some(job) = job {
             created.enter(job)?;
         }
@@ -1292,7 +1394,7 @@ mod windows {
 
     fn spawn_inner(
         launch: &mut Launch,
-        policy: &PgidPolicy,
+        placement: &Placement,
         suspended: bool,
         caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<Created, Unstarted> {
@@ -1377,8 +1479,11 @@ mod windows {
         let mut flags =
             launch.creation_flags | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
         if matches!(
-            policy,
-            PgidPolicy::NewLeader | PgidPolicy::NewSession | PgidPolicy::Join(_)
+            placement,
+            Placement::NewLeader
+                | Placement::Tenant(_)
+                | Placement::NewSession
+                | Placement::Join(_)
         ) {
             flags |= CREATE_NEW_PROCESS_GROUP;
         }

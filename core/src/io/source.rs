@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 
-use crate::process::{Scope, StdioSpec};
+use crate::process::{Scope, StdioSpec, TerminalInput};
 #[cfg(unix)]
 use std::os::fd::OwnedFd as Owned;
 #[cfg(windows)]
@@ -29,6 +29,17 @@ pub struct SourceReader {
 }
 
 impl Source {
+    /// Withhold only terminal input; pipes and explicit EOF belong to the caller.
+    pub(crate) fn offered(&self, input: TerminalInput) -> &Self {
+        match (input, self) {
+            (TerminalInput::Withheld, Self::Terminal) => &Self::Empty,
+            (TerminalInput::Readable, Self::Terminal)
+            | (TerminalInput::Readable | TerminalInput::Withheld, Self::Reader(_) | Self::Empty) => {
+                self
+            }
+        }
+    }
+
     /// Configure a child's stdin. Readers lend a duplicate of their descriptor;
     /// the source and its cancellation scope remain with the parent.
     ///

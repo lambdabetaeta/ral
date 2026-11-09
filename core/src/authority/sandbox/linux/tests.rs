@@ -145,7 +145,7 @@ fn start_granted<R>(
 ) -> R {
     use crate::io::child::Connection;
     use crate::io::{Sink, Source};
-    use crate::process::PgidPolicy;
+    use crate::process::Placement;
     use crate::shell::exec::command::Command;
     let mut shell = crate::test_helper::core_shell();
     let layer = crate::test_helper::layer(Capabilities {
@@ -168,7 +168,7 @@ fn start_granted<R>(
         let started = command
             .start(
                 Connection::new(&Source::Empty, &discard, &discard).unwrap(),
-                PgidPolicy::NewLeader,
+                Placement::NewLeader,
                 &shell.scope,
             )
             .unwrap_or_else(|broke| panic!("the confined sh must start: {broke:?}"));

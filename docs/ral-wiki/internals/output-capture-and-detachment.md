@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 6e2995f8
-verified_at_commit: 6e2995f8
+generated_at_commit: f26144e0
+verified_at_commit: f26144e0
 verified_at_date: 2026-11-09
-anchors: [Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, drained, Started::collect, spawn_child, PgidPolicy::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
+anchors: [StartFailure, StartFailure::settle, Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, Prepared::start, Launch::spawn, TerminalHold, drained, Started::collect, spawn_child, Placement::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
 # Output capture and detachment
@@ -73,9 +73,20 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   `core/src/shell/exec/pipeline/collect.rs`, [[map/core/runtime|runtime]]). A
   foreground command returns only once every byte the child wrote has been
   copied and the pipe has closed.
-- The join never delays the terminal: a lent terminal, a lone command's or a
-  pipeline's, is reclaimed the instant its tenants are dead, before the pumps
-  are joined ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
+- Every failed start retains its already-started drains in `StartFailure`
+  until caller settlement, before the error is returned. This does not change
+  audit/surface publication timing. A lone run settles immediately; a pipeline
+  first rolls back and joins, even if no stage
+  registered. A handoff or confinement refusal can follow exec and output:
+  `Launch::spawn` kills only a group it owns before reaping its child, restores
+  retained terminal state, and releases the jail. A joined child's descendants
+  remain its enclosing owner's responsibility, so drain settlement cannot
+  block that owner's launch rollback. The failed-start join has an empty kill
+  callback; it never addresses a numeric group ID after reap.
+- The join never delays the terminal: a lone command's or pipeline's opaque
+  `TerminalHold` is reclaimed once its tenants are dead, before pumps are
+  joined. An envelope's restoration-only hold returns modes without attributing
+  a key ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
 - A join under a cause in force kills the owned group once, a slice at a time:
   a survivor holding the pipe ends the join only when its pipe closes. A child
   cut for a dead write, and a collector dropped by an unwind, *detach* their
@@ -94,8 +105,8 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   on expiry the child's collector, which reads the scope each slice, tears the
   group down.
 - A headless exarch external leads a session of its own, and so its own
-  process group (`PgidPolicy::NewSession`, chosen by `Placement::for_command` in
-  `core/src/shell/exec/job_control.rs`, gated by
+  process group (`Placement::NewSession`, chosen by `Placement::command` in
+  `core/src/process/terminal/job_control.rs` from `Shell::group_owner`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
   so the cancel SIGTERMs then unconditionally SIGKILLs the *whole group* —
   grandchildren included. Every copy of the write end closes, the pump sees EOF,

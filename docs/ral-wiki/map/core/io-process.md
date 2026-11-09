@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6e2995f8
+generated_at_commit: f26144e0
 generated_at_date: 2026-11-09
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -11,7 +11,7 @@ external commands: where a stage's bytes come from and go, the signals and
 process groups that govern a foreground child, and the daemon that fires every
 scheduled action. **Authority over the controlling terminal is carried as a
 value, not re-derived from process state** — the foreground handoff is gated on
-a held [[map/core/shell-state|TerminalLease]].
+an authorised permit reaching the session's [[map/core/shell-state|terminal lease]].
 
 Windows process creation immediately owns both returned handles as
 `OwnedHandle`; failed Job Object assignment or thread resumption releases both.
@@ -86,7 +86,9 @@ duplicate ([[internals/pipeline-execution|pipeline execution]]).
   endpoints to `Launch`; `PendingDrains` retains each reader with its sink.
   `start` produces `Drains` without inspecting a child. Shared destinations
   use one binding and `Launch::dup_stdout_to_stderr` on Unix and Windows.
-  `Drains::join_under` waits explicitly; dropping drains detaches them.
+  `Drains::join_under` waits explicitly, including when the caller settles
+  `Prepared::start`'s `StartFailure` after any pipeline rollback and join;
+  dropping drains stays non-blocking and detaches them.
   See [[decisions/261109_a-drain-owns-its-reader|a-drain-owns-its-reader]].
 - `poll.rs` — `poll_slice`, the one sliced fd wait (Unix): wait for readiness
   for at most `POLL_SLICE`, `EINTR` retried against the slice's own deadline.
@@ -154,16 +156,15 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   it ends before Job Object placement/resume and waits. An explicit handle list
   restricts the raw child only, not another inheriting child; dependency spawns
   outside ral's helpers remain outside this lock. Linux has no lock.
-- `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
-  controlling terminal to a child via `tcsetpgrp`. No public constructor,
-  neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at
-  most once at session construction iff ral owned the foreground at startup
-  (`None` on a backgrounded or tty-less Unix launch; Windows mints from
-  console attachment), then lent per run as `&TerminalLease` to the one chokepoint
-  that foregrounds — `TerminalLoan::prepare`, which is *uninvocable*
-  without the borrow. Preparation captures terminal state before spawn;
-  `PreparedTerminalLoan::lend` performs the post-spawn handoff. The type lives at [[map/core/shell-state|shell-state]];
-  the rationale at [[decisions/260619_terminal-lease|terminal-lease]].
+- `terminal/lease.rs` — the session's `TerminalLease`, run-local `TerminalAccess`,
+  and affine `TerminalPermit`. `TerminalAccess::reach` requires a session lease:
+  `Denied` never reaches it, `Leased` only with terminal-bound stdout, and
+  `ExplicitLoan` regardless of stdout. Only a permit can capture state.
+  `RequestedTerminalAccess` is the only terminal-module type public outside
+  core; hosts request access, while session construction mints and stores
+  the lease internally.
+  See [[map/core/shell-state|shell-state]] and
+  [[decisions/260619_terminal-lease|terminal-lease]].
 - `deadline.rs` — one lazily started, process-global daemon (`ral-deadline`)
   owning a min-ordered heap of `(when, action)` entries, firing each at its
   `Instant`. *Deadlines are data*, not a thread per worker: `arm_lifetime` /
@@ -257,7 +258,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   reaper's `waitid`, the one funnel
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
   the pid side).
-- `group.rs` — `Pgid` / `PgidPolicy` and the platform `spawn_with_pgid`
+- `group.rs` — `Pgid` / `Placement` and the platform `spawn_with_pgid`
   family (`group/unix.rs`) for process-group placement, and the two facts of
   who signals a group: `Membership` (a joined pipeline group and its stage
   scope) and `Group` (`Owns(Pgid)`, signalled and killed whole;
@@ -270,18 +271,32 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   the collector's `Address::signal` for a group — before escalating to
   `kill_pipeline_group`;
   a pid gets the kill alone.
-- `foreground.rs` — `TerminalLoan::prepare` takes the `&TerminalLease` and
-  run's node (`ScopeNode`) before spawn on every platform, returning a
-  `PreparedTerminalLoan`; `lend` follows spawn. Unix preparation snapshots
-  foreground / termios, then lending performs `tcsetpgrp`. The loan blocks
-  SIGTTOU during parent-only restoration and hears the tenant's key back
-  (`hear`, `pressed`, `reclaim`), striking it on the run's node.
-  Windows preparation duplicates console handles and snapshots their modes,
-  restoring the same console objects on reclaim or drop. Prepared and lent
-  guards both restore on failure and unwind. It does not transfer
-  console ownership or isolate a child from the shared console.
-  `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
-  external group.
+- `terminal.rs` — private implementation modules with deliberate re-exports
+  through `process`. Lease, permit, `PreparedTerminalLoan` and `TerminalHold`
+  are crate-visible opaque resources, neither `Clone` nor `Copy`. Callers
+  cannot extract saved state or key attribution from a hold.
+  - `terminal/job_control.rs` — `GroupOwner`, `Placement::command` and
+    `Placement::input`: one owner decision and one requested-input table.
+    `Source::offered` is the io-facing interpretation, replacing only a
+    withheld `Source::Terminal` with `Empty`, never a pipe or file.
+  - `terminal/loan.rs` — infallible `PreparedTerminalLoan::capture` before
+    spawn; `lend(Pgid)` after birth returns an opaque hold, or the intact
+    preparation with its OS error. `Pgid` proves positivity only; callers
+    establish a fresh leader in ral's session. Unix `guard` is process-scoped:
+    an envelope retains restoration responsibility without a handoff.
+    `TerminalHold` exposes only empty `Default`, `hear`, `pressed` and
+    consuming `reclaim`; its representation and `TerminalLoan` are private.
+  - `terminal/loan/unix.rs` — private saved foreground and termios, captured
+    independently. Drop restores the foreground as found, then modes with
+    `Drain`, under SIGTTOU blocking. A non-controlling tty can still save modes.
+    Restoration failures are traced, not returned.
+  - `terminal/loan/windows.rs` — infallible capture of any available standard
+    console modes, retaining duplicated handles. Drop restores those same
+    console objects; handoff succeeds without transferring console ownership.
+  - `terminal/keys.rs` — terminal-internal `KeyAttribution`, owned only by a
+    lent hold, strikes reported gestures on the run's node. An envelope guard
+    restores without attributing keys; Windows `gesture` reports none because
+    ral already hears console Ctrl-C directly.
 - `limits.rs` — what a child spawned under an active grant may consume: no
   core dump, and a process budget (macOS's fork brake,
   `limits/fork_brake.rs`; a Windows Job Object cap; Linux sets the core limit
@@ -302,10 +317,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[invariants/a-launchs-report-is-the-trampolines-alone|a-launchs-report-is-the-trampolines-alone]],
   [[invariants/a-first-word-is-waited-for-under-the-scope|a-first-word-is-waited-for-under-the-scope]]).
 - `launch.rs` — the owned launch value and its platform interpreters, and the
-  two births, each returning `Unstarted` for a launch that made no child
+  two births, returning `Unstarted` when no kept child is handed to the caller
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]):
   `spawn`, which hands back a `Spawned` (the child, its `Group`
-  ([[invariants/a-child-lands-once|a-child-lands-once]]) and any jail cgroup),
+  ([[invariants/a-child-lands-once|a-child-lands-once]]), its opaque
+  `TerminalHold` and any jail cgroup),
   and the `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
   to init — its pid comes back but nothing else does, so there is no handle,
   no wait, and no `JailCgroup` comes back — shared membership never owns one (below). Unix
@@ -321,6 +337,12 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   suspended create → Job Object assignment → resume, and the widened
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
+  `spawn` alone enforces envelope placement as `NewLeader`, whatever was
+  requested. A direct `Tenant` lends after spawn; an enveloped tenant keeps a
+  restoration-only guard. A refused handoff kills the owned group before
+  reaping its leader, then restores state and releases the jail before returning
+  `Unstarted::Refused`; the shell joins all already-started drains before
+  reporting it. The child may already have run.
   The whole stop-work flow — the
   `ReaderGone < Interrupted < Cancelled < TimedOut < Terminated < Aborted`
   order — is narrated in

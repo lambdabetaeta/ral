@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 3e3fbc84
-verified_at_commit: 3e3fbc84
-verified_at_date: 2026-11-07
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read]
+generated_at_commit: f26144e0
+verified_at_commit: f26144e0
+verified_at_date: 2026-11-09
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read, Launch::spawn, Placement, PreparedTerminalLoan::guard, TerminalHold]
 ---
 
 # The Linux envelope
@@ -63,10 +63,18 @@ the filesystem**
   within microseconds of its start, and every descendant born later, go
   unclaimed
   ([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]).
-- **Process groups.** `Launch::spawn` accepts an enveloped launch only as
-  `NewLeader` (`PgidPolicy::unless_enveloped`), and returns the payload's group.
-  `Placement::for_command` never hands an envelope the terminal. A pipeline collector addresses each
-  confined stage's envelope beside its own group
+- **Process groups and terminal responsibility are separate.** `Launch::spawn`
+  alone steps an envelope `NewLeader`, whatever placement was requested, and
+  returns the payload's separate-session group as `Group::Enveloped`. No loan
+  targets an envelope. A requested `Tenant` keeps readable terminal stdin and
+  consumes its pre-spawn capture through `PreparedTerminalLoan::guard`: an
+  opaque `TerminalHold` restores modes on settlement or drop without key
+  attribution. This applies even in a non-interactive script, but requires
+  access to reach the session lease, not merely a held lease.
+  A refused start retains the capture until child teardown, restores state and
+  releases the jail, then the shell joins all started output drains before
+  reporting failure. A pipeline collector addresses each confined stage's
+  envelope beside its own group
   ([[internals/pipeline-execution|pipeline execution]]).
 
 ## bwrap mounts what ral opened, never a name

@@ -98,7 +98,7 @@ pub(super) fn launch_thread_stage(
     slot: Slot,
 ) -> Settled<(ThreadStage, Option<HeldEdge>)> {
     let node = cx.shell.scope.child();
-    let stdin = super::launch::stage_stdin(stdin, cx.shell, &node, cx.holds_terminal)?;
+    let stdin = super::launch::stage_stdin(stdin, cx.shell, &node, cx.input)?;
     let mooring = Mooring::for_thread(cx.mooring, node.clone(), cx.mooring.surface.clone());
 
     let (stdout, held) = match stdout {
@@ -155,8 +155,8 @@ mod tests {
     use super::super::group::PipelineGroup;
     use super::*;
     use crate::io::Edge;
-    use crate::process::DurableRoot;
-    use crate::shell::runtime::{End, Stop, TerminalAccess};
+    use crate::process::TerminalAccess;
+    use crate::shell::runtime::{End, Stop};
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -175,7 +175,9 @@ mod tests {
     /// An owning group whose channel nobody reads: these tests watch a single
     /// stage's own reports, never the anchor's.
     fn prepared_group() -> PipelineGroup {
-        PipelineGroup::prepare(std::sync::mpsc::channel().0).expect("anchor spawns")
+        PipelineGroup::prepare(std::sync::mpsc::channel().0, None)
+            .expect("anchor spawns")
+            .0
     }
 
     fn downstream(writer: os_pipe::PipeWriter, reader: &os_pipe::PipeReader) -> ByteOut {
@@ -203,7 +205,7 @@ mod tests {
             env: &env,
             eval: crate::shell::evaluator::STAGE_EVAL,
             group: &group,
-            holds_terminal: false,
+            input: crate::process::TerminalInput::Withheld,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (_handle, _held) = launch_thread_stage(
@@ -277,7 +279,7 @@ mod tests {
                     ..crate::shell::evaluator::STAGE_EVAL
                 },
                 group: &group,
-                holds_terminal: false,
+                input: crate::process::TerminalInput::Withheld,
             };
             let (tx, rx) = std::sync::mpsc::channel();
             let (stage, _held) = launch_thread_stage(
@@ -332,7 +334,7 @@ mod tests {
             env: &env,
             eval: crate::shell::evaluator::STAGE_EVAL,
             group: &group,
-            holds_terminal: false,
+            input: crate::process::TerminalInput::Withheld,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (handle, _held) = launch_thread_stage(
@@ -388,7 +390,7 @@ mod tests {
                 ..crate::shell::evaluator::STAGE_EVAL
             },
             group: &group,
-            holds_terminal: false,
+            input: crate::process::TerminalInput::Withheld,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (stage, _held) = launch_thread_stage(
@@ -419,29 +421,83 @@ mod tests {
         );
     }
 
+    /// Exercise `PipeNode`'s Stage branch twice, not just `Source::offered`:
+    /// the stage mooring denies access, but cannot replace its owner's stdin.
     #[test]
-    fn a_stages_terminal_lease_is_none() {
-        let mut parent = crate::test_helper::core_shell();
-        parent.session.terminal_lease = crate::process::TerminalLease::mint_at_startup(true);
-        let outer = Mooring {
-            terminal_access: TerminalAccess::Leased,
-            home: DurableRoot::default().child(),
-            cleanup_grace: Duration::ZERO,
-            ..Mooring::adrift()
-        };
-        assert!(
-            parent.terminal_lease(&outer).is_some(),
-            "precondition: the outer mooring holds a lease"
-        );
+    fn a_nested_pipeline_retains_its_owners_input_decision() {
+        crate::test_helper::subprocess::isolated(
+            "shell::exec::pipeline::thread::tests::a_nested_pipeline_retains_its_owners_input_decision",
+            || {
+                fn nested(
+                    env: &crate::shell::runtime::Env,
+                    mooring: &Mooring,
+                    shell: &mut crate::shell::runtime::Shell,
+                    readable: bool,
+                ) -> Settled<crate::shell::runtime::Value> {
+                    assert!(matches!(
+                        (readable, &shell.io.stdin),
+                        (true, crate::io::Source::Terminal) | (false, crate::io::Source::Empty)
+                    ));
+                    assert_eq!(mooring.terminal_access, TerminalAccess::Denied);
+                    assert!(matches!(
+                        shell.group_owner(mooring),
+                        crate::process::GroupOwner::Stage(_)
+                    ));
+                    let eval = super::super::StageEval {
+                        run: if readable {
+                            |_, _, _, child| {
+                                assert!(matches!(child.io.stdin, crate::io::Source::Terminal));
+                                Ok(crate::shell::runtime::Value::Unit)
+                            }
+                        } else {
+                            |_, _, _, child| {
+                                assert!(matches!(child.io.stdin, crate::io::Source::Empty));
+                                Ok(crate::shell::runtime::Value::Unit)
+                            }
+                        },
+                        ..crate::shell::evaluator::STAGE_EVAL
+                    };
+                    super::super::PipeNode::run(
+                        &[compile_one("echo unused")],
+                        env,
+                        eval,
+                        mooring,
+                        shell,
+                    )
+                }
 
-        let stage_mooring = Mooring::for_thread(
-            &outer,
-            DurableRoot::default().child(),
-            outer.surface.clone(),
-        );
-        assert!(
-            parent.terminal_lease(&stage_mooring).is_none(),
-            "a stage thread's mooring denies terminal access outright"
+                let owner = prepared_group();
+                for input in [
+                    crate::process::TerminalInput::Readable,
+                    crate::process::TerminalInput::Withheld,
+                ] {
+                    let readable = matches!(input, crate::process::TerminalInput::Readable);
+                    let mut shell = crate::test_helper::core_shell();
+                    shell.io.stdin = crate::io::Source::Terminal;
+                    let stage = shell.scope.child();
+                    shell.io.stdin =
+                        super::super::launch::stage_stdin(ByteIn::Parent, &shell, &stage, input)
+                            .expect("owner-selected input");
+                    shell.session.stage = Some(owner.membership(&stage));
+                    let env = shell.env.clone();
+                    let eval = super::super::StageEval {
+                        run: if readable {
+                            |_, env, mooring, child| nested(&env, mooring, child, true)
+                        } else {
+                            |_, env, mooring, child| nested(&env, mooring, child, false)
+                        },
+                        ..crate::shell::evaluator::STAGE_EVAL
+                    };
+                    super::super::PipeNode::run(
+                        &[compile_one("echo unused")],
+                        &env,
+                        eval,
+                        &Mooring::adrift(),
+                        &mut shell,
+                    )
+                    .expect("nested pipeline keeps the owner's input");
+                }
+            },
         );
     }
 }

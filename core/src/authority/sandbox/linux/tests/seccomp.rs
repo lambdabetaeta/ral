@@ -81,7 +81,7 @@ fn a_confined_program_killed_by_the_deny_set_is_hinted() {
     let since = std::time::Instant::now();
     let settled = start_granted(
         "sleep 0.5; exec mount -t tmpfs none /tmp",
-        |started, shell| started.collect(None, since, shell),
+        |started, shell| started.collect(since, shell),
     );
     let Err(Break::Error(error)) = settled else {
         panic!("a program the deny-set kills is the command's error: {settled:?}");

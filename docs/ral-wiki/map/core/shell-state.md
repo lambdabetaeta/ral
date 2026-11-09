@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-generated_at_date: 2026-11-07
+generated_at_commit: f26144e0
+generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -360,20 +360,23 @@ state (`Ready` or `Consumed`), delivers the batch once to the session's
 
 ### Terminal handoff
 
-The authority to hand the controlling terminal to a child is an unforgeable
-`TerminalLease`, not an inferred predicate
-([[decisions/260619_terminal-lease|terminal-lease]]). It splits across two
-lifetimes:
+**A run reaches terminal authority through a permit, not a resource getter.**
+The private process terminal module owns both the authority gate and the
+restoration protocol ([[map/core/io-process|io-process]]).
 
-- The lease itself lives on `SessionState::terminal_lease`, minted once at
-  startup from the `tcgetpgrp == getpgrp` witness — `Some` when ral owns the
-  foreground, `None` otherwise. It is *lent*, never moved or cloned.
-- A run's authority to borrow it is the `TerminalAccess` on its `Mooring`:
-  `Denied` (the safe default — an exarch tool run, the boot
-  frame), `Leased` (an interactive run), or `ExplicitLoan` (a within-run
-  elevation). `Shell::terminal_lease(mooring)` yields
-  `&TerminalLease` only when access permits *and* the session owns a lease, so a
-  `Denied` run cannot construct a foreground handoff.
+- `SessionState::terminal_lease` holds the opaque `TerminalLease`, minted at
+  startup from `tcgetpgrp == getpgrp` on Unix or console attachment on Windows.
+  Hosts request `RequestedTerminalAccess`; they cannot mint or obtain a lease.
+- `Mooring::terminal_access` carries process-layer `TerminalAccess`: `Denied`
+  (the safe default), `Leased` (REPL and batch), or within-run `ExplicitLoan`.
+  `TerminalAccess::reach` requires the session lease in every permitted case:
+  `Denied` yields none, `Leased` requires `Sink::Stdout`, and `ExplicitLoan`
+  ignores stdout. Its affine `TerminalPermit` permits one pre-spawn capture.
+- `Shell::group_owner` asks the stage question once: a stage returns its
+  `Membership` and reaches no permit; otherwise it gathers the session permit
+  and interactivity. Commands and pipelines consume this same owner decision;
+  neither shell nor io can extract saved state or key attribution from the
+  resulting `TerminalHold`.
 
 Because the mooring is invariant, a raise is not a mutation but a derivation:
 `Mooring::lend_terminal` returns a *new* mooring with `Leased` raised to

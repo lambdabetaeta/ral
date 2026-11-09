@@ -703,7 +703,7 @@ fn grant_fs_pipeline_stdin_forwarded() {
 }
 
 /// The regression this closes: `launch_external_stage_direct` spawns a
-/// confined pipeline stage under `PgidPolicy::Join`, and until the collector
+/// confined pipeline stage under `Placement::Join`, and until the collector
 /// also addresses that stage's own envelope group, the group-wide grace
 /// signal never reaches it — bwrap's monitor joins the pipeline group, the
 /// payload does not.  The fixture's `TERM` trap writing its own evidence

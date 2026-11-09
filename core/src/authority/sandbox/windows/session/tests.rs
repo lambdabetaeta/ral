@@ -149,7 +149,7 @@ fn an_exclusion_apart_from_every_whole_grant_is_kept() {
 fn a_confined_launch_started_under_a_stop_makes_no_child() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
     use crate::process::launch::Confined;
-    use crate::process::{CancelCause, DurableRoot, Launch, PgidPolicy};
+    use crate::process::{CancelCause, DurableRoot, Launch, Placement};
     let _env = env_guard();
     let root = tempfile::tempdir().unwrap();
     let projection = SandboxProjection {
@@ -166,7 +166,7 @@ fn a_confined_launch_started_under_a_stop_makes_no_child() {
         projection,
         image: None,
     });
-    let spawned = launch.spawn(PgidPolicy::Inherit, &stopped);
+    let spawned = launch.spawn(Placement::Inherit, &stopped);
     assert!(
         matches!(spawned, Err(Unstarted::Stopped(_))),
         "{:?}",
@@ -266,7 +266,7 @@ fn carving_meets_a_junction_and_a_symlink_as_links() {
 fn confined_child_writes_inside_the_grant_and_not_outside() {
     let _env = env_guard();
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
-    use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
+    use crate::process::{Launch, Placement, StdioSpec, WaitOutcome};
     use std::path::Path;
 
     // Siblings under one root, so the child can name the ungranted one
@@ -327,7 +327,7 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
         });
         let mut child = launch
             .spawn(
-                PgidPolicy::Inherit,
+                Placement::Inherit,
                 &crate::process::DurableRoot::default().child(),
             )
             .expect("CreateProcessW must accept the derived capability SIDs")
@@ -513,7 +513,7 @@ fn spawn_after_confinement<T: Send>(
         });
         test_phase::install(reached_tx, release_rx);
         let spawned = launch.spawn(
-            crate::process::PgidPolicy::Inherit,
+            crate::process::Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
         );
         (spawned, observer.join().expect("spawn observer"))
@@ -537,7 +537,7 @@ fn assert_reads(
 fn assert_launch_reads(launch: crate::process::Launch, relative: &str, readable: bool) {
     let child = launch
         .spawn(
-            crate::process::PgidPolicy::Inherit,
+            crate::process::Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
         )
         .unwrap()
@@ -748,7 +748,7 @@ fn image_read_child() {
 /// launch under the same projection does not read it.
 #[test]
 fn an_image_is_granted_to_its_own_launch_alone() {
-    use crate::process::{Launch, PgidPolicy, StdioSpec};
+    use crate::process::{Launch, Placement, StdioSpec};
     use std::io::Read;
 
     with_scoped_state(|| {
@@ -785,7 +785,7 @@ fn an_image_is_granted_to_its_own_launch_alone() {
             });
             let mut child = launch
                 .spawn(
-                    PgidPolicy::Inherit,
+                    Placement::Inherit,
                     &crate::process::DurableRoot::default().child(),
                 )
                 .unwrap()
@@ -808,7 +808,7 @@ fn an_image_is_granted_to_its_own_launch_alone() {
 #[test]
 fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
     use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
-    use crate::process::PgidPolicy;
+    use crate::process::Placement;
     with_scoped_state(|| {
         let tree = Tree::new();
         let w = tree.at("W");
@@ -828,7 +828,7 @@ fn a_read_write_folder_every_sandbox_may_write_admits_a_create() {
         let launch = confined(&writable, &w, "echo ok>made.txt").unwrap();
         let mut child = launch
             .spawn(
-                PgidPolicy::Inherit,
+                Placement::Inherit,
                 &crate::process::DurableRoot::default().child(),
             )
             .unwrap()

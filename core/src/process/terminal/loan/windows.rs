@@ -1,5 +1,6 @@
 //! Windows shares its console with children; only its modes need restoring.
 
+use std::io;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
 
 use windows_sys::Win32::System::Console::{
@@ -7,17 +8,14 @@ use windows_sys::Win32::System::Console::{
     SetConsoleMode,
 };
 
-use crate::process::Signal;
-use crate::process::cancel::CancelCause;
+use crate::process::Pgid;
 
-/// Console modes held for one foreground invocation, restored on every exit.
-///
-/// Capture before spawning: a child can change the shared console immediately.
-/// The lease still gates access.
-pub struct TerminalLoan {
+#[derive(Debug)]
+pub(super) struct Saved {
     modes: [Option<ConsoleMode>; 3],
 }
 
+#[derive(Debug)]
 struct ConsoleMode {
     handle: OwnedHandle,
     mode: u32,
@@ -39,40 +37,24 @@ impl ConsoleMode {
     }
 }
 
-/// Console state captured before spawn, awaiting the child's process group.
-pub(crate) struct PreparedTerminalLoan(TerminalLoan);
-
-impl PreparedTerminalLoan {
-    #[expect(clippy::unnecessary_wraps, reason = "matches the Unix foreground API")]
-    pub(crate) fn lend(self, _target: i32) -> Option<TerminalLoan> {
-        Some(self.0)
+impl Saved {
+    pub(super) fn capture() -> Self {
+        Self {
+            modes: [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                .map(ConsoleMode::capture),
+        }
     }
 }
 
-impl TerminalLoan {
-    pub(crate) fn prepare(
-        _lease: &crate::process::TerminalLease,
-        _home: &crate::process::ScopeNode,
-    ) -> Option<PreparedTerminalLoan> {
-        let modes =
-            [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(ConsoleMode::capture);
-        modes
-            .iter()
-            .any(Option::is_some)
-            .then_some(PreparedTerminalLoan(Self { modes }))
-    }
-
-    #[expect(clippy::unused_self, reason = "matches the Unix foreground API")]
-    pub(crate) fn pressed(&self) -> Option<CancelCause> {
-        None
-    }
-
-    pub(crate) fn reclaim(self, _: Option<Signal>) {
-        drop(self);
-    }
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a shared console has no handoff to refuse"
+)]
+pub(super) fn hand_over(_leader: Pgid) -> io::Result<()> {
+    Ok(())
 }
 
-impl Drop for TerminalLoan {
+impl Drop for Saved {
     fn drop(&mut self) {
         for saved in self.modes.iter().flatten() {
             if unsafe { SetConsoleMode(saved.handle.as_raw_handle(), saved.mode) } == 0 {

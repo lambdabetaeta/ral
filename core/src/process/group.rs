@@ -8,6 +8,7 @@
 
 use std::num::NonZeroI32;
 
+use super::PreparedTerminalLoan;
 use super::cancel::{CancelCause, Scope};
 #[cfg(unix)]
 use super::outcome::Signal;
@@ -96,14 +97,12 @@ impl Pgid {
     }
 }
 
-/// Where a spawned child's process group comes from.
+/// A launch's requested group placement and terminal responsibility.
 ///
-/// Foreground job leaders and pipeline first stages take `NewLeader`, later
-/// stages `Join`, an interactive background child `Inherit`, a headless child
-/// `NewSession`.  Unix applies the choice in `pre_exec` before `execve`;
-/// Windows maps it onto a Job Object at the launch boundary.
-#[derive(Clone, Debug)]
-pub(crate) enum PgidPolicy {
+/// Unix lowers the request into a copyable step applied in `pre_exec` before
+/// `execve`; Windows maps it onto a Job Object at the launch boundary.
+#[derive(Debug)]
+pub(crate) enum Placement {
     /// Inherit the parent's pgid — no `setpgid` call.
     Inherit,
     /// Lead a fresh group (`setpgid(0, 0)`), keeping the parent's session and
@@ -118,14 +117,32 @@ pub(crate) enum PgidPolicy {
     /// Join a pipeline's group as a non-leader (`setpgid(0, leader)`), under
     /// the stage scope its owner delivers for.
     Join(Membership),
+    /// Lead a fresh group in ral's session, lent the terminal.
+    Tenant(PreparedTerminalLoan),
 }
 
-impl PgidPolicy {
-    /// `self`, unless an envelope stands between ral and the program: one
-    /// leads a group of its own, the one placement `Launch::spawn` accepts.
-    pub(crate) fn unless_enveloped(self, enveloped: bool) -> Self {
-        if enveloped { Self::NewLeader } else { self }
+#[cfg(unix)]
+impl Placement {
+    /// What the child does before `execve`, without borrowing terminal state
+    /// or cloning a membership's scope into the child.
+    pub(super) fn step(&self) -> Step {
+        match self {
+            Self::Inherit => Step::Inherit,
+            Self::NewLeader | Self::Tenant(_) => Step::NewLeader,
+            Self::NewSession => Step::NewSession,
+            Self::Join(membership) => Step::Join(membership.group()),
+        }
     }
+}
+
+/// The resource-free placement operation owned by a Unix `pre_exec` closure.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Step {
+    Inherit,
+    NewLeader,
+    NewSession,
+    Join(Pgid),
 }
 
 /// A pipeline group joined, and the stage scope whose every cause the
@@ -196,6 +213,31 @@ mod tests {
 
     fn membership(stage: &Scope) -> Membership {
         Membership::new(Pgid::from_raw(1).expect("1 is positive"), stage.clone())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn placement_step_keeps_only_group_operations() {
+        fn copied<T: Copy>(value: T) -> T {
+            value
+        }
+
+        assert!(matches!(copied(Placement::Inherit.step()), Step::Inherit));
+        assert!(matches!(
+            copied(Placement::NewLeader.step()),
+            Step::NewLeader
+        ));
+        assert!(matches!(
+            copied(Placement::NewSession.step()),
+            Step::NewSession
+        ));
+        let stage = DurableRoot::default().child();
+        let member = membership(&stage);
+        let group = member.group();
+        assert!(matches!(
+            copied(Placement::Join(member).step()),
+            Step::Join(joined) if joined == group
+        ));
     }
 
     #[test]

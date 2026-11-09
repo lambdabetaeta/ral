@@ -15,6 +15,15 @@ name.
   does not reap it (`StageHandle::file_external_end` reaps through
   `Arc::try_unwrap`, which fails while the pin holds a reference); `settle_lone`
   drops the pin after `drained`, once no kill addresses the group.
+- A returned failed start has no collector pin to inherit. `Launch::spawn`'s
+  `discarded` kills the owned group **before** killing/reaping the child, while
+  the leader still pins its ID. A refused terminal handoff retains saved state
+  through this teardown, then restores and releases the jail. A failed joined
+  launch leaves the borrowed group to its enclosing owner. `StartFailure`
+  retains the drains until caller settlement; a pipeline rolls back while its
+  anchor still pins the group, even if no stage registered, then joins before
+  settling failed-start drains. That final settlement has an empty kill
+  callback: it retains no numeric group ID for a kill after reap.
 - Any other filed external is reaped as it files: it has left `stages`, so no
   kill names its pid.
 - Behind an envelope there is no pin: the payload leads the group, and the child

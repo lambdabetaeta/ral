@@ -9,11 +9,10 @@ use super::super::command::{self, Started};
 use super::stage::{Drain, ExternalEnd, LiveExternal, StageFrame, StageHandle, StageKind};
 use crate::fact::AuditIo;
 use crate::process::{
-    CancelCause, Group, POLL_SLICE, Pgid, PreparedTerminalLoan, Scope, ScopeId, Spawned,
-    TerminalLoan, WaitOutcome, Watch,
+    CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalHold, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, End, Error, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
+    AuditFragment, Break, End, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -343,9 +342,9 @@ pub(super) struct CollectState {
     /// of the group.  A pipeline's anchor pins its own group; an envelope's
     /// payload group, nothing once its monitor has ended.
     pin: Option<Arc<Watch>>,
-    /// The terminal lent to the group, if any: the one ear for a key, which
-    /// strikes it on the run's node as it hears.
-    loan: Option<TerminalLoan>,
+    /// Terminal restoration responsibility and, for a tenant, the one ear
+    /// that strikes reported keys on the run's node.
+    terminal: TerminalHold,
     rx: Receiver<Event>,
     /// The launching computation's current scope, read between slices.
     scope: Scope,
@@ -360,7 +359,7 @@ impl CollectState {
     pub(super) fn new(
         rx: Receiver<Event>,
         group: Group,
-        loan: Option<TerminalLoan>,
+        terminal: TerminalHold,
         scope: Scope,
         cleanup_grace: Duration,
         started: Instant,
@@ -371,7 +370,7 @@ impl CollectState {
             started,
             group,
             pin: None,
-            loan,
+            terminal,
             rx,
             scope,
             cleanup_grace,
@@ -382,12 +381,8 @@ impl CollectState {
     /// A collector over a standalone command's one child ([`Started::collect`]),
     /// in the group it landed in: one it leads, with no anchor; its enclosing
     /// stage's; or ral's own.  It has no thread stage to grant a grace.
-    pub(super) fn lone(
-        started: Started,
-        loan: Option<TerminalLoan>,
-        since: Instant,
-        shell: &Shell,
-    ) -> Self {
+    pub(super) fn lone(mut started: Started, since: Instant, shell: &Shell) -> Self {
+        let terminal = std::mem::take(&mut started.spawned.terminal);
         let group = started.spawned.group.clone();
         // A lone leader's zombie pins its group through settlement. An
         // envelope's payload, not its monitor, leads the addressed group.
@@ -398,25 +393,24 @@ impl CollectState {
         let slot = Slot { ix: 0, tx };
         let stage = started.register(&slot, group.owned());
         let pin = leads.then(|| Arc::clone(&stage.watch));
-        let mut state = Self::new(rx, group, loan, shell.scope.clone(), Duration::ZERO, since);
+        let mut state = Self::new(
+            rx,
+            group,
+            terminal,
+            shell.scope.clone(),
+            Duration::ZERO,
+            since,
+        );
         state.pin = pin;
         state.push(StageHandle::new(StageKind::External(stage), None, slot));
         state
-    }
-
-    /// Whether the group holds the terminal: the loan actually made, before
-    /// any stage exists, and not yet returned.
-    pub(super) fn holds_terminal(&self) -> bool {
-        self.loan.is_some()
     }
 
     /// The key `signal` is, if the terminal was lent: struck on the node, and
     /// read by the scope at the next slice; inert otherwise.
     #[cfg(unix)]
     fn hear(&mut self, signal: crate::process::Signal) {
-        if let Some(loan) = self.loan.as_mut() {
-            loan.hear(signal);
-        }
+        self.terminal.hear(signal);
     }
 
     /// Hear every report still queued: once the anchor has ended, a key its
@@ -432,7 +426,7 @@ impl CollectState {
 
     /// Only to skip the duplicate grace signal; attributes no death.
     fn pressed(&self) -> Option<CancelCause> {
-        self.loan.as_ref().and_then(TerminalLoan::pressed)
+        self.terminal.pressed()
     }
 
     /// A `CollectState` for `step`'s own transition-table tests — no group, no
@@ -451,7 +445,7 @@ impl CollectState {
                 anchor.clone(),
             )),
             pin: None,
-            loan: None,
+            terminal: TerminalHold::default(),
             rx,
             scope: anchor,
             cleanup_grace: Duration::ZERO,
@@ -673,9 +667,9 @@ impl CollectState {
     /// End what a launch that failed part-way started: under the cause in
     /// force, as `recv` would mint it, else as an `exit` in a stage would.
     pub(super) fn roll_back(&mut self) {
-        if self.live() {
-            self.cancel_all(self.scope.cause().unwrap_or(CancelCause::Cancelled));
-        }
+        // Even the first failed start may leave a descendant in our group.
+        // The anchor still pins its ID, whether any stage registered or not.
+        self.cancel_all(self.scope.cause().unwrap_or(CancelCause::Cancelled));
     }
 
     /// Take what the stages left to settle, once the anchor has ended: every
@@ -684,10 +678,8 @@ impl CollectState {
     fn vacate(&mut self) -> Vec<Option<StageEnd>> {
         #[cfg(unix)]
         self.hear_out();
-        if !self.live()
-            && let Some(loan) = self.loan.take()
-        {
-            loan.reclaim(None);
+        if !self.live() {
+            std::mem::take(&mut self.terminal).reclaim(None);
         }
         std::mem::take(&mut self.observed)
     }
@@ -755,9 +747,7 @@ impl CollectState {
             // Re-raised, as a panicked stage is.
             std::panic::resume_unwind(Box::new(UNREPORTED.to_owned()));
         };
-        if let Some(loan) = self.loan.take() {
-            loan.reclaim(outcome.death());
-        }
+        std::mem::take(&mut self.terminal).reclaim(outcome.death());
         let ExternalEnd { drain, settlement } = end;
         let cause = drained(drain, sent, self.window());
         drop(self.pin.take());
@@ -780,10 +770,19 @@ impl Started {
     pub(super) fn register(self, slot: &Slot, collector_owned: Option<Pgid>) -> LiveExternal {
         let Self {
             shown,
-            spawned: Spawned { child, group, jail },
+            spawned:
+                Spawned {
+                    child,
+                    group,
+                    jail,
+                    terminal,
+                },
             denial_pids,
             drains,
         } = self;
+        // Lone collection takes the hold before registering; pipeline stages
+        // join their owner and therefore arrive with an empty hold.
+        drop(terminal);
         let payload = match group {
             Group::Enveloped(payload) if Some(payload) != collector_owned => Some(payload),
             Group::Enveloped(_) | Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
@@ -802,51 +801,22 @@ impl Started {
         }
     }
 
-    /// Lend the terminal, then collect this child in the group it landed in.
-    /// Even a refused loan goes through collection: no live child can escape
-    /// on that error path. The terminal returns before pump joins (on Windows,
-    /// once the job is empty, including its descendants).
-    pub(crate) fn collect(
-        self,
-        lending: Option<PreparedTerminalLoan>,
-        since: Instant,
-        shell: &Shell,
-    ) -> Settled<()> {
+    /// Collect the child with its launch's opaque terminal responsibility.
+    /// The terminal returns before jail settlement and pump joins.
+    pub(crate) fn collect(self, since: Instant, shell: &Shell) -> Settled<()> {
         // Declared first, so an unwind kills before it releases.
         #[cfg(windows)]
         let job = match self.spawned.group {
             Group::Owns(leader) => Some(super::group::Job::owning(leader)),
             Group::Enveloped(_) | Group::Joins(_) | Group::Shares => None,
         };
-        let (loan, refusal) = match lending {
-            None => (None, None),
-            Some(lending) => {
-                if let Some(loan) = lending.lend(self.spawned.child.id().cast_signed()) {
-                    (Some(loan), None)
-                } else {
-                    if let Some(group) = self.spawned.group.owned() {
-                        group.kill();
-                    }
-                    let refusal = Error::new(format!(
-                        "could not hand the terminal to '{}': tcsetpgrp refused its process group; the \
-                         command was killed before it could stop on a terminal read",
-                        self.shown
-                    ));
-                    (None, Some(refusal))
-                }
-            }
-        };
-        let mut collect = CollectState::lone(self, loan, since, shell);
+        let mut collect = CollectState::lone(self, since, shell);
         collect.drive();
         #[cfg(windows)]
         if let Some(job) = job {
             job.drain(&shell.scope);
         }
-        let settled = collect.settle_lone();
-        match refusal {
-            Some(refusal) => Err(refusal.into()),
-            None => settled,
-        }
+        collect.settle_lone()
     }
 }
 
@@ -860,12 +830,24 @@ pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<
         denial_pids: None,
         drains: crate::io::child::Drains::default(),
     };
-    let mut lone = CollectState::lone(started, None, Instant::now(), shell);
+    let mut lone = CollectState::lone(started, Instant::now(), shell);
     lone.drive();
     match lone.observed.pop().flatten() {
         Some(StageEnd::External { outcome, sent, .. }) => (outcome, sent),
         _ => panic!("a lone collector files its one external"),
     }
+}
+
+/// Settle a process test's launch through the production terminal-return boundary.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn collect_spawned(spawned: Spawned, since: Instant, shell: &Shell) -> Settled<()> {
+    Started {
+        shown: "test".into(),
+        spawned,
+        denial_pids: None,
+        drains: crate::io::child::Drains::default(),
+    }
+    .collect(since, shell)
 }
 
 /// Pure over [`CollectState`]: filing an observation happens here too, being

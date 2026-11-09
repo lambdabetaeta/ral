@@ -6,7 +6,7 @@ use super::Error;
 use super::flow::Settled;
 use super::state::Bequest;
 use super::value::Value;
-use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode};
+use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode, TerminalAccess};
 use crate::sync::LockExt as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -143,24 +143,6 @@ pub enum Fork {
 pub trait DeferredSink: Send + Sync {
     /// Deliver surfaced values: a settled worker's whole batch, or one watched line.
     fn deliver(&self, batch: Vec<crate::data::FOValue>);
-}
-
-/// This run's authority to hand the controlling terminal to a child: the
-/// internal form of
-/// [`RequestedTerminalAccess`](crate::process::RequestedTerminalAccess), carrying
-/// the extra `ExplicitLoan` no host can request at a run.  Read by
-/// [`Shell::terminal_lease`](crate::shell::runtime::Shell::terminal_lease); `Denied` is
-/// the safe [`Default`], so an unstated policy cannot reach the handoff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum TerminalAccess {
-    #[default]
-    Denied,
-    Leased,
-    /// A within-run elevation of `Leased`: the handoff fires even though stdout
-    /// is a buffer, because the body (`_ed-tui`'s `fzf`) draws on `/dev/tty`
-    /// and must own the foreground pgid.  Raised only by
-    /// [`Mooring::lend_terminal`].
-    ExplicitLoan,
 }
 
 /// Whether a `spawn` must name its work: a host's legibility policy, refused

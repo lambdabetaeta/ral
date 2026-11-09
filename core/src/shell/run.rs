@@ -15,7 +15,7 @@ use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
 use crate::fact::FailureCode as _;
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
-use crate::process::{Deadline, RequestedTerminalAccess, Scope, ScopeNode, arm_lifetime};
+use crate::process::{Deadline, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
     DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
@@ -320,10 +320,6 @@ impl Shell {
             },
             RunStdin::Empty => Source::Empty,
         };
-        let terminal_access = match run.terminal {
-            RequestedTerminalAccess::Leased => crate::shell::runtime::TerminalAccess::Leased,
-            RequestedTerminalAccess::Denied => crate::shell::runtime::TerminalAccess::Denied,
-        };
 
         let _nursery_guard = NurseryGuard(fork.clone());
         let mooring = Mooring {
@@ -335,7 +331,7 @@ impl Shell {
             cleanup_grace: run.cleanup_grace,
             worker_cap: run.worker_cap,
             worker_title: run.worker_title,
-            terminal_access,
+            terminal_access: run.terminal.into(),
         };
         let next = build_run(self, sinks, stdin);
         let ending = run_framed(&mooring, self, next, &run, wall, base, body);
@@ -442,6 +438,7 @@ pub(crate) fn compile_run(
     let schemes = shell.session_schemes();
     #[cfg(debug_assertions)]
     let n_bindings = schemes.bindings.len();
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "shell",
         "session_schemes: {n_bindings} names in {:?}",
@@ -451,6 +448,7 @@ pub(crate) fn compile_run(
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
     let outcome = compile_and_typecheck(src, schemes, file, origin.file(), None);
+    #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "shell",
         "compile_and_typecheck: {n_bindings} bindings, {} src bytes in {:?}",

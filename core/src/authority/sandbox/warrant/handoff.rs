@@ -492,7 +492,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_closed_inherited_stream_refuses_envelope_preparation() {
-        use crate::process::{Launch, PgidPolicy, Unstarted};
+        use crate::process::{Launch, Placement, Unstarted};
         let mut handoff = Handoff::default();
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
         let mut cmd = Command::new("/bin/sh");
@@ -507,7 +507,7 @@ mod tests {
         let mut launch = Launch::from_command(cmd);
         launch.envelope_stdio(stdio);
         let result = launch.spawn(
-            PgidPolicy::Inherit,
+            Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
         );
         let Err(Unstarted::Refused(why)) = result else {
@@ -551,7 +551,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn envelope_diagnostics_survive_a_null_payload_stderr() {
-        use crate::process::{Launch, PgidPolicy, StdioSpec, Unstarted};
+        use crate::process::{Launch, Placement, StdioSpec, Unstarted};
         use std::os::fd::AsFd;
         let mut handoff = Handoff::default();
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
@@ -574,7 +574,7 @@ mod tests {
             .stdout(StdioSpec::Null)
             .stderr(StdioSpec::Null);
         let result = launch.spawn(
-            PgidPolicy::Inherit,
+            Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
         );
         let Err(Unstarted::Refused(why)) = result else {

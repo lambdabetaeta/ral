@@ -1,8 +1,7 @@
 //! Launch phase: wire one stage's byte endpoints and start it — a ral-written
 //! thread, or a direct external spawned into the pipeline's process group.
 
-use super::super::command::{Command, Request};
-use super::super::job_control::TerminalInput;
+use super::super::command::{Command, Request, StartFailure};
 use super::super::record::CommandRecord;
 use super::collect::Slot;
 use super::group::PipelineGroup;
@@ -14,7 +13,7 @@ use crate::authority::sandbox::Ownership;
 use crate::fact::AuditIo;
 use crate::io::child::Connection;
 use crate::io::{Source, SourceReader};
-use crate::process::{PgidPolicy, Scope};
+use crate::process::{Placement, Scope, TerminalInput};
 use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use std::sync::Arc;
@@ -26,19 +25,17 @@ pub(super) fn stage_stdin(
     route: ByteIn,
     shell: &Shell,
     scope: &Scope,
-    holds_terminal: bool,
+    input: TerminalInput,
 ) -> Settled<Source> {
     let reader = match route {
         ByteIn::Upstream(r) => SourceReader::pipe(r),
-        ByteIn::Parent => {
-            match TerminalInput::for_pipeline(shell, holds_terminal).stdin(&shell.io.stdin) {
-                Source::Empty => return Ok(Source::Empty),
-                Source::Terminal => return Ok(Source::Terminal),
-                Source::Reader(r) => r
-                    .try_clone()
-                    .map_err(|e| Error::io("could not duplicate stdin", &e))?,
-            }
-        }
+        ByteIn::Parent => match shell.io.stdin.offered(input) {
+            Source::Empty => return Ok(Source::Empty),
+            Source::Terminal => return Ok(Source::Terminal),
+            Source::Reader(r) => r
+                .try_clone()
+                .map_err(|e| Error::io("could not duplicate stdin", &e))?,
+        },
     };
     Ok(Source::Reader(reader.interruptible(scope.clone())))
 }
@@ -51,8 +48,8 @@ pub(super) struct LaunchCx<'a> {
     pub(super) env: &'a Env,
     pub(super) eval: super::StageEval,
     pub(super) group: &'a PipelineGroup,
-    /// Whether the group was lent the terminal, frozen before any stage exists.
-    pub(super) holds_terminal: bool,
+    /// Terminal input selected once, before any stage exists.
+    pub(super) input: TerminalInput,
 }
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`], which a direct
@@ -65,7 +62,7 @@ pub(super) fn spawn_stage(
     route: StageRoute,
     cx: &mut LaunchCx<'_>,
     slot: Slot,
-) -> Settled<StageHandle> {
+) -> Result<StageHandle, StartFailure> {
     let StageRoute { stdin, stdout } = route;
     let name = match &stage.item {
         crate::ir::CompKind::Exec(exec) => exec.head.name().written(),
@@ -78,9 +75,13 @@ pub(super) fn spawn_stage(
                 .map(|(stage, held)| (StageKind::External(stage), held))
         }
         StageLaunch::Thread => launch_thread_stage(stage, stdin, stdout, cx, slot.clone())
-            .map(|(stage, held)| (StageKind::Thread(stage), held)),
+            .map(|(stage, held)| (StageKind::Thread(stage), held))
+            .map_err(StartFailure::from),
     }
-    .map_err(|b| b.locate(&name, span, cx.shell))?;
+    .map_err(|mut failure| {
+        failure.reason = Box::new(failure.reason.locate(&name, span, cx.shell));
+        failure
+    })?;
     Ok(StageHandle::new(kind, held, slot))
 }
 
@@ -93,16 +94,16 @@ fn launch_external_stage_direct(
     stdout: ByteOut,
     cx: &mut LaunchCx<'_>,
     slot: &Slot,
-) -> Settled<(LiveExternal, Option<HeldEdge>)> {
+) -> Result<(LiveExternal, Option<HeldEdge>), StartFailure> {
     let mooring = cx.mooring;
     let group = cx.group;
-    let holds_terminal = cx.holds_terminal;
+    let input = cx.input;
     cx.shell.at_site(command.shown.clone(), span, |shell| {
         let command = command
             .lookup(&shell.context.grants, shell.baseline())
             .admit(mooring, shell)?;
         let record = CommandRecord::begin(&command, args, CommandOrigin::External, mooring, shell);
-        let launched = (|| -> Settled<_> {
+        let launched = (|| -> Result<_, StartFailure> {
             let command = command.prepare(args, Ownership::Kept, shell)?;
             let upstream;
             let stdin = match stdin {
@@ -110,9 +111,7 @@ fn launch_external_stage_direct(
                     upstream = Source::Reader(SourceReader::pipe(r));
                     &upstream
                 }
-                ByteIn::Parent => {
-                    TerminalInput::for_pipeline(shell, holds_terminal).stdin(&shell.io.stdin)
-                }
+                ByteIn::Parent => shell.io.stdin.offered(input),
             };
             // Admission is over: borrow parent destinations only now.
             let (io, held) = match stdout {
@@ -125,10 +124,10 @@ fn launch_external_stage_direct(
                     Some(held),
                 ),
             };
-            let pgid = PgidPolicy::Join(group.membership(&shell.scope))
-                .unless_enveloped(command.enveloped());
-            let io = io.map_err(|e| command.connection_error(&e))?;
-            let started = command.start(io, pgid, &shell.scope)?;
+            let placement = Placement::Join(group.membership(&shell.scope));
+            let io =
+                io.map_err(|e| crate::shell::runtime::Break::from(command.connection_error(&e)))?;
+            let started = command.start(io, placement, &shell.scope)?;
             let stage = started.register(slot, group.group().owned());
             Ok((stage, held))
         })();
@@ -139,7 +138,7 @@ fn launch_external_stage_direct(
                 Ok((stage, held))
             }
             Err(broke) => {
-                record.close(Some(&broke), AuditIo::default(), mooring, shell);
+                record.close(Some(&broke.reason), AuditIo::default(), mooring, shell);
                 Err(broke)
             }
         }
@@ -148,57 +147,31 @@ fn launch_external_stage_direct(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::job_control::Placement;
     use super::*;
 
-    #[test]
-    fn the_terminal_reaches_a_thread_stage_only_when_the_group_holds_it() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.io.stdin = Source::Terminal;
-        let scope = shell.scope.child();
-
-        let held = stage_stdin(ByteIn::Parent, &shell, &scope, true).expect("stage_stdin");
-        assert!(matches!(held, Source::Terminal));
-        let denied = stage_stdin(ByteIn::Parent, &shell, &scope, false).expect("stage_stdin");
-        assert!(matches!(denied, Source::Empty));
-    }
-
-    /// `!{ cat } | wc` and `!{ cat | head -1 } | wc` agree: `cat`, a lone
-    /// child or a nested pipeline's stage, joins the stage's group and reads
-    /// what the stage was given, the terminal under the loan and EOF without.
+    /// A lone child and a nested pipeline both preserve the stage owner's
+    /// source, including EOF selected after a refused handoff.
     #[test]
     fn a_stages_external_reads_the_stages_stdin_however_it_runs() {
-        for lent in [true, false] {
-            let expected = |seen: &Source| {
-                if lent {
-                    matches!(seen, Source::Terminal)
-                } else {
-                    matches!(seen, Source::Empty)
-                }
-            };
+        for input in [TerminalInput::Readable, TerminalInput::Withheld] {
             let mut shell = crate::test_helper::core_shell();
             shell.io.stdin = Source::Terminal;
             let node = shell.scope.child();
-            let given = stage_stdin(ByteIn::Parent, &shell, &node, lent).expect("stage_stdin");
-            assert!(expected(&given));
-
-            // The stage's own stdin and group, as `launch_thread_stage` seats it.
-            let group = crate::process::Pgid::from_raw(1).expect("1 is positive");
+            let given = stage_stdin(ByteIn::Parent, &shell, &node, input).expect("stage_stdin");
+            let readable = matches!(input, TerminalInput::Readable);
+            assert_eq!(matches!(given, Source::Terminal), readable);
             shell.io.stdin = given;
+            let group = crate::process::Pgid::from_raw(1).expect("positive group");
             shell.session.stage = Some(crate::process::Membership::new(group, Scope::clone(&node)));
-            let placed = Placement::for_command(&shell, &Mooring::adrift(), false);
-            assert!(matches!(placed, Placement::Joined(_)));
-            // Joined, the lone child and the nested stage read the same source,
-            // whatever their group could read.
-            assert!(expected(placed.stdin(&shell.io.stdin)));
-            for holds_terminal in [true, false] {
-                assert!(expected(
-                    TerminalInput::for_pipeline(&shell, holds_terminal).stdin(&shell.io.stdin)
-                ));
-                let nested = stage_stdin(ByteIn::Parent, &shell, &node, holds_terminal)
-                    .expect("stage_stdin");
-                assert!(expected(&nested));
-            }
+            let placed = Placement::command(shell.group_owner(&Mooring::adrift()));
+            assert!(matches!(placed, Placement::Join(_)));
+            assert_eq!(
+                matches!(shell.io.stdin.offered(placed.input()), Source::Terminal),
+                readable
+            );
+            let nested = stage_stdin(ByteIn::Parent, &shell, &node, TerminalInput::Readable)
+                .expect("stage_stdin");
+            assert_eq!(matches!(nested, Source::Terminal), readable);
         }
     }
 }

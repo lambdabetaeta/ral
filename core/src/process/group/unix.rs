@@ -3,25 +3,25 @@
 
 use rustix::process::Pid;
 
-use super::{Group, Pgid, PgidPolicy};
+use super::{Group, Pgid, Placement, Step};
 use crate::process::reset_child_signals;
 
-impl PgidPolicy {
-    /// Apply this policy from inside a post-fork `pre_exec` closure: no
+impl Step {
+    /// Apply this step from inside a post-fork `pre_exec` closure: no
     /// allocation and no stdlib lock (`last_os_error` only reads `errno`).  The
     /// failure must not be swallowed — a child left in the wrong group is
     /// invisible to every teardown that addresses the group as a whole.
     ///
     /// # Errors
     /// Returns `Err` if `setpgid` / `setsid` fails; `Inherit` makes no syscall.
-    fn apply(&self) -> std::io::Result<()> {
+    fn apply(self) -> std::io::Result<()> {
         // `setsid` returns the new sid and `setpgid` 0; both fail with `-1`.
         let rc = unsafe {
             match self {
                 Self::Inherit => 0,
                 Self::NewLeader => libc::setpgid(0, 0),
                 Self::NewSession => libc::setsid(),
-                Self::Join(membership) => libc::setpgid(0, membership.group().as_raw()),
+                Self::Join(group) => libc::setpgid(0, group.as_raw()),
             }
         };
         if rc == -1 {
@@ -43,7 +43,7 @@ pub(crate) enum SpawnError {
 
 /// Spawn `cmd` under the one canonical pre-exec discipline.
 ///
-/// Apply `pgid` then [`reset_child_signals`] in the child, and mirror the
+/// Apply `placement` then [`reset_child_signals`] in the child, and mirror the
 /// `setpgid` in the parent so the placement holds whichever side wins the
 /// race.  `NewSession` has no mirror — only a process can `setsid` itself —
 /// and rests on its `pre_exec`.  The [`Group`] returned is the whole
@@ -59,9 +59,9 @@ pub(crate) enum SpawnError {
 /// anything before it does: the fork, the placement, or any hook.
 pub(crate) fn spawn_with_pgid(
     cmd: &mut std::process::Command,
-    pgid: PgidPolicy,
+    placement: &Placement,
 ) -> Result<(std::process::Child, Group), SpawnError> {
-    spawn_with_pgid_after(cmd, pgid, || Ok(()))
+    spawn_with_pgid_after(cmd, placement, || Ok(()))
 }
 
 /// [`spawn_with_pgid`] plus one caller hook, run in the child after the
@@ -74,7 +74,7 @@ pub(crate) fn spawn_with_pgid(
 /// As [`spawn_with_pgid`]; `after` failing is [`SpawnError::Prepare`].
 fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
-    pgid: PgidPolicy,
+    placement: &Placement,
     after: F,
 ) -> Result<(std::process::Child, Group), SpawnError>
 where
@@ -83,7 +83,7 @@ where
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     let (cleared, mark) = crate::process::cloexec_socketpair().map_err(SpawnError::Prepare)?;
-    let step = pgid.clone();
+    let step = placement.step();
     // SAFETY: async-signal-safe throughout; the closure owns `mark`, so the
     // fd it writes is open for as long as `cmd` lives.
     unsafe {
@@ -102,21 +102,21 @@ where
     // The mirror's result is ignored: either the child already applied the
     // policy, and a failure here is the benign post-`execve` `EACCES` race, or
     // its `pre_exec` failed and the spawn above already returned that error.
-    let group = match pgid {
-        PgidPolicy::Inherit => Group::Shares,
-        PgidPolicy::NewLeader => {
+    let group = match placement {
+        Placement::Inherit => Group::Shares,
+        Placement::NewLeader | Placement::Tenant(_) => {
             let pid = Pid::from_child(&child);
             let _ = rustix::process::setpgid(Some(pid), Some(pid));
             Group::Owns(Pgid::from_pid(pid))
         }
-        PgidPolicy::NewSession => {
+        Placement::NewSession => {
             // The new session's pgid equals the child's pid.
             Group::Owns(Pgid::from_pid(Pid::from_child(&child)))
         }
-        PgidPolicy::Join(membership) => {
+        Placement::Join(membership) => {
             let leader = membership.group().as_pid();
             let _ = rustix::process::setpgid(Some(Pid::from_child(&child)), Some(leader));
-            Group::Joins(membership)
+            Group::Joins(membership.clone())
         }
     };
     Ok((child, group))
@@ -171,7 +171,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> Result<Survivor, Spawn
     let (receipt, handshake) = crate::process::cloexec_pipe().map_err(SpawnError::Prepare)?;
     let fd = handshake.as_raw_fd();
     let (intermediate, _its_group) =
-        spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
+        spawn_with_pgid_after(cmd, &Placement::NewSession, move || {
             // SAFETY: a spawn's hook, async-signal-safe throughout: fork,
             // write, _exit, setsid, fcntl.
             if let crate::process::Forked::Parent(pid) = unsafe { crate::process::fork() }? {
@@ -230,11 +230,11 @@ fn survivor_pid(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{Group, Pgid, PgidPolicy, SpawnError, Survivor, spawn_detached, spawn_with_pgid};
+    use super::{Group, Pgid, Placement, SpawnError, Survivor, spawn_detached, spawn_with_pgid};
     use crate::process::{DurableRoot, Membership, Scope};
 
-    fn joining(group: Pgid) -> PgidPolicy {
-        PgidPolicy::Join(Membership::new(
+    fn joining(group: Pgid) -> Placement {
+        Placement::Join(Membership::new(
             group,
             Scope::clone(&DurableRoot::default().child()),
         ))
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn a_join_into_a_group_nobody_leads_is_ral_s_failure() {
         let nobody = Pgid::from_raw(i32::MAX).expect("positive");
-        let err = spawn_with_pgid(&mut std::process::Command::new("/bin/sh"), joining(nobody))
+        let err = spawn_with_pgid(&mut std::process::Command::new("/bin/sh"), &joining(nobody))
             .expect_err("a group nobody leads cannot be joined");
         assert!(
             matches!(&err, SpawnError::Prepare(e) if e.raw_os_error() == Some(libc::EPERM)),
@@ -260,7 +260,7 @@ mod tests {
     fn a_missing_program_is_the_program_s_failure() {
         let err = spawn_with_pgid(
             &mut std::process::Command::new("ral-no-such-program-exists"),
-            PgidPolicy::NewLeader,
+            &Placement::NewLeader,
         )
         .expect_err("a program that does not exist cannot be born");
         assert!(
@@ -278,11 +278,11 @@ mod tests {
             cmd.arg("30");
             cmd
         };
-        let landed = |policy| {
-            let (child, group) = spawn_with_pgid(&mut sleeper(), policy).expect("spawn");
+        let landed = |placement| {
+            let (child, group) = spawn_with_pgid(&mut sleeper(), &placement).expect("spawn");
             (child.id(), group, child)
         };
-        let (leader, led, mut lead) = landed(PgidPolicy::NewLeader);
+        let (leader, led, mut lead) = landed(Placement::NewLeader);
         let group = Pgid::from_raw(leader.cast_signed()).expect("a pid is positive");
         assert!(matches!(led, Group::Owns(g) if g == group), "{led:?}");
         let (_, joined, mut member) = landed(joining(group));
@@ -290,7 +290,7 @@ mod tests {
             matches!(&joined, Group::Joins(m) if m.group() == group),
             "{joined:?}"
         );
-        let (_, shared, mut inheriting) = landed(PgidPolicy::Inherit);
+        let (_, shared, mut inheriting) = landed(Placement::Inherit);
         assert!(matches!(shared, Group::Shares), "{shared:?}");
         for child in [&mut lead, &mut member, &mut inheriting] {
             let _ = child.kill();

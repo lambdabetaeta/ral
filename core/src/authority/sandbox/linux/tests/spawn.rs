@@ -13,7 +13,7 @@ fn spawn_confined(
     crate::process::Pgid,
     crate::shell::runtime::Shell,
 ) {
-    use crate::process::{Group, PgidPolicy};
+    use crate::process::{Group, Placement};
     let mut shell = crate::test_helper::core_shell();
     shell.scope = scope.clone();
     let launch = crate::authority::sandbox::Confinement::Projected(Box::new(unrestricted()))
@@ -25,7 +25,7 @@ fn spawn_confined(
         )
         .expect("build confined launch");
     let spawned = launch
-        .spawn(PgidPolicy::NewLeader, scope)
+        .spawn(Placement::NewLeader, scope)
         .expect("spawn confined sh");
     let Group::Enveloped(pgid) = spawned.group else {
         panic!("a kept launch names its payload's group");
@@ -353,7 +353,7 @@ impl HostPty {
 /// even when the test runner's own stdout is a pipe or a file.
 #[test]
 fn an_owned_stdout_terminal_remains_the_envelopes_console() {
-    use crate::process::{PgidPolicy, StdioSpec, WaitOutcome};
+    use crate::process::{Placement, StdioSpec, WaitOutcome};
     pin_envelope();
     let bwrap = match envelope() {
         Ok(bwrap) => bwrap,
@@ -386,7 +386,7 @@ fn an_owned_stdout_terminal_remains_the_envelopes_console() {
         .stderr(StdioSpec::Null);
     let spawned = launch
         .spawn(
-            PgidPolicy::NewLeader,
+            Placement::NewLeader,
             &crate::process::DurableRoot::default().child(),
         )
         .expect("spawn with owned tty stdout");
@@ -642,7 +642,7 @@ fn an_enveloped_start_claims_its_running_program_and_not_the_monitor() {
         let leader = pids.contains(&payload.as_raw().cast_unsigned());
         let monitor = pids.contains(&started.spawned.child.id());
         payload.kill();
-        let _ = started.collect(None, std::time::Instant::now(), shell);
+        let _ = started.collect(std::time::Instant::now(), shell);
         assert!(program.is_some(), "the running program is unclaimed");
         assert!(leader, "the payload's leader is unclaimed");
         assert!(!monitor, "bwrap's monitor is claimed");
@@ -656,7 +656,7 @@ fn signaled(signal: i32) -> crate::process::WaitOutcome {
 /// The program's end as its supervisor saw it, through the reaper as every
 /// waiter sees it: a signal death and an exit of `128 + n` stay apart.
 fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutcome> {
-    use crate::process::{PgidPolicy, Spawned};
+    use crate::process::{Placement, Spawned};
     envelope_launches(&unrestricted())?;
     let shell = crate::test_helper::core_shell();
     let mut launch = crate::authority::sandbox::Confinement::Projected(Box::new(unrestricted()))
@@ -672,7 +672,7 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
         .expect("build confined launch");
     launch.stdin(crate::process::StdioSpec::Null);
     let Spawned { child, .. } = launch
-        .spawn(PgidPolicy::NewLeader, &shell.scope)
+        .spawn(Placement::NewLeader, &shell.scope)
         .expect("spawn the confined program");
     let (tx, rx) = std::sync::mpsc::channel();
     let watch = child.into_watch(tx, std::convert::identity);
@@ -749,7 +749,7 @@ fn assert_stream_closure(
     prefix: &[&str],
     open_files: Option<u64>,
 ) {
-    use crate::process::{PgidPolicy, Spawned, StdioSpec, WaitOutcome};
+    use crate::process::{Placement, Spawned, StdioSpec, WaitOutcome};
     use rustix::fs::{OFlags, fcntl_setfl};
     use rustix::io::{Errno, read, write};
     use std::sync::mpsc::{TryRecvError, channel};
@@ -799,7 +799,7 @@ fn assert_stream_closure(
         .stdout(StdioSpec::from_owned(output))
         .stderr(StdioSpec::from_owned(error));
     let Spawned { child, group, .. } = launch
-        .spawn(PgidPolicy::NewLeader, &shell.scope)
+        .spawn(Placement::NewLeader, &shell.scope)
         .expect("spawn the confined program");
     let (tx, rx) = channel();
     let watch = child.into_watch(tx, std::convert::identity);

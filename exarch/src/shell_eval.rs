@@ -118,6 +118,7 @@ pub(crate) fn run_shell(
     };
 
     let report = ral_core::carrier::dispatch_to_report(transport, run, host, within);
+    #[cfg(debug_assertions)]
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
     report
 }

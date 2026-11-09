@@ -10,13 +10,11 @@ pub mod cancel;
 pub(crate) mod child;
 pub mod deadline;
 mod fatal;
-pub(crate) mod foreground;
 #[cfg(unix)]
 mod fork;
 pub(crate) mod group;
 pub(crate) mod jail;
 pub(crate) mod launch;
-pub mod lease;
 pub(crate) mod limits;
 pub(crate) mod outcome;
 pub(crate) mod reaper;
@@ -27,11 +25,16 @@ mod site;
 #[cfg(unix)]
 pub(crate) mod slot;
 pub(crate) mod spawn_lock;
+mod terminal;
 
 pub(crate) use outcome::{Signal, WaitOutcome};
 
 pub(crate) use launch::{Launch, Spawned, StdioSpec, Unstarted};
-pub use lease::{RequestedTerminalAccess, TerminalLease};
+pub use terminal::RequestedTerminalAccess;
+pub(crate) use terminal::{
+    GroupOwner, PreparedTerminalLoan, TerminalAccess, TerminalHold, TerminalInput, TerminalLease,
+    TerminalPermit,
+};
 
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
 pub use fatal::Fatal;
@@ -44,9 +47,8 @@ pub use cancel::{
 pub(crate) use cancel::{DEFAULT_CLEANUP_GRACE, POLL_SLICE, TEARDOWN_GRACE, wait_ended};
 
 pub use child::ChildHandle;
-pub(crate) use foreground::PreparedTerminalLoan;
 pub use group::Pgid;
-pub(crate) use group::{Group, Membership, PgidPolicy};
+pub(crate) use group::{Group, Membership, Placement};
 #[cfg(unix)]
 pub use limits::ChildLimit;
 pub use limits::ChildLimits;
@@ -57,8 +59,6 @@ pub(crate) use signal::{grace_signal, signals_of};
 pub use spawn_lock::cloexec_socketpair;
 pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 
-#[cfg(unix)]
-pub use foreground::{TerminalLoan, interrupt_foreground_child, termios_snapshot};
 #[cfg(unix)]
 pub(crate) use fork::{Forked, fork, reap};
 #[cfg(unix)]
@@ -71,8 +71,6 @@ pub use signal::{Disposition, install, install_handlers};
 #[cfg(unix)]
 pub use slot::clobber_slot;
 
-#[cfg(windows)]
-pub use foreground::TerminalLoan;
 #[cfg(windows)]
 pub(crate) use group::release_win_group;
 #[cfg(windows)]

@@ -10,7 +10,6 @@
 //! [`Command::run`] takes an admitted command alone through steps 4–6. A
 //! pipeline stage and `detach` take those steps their own way.
 
-use super::job_control::Placement;
 use super::redirect::with_redirects;
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{self, Admitted, Baseline, GrantStack};
@@ -20,7 +19,7 @@ use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::child::{Connection, Drains};
 use crate::ir::{CommandName, Redirects};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
-use crate::process::{CancelCause, Launch, PgidPolicy, Scope, Spawned, Unstarted, WaitOutcome};
+use crate::process::{CancelCause, Launch, Placement, Scope, Spawned, Unstarted, WaitOutcome};
 use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use crate::ty::RefusedArg;
@@ -473,9 +472,9 @@ pub(crate) struct Prepared {
 impl Prepared {
     /// Run the command on the shell's streams and wait for it.
     pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-        let placement = Placement::for_command(shell, mooring, self.enveloped());
+        let placement = Placement::command(shell.group_owner(mooring));
         let io = Connection::new(
-            placement.stdin(&shell.io.stdin),
+            shell.io.stdin.offered(placement.input()),
             &shell.io.stdout,
             &shell.io.stderr,
         )
@@ -485,30 +484,37 @@ impl Prepared {
         }
         // Kernel denials logged from here on may belong to this command.
         let since = Instant::now();
-        self.start(io, placement.policy(), &shell.scope)?
-            .collect(placement.into_loan(), since, shell)
+        self.start(io, placement, &shell.scope)
+            .map_err(|failure| failure.settle(&shell.scope))?
+            .collect(since, shell)
             .map(|()| Value::Unit)
     }
 
-    /// Whether the program runs inside an envelope. If so, place it with
-    /// [`PgidPolicy::unless_enveloped`].
-    pub(crate) fn enveloped(&self) -> bool {
-        self.launch.enveloped()
-    }
-
     /// Connect the streams, start the output drains, then spawn. If a drain
-    /// fails to start, no child is spawned.
-    pub(crate) fn start(self, io: Connection, pgid: PgidPolicy, scope: &Scope) -> Settled<Started> {
+    /// fails to start, no child is spawned. A failed start transfers its drains
+    /// to the caller: owner teardown must precede their settlement.
+    pub(crate) fn start(
+        self,
+        io: Connection,
+        placement: Placement,
+        scope: &Scope,
+    ) -> Result<Started, StartFailure> {
         let Self {
             mut launch,
             confinement,
             program,
         } = self;
         let drains = (io.install(&mut launch).start(scope))
-            .map_err(|e| program.io_error("start output drains", &e))?;
-        let spawned = launch
-            .spawn(pgid, scope)
-            .map_err(|why| program.unstarted(why, &confinement))?;
+            .map_err(|e| Break::from(program.io_error("start output drains", &e)))?;
+        let spawned = match launch.spawn(placement, scope) {
+            Ok(spawned) => spawned,
+            Err(why) => {
+                return Err(StartFailure {
+                    reason: Box::new(program.unstarted(why, &confinement)),
+                    drains,
+                });
+            }
+        };
         let denial_pids = confinement.denial_pids(&spawned);
         Ok(Started {
             shown: program.shown,
@@ -536,6 +542,33 @@ pub(crate) struct Started {
 }
 
 // ── Failure to start ────────────────────────────────────────────────────
+
+/// A failed start still owns its output. The caller tears down any enclosing
+/// owner before settling: a joined child's descendants may hold these pipes.
+#[derive(Debug)]
+#[must_use = "settle failed-start drains after owner teardown"]
+pub(crate) struct StartFailure {
+    pub(super) reason: Box<Break>,
+    drains: Drains,
+}
+
+impl From<Break> for StartFailure {
+    fn from(reason: Break) -> Self {
+        Self {
+            reason: Box::new(reason),
+            drains: Drains::default(),
+        }
+    }
+}
+
+impl StartFailure {
+    pub(super) fn settle(self, scope: &Scope) -> Break {
+        // Launch already reaped its child. Never retain a numeric ID for a
+        // later kill; only the enclosing owner can still pin its own group.
+        self.drains.join_under(scope, || {});
+        *self.reason
+    }
+}
 
 /// The program a launch starts, named as lookup named it. It outlives the
 /// launch, which spawning consumes, to explain a failed start.
@@ -698,4 +731,4 @@ impl Shell {
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests;
+pub(super) mod tests;

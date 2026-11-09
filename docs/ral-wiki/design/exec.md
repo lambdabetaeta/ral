@@ -1,7 +1,3 @@
----
-generated_at_commit: 3e3fbc84
----
-
 # Exec: the one effect
 
 This page is about the only effect operation in ral: running an external
@@ -80,7 +76,7 @@ context: cwd, env overrides, stdin, stdout, stderr, grant stack,
 
 ⟨ exec p ws | κ ⟩ → ⟨ return () | κ ⟩                       exit status 0
                   → ⟨ ↯(process [program: p, failure: f], prov κ) | κ ⟩
-                  → ⟨ ↯(raised m, prov κ) | κ ⟩             refused before running
+                  → ⟨ ↯(raised m, prov κ) | κ ⟩             launch refused (may have run)
                   → ⟨ ⇑ stop(c) | κ ⟩                        cancelled by cause c
 ```
 
@@ -176,16 +172,18 @@ streams exist ([[invariants/redirects-are-the-three-standard-streams|redirects-a
 | a here-string | `<< s`, written into a pipe by a thread |
 | empty (`/dev/null`) | captured runs (exarch), workers, `detach`, and a startup terminal the child's group cannot read |
 
-**One rule decides what a child at the boundary reads** (`TerminalInput`), and
-the child's source is then wired as it stands.
+**Requested placement fixes terminal input once**, then the source is wired
+as it stands (`Placement::input`, interpreted by `Source::offered`).
 
-- A group the child joins passes its owner's source through.
-- A startup terminal survives only where the child's group can read it: ral's
-  own group, or one lent the terminal.
-- A group of its own that is not lent the terminal reads EOF.
-- An interactive enveloped child keeps the terminal as stdin: `Placement::for_command`
-  retains its terminal input with the policy, and an envelope's session has no
-  controlling terminal to stop a read.
+- `Inherit`, `Join` and `Tenant` offer terminal stdin: ral's own group, a
+  stage whose owner chose its source, or a fresh group lent the foreground.
+- `NewLeader` and `NewSession` withhold it: an unlent background group or a
+  headless session reads EOF instead of a startup terminal.
+- Pipes and files are unchanged by either input decision.
+- An envelope obeys the requested input decision even though its payload
+  lands in a separate session. An eligible `Tenant` therefore keeps readable
+  terminal stdin in a script too, and retains a restoration-only guard, not
+  a foreground loan. No controlling terminal can stop its read.
 
 | stdout / stderr | arises from | the child sees |
 |---|---|---|
@@ -234,25 +232,49 @@ stopped with `SIGTTIN`.
 - **A host requests terminal access per run**, `RequestedTerminalAccess`:
   `Leased` for the REPL and batch, `Denied` for exarch. A lease exists only if
   ral owned the foreground at startup.
-- **One rule fixes the process group and the handoff**, for a standalone command
-  and a pipeline alike (`Placement::for_command` and `prepare_terminal_loan`,
-  `core/src/shell/exec/job_control.rs`):
+- **Authority reaches the lease through one gate.** `TerminalAccess::reach`
+  requires a session lease: `Denied` never reaches it, `Leased` requires
+  terminal-bound stdout, and `ExplicitLoan` reaches it regardless of stdout.
+  It yields an affine permit for one pre-spawn capture. Only
+  `RequestedTerminalAccess` is public to hosts; leases, permits, preparations
+  and terminal holds are opaque crate resources. Saved state and key
+  attribution never leave the private terminal implementation.
+- **One owner decision supplies placement** (`Shell::group_owner`, then
+  process-layer `Placement::command`):
 
-  | policy | when | consequence |
+  | owner | requested placement | consequence |
   |---|---|---|
-  | `Join` | inside a pipeline stage | the stage's group, never lent the terminal |
-  | `NewLeader` | the run holds the lease, stdout is the terminal or the run is an explicit loan, and no envelope | the terminal is lent to the child's group with `tcsetpgrp`, and taken back at its death |
-  | `NewLeader` | an envelope stands between ral and the program | the envelope's own group, never lent the terminal |
-  | `Inherit` | an interactive run otherwise | ral's own group |
-  | `NewSession` | a non-interactive run otherwise | own session and group, so a teardown reaches the whole tree |
+  | pipeline stage | `Join(membership)` | join its owner's group; no independent capture |
+  | session with a permit | `Tenant(prepared)` | capture before spawn; lead a fresh group and lend it the foreground |
+  | session without a permit, interactive | `Inherit` | ral's own group |
+  | session without a permit, non-interactive | `NewSession` | headless session and group |
 
-  A pipeline's group is led by its anchor, which takes the `NewLeader` row's
-  loan for the whole group.
-
-  A lone child is lent the terminal only after it exists; a `tcsetpgrp` that
-  fails then kills it, since outside the foreground its first tty read would
-  stop it for ever, and the run reports that the terminal could not be handed
-  over.
+  `Launch::spawn` alone steps every envelope `NewLeader`, regardless of the
+  request. A requested tenant then keeps captured state for restoration,
+  without handing foreground to the envelope or attributing its keys.
+  Direct tenants lower to `NewLeader` and lend to the child's pid after spawn.
+  `Pgid` proves positivity, not freshness or session provenance; the two
+  handoff sites establish those preconditions by construction.
+- **A pipeline selects input at its handoff boundary.** It captures before
+  spawning its anchor and lends only after the anchor reports readiness.
+  Success selects readable input; no permit or refusal selects withheld input,
+  stored once for every stage. The refusal can restore immediately because
+  only the anchor exists and never changes modes. A nested pipeline joins
+  with its owner's input and no capture.
+- **A refused command handoff retains restoration responsibility through
+  teardown.** The owned group is killed before its leader is reaped, then the
+  child is killed/reaped, saved state restored, and the jail released.
+  `Unstarted::Refused` names the handoff and OS error; the command may already
+  have produced effects. Every failed start owns its already-started output
+  drains until caller settlement: a lone run settles before propagating the
+  reason; a pipeline rolls back and joins before settling and reporting.
+  Joined descendants remain the enclosing owner's responsibility, never a
+  reason for a borrowed-group kill. Settlement retains no reaped group ID.
+- **Restoration returns what capture found.** Unix saves foreground and modes
+  independently, restoring that foreground first and then termios with
+  `Drain` under SIGTTOU blocking. Windows infallibly captures any available
+  standard console modes and restores them on drop; no console ownership is
+  transferred. An empty snapshot is valid on either platform.
 
 - **ral has no job control.** The reaper answers every stop with `SIGCONT`, so
   Ctrl-Z suspends nothing and no stopped job ever exists
@@ -418,7 +440,7 @@ exit code is a projection of the reason (`FailureCode`), never stored.
 | `not-runnable … io m` | any other spawn error, or any other failure of a path head's or `PATH` candidate's walk | failure | 126 |
 | grant refusal | the judgment denies the program | failure, `raised` | 1 |
 | argument refusal | an argument is not a word | failure, `raised` | 1 |
-| launch refused | ral could not start the launch: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, or the envelope dies before the program starts | failure, `raised` | 1 |
+| launch refused | startup is refused: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, the envelope dies before the program starts, or a terminal handoff is refused after exec | failure, `raised` | 1 |
 | stopped | a death by a signal of a cause in force, or a cause the start sees before the program runs | stop | 124, 130, 131, 141, 143 |
 | cut at the write | a non-final stage writes after its reader ended | stop, forgiven by its pipeline | none |
 
@@ -489,7 +511,7 @@ force** (`WaitOutcome::cancelled_by`, `core/src/process/outcome.rs`;
   command or pipeline holds the terminal, the kernel delivers Ctrl-C to it,
   not to ral; ral hears the key back when it reclaims the terminal and strikes
   the run ([[decisions/260924_the-lent-terminal-returns-the-gesture|the-lent-terminal-returns-the-gesture]]).
-  Without a loan (exarch, a capture, a worker), a `SIGINT` death is
+  Without a loan (exarch, a capture without explicit access, a worker), a `SIGINT` death is
   `signaled 2`, which `try` catches.
 - **Windows** has no signals. A teardown opens with Ctrl-Break to each console
   group ral owns and ends with `TerminateProcess` or `TerminateJobObject`

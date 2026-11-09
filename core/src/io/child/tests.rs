@@ -1,6 +1,6 @@
 use super::*;
 use crate::io::{Edge, new_buffer};
-use crate::process::{DurableRoot, PgidPolicy};
+use crate::process::{DurableRoot, Placement};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -92,7 +92,7 @@ fn failed_spawn_releases_writers_without_starting_drains() {
         .unwrap()
         .install(&mut launch);
     let scope = DurableRoot::default().child();
-    assert!(launch.spawn(PgidPolicy::Inherit, &scope).is_err());
+    assert!(launch.spawn(Placement::Inherit, &scope).is_err());
     let drains = pending.start(&scope).unwrap();
     drains.join_under(&scope, || panic!("not cancelled"));
     assert_eq!(bytes.take().bytes, b"");
@@ -114,7 +114,7 @@ fn merged_child_streams_reach_the_same_reader_on_each_platform() {
         .unwrap()
         .install(&mut launch);
     let scope = DurableRoot::default().child();
-    let mut child = launch.spawn(PgidPolicy::Inherit, &scope).unwrap().child;
+    let mut child = launch.spawn(Placement::Inherit, &scope).unwrap().child;
     // Explicit endpoints, not backend-created output pipes.
     assert!(child.take_stdout().is_none());
     assert!(child.take_stderr().is_none());

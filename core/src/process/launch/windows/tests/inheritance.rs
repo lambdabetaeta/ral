@@ -57,7 +57,7 @@ impl Drop for ReapedChild {
 
 fn raw_child(launch: Launch) -> io::Result<ReapedChild> {
     match launch.spawn(
-        PgidPolicy::Inherit,
+        Placement::Inherit,
         &crate::process::DurableRoot::default().child(),
     ) {
         Ok(spawned) => Ok(ReapedChild(spawned.child)),

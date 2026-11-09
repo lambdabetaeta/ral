@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 257c6c00
-verified_at_commit: 248aff5c
+generated_at_commit: f26144e0
+verified_at_commit: f26144e0
 verified_at_date: 2026-11-09
-anchors: [Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+anchors: [StartFailure, StartFailure::settle, Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, Placement::command, TerminalAccess::reach, TerminalHold, PreparedTerminalLoan::lend, discarded, Drains::join_under, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
@@ -21,13 +21,13 @@ is [[design/exec|exec]]; what a confined launch adds is
 | stage | function | it does | its failures leave as |
 |---|---|---|---|
 | prepare | `Command::prepare` | reads the head's verdict, vets argv and owns the launch, its image, interpreter and confinement context; `detach` alone asks for a surrendered one | the head's verdict; a refused argument; a preparation error |
-| start | `Prepared::start` / `run`, `Prepared::detach` | consumes the command, connects its streams (a survivor's to null), and spawns under the scope; a kept result owns the child, pumps and denial PIDs, a detached result is `Survivor` | `Program::unstarted`, the one conversion of `Unstarted`, below |
+| start | `Prepared::start` / `run`, `Prepared::detach` | consumes the command, connects its streams (a survivor's to null), and spawns under the scope; a kept result owns the child, opaque terminal hold, pumps and denial PIDs, a detached result is `Survivor` | `Program::unstarted`, the one conversion of `Unstarted`, below |
 | ending | `ending` | a death by a signal of a cause in force is that cause's stop; any other end is a process failure (`Reason::process`), with the kernel's account of the deny lines its start claimed | a stop, or a process failure |
 
 - **Every failure of a stage has one home.** Preparation raises its refusals as
   the `Error`s its building meets; `unstarted` is the only place a launch that
-  made no child becomes the run's error; `ending` is the only place a child's
-  end does. A fourth way to raise is a defect.
+  returned no kept child becomes the run's error; `ending` is the only place
+  a child's end does. A fourth way to raise is a defect.
 - **Installation fixes child setup order once.** A launch's child steps are
   data, its `ChildSetup`, whatever order they were configured in; the spawn's
   `ChildSetup::install` registers them as one hook: merge stderr, capture
@@ -71,7 +71,23 @@ Which of the three cases a failure is, and so whom it blames, is
   program's place, its `Exec` failure is the launcher's, `Refused`.
 - **A discarded child is killed and reaped** (`discarded`). A refusal after the
   fork, such as an unnameable payload group or a refused report, leaves no
-  running child behind. `detach` leaves its survivor: it is never killed.
+  running child behind. The owned group is killed before reaping its leader,
+  whose unreaped pid pins the group ID. `detach` leaves its survivor: it is
+  never killed.
+- **A refused terminal handoff may follow effects.** `Launch::spawn` lends a
+  direct tenant's fresh group after exec. Refusal retains the captured guard
+  through group kill and child kill/reap, then restores state and releases the
+  jail before returning `Unstarted::Refused`, naming the operation and OS error.
+  It does not claim the command never ran.
+- **A failed start owns its drains until caller settlement.**
+  `Prepared::start` returns `StartFailure` with the reason and already-started
+  drains: even a refused child may have written output. A lone `run` settles
+  before propagating the reason. A pipeline first rolls back and joins its
+  owner, even if no stage registered, then settles the failed-start drains
+  before returning the error. A joined child's descendants are its enclosing
+  owner's to kill, not the failed launch's. `StartFailure::settle` uses an
+  empty kill callback, never a numeric ID retained after reap.
+  `Drains::drop` remains non-blocking for unwinding.
 
 ## Which failure reads as what
 
@@ -168,9 +184,17 @@ its `denial_pids` the moment the spawn returns, and `ending` hands `exit_error` 
 ## Where the child landed
 
 **A child's `Group` is computed once, at its birth, and carried.**
-`Placement::for_command` decides the policy once, `spawn_with_pgid` returns the group with
-the child, an envelope's payload group becomes `Enveloped`, and nothing
-downstream recomputes it ([[invariants/a-child-lands-once|a-child-lands-once]]);
+`Shell::group_owner` gathers stage membership or session facts once;
+`Placement::command` selects `Join`, permitted `Tenant`, interactive `Inherit`
+or headless `NewSession`. `Placement::input` determines the requested terminal
+stdin before `Source::offered` interprets it. `Launch::spawn` alone applies the
+envelope rule: it steps `NewLeader` regardless of request and returns the
+payload's group as `Enveloped`. An eligible envelope's `Tenant` keeps readable
+stdin and a restoration-only hold, without handoff or key attribution.
+Otherwise the direct tenant lends to its child's new leader; `Pgid` itself
+proves only positivity, not provenance. `Spawned.terminal` carries the opaque
+hold to collection, which reclaims it before jail settlement and pump joins.
+Nothing downstream recomputes the landing ([[invariants/a-child-lands-once|a-child-lands-once]]);
 what each landing lets a collector signal is
 [[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]'s. The process limit is a
 property of the launch, applied where the child is born (a macOS fork limit set

@@ -14,16 +14,17 @@ mod sentinel;
 mod stage;
 mod thread;
 
-use super::job_control::{LoanPreparation, prepare_terminal_loan};
 use crate::ir::{Argv, Comp};
+use crate::process::{GroupOwner, PreparedTerminalLoan, TerminalHold, TerminalInput};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use collect::lone_end;
+use super::command::StartFailure;
 use collect::{CollectState, Event, Slot};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use collect::{collect_spawned, lone_end};
 use group::PipelineGroup;
 use launch::{LaunchCx, spawn_stage};
 use resolve::{StageLaunch, resolve_pipeline};
@@ -72,21 +73,23 @@ impl PipeNode {
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        // Prepare before even the anchor runs; a joined group is lent nothing.
-        let lending = prepare_terminal_loan(shell, mooring);
-        let group = match shell.session.stage.clone() {
-            Some(membership) => PipelineGroup::joining(membership),
-            None => PipelineGroup::prepare(tx.clone())?,
-        };
-        let loan = match lending {
-            LoanPreparation::Prepared(loan) => loan.lend(group.leader_pgid().as_raw()),
-            LoanPreparation::NotEligible | LoanPreparation::Unavailable => None,
+        let (group, terminal, input) = match shell.group_owner(mooring) {
+            GroupOwner::Stage(membership) => (
+                PipelineGroup::joining(membership),
+                TerminalHold::default(),
+                TerminalInput::Readable,
+            ),
+            GroupOwner::Session { permit, .. } => {
+                // Capture before even the anchor can run.
+                let prepared = permit.map(PreparedTerminalLoan::capture);
+                PipelineGroup::prepare(tx.clone(), prepared)?
+            }
         };
 
         let collect = CollectState::new(
             rx,
             group.group(),
-            loan,
+            terminal,
             shell.scope.clone(),
             mooring.cleanup_grace,
             started,
@@ -98,16 +101,31 @@ impl PipeNode {
             env,
             eval,
             group: &node.group,
-            holds_terminal: node.collect.holds_terminal(),
+            input,
         };
         let launched = launch(stages, launches, &mut cx, &mut node.collect, &tx);
         // The collector keeps no sender: `recv` sees the last producer go.
         drop(tx);
+        node.finish(launched, mooring, shell)
+    }
+
+    /// Roll back before settling a failed start's output, including when no
+    /// stage registered. A joining node leaves group teardown to its owner.
+    fn finish(
+        mut self,
+        launched: Result<(), StartFailure>,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Value> {
         if launched.is_err() {
-            node.collect.roll_back();
+            self.collect.roll_back();
         }
-        let value = node.join(mooring, shell);
-        launched.and(value)
+        let value = self.join(mooring, shell);
+        // A failed joined launch may leave descendants holding its streams.
+        // The owner must finish rollback before we wait for those drains.
+        launched
+            .map_err(|failure| failure.settle(&shell.scope))
+            .and(value)
     }
 
     /// Wait on every stage and fold their observations into one value.  The
@@ -134,7 +152,7 @@ fn launch(
     cx: &mut LaunchCx<'_>,
     collect: &mut CollectState,
     tx: &Sender<Event>,
-) -> Settled<()> {
+) -> Result<(), StartFailure> {
     let routes = open_stage_routes(stages.len())?;
     for (ix, ((stage, launch), route)) in stages.iter().zip(launches).zip(routes).enumerate() {
         cx.shell.poll()?;
@@ -151,6 +169,147 @@ mod tests {
     use crate::test_helper::eventually;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    /// Exercise the real failed-start boundary with no registered stage. A
+    /// non-enveloped confined child forks a descendant holding stderr while
+    /// `Testimony::first` waits. Only the owning pipeline may kill that group.
+    #[test]
+    fn a_joined_failed_start_rolls_back_before_settling_its_drains() {
+        crate::test_helper::subprocess::isolated(
+            "shell::exec::pipeline::tests::a_joined_failed_start_rolls_back_before_settling_its_drains",
+            || {
+                use super::{CollectState, PipeNode, PipelineGroup};
+                use crate::io::child::Connection;
+                use crate::io::{Sink, Source};
+                use crate::process::{DurableRoot, Placement, Scope, TerminalHold};
+                use crate::shell::runtime::{Break, Mooring};
+                use crate::test_helper::terminal::{WAIT, checkpoints};
+                use std::io::Read as _;
+                use std::os::fd::OwnedFd;
+                use std::sync::{Arc, Mutex, mpsc};
+                use std::time::Instant;
+
+                const MARKER: &[u8] = b"descendant retains stderr\n";
+                for cancelled in [false, true] {
+                    let home = DurableRoot::default().child();
+                    let scope = Scope::clone(&home);
+                    let (mut ready, output) =
+                        crate::process::cloexec_socketpair().expect("readiness socket");
+                    ready
+                        .set_read_timeout(Some(WAIT))
+                        .expect("bound descendant readiness and EOF");
+                    let stdout = Sink::File(Arc::new(std::fs::File::from(OwnedFd::from(output))));
+                    let (report, writer) =
+                        crate::process::cloexec_socketpair().expect("startup report");
+                    let witness = crate::process::report::Witness::new(
+                        writer.try_clone().expect("witness copy").into(),
+                    )
+                    .expect("report socket");
+                    let report = crate::process::report::Report::new(report, writer.into());
+                    let (mut observer, blocker) = checkpoints().expect("sink checkpoints");
+                    let blocker = Mutex::new(blocker);
+                    let (capture, bytes) = crate::io::new_buffer();
+                    let stderr = Sink::Tee(
+                        Box::new(Sink::Watch {
+                            line: Arc::new(move |line| {
+                                assert_eq!(line, &MARKER[..MARKER.len() - 1]);
+                                let mut blocker = blocker.lock().unwrap();
+                                blocker.send(b'B').expect("sink entered");
+                                blocker.expect(b'R').expect("release sink");
+                            }),
+                            pending: Vec::new(),
+                        }),
+                        Box::new(capture),
+                    );
+                    let (failed_tx, failed_rx) = mpsc::channel();
+                    let (done_tx, done_rx) = mpsc::channel();
+                    let worker = std::thread::spawn(move || {
+                        let mut shell = crate::test_helper::core_shell();
+                        shell.scope = scope;
+                        let mooring = Mooring::adrift();
+                        let (tx, rx) = mpsc::channel();
+                        let (group, _, _) =
+                            PipelineGroup::prepare(tx.clone(), None).expect("owner anchor");
+                        let collect = CollectState::new(
+                            rx,
+                            group.group(),
+                            TerminalHold::default(),
+                            shell.scope.clone(),
+                            mooring.cleanup_grace,
+                            Instant::now(),
+                        );
+                        let command = crate::shell::exec::command::tests::joined_startup_report(
+                            &mut shell,
+                            // Readiness follows the descendant's stderr write.
+                            // sleep bounds its life even if the regression fails.
+                            "(printf 'descendant retains stderr\n' >&2; printf D; exec /bin/sleep 20) & wait",
+                            report,
+                        );
+                        let io = Connection::new(&Source::Empty, &stdout, &stderr)
+                            .expect("captured stderr");
+                        drop(stdout);
+                        drop(stderr);
+                        let Err(failure) = command.start(
+                            io,
+                            Placement::Join(group.membership(&shell.scope)),
+                            &shell.scope,
+                        ) else {
+                            panic!("the startup report must refuse or cancel");
+                        };
+                        assert_eq!(matches!(*failure.reason, Break::Escape(_)), cancelled);
+                        failed_tx
+                            .send(())
+                            .expect("start returned ownership of drains");
+                        drop(tx);
+                        let node = PipeNode { collect, group };
+                        let settled = node.finish(Err(failure), &mooring, &mut shell);
+                        assert_eq!(matches!(settled, Err(Break::Escape(_))), cancelled);
+                        if let Err(Break::Error(error)) = &settled {
+                            assert!(error.describe().contains("checkpoint refusal"));
+                        }
+                        done_tx.send(settled.is_err()).expect("settled failure");
+                    });
+                    let mut phase = [0];
+                    ready
+                        .read_exact(&mut phase)
+                        .expect("descendant wrote stderr and is live");
+                    assert_eq!(phase, [b'D']);
+                    observer.expect(b'B').expect("drain is blocked in the sink");
+                    if cancelled {
+                        home.cancel(CancelCause::Aborted);
+                        // Keep the report open: cancellation, not EOF, ends first().
+                    } else {
+                        witness.refused("checkpoint refusal after descendant startup");
+                    }
+                    failed_rx
+                        .recv_timeout(WAIT)
+                        .expect("failed start must return before joining drains");
+                    assert_eq!(
+                        ready
+                            .read(&mut phase)
+                            .expect("owner rollback closes descendant output"),
+                        0
+                    );
+                    let premature = done_rx.recv_timeout(Duration::from_millis(200));
+                    observer.send(b'R').expect("release sink after rollback");
+                    assert!(
+                        matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+                        "failure escaped before drain settlement: {premature:?}"
+                    );
+                    assert!(
+                        done_rx
+                            .recv_timeout(WAIT)
+                            .expect("settlement completes after release")
+                    );
+                    worker.join().expect("pipeline settlement worker");
+                    let retained = bytes.take();
+                    assert_eq!(retained.bytes, MARKER);
+                    assert_eq!(retained.total, MARKER.len() as u64);
+                    assert!(retained.is_whole());
+                }
+            },
+        );
+    }
 
     /// A `sh` that appends a line to `hits` for every SIGINT or SIGTERM it
     /// hears and carries on, writing its pid to `ready` once the trap is set.
@@ -271,53 +430,68 @@ mod tests {
     /// report of the key.
     #[test]
     fn a_key_heard_while_a_launch_failed_is_struck() {
-        use super::stage::StageHandle;
-        use super::{CollectState, PipeNode, PipelineGroup, Slot};
-        use crate::shell::runtime::Mooring;
+        crate::test_helper::subprocess::isolated(
+            "shell::exec::pipeline::tests::a_key_heard_while_a_launch_failed_is_struck",
+            || {
+                use super::stage::StageHandle;
+                use super::{CollectState, PipeNode, PipelineGroup, Slot};
+                use crate::shell::runtime::Mooring;
 
-        let trapper = Trapper::new();
-        let mut shell = crate::test_helper::core_shell();
-        let mooring = Mooring::adrift();
-        let frame = crate::process::DurableRoot::default().child();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let group = PipelineGroup::prepare(tx.clone()).expect("anchor spawns");
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", &trapper.script()]);
-        let (child, _) = crate::process::spawn_with_pgid(
-            &mut cmd,
-            crate::process::PgidPolicy::Join(group.membership(&frame)),
-        )
-        .expect("spawn the trapper into the group");
-        let mut collect = CollectState::new(
-            rx,
-            group.group(),
-            Some(crate::process::TerminalLoan::for_test(&frame)),
-            shell.scope.clone(),
-            mooring.cleanup_grace,
-            std::time::Instant::now(),
-        );
-        collect.push(StageHandle::for_test(
-            Slot { ix: 0, tx },
-            crate::process::ChildHandle::from_std(child),
-        ));
-        let pid = trapper.pid();
-        // As the tty delivers a key: to the whole group, the anchor included.
-        group
-            .leader_pgid()
-            .signal_group(crate::process::Signal::new(libc::SIGINT));
+                let trapper = Trapper::new();
+                let mut shell = crate::test_helper::core_shell();
+                let mooring = Mooring::adrift();
+                let frame = crate::process::DurableRoot::default().child();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (group, _, _) =
+                    PipelineGroup::prepare(tx.clone(), None).expect("anchor spawns");
+                let mut cmd = std::process::Command::new("/bin/sh");
+                cmd.args(["-c", &trapper.script()]);
+                let (child, _) = crate::process::spawn_with_pgid(
+                    &mut cmd,
+                    &crate::process::Placement::Join(group.membership(&frame)),
+                )
+                .expect("spawn the trapper into the group");
+                let mut collect = CollectState::new(
+                    rx,
+                    group.group(),
+                    {
+                        let lease =
+                            crate::process::TerminalLease::mint_at_startup(true).expect("lease");
+                        let permit = crate::process::TerminalAccess::Leased
+                            .reach(Some(&lease), &frame, true)
+                            .expect("permit");
+                        crate::process::PreparedTerminalLoan::capture(permit).assumed()
+                    },
+                    shell.scope.clone(),
+                    mooring.cleanup_grace,
+                    std::time::Instant::now(),
+                );
+                collect.push(StageHandle::for_test(
+                    Slot { ix: 0, tx },
+                    crate::process::ChildHandle::from_std(child),
+                ));
+                let pid = trapper.pid();
+                // As the tty delivers a key: to the whole group, the anchor included.
+                group
+                    .group()
+                    .owned()
+                    .expect("owning group")
+                    .signal_group(crate::process::Signal::new(libc::SIGINT));
 
-        let mut node = PipeNode { collect, group };
-        node.collect.roll_back();
-        let _ = node.join(&mooring, &mut shell);
-        assert_eq!(
-            frame.cause(),
-            Some(CancelCause::Interrupted),
-            "a key heard during the launch must be struck on the run's node"
-        );
-        assert_ne!(
-            unsafe { libc::kill(pid, 0) },
-            0,
-            "the started stage must be torn down"
+                let mut node = PipeNode { collect, group };
+                node.collect.roll_back();
+                let _ = node.join(&mooring, &mut shell);
+                assert_eq!(
+                    frame.cause(),
+                    Some(CancelCause::Interrupted),
+                    "a key heard during the launch must be struck on the run's node"
+                );
+                assert_ne!(
+                    unsafe { libc::kill(pid, 0) },
+                    0,
+                    "the started stage must be torn down"
+                );
+            },
         );
     }
 }

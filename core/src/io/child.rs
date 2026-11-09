@@ -170,9 +170,11 @@ impl PendingDrain {
     }
 }
 
-/// Running drains. Dropping them detaches rather than waiting for descendants
-/// that may still hold a pipe; only normal settlement explicitly joins.
-#[derive(Default)]
+/// Running drains. Ordinary settlement joins them after owner teardown and
+/// before reporting success or failure, including a failed start.
+/// Dropping stays non-blocking for unwinding: it detaches rather than waiting
+/// for descendants that may still hold a pipe.
+#[derive(Debug, Default)]
 pub(crate) struct Drains(Vec<JoinHandle<()>>);
 
 impl Drains {

@@ -1175,60 +1175,46 @@ mod vet {
 }
 
 mod stdio {
-    use crate::io::Source;
-    use crate::process::{DurableRoot, Membership, Pgid, Scope, StdioSpec};
-    use crate::shell::exec::job_control::{Placement, TerminalInput};
-    use crate::shell::runtime::Mooring;
-    use crate::shell::runtime::Shell;
-
-    /// The terminal on the shell's stdin.
-    fn at_a_tty() -> Shell {
-        let mut shell = crate::test_helper::core_shell();
-        shell.io.stdin = Source::Terminal;
-        shell
-    }
-
-    /// The terminal survives in ral's own group or a lent one, and is EOF to
-    /// any other group of its own.
-    #[test]
-    fn the_terminal_survives_only_where_its_group_can_read_it() {
-        let shell = at_a_tty();
-        assert!(matches!(
-            TerminalInput::Retain.stdin(&shell.io.stdin),
-            Source::Terminal
-        ));
-        assert!(matches!(
-            TerminalInput::Withhold.stdin(&shell.io.stdin),
-            Source::Empty
-        ));
-    }
-
-    /// A joined group reads what its owner chose, lent or not.
-    #[test]
-    fn a_joined_group_passes_its_owners_source_through() {
-        let mut shell = at_a_tty();
-        let group = Pgid::from_raw(1).expect("1 is positive");
-        let stage = Scope::clone(&DurableRoot::default().child());
-        shell.session.stage = Some(Membership::new(group, stage));
-        let placed = Placement::for_command(&shell, &Mooring::adrift(), false);
-        assert!(matches!(placed, Placement::Joined(_)));
-        assert!(matches!(placed.stdin(&shell.io.stdin), Source::Terminal));
-        shell.io.stdin = Source::Empty;
-        assert!(matches!(placed.stdin(&shell.io.stdin), Source::Empty));
-    }
-
-    /// Only the terminal is withheld: a non-tty fd 0 is a reader, and
-    /// reaches every group.
+    use crate::io::{Source, SourceReader};
     #[cfg(unix)]
+    use crate::process::{DurableRoot, Scope};
+    use crate::process::{StdioSpec, TerminalInput};
+
     #[test]
-    fn a_non_tty_stdin_reaches_every_group() {
-        let mut shell = at_a_tty();
-        let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
-        shell.io.stdin = Source::Reader(crate::io::SourceReader::pipe(r));
-        assert!(matches!(
-            TerminalInput::Withhold.stdin(&shell.io.stdin),
-            Source::Reader(_)
-        ));
+    fn offered_withholds_only_terminal_input_and_borrows_other_sources() {
+        let terminal = Source::Terminal;
+        let empty = Source::Empty;
+        let file = Source::Reader(SourceReader::file(tempfile::tempfile().expect("reader")));
+        #[cfg(unix)]
+        let (pipe, _writer) = crate::process::cloexec_pipe().expect("data pipe");
+        let sources = [
+            empty,
+            file,
+            #[cfg(unix)]
+            Source::Reader(SourceReader::pipe(pipe)),
+        ];
+        for input in [TerminalInput::Readable, TerminalInput::Withheld] {
+            match input {
+                TerminalInput::Readable => {
+                    assert!(std::ptr::eq(terminal.offered(input), &raw const terminal));
+                }
+                TerminalInput::Withheld => {
+                    assert!(matches!(terminal.offered(input), Source::Empty));
+                }
+            }
+            for source in &sources {
+                assert!(std::ptr::eq(source.offered(input), source));
+                if matches!(source, Source::Reader(_)) {
+                    assert!(matches!(source.child_stdio(), Ok(StdioSpec::Owned(_))));
+                    assert!(
+                        source
+                            .reader()
+                            .expect("source keeps its descriptor")
+                            .is_some()
+                    );
+                }
+            }
+        }
     }
 
     /// The source is authoritative: `Empty` wires `/dev/null` and `Terminal`
@@ -1245,8 +1231,6 @@ mod stdio {
     #[cfg(unix)]
     #[test]
     fn a_stage_shaped_source_is_borrowed() {
-        use crate::io::SourceReader;
-
         let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
         let stdin = Source::Reader(
             SourceReader::pipe(r).interruptible(Scope::clone(&DurableRoot::default())),
@@ -1260,212 +1244,212 @@ mod stdio {
     }
 }
 
+#[cfg(unix)]
 mod foreground {
     use super::super::*;
-    use crate::io::Source;
-    use crate::process::{DurableRoot, Membership, Pgid, Scope, TerminalLease};
-    use crate::shell::exec::job_control::TerminalInput;
-    use crate::shell::runtime::TerminalAccess;
+    use crate::io::{Sink, Source};
+    use crate::process::{TerminalAccess, TerminalLease};
+    use crate::test_helper::terminal::{self, Mode};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::FileExt as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::sync::{Arc, Mutex, mpsc};
 
-    /// A session owning a terminal lease plus a `Leased` mooring: the REPL, or
-    /// a terminal-launched script.  Stdout defaults to `Sink::Stdout`.
-    fn leased_shell() -> (Shell, Mooring) {
+    fn tenant_shell() -> Shell {
         let mut shell = crate::test_helper::core_shell();
-        shell.session.interactive = true;
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        let mooring = Mooring {
-            terminal_access: TerminalAccess::Leased,
-            home: DurableRoot::default().child(),
-            cleanup_grace: std::time::Duration::ZERO,
-            ..Mooring::adrift()
-        };
-        (shell, mooring)
+        shell.io.stdin = Source::Terminal;
+        shell.io.stdout = Sink::Stdout;
+        shell
     }
 
-    fn captured(shell: &mut Shell) {
-        shell.io.stdout = crate::io::new_buffer().0;
-    }
-
-    /// Never foreground: no loan, and the group `interactive` leaves it in,
-    /// where only an interactive run's terminal is readable.
-    fn assert_background(placed: &Placement, interactive: bool) {
-        let policy = placed.policy();
-        if interactive {
-            assert!(matches!(placed, Placement::Inherit));
-            assert!(matches!(policy, PgidPolicy::Inherit), "{policy:?}");
-        } else {
-            assert!(matches!(placed, Placement::Headless));
-            assert!(matches!(policy, PgidPolicy::NewSession), "{policy:?}");
-        }
-        assert_eq!(
-            matches!(placed.stdin(&Source::Terminal), Source::Terminal),
-            interactive
-        );
-    }
-
-    #[cfg(unix)]
-    fn assert_foreground(placed: &Placement) {
-        assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
-        assert!(matches!(placed, Placement::Foreground(_)));
-        assert!(matches!(placed.stdin(&Source::Terminal), Source::Terminal));
-    }
-
-    /// A joined group is never lent: dropping a loan restores the terminal,
-    /// out from under the owner.
-    #[test]
-    fn a_stages_child_joins_its_group_unlent() {
-        let (mut shell, mooring) = leased_shell();
-        let group = Pgid::from_raw(1).expect("1 is positive");
-        shell.session.stage = Some(Membership::new(group, shell.scope.clone()));
-        let placed = Placement::for_command(&shell, &mooring, false);
-        assert!(matches!(&placed, Placement::Joined(m) if m.group() == group));
-        assert!(matches!(placed.policy(), PgidPolicy::Join(m) if m.group() == group));
-        assert!(placed.into_loan().is_none());
-    }
-
-    /// An envelope leads a group of its own, whatever its pipeline's.
-    #[test]
-    fn an_enveloped_member_leads_its_own_group() {
-        let (mut shell, mooring) = leased_shell();
-        let group = Pgid::from_raw(1).expect("1 is positive");
-        shell.session.stage = Some(Membership::new(
-            group,
-            Scope::clone(&DurableRoot::default().child()),
-        ));
-        for interactive in [true, false] {
-            shell.session.interactive = interactive;
-            let placed = Placement::for_command(&shell, &mooring, true);
-            assert!(matches!(
-                placed,
-                Placement::Unloaned {
-                    terminal_input: TerminalInput::Retain
+    /// Both records precede exec, hence precede the parent's spawn return.
+    /// No script scheduling or child-side readiness race can lose the marker.
+    fn marked_sleep(pid_file: &std::fs::File, marker: &'static [u8]) -> Launch {
+        let pid_file = pid_file.try_clone().expect("child pid file");
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        // SAFETY: the hook only calls getpid/write on prepared descriptors;
+        // all bytes live on the stack or in static storage. No locks or allocation.
+        unsafe {
+            command.pre_exec(move || {
+                let pid = libc::getpid().to_ne_bytes();
+                for (fd, mut bytes) in [
+                    (pid_file.as_raw_fd(), pid.as_slice()),
+                    (libc::STDERR_FILENO, marker),
+                ] {
+                    while !bytes.is_empty() {
+                        let n = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                        if n < 0 {
+                            let error = std::io::Error::last_os_error();
+                            if error.kind() == ErrorKind::Interrupted {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        if n == 0 {
+                            return Err(ErrorKind::WriteZero.into());
+                        }
+                        bytes = &bytes[n.unsigned_abs()..];
+                    }
                 }
-            ));
-            assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
-            assert!(matches!(placed.stdin(&Source::Terminal), Source::Terminal));
-            assert!(matches!(placed.stdin(&Source::Empty), Source::Empty));
-            assert!(placed.into_loan().is_none());
+                Ok(())
+            });
         }
+        Launch::from_command(command)
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn a_leased_terminal_bound_child_foregrounds() {
-        let (shell, mooring) = leased_shell();
-        assert_foreground(&Placement::for_command(&shell, &mooring, false));
-    }
-
-    /// A capture's sink is a buffer, not the terminal, so it must not steal the
-    /// foreground even under a `Leased` mooring.
-    #[test]
-    fn a_leased_captured_child_stays_in_the_background() {
-        let (mut shell, mooring) = leased_shell();
-        captured(&mut shell);
-        assert_background(&Placement::for_command(&shell, &mooring, false), true);
-    }
-
-    /// The loan foregrounds despite the buffer sink, a lone command as a
-    /// pipeline: otherwise `fzf`, drawing on `/dev/tty` from a background
-    /// pgroup, raises SIGTTOU (the CTRL-R failure).
-    #[test]
-    #[cfg(unix)]
-    fn an_explicit_loan_foregrounds_a_captured_child() {
-        let (mut shell, mut mooring) = leased_shell();
-        captured(&mut shell);
-        mooring.terminal_access = TerminalAccess::ExplicitLoan;
-        assert_foreground(&Placement::for_command(&shell, &mooring, false));
-    }
-
-    /// A terminal-launched script holds `Leased` exactly like the REPL: gating on
-    /// interactivity would strand `claude` or `fzf` in the background on SIGTTOU.
-    #[test]
-    #[cfg(unix)]
-    fn a_terminal_scripts_leased_child_foregrounds() {
-        let (mut shell, mooring) = leased_shell();
-        shell.session.interactive = false;
-        assert_foreground(&Placement::for_command(&shell, &mooring, false));
-    }
-
-    /// A headless background child leads a session of its own.
-    #[test]
-    fn a_headless_captured_child_leads_a_session() {
-        let (mut shell, mooring) = leased_shell();
-        shell.session.interactive = false;
-        captured(&mut shell);
-        assert_background(&Placement::for_command(&shell, &mooring, false), false);
-    }
-
-    /// Its session has no controlling terminal: lent nothing, led as a group
-    /// of its own, and the terminal readable as in ral's own group.
-    #[test]
-    fn an_enveloped_child_is_never_lent_the_terminal() {
-        let (mut shell, mut mooring) = leased_shell();
-        let enveloped = |shell: &Shell, mooring: &Mooring| {
-            let placed = Placement::for_command(shell, mooring, true);
-            assert!(matches!(placed, Placement::Unloaned { .. }));
-            assert!(matches!(placed.policy(), PgidPolicy::NewLeader));
-            let retained = matches!(placed.stdin(&Source::Terminal), Source::Terminal);
-            assert!(placed.into_loan().is_none());
-            retained
-        };
-        assert!(enveloped(&shell, &mooring));
-        mooring.terminal_access = TerminalAccess::ExplicitLoan;
-        assert!(enveloped(&shell, &mooring));
-        shell.session.interactive = false;
-        assert!(!enveloped(&shell, &mooring));
-    }
-
-    /// The handoff fails where stdin is no terminal: the child, outside the
-    /// foreground, would stop on its first tty read, so it is killed and the
-    /// refusal is the verdict.
-    #[cfg(unix)]
-    #[test]
-    fn a_child_the_terminal_cannot_be_lent_to_is_killed() {
-        if rustix::termios::tcgetpgrp(rustix::stdio::stdin()).is_ok() {
-            return;
+    fn assert_child_reaped(pid_file: &std::fs::File) {
+        let mut bytes = [0; std::mem::size_of::<libc::pid_t>()];
+        pid_file.read_exact_at(&mut bytes, 0).expect("pre-exec pid");
+        let pid = libc::pid_t::from_ne_bytes(bytes);
+        let mut status = 0;
+        // SAFETY: this pid was recorded by our own child before exec.
+        let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        let error = std::io::Error::last_os_error();
+        if waited == 0 {
+            // A failed assertion must not leak a live child in its own group.
+            // waitpid just proved it is still our unreaped child, pinning its ID.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, &raw mut status, 0);
+            }
         }
-        let (mut shell, mooring) = leased_shell();
-        let command = Command::from_name(&CommandName::Path("/bin/sleep".into()), &shell.context)
-            .lookup(&shell.context.grants, shell.baseline())
-            .admit(&mooring, &mut shell)
-            .expect("an unrestricted shell admits sleep");
-        let started = std::time::Instant::now();
-        let command = command
-            .prepare(&[Value::string("30")], Ownership::Kept, &shell)
-            .expect("the launch builds");
-        let Err(Break::Error(refusal)) = command.run(&mooring, &shell) else {
-            panic!("a failed handoff must refuse the command");
-        };
+        assert_eq!(waited, -1, "the refused child must already be reaped");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    fn assert_handoff_refusal(refusal: &Error) {
+        let described = refusal.describe();
         assert!(
-            refusal.describe().contains("could not hand the terminal"),
+            described.contains("could not hand over the terminal"),
             "{refusal}"
         );
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
-            "the child must be killed, not waited out"
+            described.contains(&std::io::Error::from_raw_os_error(libc::ENOTTY).to_string()),
+            "the handoff must name the real non-controlling-tty error: {refusal}"
         );
     }
 
-    /// A `Denied` mooring never foregrounds even though the session owns a lease
-    /// — exarch's tool runs: the borrow is unreachable, the handoff unbuildable.
+    /// Placement cases live in the process table. Here the real handoff must
+    /// return `Refused` (not `Program` or `Stopped`), having killed and reaped its child.
     #[test]
-    fn a_denied_run_never_foregrounds() {
-        let (shell, mut mooring) = leased_shell();
-        mooring.terminal_access = TerminalAccess::Denied;
-        assert!(
-            shell.session.terminal_lease.is_some(),
-            "session owns a lease"
+    fn a_child_the_terminal_cannot_be_lent_to_is_killed() {
+        terminal::isolated(
+            "shell::exec::command::tests::foreground::a_child_the_terminal_cannot_be_lent_to_is_killed",
+            Mode::NonControlling,
+            |_pty| {
+                let shell = tenant_shell();
+                let mooring = Mooring {
+                    terminal_access: TerminalAccess::Leased,
+                    ..Mooring::adrift()
+                };
+                let pid_file = tempfile::tempfile().expect("pid file");
+                let mut launch = marked_sleep(&pid_file, b"");
+                launch.stdout(crate::process::StdioSpec::Null);
+                launch.stderr(crate::process::StdioSpec::Null);
+                let placement = Placement::command(shell.group_owner(&mooring));
+                let result = launch.spawn(placement, &shell.scope);
+                assert_child_reaped(&pid_file);
+                let Err(Unstarted::Refused(refusal)) = result else {
+                    panic!("a failed handoff must refuse the start");
+                };
+                assert_handoff_refusal(&refusal);
+            },
         );
-        assert_background(&Placement::for_command(&shell, &mooring, false), true);
     }
 
-    /// A launch that never owned the terminal foreground (backgrounded `ral … &`,
-    /// a piped or tty-less eval) minted no lease, so there is nothing to borrow.
+    /// An ordinary start error must not detach a drain that is still inside
+    /// `Sink::write_under`. The watch callback is the actual blocking sink,
+    /// and the tee's second branch retains every stderr byte after release.
     #[test]
-    fn no_lease_never_foregrounds() {
-        let (mut shell, mooring) = leased_shell();
-        shell.session.terminal_lease = None;
-        assert_background(&Placement::for_command(&shell, &mooring, false), true);
+    fn a_refused_start_waits_for_its_blocked_stderr_drain() {
+        terminal::isolated(
+            "shell::exec::command::tests::foreground::a_refused_start_waits_for_its_blocked_stderr_drain",
+            Mode::NonControlling,
+            |_pty| {
+                const MARKER: &[u8] = b"stderr written before spawn returns\n";
+                let mut shell = tenant_shell();
+                let mooring = Mooring {
+                    terminal_access: TerminalAccess::Leased,
+                    ..Mooring::adrift()
+                };
+                let mut command =
+                    Command::from_name(&CommandName::Path("/bin/sleep".into()), &shell.context)
+                        .lookup(&shell.context.grants, shell.baseline())
+                        .admit(&mooring, &mut shell)
+                        .expect("unrestricted sleep")
+                        .prepare(&[Value::string("30")], Ownership::Kept, &shell)
+                        .expect("prepare sleep");
+                let pid_file = tempfile::tempfile().expect("pid file");
+                command.launch = marked_sleep(&pid_file, MARKER);
+                let (mut observer, blocker) = terminal::checkpoints().expect("sink checkpoints");
+                let blocker = Mutex::new(blocker);
+                let (capture, bytes) = crate::io::new_buffer();
+                let stderr = Sink::Tee(
+                    Box::new(Sink::Watch {
+                        line: Arc::new(move |line| {
+                            assert_eq!(line, &MARKER[..MARKER.len() - 1]);
+                            let mut checkpoint = blocker.lock().unwrap();
+                            checkpoint.send(b'B').expect("entered sink write");
+                            checkpoint.expect(b'R').expect("release sink write");
+                        }),
+                        pending: Vec::new(),
+                    }),
+                    Box::new(capture),
+                );
+                let placement = Placement::command(shell.group_owner(&mooring));
+                let io = Connection::new(
+                    shell.io.stdin.offered(placement.input()),
+                    &shell.io.stdout,
+                    &stderr,
+                )
+                .expect("connection");
+                let scope = shell.scope.clone();
+                let (tx, rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let result = match command
+                        .start(io, placement, &scope)
+                        .map_err(|failure| failure.settle(&scope))
+                    {
+                        Err(Break::Error(refusal)) => {
+                            assert_handoff_refusal(&refusal);
+                            Err(refusal.describe().into_owned())
+                        }
+                        Err(other) => panic!("expected handoff refusal, got {other:?}"),
+                        Ok(mut started) => {
+                            // If handoff refusal breaks, still settle the unexpected child.
+                            started.spawned.group.owned().expect("tenant group").kill();
+                            let _ = started.spawned.child.kill();
+                            let _ = started.spawned.child.reap();
+                            started.drains.join_under(&scope, || {});
+                            Ok(())
+                        }
+                    };
+                    tx.send(result).expect("report start result");
+                });
+                observer
+                    .expect(b'B')
+                    .expect("drain entered the blocking sink");
+                let premature = rx.recv_timeout(std::time::Duration::from_millis(200));
+                // Always release before asserting, including on a broken join path.
+                observer.send(b'R').expect("release the blocked sink");
+                assert!(
+                    matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+                    "a start result escaped while stderr was blocked: {premature:?}"
+                );
+                assert!(
+                    rx.recv_timeout(terminal::WAIT)
+                        .expect("settled refusal")
+                        .is_err()
+                );
+                worker.join().expect("start worker");
+                assert_child_reaped(&pid_file);
+                let retained = bytes.take();
+                assert_eq!(retained.bytes, MARKER);
+                assert_eq!(retained.total, MARKER.len() as u64);
+            },
+        );
     }
 }
 
@@ -1586,11 +1570,13 @@ mod process {
             stopped.cancel(crate::process::CancelCause::Cancelled);
             shell.scope = crate::process::Scope::clone(&stopped);
             let prepared = judge(&mut shell, &[]);
-            let started = prepared.start(
-                Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
-                crate::process::PgidPolicy::Inherit,
-                &shell.scope,
-            );
+            let started = prepared
+                .start(
+                    Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
+                    crate::process::Placement::Inherit,
+                    &shell.scope,
+                )
+                .map_err(|failure| failure.settle(&shell.scope));
             assert!(
                 matches!(
                     started,
@@ -1620,7 +1606,7 @@ mod process {
                 ..
             }) = prepared.start(
                 Connection::new(&Source::Empty, &discard, &discard).unwrap(),
-                crate::process::PgidPolicy::Inherit,
+                crate::process::Placement::Inherit,
                 &shell.scope,
             )
             else {
@@ -1884,7 +1870,7 @@ mod process {
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
         use crate::path::FrozenPath;
-        use crate::process::PgidPolicy;
+        use crate::process::Placement;
         use crate::shell::runtime::{Break, Error, Mooring, Settled};
         use std::os::unix::fs::PermissionsExt;
         use std::path::Path;
@@ -1926,15 +1912,17 @@ mod process {
                     .prepare(&[], Ownership::Kept, shell)
                     .expect("the launch builds");
                 let shown = prepared.program.shown.clone();
-                let pgid = PgidPolicy::Inherit.unless_enveloped(prepared.enveloped());
+                let placement = Placement::Inherit;
                 between();
                 (
                     shown,
-                    prepared.start(
-                        Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
-                        pgid,
-                        &shell.scope,
-                    ),
+                    prepared
+                        .start(
+                            Connection::new(&Source::Empty, &Sink::Stdout, &Sink::Stderr).unwrap(),
+                            placement,
+                            &shell.scope,
+                        )
+                        .map_err(|failure| failure.settle(&shell.scope)),
                 )
             })
         }
@@ -2132,4 +2120,29 @@ mod alone {
         );
         assert!(result.is_err());
     }
+}
+
+/// A non-enveloped confined startup report, independent of host sandbox support.
+#[cfg(unix)]
+pub(in crate::shell::exec) fn joined_startup_report(
+    shell: &mut super::Shell,
+    script: &str,
+    report: crate::process::report::Report,
+) -> super::Prepared {
+    use super::*;
+    let mooring = Mooring::adrift();
+    let mut prepared = Command::from_name(&CommandName::Path("/bin/sh".into()), &shell.context)
+        .lookup(&shell.context.grants, shell.baseline())
+        .admit(&mooring, shell)
+        .expect("admit shell")
+        .prepare(&[], Ownership::Kept, shell)
+        .expect("prepare shell");
+    let mut launch = Launch::new("/bin/sh");
+    launch.args(["-c", script]);
+    launch.confine(crate::process::launch::Confined {
+        report,
+        envelope: None,
+    });
+    prepared.launch = launch;
+    prepared
 }

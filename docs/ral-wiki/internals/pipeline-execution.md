@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6e2995f8
+verified_at_commit: f26144e0
 verified_at_date: 2026-11-09
-anchors: [PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalLoan, PreparedTerminalLoan, PreparedTerminalLoan::lend, prepare_terminal_loan, Placement, Placement::for_command, PgidPolicy::unless_enveloped, TerminalInput, TerminalInput::for_pipeline, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, terminal_lease, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
+anchors: [StartFailure, StartFailure::settle, PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalHold, PreparedTerminalLoan, PreparedTerminalLoan::lend, GroupOwner, Shell::group_owner, Placement, Placement::command, Placement::input, TerminalInput, Source::offered, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, TerminalAccess::reach, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -126,15 +126,14 @@ reads are masked with the cleanup. `Source::reader` never *takes* a source —
 every consumer, a builtin, an external's stdin, a nested stage, receives a
 `dup(2)` — so a stage's stdin outlives every command that reads it; the scope
 is stripped before a child inherits the source, so it is never a child's
-problem. `ByteIn::Parent` at
-stage 0 resolves against the shell's own stdin through `TerminalInput::for_pipeline`;
-`TerminalInput` is the one rule for what a child at the boundary reads, a lone
-command's included (selected there by `Placement::stdin`): a
-joined group passes its owner's source through; the terminal survives only
-where the child's group can read it, ral's own group or one lent the terminal;
-and a group of its own that is not lent it reads `Source::Empty`, never the
-controlling terminal, which `SIGTTIN` would deny it. `Source::Terminal`
-means a terminal: a non-tty fd 0 became a `Source::Reader` once, at session
+problem. `ByteIn::Parent` at stage 0 resolves against the shell's own stdin
+through `Source::offered(LaunchCx.input)`. The pipeline selects this
+`TerminalInput` once at its owner boundary: a nested pipeline passes its
+owner's source through; an owning pipeline offers the terminal only after a
+successful loan. Without one, `Source::Terminal` becomes `Source::Empty`;
+pipes and files pass through unchanged. A lone command uses the same
+interpretation with `Placement::input`.
+`Source::Terminal` means a terminal: a non-tty fd 0 became a `Source::Reader` once, at session
 start (the `Runtime` holds its one close-on-exec dup, and each run's
 inherited stdin is minted from it). A thread stage's tty
 passes as `Source::Terminal`: its externals inherit it and `stdin_reader`
@@ -158,14 +157,24 @@ member already, so the pgid is never child-less. On Unix, the anchor writes
 a zero readiness byte after installing all signal dispositions; `prepare`
 waits for it before exposing the group. A key on the lent terminal therefore
 cannot race the anchor's handler installation.
-`PipeNode::run` lends the terminal as soon as the group exists, before
-any edge is opened and so before any stage runs — `prepare_terminal_loan`, the preparation a lone
-command's `Placement::for_command` makes too, prepares the loan (`TerminalLoan::prepare` borrows the
-`&TerminalLease` and captures the terminal's state before the anchor spawns),
-`PreparedTerminalLoan::lend` hands the foreground to the anchor's pgid, and
-only an owning group is lent anything.
-The `TerminalLoan` goes to the collector, and `LaunchCx.holds_terminal`
-freezes whether it was made.
+`PipeNode::run` matches `Shell::group_owner` once. A nested pipeline joins
+its stage's membership with readable input and an empty hold. An owning
+pipeline consumes any `TerminalPermit` with `PreparedTerminalLoan::capture`
+**before the anchor exists**. `PipelineGroup::prepare` lends only after the
+zero byte and witness readiness, to the anchor's fresh pgid in ral's session,
+and returns `(group, TerminalHold, TerminalInput)`:
+
+- success retains the opaque hold and selects `Readable`;
+- no preparation selects an empty hold and `Withheld`;
+- refusal returns the preparation intact, then explicitly drops it and selects
+  an empty hold and `Withheld`. Only the anchor exists: it reads its release
+  pipe and reports signals, never changes modes. No stage needs teardown
+  before this restoration; this is not a rule for arbitrary children.
+
+The collector owns the hold. `LaunchCx.input` stores the chosen input for
+both direct and thread stages, without inspecting the hold or recomputing
+permission at each launch. `Pgid` proves positivity only; the two handoff
+callers establish freshness and session membership by their spawn paths.
 With the terminal settled before user code exists, no start-gate frame is
 needed.
 
@@ -180,7 +189,8 @@ swallows the signal. `PipelineGroup::prepare` spawns the anchor and starts its
 witness in one act, so no signal it swallows can land before someone is
 reading for it: one dedicated thread blocks to EOF on the anchor's stdout —
 one byte per swallowed signal, sending `Event::Heard(signal)` raw, since only
-the pipeline's `TerminalLoan` may read a signal as a key — and the anchor's
+the pipeline's opaque `TerminalHold` may attribute a signal as a key — and
+the anchor's
 own `ChildHandle` goes to the reaper as a `Watch` whose posting closure maps
 its every exit to `Event::AnchorDied`. The
 anchor's own rare stop is the reaper's, as any watched pid's is (below). A
@@ -192,7 +202,7 @@ inside a teardown died of the collector's own kill, and changes nothing — an
 **A heard key strikes; the scope decides.** `Heard` is the kernel's own
 delivery — the tty gave that signal to every member of the pgid before the
 anchor reported it — and only a lent terminal makes it a key: with no loan
-(exarch, a capture, a stage thread, a worker's pipeline) it is inert, and so
+(exarch, a capture without explicit access, a stage thread, a worker's pipeline) it is inert, and so
 is a signal no terminal sends, such as a stray SIGTERM. Hearing a key tears
 nothing down: the loan strikes the run's node (`Mooring::home`) and records
 `pressed`, and the teardown follows from the *current scope* the collector
@@ -243,30 +253,31 @@ cases: `start` for a stage, `run` (which titles the terminal between the two)
 for a standalone command. The pumps start before the spawn, so `Started::register`
 (`pipeline/collect.rs`) only subscribes to the reaper, in one place; it addresses an envelope
 separately only when the collector does not already own its payload's group.
-A standalone command's `Started::collect`, beside it, lends the terminal and
-builds `CollectState::lone` (slot 0, no thread stage, so no cleanup grace to
-grant). It runs the same `drive` as any pipeline, then `settle_lone` settles it
+A standalone command's `Started::collect`, beside it, takes the opaque
+`Spawned.terminal` established by `Launch::spawn` and builds
+`CollectState::lone` (slot 0, no thread stage, so no cleanup grace to grant). It runs the same `drive` as any pipeline, then `settle_lone` settles it
 as a command ends. No other wait on an external exists: the
 reaper's `Watch` posts its exit as `Event::Ended` and one `cancel_all` tears it
 down, whether the child is a stage, a stage's own child, or a bare command.
-**Where the child landed (`Group`, from the `PgidPolicy` it was spawned under)
+**Where the child landed (`Group`, from the placement applied at spawn)
 decides what the collector may address**, and the collector reads it from
 nothing else ([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
 The code facts behind each landing:
 
 - An `Owns` child leads a group of one with no anchor. An enveloped child is
-  placed `NewLeader` (`Placement::for_command` and `PgidPolicy::unless_enveloped` say so,
-  `Launch::spawn` asserts it): it leads its payload's group, which `Launch::spawn` returns as
-  `Group::Enveloped` and which neither bwrap's pid nor the pipeline's group can
-  reach.
+  stepped `NewLeader` by `Launch::spawn` whatever placement was requested.
+  Its payload leads a separate session's group, returned as `Group::Enveloped`,
+  which neither bwrap's pid nor the pipeline's group can reach. A requested
+  `Tenant` becomes a restoration-only hold: readable stdin, no handoff, no
+  key attribution.
 - A `Joins` child belongs to a `Thread` stage's group. The stage's shell carries
   `Some(membership)` as its session's `stage`, a `Membership` pairing the
   group's pgid with the stage thread's own cancel scope, so any external it
   spawns, at its own root or nested arbitrarily deep, resolves
-  `PgidPolicy::Join(membership)`. Its collector opens with a grace signal only
+  `Placement::Join(membership)`. Its collector opens with a grace signal only
   for a cause `Membership::owes`, one stronger than the stage scope holds, struck
   beneath the stage.
-- A `Shares` child sits in ral's own group (`PgidPolicy::Inherit`); `Group::owes`
+- A `Shares` child sits in ral's own group (`Placement::Inherit`); `Group::owes`
   is total over the four arms.
 
 A `spawn` worker is outside that evaluation: its session `stage` is
@@ -288,14 +299,15 @@ Behind an envelope the payload leads the group and the child is only its
 monitor, so there is no pin once the monitor ends.
 
 **A lone command settles in one order, and the terminal comes first.**
-`Started::collect` always reaches `drive`, then `settle_lone`, even after
-killing a child whose terminal loan was refused:
+A successful `Prepared::start` hands `Started::collect` its opaque hold;
+collection reaches `drive`, then `settle_lone`:
 
 1. `drive` returns once the child's end is filed; on Windows `Job::drain` has
    first waited for every member of the job to leave (below);
-2. the loan `reclaim`s the terminal the instant its tenant is dead, with no
-   anchor to have reported a key, so the key the child died of is read from its
-   own `death` and struck on the run's node as `reclaim` hears it;
+2. `TerminalHold::reclaim` restores the terminal the instant its tenant is
+   dead. A lent hold hears the child's own `death`, with no anchor to report
+   a key, and strikes the run's node; an envelope guard restores modes without
+   attributing a key;
 3. `drained`: the guest jail's cgroup is finished first (its kill frees a
    straggler holding a pump's pipe), then the pumps are joined a slice at a
    time, killing an owned group once if a cause ends the join; a child cut for a
@@ -307,9 +319,30 @@ killing a child whose terminal loan was refused:
 
 The terminal never waits on a pump
 ([[invariants/the-terminal-returns-before-the-pumps|the-terminal-returns-before-the-pumps]]).
-A pipeline's `fold` opens with `CollectState::vacate`, which returns the loan
+A pipeline's `fold` opens with `CollectState::vacate`, which consumes the hold
 once no stage is live, then runs the same `drained` per external
 (`StageEnd::settle`), its pin being the anchor, held to the group's drop.
+
+**A failed start owns its drains until the caller can settle them.**
+`Launch::spawn` owns child cleanup; `Prepared::start` returns `StartFailure`
+with its reason and drains. A direct tenant's refused handoff may follow exec
+and emitted bytes: it kills the owned group while the unreaped leader pins the
+ID, kills/reaps the child, then restores the retained preparation and releases
+the jail. A joined launch cannot kill its borrowed group: descendants holding
+stderr must not prevent its enclosing owner from rolling back.
+
+- `launch` and `spawn_stage` carry failed-start responsibility without joining.
+- `PipeNode::finish` rolls back even if no stage registered, joins the pipeline
+  and returns its terminal, then settles failed-start drains before returning
+  the launch error. Only an owning node addresses its still-pinned group.
+- A lone `Prepared::run` settles before propagating the reason.
+- `StartFailure::settle` joins with an empty kill callback: no numeric ID is
+  retained after reap. Dropping drains on unwind remains non-blocking.
+- A joining nested node leaves group teardown to its parent. Inherited
+  cancellation remains independently observable by the owning collector while
+  the nested thread settles. Without cancellation, joined/shared descendants
+  can delay settlement until EOF or external owner cancellation; a refusal
+  does not grant authority to kill the borrowed group or cancel its owner.
 
 **A stage thread can itself launch a pipeline, which joins rather than owns.**
 The machine's `Pipeline` arm is `PipeNode`'s only caller and steps identically
@@ -416,18 +449,20 @@ direct stage's pid from the anchor's, an owning collector from a joining one,
 or one depth of nesting from another. A stage thread's interior wait for its
 own child follows the same rule through its own collector. `!{ a } | !{ b }`,
 a pipeline with no external at all, therefore no longer parks on Ctrl-Z, and
-Ctrl-Z on `sleep 10 | cat` is invisible: the `TerminalLoan` and the pgid's
+Ctrl-Z on `sleep 10 | cat` is invisible: the terminal hold and the pgid's
 `tcsetpgrp` ownership are never released. A teardown's own `SIGCONT`, which
 follows a group's grace signal, is a different act, the collector's (below).
 
-**Windows never had a foreground handoff to race and still has none.** There
-is no `tcsetpgrp`: the loan `prepare_terminal_loan` prepares only saves and restores the
-console modes, and moves no foreground. The anchor still exists on Windows — it is what
+**Windows shares the console without transferring foreground ownership.**
+Capture infallibly saves any available standard console modes; drop restores
+those same console objects. Handoff succeeds without a syscall, and
+`gesture` returns `None`: ral already hears console Ctrl-C directly, so a
+child death reports no additional key. The anchor still exists on Windows — it is what
 keys the Job Object in `GROUPS` — but it witnesses nothing there, Windows
 having no group-wide delivery to hear, and it swallows every console event,
 the group's own Ctrl-Break grace included; every
 external spawned inside a stage thread still joins the Job Object through the
-same `PgidPolicy::Join` resolution, assigned at creation under the suspended
+same `Placement::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
 
 **On Windows a group is one owned `Job` value.** The Job Object and its `GROUPS`

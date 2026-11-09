@@ -587,7 +587,7 @@ mod tests {
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&kept).unwrap();
             let Err(crate::process::Unstarted::Program(e)) =
-                failed.spawn(crate::process::PgidPolicy::NewLeader, &unstopped)
+                failed.spawn(crate::process::Placement::NewLeader, &unstopped)
             else {
                 panic!("a program that does not exist is not born");
             };

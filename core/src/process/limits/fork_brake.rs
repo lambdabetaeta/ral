@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn a_limited_child_holds_the_limit_as_soft_and_hard() {
-        use crate::process::{Launch, PgidPolicy, StdioSpec};
+        use crate::process::{Launch, Placement, StdioSpec};
         use std::io::Read;
         let mut cmd = Launch::new("sh");
         cmd.args(["-c", "ulimit -Su; ulimit -Hu"]);
@@ -102,7 +102,7 @@ mod tests {
         cmd.limit_resources().unwrap();
         let mut child = cmd
             .spawn(
-                PgidPolicy::Inherit,
+                Placement::Inherit,
                 &crate::process::DurableRoot::default().child(),
             )
             .unwrap()

@@ -11,7 +11,6 @@
 
 pub(crate) mod capture;
 pub(crate) mod command;
-mod job_control;
 pub(crate) mod pipeline;
 mod record;
 pub(crate) mod redirect;

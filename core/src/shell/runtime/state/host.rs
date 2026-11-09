@@ -5,13 +5,13 @@
 
 use super::Mooring;
 use super::Shell;
-use super::TerminalAccess;
 use super::bindings::BindingLease;
 use crate::environ::EnvVars;
 use crate::environ::Reserved;
 use crate::fact::unix_secs;
+use crate::io::Sink;
 use crate::io::terminal::TerminalState;
-use crate::process::{DurableRoot, ScopeNode, TerminalLease};
+use crate::process::{DurableRoot, GroupOwner, ScopeNode};
 use crate::protocol::probe::{WorkerRow, WorkerState};
 use crate::shell::runtime::ExitHints;
 use crate::shell::runtime::{BuiltinEntry, ReapNotice, Sample, WorkerEntry};
@@ -187,18 +187,18 @@ impl Shell {
             .collect()
     }
 
-    /// The terminal-foreground handoff borrow: `Some` iff `mooring`'s
-    /// [`TerminalAccess`] permits it *and* the session owns a lease.  Every
-    /// post-startup handoff funnels through here, so a run denied authority
-    /// (exarch's tool runs) cannot construct one at all — it has no
-    /// `&TerminalLease` to hand
-    /// [`TerminalLoan::prepare`](crate::process::TerminalLoan::prepare).
-    pub(crate) fn terminal_lease(&self, mooring: &Mooring) -> Option<&TerminalLease> {
-        match mooring.terminal_access {
-            TerminalAccess::Denied => None,
-            TerminalAccess::Leased | TerminalAccess::ExplicitLoan => {
-                self.session.terminal_lease.as_ref()
-            }
+    /// Gather group ownership and terminal authority once, before capture.
+    pub(crate) fn group_owner<'a>(&'a self, mooring: &'a Mooring) -> GroupOwner<'a> {
+        match &self.session.stage {
+            Some(stage) => GroupOwner::Stage(stage.clone()),
+            None => GroupOwner::Session {
+                permit: mooring.terminal_access.reach(
+                    self.session.terminal_lease.as_ref(),
+                    &mooring.home,
+                    matches!(self.io.stdout, Sink::Stdout),
+                ),
+                interactive: self.session.interactive,
+            },
         }
     }
 
@@ -266,41 +266,98 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::process::TerminalLease;
+    use crate::process::{Membership, Pgid, TerminalAccess, TerminalLease};
 
-    /// Both halves of the gate bear weight: `Denied` cannot borrow a lease the
-    /// session owns, and no access reaches a lease never minted.
     #[test]
-    #[cfg(unix)]
-    fn terminal_lease_gated_by_access_and_session() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        assert!(
-            shell.session.terminal_lease.is_some(),
-            "session owns a lease"
-        );
-
-        let denied = Mooring::adrift();
-        assert!(
-            shell.terminal_lease(&denied).is_none(),
-            "a Denied mooring cannot borrow the session lease"
-        );
-
-        let leased = Mooring {
+    fn a_stage_moorings_owner_reaches_no_lease() {
+        let mut parent = crate::test_helper::core_shell();
+        parent.session.terminal_lease = TerminalLease::mint_at_startup(true);
+        parent.io.stdout = Sink::Stdout;
+        let outer = Mooring {
             terminal_access: TerminalAccess::Leased,
+            home: DurableRoot::default().child(),
             ..Mooring::adrift()
         };
         assert!(
-            shell.terminal_lease(&leased).is_some(),
-            "a Leased mooring borrows the session lease"
+            matches!(
+                parent.group_owner(&outer),
+                GroupOwner::Session {
+                    permit: Some(_),
+                    ..
+                }
+            ),
+            "precondition: the outer mooring holds a lease"
         );
 
-        // A backgrounded / piped / tty-less launch mints no lease at all.
-        shell.session.terminal_lease = None;
+        let stage_mooring = Mooring::for_thread(
+            &outer,
+            DurableRoot::default().child(),
+            outer.surface.clone(),
+        );
         assert!(
-            shell.terminal_lease(&leased).is_none(),
-            "no session lease → no borrow, regardless of access"
+            matches!(
+                parent.group_owner(&stage_mooring),
+                GroupOwner::Session { permit: None, .. }
+            ),
+            "a stage thread's mooring denies terminal access outright"
+        );
+    }
+
+    #[test]
+    fn group_owner_gates_the_session_lease_and_preserves_stages() {
+        crate::test_helper::subprocess::isolated(
+            "shell::runtime::state::host::tests::group_owner_gates_the_session_lease_and_preserves_stages",
+            || {
+                let mut shell = crate::test_helper::core_shell();
+                let group = Pgid::from_raw(1).expect("positive group");
+                for has_lease in [false, true] {
+                    shell.session.terminal_lease = TerminalLease::mint_at_startup(has_lease);
+                    for interactive in [false, true] {
+                        shell.session.interactive = interactive;
+                        for access in [
+                            TerminalAccess::Denied,
+                            TerminalAccess::Leased,
+                            TerminalAccess::ExplicitLoan,
+                        ] {
+                            let mooring = Mooring {
+                                terminal_access: access,
+                                ..Mooring::adrift()
+                            };
+                            for to_terminal in [false, true] {
+                                shell.io.stdout = if to_terminal {
+                                    Sink::Stdout
+                                } else {
+                                    crate::io::new_buffer().0
+                                };
+                                shell.session.stage = None;
+                                let GroupOwner::Session {
+                                    permit,
+                                    interactive: seen,
+                                } = shell.group_owner(&mooring)
+                                else {
+                                    panic!("session owns non-stage launches");
+                                };
+                                assert_eq!(seen, interactive);
+                                assert_eq!(
+                                    permit.is_some(),
+                                    has_lease
+                                        && (access == TerminalAccess::ExplicitLoan
+                                            || (access == TerminalAccess::Leased && to_terminal)),
+                                    "lease={has_lease}, interactive={interactive}, access={access:?}, stdout={to_terminal}"
+                                );
+                                // A stage wins even when every session-side fact would
+                                // otherwise permit capture; it returns no session permit.
+                                shell.session.stage =
+                                    Some(Membership::new(group, shell.scope.clone()));
+                                assert!(matches!(
+                                    shell.group_owner(&mooring),
+                                    GroupOwner::Stage(m) if m.group() == group
+                                ));
+                            }
+                        }
+                    }
+                }
+            },
         );
     }
 

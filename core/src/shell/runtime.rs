@@ -101,11 +101,11 @@ pub use crate::fact::{
 pub use crate::source::CallSite;
 
 mod mooring;
+pub(crate) use mooring::NurseryGuard;
 pub use mooring::{
     DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT, Nursery,
     NurseryId, SurfaceSink, TitlePolicy, no_desk,
 };
-pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 
 mod state;
 pub(crate) use state::Context;

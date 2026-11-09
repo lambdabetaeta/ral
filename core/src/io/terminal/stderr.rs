@@ -75,6 +75,8 @@ macro_rules! dbg_trace {
 #[macro_export]
 macro_rules! dbg_trace {
     ($tag:expr, $($arg:tt)*) => {
-        ()
+        if false {
+            let _ = ($tag, format!($($arg)*));
+        }
     };
 }
