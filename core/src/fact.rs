@@ -45,7 +45,7 @@ impl Datum for WorkerId {
 
 impl Typed for WorkerId {
     fn ty() -> Ty {
-        Ty::Int
+        Ty::int()
     }
 }
 

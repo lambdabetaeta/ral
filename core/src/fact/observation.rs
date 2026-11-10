@@ -15,7 +15,7 @@ use crate::io::{Retained, Streams};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
 use crate::ty::{Ty, Typed, closed_record};
-use crate::{label, record, variant};
+use crate::{label, memoized_ty, record, variant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use strum::{IntoStaticStr, VariantArray};
@@ -215,11 +215,11 @@ impl Datum for Check {
 
 impl Typed for Check {
     fn ty() -> Ty {
-        closed_record(&[
+        memoized_ty!(closed_record(&[
             ("resource", Resource::ty()),
             ("decision", Decision::ty()),
             ("fields", BTreeMap::<String, String>::ty()),
-        ])
+        ]))
     }
 }
 

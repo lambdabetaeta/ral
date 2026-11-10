@@ -77,7 +77,7 @@ impl From<Keymap> for EditMode {
 
 impl Typed for Keymap {
     fn ty() -> Ty {
-        Ty::String
+        Ty::string()
     }
 }
 

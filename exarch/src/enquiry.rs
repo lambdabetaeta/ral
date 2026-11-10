@@ -15,7 +15,7 @@ use ral_core::data::datum::{Datum, exact_keys, field, tag, untag};
 use ral_core::shell::runtime::NurseryId;
 use ral_core::text::code;
 use ral_core::ty::{Ty, Typed, closed_record};
-use ral_core::{record, variant};
+use ral_core::{memoized_ty, record, variant};
 use regex::Regex;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -812,7 +812,11 @@ pub(crate) struct Evict {
 
 impl Typed for Evict {
     fn ty() -> Ty {
-        closed_record(&[("from", u64::ty()), ("to", u64::ty()), ("note", Note::ty())])
+        memoized_ty!(closed_record(&[
+            ("from", u64::ty()),
+            ("to", u64::ty()),
+            ("note", Note::ty())
+        ]))
     }
 }
 
@@ -846,7 +850,7 @@ impl Note {
 
 impl Typed for Note {
     fn ty() -> Ty {
-        Ty::String
+        Ty::string()
     }
 }
 

@@ -146,7 +146,7 @@ fn argument_row(binders: &mut Binders) -> RowVar {
 ///
 /// `start`'s and `message`'s record rows are closed because a record
 /// literal with literal keys infers an exact one (`infer_map_val` builds on
-/// `Row::Empty`), so a missing or misspelled field is a static error naming
+/// `Row::empty()`), so a missing or misspelled field is a static error naming
 /// it. The `type`, `grant` and `model` rows *inside* `start` stay
 /// open, because a literal tag infers its own open row: closing them would
 /// make `` `bogus `` a bare row-mismatch diagnostic that never reaches the
@@ -163,29 +163,29 @@ fn scheme_agents(binders: &mut Binders) -> Ty {
     thunk(fun(
         open_variant(
             &[
-                ("list", Ty::Unit),
+                ("list", Ty::unit()),
                 (
                     "start",
                     closed_record(&[
-                        ("prompt", Ty::String),
-                        ("name", Ty::String),
-                        ("type", Ty::Variant(Row::Var(type_row))),
-                        ("grant", Ty::Variant(Row::Var(grant_row))),
-                        ("model", Ty::Variant(Row::Var(model_row))),
+                        ("prompt", Ty::string()),
+                        ("name", Ty::string()),
+                        ("type", Ty::variant(Row::var(type_row))),
+                        ("grant", Ty::variant(Row::var(grant_row))),
+                        ("model", Ty::variant(Row::var(model_row))),
                     ]),
                 ),
                 (
                     "message",
-                    closed_record(&[("to", Ty::String), ("text", Ty::String)]),
+                    closed_record(&[("to", Ty::string()), ("text", Ty::string())]),
                 ),
-                ("stop", Ty::String),
-                ("dismiss", Ty::String),
-                ("reply", Ty::Var(reply_ty)),
-                ("read", Ty::String),
+                ("stop", Ty::string()),
+                ("dismiss", Ty::string()),
+                ("reply", Ty::var(reply_ty)),
+                ("read", Ty::string()),
             ],
             tag_row,
         ),
-        pure(Ty::Var(answer_ty)),
+        pure(Ty::var(answer_ty)),
     ))
 }
 
@@ -203,16 +203,16 @@ fn scheme_schedules(binders: &mut Binders) -> Ty {
     thunk(fun(
         open_variant(
             &[
-                ("list", Ty::Unit),
+                ("list", Ty::unit()),
                 (
                     "add",
                     closed_record(&[
-                        ("trigger", Ty::Variant(Row::Var(trigger_row))),
-                        ("label", Ty::String),
-                        ("prompt", Ty::String),
+                        ("trigger", Ty::variant(Row::var(trigger_row))),
+                        ("label", Ty::string()),
+                        ("prompt", Ty::string()),
                     ]),
                 ),
-                ("remove", Ty::String),
+                ("remove", Ty::string()),
             ],
             tag_row,
         ),
@@ -241,17 +241,17 @@ fn scheme_pins(binders: &mut Binders) -> Ty {
                 (
                     "set",
                     closed_record(&[
-                        ("key", Ty::String),
-                        ("body", Ty::Variant(Row::Var(card_row))),
+                        ("key", Ty::string()),
+                        ("body", Ty::variant(Row::var(card_row))),
                     ]),
                 ),
-                ("clear", Ty::String),
-                ("read", Ty::String),
-                ("list", Ty::Unit),
+                ("clear", Ty::string()),
+                ("read", Ty::string()),
+                ("list", Ty::unit()),
             ],
             tag_row,
         ),
-        pure(Ty::Var(answer_ty)),
+        pure(Ty::var(answer_ty)),
     ))
 }
 
@@ -272,7 +272,7 @@ fn scheme_pins(binders: &mut Binders) -> Ty {
 fn scheme_context(binders: &mut Binders) -> Ty {
     let tag_row = argument_row(binders);
     thunk(fun(
-        open_variant(&[("survey", Ty::Unit), ("evict", Evict::ty())], tag_row),
+        open_variant(&[("survey", Ty::unit()), ("evict", Evict::ty())], tag_row),
         pure(Survey::ty()),
     ))
 }
@@ -299,16 +299,16 @@ fn scheme_transcript(binders: &mut Binders) -> Ty {
     thunk(fun(
         open_variant(
             &[
-                ("index", Ty::Unit),
+                ("index", Ty::unit()),
                 ("read", Reading::ty()),
                 (
                     "grep",
-                    closed_record(&[("pattern", Ty::String), ("turns", Turns::ty())]),
+                    closed_record(&[("pattern", Ty::string()), ("turns", Turns::ty())]),
                 ),
             ],
             tag_row,
         ),
-        pure(Ty::Var(answer_ty)),
+        pure(Ty::var(answer_ty)),
     ))
 }
 

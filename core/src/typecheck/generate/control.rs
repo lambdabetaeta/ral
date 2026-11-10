@@ -86,7 +86,7 @@ impl Generator {
             other => {
                 let (ty, node) = this.val(other, arm.span);
                 this.solver
-                    .equate(&ty, &Ty::Thunk(Box::new(expected.clone())), arm.why.clone());
+                    .equate(&ty, &Ty::thunk(expected.clone()), arm.why.clone());
                 node
             }
         })
@@ -100,7 +100,7 @@ impl Generator {
     ) -> (CompTy, CompKind<Inferring>) {
         let (cond_ty, cond_node) = self.val(&cond.item, cond.span);
         self.with_span(cond.span, |this| {
-            this.solver.equate(&cond_ty, &Ty::Bool, Reason::IfCond);
+            this.solver.equate(&cond_ty, &Ty::bool(), Reason::IfCond);
         });
         let arms = [then, else_].map(|arm| JoinArm::new(arm, vec![], Reason::IfBranches));
         let (cty, nodes) = self.join_arms(&arms, &Reason::IfBranches);
@@ -126,21 +126,20 @@ impl Generator {
         let row = self.solver.fresh_row();
         self.with_span(scrutinee.span, |this| {
             this.solver
-                .equate(&scrut_ty, &Ty::Variant(row.clone()), Reason::CaseScrutinee);
+                .equate(&scrut_ty, &Ty::variant(row.clone()), Reason::CaseScrutinee);
         });
         let payloads: Vec<_> = arms.iter().map(|_| self.solver.fresh_ty()).collect();
         let labels: Vec<_> = arms
             .iter()
             .map(|arm| Label::Case(arm.tag.item.clone()))
             .collect();
-        let closed =
-            labels
-                .iter()
-                .zip(&payloads)
-                .rev()
-                .fold(Row::Empty, |rest, (label, payload)| {
-                    Row::Extend(label.clone(), Box::new(payload.clone()), Box::new(rest))
-                });
+        let closed = labels
+            .iter()
+            .zip(&payloads)
+            .rev()
+            .fold(Row::empty(), |rest, (label, payload)| {
+                Row::extend(label.clone(), payload.clone(), rest)
+            });
         // Coverage also pushes each payload into its arm before generation.
         self.solver.equate_row(
             &row,
@@ -246,7 +245,7 @@ impl Generator {
         }
         let unit = Producer {
             grade: producer.grade,
-            ty: Ty::Unit,
+            ty: Ty::unit(),
         };
         self.solver.equate_comp(
             &producer.clone().into(),
@@ -322,7 +321,10 @@ impl Generator {
         let (cty, body) = self.comp(body);
         self.solver
             .equate_comp(&cty, &CompTy::command(), Reason::Capture);
-        (self.produces(Ty::Bytes), CompKind::Capture(Arc::new(body)))
+        (
+            self.produces(Ty::bytes()),
+            CompKind::Capture(Arc::new(body)),
+        )
     }
 }
 
@@ -344,7 +346,7 @@ mod tests {
     use super::*;
     use crate::ir::{Argv, Key, Pattern, Prim, WriteMode};
     use crate::source::FileId;
-    use crate::ty::{Grade, Scheme};
+    use crate::ty::{CompTyNode, Grade, Scheme, TyNode};
     use crate::typecheck::builtins::{Convention, Decl, scheme};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::generate::tests::solved;
@@ -385,10 +387,11 @@ mod tests {
     }
 
     fn producer(solution: &Solution, cty: &CompTy) -> (Grade, Ty) {
-        let CompTy::Return(grade, ty) = solution.resolve_comp(cty) else {
+        let resolved = solution.resolve_comp(cty);
+        let CompTyNode::Return(grade, ty) = resolved.node() else {
             panic!("ready producer")
         };
-        (grade, solution.resolve_ty(&ty))
+        (*grade, solution.resolve_ty(ty))
     }
 
     fn case_arm(tag: &str, body: Comp) -> CaseArm {
@@ -422,7 +425,7 @@ mod tests {
             };
             assert_eq!(body.shape().span, Some(at(u32::try_from(i).unwrap() + 1)));
         }
-        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::Int);
+        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::int());
     }
 
     #[test]
@@ -431,7 +434,7 @@ mod tests {
         let unknown = generator.solver.fresh_comp();
         generator
             .env
-            .bind("f".into(), Scheme::mono(Ty::Thunk(Box::new(unknown))));
+            .bind("f".into(), Scheme::mono(Ty::thunk(unknown)));
         let cond = Spanned::new(at(1), Val::Bool(true));
         let then = block(node(2, CompKind::Force(Val::Variable("f".into()))));
         let else_ = block(command(3));
@@ -440,8 +443,8 @@ mod tests {
         assert!(matches!(item, CompKind::If { .. }));
         assert!(generator.env.lookup_binding("payload").is_none());
         let solution = solved(generator.solver);
-        assert_eq!(producer(&solution, &cty), (Grade::Output, Ty::Unit));
-        assert_eq!(solution.resolve_ty(&bound), Ty::String);
+        assert_eq!(producer(&solution, &cty), (Grade::Output, Ty::unit()));
+        assert_eq!(solution.resolve_ty(&bound), Ty::string());
         assert_eq!(solution.mode(hole), Mode::Capture);
     }
 
@@ -483,14 +486,14 @@ mod tests {
             let rest = if open {
                 generator.solver.fresh_row()
             } else {
-                Row::Empty
+                Row::empty()
             };
             let row = tags.into_iter().rev().fold(rest, |rest, tag| {
-                Row::Extend(Label::Case(tag.into()), Box::new(Ty::Unit), Box::new(rest))
+                Row::extend(Label::Case(tag.into()), Ty::unit(), rest)
             });
             generator
                 .env
-                .bind("v".into(), Scheme::mono(Ty::Variant(row)));
+                .bind("v".into(), Scheme::mono(Ty::variant(row)));
             let arms = covered
                 .into_iter()
                 .map(|tag| case_arm(tag, returning(3, Val::Unit)))
@@ -558,7 +561,7 @@ mod tests {
         let (cty, item) = generator.try_(&body, &handler);
         assert!(matches!(item, CompKind::Try { .. }));
         assert!(generator.env.lookup_binding("error").is_none());
-        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::String);
+        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::string());
     }
 
     #[test]
@@ -573,7 +576,7 @@ mod tests {
             nodes.iter().map(|node| node.span).collect::<Vec<_>>(),
             [Some(at(1)), Some(at(2))]
         );
-        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::Int);
+        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::int());
 
         let mut generator = self::generator();
         generator.pipeline(&[Arc::new(returning(1, Val::Int(1))), Arc::new(command(2))]);
@@ -622,14 +625,15 @@ mod tests {
                 matches!(&errors[0].kind, TypeErrorKind::BuiltinArity { name, expected: 1, got: 0 } if name == "decode-at")
             );
             assert_eq!(errors[0].pos, Some(at(2)));
-            let CompTy::Return(grade, ty) = store.resolve_comp_ty(&cty) else {
+            let resolved = store.resolve_comp_ty_graded(&cty);
+            let CompTyNode::Return(grade, ty) = resolved.node() else {
                 panic!("ready producer")
             };
-            let payload = store.resolve_ty(&ty);
+            let payload = store.resolve_ty(ty);
             if final_stage {
-                assert!(matches!(payload, Ty::Var(_)), "{payload:?}");
+                assert!(matches!(payload.node(), TyNode::Var(_)), "{payload:?}");
             } else {
-                assert_eq!((grade, payload), (Grade::Output, Ty::Unit));
+                assert_eq!((*grade, payload), (Grade::Output, Ty::unit()));
             }
         }
     }
@@ -648,10 +652,9 @@ mod tests {
             decl.diagnostic = BuiltinDiagnostic::Decoder;
             generator.env.builtins.push(vec![decl].into());
             if shadow {
-                generator.env.bind(
-                    "decode".into(),
-                    Scheme::mono(Ty::Thunk(Box::new(CompTy::command()))),
-                );
+                generator
+                    .env
+                    .bind("decode".into(), Scheme::mono(Ty::thunk(CompTy::command())));
             }
             let decode = node(
                 1,
@@ -740,7 +743,7 @@ mod tests {
             let (cty, item) = generator.redirect(&command(1), &redirects);
             assert!(matches!(item, CompKind::Redirect { .. }));
             let (grade, ty) = producer(&solved(generator.solver), &cty);
-            assert_eq!(ty, Ty::Unit);
+            assert_eq!(ty, Ty::unit());
             assert!(if stdout {
                 matches!(grade, Grade::Var(_))
             } else {
@@ -781,7 +784,7 @@ mod tests {
         };
         let call = *hole;
         let solution = solved(generator.solver);
-        assert_eq!(producer(&solution, &cty).1, Ty::Bytes);
+        assert_eq!(producer(&solution, &cty).1, Ty::bytes());
         assert_eq!(solution.mode(bound), Mode::Capture);
         assert_eq!(solution.splits(call), Vec::<usize>::new());
         Readback::new(&solution, crate::ty::UnitId::fresh(), 0).comp(&Spanned::new(at(0), item));

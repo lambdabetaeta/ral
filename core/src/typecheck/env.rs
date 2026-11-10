@@ -189,16 +189,16 @@ mod tests {
     #[test]
     fn recursive_binding_provenance_respects_shadowing_rebinding_and_scope_exit() {
         let mut env = TyEnv::new();
-        env.bind_recursive("f".into(), Scheme::mono(Ty::Unit));
-        env.bind("g".into(), Scheme::mono(Ty::Unit));
+        env.bind_recursive("f".into(), Scheme::mono(Ty::unit()));
+        env.bind("g".into(), Scheme::mono(Ty::unit()));
         assert!(env.is_recursive_binding("f"));
         assert!(!env.is_recursive_binding("g"));
         env.push();
-        env.bind("f".into(), Scheme::mono(Ty::Unit));
+        env.bind("f".into(), Scheme::mono(Ty::unit()));
         assert!(!env.is_recursive_binding("f"));
         env.pop();
         assert!(env.is_recursive_binding("f"));
-        env.bind("f".into(), Scheme::mono(Ty::Unit));
+        env.bind("f".into(), Scheme::mono(Ty::unit()));
         assert!(!env.is_recursive_binding("f"));
     }
 }

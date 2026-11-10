@@ -67,7 +67,7 @@ impl Generator {
                     this.comp(body)
                 });
                 (
-                    CompTy::Fun(Box::new(param_ty), Box::new(body_ty)),
+                    CompTy::fun(param_ty, body_ty),
                     CompKind::Lam {
                         param: param.clone(),
                         body: Arc::new(body),
@@ -126,7 +126,7 @@ impl Generator {
                 (self.produces(ty), CompKind::Prim(prim))
             }
             CompKind::Rec { group, index } => self.rec(group, *index),
-            CompKind::Tilde(path) => (self.produces(Ty::String), CompKind::Tilde(path.clone())),
+            CompKind::Tilde(path) => (self.produces(Ty::string()), CompKind::Tilde(path.clone())),
             CompKind::If { cond, then, else_ } => self.if_(cond, then, else_),
             CompKind::Case { scrutinee, arms } => self.case(scrutinee, arms),
             CompKind::Within {
@@ -151,7 +151,7 @@ impl Generator {
             if let CompKind::Lam { param, body } = &comp.item {
                 let param_ty = this.solver.fresh_ty();
                 let result = this.solver.fresh_comp();
-                let shape = CompTy::Fun(Box::new(param_ty.clone()), Box::new(result.clone()));
+                let shape = CompTy::fun(param_ty.clone(), result.clone());
                 this.solver.equate_comp(expected, &shape, why.clone());
                 let body = this.scope(|this| {
                     this.env.bind(param.to_string(), Scheme::mono(param_ty));
@@ -240,7 +240,10 @@ impl Generator {
 
     pub(super) fn statement(&mut self, comp: &Comp) -> (CompTy, Comp<Inferring>) {
         let (cty, node) = if let Some(item) = self.handler_statement(comp) {
-            (self.produces(Ty::Unit), Spanned::with_span(comp.span, item))
+            (
+                self.produces(Ty::unit()),
+                Spanned::with_span(comp.span, item),
+            )
         } else {
             self.comp(comp)
         };
@@ -286,14 +289,10 @@ impl Generator {
                     .zip(&fields)
                     .rev()
                     .fold(tail, |row, (entry, ty)| {
-                        Row::Extend(
-                            Label::Field(entry.key.clone()),
-                            Box::new(ty.clone()),
-                            Box::new(row),
-                        )
+                        Row::extend(Label::Field(entry.key.clone()), ty.clone(), row)
                     });
                 self.solver
-                    .equate(ty, &Ty::Record(row), Reason::RecordPattern);
+                    .equate(ty, &Ty::record(row), Reason::RecordPattern);
                 for (entry, ty) in entries.iter().zip(&fields) {
                     self.collect_pattern(&entry.pattern, ty, bindings);
                 }
@@ -321,10 +320,8 @@ impl Generator {
             let types: Vec<_> = members.iter().map(|_| this.solver.fresh_comp()).collect();
             let nodes = this.scope(|this| {
                 for ((name, _), ty) in members.iter().zip(&types) {
-                    this.env.bind_recursive(
-                        name.to_string(),
-                        Scheme::mono(Ty::Thunk(Box::new(ty.clone()))),
-                    );
+                    this.env
+                        .bind_recursive(name.to_string(), Scheme::mono(Ty::thunk(ty.clone())));
                 }
                 members
                     .iter()
@@ -340,13 +337,13 @@ impl Generator {
         });
         let schemes = types
             .into_iter()
-            .map(|ty| Arc::new(self.solver.generalise(&Ty::Thunk(Box::new(ty)))))
+            .map(|ty| Arc::new(self.solver.generalise(&Ty::thunk(ty))))
             .collect();
         (schemes, GroupNode::new(nodes.into()))
     }
 
     pub(super) fn produces(&mut self, ty: Ty) -> CompTy {
-        CompTy::Return(self.solver.fresh_grade(), Box::new(ty))
+        CompTy::ret(self.solver.fresh_grade(), ty)
     }
 
     pub(super) fn forced(&mut self, value: &Val, ty: &Ty, why: Reason) -> CompTy {
@@ -357,8 +354,7 @@ impl Generator {
             _ => why,
         };
         let body = self.solver.fresh_comp();
-        self.solver
-            .equate(ty, &Ty::Thunk(Box::new(body.clone())), why);
+        self.solver.equate(ty, &Ty::thunk(body.clone()), why);
         body
     }
 
@@ -539,8 +535,8 @@ mod tests {
     pub(super) fn assert_solved_comp(store: &Unifier, actual: &CompTy, expected: &CompTy) {
         assert_solved_type(
             store,
-            &Ty::Thunk(Box::new(actual.clone())),
-            &Ty::Thunk(Box::new(expected.clone())),
+            &Ty::thunk(actual.clone()),
+            &Ty::thunk(expected.clone()),
         );
     }
 
@@ -595,7 +591,7 @@ mod tests {
         let home = binding(&mut generator, "home");
         let solution = solved(generator.solver);
         assert_eq!(solution.mode(hole), Mode::Run);
-        assert_eq!(solution.resolve_ty(&home), Ty::String);
+        assert_eq!(solution.resolve_ty(&home), Ty::string());
     }
 
     #[test]
@@ -636,7 +632,7 @@ mod tests {
                 body: Arc::new(tilde(2)),
             },
         );
-        let node = generator.check(&source, &CompTy::pure(Ty::String), Reason::Argument);
+        let node = generator.check(&source, &CompTy::pure(Ty::string()), Reason::Argument);
         assert_eq!(node.span, Some(at(1)));
         assert!(generator.env.lookup_binding("arg").is_none());
         let errors = generator.solver.refused().1;
@@ -667,12 +663,12 @@ mod tests {
         assert!(
             generator
                 .solver
-                .equate(&first, &Ty::Int, Reason::ListPattern)
+                .equate(&first, &Ty::int(), Reason::ListPattern)
         );
         assert!(
             generator
                 .solver
-                .equate(&rest, &Ty::list(Ty::Bool), Reason::ListPattern)
+                .equate(&rest, &Ty::list(Ty::bool()), Reason::ListPattern)
         );
         solved(generator.solver);
     }
@@ -696,12 +692,12 @@ mod tests {
         assert!(
             generator
                 .solver
-                .equate(&first, &Ty::Int, Reason::ListPattern)
+                .equate(&first, &Ty::int(), Reason::ListPattern)
         );
         assert!(
             !generator
                 .solver
-                .equate(&second, &Ty::Bool, Reason::ListPattern)
+                .equate(&second, &Ty::bool(), Reason::ListPattern)
         );
         assert_eq!(generator.solver.refused().1.len(), 1);
     }
@@ -709,7 +705,7 @@ mod tests {
     #[test]
     fn rec_sibling_lets_share_one_group_and_restore_shadowed_bindings() {
         let mut generator = generator();
-        let original = Arc::new(Scheme::mono(Ty::String));
+        let original = Arc::new(Scheme::mono(Ty::string()));
         generator.env.bind("self".into(), Arc::clone(&original));
         let group = GroupNode::new(
             vec![(
@@ -739,10 +735,9 @@ mod tests {
             &original
         ));
         for name in ["first", "second"] {
-            for param in [Ty::Int, Ty::Bool] {
+            for param in [Ty::int(), Ty::bool()] {
                 let instance = binding(&mut generator, name);
-                let expected =
-                    Ty::Thunk(Box::new(CompTy::arrows([param], CompTy::pure(Ty::String))));
+                let expected = Ty::thunk(CompTy::arrows([param], CompTy::pure(Ty::string())));
                 assert!(
                     generator
                         .solver
@@ -781,10 +776,7 @@ mod tests {
         generator.let_(&Pattern::Name("applied".into()), &applied);
         generator.let_(&Pattern::Name("other".into()), &projection);
         let other = binding(&mut generator, "other");
-        let expected = Ty::Thunk(Box::new(CompTy::arrows(
-            [Ty::Bool],
-            CompTy::pure(Ty::String),
-        )));
+        let expected = Ty::thunk(CompTy::arrows([Ty::bool()], CompTy::pure(Ty::string())));
         assert!(
             generator
                 .solver
@@ -803,16 +795,12 @@ mod tests {
             .equate_comp(&body, &CompTy::command(), Reason::Argument);
         let producer = generator.force_return_shape(&body, Reason::ReturnShape);
         let solution = solved(generator.solver);
-        assert_solved_type(
-            &solution.scratch(),
-            &ty,
-            &Ty::Thunk(Box::new(CompTy::command())),
-        );
-        assert_eq!(solution.resolve_ty(&producer.ty), Ty::Unit);
+        assert_solved_type(&solution.scratch(), &ty, &Ty::thunk(CompTy::command()));
+        assert_eq!(solution.resolve_ty(&producer.ty), Ty::unit());
         assert_solved_comp(
             &solution.scratch(),
             &producer.into(),
-            &CompTy::Return(Grade::Output, Box::new(Ty::Unit)),
+            &CompTy::ret(Grade::Output, Ty::unit()),
         );
     }
 
@@ -822,7 +810,7 @@ mod tests {
         generator.with_span(Some(at(3)), |this| {
             this.forced(
                 &Val::Variable("f".into()),
-                &Ty::String,
+                &Ty::string(),
                 Reason::ForceOperand,
             );
         });
@@ -834,7 +822,7 @@ mod tests {
 
     #[test]
     fn scope_preserves_span_scheme_identity_and_name_supply() {
-        let stored = Arc::new(Scheme::mono(Ty::Int));
+        let stored = Arc::new(Scheme::mono(Ty::int()));
         let mut generator = Generator::new(
             Solver::new(),
             TyEnv::new(),
@@ -844,7 +832,7 @@ mod tests {
         *generator.span_slot() = Some(at(1));
         let first = crate::typecheck::readback::fresh_name(&mut generator.synth_counter, "eta");
         generator.scope(|this| {
-            this.env.bind("imported".into(), Scheme::mono(Ty::String));
+            this.env.bind("imported".into(), Scheme::mono(Ty::string()));
             *this.span_slot() = Some(at(2));
             assert_ne!(
                 crate::typecheck::readback::fresh_name(&mut this.synth_counter, "eta"),

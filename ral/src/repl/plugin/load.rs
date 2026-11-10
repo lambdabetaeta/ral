@@ -458,7 +458,7 @@ pub(in crate::repl) mod harness {
     /// The sink's type: an argv in, `Unit` out — the base-frame convention,
     /// since the sink takes whatever a hook body hands it, however much of it.
     fn sink_scheme(_: &mut Binders) -> Ty {
-        thunk(fun(Ty::argv(), pure(Ty::Unit)))
+        thunk(fun(Ty::argv(), pure(Ty::unit())))
     }
 
     /// A test-only sink base frame: `record` appends its argument values into

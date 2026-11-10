@@ -542,7 +542,7 @@ pub(crate) fn builtin_test_clear_block_forever(
 }
 
 pub(crate) fn scheme_test_clear_block_forever(_: &mut Binders) -> Ty {
-    thunk(pure(Ty::Unit))
+    thunk(pure(Ty::unit()))
 }
 
 static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

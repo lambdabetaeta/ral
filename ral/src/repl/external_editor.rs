@@ -25,7 +25,7 @@ pub(crate) static BUILTINS: &[BuiltinEntry] = &ENTRIES;
 fn scheme(_: &mut ral_core::ty::Binders) -> ral_core::ty::Ty {
     use ral_core::ty::Ty;
     use ral_core::typecheck::builtins::{fun, pure, thunk};
-    thunk(fun(Ty::String, pure(Ty::String)))
+    thunk(fun(Ty::string(), pure(Ty::string())))
 }
 
 pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {

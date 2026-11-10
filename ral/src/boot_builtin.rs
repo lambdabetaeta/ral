@@ -40,7 +40,7 @@ pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 /// The request row stays open; the answer distinguishes host refusals.
 fn scheme(binders: &mut Binders) -> Ty {
     let row = binders.row(false);
-    thunk(fun(Ty::Record(Row::Var(row)), pure(BootAnswer::ty())))
+    thunk(fun(Ty::record(Row::var(row)), pure(BootAnswer::ty())))
 }
 
 /// Register the builtin as the `Session "boot"` hook, over a shell whose surface

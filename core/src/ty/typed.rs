@@ -16,6 +16,16 @@ pub trait Typed: Datum {
     fn ty() -> Ty;
 }
 
+/// The body of a [`Typed::ty`] that builds its type once: `$build` runs on the
+/// first call, and every call is a clone of what it built.
+#[macro_export]
+macro_rules! memoized_ty {
+    ($build:expr) => {{
+        static TY: ::std::sync::LazyLock<$crate::ty::Ty> = ::std::sync::LazyLock::new(|| $build);
+        TY.clone()
+    }};
+}
+
 /// `T`'s type, found through a projection that is never run, so a record's
 /// field types are never written beside the fields.
 pub fn field_ty<S, T: Typed>(_: impl Fn(&S) -> &T) -> Ty {
@@ -25,32 +35,28 @@ pub fn field_ty<S, T: Typed>(_: impl Fn(&S) -> &T) -> Ty {
 /// The row of `fields` under `label`, ending in `tail`.
 fn rfold(fields: &[(&str, Ty)], tail: Row, label: fn(String) -> Label) -> Row {
     fields.iter().rev().fold(tail, |row, (name, ty)| {
-        Row::Extend(
-            label((*name).to_string()),
-            Box::new(ty.clone()),
-            Box::new(row),
-        )
+        Row::extend(label((*name).to_string()), ty.clone(), row)
     })
 }
 
 /// A record type over a row of fields ending in `tail`.
 pub fn record_row(fields: &[(&str, Ty)], tail: Row) -> Ty {
-    Ty::Record(rfold(fields, tail, Label::Field))
+    Ty::record(rfold(fields, tail, Label::Field))
 }
 
 /// A record type over a closed row: the tail is `Empty`, so no extension.
 pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
-    record_row(fields, Row::Empty)
+    record_row(fields, Row::empty())
 }
 
 /// A record type left open on `tail`: at least these fields, and any others.
 pub fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
-    record_row(fields, Row::Var(tail))
+    record_row(fields, Row::var(tail))
 }
 
 /// A variant type over a row of tags with stated payloads, ending in `tail`.
 pub fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
-    Ty::Variant(rfold(tags, tail, Label::Case))
+    Ty::variant(rfold(tags, tail, Label::Case))
 }
 
 /// A variant type over a closed row of tags.
@@ -59,20 +65,20 @@ pub fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
 /// payload-less tag takes `Unit`, as `Inferencer::infer_val` gives one at its
 /// construction site.
 pub fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
-    variant_row(arms, Row::Empty)
+    variant_row(arms, Row::empty())
 }
 
 /// A variant left open on `tail`, so an unknown tag reaches the runtime door
 /// that enumerates the legal ones rather than dying as a row-unification
 /// mismatch.
 pub fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
-    variant_row(tags, Row::Var(tail))
+    variant_row(tags, Row::var(tail))
 }
 
 /// The `` `some x | `none `` an optional field carries: an absent value is a
 /// fact, not a missing key.
 pub fn optional_ty(payload: Ty) -> Ty {
-    closed_variant(&[("some", payload), ("none", Ty::Unit)])
+    closed_variant(&[("some", payload), ("none", Ty::unit())])
 }
 
 macro_rules! leaf {
@@ -86,23 +92,23 @@ macro_rules! leaf {
 }
 
 leaf! {
-    () => Ty::Unit,
-    u8 => Ty::Int,
-    NonZeroU8 => Ty::Int,
-    String => Ty::String,
-    Arc<str> => Ty::String,
-    bool => Ty::Bool,
-    i32 => Ty::Int,
-    i64 => Ty::Int,
-    u32 => Ty::Int,
-    u64 => Ty::Int,
-    usize => Ty::Int,
-    Finite => Ty::Float,
+    () => Ty::unit(),
+    u8 => Ty::int(),
+    NonZeroU8 => Ty::int(),
+    String => Ty::string(),
+    Arc<str> => Ty::string(),
+    bool => Ty::bool(),
+    i32 => Ty::int(),
+    i64 => Ty::int(),
+    u32 => Ty::int(),
+    u64 => Ty::int(),
+    usize => Ty::int(),
+    Finite => Ty::float(),
 }
 
 impl Typed for Bytes {
     fn ty() -> Ty {
-        Ty::Bytes
+        Ty::bytes()
     }
 }
 

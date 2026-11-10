@@ -10,6 +10,15 @@ covers_paths: [core/src/ty.rs, core/src/ty/]
 [[map/core/ir|IR]] and the [[map/core/typecheck|checker]]: the IR's schemes and
 sites name it, and nothing in it reads a unifier or a runtime value.
 
+Types are *interned handles*: `Ty`, `Row` and `CompTy` each wrap one allocation
+of a one-layer node (`TyNode`, `RowNode`, `CompTyNode`) whose children are
+handles, made by `ty/intern.rs`. **Equal structures are one allocation**, so
+`==` is pointer equality, `Hash` a structural hash cached at construction, and
+`is_ground` a flag cached per node. The table holds its entries weakly and
+sweeps the dead ones in amortized constant time per insertion. The sharing is
+the point: the checker answers "same type?" and "free of variables?" in O(1)
+and skips every walk those answers make unnecessary.
+
 - `ty.rs`: `Ty`, `CompTy`, `Grade`, `Row`, `Label`, the unification-variable
   newtypes, `Var` (a variable of any sort) and `Term` (a term of any sort);
   `TAG_PREFIX`, the sigil of a tag, written once.

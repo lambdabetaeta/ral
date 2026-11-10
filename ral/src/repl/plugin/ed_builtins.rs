@@ -359,33 +359,40 @@ fn scheme_ed_get(_: &mut Binders) -> Ty {
 }
 
 fn scheme_unit_thunk(_: &mut Binders) -> Ty {
-    thunk(pure(Ty::Unit))
+    thunk(pure(Ty::unit()))
 }
 
 fn scheme_ed_set(_: &mut Binders) -> Ty {
-    let field = |ty| closed_variant(&[("keep", Ty::Unit), ("set", ty)]);
-    let record = closed_record(&[("text", field(Ty::String)), ("cursor", field(Ty::Int))]);
-    thunk(fun(record, pure(Ty::Unit)))
+    let field = |ty| closed_variant(&[("keep", Ty::unit()), ("set", ty)]);
+    let record = closed_record(&[("text", field(Ty::string())), ("cursor", field(Ty::int()))]);
+    thunk(fun(record, pure(Ty::unit())))
 }
 
 fn scheme_string_to_bool(_: &mut Binders) -> Ty {
-    thunk(fun(Ty::String, pure(Ty::Bool)))
+    thunk(fun(Ty::string(), pure(Ty::bool())))
 }
 
 fn scheme_string_string_to_string(_: &mut Binders) -> Ty {
-    thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String))))
+    thunk(fun(Ty::string(), fun(Ty::string(), pure(Ty::string()))))
 }
 
 fn scheme_highlight(binders: &mut Binders) -> Ty {
     let span = open_record(
-        &[("start", Ty::Int), ("end", Ty::Int), ("style", Ty::String)],
+        &[
+            ("start", Ty::int()),
+            ("end", Ty::int()),
+            ("style", Ty::string()),
+        ],
         binders.row(false),
     );
-    thunk(fun(Ty::list(span), pure(Ty::Unit)))
+    thunk(fun(Ty::list(span), pure(Ty::unit())))
 }
 
 fn scheme_history(_: &mut Binders) -> Ty {
-    thunk(fun(Ty::String, fun(Ty::Int, pure(Ty::list(Ty::String)))))
+    thunk(fun(
+        Ty::string(),
+        fun(Ty::int(), pure(Ty::list(Ty::string()))),
+    ))
 }
 
 fn scheme_parse(_: &mut Binders) -> Ty {
@@ -395,19 +402,19 @@ fn scheme_parse(_: &mut Binders) -> Ty {
 /// `_ed-tui :: ∀ε α. U(F^ε α) → F [output: Str, status: Int]` — absorbs its
 /// body, whatever it produces; the output is the record's.
 fn scheme_tui(binders: &mut Binders) -> Ty {
-    let a = Ty::Var(binders.ty(Kind::ANY));
-    let body = CompTy::Return(Grade::Var(binders.grade()), Box::new(a));
+    let a = Ty::var(binders.ty(Kind::ANY));
+    let body = CompTy::ret(Grade::Var(binders.grade()), a);
     thunk(fun(
         thunk(body),
         pure(closed_record(&[
-            ("output", Ty::String),
-            ("status", Ty::Int),
+            ("output", Ty::string()),
+            ("status", Ty::int()),
         ])),
     ))
 }
 
 fn scheme_state(binders: &mut Binders) -> Ty {
-    let a = Ty::Var(binders.ty(Kind::DATA));
+    let a = Ty::var(binders.ty(Kind::DATA));
     thunk(fun(
         a.clone(),
         fun(thunk(fun(a.clone(), pure(a.clone()))), pure(a)),

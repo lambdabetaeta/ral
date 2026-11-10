@@ -1,6 +1,6 @@
 use super::*;
 use crate::source::FileId;
-use crate::ty::{Ty, UnitId};
+use crate::ty::{Ty, TyNode, UnitId};
 use crate::ty::{closed_record, closed_variant, open_record};
 use crate::typecheck::Unifier;
 
@@ -14,7 +14,9 @@ fn ground(ty: &Ty) -> Site {
 
 fn weak_comparable(u: &mut Unifier) -> Ty {
     let v = u.fresh_kinded(Kind::COMPARABLE);
-    let Ty::Var(root) = v else { unreachable!() };
+    let TyNode::Var(root) = *v.node() else {
+        unreachable!()
+    };
     u.mark_residual(crate::ty::Var::Ty(root));
     v
 }
@@ -36,7 +38,7 @@ fn refusal(site: &Site, value: &Value) -> String {
 
 #[test]
 fn a_value_of_the_solved_type_is_admitted() {
-    let ty = closed_record(&[("a", Ty::Int), ("b", Ty::list(Ty::String))]);
+    let ty = closed_record(&[("a", Ty::int()), ("b", Ty::list(Ty::string()))]);
     let value = map(&[
         ("a", Value::Int(1)),
         ("b", Value::list(vec![Value::string("x")])),
@@ -46,7 +48,7 @@ fn a_value_of_the_solved_type_is_admitted() {
 
 #[test]
 fn a_deep_mismatch_names_its_pointer() {
-    let ty = Ty::list(closed_record(&[("size", Ty::Int)]));
+    let ty = Ty::list(closed_record(&[("size", Ty::int())]));
     let value = Value::list(vec![
         map(&[("size", Value::Int(1))]),
         map(&[("size", Value::string("12kB"))]),
@@ -59,7 +61,7 @@ fn a_deep_mismatch_names_its_pointer() {
 
 #[test]
 fn a_key_with_a_slash_or_a_tilde_is_escaped_in_its_pointer() {
-    let ty = Ty::map(Ty::Int);
+    let ty = Ty::map(Ty::int());
     let value = map(&[("a/b~c", Value::string("x"))]);
     assert!(refusal(&ground(&ty), &value).contains("`/a~1b~0c`"));
 }
@@ -69,15 +71,15 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
     let mut u = Unifier::new();
     let tail = u.fresh_row_var();
     let value = map(&[("a", Value::Int(1)), ("extra", Value::Bool(true))]);
-    let open = open_record(&[("a", Ty::Int)], tail);
+    let open = open_record(&[("a", Ty::int())], tail);
     assert!(site(&u, &open).admit(&value, &Fixings::default()).is_ok());
-    let closed = closed_record(&[("a", Ty::Int)]);
+    let closed = closed_record(&[("a", Ty::int())]);
     assert!(refusal(&ground(&closed), &value).contains("has a field `extra`"));
 }
 
 #[test]
 fn a_missing_field_is_named() {
-    let ty = closed_record(&[("verdict", Ty::String)]);
+    let ty = closed_record(&[("verdict", Ty::string())]);
     let message = refusal(&ground(&ty), &map(&[]));
     assert_eq!(
         message,
@@ -174,9 +176,9 @@ fn a_unit_fixes_independently_in_two_stores() {
 fn a_recursive_type_admits_a_nested_document_and_refuses_a_scalar_leaf() {
     let mut u = Unifier::new();
     let v = u.fresh_tyvar();
-    u.unify_ty(&Ty::Var(v), &Ty::map(Ty::Var(v)))
+    u.unify_ty(&Ty::var(v), &Ty::map(Ty::var(v)))
         .expect("a cycle through a map is data");
-    let s = site(&u, &Ty::Var(v));
+    let s = site(&u, &Ty::var(v));
     let nested = map(&[("a", map(&[("b", map(&[]))]))]);
     assert!(s.admit(&nested, &Fixings::default()).is_ok());
     let leaf = map(&[("a", map(&[("b", Value::Int(1))]))]);
@@ -188,9 +190,9 @@ fn a_recursive_type_admits_a_nested_document_and_refuses_a_scalar_leaf() {
 
 #[test]
 fn a_json_number_keeps_its_kind_at_a_ground_site() {
-    let float = refusal(&ground(&Ty::Float), &Value::Int(3));
+    let float = refusal(&ground(&Ty::float()), &Value::Int(3));
     assert!(float.contains("a whole number (`3`)") && float.contains("as a Float"));
-    let int = ground(&Ty::Int)
+    let int = ground(&Ty::int())
         .admit(
             &Value::Float(crate::data::Finite::new(2.5).expect("finite")),
             &Fixings::default(),
@@ -204,7 +206,7 @@ fn a_json_number_keeps_its_kind_at_a_ground_site() {
 
 #[test]
 fn a_variant_site_needs_a_tag_of_its_row() {
-    let ty = closed_variant(&[("none", Ty::Unit), ("some", Ty::Int)]);
+    let ty = closed_variant(&[("none", Ty::unit()), ("some", Ty::int())]);
     let s = ground(&ty);
     let some = Value::Variant {
         label: "some".into(),
@@ -230,9 +232,9 @@ fn the_witness_is_the_use_that_fixed_the_structure() {
     let at = Span::new(FileId::DUMMY, 3, 9);
     u.at = Some(at);
     let v = u.fresh_tyvar();
-    u.unify_ty(&Ty::Var(v), &Ty::Int)
+    u.unify_ty(&Ty::var(v), &Ty::int())
         .expect("a free variable meets Int");
-    let mismatch = site(&u, &Ty::Var(v))
+    let mismatch = site(&u, &Ty::var(v))
         .admit(&Value::string("x"), &Fixings::default())
         .expect_err("text is not an Int");
     assert_eq!(mismatch.witness(), Some(at));
@@ -262,7 +264,7 @@ fn a_module_closure_is_held_to_its_scheme() {
     use crate::typecheck::builtins::{fun, pure, thunk};
     let mut u = Unifier::new();
     let block = |param: Ty, result: Ty| thunk(fun(param, pure(result)));
-    let ty = closed_record(&[("f", block(Ty::Int, Ty::Int))]);
+    let ty = closed_record(&[("f", block(Ty::int(), Ty::int()))]);
     let site = site(&u, &ty);
     let record = map(&[(
         "f",
@@ -271,13 +273,17 @@ fn a_module_closure_is_held_to_its_scheme() {
     let scheme_of =
         |param: Ty, result: Ty| vec![("f".to_owned(), Binders::close(|_| block(param, result)))];
     assert!(
-        site.admit_module(&record, &scheme_of(Ty::Int, Ty::Int), &Fixings::default())
-            .is_ok()
+        site.admit_module(
+            &record,
+            &scheme_of(Ty::int(), Ty::int()),
+            &Fixings::default()
+        )
+        .is_ok()
     );
     let err = site
         .admit_module(
             &record,
-            &scheme_of(Ty::String, Ty::Int),
+            &scheme_of(Ty::string(), Ty::int()),
             &Fixings::default(),
         )
         .expect_err("a block over text is no block over Int");

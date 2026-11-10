@@ -492,11 +492,11 @@ mod tests {
     }
 
     fn command() -> CompTy {
-        CompTy::Return(Grade::Output, Box::new(Ty::Unit))
+        CompTy::ret(Grade::Output, Ty::unit())
     }
 
     fn thunk(body: CompTy) -> Ty {
-        Ty::Thunk(Box::new(body))
+        Ty::thunk(body)
     }
 
     fn force_f<P: Phase>() -> Comp<P> {
@@ -506,9 +506,9 @@ mod tests {
     #[test]
     fn bound_holes_run_thunk_or_capture_with_supplied_names_and_spans() {
         let cases = [
-            (CompTy::pure(Ty::Int), Mode::Run),
+            (CompTy::pure(Ty::int()), Mode::Run),
             (
-                CompTy::arrows([Ty::Int], CompTy::pure(Ty::Int)),
+                CompTy::arrows([Ty::int()], CompTy::pure(Ty::int())),
                 Mode::Thunk,
             ),
             (command(), Mode::Capture),
@@ -540,12 +540,12 @@ mod tests {
     #[test]
     fn call_hole_preserves_repeated_zero_based_splits_and_argument_spans() {
         let ty = CompTy::pure(thunk(CompTy::pure(thunk(CompTy::arrows(
-            [Ty::Int],
-            CompTy::pure(Ty::Int),
+            [Ty::int()],
+            CompTy::pure(Ty::int()),
         )))));
         let mut solver = Solver::new();
         let call = solver.call();
-        solver.argument(call, &ty, None, Ty::Int, false);
+        solver.argument(call, &ty, None, Ty::int(), false);
         let solution = success(solver);
         assert_eq!(solution.splits(call), [0, 0]);
         let pending = node(CompKind::App {
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn binding_call_fuses_unsplit_redirects_but_wraps_the_entire_split() {
         for split in [false, true] {
-            let arrow = CompTy::arrows([Ty::Int], command());
+            let arrow = CompTy::arrows([Ty::int()], command());
             let ty = if split {
                 CompTy::pure(thunk(arrow))
             } else {
@@ -585,7 +585,7 @@ mod tests {
             };
             let mut solver = Solver::new();
             let call = solver.call();
-            solver.argument(call, &ty, None, Ty::Int, false);
+            solver.argument(call, &ty, None, Ty::int(), false);
             let solution = success(solver);
             let mut walk = Readback::new(&solution, UnitId::fresh(), 0);
             let redirects: Redirects<Val> = Redirects {
@@ -631,12 +631,12 @@ mod tests {
 
     #[test]
     fn elaborated_capture_and_repeated_splits_reinfer_unchanged() {
-        let arrow = CompTy::arrows([Ty::Int], CompTy::pure(Ty::Int));
+        let arrow = CompTy::arrows([Ty::int()], CompTy::pure(Ty::int()));
         let ty = CompTy::pure(thunk(CompTy::pure(thunk(arrow))));
         let mut solver = Solver::new();
         let (_, bound) = solver.binding(&command(), None);
         let call = solver.call();
-        solver.argument(call, &ty, None, Ty::Int, false);
+        solver.argument(call, &ty, None, Ty::int(), false);
         let solution = success(solver);
         let capture = node(CompKind::Bind {
             comp: Arc::new(node(exec_node(
@@ -692,11 +692,11 @@ mod tests {
     fn sites_keep_identity_and_imports_keep_only_delayed_protection() {
         let solution = success(Solver::new());
         let unit = UnitId::fresh();
-        let kept = Arc::new(solution.site(&Ty::Int, UnitId::fresh()));
+        let kept = Arc::new(solution.site(&Ty::int(), UnitId::fresh()));
         let mut walk = Readback::new(&solution, unit, 0);
         for membrane in [
             Membrane::Kept(Arc::clone(&kept)),
-            Membrane::Imported(Ty::Int),
+            Membrane::Imported(Ty::int()),
             Membrane::Imported(thunk(command())),
         ] {
             let imported = matches!(&membrane, Membrane::Imported(_));
@@ -721,7 +721,7 @@ mod tests {
             &CommandWord::Name(CommandName::Bare("decode".into())),
             Argv::default(),
             Redirects::default(),
-            Some(Ty::Int),
+            Some(Ty::int()),
         )));
         let CompKind::Exec(Exec {
             site: Some(site), ..
@@ -737,7 +737,7 @@ mod tests {
         let mut solver = Solver::new();
         let ty = solver.fresh_ty();
         let scheme = Arc::new(solver.generalise(&ty));
-        solver.equate(&ty, &Ty::Int, crate::typecheck::error::Reason::Argument);
+        solver.equate(&ty, &Ty::int(), crate::typecheck::error::Reason::Argument);
         let (_, hole) = solver.binding(&CompTy::pure(ty.clone()), None);
         let solution = success(solver);
         let unit = UnitId::fresh();
@@ -756,11 +756,11 @@ mod tests {
         let Phrase::Define { schemes, comp, .. } = &result.phrases[0].item else {
             panic!("expected definition")
         };
-        assert_eq!(schemes, &vec![("x".into(), Binders::close(|_| Ty::Int))]);
+        assert_eq!(schemes, &vec![("x".into(), Binders::close(|_| Ty::int()))]);
         assert_eq!(comp.as_ref(), &node(CompKind::Return(Val::Int(1))));
         assert_eq!(result.admits[0].0, "imported");
         assert_eq!(result.admits[0].1.unit, unit);
-        assert_eq!(*result.admits[0].1, solution.site(&Ty::Int, unit));
+        assert_eq!(*result.admits[0].1, solution.site(&Ty::int(), unit));
     }
 
     #[test]

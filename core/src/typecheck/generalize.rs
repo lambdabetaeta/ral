@@ -6,7 +6,8 @@
 
 use super::unify::{Unifier, Visited};
 use crate::ty::{
-    Closed, CompTy, CompTyVar, Grade, GradeVar, Role, Row, RowVar, Scheme, Term, Ty, TyVar, Var,
+    Closed, CompTy, CompTyNode, CompTyVar, Grade, GradeVar, Role, Row, RowNode, RowVar, Scheme,
+    Term, Ty, TyNode, TyVar, Var,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::Infallible;
@@ -69,11 +70,13 @@ fn capture(u: &Unifier, ty: &Ty, scheme: &mut Scheme, keep: impl Fn(Var) -> bool
     for root in comps.into_iter().filter(|&root| keep(Var::Comp(root))) {
         let binding = u
             .resolved_comp_root_binding(root)
-            .unwrap_or(CompTy::Var(root));
+            .unwrap_or_else(|| CompTy::var(root));
         scheme.comps.entry(root).or_insert(Role::Mu(binding));
     }
     for root in tys.into_iter().filter(|&root| keep(Var::Ty(root))) {
-        let binding = u.resolved_ty_root_binding(root).unwrap_or(Ty::Var(root));
+        let binding = u
+            .resolved_ty_root_binding(root)
+            .unwrap_or_else(|| Ty::var(root));
         scheme.tys.entry(root).or_insert(Role::Mu(binding));
     }
 }
@@ -104,18 +107,18 @@ pub(crate) fn generalize(u: &Unifier, ty: &Ty) -> Scheme {
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn has_result_only_var(scheme: &Scheme) -> bool {
     use crate::ty::collect_vars;
-    let Ty::Thunk(body) = &scheme.ty else {
+    let TyNode::Thunk(body) = scheme.ty.node() else {
         return false;
     };
-    let (mut args, mut cur) = (BTreeSet::new(), &**body);
+    let (mut args, mut cur) = (BTreeSet::new(), body);
     let result = loop {
-        match cur {
-            CompTy::Fun(arg, rest) => {
+        match cur.node() {
+            CompTyNode::Fun(arg, rest) => {
                 collect_vars(Term::Ty(arg), &mut args);
                 cur = rest;
             }
-            CompTy::Return(_, result) => break result,
-            CompTy::Var(_) => return false,
+            CompTyNode::Return(_, result) => break result,
+            CompTyNode::Var(_) => return false,
         }
     };
     let mut results = BTreeSet::new();
@@ -153,9 +156,9 @@ pub(crate) fn settle_weak(u: &Unifier, scheme: Arc<Scheme>) -> Closed {
     };
     for &var in &residuals {
         let image = match var {
-            Var::Ty(v) => images.ty(&Ty::Var(v)),
-            Var::Row(v) => Ty::Record(images.row(&Row::Var(v))),
-            Var::Comp(v) => Ty::Thunk(Box::new(images.comp(&CompTy::Var(v)))),
+            Var::Ty(v) => images.ty(&Ty::var(v)),
+            Var::Row(v) => Ty::record(images.row(&Row::var(v))),
+            Var::Comp(v) => Ty::thunk(images.comp(&CompTy::var(v))),
             Var::Grade(_) => continue,
         };
         capture(u, &image, &mut settled, |_| true);
@@ -287,35 +290,47 @@ trait Subst {
     fn grade_var(&self, v: GradeVar) -> Option<Grade>;
 
     fn ty(&self, ty: &Ty) -> Ty {
-        match ty {
-            Ty::Var(v) => self.ty_var(*v).unwrap_or_else(|| ty.clone()),
-            Ty::List(a) => Ty::list(self.ty(a)),
-            Ty::Map(a) => Ty::map(self.ty(a)),
-            Ty::Handle(g, a) => Ty::Handle(self.grade(*g), Box::new(self.ty(a))),
-            Ty::Record(r) => Ty::Record(self.row(r)),
-            Ty::Variant(r) => Ty::Variant(self.row(r)),
-            Ty::Thunk(b) => Ty::Thunk(Box::new(self.comp(b))),
+        if ty.is_ground() {
+            return ty.clone();
+        }
+        match ty.node() {
+            TyNode::Var(v) => self.ty_var(*v).unwrap_or_else(|| ty.clone()),
+            TyNode::List(a) => Ty::list(self.ty(a)),
+            TyNode::Map(a) => Ty::map(self.ty(a)),
+            TyNode::Handle(g, a) => Ty::handle(self.grade(*g), self.ty(a)),
+            TyNode::Record(r) => Ty::record(self.row(r)),
+            TyNode::Variant(r) => Ty::variant(self.row(r)),
+            TyNode::Thunk(b) => Ty::thunk(self.comp(b)),
             // Enumerated, not `_`: cloning a new variable-carrying `Ty`
             // unsubstituted would be variable capture.
-            Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => ty.clone(),
+            TyNode::Unit
+            | TyNode::Bytes
+            | TyNode::Bool
+            | TyNode::Int
+            | TyNode::Float
+            | TyNode::String => ty.clone(),
         }
     }
 
     fn row(&self, row: &Row) -> Row {
-        match row {
-            Row::Empty => Row::Empty,
-            Row::Var(v) => self.row_var(*v).unwrap_or_else(|| row.clone()),
-            Row::Extend(l, ty, rest) => {
-                Row::Extend(l.clone(), Box::new(self.ty(ty)), Box::new(self.row(rest)))
-            }
+        if row.is_ground() {
+            return row.clone();
+        }
+        match row.node() {
+            RowNode::Empty => Row::empty(),
+            RowNode::Var(v) => self.row_var(*v).unwrap_or_else(|| row.clone()),
+            RowNode::Extend(l, ty, rest) => Row::extend(l.clone(), self.ty(ty), self.row(rest)),
         }
     }
 
     fn comp(&self, cty: &CompTy) -> CompTy {
-        match cty {
-            CompTy::Var(v) => self.comp_var(*v).unwrap_or_else(|| cty.clone()),
-            CompTy::Return(grade, a) => CompTy::Return(self.grade(*grade), Box::new(self.ty(a))),
-            CompTy::Fun(a, b) => CompTy::Fun(Box::new(self.ty(a)), Box::new(self.comp(b))),
+        if cty.is_ground() {
+            return cty.clone();
+        }
+        match cty.node() {
+            CompTyNode::Var(v) => self.comp_var(*v).unwrap_or_else(|| cty.clone()),
+            CompTyNode::Return(grade, a) => CompTy::ret(self.grade(*grade), self.ty(a)),
+            CompTyNode::Fun(a, b) => CompTy::fun(self.ty(a), self.comp(b)),
         }
     }
 
@@ -329,15 +344,15 @@ trait Subst {
 
 impl Subst for Renaming {
     fn ty_var(&self, v: TyVar) -> Option<Ty> {
-        self.tys.get(&v).copied().map(Ty::Var)
+        self.tys.get(&v).copied().map(Ty::var)
     }
 
     fn comp_var(&self, v: CompTyVar) -> Option<CompTy> {
-        self.comps.get(&v).copied().map(CompTy::Var)
+        self.comps.get(&v).copied().map(CompTy::var)
     }
 
     fn row_var(&self, v: RowVar) -> Option<Row> {
-        self.rows.get(&v).copied().map(Row::Var)
+        self.rows.get(&v).copied().map(Row::var)
     }
 
     fn grade_var(&self, v: GradeVar) -> Option<Grade> {
@@ -350,19 +365,19 @@ impl Subst for (&Unifier, &BTreeSet<Var>) {
     fn ty_var(&self, v: TyVar) -> Option<Ty> {
         self.1
             .contains(&Var::Ty(v))
-            .then(|| self.0.apply_ty(&Ty::Var(v)))
+            .then(|| self.0.apply_ty(&Ty::var(v)))
     }
 
     fn comp_var(&self, v: CompTyVar) -> Option<CompTy> {
         self.1
             .contains(&Var::Comp(v))
-            .then(|| self.0.apply_comp_ty(&CompTy::Var(v)))
+            .then(|| self.0.apply_comp_ty(&CompTy::var(v)))
     }
 
     fn row_var(&self, v: RowVar) -> Option<Row> {
         self.1
             .contains(&Var::Row(v))
-            .then(|| self.0.apply_row(&Row::Var(v)))
+            .then(|| self.0.apply_row(&Row::var(v)))
     }
 
     fn grade_var(&self, v: GradeVar) -> Option<Grade> {
@@ -397,29 +412,32 @@ mod tests {
     }
 
     fn arrow(param: Ty, result: Ty) -> Ty {
-        Ty::Thunk(Box::new(CompTy::Fun(
-            Box::new(param),
-            Box::new(CompTy::pure(result)),
-        )))
+        Ty::thunk(CompTy::fun(param, CompTy::pure(result)))
     }
 
     fn unit_block(grade: Grade) -> Ty {
-        Ty::Thunk(Box::new(CompTy::Return(grade, Box::new(Ty::Unit))))
+        Ty::thunk(CompTy::ret(grade, Ty::unit()))
     }
 
     fn recursive_row_parts(u: &Unifier, ty: &Ty) -> (HashMap<String, Ty>, Row) {
-        let Ty::Record(mut row) = u.resolve_ty(ty) else {
+        let resolved = u.resolve_ty(ty);
+        let TyNode::Record(row) = resolved.node() else {
             panic!("record")
         };
+        let mut row = row.clone();
         let mut fields = HashMap::new();
         loop {
             row = u.resolve_row(&row);
-            match row {
-                Row::Extend(label, payload, rest) => {
-                    assert!(fields.insert(label.name().to_owned(), *payload).is_none());
-                    row = *rest;
+            match row.node() {
+                RowNode::Extend(label, payload, rest) => {
+                    assert!(
+                        fields
+                            .insert(label.name().to_owned(), payload.clone())
+                            .is_none()
+                    );
+                    row = rest.clone();
                 }
-                tail => return (fields, tail),
+                RowNode::Empty | RowNode::Var(_) => return (fields, row),
             }
         }
     }
@@ -432,11 +450,11 @@ mod tests {
         let residual = u.fresh_row_var();
         let item = u.fresh_kinded(Kind::COMPARABLE);
         let inner = crate::ty::open_record(&[("item", item.clone()), ("mirror", item)], rho);
-        let Ty::Record(proposed) = crate::ty::open_record(&[("next", inner.clone())], residual)
-        else {
+        let proposed = crate::ty::open_record(&[("next", inner.clone())], residual);
+        let TyNode::Record(proposed) = proposed.node() else {
             unreachable!()
         };
-        u.unify_row(&Row::Var(rho), &proposed).unwrap();
+        u.unify_row(&Row::var(rho), proposed).unwrap();
         let scheme = Arc::new(generalized(&mut u, &inner));
         let scheme = settle_weak(&u, scheme);
         let sorts = forall(&scheme);
@@ -449,20 +467,21 @@ mod tests {
         next.enter();
         let first = instantiate(&mut next, &stored);
         let second = instantiate(&mut next, &stored);
-        for (instance, rigid) in [(&first, Ty::Int), (&second, Ty::String)] {
+        for (instance, rigid) in [(&first, Ty::int()), (&second, Ty::string())] {
             let (fields, tail) = recursive_row_parts(&next, instance);
             assert_eq!(fields.len(), 3);
             next.unify_ty(&fields["item"], &rigid).unwrap();
             assert_eq!(next.apply_ty(&fields["mirror"]), rigid);
-            assert!(matches!(tail, Row::Var(_)));
-            let Ty::Record(closed) = crate::ty::closed_record(&[("extra", rigid.clone())]) else {
+            assert!(matches!(tail.node(), RowNode::Var(_)));
+            let closed = crate::ty::closed_record(&[("extra", rigid.clone())]);
+            let TyNode::Record(closed) = closed.node() else {
                 unreachable!()
             };
-            next.unify_row(&tail, &closed).unwrap();
+            next.unify_row(&tail, closed).unwrap();
             let mut current = instance.clone();
             for _ in 0..4 {
                 let (fields, rest) = recursive_row_parts(&next, &current);
-                assert_eq!(rest, Row::Empty);
+                assert_eq!(rest, Row::empty());
                 assert_eq!(fields.len(), 4);
                 for name in ["item", "mirror", "extra"] {
                     assert_eq!(next.apply_ty(&fields[name]), rigid);
@@ -478,7 +497,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let rho = u.fresh_row_var();
-        let ty = Ty::Record(Row::Var(rho));
+        let ty = Ty::record(Row::var(rho));
         u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
         let harvested = Arc::new(generalized(&mut u, &ty));
         assert_eq!(
@@ -489,11 +508,12 @@ mod tests {
             }
         );
         u.enter();
-        let inner = crate::ty::open_record(&[("item", Ty::Int)], rho);
-        let Ty::Record(proposed) = crate::ty::closed_record(&[("next", inner)]) else {
+        let inner = crate::ty::open_record(&[("item", Ty::int())], rho);
+        let proposed = crate::ty::closed_record(&[("next", inner)]);
+        let TyNode::Record(proposed) = proposed.node() else {
             unreachable!()
         };
-        u.unify_row(&Row::Var(rho), &proposed).unwrap();
+        u.unify_row(&Row::var(rho), proposed).unwrap();
         u.exit();
         let settled = settle_weak(&u, harvested);
         assert!(!settled.has_weak());
@@ -503,14 +523,14 @@ mod tests {
         let mut next = Unifier::new();
         let instance = instantiate(&mut next, &settled);
         let (fields, tail) = recursive_row_parts(&next, &instance);
-        assert_eq!(tail, Row::Empty);
+        assert_eq!(tail, Row::empty());
         assert_eq!(fields.len(), 1);
         let mut current = fields["next"].clone();
         for _ in 0..4 {
             let (fields, tail) = recursive_row_parts(&next, &current);
-            assert_eq!(tail, Row::Empty);
+            assert_eq!(tail, Row::empty());
             assert_eq!(fields.len(), 2);
-            assert_eq!(next.apply_ty(&fields["item"]), Ty::Int);
+            assert_eq!(next.apply_ty(&fields["item"]), Ty::int());
             current = fields["next"].clone();
         }
     }
@@ -522,23 +542,23 @@ mod tests {
             u.enter();
             let seed = match kind {
                 0 => u.fresh_ty(),
-                1 => Ty::Thunk(Box::new(u.fresh_comp_ty())),
-                _ => Ty::Record(u.fresh_row()),
+                1 => Ty::thunk(u.fresh_comp_ty()),
+                _ => Ty::record(u.fresh_row()),
             };
             u.enter();
             let inner = u.fresh_tyvar();
             let structure = match kind {
-                0 => Ty::list(Ty::Var(inner)),
-                1 => Ty::Thunk(Box::new(CompTy::pure(Ty::Var(inner)))),
-                _ => Ty::Record(Row::Extend(
+                0 => Ty::list(Ty::var(inner)),
+                1 => Ty::thunk(CompTy::pure(Ty::var(inner))),
+                _ => Ty::record(Row::extend(
                     Label::Field("a".into()),
-                    Box::new(Ty::Var(inner)),
-                    Box::new(Row::Empty),
+                    Ty::var(inner),
+                    Row::empty(),
                 )),
             };
             u.unify_ty(&seed, &structure).unwrap();
             u.exit();
-            let next = generalize(&u, &Ty::Var(inner));
+            let next = generalize(&u, &Ty::var(inner));
             assert_eq!(forall(&next), [], "residual kind {kind}");
             assert!(!next.has_weak(), "rank one is old, not weak");
         }
@@ -549,8 +569,8 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (bound, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        let ty = arrow(Ty::Var(bound), Ty::Var(weak));
+        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        let ty = arrow(Ty::var(bound), Ty::var(weak));
         let scheme = generalized(&mut u, &ty);
         assert_eq!(
             scheme,
@@ -570,11 +590,11 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (row, comp) = (u.fresh_row_var(), u.fresh_comp_ty());
-        let ty = Ty::list(Ty::Record(Row::Var(row)));
-        let body = Ty::Thunk(Box::new(comp.clone()));
+        let ty = Ty::list(Ty::record(Row::var(row)));
+        let body = Ty::thunk(comp.clone());
         u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
         u.mark_weak(&body, &WeakSource::Boundary("from-json".into()));
-        let CompTy::Var(comp) = comp else {
+        let &CompTyNode::Var(comp) = comp.node() else {
             unreachable!("fresh_comp_ty yields a Var")
         };
         let ty = arrow(ty, body);
@@ -595,8 +615,8 @@ mod tests {
             let mut u = Unifier::new();
             u.enter();
             let (weak, other) = (u.fresh_tyvar(), u.fresh_tyvar());
-            u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-            let (a, b) = (Ty::Var(weak), Ty::Var(other));
+            u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+            let (a, b) = (Ty::var(weak), Ty::var(other));
             let result = if weak_first {
                 u.unify_ty(&a, &b)
             } else {
@@ -604,7 +624,7 @@ mod tests {
             };
             result.expect("two variables unite");
             assert!(u.is_weak_ty(other) && u.is_weak_ty(weak));
-            let scheme = generalized(&mut u, &arrow(b, Ty::Unit));
+            let scheme = generalized(&mut u, &arrow(b, Ty::unit()));
             assert_eq!(forall(&scheme), []);
         }
     }
@@ -614,10 +634,10 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (weak, inner) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        u.unify_ty(&Ty::Var(weak), &Ty::list(Ty::Var(inner)))
+        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.unify_ty(&Ty::var(weak), &Ty::list(Ty::var(inner)))
             .expect("a free variable binds");
-        let scheme = generalized(&mut u, &arrow(Ty::Var(weak), Ty::Unit));
+        let scheme = generalized(&mut u, &arrow(Ty::var(weak), Ty::unit()));
         assert_eq!(forall(&scheme), []);
         assert!(u.is_weak_ty(inner));
         assert_eq!(scheme.tys, [(weak, Role::Weak(Kind::ANY))].into());
@@ -633,22 +653,18 @@ mod tests {
         u.enter();
         let (weak, other) = (u.fresh_row_var(), u.fresh_row_var());
         u.mark_weak(
-            &Ty::Record(Row::Var(weak)),
+            &Ty::record(Row::var(weak)),
             &WeakSource::Boundary("from-json".into()),
         );
-        let spine = Row::Extend(
-            Label::Field("a".into()),
-            Box::new(Ty::Int),
-            Box::new(Row::Empty),
-        );
-        u.unify_row(&Row::Var(weak), &spine)
+        let spine = Row::extend(Label::Field("a".into()), Ty::int(), Row::empty());
+        u.unify_row(&Row::var(weak), &spine)
             .expect("a free row binds");
-        u.unify_row(&Row::Var(other), &Row::Var(weak))
+        u.unify_row(&Row::var(other), &Row::var(weak))
             .expect("a free row binds the spine");
         assert!(u.is_weak_row(other));
-        let kept = u.apply_ty_keeping_weak(&Ty::Record(Row::Var(weak)));
-        assert_eq!(kept, Ty::Record(Row::Var(weak)));
-        assert_ne!(u.apply_ty(&Ty::Record(Row::Var(weak))), kept);
+        let kept = u.apply_ty_keeping_weak(&Ty::record(Row::var(weak)));
+        assert_eq!(kept, Ty::record(Row::var(weak)));
+        assert_ne!(u.apply_ty(&Ty::record(Row::var(weak))), kept);
     }
 
     #[test]
@@ -657,14 +673,14 @@ mod tests {
         u.enter();
         let (weak, other) = (u.fresh_comp_ty(), u.fresh_comp_ty());
         u.mark_weak(
-            &Ty::Thunk(Box::new(weak.clone())),
+            &Ty::thunk(weak.clone()),
             &WeakSource::Boundary("from-json".into()),
         );
-        u.unify_comp_ty(&weak, &CompTy::pure(Ty::Int))
+        u.unify_comp_ty(&weak, &CompTy::pure(Ty::int()))
             .expect("a free computation binds");
         u.unify_comp_ty(&other, &weak)
             .expect("a free computation binds");
-        let CompTy::Var(other) = other else {
+        let &CompTyNode::Var(other) = other.node() else {
             unreachable!("fresh_comp_ty yields a Var")
         };
         assert!(u.is_weak_comp(other));
@@ -679,10 +695,10 @@ mod tests {
             first.fresh_tyvar();
         }
         let (bound, weak) = (first.fresh_tyvar(), first.fresh_tyvar());
-        first.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
+        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
         let scheme = Arc::new(generalized(
             &mut first,
-            &arrow(Ty::Var(bound), Ty::Var(weak)),
+            &arrow(Ty::var(bound), Ty::var(weak)),
         ));
         let scheme = settle_weak(&first, scheme);
         let bytes = postcard::to_allocvec(&scheme).expect("a scheme serialises");
@@ -701,7 +717,7 @@ mod tests {
         };
         assert_eq!(seeded.tys[&bound], Role::Forall(Kind::ANY));
         assert_ne!(bound, fresh);
-        assert_eq!(seeded.ty, arrow(Ty::Var(bound), Ty::Var(fresh)));
+        assert_eq!(seeded.ty, arrow(Ty::var(bound), Ty::var(fresh)));
     }
 
     #[test]
@@ -709,16 +725,17 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let v = u.fresh_kinded_var(Kind::NUMBER);
-        let scheme = generalized(&mut u, &arrow(Ty::Var(v), Ty::Var(v)));
+        let scheme = generalized(&mut u, &arrow(Ty::var(v), Ty::var(v)));
         assert_eq!(scheme.tys, [(v, Role::Forall(Kind::NUMBER))].into());
         assert_eq!(scheme.to_string(), "∀α:number. α → Returns α");
-        let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
+        let instance = instantiate(&mut u, &scheme);
+        let TyNode::Thunk(body) = instance.node() else {
             panic!("a function scheme instantiates to a thunk")
         };
-        let CompTy::Fun(param, _) = *body else {
+        let CompTyNode::Fun(param, _) = body.node() else {
             panic!("a function")
         };
-        let Ty::Var(fresh) = *param else {
+        let &TyNode::Var(fresh) = param.node() else {
             panic!("a fresh variable")
         };
         assert_ne!(fresh, v);
@@ -730,15 +747,19 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let row = u.fresh_deep_row_var(true);
-        let scheme = generalized(&mut u, &arrow(Ty::Record(Row::Var(row)), Ty::Unit));
+        let scheme = generalized(&mut u, &arrow(Ty::record(Row::var(row)), Ty::unit()));
         assert_eq!(scheme.rows, [(row, Role::Forall(true))].into());
-        let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
+        let instance = instantiate(&mut u, &scheme);
+        let TyNode::Thunk(body) = instance.node() else {
             panic!("a thunk")
         };
-        let CompTy::Fun(param, _) = *body else {
+        let CompTyNode::Fun(param, _) = body.node() else {
             panic!("a function")
         };
-        let Ty::Record(Row::Var(fresh)) = *param else {
+        let TyNode::Record(row) = param.node() else {
+            panic!("a record on a fresh row")
+        };
+        let &RowNode::Var(fresh) = row.node() else {
             panic!("a record on a fresh row")
         };
         assert!(u.is_deep_row(fresh));
@@ -752,10 +773,10 @@ mod tests {
             first.fresh_kinded_var(Kind::SIZED),
             first.fresh_kinded_var(Kind::COMPARABLE),
         );
-        first.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
+        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
         let scheme = Arc::new(generalized(
             &mut first,
-            &arrow(Ty::Var(bound), Ty::Var(weak)),
+            &arrow(Ty::var(bound), Ty::var(weak)),
         ));
         let scheme = settle_weak(&first, scheme);
         let bytes = postcard::to_allocvec(&scheme).expect("a scheme serialises");
@@ -780,10 +801,10 @@ mod tests {
         let (comp, row, grade) = (CompTyVar(0), RowVar(0), GradeVar(0));
         let ty = crate::ty::open_record(
             &[
-                ("bound", Ty::Var(bound)),
-                ("weak", Ty::Var(weak)),
-                ("root", Ty::Var(root)),
-                ("comp", Ty::Thunk(Box::new(CompTy::Var(comp)))),
+                ("bound", Ty::var(bound)),
+                ("weak", Ty::var(weak)),
+                ("root", Ty::var(root)),
+                ("comp", Ty::thunk(CompTy::var(comp))),
                 ("grade", unit_block(Grade::Var(grade))),
             ],
             row,
@@ -792,7 +813,7 @@ mod tests {
             tys: [
                 (bound, Role::Forall(Kind::SIZED)),
                 (weak, Role::Weak(Kind::ANY)),
-                (root, Role::Mu(Ty::list(Ty::Var(root)))),
+                (root, Role::Mu(Ty::list(Ty::var(root)))),
             ]
             .into(),
             comps: [(comp, Role::Forall(()))].into(),
@@ -814,13 +835,13 @@ mod tests {
             // Ids are reseeded in order, so the residual's lands on `bound`'s.
             let _ = first.fresh_tyvar();
             let (bound, weak) = (first.fresh_tyvar(), first.fresh_tyvar());
-            first.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
+            first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
             if recursive {
-                first.bind_ty_root(bound, Ty::list(Ty::Var(bound)));
+                first.bind_ty_root(bound, Ty::list(Ty::var(bound)));
             }
             let scheme = Arc::new(generalized(
                 &mut first,
-                &arrow(Ty::Var(bound), Ty::Var(weak)),
+                &arrow(Ty::var(bound), Ty::var(weak)),
             ));
             let scheme = settle_weak(&first, scheme);
             let mut next = Unifier::new();
@@ -830,20 +851,20 @@ mod tests {
             };
             assert_eq!(fresh_weak, bound, "force the old namespace collision");
             let instance = instantiate(&mut next, &seeded);
-            let Ty::Thunk(body) = instance else {
+            let TyNode::Thunk(body) = instance.node() else {
                 panic!("a thunk")
             };
-            let CompTy::Fun(param, rest) = *body else {
+            let CompTyNode::Fun(param, rest) = body.node() else {
                 panic!("a function")
             };
-            let CompTy::Return(_, result) = *rest else {
+            let CompTyNode::Return(_, result) = rest.node() else {
                 panic!("a result")
             };
-            assert_eq!(*result, Ty::Var(fresh_weak));
+            assert_eq!(*result, Ty::var(fresh_weak));
             assert_ne!(*param, *result);
-            next.unify_ty(&result, &Ty::Int)
+            next.unify_ty(result, &Ty::int())
                 .expect("the weak result fixes independently");
-            assert_ne!(next.apply_ty(&param), Ty::Int);
+            assert_ne!(next.apply_ty(param), Ty::int());
         }
     }
 
@@ -854,20 +875,16 @@ mod tests {
         let (bound_row, weak_row) = (first.fresh_row_var(), first.fresh_row_var());
         let (bound_comp, weak_comp) = (first.fresh_comp_ty(), first.fresh_comp_ty());
         let ty = arrow(
-            arrow(
-                Ty::Record(Row::Var(bound_row)),
-                Ty::Thunk(Box::new(bound_comp)),
-            ),
-            arrow(
-                Ty::Record(Row::Var(weak_row)),
-                Ty::Thunk(Box::new(weak_comp)),
-            ),
+            arrow(Ty::record(Row::var(bound_row)), Ty::thunk(bound_comp)),
+            arrow(Ty::record(Row::var(weak_row)), Ty::thunk(weak_comp)),
         );
-        let Ty::Thunk(body) = &ty else { unreachable!() };
-        let CompTy::Fun(_, rest) = &**body else {
+        let TyNode::Thunk(body) = ty.node() else {
             unreachable!()
         };
-        let CompTy::Return(_, result) = &**rest else {
+        let CompTyNode::Fun(_, rest) = body.node() else {
+            unreachable!()
+        };
+        let CompTyNode::Return(_, result) = rest.node() else {
             unreachable!()
         };
         first.mark_weak(result, &WeakSource::Boundary("from-json".into()));
@@ -905,10 +922,7 @@ mod tests {
         u.mark_weak(&weak, &WeakSource::Boundary("from-json".into()));
         let scheme = Arc::new(generalized(&mut u, &weak));
         let grade = u.fresh_grade_var();
-        let block = Ty::Thunk(Box::new(CompTy::Return(
-            Grade::Var(grade),
-            Box::new(Ty::Unit),
-        )));
+        let block = Ty::thunk(CompTy::ret(Grade::Var(grade), Ty::unit()));
         u.unify_ty(&weak, &block).unwrap();
         let settled = settle_weak(&u, scheme);
         assert_eq!(settled.ty, block);
@@ -978,7 +992,7 @@ mod tests {
                     u.mark_weak(&data, &WeakSource::Host("sv_data".into()));
                     data
                 } else {
-                    Ty::Unit
+                    Ty::unit()
                 };
                 u.exit();
                 let scheme = generalize(&u, &arrow(block, data.clone()));
@@ -1003,8 +1017,8 @@ mod tests {
         u.exit();
         let scheme = generalize(&u, &block);
         u.unify_comp_ty(
-            &CompTy::Return(Grade::Var(grade), Box::new(Ty::Unit)),
-            &CompTy::Return(Grade::Var(root), Box::new(Ty::Unit)),
+            &CompTy::ret(Grade::Var(grade), Ty::unit()),
+            &CompTy::ret(Grade::Var(root), Ty::unit()),
         )
         .unwrap();
         assert_eq!(u.resolve_grade(Grade::Var(grade)), Grade::Var(root));
@@ -1049,10 +1063,10 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (root, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        u.bind_ty_root(root, Ty::list(arrow(Ty::Var(weak), Ty::Var(root))));
-        let scheme = Arc::new(generalized(&mut u, &Ty::Var(root)));
-        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
+        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.bind_ty_root(root, Ty::list(arrow(Ty::var(weak), Ty::var(root))));
+        let scheme = Arc::new(generalized(&mut u, &Ty::var(root)));
+        u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
         let settled = settle_weak(&u, scheme);
         assert!(!settled.has_weak());
         assert!(!settled.syntactic_vars().contains(&Var::Ty(weak)));
@@ -1070,15 +1084,12 @@ mod tests {
         first.enter();
         let weak = first.fresh_tyvar();
         let root = first.fresh_comp_root();
-        first.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        let body = CompTy::pure(Ty::list(arrow(
-            Ty::Var(weak),
-            Ty::Thunk(Box::new(CompTy::Var(root))),
-        )));
+        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        let body = CompTy::pure(Ty::list(arrow(Ty::var(weak), Ty::thunk(CompTy::var(root)))));
         let scheme = Closed::new(Arc::new(Scheme {
             tys: [(weak, Role::Weak(Kind::ANY))].into(),
             comps: [(root, Role::Mu(body))].into(),
-            ..Scheme::mono(Ty::Thunk(Box::new(CompTy::Var(root))))
+            ..Scheme::mono(Ty::thunk(CompTy::var(root)))
         }))
         .unwrap();
         let mut next = Unifier::new();
@@ -1086,7 +1097,7 @@ mod tests {
         let [Var::Ty(weak)] = super::tests::weak(&seeded)[..] else {
             panic!("one residual: {seeded:?}")
         };
-        next.unify_ty(&Ty::Var(weak), &Ty::list(Ty::Var(weak)))
+        next.unify_ty(&Ty::var(weak), &Ty::list(Ty::var(weak)))
             .unwrap();
         assert!(
             next.weak_source_in_ty(&seeded.ty).is_none(),
@@ -1111,15 +1122,15 @@ mod tests {
         u.enter();
         let root = u.fresh_tyvar();
         let dangling = u.fresh_tyvar();
-        u.unify_ty(&Ty::Var(dangling), &Ty::Int).unwrap();
+        u.unify_ty(&Ty::var(dangling), &Ty::int()).unwrap();
         let mu = |binding| Scheme {
             tys: [(root, Role::Mu(binding))].into(),
-            ..Scheme::mono(Ty::Var(root))
+            ..Scheme::mono(Ty::var(root))
         };
-        assert!(!mu(Ty::list(Ty::Var(dangling))).is_closed());
-        let cyclic = mu(Ty::list(Ty::Var(root)));
+        assert!(!mu(Ty::list(Ty::var(dangling))).is_closed());
+        let cyclic = mu(Ty::list(Ty::var(root)));
         assert!(cyclic.is_closed());
-        let open = Role::Mu(CompTy::pure(Ty::Record(Row::Var(RowVar(0)))));
+        let open = Role::Mu(CompTy::pure(Ty::record(Row::var(RowVar(0)))));
         assert!(
             !Scheme {
                 comps: [(CompTyVar(0), open)].into(),
@@ -1134,12 +1145,12 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (local, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        let scheme = Arc::new(generalized(&mut u, &arrow(Ty::Var(local), Ty::Var(weak))));
-        u.bind_ty_root(local, Ty::list(Ty::Var(local)));
-        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
+        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        let scheme = Arc::new(generalized(&mut u, &arrow(Ty::var(local), Ty::var(weak))));
+        u.bind_ty_root(local, Ty::list(Ty::var(local)));
+        u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
         let settled = settle_weak(&u, scheme);
-        assert_eq!(settled.ty, arrow(Ty::Var(local), Ty::Int));
+        assert_eq!(settled.ty, arrow(Ty::var(local), Ty::int()));
         assert_eq!(mus(&settled), 0);
         assert!(!settled.has_weak());
     }
@@ -1149,11 +1160,11 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let weak = u.fresh_tyvar();
-        u.mark_weak(&Ty::Var(weak), &WeakSource::Boundary("from-json".into()));
-        u.unify_ty(&Ty::Var(weak), &Ty::Int).unwrap();
-        let scheme = Arc::new(generalized(&mut u, &Ty::Var(weak)));
+        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
+        let scheme = Arc::new(generalized(&mut u, &Ty::var(weak)));
         let settled = settle_weak(&u, scheme);
-        assert_eq!(settled.ty, Ty::Int);
+        assert_eq!(settled.ty, Ty::int());
         assert!(!settled.has_weak());
     }
 
@@ -1162,13 +1173,13 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (fixed, open) = (u.fresh_tyvar(), u.fresh_tyvar());
-        let ty = arrow(Ty::Var(fixed), Ty::Var(open));
+        let ty = arrow(Ty::var(fixed), Ty::var(open));
         u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
         let scheme = Arc::new(generalized(&mut u, &ty));
-        u.unify_ty(&Ty::Var(fixed), &Ty::Int)
+        u.unify_ty(&Ty::var(fixed), &Ty::int())
             .expect("a free variable binds");
         let settled = settle_weak(&u, scheme);
-        assert_eq!(settled.ty, arrow(Ty::Int, Ty::Var(open)));
+        assert_eq!(settled.ty, arrow(Ty::int(), Ty::var(open)));
         assert_eq!(settled.tys, [(open, Role::Weak(Kind::ANY))].into());
     }
 }

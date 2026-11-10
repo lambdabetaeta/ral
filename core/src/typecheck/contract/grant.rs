@@ -3,7 +3,8 @@
 //!
 //! The vocabularies are minted from the Rust types (`EditorVerb`, `ShellVerb`,
 //! `Net`, `Gpu`, `Selector`, `Anchor`), so a new verb, selector or XDG kind is one
-//! variant.  A `Ty::List` cannot sit in a `static`, hence `Shaped`.
+//! variant.  No type can sit in a `static`, so each key holds the function that
+//! builds its type.
 
 use super::{Holds, Key, Table, Vocab};
 use crate::authority::grant::freeze::{Anchor, Selector};
@@ -41,22 +42,22 @@ pub(super) static GRANT: Table = Table {
         },
         Key {
             label: "net",
-            holds: Holds::Shaped(net),
+            holds: Holds::At(net),
             reason: Some(Reason::Vocabulary(&NET)),
         },
         Key {
             label: "gpu",
-            holds: Holds::Shaped(gpu),
+            holds: Holds::At(gpu),
             reason: Some(Reason::Vocabulary(&GPU)),
         },
         Key {
             label: "editor",
-            holds: Holds::Shaped(editor),
+            holds: Holds::At(editor),
             reason: Some(Reason::Vocabulary(&EDITOR)),
         },
         Key {
             label: "shell",
-            holds: Holds::Shaped(shell),
+            holds: Holds::At(shell),
             reason: Some(Reason::Vocabulary(&SHELL)),
         },
         Key {
@@ -75,12 +76,12 @@ static EXEC: Table = Table {
     keys: &[
         Key {
             label: "allow",
-            holds: Holds::Shaped(exec_targets),
+            holds: Holds::At(exec_targets),
             reason: Some(Reason::Vocabulary(&EXEC_TARGET)),
         },
         Key {
             label: "deny",
-            holds: Holds::Shaped(exec_targets),
+            holds: Holds::At(exec_targets),
             reason: Some(Reason::Vocabulary(&EXEC_TARGET)),
         },
     ],
@@ -92,17 +93,17 @@ static FS: Table = Table {
     keys: &[
         Key {
             label: "read",
-            holds: Holds::Shaped(places),
+            holds: Holds::At(places),
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
         Key {
             label: "write",
-            holds: Holds::Shaped(places),
+            holds: Holds::At(places),
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
         Key {
             label: "deny",
-            holds: Holds::Shaped(places),
+            holds: Holds::At(places),
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
     ],
@@ -217,23 +218,23 @@ type Tags = Vec<(String, Ty)>;
 fn nullary<V: VariantArray + Copy + Into<&'static str>>() -> Tags {
     V::VARIANTS
         .iter()
-        .map(|&v| (v.into().to_string(), Ty::Unit))
+        .map(|&v| (v.into().to_string(), Ty::unit()))
         .collect()
 }
 
 fn place_row() -> Tags {
     Anchor::all()
-        .map(|a| (a.tag().into_owned(), Ty::String))
+        .map(|a| (a.tag().into_owned(), Ty::string()))
         .collect()
 }
 
 fn dir_target_row() -> Tags {
-    let selectors = Selector::names().map(|n| (n.to_string(), Ty::Unit));
+    let selectors = Selector::names().map(|n| (n.to_string(), Ty::unit()));
     place_row().into_iter().chain(selectors).collect()
 }
 
 fn exec_target_row() -> Tags {
-    let name = ("name".to_string(), Ty::String);
+    let name = ("name".to_string(), Ty::string());
     let nested = EXEC_TARGET
         .within
         .iter()

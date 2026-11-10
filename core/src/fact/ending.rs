@@ -170,9 +170,9 @@ impl<V: Typed, F: Typed, S: Typed> Typed for Ending<V, F, S> {
         closed_variant(&[
             (tag::OK, V::ty()),
             (tag::ERR, F::ty()),
-            (tag::EXITED, Ty::Int),
+            (tag::EXITED, Ty::int()),
             (tag::STOPPED, S::ty()),
-            (tag::PANIC, Ty::String),
+            (tag::PANIC, Ty::string()),
         ])
     }
 }
@@ -247,6 +247,7 @@ impl Done {
 mod tests {
     use super::*;
     use crate::fact::Reason;
+    use crate::ty::TyNode;
     use strum::VariantArray as _;
 
     fn failure() -> ErrorRecord {
@@ -306,7 +307,8 @@ mod tests {
             let encoded = ending.encode();
             assert_eq!(datum::untag(&encoded).map(|(label, _)| label), Some(label));
         }
-        let Ty::Variant(row) = Done::ty() else {
+        let ty = Done::ty();
+        let TyNode::Variant(row) = ty.node() else {
             panic!("an ending has a variant type");
         };
         assert_eq!(

@@ -95,10 +95,10 @@ macro_rules! record {
         $crate::record!($ty { $($field: $key),* });
         impl $crate::ty::Typed for $ty {
             fn ty() -> $crate::ty::Ty {
-                $crate::ty::closed_record(&[$((
+                $crate::memoized_ty!($crate::ty::closed_record(&[$((
                     $key,
-                    $crate::ty::field_ty(|s: &Self| &s.$field),
-                )),*])
+                    $crate::ty::field_ty(|s: &$ty| &s.$field),
+                )),*]))
             }
         }
     };
@@ -134,12 +134,12 @@ macro_rules! label {
         $crate::label!($ty);
         impl $crate::ty::Typed for $ty {
             fn ty() -> $crate::ty::Ty {
-                $crate::ty::closed_variant(
+                $crate::memoized_ty!($crate::ty::closed_variant(
                     &<$ty as $crate::data::datum::strum::VariantArray>::VARIANTS
                         .iter()
-                        .map(|v| (<&str>::from(*v), $crate::ty::Ty::Unit))
+                        .map(|v| (<&str>::from(*v), $crate::ty::Ty::unit()))
                         .collect::<Vec<_>>(),
-                )
+                ))
             }
         }
     };
@@ -162,7 +162,7 @@ macro_rules! label {
 #[macro_export]
 macro_rules! variant {
     (@bind $t:ty, $x:ident) => { $x };
-    (@ty) => { $crate::ty::Ty::Unit };
+    (@ty) => { $crate::ty::Ty::unit() };
     (@ty $t:ty) => { <$t as $crate::ty::Typed>::ty() };
     (@enc) => { None };
     (@enc $x:ident $t:ty) => { Some($crate::data::datum::Datum::encode($x)) };
@@ -183,10 +183,10 @@ macro_rules! variant {
         $crate::variant!($ty { $($arm $(($payload))?: $label),* });
         impl $crate::ty::Typed for $ty {
             fn ty() -> $crate::ty::Ty {
-                $crate::ty::closed_variant(&[$((
+                $crate::memoized_ty!($crate::ty::closed_variant(&[$((
                     $label,
                     $crate::variant!(@ty $($payload)?),
-                )),*])
+                )),*]))
             }
         }
     };
@@ -558,6 +558,6 @@ mod tests {
             );
         }
         assert!(u8::decode(&FOValue::Unit).is_err());
-        assert_eq!(u8::ty(), Ty::Int);
+        assert_eq!(u8::ty(), Ty::int());
     }
 }

@@ -9,7 +9,8 @@ use super::generalize::{generalize, instantiate, reseed_weak, settle_weak};
 use super::unify::{Unifier, WeakSource};
 use crate::source::{Span, WithSpan};
 use crate::ty::{
-    Closed, CompTy, Grade, Kind, RefusedArg, Row, Scheme, Site, Term, Ty, UnitId, Var,
+    Closed, CompTy, CompTyNode, Grade, Kind, RefusedArg, Row, Scheme, Site, Term, Ty, TyNode,
+    UnitId, Var,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -155,7 +156,7 @@ impl Solver {
         self.constrain(|this| {
             let outcome = this.unifier.unify_row(a, b);
             this.held(outcome.map_err(|kind| Box::new((kind, why))), |u| {
-                let weak = |row: &Row| u.weak_source_in_ty(&Ty::Record(row.clone()));
+                let weak = |row: &Row| u.weak_source_in_ty(&Ty::record(row.clone()));
                 weak(a).or_else(|| weak(b))
             })
         })
@@ -447,13 +448,14 @@ impl Solver {
                 Match::Binding {
                     hole, rhs, binder, ..
                 } => {
-                    let (mode, ty) = match self.unifier.resolve_comp_ty(rhs) {
-                        head @ CompTy::Fun(..) => (Mode::Thunk, Ty::Thunk(Box::new(head))),
-                        CompTy::Return(Grade::Value, ty) => (Mode::Run, *ty),
-                        CompTy::Return(Grade::Output, _) => (Mode::Capture, Ty::String),
+                    let head = self.unifier.resolve_comp_ty_graded(rhs);
+                    let (mode, ty) = match head.node() {
+                        CompTyNode::Fun(..) => (Mode::Thunk, Ty::thunk(head.clone())),
+                        CompTyNode::Return(Grade::Value, ty) => (Mode::Run, ty.clone()),
+                        CompTyNode::Return(Grade::Output, _) => (Mode::Capture, Ty::string()),
                         // A payload excluding Unit has already improved the grade.
-                        CompTy::Return(Grade::Var(v), _) => break Var::Grade(v),
-                        CompTy::Var(v) => break Var::Comp(v),
+                        CompTyNode::Return(Grade::Var(v), _) => break Var::Grade(*v),
+                        CompTyNode::Var(v) => break Var::Comp(*v),
                     };
                     self.modes[hole.0 as usize] = Some(mode);
                     self.unify(binder, &ty, Reason::Binding { defaulted_at: None });
@@ -472,16 +474,17 @@ impl Solver {
                         defaulted_at: None,
                         recursive_call: *recursive_call,
                     };
-                    match self.unifier.resolve_comp_ty(head) {
-                        CompTy::Var(v) => break Var::Comp(v),
-                        CompTy::Fun(param, body) => {
-                            self.unify(arg, &param, why.clone());
-                            self.unify_comp(result, &body, why);
+                    let resolved = self.unifier.resolve_comp_ty_graded(head);
+                    match resolved.node() {
+                        CompTyNode::Var(v) => break Var::Comp(*v),
+                        CompTyNode::Fun(param, body) => {
+                            self.unify(arg, param, why.clone());
+                            self.unify_comp(result, body, why);
                             return;
                         }
-                        CompTy::Return(_, payload) => {
+                        CompTyNode::Return(_, payload) => {
                             let next = self.fresh_comp();
-                            if !self.unify(&payload, &Ty::Thunk(Box::new(next.clone())), why) {
+                            if !self.unify(payload, &Ty::thunk(next.clone()), why) {
                                 return;
                             }
                             self.calls[call.0 as usize].1.push(*index);
@@ -617,7 +620,7 @@ impl Solver {
                 error.unit = self.unit_reads.iter().find_map(|(pos, ty, call)| {
                     (pos.is_some()
                         && *pos == error.pos
-                        && matches!(self.unifier.resolve_ty(ty), Ty::Unit))
+                        && matches!(self.unifier.resolve_ty(ty).node(), TyNode::Unit))
                     .then(|| call.clone())
                 });
             }
@@ -673,7 +676,7 @@ impl Solution {
     }
 
     pub(super) fn resolve_comp(&self, ty: &CompTy) -> CompTy {
-        self.unifier.resolve_comp_ty(ty)
+        self.unifier.resolve_comp_ty_graded(ty)
     }
 }
 
@@ -709,15 +712,15 @@ mod tests {
     }
 
     fn thunk(body: CompTy) -> Ty {
-        Ty::Thunk(Box::new(body))
+        Ty::thunk(body)
     }
 
     fn command() -> CompTy {
-        CompTy::Return(Grade::Output, Box::new(Ty::Unit))
+        CompTy::ret(Grade::Output, Ty::unit())
     }
 
     fn function() -> CompTy {
-        CompTy::arrows([Ty::Int], command())
+        CompTy::arrows([Ty::int()], command())
     }
 
     fn exit(solver: &mut Solver) {
@@ -762,19 +765,19 @@ mod tests {
                 let payload = solver.fresh_ty();
                 let grade = solver.fresh_grade();
                 let producer = if handles {
-                    Ty::list(Ty::Handle(grade, Box::new(payload.clone())))
+                    Ty::list(Ty::handle(grade, payload.clone()))
                 } else {
                     thunk(CompTy::arrows(
-                        [Ty::Unit],
-                        CompTy::Return(grade, Box::new(payload.clone())),
+                        [Ty::unit()],
+                        CompTy::ret(grade, payload.clone()),
                     ))
                 };
                 if discover_first {
-                    solver.equate(&payload, &Ty::Int, Reason::IfBranches);
+                    solver.equate(&payload, &Ty::int(), Reason::IfBranches);
                 }
                 let opaque = solver.opaque(&producer);
                 if !discover_first {
-                    solver.equate(&payload, &Ty::Int, Reason::IfBranches);
+                    solver.equate(&payload, &Ty::int(), Reason::IfBranches);
                 }
                 assert_eq!(solver.unifier.resolve_grade(grade), Grade::Value);
                 exit(&mut solver);
@@ -790,23 +793,24 @@ mod tests {
         solver.enter();
         let payload = solver.fresh_ty();
         let grade = solver.fresh_grade();
-        let opaque = solver.opaque(&thunk(CompTy::Return(grade, Box::new(payload))));
+        let opaque = solver.opaque(&thunk(CompTy::ret(grade, payload)));
         exit(&mut solver);
         let scheme = solver.generalise(&opaque);
         assert_eq!(scheme.grades.len(), 1);
         assert_eq!(forall_tys(&scheme).len(), 1);
-        for concrete in [Ty::Int, Ty::Unit] {
+        for concrete in [Ty::int(), Ty::unit()] {
             let instance = solver.instantiate(&scheme);
-            let Ty::Thunk(body) = solver.unifier.resolve_ty(&instance) else {
+            let resolved = solver.unifier.resolve_ty(&instance);
+            let TyNode::Thunk(body) = resolved.node() else {
                 unreachable!()
             };
-            let CompTy::Return(instance_grade, instance_payload) = *body else {
+            let &CompTyNode::Return(instance_grade, ref instance_payload) = body.node() else {
                 unreachable!()
             };
-            solver.equate(&instance_payload, &concrete, Reason::IfBranches);
+            solver.equate(instance_payload, &concrete, Reason::IfBranches);
             assert_eq!(
                 solver.unifier.resolve_grade(instance_grade),
-                if concrete == Ty::Int {
+                if concrete == Ty::int() {
                     Grade::Value
                 } else {
                     instance_grade
@@ -829,12 +833,9 @@ mod tests {
                 let grade = solver.fresh_grade();
                 let producer = |grade, payload| {
                     if handles {
-                        Ty::Handle(grade, Box::new(payload))
+                        Ty::handle(grade, payload)
                     } else {
-                        thunk(CompTy::arrows(
-                            [Ty::Int],
-                            CompTy::Return(grade, Box::new(payload)),
-                        ))
+                        thunk(CompTy::arrows([Ty::int()], CompTy::ret(grade, payload)))
                     }
                 };
                 let opaque = solver.opaque(&producer(grade, payload.clone()));
@@ -842,31 +843,31 @@ mod tests {
                 let scheme = solver.generalise(&opaque);
                 assert_eq!(scheme.grades.len(), 1);
                 assert_eq!(forall_tys(&scheme), []);
-                let Ty::Var(payload_var) = payload else {
+                let TyNode::Var(payload_var) = payload.node() else {
                     unreachable!()
                 };
-                assert_eq!(scheme.tys.get(&payload_var), Some(&Role::Weak(Kind::ANY)));
+                assert_eq!(scheme.tys.get(payload_var), Some(&Role::Weak(Kind::ANY)));
                 assert_eq!(solver.unifier.weak_source_in_ty(&payload), Some(source));
 
                 solver.enter();
                 let instances = [solver.instantiate(&scheme), solver.instantiate(&scheme)];
-                let pairs =
-                    instances
-                        .each_ref()
-                        .map(|instance| match solver.unifier.apply_ty(instance) {
-                            Ty::Handle(grade, payload) => (grade, *payload),
-                            Ty::Thunk(body) => {
-                                let CompTy::Fun(arg, result) = *body else {
-                                    unreachable!()
-                                };
-                                assert_eq!(*arg, Ty::Int);
-                                let CompTy::Return(grade, payload) = *result else {
-                                    unreachable!()
-                                };
-                                (grade, *payload)
-                            }
-                            _ => unreachable!(),
-                        });
+                let pairs = instances.each_ref().map(|instance| {
+                    let applied = solver.unifier.apply_ty(instance);
+                    match applied.node() {
+                        TyNode::Handle(grade, payload) => (*grade, payload.clone()),
+                        TyNode::Thunk(body) => {
+                            let CompTyNode::Fun(arg, result) = body.node() else {
+                                unreachable!()
+                            };
+                            assert_eq!(*arg, Ty::int());
+                            let CompTyNode::Return(grade, payload) = result.node() else {
+                                unreachable!()
+                            };
+                            (*grade, payload.clone())
+                        }
+                        _ => unreachable!(),
+                    }
+                });
                 assert_ne!(pairs[0].0, pairs[1].0);
                 assert!(pairs.iter().all(|(g, p)| *g != grade && *p == payload));
                 let grades = if output_first {
@@ -877,18 +878,18 @@ mod tests {
                 for (instance, concrete) in instances.iter().zip(grades) {
                     assert!(solver.equate(
                         instance,
-                        &producer(concrete, Ty::Unit),
+                        &producer(concrete, Ty::unit()),
                         Reason::IfBranches,
                     ));
                 }
-                assert_eq!(solver.unifier.resolve_ty(&payload), Ty::Unit);
+                assert_eq!(solver.unifier.resolve_ty(&payload), Ty::unit());
                 for ((instance_grade, _), concrete) in pairs.iter().zip(grades) {
                     assert_eq!(solver.unifier.resolve_grade(*instance_grade), concrete);
                 }
                 assert_eq!(solver.unifier.resolve_grade(grade), grade);
                 let settled = settle_weak(&solver.unifier, Arc::new(scheme.clone()));
                 assert_eq!(settled.grades, scheme.grades);
-                assert_eq!(settled.ty, producer(grade, Ty::Unit));
+                assert_eq!(settled.ty, producer(grade, Ty::unit()));
                 exit(&mut solver);
                 assert_eq!(solver.generalise(&opaque).grades, scheme.grades);
                 success(solver);
@@ -907,9 +908,9 @@ mod tests {
             let grade = solver.fresh_grade();
             let payload = solver.fresh_ty();
             let producer = if handles {
-                Ty::Handle(grade, Box::new(payload.clone()))
+                Ty::handle(grade, payload.clone())
             } else {
-                thunk(CompTy::Return(grade, Box::new(payload.clone())))
+                thunk(CompTy::ret(grade, payload.clone()))
             };
             assert!(solver.equate(&root, &producer, Reason::Argument));
             let Grade::Var(grade_var) = grade else {
@@ -932,7 +933,7 @@ mod tests {
             .spawn(|| {
                 let mut solver = Solver::new();
                 solver.enter();
-                let rhs = CompTy::arrows((0..2_000).map(|_| Ty::Int), CompTy::pure(Ty::Int));
+                let rhs = CompTy::arrows((0..2_000).map(|_| Ty::int()), CompTy::pure(Ty::int()));
                 let ty = thunk(rhs.clone());
                 let opaque = solver.opaque(&ty);
                 let (binder, _) = solver.binding(&rhs, None);
@@ -980,7 +981,7 @@ mod tests {
             }
             solver.enter();
             let (y, hole) = solver.binding(&f, None);
-            assert!(matches!(y, Ty::Var(_)));
+            assert!(matches!(y.node(), TyNode::Var(_)));
             exit(&mut solver);
             if !context_first {
                 solver.equate_comp(&f, &command(), Reason::IfBranches);
@@ -988,7 +989,7 @@ mod tests {
             exit(&mut solver);
             let solution = success(solver);
             assert_eq!(solution.mode(hole), Mode::Capture);
-            assert_eq!(solution.resolve_ty(&y), Ty::String);
+            assert_eq!(solution.resolve_ty(&y), Ty::string());
         }
     }
 
@@ -1003,8 +1004,8 @@ mod tests {
             if context_first {
                 solver.equate_comp(&f, &context, Reason::IfBranches);
             }
-            let (result, call) = apply(&mut solver, &f, Ty::Int, false);
-            assert!(matches!(result, CompTy::Var(_)));
+            let (result, call) = apply(&mut solver, &f, Ty::int(), false);
+            assert!(matches!(result.node(), CompTyNode::Var(_)));
             if !context_first {
                 solver.equate_comp(&f, &context, Reason::IfBranches);
             }
@@ -1022,11 +1023,11 @@ mod tests {
             let mut solver = Solver::new();
             let x = solver.fresh_ty();
             if context_first {
-                solver.equate(&x, &Ty::Unit, Reason::ListElem);
+                solver.equate(&x, &Ty::unit(), Reason::ListElem);
             }
             solver.gate(&x, ArgvBoundary::InShell("echo".into()));
             if !context_first {
-                solver.equate(&x, &Ty::Unit, Reason::ListElem);
+                solver.equate(&x, &Ty::unit(), Reason::ListElem);
             }
             let errors = solver.refused().1;
             assert_eq!(errors.len(), 1);
@@ -1046,14 +1047,14 @@ mod tests {
         solver.equate_comp(&f, &alias, Reason::Argument);
         let (binder, result) = if reverse {
             solver.unifier.at = Some(at(20));
-            let (result, _) = apply(solver, &alias, Ty::Int, false);
+            let (result, _) = apply(solver, &alias, Ty::int(), false);
             solver.unifier.at = Some(at(10));
             (solver.binding(&f, None).0, result)
         } else {
             solver.unifier.at = Some(at(10));
             let (binder, _) = solver.binding(&f, None);
             solver.unifier.at = Some(at(20));
-            (binder, apply(solver, &alias, Ty::Int, false).0)
+            (binder, apply(solver, &alias, Ty::int(), false).0)
         };
         (f, binder, result)
     }
@@ -1074,9 +1075,15 @@ mod tests {
             let (f, binder, result) = conflicting_uses(&mut solver, reverse);
             let (store, errors) = solver.refused();
             assert_conflict(&errors);
-            assert!(matches!(store.resolve_comp_ty(&f), CompTy::Var(_)));
-            assert!(matches!(store.resolve_ty(&binder), Ty::Var(_)));
-            assert!(matches!(store.resolve_comp_ty(&result), CompTy::Var(_)));
+            assert!(matches!(
+                store.resolve_comp_ty_graded(&f).node(),
+                CompTyNode::Var(_)
+            ));
+            assert!(matches!(store.resolve_ty(&binder).node(), TyNode::Var(_)));
+            assert!(matches!(
+                store.resolve_comp_ty_graded(&result).node(),
+                CompTyNode::Var(_)
+            ));
             assert_eq!(store.rank(), 0);
         }
     }
@@ -1091,15 +1098,21 @@ mod tests {
             exit(&mut solver);
             assert_conflict(&solver.errors);
             assert!(solver.waiting.is_empty());
-            assert!(matches!(solver.unifier.resolve_comp_ty(&f), CompTy::Var(_)));
-            assert!(matches!(solver.unifier.resolve_ty(&binder), Ty::Var(_)));
+            assert!(matches!(
+                solver.unifier.resolve_comp_ty_graded(&f).node(),
+                CompTyNode::Var(_)
+            ));
+            assert!(matches!(
+                solver.unifier.resolve_ty(&binder).node(),
+                TyNode::Var(_)
+            ));
             solver.enter();
             let sibling = solver.fresh_comp();
             solver.binding(&sibling, None);
             exit(&mut solver);
             assert!(matches!(
-                solver.unifier.resolve_comp_ty(&sibling),
-                CompTy::Return(Grade::Value, _)
+                solver.unifier.resolve_comp_ty_graded(&sibling).node(),
+                CompTyNode::Return(Grade::Value, _)
             ));
             exit(&mut solver);
             assert_conflict(&solver.refused().1);
@@ -1120,7 +1133,7 @@ mod tests {
                 };
                 let call = solver.call();
                 if reverse {
-                    solver.argument(call, &head, None, Ty::Int, false);
+                    solver.argument(call, &head, None, Ty::int(), false);
                 }
                 solver.enter();
                 // let a = $f, or let h = !$f; h 1.
@@ -1141,7 +1154,7 @@ mod tests {
                     );
                 }
                 if !reverse {
-                    solver.argument(call, &head, None, Ty::Int, false);
+                    solver.argument(call, &head, None, Ty::int(), false);
                 }
                 exit(&mut solver);
                 let solution = success(solver);
@@ -1149,11 +1162,14 @@ mod tests {
                 assert_eq!(solution.mode(hole), Mode::Run);
                 if returned {
                     assert!(matches!(
-                        solution.resolve_comp(&f),
-                        CompTy::Return(Grade::Value, _)
+                        solution.resolve_comp(&f).node(),
+                        CompTyNode::Return(Grade::Value, _)
                     ));
                 } else {
-                    assert!(matches!(solution.resolve_comp(&f), CompTy::Fun(..)));
+                    assert!(matches!(
+                        solution.resolve_comp(&f).node(),
+                        CompTyNode::Fun(..)
+                    ));
                 }
             }
         }
@@ -1167,11 +1183,11 @@ mod tests {
                 let mut solver = Solver::new();
                 solver.enter();
                 let f = solver.fresh_comp();
-                let k = CompTy::arrows([thunk(f.clone())], CompTy::pure(Ty::String));
+                let k = CompTy::arrows([thunk(f.clone())], CompTy::pure(Ty::string()));
                 let mk = CompTy::pure(thunk(command()));
                 if local_let {
                     solver.enter();
-                    solver.binding(&CompTy::pure(Ty::Int), None);
+                    solver.binding(&CompTy::pure(Ty::int()), None);
                     exit(&mut solver);
                 }
                 let (argument, _) = solver.binding(&mk, None);
@@ -1187,7 +1203,7 @@ mod tests {
                 exit(&mut solver);
                 let solution = success(solver);
                 assert_eq!(solution.mode(hole), Mode::Capture);
-                assert_eq!(solution.resolve_ty(&y), Ty::String);
+                assert_eq!(solution.resolve_ty(&y), Ty::string());
             }
         }
     }
@@ -1201,7 +1217,7 @@ mod tests {
                 solver.enter();
                 let f = solver.fresh_comp();
                 let grade = solver.fresh_grade();
-                let context = CompTy::Return(grade, Box::new(Ty::Unit));
+                let context = CompTy::ret(grade, Ty::unit());
                 if context_first {
                     solver.equate_comp(&f, &context, Reason::IfBranches);
                 }
@@ -1218,9 +1234,9 @@ mod tests {
                             name: Some("y".into()),
                         },
                     );
-                    apply(&mut solver, &body, Ty::Int, false);
+                    apply(&mut solver, &body, Ty::int(), false);
                 } else {
-                    solver.equate(&y, &Ty::String, Reason::Argument);
+                    solver.equate(&y, &Ty::string(), Reason::Argument);
                 }
                 if !context_first {
                     solver.equate_comp(&f, &context, Reason::IfBranches);
@@ -1244,7 +1260,7 @@ mod tests {
                 let context = if map {
                     function()
                 } else {
-                    CompTy::pure(Ty::Unit)
+                    CompTy::pure(Ty::unit())
                 };
                 if context_first {
                     solver.equate_comp(&f, &context, Reason::Argument);
@@ -1253,7 +1269,7 @@ mod tests {
                 // map { |f| let y = f 1; return $y } [{ |n| echo $n }]
                 // each { |t| let y = !$t; echo $y } [{ return () }]
                 let rhs = if map {
-                    apply(&mut solver, &f, Ty::Int, false).0
+                    apply(&mut solver, &f, Ty::int(), false).0
                 } else {
                     f.clone()
                 };
@@ -1269,7 +1285,7 @@ mod tests {
                 if map {
                     let solution = success(solver);
                     assert_eq!(solution.mode(hole), Mode::Capture);
-                    assert_eq!(solution.resolve_ty(&y), Ty::String);
+                    assert_eq!(solution.resolve_ty(&y), Ty::string());
                 } else {
                     let errors = solver.refused().1;
                     assert_eq!(errors.len(), 1);
@@ -1289,11 +1305,11 @@ mod tests {
                 let mut solver = Solver::new();
                 let payload = solver.fresh_ty();
                 let grade = solver.fresh_grade();
-                let rhs = CompTy::Return(grade, Box::new(payload.clone()));
+                let rhs = CompTy::ret(grade, payload.clone());
                 let excludes_unit = if kind {
                     solver.fresh_kinded(Kind::NUMBER)
                 } else {
-                    Ty::Int
+                    Ty::int()
                 };
                 if context_first {
                     solver.equate(&payload, &excludes_unit, Reason::Argument);
@@ -1313,21 +1329,21 @@ mod tests {
 
     #[test]
     fn bound_never_improves_backwards_from_binder() {
-        for payload in [Ty::Unit, Ty::Int] {
+        for payload in [Ty::unit(), Ty::int()] {
             let mut solver = Solver::new();
             let grade = solver.fresh_grade();
-            let rhs = CompTy::Return(grade, Box::new(Ty::Unit));
+            let rhs = CompTy::ret(grade, Ty::unit());
             let (binder, _) = solver.binding(&rhs, None);
             solver.equate(&binder, &payload, Reason::Argument);
             assert!(matches!(solver.unifier.resolve_grade(grade), Grade::Var(_)));
             assert_eq!(waiters(&solver), 1);
-            assert_eq!(solver.close().is_ok(), payload == Ty::Unit);
+            assert_eq!(solver.close().is_ok(), payload == Ty::unit());
         }
         let mut solver = Solver::new();
         let grade = solver.fresh_grade();
-        let rhs = CompTy::Return(grade, Box::new(Ty::Unit));
+        let rhs = CompTy::ret(grade, Ty::unit());
         let (binder, _) = solver.binding(&rhs, None);
-        solver.equate(&binder, &Ty::String, Reason::Argument);
+        solver.equate(&binder, &Ty::string(), Reason::Argument);
         let (store, _) = solver.refused();
         assert_eq!(store.resolve_grade(grade), Grade::Value);
     }
@@ -1341,7 +1357,7 @@ mod tests {
             }
             let head = solver.fresh_comp();
             solver.unifier.at = Some(at(10));
-            let (result, _) = apply(&mut solver, &head, Ty::Int, false);
+            let (result, _) = apply(&mut solver, &head, Ty::int(), false);
             solver.equate_comp(&result, &head, Reason::Argument);
             solver.unifier.at = Some(at(30));
             if nested {
@@ -1364,9 +1380,9 @@ mod tests {
             let mut solver = Solver::new();
             let head = solver.fresh_comp();
             solver.unifier.at = Some(at(10));
-            apply(&mut solver, &head, Ty::String, recursive_call);
+            apply(&mut solver, &head, Ty::string(), recursive_call);
             solver.unifier.at = Some(at(30));
-            let body = CompTy::arrows([Ty::Int], CompTy::pure(Ty::Unit));
+            let body = CompTy::arrows([Ty::int()], CompTy::pure(Ty::unit()));
             solver.equate_comp(&head, &CompTy::pure(thunk(body)), Reason::Argument);
             let errors = solver.refused().1;
             assert_eq!(errors.len(), 1, "{errors:?}");
@@ -1388,9 +1404,9 @@ mod tests {
                 solver.enter();
             }
             let head = solver.fresh_comp();
-            for (pos, body) in [(at(10), CompTy::pure(Ty::Int)), (at(20), command())] {
+            for (pos, body) in [(at(10), CompTy::pure(Ty::int())), (at(20), command())] {
                 solver.unifier.at = Some(pos);
-                let (result, _) = apply(&mut solver, &head, Ty::Unit, true);
+                let (result, _) = apply(&mut solver, &head, Ty::unit(), true);
                 assert!(solver.equate_comp(&result, &body, Reason::IfBranches));
             }
             solver.unifier.at = Some(at(30));
@@ -1424,25 +1440,25 @@ mod tests {
             let old = solver.fresh_comp();
             solver.enter();
             let (old_binder, old_hole) = solver.binding(&old, None);
-            solver.equate(&old_binder, &Ty::String, Reason::Argument);
+            solver.equate(&old_binder, &Ty::string(), Reason::Argument);
 
             let head = solver.fresh_comp();
             let bodies = if reverse {
-                [command(), CompTy::pure(Ty::Int)]
+                [command(), CompTy::pure(Ty::int())]
             } else {
-                [CompTy::pure(Ty::Int), command()]
+                [CompTy::pure(Ty::int()), command()]
             };
             for (pos, body) in [(at(10), &bodies[0]), (at(20), &bodies[1])] {
                 solver.unifier.at = Some(pos);
-                let (result, _) = apply(&mut solver, &head, Ty::Unit, false);
+                let (result, _) = apply(&mut solver, &head, Ty::unit(), false);
                 assert!(solver.equate_comp(&result, body, Reason::IfBranches));
             }
 
             let rhs = solver.fresh_comp();
             let (binder, _) = solver.binding(&rhs, None);
-            solver.equate(&binder, &Ty::Bool, Reason::Argument);
+            solver.equate(&binder, &Ty::bool(), Reason::Argument);
             let other_head = solver.fresh_comp();
-            let (other_result, _) = apply(&mut solver, &other_head, Ty::Int, false);
+            let (other_result, _) = apply(&mut solver, &other_head, Ty::int(), false);
             solver.equate_comp(&other_result, &command(), Reason::IfBranches);
             solver.unifier.at = Some(at(60));
             exit(&mut solver);
@@ -1458,11 +1474,11 @@ mod tests {
                 matches!(error.reason, Some(Reason::Call { defaulted_at, recursive_call: false })
                 if defaulted_at == Some(at(60)))
             );
-            assert_eq!(solver.unifier.apply_comp_ty(&rhs), CompTy::pure(Ty::Bool));
-            assert_eq!(solver.unifier.resolve_ty(&binder), Ty::Bool);
+            assert_eq!(solver.unifier.apply_comp_ty(&rhs), CompTy::pure(Ty::bool()));
+            assert_eq!(solver.unifier.resolve_ty(&binder), Ty::bool());
             assert_eq!(
                 solver.unifier.apply_comp_ty(&other_head),
-                CompTy::arrows([Ty::Int], command())
+                CompTy::arrows([Ty::int()], command())
             );
             assert_eq!(waiters(&solver), 1);
             assert!(solver.waiting.values().flatten().all(|pending| matches!(
@@ -1472,8 +1488,8 @@ mod tests {
 
             let (store, errors) = solver.refused();
             assert_eq!(errors.len(), 1, "{errors:?}");
-            assert_eq!(store.apply_comp_ty(&old), CompTy::pure(Ty::String));
-            assert_eq!(store.resolve_ty(&old_binder), Ty::String);
+            assert_eq!(store.apply_comp_ty(&old), CompTy::pure(Ty::string()));
+            assert_eq!(store.resolve_ty(&old_binder), Ty::string());
         }
     }
 
@@ -1483,23 +1499,23 @@ mod tests {
             let mut solver = Solver::new();
             solver.enter();
             let grade = solver.fresh_grade();
-            let rhs = CompTy::Return(grade, Box::new(Ty::Unit));
+            let rhs = CompTy::ret(grade, Ty::unit());
             let head = solver.fresh_comp();
             if reverse {
-                apply(&mut solver, &head, Ty::Int, false);
+                apply(&mut solver, &head, Ty::int(), false);
             }
             let (binder, _) = solver.binding(&rhs, None);
             solver.equate(&binder, &thunk(head.clone()), Reason::Argument);
             if !reverse {
-                apply(&mut solver, &head, Ty::Int, false);
+                apply(&mut solver, &head, Ty::int(), false);
             }
             exit(&mut solver);
             assert!(solver.waiting.is_empty());
             assert!(!solver.errors.is_empty());
             assert_eq!(solver.unifier.resolve_grade(grade), Grade::Value);
             assert!(matches!(
-                solver.unifier.resolve_comp_ty(&head),
-                CompTy::Fun(..)
+                solver.unifier.resolve_comp_ty_graded(&head).node(),
+                CompTyNode::Fun(..)
             ));
             assert!(solver.close().is_err());
         }
@@ -1524,8 +1540,8 @@ mod tests {
         let (store, errors) = solver.refused();
         assert_conflict(&errors);
         assert!(matches!(
-            store.resolve_comp_ty(&old),
-            CompTy::Return(Grade::Value, _)
+            store.resolve_comp_ty_graded(&old).node(),
+            CompTyNode::Return(Grade::Value, _)
         ));
     }
 
@@ -1540,12 +1556,12 @@ mod tests {
         let (binder, hole) = solver.binding(&old, None);
         solver.equate(&binder, &thunk(head.clone()), Reason::Argument);
         for term in [&arg, &binder] {
-            let Ty::Var(v) = term else {
+            let TyNode::Var(v) = term.node() else {
                 panic!("constraint answer must be unknown")
             };
             assert_eq!(solver.unifier.rank_of(Var::Ty(*v)), 0);
         }
-        let CompTy::Var(v) = result else {
+        let &CompTyNode::Var(v) = result.node() else {
             panic!("application answer must be unknown")
         };
         assert_eq!(solver.unifier.rank_of(Var::Comp(v)), 0);
@@ -1564,19 +1580,19 @@ mod tests {
         let grade = solver.fresh_grade();
         let holes = [
             (unknown, Mode::Run),
-            (CompTy::Return(grade, Box::new(Ty::Unit)), Mode::Run),
+            (CompTy::ret(grade, Ty::unit()), Mode::Run),
             (function(), Mode::Thunk),
             (command(), Mode::Capture),
         ]
         .map(|(rhs, mode)| (solver.binding(&rhs, None).1, mode));
         let head = CompTy::pure(thunk(CompTy::pure(thunk(CompTy::arrows(
-            [Ty::Int, Ty::String],
-            CompTy::pure(Ty::Bool),
+            [Ty::int(), Ty::string()],
+            CompTy::pure(Ty::bool()),
         )))));
         let call = solver.call();
-        let result = solver.argument(call, &head, None, Ty::Int, false);
-        solver.argument(call, &result, None, Ty::String, false);
-        let (_, single) = apply(&mut solver, &function(), Ty::Int, false);
+        let result = solver.argument(call, &head, None, Ty::int(), false);
+        solver.argument(call, &result, None, Ty::string(), false);
+        let (_, single) = apply(&mut solver, &function(), Ty::int(), false);
         exit(&mut solver);
         assert!(solver.waiting.is_empty());
         let solution = success(solver);
@@ -1591,7 +1607,7 @@ mod tests {
     fn pure_return_thunk_cycles_fail_without_infinite_peeling() {
         let mut solver = Solver::new();
         let head = solver.fresh_comp();
-        apply(&mut solver, &head, Ty::Int, false);
+        apply(&mut solver, &head, Ty::int(), false);
         assert!(!solver.equate_comp(&head, &CompTy::pure(thunk(head.clone())), Reason::Argument));
         let errors = solver.refused().1;
         assert!(
@@ -1634,12 +1650,12 @@ mod tests {
             );
         }
         solver.unifier.at = Some(at(30));
-        solver.equate(&not_unit, &Ty::Int, Reason::Argument);
-        solver.equate(&not_unit, &Ty::String, Reason::Argument);
-        solver.equate(&Ty::Bool, &Ty::String, Reason::Argument);
+        solver.equate(&not_unit, &Ty::int(), Reason::Argument);
+        solver.equate(&not_unit, &Ty::string(), Reason::Argument);
+        solver.equate(&Ty::bool(), &Ty::string(), Reason::Argument);
         solver.unifier.at = Some(at(10));
         solver.gate(&unit, ArgvBoundary::InShell("echo".into()));
-        solver.equate(&unit, &Ty::Unit, Reason::Argument);
+        solver.equate(&unit, &Ty::unit(), Reason::Argument);
         let errors = solver.refused().1;
         assert_eq!(errors.len(), 3);
         assert_eq!(errors[0].pos, Some(at(10)));
@@ -1651,11 +1667,11 @@ mod tests {
         assert!(errors[2].unit.is_none());
         assert!(matches!(
             &errors[1].kind,
-            TypeErrorKind::TyMismatch { expected, .. } if **expected == Ty::Int
+            TypeErrorKind::TyMismatch { expected, .. } if *expected == Ty::int()
         ));
         assert!(matches!(
             &errors[2].kind,
-            TypeErrorKind::TyMismatch { expected, .. } if **expected == Ty::Bool
+            TypeErrorKind::TyMismatch { expected, .. } if *expected == Ty::bool()
         ));
     }
 
@@ -1669,8 +1685,8 @@ mod tests {
         exit(&mut solver);
         let scheme = solver.generalise(&value);
         assert_eq!(forall_tys(&scheme), []);
-        solver.equate(&value, &Ty::Int, Reason::Argument);
-        solver.equate(&value, &Ty::String, Reason::Argument);
+        solver.equate(&value, &Ty::int(), Reason::Argument);
+        solver.equate(&value, &Ty::string(), Reason::Argument);
         let errors = solver.refused().1;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].weak, Some(source));
@@ -1679,11 +1695,11 @@ mod tests {
     #[test]
     fn instantiate_answers_only_with_unknowns() {
         let mut solver = Solver::new();
-        let scheme = Scheme::mono(Ty::String);
+        let scheme = Scheme::mono(Ty::string());
         let ty = solver.instantiate(&scheme);
-        assert!(matches!(ty, Ty::Var(_)));
+        assert!(matches!(ty.node(), TyNode::Var(_)));
         let solution = success(solver);
-        assert_eq!(solution.resolve_ty(&ty), Ty::String);
+        assert_eq!(solution.resolve_ty(&ty), Ty::string());
     }
     /// The second use meets `Int`, which the weak variable was fixed to, not
     /// the variable itself.
@@ -1692,8 +1708,8 @@ mod tests {
         let mut ctx = Solver::new();
         let weak = ctx.fresh_ty();
         ctx.weak(&weak, WeakSource::Boundary("from-json".into()));
-        ctx.equate(&weak, &Ty::Int, Reason::Argument);
-        ctx.equate(&weak, &Ty::String, Reason::Argument);
+        ctx.equate(&weak, &Ty::int(), Reason::Argument);
+        ctx.equate(&weak, &Ty::string(), Reason::Argument);
         let [err] = &ctx.errors[..] else {
             panic!("one mismatch expected: {:?}", ctx.errors);
         };
@@ -1708,8 +1724,8 @@ mod tests {
     fn a_mismatch_with_no_weak_variable_has_no_note() {
         let mut ctx = Solver::new();
         let var = ctx.fresh_ty();
-        ctx.equate(&var, &Ty::Int, Reason::Argument);
-        ctx.equate(&var, &Ty::String, Reason::Argument);
+        ctx.equate(&var, &Ty::int(), Reason::Argument);
+        ctx.equate(&var, &Ty::string(), Reason::Argument);
         let [err] = &ctx.errors[..] else {
             panic!("one mismatch expected: {:?}", ctx.errors);
         };
@@ -1725,16 +1741,16 @@ mod tests {
     #[test]
     fn raise_drops_only_the_same_sentence_at_the_same_span() {
         let mismatch = |actual| TypeErrorKind::TyMismatch {
-            expected: Box::new(Ty::Int),
-            actual: Box::new(actual),
+            expected: Ty::int(),
+            actual,
         };
         let at = |start| Some(Span::new(FileId::DUMMY, start, start + 1));
         let mut ctx = Solver::new();
         for (pos, ty) in [
-            (at(0), Ty::String),
-            (at(0), Ty::String),
-            (at(2), Ty::String),
-            (at(0), Ty::Bool),
+            (at(0), Ty::string()),
+            (at(0), Ty::string()),
+            (at(2), Ty::string()),
+            (at(0), Ty::bool()),
         ] {
             ctx.unifier.at = pos;
             ctx.diagnose(mismatch(ty));
@@ -1746,11 +1762,11 @@ mod tests {
     fn nested_table_and_gate_checks_are_late_and_stably_source_ordered() {
         let mut solver = Solver::new();
         solver.unifier.at = Some(at(30));
-        solver.gate(&Ty::Unit, ArgvBoundary::Exec("echo".into()));
+        solver.gate(&Ty::unit(), ArgvBoundary::Exec("echo".into()));
         solver.nested(NestedCheck {
             key: "exec",
             table: contract::declared(contract::Form::Manifest),
-            ty: Ty::Int,
+            ty: Ty::int(),
             pos: Some(at(10)),
         });
         assert!(solver.errors.is_empty());

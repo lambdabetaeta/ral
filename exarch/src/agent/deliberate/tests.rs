@@ -241,7 +241,7 @@ fn builtin_t2_cancel_now(
 }
 
 fn scheme_t2_cancel_now(_: &mut Binders) -> Ty {
-    thunk(pure(Ty::Unit))
+    thunk(pure(Ty::unit()))
 }
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]

@@ -1144,19 +1144,19 @@ mod vet {
         use crate::ty::{Row, Ty};
         let of_value = |v: &Value| v.heads().first().copied().and_then(RefusedArg::of_head);
         let pairs: [(Value, Ty); 9] = [
-            (Value::Unit, Ty::Unit),
-            (Value::Bool(true), Ty::Bool),
-            (Value::Int(1), Ty::Int),
+            (Value::Unit, Ty::unit()),
+            (Value::Bool(true), Ty::bool()),
+            (Value::Int(1), Ty::int()),
             (
                 Value::Float(crate::data::Finite::new(1.0).expect("finite")),
-                Ty::Float,
+                Ty::float(),
             ),
-            (Value::string("x"), Ty::String),
-            (Value::bytes(vec![1]), Ty::Bytes),
-            (Value::List(vec![].into()), Ty::list(Ty::String)),
-            (Value::map(vec![]), Ty::map(Ty::Int)),
+            (Value::string("x"), Ty::string()),
+            (Value::bytes(vec![1]), Ty::bytes()),
+            (Value::List(vec![].into()), Ty::list(Ty::string())),
+            (Value::map(vec![]), Ty::map(Ty::int())),
             // A tagged value renders, so neither side refuses it.
-            (Value::variant("ok", None), Ty::Variant(Row::Empty)),
+            (Value::variant("ok", None), Ty::variant(Row::empty())),
         ];
         for (value, ty) in pairs {
             assert_eq!(
@@ -1167,11 +1167,11 @@ mod vet {
         }
         // A record is a map at run time, so it is refused as the map it is.
         assert_eq!(
-            RefusedArg::of_ty(&Ty::Record(Row::Empty)),
+            RefusedArg::of_ty(&Ty::record(Row::empty())),
             Some(RefusedArg::Map)
         );
         // A variable is not a shape: the runtime keeps that question.
-        assert_eq!(RefusedArg::of_ty(&Ty::Var(crate::ty::TyVar(0))), None);
+        assert_eq!(RefusedArg::of_ty(&Ty::var(crate::ty::TyVar(0))), None);
     }
 }
 

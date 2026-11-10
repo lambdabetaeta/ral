@@ -4,7 +4,7 @@
 use super::contract::Vocab;
 use crate::ir::BinaryOp;
 use crate::source::Span;
-use crate::ty::{CompTy, Kind, Label, RefusedArg, Row, Ty};
+use crate::ty::{CompTy, CompTyNode, Kind, Label, RefusedArg, Row, Ty, TyNode};
 
 /// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
@@ -194,7 +194,7 @@ pub enum CycleVia {
 #[derive(Debug, Clone)]
 pub enum KindFound {
     /// A type whose head the kind does not admit.
-    Type(Box<Ty>),
+    Type(Ty),
     /// Another variable's kind, sharing no head with the required one.
     Used { kind: Kind, witness: Option<Span> },
 }
@@ -221,11 +221,9 @@ pub enum TypeErrorKind {
     CyclicType {
         via: CycleVia,
     },
-    /// Boxed: two `Ty`s inline make this enum the largest thing every
-    /// `Result` in the unifier carries, and a mismatch is the cold path.
     TyMismatch {
-        expected: Box<Ty>,
-        actual: Box<Ty>,
+        expected: Ty,
+        actual: Ty,
     },
     /// A variable's kind, imposed at `witness`, is not met by `found`.
     KindMismatch {
@@ -379,11 +377,12 @@ impl TypeErrorKind {
     pub fn reported(self, reason: &Reason) -> Self {
         match (reason, &self) {
             (Reason::Head { name }, Self::TyMismatch { expected, actual }) => {
-                let ty = match (&**expected, &**actual) {
-                    (Ty::Thunk(_), other) | (other, Ty::Thunk(_))
-                        if !matches!(other, Ty::Thunk(_)) =>
-                    {
-                        other.clone()
+                let ty = match (expected.node(), actual.node()) {
+                    (TyNode::Thunk(_), other) if !matches!(other, TyNode::Thunk(_)) => {
+                        actual.clone()
+                    }
+                    (other, TyNode::Thunk(_)) if !matches!(other, TyNode::Thunk(_)) => {
+                        expected.clone()
                     }
                     _ => return self,
                 };
@@ -396,11 +395,12 @@ impl TypeErrorKind {
                 }
             }
             (Reason::CaseScrutinee, Self::TyMismatch { expected, actual }) => {
-                let ty = match (&**expected, &**actual) {
-                    (Ty::Variant(_), other) | (other, Ty::Variant(_))
-                        if !matches!(other, Ty::Variant(_)) =>
-                    {
-                        other.clone()
+                let ty = match (expected.node(), actual.node()) {
+                    (TyNode::Variant(_), other) if !matches!(other, TyNode::Variant(_)) => {
+                        actual.clone()
+                    }
+                    (other, TyNode::Variant(_)) if !matches!(other, TyNode::Variant(_)) => {
+                        expected.clone()
                     }
                     _ => return self,
                 };
@@ -440,8 +440,9 @@ impl TypeErrorKind {
                 },
                 Self::CompTyMismatch { expected, actual },
             ) if matches!(
-                (expected, actual),
-                (CompTy::Fun(..), CompTy::Return(..)) | (CompTy::Return(..), CompTy::Fun(..))
+                (expected.node(), actual.node()),
+                (CompTyNode::Fun(..), CompTyNode::Return(..))
+                    | (CompTyNode::Return(..), CompTyNode::Fun(..))
             ) =>
             {
                 Self::BuiltinArity {
@@ -539,26 +540,23 @@ mod tests {
     use crate::ty::{Grade, RowVar};
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
-        TypeErrorKind::TyMismatch {
-            expected: Box::new(expected),
-            actual: Box::new(actual),
-        }
+        TypeErrorKind::TyMismatch { expected, actual }
     }
 
     #[test]
     fn reported_head_failures_name_bound_values_or_unnamed_heads() {
-        let thunk = Ty::Thunk(Box::new(CompTy::pure(Ty::Unit)));
-        for (expected, actual) in [(&thunk, &Ty::String), (&Ty::String, &thunk)] {
+        let thunk = Ty::thunk(CompTy::pure(Ty::unit()));
+        for (expected, actual) in [(&thunk, &Ty::string()), (&Ty::string(), &thunk)] {
             for name in [Some("f".to_string()), None] {
                 let reported = mismatch(expected.clone(), actual.clone())
                     .reported(&Reason::Head { name: name.clone() });
                 match (name, reported) {
                     (Some(want), TypeErrorKind::HeadBoundToValue { name, ty }) => {
                         assert_eq!(name, want);
-                        assert_eq!(ty, Ty::String);
+                        assert_eq!(ty, Ty::string());
                     }
                     (None, TypeErrorKind::CommandNotFunction { ty }) => {
-                        assert_eq!(ty, Ty::String);
+                        assert_eq!(ty, Ty::string());
                     }
                     (_, other) => panic!("not a head diagnosis: {other:?}"),
                 }
@@ -568,13 +566,13 @@ mod tests {
 
     #[test]
     fn reported_case_scrutinee_failures_name_the_non_variant() {
-        let variant = Ty::Variant(Row::Empty);
-        for (expected, actual) in [(&variant, &Ty::Int), (&Ty::Int, &variant)] {
+        let variant = Ty::variant(Row::empty());
+        for (expected, actual) in [(&variant, &Ty::int()), (&Ty::int(), &variant)] {
             let reported =
                 mismatch(expected.clone(), actual.clone()).reported(&Reason::CaseScrutinee);
             assert!(matches!(
-                reported,
-                TypeErrorKind::CaseOnNonVariant { ty: Ty::Int }
+                &reported,
+                TypeErrorKind::CaseOnNonVariant { ty } if *ty == Ty::int()
             ));
             assert_eq!(reported.code(), "T0032");
         }
@@ -584,11 +582,7 @@ mod tests {
     fn reported_case_coverage_uses_both_label_sets_and_respects_open_rows() {
         let row = |tags: &[&str], tail| {
             tags.iter().rev().fold(tail, |rest, tag| {
-                Row::Extend(
-                    Label::Case((*tag).into()),
-                    Box::new(Ty::Unit),
-                    Box::new(rest),
-                )
+                Row::extend(Label::Case((*tag).into()), Ty::unit(), rest)
             })
         };
         let labels = |tags: &[&str]| -> Vec<Label> {
@@ -598,16 +592,16 @@ mod tests {
             labels(tags).iter().map(ToString::to_string).collect()
         };
         for (scrutinee, arms, missing, extra) in [
-            (row(&["a", "b"], Row::Empty), vec!["a"], vec!["b"], vec![]),
-            (row(&["a"], Row::Empty), vec!["a", "b"], vec![], vec!["b"]),
+            (row(&["a", "b"], Row::empty()), vec!["a"], vec!["b"], vec![]),
+            (row(&["a"], Row::empty()), vec!["a", "b"], vec![], vec!["b"]),
             (
-                row(&["a"], Row::Empty),
+                row(&["a"], Row::empty()),
                 vec!["b", "c"],
                 vec!["a"],
                 vec!["b", "c"],
             ),
             (
-                row(&["a", "b"], Row::Var(RowVar(0))),
+                row(&["a", "b"], Row::var(RowVar(0))),
                 vec!["a", "c"],
                 vec!["b"],
                 vec![],
@@ -640,8 +634,8 @@ mod tests {
             }
         }
         for (scrutinee, arms) in [
-            (row(&["a", "b"], Row::Empty), vec!["a", "b"]),
-            (row(&["a"], Row::Var(RowVar(0))), vec!["a", "b"]),
+            (row(&["a", "b"], Row::empty()), vec!["a", "b"]),
+            (row(&["a"], Row::var(RowVar(0))), vec!["a", "b"]),
         ] {
             let reason = Reason::CaseCoverage {
                 scrutinee,
@@ -656,8 +650,8 @@ mod tests {
 
     #[test]
     fn reported_shape_failures_name_under_applied_builtins_only() {
-        let producer = CompTy::pure(Ty::Unit);
-        let function = CompTy::arrows([Ty::Int], producer.clone());
+        let producer = CompTy::pure(Ty::unit());
+        let function = CompTy::arrows([Ty::int()], producer.clone());
         for (expected, actual) in [(&function, &producer), (&producer, &function)] {
             for pipeline in [false, true] {
                 for builtin in [false, true] {
@@ -697,7 +691,7 @@ mod tests {
             Reason::Head { name: None },
             Reason::CaseScrutinee,
             Reason::CaseCoverage {
-                scrutinee: Row::Empty,
+                scrutinee: Row::empty(),
                 arms: vec![],
             },
             Reason::PipelineStageShape {
@@ -723,9 +717,9 @@ mod tests {
         ];
         for reason in reasons {
             assert!(matches!(
-                mismatch(Ty::Int, Ty::String).reported(&reason),
+                mismatch(Ty::int(), Ty::string()).reported(&reason),
                 TypeErrorKind::TyMismatch { expected, actual }
-                    if *expected == Ty::Int && *actual == Ty::String
+                    if expected == Ty::int() && actual == Ty::string()
             ));
             assert!(matches!(
                 TypeErrorKind::CyclicType {
@@ -738,8 +732,8 @@ mod tests {
             ));
             assert!(matches!(
                 TypeErrorKind::CompTyMismatch {
-                    expected: CompTy::pure(Ty::Int),
-                    actual: CompTy::Return(Grade::Output, Box::new(Ty::Unit)),
+                    expected: CompTy::pure(Ty::int()),
+                    actual: CompTy::ret(Grade::Output, Ty::unit()),
                 }
                 .reported(&reason),
                 TypeErrorKind::CompTyMismatch { .. }
@@ -751,11 +745,7 @@ mod tests {
     fn coverage_names_missing_arms_and_extra_arms_of_a_closed_row_only() {
         let row = |tags: &[&str], tail: Row| {
             tags.iter().rev().fold(tail, |rest, tag| {
-                Row::Extend(
-                    Label::Case((*tag).into()),
-                    Box::new(Ty::Unit),
-                    Box::new(rest),
-                )
+                Row::extend(Label::Case((*tag).into()), Ty::unit(), rest)
             })
         };
         let arms = |tags: &[&str]| -> Vec<Label> {
@@ -763,13 +753,13 @@ mod tests {
         };
         let strings =
             |tags: &[&str]| -> Vec<String> { arms(tags).iter().map(Label::to_string).collect() };
-        let open = || Row::Var(crate::ty::RowVar(0));
+        let open = || Row::var(crate::ty::RowVar(0));
         let cases: [(Row, &[&str], Verdict); 6] = [
-            (row(&["a", "b"], Row::Empty), &["a", "b"], None),
-            (row(&["a", "b"], Row::Empty), &["a"], Some((&["b"], &[]))),
-            (row(&["a"], Row::Empty), &["a", "b"], Some((&[], &["b"]))),
+            (row(&["a", "b"], Row::empty()), &["a", "b"], None),
+            (row(&["a", "b"], Row::empty()), &["a"], Some((&["b"], &[]))),
+            (row(&["a"], Row::empty()), &["a", "b"], Some((&[], &["b"]))),
             (
-                row(&["a"], Row::Empty),
+                row(&["a"], Row::empty()),
                 &["b", "c"],
                 Some((&["a"], &["b", "c"])),
             ),

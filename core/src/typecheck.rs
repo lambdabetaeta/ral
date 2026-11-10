@@ -35,7 +35,7 @@ use self::readback::Readback;
 use self::solve::Solver;
 use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
-use crate::ty::{Closed, CompTy, Ty, UnitId};
+use crate::ty::{Closed, CompTy, Ty, TyNode, UnitId};
 use std::sync::Arc;
 
 /// What a form holds its programs' own return value to: the declared
@@ -102,7 +102,7 @@ fn first_error(errors: Vec<TypeError>) -> Box<TypeError> {
 
 /// Exit the inference region before generalising, and export only after closure.
 fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Box<TypeError>> {
-    let scheme = generator.solver.generalise(&Ty::Thunk(Box::new(cty)));
+    let scheme = generator.solver.generalise(&Ty::thunk(cty));
     let solution = generator.solver.close().map_err(first_error)?;
     Ok(solution.settle(Arc::new(scheme)))
 }
@@ -214,13 +214,11 @@ pub(crate) fn binding_value_scheme(
 pub(crate) fn takes(scheme: &Closed, n: usize) -> bool {
     let mut u = Unifier::new();
     let scheme = reseed_weak(&mut u, scheme);
-    let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
+    let instance = instantiate(&mut u, &scheme);
+    let TyNode::Thunk(body) = instance.node() else {
         return false;
     };
     let params: Vec<Ty> = (0..n).map(|_| u.fresh_ty()).collect();
-    let shape = CompTy::arrows(
-        params,
-        CompTy::Return(u.fresh_grade(), Box::new(u.fresh_ty())),
-    );
-    u.unify_comp_ty(&shape, &body).is_ok()
+    let shape = CompTy::arrows(params, CompTy::ret(u.fresh_grade(), u.fresh_ty()));
+    u.unify_comp_ty(&shape, body).is_ok()
 }

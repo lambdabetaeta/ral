@@ -12,8 +12,8 @@ use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
 use crate::text::{indefinite, plural};
 use crate::ty::{
-    CompTy, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, fmt_comp_ty_ctx,
-    fmt_ty_ctx,
+    CompTy, CompTyNode, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, TyNode,
+    fmt_comp_ty_ctx, fmt_ty_ctx,
 };
 
 impl TypeErrorKind {
@@ -265,20 +265,20 @@ impl TypeErrorKind {
 
 /// What a value of this type is, for a sentence.
 fn describe(ty: &Ty) -> String {
-    match ty {
-        Ty::Unit => "nothing (`()`)",
-        Ty::Bool => "a Bool",
-        Ty::Int => "an Int",
-        Ty::Float => "a Float",
-        Ty::String => "text (String)",
-        Ty::Bytes => "Bytes",
-        Ty::List(_) => "a list",
-        Ty::Map(_) => "a map",
-        Ty::Record(_) => "a record",
-        Ty::Variant(_) => "a tagged value",
-        Ty::Thunk(_) => "a block",
-        Ty::Handle(..) => "a handle",
-        Ty::Var(_) => "a value of unknown type",
+    match ty.node() {
+        TyNode::Unit => "nothing (`()`)",
+        TyNode::Bool => "a Bool",
+        TyNode::Int => "an Int",
+        TyNode::Float => "a Float",
+        TyNode::String => "text (String)",
+        TyNode::Bytes => "Bytes",
+        TyNode::List(_) => "a list",
+        TyNode::Map(_) => "a map",
+        TyNode::Record(_) => "a record",
+        TyNode::Variant(_) => "a tagged value",
+        TyNode::Thunk(_) => "a block",
+        TyNode::Handle(..) => "a handle",
+        TyNode::Var(_) => "a value of unknown type",
     }
     .into()
 }
@@ -330,29 +330,33 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
         }
         _ => None,
     };
-    let way = match (reason, &**ty) {
-        (Some(Reason::BinaryOperands(BinaryOp::Arith(op))), Ty::String) if *op != ArithOp::Mod => {
+    let way = match (reason, ty.node()) {
+        (Some(Reason::BinaryOperands(BinaryOp::Arith(op))), TyNode::String)
+            if *op != ArithOp::Mod =>
+        {
             Some("to join text, interpolate: `\"$a$b\"`")
         }
-        (_, Ty::List(_) | Ty::Record(_) | Ty::Map(_)) if required == Kind::COMPARABLE => {
+        (_, TyNode::List(_) | TyNode::Record(_) | TyNode::Map(_))
+            if required == Kind::COMPARABLE =>
+        {
             Some("sort with `sort-list-by` and a key")
         }
-        (Some(Reason::Interpolation), Ty::List(_)) => {
+        (Some(Reason::Interpolation), TyNode::List(_)) => {
             Some("join a list with `!{intercalate ', ' $xs}`")
         }
-        (Some(Reason::Interpolation), Ty::Record(_) | Ty::Map(_)) => {
+        (Some(Reason::Interpolation), TyNode::Record(_) | TyNode::Map(_)) => {
             Some("render it with `!{to-json $x}`")
         }
-        (Some(Reason::Interpolation), Ty::Unit) => {
+        (Some(Reason::Interpolation), TyNode::Unit) => {
             Some("`()` is nothing to print; to print the text, write `'()'`")
         }
-        (Some(Reason::Interpolation), Ty::Bytes) => {
+        (Some(Reason::Interpolation), TyNode::Bytes) => {
             Some("decode it with `from-string`, or render it with `str`")
         }
-        (_, Ty::Thunk(_)) if required == Kind::DATA => {
+        (_, TyNode::Thunk(_)) if required == Kind::DATA => {
             Some("a block has no equality and no encoding: use what it computes, `!$f`")
         }
-        (_, Ty::Handle(..)) if required == Kind::DATA => {
+        (_, TyNode::Handle(..)) if required == Kind::DATA => {
             Some("a handle has no equality and no encoding: use what `await` gives")
         }
         _ => None,
@@ -368,8 +372,8 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
 /// `unify.rs` blames no component when the two heads differ in shape —
 /// `Return` against `Fun`.
 fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
-    match (expected, actual) {
-        (CompTy::Return(g, expected), CompTy::Return(h, actual)) if g == h => {
+    match (expected.node(), actual.node()) {
+        (CompTyNode::Return(g, expected), CompTyNode::Return(h, actual)) if g == h => {
             let ctx = FmtCtx::for_value_types(&[expected, actual]);
             format!(
                 "couldn't match type {} with type {}",
@@ -377,7 +381,7 @@ fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
                 fmt_ty_ctx(actual, &ctx)
             )
         }
-        (CompTy::Return(..), CompTy::Return(..)) => {
+        (CompTyNode::Return(..), CompTyNode::Return(..)) => {
             let ctx = FmtCtx::for_comp_types(&[expected, actual]);
             format!(
                 "couldn't match type {} with type {}",
@@ -396,10 +400,14 @@ fn fmt_comp_mismatch(expected: &CompTy, actual: &CompTy) -> String {
 fn value_sides(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
     match kind {
         TypeErrorKind::TyMismatch { expected, actual } => Some((expected, actual)),
-        TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(g, expected),
-            actual: CompTy::Return(h, actual),
-        } if g == h => Some((expected, actual)),
+        TypeErrorKind::CompTyMismatch { expected, actual } => {
+            match (expected.node(), actual.node()) {
+                (CompTyNode::Return(g, expected), CompTyNode::Return(h, actual)) if g == h => {
+                    Some((expected, actual))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -408,14 +416,21 @@ fn value_sides(kind: &TypeErrorKind) -> Option<(&Ty, &Ty)> {
 /// was found where the value was demanded.
 fn command_against_value(kind: &TypeErrorKind) -> Option<(&Ty, bool)> {
     match kind {
-        TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(grade, value),
-            actual: CompTy::Return(Grade::Output, _),
-        } if *grade != Grade::Output => Some((value, true)),
-        TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(Grade::Output, _),
-            actual: CompTy::Return(grade, value),
-        } if *grade != Grade::Output => Some((value, false)),
+        TypeErrorKind::CompTyMismatch { expected, actual } => {
+            match (expected.node(), actual.node()) {
+                (CompTyNode::Return(grade, value), CompTyNode::Return(Grade::Output, _))
+                    if *grade != Grade::Output =>
+                {
+                    Some((value, true))
+                }
+                (CompTyNode::Return(Grade::Output, _), CompTyNode::Return(grade, value))
+                    if *grade != Grade::Output =>
+                {
+                    Some((value, false))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -447,17 +462,17 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         // Every other reason says what it demanded in its own words.
         _ => return None,
     };
-    Some(match (form.map(|form| form.words()), command_found, value) {
-        (Some((form, phrase)), true, Ty::String | Ty::Var(_)) => format!(
+    Some(match (form.map(|form| form.words()), command_found, value.node()) {
+        (Some((form, phrase)), true, TyNode::String | TyNode::Var(_)) => format!(
             "this {form} is a command and an earlier one returns a value; {phrase}'s output is not captured: return it, `{{ return !{{…}} }}`"
         ),
-        (Some((form, phrase)), false, Ty::String | Ty::Var(_)) => format!(
+        (Some((form, phrase)), false, TyNode::String | TyNode::Var(_)) => format!(
             "this {form} returns a value and an earlier one is a command; {phrase}'s output is not captured: make that one return it, `{{ return !{{…}} }}`"
         ),
-        (Some((form, _)), true, Ty::Bool) => format!(
+        (Some((form, _)), true, TyNode::Bool) => format!(
             "this {form} is a command and an earlier one returns a Bool; for a yes/no answer from a command, `succeeds {{ … }}`"
         ),
-        (Some((form, _)), false, Ty::Bool) => format!(
+        (Some((form, _)), false, TyNode::Bool) => format!(
             "this {form} returns a Bool and an earlier one is a command; for a yes/no answer from that command, `succeeds {{ … }}`"
         ),
         (Some((form, _)), true, _) => format!(
@@ -468,9 +483,9 @@ fn grade_hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             "this {form} returns {} and an earlier one is a command; give that one a value of that type too (`… | from-json`, or `return` one), or write this {form}'s value out with `echo`",
             describe(value)
         ),
-        (None, true, Ty::String | Ty::Var(_)) =>
+        (None, true, TyNode::String | TyNode::Var(_)) =>
             "this block is a command, but a block that returns a value is wanted here: return its output, `{ |…| return !{…} }`".into(),
-        (None, true, Ty::Bool) =>
+        (None, true, TyNode::Bool) =>
             "this block is a command, but a block that returns a Bool is wanted here; for a yes/no answer, `succeeds { … }`".into(),
         (None, true, _) => format!(
             "this block is a command, but a block that returns {} is wanted here: decode its output (`return !{{… | from-json}}`) or `return` one",
@@ -496,15 +511,15 @@ fn arm_join_hint(form: &str) -> String {
 /// An arm that is no block, where an `if` or `case` forces one.
 fn not_a_block(kind: &TypeErrorKind) -> bool {
     matches!(kind, TypeErrorKind::TyMismatch { expected, actual }
-        if matches!(**expected, Ty::Thunk(_)) != matches!(**actual, Ty::Thunk(_)))
+        if matches!(expected.node(), TyNode::Thunk(_)) != matches!(actual.node(), TyNode::Thunk(_)))
 }
 
 /// What a producer's value is, for a sentence: a command's is its output.
 fn describe_producer(cty: &CompTy) -> String {
-    match cty {
-        CompTy::Return(Grade::Output, _) => "its output, being a command".to_string(),
-        CompTy::Return(_, ty) => describe(ty),
-        CompTy::Fun(..) | CompTy::Var(_) => "something else".to_string(),
+    match cty.node() {
+        CompTyNode::Return(Grade::Output, _) => "its output, being a command".to_string(),
+        CompTyNode::Return(_, ty) => describe(ty),
+        CompTyNode::Fun(..) | CompTyNode::Var(_) => "something else".to_string(),
     }
 }
 
@@ -543,7 +558,7 @@ fn stage_writes_hint(stage: Option<&str>, next: Option<&str>, kind: &TypeErrorKi
     let returned = value_sides(kind).map_or_else(
         || "a value".to_string(),
         |(expected, actual)| {
-            describe(if *actual == Ty::Unit {
+            describe(if *actual == Ty::unit() {
                 expected
             } else {
                 actual
@@ -687,9 +702,9 @@ fn concerns_unit(kind: &TypeErrorKind) -> bool {
         TypeErrorKind::KindMismatch {
             found: KindFound::Type(ty),
             ..
-        } => **ty == Ty::Unit,
+        } => *ty == Ty::unit(),
         TypeErrorKind::TyMismatch { expected, actual } => {
-            **expected == Ty::Unit || **actual == Ty::Unit
+            *expected == Ty::unit() || *actual == Ty::unit()
         }
         TypeErrorKind::ExecArgNotText { refused, .. } => *refused == RefusedArg::Unit,
         _ => false,
@@ -1104,7 +1119,7 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
-    let keyed = |t: &Ty| matches!(t, Ty::Record(_) | Ty::Map(_));
+    let keyed = |t: &Ty| matches!(t.node(), TyNode::Record(_) | TyNode::Map(_));
     (keyed(expected) || keyed(actual)).then(|| {
         "this is a list literal, and `...` here copies list elements: a record \
          update is written as a record literal (`[...$a, port: 1]`), a map merge as \
@@ -1120,18 +1135,20 @@ fn argument_hint(kind: &TypeErrorKind) -> Option<String> {
     let (expected, actual) = value_sides(kind)?;
     [(expected, actual), (actual, expected)]
         .into_iter()
-        .find_map(|pair| match pair {
-            (Ty::List(_), Ty::String) => Some(
+        .find_map(|pair| match (pair.0.node(), pair.1.node()) {
+            (TyNode::List(_), TyNode::String) => Some(
                 "a String is not a list: `slice $s 0 n` cuts text and `lines $s` splits \
                  it into a list; a list is cut with `take`/`drop`, and strings join by \
                  interpolation, `\"$a$b\"`, or `intercalate '' $xs`"
                     .to_string(),
             ),
-            (Ty::Record(row), Ty::String) => {
-                let text = row.fields().find_map(|(label, ty)| match (label, ty) {
-                    (Label::Field(name), Ty::String) => Some(name),
-                    _ => None,
-                })?;
+            (TyNode::Record(row), TyNode::String) => {
+                let text = row
+                    .fields()
+                    .find_map(|(label, ty)| match (label, ty.node()) {
+                        (Label::Field(name), TyNode::String) => Some(name),
+                        _ => None,
+                    })?;
                 Some(format!(
                     "this is a record {}: did you mean one of its fields, \
                      as in `$x[{text}]`?",
@@ -1158,15 +1175,15 @@ fn meets_as_peers(reason: &Reason) -> bool {
 }
 
 /// Help for a value mismatch derived from the types' own shapes, not from which
-/// reason raised it — a `Ty::Thunk` parameter, an error-record `[status: Int |
+/// reason raised it — a `TyNode::Thunk` parameter, an error-record `[status: Int |
 /// r]`, and a byte/list confusion each name what the mismatch *is*, whether it
 /// arose at an argument, a spread, or a branch join. Which side lands in
 /// `expected` is an accident of the call site, so every test here considers
 /// both orders.
 fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let (expected, actual) = value_sides(kind)?;
-    let is_record = |t: &Ty| matches!(t, Ty::Record(_));
-    let is_map = |t: &Ty| matches!(t, Ty::Map(_));
+    let is_record = |t: &Ty| matches!(t.node(), TyNode::Record(_));
+    let is_map = |t: &Ty| matches!(t.node(), TyNode::Map(_));
     if (is_record(expected) && is_map(actual)) || (is_map(expected) && is_record(actual)) {
         return Some(
             "a record and a map are different types over the same pairs: a record's fields \
@@ -1176,7 +1193,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
                 .to_string(),
         );
     }
-    let is_thunk = |t: &Ty| matches!(t, Ty::Thunk(_));
+    let is_thunk = |t: &Ty| matches!(t.node(), TyNode::Thunk(_));
     if is_thunk(expected) != is_thunk(actual) {
         return Some(
             "one side is a block value (something built with `{ ... }` or `|x| ...`) \
@@ -1184,7 +1201,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
                 .to_string(),
         );
     }
-    let is_variant = |t: &Ty| matches!(t, Ty::Variant(_));
+    let is_variant = |t: &Ty| matches!(t.node(), TyNode::Variant(_));
     if is_variant(expected) != is_variant(actual) {
         return Some(
             "one of these is a tagged value (something built with a backtick, like \
@@ -1193,7 +1210,7 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
                 .to_string(),
         );
     }
-    let is_error_record = |t: &Ty| matches!(t, Ty::Record(row) if row_has_reason(row));
+    let is_error_record = |t: &Ty| matches!(t.node(), TyNode::Record(row) if row_has_reason(row));
     if is_error_record(expected) || is_error_record(actual) {
         return Some(
             "`fail` takes a String; use `raise $e` to re-raise an error record, \
@@ -1207,16 +1224,16 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
 /// A read refusal, by its written key and the head found.
 fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
     let accepts: fn(&Ty) -> bool = match reason {
-        Reason::RecordFieldRead => |ty| matches!(ty, Ty::Record(_)),
-        Reason::ListPositionRead => |ty| matches!(ty, Ty::List(_)),
-        Reason::MapKeyRead => |ty| matches!(ty, Ty::Map(_)),
-        Reason::MapIndexKey => |ty| matches!(ty, Ty::String),
+        Reason::RecordFieldRead => |ty| matches!(ty.node(), TyNode::Record(_)),
+        Reason::ListPositionRead => |ty| matches!(ty.node(), TyNode::List(_)),
+        Reason::MapKeyRead => |ty| matches!(ty.node(), TyNode::Map(_)),
+        Reason::MapIndexKey => |ty| matches!(ty.node(), TyNode::String),
         _ => return None,
     };
     let found = match kind {
-        TypeErrorKind::TyMismatch { expected, actual } => [&**expected, &**actual]
-            .into_iter()
-            .find(|ty| !accepts(ty))?,
+        TypeErrorKind::TyMismatch { expected, actual } => {
+            [expected, actual].into_iter().find(|ty| !accepts(ty))?
+        }
         TypeErrorKind::KindMismatch {
             found: KindFound::Type(ty),
             ..
@@ -1224,43 +1241,45 @@ fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
         _ => return None,
     };
     Some(
-        match (reason, found) {
-            (Reason::RecordFieldRead, Ty::Map(_)) => {
+        match (reason, found.node()) {
+            (Reason::RecordFieldRead, TyNode::Map(_)) => {
                 "a key written out, like `HOME`, names a record field, and this is a map, whose \
              keys are data: read it with a computed key (`$m[$k]`) or with `get $m HOME default`"
             }
-            (Reason::RecordFieldRead, Ty::List(_)) => {
+            (Reason::RecordFieldRead, TyNode::List(_)) => {
                 "a list is read by position: `$xs[0]`, or `nth $i $xs` for a computed one"
             }
-            (Reason::MapKeyRead, Ty::Record(_)) => {
+            (Reason::MapKeyRead, TyNode::Record(_)) => {
                 "a computed key reads a map, and this is a record, whose fields have names: \
              write the name, as in `$r[host]`"
             }
-            (Reason::MapKeyRead, Ty::List(_)) => {
+            (Reason::MapKeyRead, TyNode::List(_)) => {
                 "a computed key reads a map; for a list element at a computed position, \
              write `nth $i $xs`"
             }
-            (Reason::ListPositionRead, Ty::Record(_) | Ty::Map(_)) => {
+            (Reason::ListPositionRead, TyNode::Record(_) | TyNode::Map(_)) => {
                 "a whole number reads a list element; a field whose name is digits is written \
              quoted, as in `$r['0']`"
             }
-            (Reason::MapIndexKey, Ty::Int) => {
+            (Reason::MapIndexKey, TyNode::Int) => {
                 "a computed key reads a map, whose keys are Strings; for a list position, \
              write `nth $i $xs`"
             }
-            (Reason::MapIndexKey, ty) if !matches!(ty, Ty::String) => {
+            (Reason::MapIndexKey, ty) if !matches!(ty, TyNode::String) => {
                 "a computed key reads a map, whose keys are Strings; convert it with `str`"
             }
             (Reason::RecordFieldRead | Reason::ListPositionRead | Reason::MapKeyRead, ty) => {
                 match ty {
-                    Ty::Thunk(_) => {
+                    TyNode::Thunk(_) => {
                         "run the block first, then index its result: `!{!$t}[field]` \
              (`!$t[field]` reads `field` off `$t` and forces *that*)"
                     }
-                    Ty::Bytes => "decode bytes first: `bytes-to-string $b`",
-                    Ty::Handle(..) => "await the handle first: `await $h`",
-                    Ty::String => "text is not read with `[…]`; use `slice $s 0 80` or `lines $s`",
-                    Ty::Unit | Ty::Bool | Ty::Int | Ty::Float => {
+                    TyNode::Bytes => "decode bytes first: `bytes-to-string $b`",
+                    TyNode::Handle(..) => "await the handle first: `await $h`",
+                    TyNode::String => {
+                        "text is not read with `[…]`; use `slice $s 0 80` or `lines $s`"
+                    }
+                    TyNode::Unit | TyNode::Bool | TyNode::Int | TyNode::Float => {
                         "only records, lists and maps are read with `[…]`"
                     }
                     _ => return None,
@@ -1283,7 +1302,8 @@ fn row_has_reason(row: &Row) -> bool {
 /// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
 /// takes one argument type, so the hint must hold for each of them.
 fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
-    let list_for_bytes = |a: &Ty, b: &Ty| matches!(a, Ty::List(_)) && matches!(b, Ty::Bytes);
+    let list_for_bytes =
+        |a: &Ty, b: &Ty| matches!(a.node(), TyNode::List(_)) && matches!(b.node(), TyNode::Bytes);
     (list_for_bytes(expected, actual) || list_for_bytes(actual, expected)).then(|| {
         "Bytes are not a list: read them as text with `bytes-to-string $b`, or as \
          lines with `lines !{bytes-to-string $b}`; a list of numbers is written as \
@@ -1345,16 +1365,16 @@ fn unbound_variable_hint(name: &str, suggestions: &[String]) -> String {
 /// What a contract file that returns no record should return instead.
 fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
     let key = offered.first().copied().unwrap_or("key");
-    match found {
-        Ty::Map(_) => format!(
+    match found.node() {
+        TyNode::Map(_) => format!(
             "the keys of `{form}` are its labels, so write a record: `[{key}: …]`, \
              not a map (`[:, {key}: …]`)"
         ),
-        Ty::List(_) => format!(
+        TyNode::List(_) => format!(
             "`[]` is the empty list, not the empty record; a file with nothing to set \
              returns `()`, and otherwise `{form}` wants a record such as `[{key}: …]`"
         ),
-        Ty::Thunk(_) => format!("`{form}` returns its settings, not a block"),
+        TyNode::Thunk(_) => format!("`{form}` returns its settings, not a block"),
         _ => format!("return a record such as `[{key}: …]`, or `()` for nothing to set"),
     }
 }
@@ -1372,9 +1392,9 @@ fn near_tags<'a>(tag: &str, known: &'a [String]) -> Vec<&'a str> {
 
 /// The tags a type offers, peeling the lists around it.
 fn offered_tags(ty: &Ty) -> Option<Vec<String>> {
-    match ty {
-        Ty::List(elem) => offered_tags(elem),
-        Ty::Variant(row) => Some(row.fields().map(|(label, _)| label.to_string()).collect()),
+    match ty.node() {
+        TyNode::List(elem) => offered_tags(elem),
+        TyNode::Variant(row) => Some(row.fields().map(|(label, _)| label.to_string()).collect()),
         _ => None,
     }
 }
@@ -1449,8 +1469,8 @@ impl TypeError {
             (TypeErrorKind::TyMismatch { expected, actual }, Some(Reason::Vocabulary(vocab)))
                 if untagged_mismatch(expected, actual) =>
             {
-                let wanted = match **expected {
-                    Ty::List(_) => format!("a list of {}s", vocab.noun),
+                let wanted = match expected.node() {
+                    TyNode::List(_) => format!("a list of {}s", vocab.noun),
                     _ => indefinite(vocab.noun),
                 };
                 Some(format!("expected {wanted}, got {}", describe(actual)))
@@ -1482,16 +1502,13 @@ mod tests {
     use crate::ty::{CompTy, Typed as _};
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
-        TypeErrorKind::TyMismatch {
-            expected: Box::new(expected),
-            actual: Box::new(actual),
-        }
+        TypeErrorKind::TyMismatch { expected, actual }
     }
 
     fn producer_mismatch(expected: Ty, actual: Ty, grades: (Grade, Grade)) -> TypeErrorKind {
         TypeErrorKind::CompTyMismatch {
-            expected: CompTy::Return(grades.0, Box::new(expected)),
-            actual: CompTy::Return(grades.1, Box::new(actual)),
+            expected: CompTy::ret(grades.0, expected),
+            actual: CompTy::ret(grades.1, actual),
         }
     }
 
@@ -1601,7 +1618,13 @@ mod tests {
                 "head a computation returning a block",
             ),
         ] {
-            let hint = hint(&mismatch(Ty::Int, Ty::String), Some(&reason), None, None).unwrap();
+            let hint = hint(
+                &mismatch(Ty::int(), Ty::string()),
+                Some(&reason),
+                None,
+                None,
+            )
+            .unwrap();
             assert!(hint.contains("nothing in the enclosing definition makes"));
             assert!(hint.contains(fragment));
         }
@@ -1612,7 +1635,13 @@ mod tests {
                 recursive_call: false,
             },
         ] {
-            let hint = hint(&mismatch(Ty::Int, Ty::String), Some(&reason), None, None).unwrap();
+            let hint = hint(
+                &mismatch(Ty::int(), Ty::string()),
+                Some(&reason),
+                None,
+                None,
+            )
+            .unwrap();
             assert!(!hint.contains("nothing in the enclosing definition makes"));
         }
     }
@@ -1621,22 +1650,22 @@ mod tests {
     fn same_grade_producer_mismatches_keep_value_shape_hints() {
         let shapes = [
             (
-                Ty::Record(Row::Empty),
-                Ty::map(Ty::String),
+                Ty::record(Row::empty()),
+                Ty::map(Ty::string()),
                 "a record and a map",
             ),
-            (Ty::Variant(Row::Empty), Ty::Int, "a tagged value"),
+            (Ty::variant(Row::empty()), Ty::int(), "a tagged value"),
             (
-                Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
-                Ty::Int,
+                Ty::thunk(CompTy::pure(Ty::unit())),
+                Ty::int(),
                 "a block value",
             ),
             (
                 crate::fact::ErrorRecord::ty(),
-                Ty::String,
+                Ty::string(),
                 "use `raise $e` to re-raise an error record",
             ),
-            (Ty::Bytes, Ty::list(Ty::Int), "Bytes are not a list"),
+            (Ty::bytes(), Ty::list(Ty::int()), "Bytes are not a list"),
         ];
         for (left, right, fragment) in shapes {
             for (expected, actual) in [(&left, &right), (&right, &left)] {
@@ -1669,8 +1698,8 @@ mod tests {
         let other = Grade::Var(crate::ty::GradeVar(1));
         for grades in [(Grade::Value, free), (free, Grade::Value), (free, other)] {
             for (expected, actual) in [
-                (Ty::Record(Row::Empty), Ty::map(Ty::String)),
-                (Ty::String, Ty::list(Ty::Int)),
+                (Ty::record(Row::empty()), Ty::map(Ty::string())),
+                (Ty::string(), Ty::list(Ty::int())),
             ] {
                 let producer = producer_mismatch(expected, actual, grades);
                 for (reason, form) in [
@@ -1691,13 +1720,13 @@ mod tests {
     fn command_value_grade_hints_take_priority_over_payload_shapes() {
         for value in [
             crate::fact::ErrorRecord::ty(),
-            Ty::Variant(Row::Empty),
-            Ty::Thunk(Box::new(CompTy::pure(Ty::Unit))),
-            Ty::Bytes,
+            Ty::variant(Row::empty()),
+            Ty::thunk(CompTy::pure(Ty::unit())),
+            Ty::bytes(),
         ] {
             for (expected, actual, grades) in [
-                (value.clone(), Ty::Unit, (Grade::Value, Grade::Output)),
-                (Ty::Unit, value, (Grade::Output, Grade::Value)),
+                (value.clone(), Ty::unit(), (Grade::Value, Grade::Output)),
+                (Ty::unit(), value, (Grade::Output, Grade::Value)),
             ] {
                 let producer = producer_mismatch(expected, actual, grades);
                 for reason in [
@@ -1717,10 +1746,10 @@ mod tests {
     #[test]
     fn same_grade_producer_arguments_keep_value_argument_hints() {
         for (left, right, fragment) in [
-            (Ty::list(Ty::Int), Ty::String, "`lines $s`"),
+            (Ty::list(Ty::int()), Ty::string(), "`lines $s`"),
             (
-                Ty::Record(Row::Empty).extend("name", Ty::String),
-                Ty::String,
+                Ty::record(Row::empty()).extend("name", Ty::string()),
+                Ty::string(),
                 "`$x[name]`",
             ),
         ] {
@@ -1741,9 +1770,9 @@ mod tests {
 
     #[test]
     fn block_value_hint_is_the_same_in_both_orders() {
-        let block = || Ty::Thunk(Box::new(CompTy::pure(Ty::Unit)));
-        let forward = shape_hint(&mismatch(block(), Ty::Int));
-        let backward = shape_hint(&mismatch(Ty::Int, block()));
+        let block = || Ty::thunk(CompTy::pure(Ty::unit()));
+        let forward = shape_hint(&mismatch(block(), Ty::int()));
+        let backward = shape_hint(&mismatch(Ty::int(), block()));
         assert!(
             forward
                 .as_deref()
@@ -1754,9 +1783,9 @@ mod tests {
 
     #[test]
     fn text_for_a_list_hint_is_the_same_in_both_orders() {
-        let list = || Ty::list(Ty::Var(crate::ty::TyVar(0)));
-        let forward = argument_hint(&mismatch(list(), Ty::String));
-        let backward = argument_hint(&mismatch(Ty::String, list()));
+        let list = || Ty::list(Ty::var(crate::ty::TyVar(0)));
+        let forward = argument_hint(&mismatch(list(), Ty::string()));
+        let backward = argument_hint(&mismatch(Ty::string(), list()));
         assert!(forward.as_deref().is_some_and(|h| h.contains("`lines $s`")));
         assert_eq!(forward, backward);
     }
@@ -1764,12 +1793,12 @@ mod tests {
     #[test]
     fn record_for_text_hint_is_the_same_in_both_orders() {
         let entry = || {
-            Ty::Record(Row::Empty)
-                .extend("size", Ty::Int)
-                .extend("name", Ty::String)
+            Ty::record(Row::empty())
+                .extend("size", Ty::int())
+                .extend("name", Ty::string())
         };
-        let forward = argument_hint(&mismatch(entry(), Ty::String));
-        let backward = argument_hint(&mismatch(Ty::String, entry()));
+        let forward = argument_hint(&mismatch(entry(), Ty::string()));
+        let backward = argument_hint(&mismatch(Ty::string(), entry()));
         assert!(
             forward
                 .as_deref()
@@ -1780,7 +1809,7 @@ mod tests {
 
     #[test]
     fn record_without_text_has_no_argument_hint() {
-        let point = Ty::Record(Row::Empty).extend("x", Ty::Int);
-        assert_eq!(argument_hint(&mismatch(point, Ty::String)), None);
+        let point = Ty::record(Row::empty()).extend("x", Ty::int());
+        assert_eq!(argument_hint(&mismatch(point, Ty::string())), None);
     }
 }

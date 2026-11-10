@@ -5,7 +5,7 @@
 //! those are the rest.  Binding a kinded variable checks the head, and a deep
 //! kind imposes `data` on every component (see `typecheck::unify`).
 
-use super::Ty;
+use super::{Ty, TyNode};
 use std::fmt;
 
 /// The outermost constructor of a non-variable value type.
@@ -43,20 +43,20 @@ impl Head {
 
     /// `None` for a variable, which is not yet a head.
     pub(crate) fn of(ty: &Ty) -> Option<Self> {
-        Some(match ty {
-            Ty::Var(_) => return None,
-            Ty::Unit => Self::Unit,
-            Ty::Bool => Self::Bool,
-            Ty::Int => Self::Int,
-            Ty::Float => Self::Float,
-            Ty::String => Self::String,
-            Ty::Bytes => Self::Bytes,
-            Ty::List(_) => Self::List,
-            Ty::Map(_) => Self::Map,
-            Ty::Record(_) => Self::Record,
-            Ty::Variant(_) => Self::Variant,
-            Ty::Thunk(_) => Self::Thunk,
-            Ty::Handle(..) => Self::Handle,
+        Some(match ty.node() {
+            TyNode::Var(_) => return None,
+            TyNode::Unit => Self::Unit,
+            TyNode::Bool => Self::Bool,
+            TyNode::Int => Self::Int,
+            TyNode::Float => Self::Float,
+            TyNode::String => Self::String,
+            TyNode::Bytes => Self::Bytes,
+            TyNode::List(_) => Self::List,
+            TyNode::Map(_) => Self::Map,
+            TyNode::Record(_) => Self::Record,
+            TyNode::Variant(_) => Self::Variant,
+            TyNode::Thunk(_) => Self::Thunk,
+            TyNode::Handle(..) => Self::Handle,
         })
     }
 
@@ -67,12 +67,12 @@ impl Head {
     /// The type a head with no components is.
     fn nullary(self) -> Option<Ty> {
         Some(match self {
-            Self::Unit => Ty::Unit,
-            Self::Bool => Ty::Bool,
-            Self::Int => Ty::Int,
-            Self::Float => Ty::Float,
-            Self::String => Ty::String,
-            Self::Bytes => Ty::Bytes,
+            Self::Unit => Ty::unit(),
+            Self::Bool => Ty::bool(),
+            Self::Int => Ty::int(),
+            Self::Float => Ty::float(),
+            Self::String => Ty::string(),
+            Self::Bytes => Ty::bytes(),
             Self::List | Self::Map | Self::Record | Self::Variant | Self::Thunk | Self::Handle => {
                 return None;
             }
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn a_single_nullary_head_pins_the_variable() {
         let text = Kind::SIZED.meet(Kind::COMPARABLE).expect("both admit text");
-        assert_eq!(text.pin(), Some(Ty::String));
+        assert_eq!(text.pin(), Some(Ty::string()));
         assert_eq!(Kind::SIZED.pin(), None);
     }
 

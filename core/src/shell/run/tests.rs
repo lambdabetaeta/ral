@@ -44,7 +44,7 @@ fn install_body(
     use crate::typecheck::builtins::{pure, thunk};
     let entry = crate::shell::runtime::BuiltinEntry::new(
         std::borrow::Cow::Borrowed(name),
-        |_| thunk(pure(crate::ty::Ty::Unit)),
+        |_| thunk(pure(crate::ty::Ty::unit())),
         "test-only: act from inside the run.",
         crate::shell::runtime::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
             body(mooring, shell)
@@ -760,7 +760,7 @@ fn builtin_panic_now(
 
 fn scheme_panic_now(_: &mut crate::ty::Binders) -> crate::ty::Ty {
     use crate::typecheck::builtins::{pure, thunk};
-    thunk(pure(crate::ty::Ty::Unit))
+    thunk(pure(crate::ty::Ty::unit()))
 }
 
 static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =

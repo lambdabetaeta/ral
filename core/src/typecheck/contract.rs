@@ -32,7 +32,7 @@ use super::unify::Unifier;
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
 pub(crate) use crate::text::code;
-use crate::ty::{CompTy, Label, Row, TAG_PREFIX, Ty};
+use crate::ty::{CompTy, CompTyNode, Label, Row, RowNode, TAG_PREFIX, Ty, TyNode};
 
 /// Which declared table.  An enum rather than a name, so a lookup cannot miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,16 +45,15 @@ pub enum Form {
 
 /// What a table holds one of its labels to.
 pub enum Holds {
-    /// Held at this ground type.
-    At(Ty),
-    /// Held at this ground type, and the row must have it.
-    Required(Ty),
+    /// Held at the ground type this builds.  A function, not a type: a table
+    /// is a `static`, and an interned type is made at run time.
+    At(fn() -> Ty),
+    /// The same, and the row must have it.
+    Required(fn() -> Ty),
     /// The decoders': a fresh variable per occurrence, nothing imposed.
     Decoded,
     /// `within`'s catch-all handler, the one value inferred in context.
     CatchAll,
-    /// A ground shape built per occurrence.
-    Shaped(fn() -> Ty),
     /// A nested table, whose optional keys no row can express: ascribed once
     /// inference has finished, and never constraining.
     Table(&'static Table),
@@ -79,9 +78,8 @@ impl Holds {
     /// holding a value cannot be ignored by the doors that apply it.
     pub(super) fn held(&self) -> Held<'_> {
         match self {
-            Self::At(ty) | Self::Required(ty) => Held::Unify(ty.clone()),
+            Self::At(mint) | Self::Required(mint) => Held::Unify(mint()),
             Self::CatchAll => Held::Unify(catch_all_ty()),
-            Self::Shaped(mint) => Held::Unify(mint()),
             Self::Table(table) => Held::Nested(table),
             Self::Refused(advice) => Held::Refuse(advice),
             Self::Decoded => Held::Nothing,
@@ -126,12 +124,12 @@ impl fmt::Debug for Vocab {
 impl Vocab {
     /// The closed variant this vocabulary is.
     pub(crate) fn ty(&self) -> Ty {
-        Ty::Variant(
+        Ty::variant(
             (self.row)()
                 .into_iter()
                 .rev()
-                .fold(Row::Empty, |rest, (tag, ty)| {
-                    Row::Extend(Label::Case(tag), Box::new(ty), Box::new(rest))
+                .fold(Row::empty(), |rest, (tag, ty)| {
+                    Row::extend(Label::Case(tag), ty, rest)
                 }),
         )
     }
@@ -222,7 +220,7 @@ static WITHIN: Table = Table {
     keys: &[
         Key {
             label: "dir",
-            holds: Holds::At(Ty::String),
+            holds: Holds::At(Ty::string),
             reason: None,
         },
         Key {
@@ -248,7 +246,7 @@ static RC: Table = Table {
     keys: &[
         Key {
             label: "umask",
-            holds: Holds::At(Ty::String),
+            holds: Holds::At(Ty::string),
             reason: None,
         },
         Key {
@@ -278,22 +276,22 @@ static RC: Table = Table {
         },
         Key {
             label: "edit-mode",
-            holds: Holds::At(Ty::String),
+            holds: Holds::At(Ty::string),
             reason: None,
         },
         Key {
             label: "bell",
-            holds: Holds::At(Ty::Bool),
+            holds: Holds::At(Ty::bool),
             reason: None,
         },
         Key {
             label: "surface",
-            holds: Holds::At(Ty::String),
+            holds: Holds::At(Ty::string),
             reason: None,
         },
         Key {
             label: "recursion-limit",
-            holds: Holds::At(Ty::Int),
+            holds: Holds::At(Ty::int),
             reason: None,
         },
         Key {
@@ -326,7 +324,7 @@ static MANIFEST: Table = Table {
     keys: &[
         Key {
             label: "name",
-            holds: Holds::Required(Ty::String),
+            holds: Holds::Required(Ty::string),
             reason: None,
         },
         Key {
@@ -359,12 +357,12 @@ static MANIFEST: Table = Table {
 
 /// The catch-all's shape around what it produces: the name, then the argv.
 pub(super) fn catch_all_shape(body: CompTy) -> CompTy {
-    CompTy::arrows([Ty::String, Ty::argv()], body)
+    CompTy::arrows([Ty::string(), Ty::argv()], body)
 }
 
 /// What the catch-all `handler:` is: `String → [String] → Command`.
 fn catch_all_ty() -> Ty {
-    Ty::Thunk(Box::new(catch_all_shape(CompTy::command())))
+    Ty::thunk(catch_all_shape(CompTy::command()))
 }
 
 /// The table `form` declares.
@@ -429,15 +427,16 @@ fn unify_vocab(
 
 /// The payload `tag` carries in the variant `ty` offers, under any lists.
 fn payload_at(u: &Unifier, ty: &Ty, tag: &str) -> Option<Ty> {
-    match u.resolve_ty(ty) {
-        Ty::List(elem) => payload_at(u, &elem, tag),
-        Ty::Variant(row) => {
-            let mut rest = u.resolve_row(&row);
-            while let Row::Extend(label, payload, tail) = rest {
-                if label == Label::Case(tag.to_string()) {
-                    return Some(*payload);
+    let resolved = u.resolve_ty(ty);
+    match resolved.node() {
+        TyNode::List(elem) => payload_at(u, elem, tag),
+        TyNode::Variant(row) => {
+            let mut rest = u.resolve_row(row);
+            while let RowNode::Extend(label, payload, tail) = rest.node() {
+                if *label == Label::Case(tag.to_string()) {
+                    return Some(payload.clone());
                 }
-                rest = u.resolve_row(&tail);
+                rest = u.resolve_row(tail);
             }
             None
         }
@@ -480,10 +479,11 @@ pub(super) fn ascribe(
     cty: Option<CompTy>,
     table: &'static Table,
 ) -> Result<(), Vec<TypeError>> {
-    let resolved = match cty.map(|cty| solution.resolve_comp(&cty)) {
-        Some(CompTy::Return(_, value)) => solution.resolve_ty(&value),
+    let resolved = cty.map(|cty| solution.resolve_comp(&cty));
+    let resolved = match resolved.as_ref().map(CompTy::node) {
+        Some(CompTyNode::Return(_, value)) => solution.resolve_ty(value),
         Some(_) => return Ok(()),
-        None => Ty::Unit,
+        None => Ty::unit(),
     };
     let written = match tail.map(|phrase| &phrase.item) {
         Some(Phrase::Run(comp)) if let CompKind::Return(record @ Val::Record(_)) = &comp.item => {
@@ -509,7 +509,7 @@ fn made_by(scratch: &mut Unifier, body: &CompTy, at: Option<Span>) -> Result<Ty,
     let made = scratch.fresh_ty();
     let factory = CompTy::arrows(
         [scratch.fresh_ty()],
-        CompTy::Return(scratch.fresh_grade(), Box::new(made.clone())),
+        CompTy::ret(scratch.fresh_grade(), made.clone()),
     );
     scratch.unify_comp_ty(&factory, body)?;
     Ok(scratch.resolve_ty(&made))
@@ -539,18 +539,18 @@ impl Ascription {
         written: Option<&Val>,
         factory: bool,
     ) {
-        match value {
-            Ty::Record(row) => self.row(scratch, &row, table, written),
-            Ty::Unit => self.row(scratch, &Row::Empty, table, written),
-            Ty::Var(_) => {}
-            Ty::Thunk(body) if factory => match made_by(&mut scratch, &body, self.pos) {
+        match value.node() {
+            TyNode::Record(row) => self.row(scratch, row, table, written),
+            TyNode::Unit => self.row(scratch, &Row::empty(), table, written),
+            TyNode::Var(_) => {}
+            TyNode::Thunk(body) if factory => match made_by(&mut scratch, body, self.pos) {
                 Ok(made) => self.value(scratch, made, table, None, false),
                 Err(kind) => self.report(kind, Some(Reason::Factory)),
             },
-            found => self.report(
+            _ => self.report(
                 TypeErrorKind::ReturnNotRecord {
                     form: table.form,
-                    found,
+                    found: value,
                     offered: table.offered(),
                 },
                 None,
@@ -569,26 +569,25 @@ impl Ascription {
         let phrase_pos = self.pos;
         let mut present = Vec::new();
         let mut rest = scratch.resolve_row(row);
-        while let Row::Extend(label, payload, tail) = rest {
+        while let RowNode::Extend(label, payload, tail) = rest.node() {
             let Label::Field(label) = label else {
-                rest = scratch.resolve_row(&tail);
+                rest = scratch.resolve_row(tail);
                 continue;
             };
             present.push(label.clone());
-            self.pos = written.and_then(|w| written_at(w, &label)).or(phrase_pos);
+            self.pos = written.and_then(|w| written_at(w, label)).or(phrase_pos);
             if let Some(key) = table.keys.iter().find(|k| k.label == label) {
                 match key.holds.held() {
                     Held::Unify(declared) => {
                         scratch.at = self.pos;
-                        if let Err(clash) =
-                            unify_held(table, key)(&mut scratch, &declared, &payload)
+                        if let Err(clash) = unify_held(table, key)(&mut scratch, &declared, payload)
                         {
                             self.report(clash.0, Some(clash.1));
                         }
                     }
                     Held::Nested(sub) => {
-                        let inner = written.and_then(|w| written_field(w, &label));
-                        self.nested(&scratch, key.label, &payload, sub, inner.map(|v| &v.item));
+                        let inner = written.and_then(|w| written_field(w, label));
+                        self.nested(&scratch, key.label, payload, sub, inner.map(|v| &v.item));
                     }
                     Held::Refuse(advice) => self.report(
                         TypeErrorKind::RefusedKey {
@@ -604,13 +603,13 @@ impl Ascription {
                 self.report(
                     TypeErrorKind::UnknownKey {
                         form: table.form,
-                        key: label,
+                        key: label.clone(),
                         offered: table.offered(),
                     },
                     None,
                 );
             }
-            rest = scratch.resolve_row(&tail);
+            rest = scratch.resolve_row(tail);
         }
         self.pos = phrase_pos;
         for key in table.keys {
@@ -633,10 +632,11 @@ impl Ascription {
         table: &'static Table,
         written: Option<&Val>,
     ) {
-        match store.resolve_ty(ty) {
-            Ty::Record(row) => self.row(store.clone(), &row, table, written),
-            Ty::Var(_) => {}
-            found => self.report(
+        let found = store.resolve_ty(ty);
+        match found.node() {
+            TyNode::Record(row) => self.row(store.clone(), row, table, written),
+            TyNode::Var(_) => {}
+            _ => self.report(
                 TypeErrorKind::NotATable {
                     key,
                     first: table.keys.first().map_or("", |k| k.label),
@@ -763,12 +763,12 @@ mod tests {
             keys: &[
                 super::Key {
                     label: "a",
-                    holds: Holds::At(Ty::Bool),
+                    holds: Holds::At(Ty::bool),
                     reason: None,
                 },
                 super::Key {
                     label: "b",
-                    holds: Holds::At(Ty::String),
+                    holds: Holds::At(Ty::string),
                     reason: None,
                 },
             ],
@@ -778,17 +778,13 @@ mod tests {
         let row = ["a", "b"]
             .into_iter()
             .rev()
-            .fold(Row::Empty, |tail, label| {
-                Row::Extend(
-                    Label::Field(label.into()),
-                    Box::new(payload.clone()),
-                    Box::new(tail),
-                )
+            .fold(Row::empty(), |tail, label| {
+                Row::extend(Label::Field(label.into()), payload.clone(), tail)
             });
         let Ok(solution) = solver.close() else {
             panic!("an unconstrained unit closes");
         };
-        let errors = super::ascribe(&solution, None, Some(CompTy::pure(Ty::Record(row))), &TABLE)
+        let errors = super::ascribe(&solution, None, Some(CompTy::pure(Ty::record(row))), &TABLE)
             .expect_err("the shared payload is refused");
         assert_eq!(
             errors.len(),

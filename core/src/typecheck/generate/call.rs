@@ -6,7 +6,7 @@ use crate::ir::{
     Argv, CommandName, CommandWord, Comp, CompKind, Exec, Redirects, ThunkNode, Val, ValListElem,
 };
 use crate::source::{Span, Spanned, WithSpan};
-use crate::ty::{CompTy, Scheme, Ty};
+use crate::ty::{CompTy, CompTyNode, Scheme, Ty, TyNode};
 use crate::typecheck::builtins::{BuiltinDiagnostic, Decl, Manifest};
 use crate::typecheck::contract::catch_all_shape;
 use crate::typecheck::env::{HandlerBinding, HandlerOrigin, Inferring, Membrane};
@@ -233,11 +233,8 @@ impl Generator {
                 Val::Thunk(body) => {
                     let wanted = self.solver.fresh_comp();
                     self.with_span(arg.span, |this| {
-                        this.solver.equate(
-                            ty,
-                            &Ty::Thunk(Box::new(wanted.clone())),
-                            Reason::Argument,
-                        );
+                        this.solver
+                            .equate(ty, &Ty::thunk(wanted.clone()), Reason::Argument);
                     });
                     Some((body, wanted))
                 }
@@ -299,14 +296,15 @@ impl Generator {
 
     /// Only declaration structure is inspected, never an instantiated scheme token.
     pub(in crate::typecheck) fn declared_spine(&mut self, entry: &Decl) -> (Vec<Ty>, CompTy) {
-        let Ty::Thunk(body) = self.solver.declared(entry) else {
+        let declared = self.solver.declared(entry);
+        let TyNode::Thunk(body) = declared.node() else {
             unreachable!("builtin declarations have thunk types")
         };
-        let mut tail = *body;
+        let mut tail = body.clone();
         let mut params = Vec::new();
-        while let CompTy::Fun(param, body) = tail {
-            params.push(*param);
-            tail = *body;
+        while let CompTyNode::Fun(param, body) = tail.node() {
+            params.push(param.clone());
+            tail = body.clone();
         }
         (params, tail)
     }
@@ -355,12 +353,12 @@ impl Generator {
         if !entry.is_boundary() {
             return None;
         }
-        let CompTy::Return(_, ty) = declared_tail else {
+        let CompTyNode::Return(_, ty) = declared_tail.node() else {
             return None;
         };
         self.solver
             .weak(ty, WeakSource::Boundary(entry.name.as_ref().into()));
-        Some((ty.as_ref().clone(), missing))
+        Some((ty.clone(), missing))
     }
 
     pub(in crate::typecheck) fn instantiate_comp(&mut self, name: &str, scheme: &Scheme) -> CompTy {
@@ -610,11 +608,9 @@ impl Generator {
                 held => {
                     let (ty, node) = this.val(held, at);
                     let got = this.solver.fresh_comp();
-                    let thunk = this.solver.equate(
-                        &ty,
-                        &Ty::Thunk(Box::new(got.clone())),
-                        Reason::HandlerArm,
-                    );
+                    let thunk =
+                        this.solver
+                            .equate(&ty, &Ty::thunk(got.clone()), Reason::HandlerArm);
                     let met = thunk && this.solver.equate_comp(&wanted, &got, why);
                     (met, node)
                 }
@@ -648,7 +644,7 @@ impl Generator {
         let (cty, node) = self.with_span(at, |this| {
             this.region(|this| this.arm(block, Arm::Named(name), at))
         });
-        (self.solver.generalise(&Ty::Thunk(Box::new(cty))), node)
+        (self.solver.generalise(&Ty::thunk(cty)), node)
     }
 
     fn stands_for(&mut self, arm: Arm<'_>) -> (CompTy, Standing) {
@@ -727,11 +723,11 @@ mod tests {
         let head = generator.solver.fresh_comp();
         let args = [block(1), block(2)];
         let (result, call, nodes) = generator.apply_args(head.clone(), None, &args);
-        let param = Ty::Thunk(Box::new(CompTy::pure(Ty::String)));
-        let inner = CompTy::arrows([param.clone()], CompTy::pure(Ty::Int));
-        let middle = CompTy::pure(Ty::Thunk(Box::new(inner)));
+        let param = Ty::thunk(CompTy::pure(Ty::string()));
+        let inner = CompTy::arrows([param.clone()], CompTy::pure(Ty::int()));
+        let middle = CompTy::pure(Ty::thunk(inner));
         let first = CompTy::arrows([param], middle);
-        let context = CompTy::pure(Ty::Thunk(Box::new(first)));
+        let context = CompTy::pure(Ty::thunk(first));
         generator
             .solver
             .equate_comp(&head, &context, Reason::Argument);
@@ -740,7 +736,7 @@ mod tests {
             [Some(at(1)), Some(at(2))]
         );
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_comp(&result), CompTy::pure(Ty::Int));
+        assert_eq!(solution.resolve_comp(&result), CompTy::pure(Ty::int()));
         assert_eq!(solution.splits(call), [0, 1]);
     }
 
@@ -762,16 +758,17 @@ mod tests {
         assert!(matches!(head.item, CompKind::Lam { .. }));
         let solution = solved(generator.solver);
         assert_eq!(solution.splits(hole), Vec::<usize>::new());
-        assert!(matches!(solution.resolve_comp(&cty), CompTy::Return(_, ty) if *ty == Ty::String));
+        assert!(
+            matches!(solution.resolve_comp(&cty).node(), CompTyNode::Return(_, ty) if *ty == Ty::string())
+        );
     }
 
     #[test]
     fn bare_binding_call_carries_its_hole_even_without_arguments() {
         let mut generator = generator();
-        generator.env.bind(
-            "f".into(),
-            Scheme::mono(Ty::Thunk(Box::new(CompTy::command()))),
-        );
+        generator
+            .env
+            .bind("f".into(), Scheme::mono(Ty::thunk(CompTy::command())));
         let source = bare("f", Argv::default());
         let (_, node) = generator.comp(&source);
         let CompKind::BindingCall {
@@ -787,10 +784,10 @@ mod tests {
 
     #[test]
     fn imported_binding_app_keeps_both_the_admission_and_the_call() {
-        let stored = Arc::new(Scheme::mono(Ty::Thunk(Box::new(CompTy::arrows(
-            [Ty::Thunk(Box::new(CompTy::pure(Ty::String)))],
-            CompTy::pure(Ty::Int),
-        )))));
+        let stored = Arc::new(Scheme::mono(Ty::thunk(CompTy::arrows(
+            [Ty::thunk(CompTy::pure(Ty::string()))],
+            CompTy::pure(Ty::int()),
+        ))));
         let mut generator = Generator::new(
             Solver::new(),
             super::super::TyEnv::new(),
@@ -835,22 +832,22 @@ mod tests {
         let Some(result) = exec.site.clone() else {
             panic!("boundary result site")
         };
-        let stored = generator.solver.generalise(&Ty::Thunk(Box::new(cty)));
+        let stored = generator.solver.generalise(&Ty::thunk(cty));
         let first = generator.instantiate_comp("first", &stored);
         let second = generator.instantiate_comp("second", &stored);
         generator.solver.equate_comp(
             &first,
-            &CompTy::arrows([Ty::argv()], CompTy::pure(Ty::Int)),
+            &CompTy::arrows([Ty::argv()], CompTy::pure(Ty::int())),
             Reason::Argument,
         );
         assert!(!generator.solver.equate_comp(
             &second,
-            &CompTy::arrows([Ty::argv()], CompTy::pure(Ty::Bool)),
+            &CompTy::arrows([Ty::argv()], CompTy::pure(Ty::bool())),
             Reason::Argument
         ));
         let (store, errors) = generator.solver.refused();
         assert_eq!(errors.len(), 1);
-        assert_eq!(store.resolve_ty(&result), Ty::Int);
+        assert_eq!(store.resolve_ty(&result), Ty::int());
     }
 
     #[test]
@@ -910,8 +907,8 @@ mod tests {
             &solved(generator.solver).scratch(),
             &installed,
             &CompTy::arrows(
-                [Ty::String, Ty::argv()],
-                CompTy::Return(Grade::Output, Box::new(Ty::Unit)),
+                [Ty::string(), Ty::argv()],
+                CompTy::ret(Grade::Output, Ty::unit()),
             ),
         );
     }
@@ -923,7 +920,7 @@ mod tests {
 
         let mut generator = generator();
         let original = Binders::close(|binders| {
-            let a = Ty::Var(binders.ty(Kind::ANY));
+            let a = Ty::var(binders.ty(Kind::ANY));
             thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::list(a))))
         });
         generator.env.bind_handler(
@@ -939,7 +936,7 @@ mod tests {
             },
         )));
         let (stored, _) = generator.install_arm(&block, "items", Some(at(0)));
-        for elem in [Ty::Int, Ty::Bool] {
+        for elem in [Ty::int(), Ty::bool()] {
             let instance = generator.instantiate_comp("items", &stored);
             assert!(generator.solver.equate_comp(
                 &instance,
@@ -1001,7 +998,7 @@ mod tests {
             vec![("date".to_string(), scheme)]
         };
         assert_eq!(
-            super::super::tests::error_codes_seeded("date +%s", bound(Some(Ty::Int))),
+            super::super::tests::error_codes_seeded("date +%s", bound(Some(Ty::int()))),
             ["T0072"]
         );
         assert_eq!(

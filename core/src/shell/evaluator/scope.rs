@@ -224,7 +224,7 @@ mod tests {
 
     fn panic_now_scheme(_: &mut crate::ty::Binders) -> crate::ty::Ty {
         use crate::typecheck::builtins::{pure, thunk};
-        thunk(pure(crate::ty::Ty::Unit))
+        thunk(pure(crate::ty::Ty::unit()))
     }
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

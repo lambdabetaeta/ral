@@ -55,7 +55,7 @@ impl Generator {
     // Last-declared fields are innermost.
     fn fields_row(fields: Vec<(String, Ty)>, tail: Row) -> Row {
         fields.into_iter().rev().fold(tail, |rest, (key, ty)| {
-            Row::Extend(Label::Field(key), Box::new(ty), Box::new(rest))
+            Row::extend(Label::Field(key), ty, rest)
         })
     }
 
@@ -83,7 +83,7 @@ impl Generator {
             .map(|(key, value)| (key.clone(), self.record_field(key, value, &mut fields)))
             .collect();
         (
-            Ty::Record(Self::fields_row(fields, Row::Empty)),
+            Ty::record(Self::fields_row(fields, Row::empty())),
             FieldsNode::new(nodes),
         )
     }
@@ -103,16 +103,16 @@ impl Generator {
         let tail = self.solver.fresh_row();
         let probe = fields.iter().rev().fold(tail.clone(), |rest, (key, _)| {
             let old = self.solver.fresh_ty();
-            Row::Extend(Label::Field(key.clone()), Box::new(old), Box::new(rest))
+            Row::extend(Label::Field(key.clone()), old, rest)
         });
         let reason = Reason::RecordUpdate {
             base: written(&base.item).map(ToString::to_string),
         };
         self.with_span(base.span, |this| {
-            this.solver.equate(&base_ty, &Ty::Record(probe), reason);
+            this.solver.equate(&base_ty, &Ty::record(probe), reason);
         });
         (
-            Ty::Record(Self::fields_row(fields, tail)),
+            Ty::record(Self::fields_row(fields, tail)),
             Prim::Update {
                 base: Spanned::with_span(base.span, base_node),
                 fields: nodes,
@@ -149,7 +149,7 @@ impl Generator {
                     let (key_ty, key_node) =
                         self.with_span(key.span, |this| this.val(&key.item, key.span));
                     self.with_span(key.span, |this| {
-                        this.solver.equate(&key_ty, &Ty::String, Reason::MapKey);
+                        this.solver.equate(&key_ty, &Ty::string(), Reason::MapKey);
                         if let Val::String(label) = &key.item {
                             this.diagnose_if_duplicate(
                                 label.as_str(),
@@ -244,7 +244,7 @@ impl Generator {
         if entry.is_boundary() {
             let (params, tail) = self.declared_spine(entry);
             let boundary = self.note_boundary_call(entry, &tail, entry.fixed_arity());
-            let ty = Ty::Thunk(Box::new(CompTy::arrows(params, tail)));
+            let ty = Ty::thunk(CompTy::arrows(params, tail));
             if let Some((result, missing)) = boundary {
                 let node = readback::boundary_block(
                     &entry.name,
@@ -295,11 +295,11 @@ impl Generator {
     ) -> (Ty, Val<Inferring>) {
         match val {
             Val::Protected { value, site } => self.protected_val(value, site),
-            Val::Unit => (Ty::Unit, Val::Unit),
-            Val::String(v) => (Ty::String, Val::String(v.clone())),
-            Val::Int(v) => (Ty::Int, Val::Int(*v)),
-            Val::Float(v) => (Ty::Float, Val::Float(*v)),
-            Val::Bool(v) => (Ty::Bool, Val::Bool(*v)),
+            Val::Unit => (Ty::unit(), Val::Unit),
+            Val::String(v) => (Ty::string(), Val::String(v.clone())),
+            Val::Int(v) => (Ty::int(), Val::Int(*v)),
+            Val::Float(v) => (Ty::float(), Val::Float(*v)),
+            Val::Bool(v) => (Ty::bool(), Val::Bool(*v)),
             Val::Variable(name) => {
                 if crate::syntax::is_control_operator(name) {
                     self.solver.diagnose(TypeErrorKind::ControlOperatorAsValue {
@@ -340,7 +340,7 @@ impl Generator {
                                 (self.solver.fresh_ty(), Val::Unit)
                             }
                             None if LANGUAGE_CONSTANTS.iter().any(|&(c, _)| c == &**name) => {
-                                (Ty::Bool, Val::Variable(name.clone()))
+                                (Ty::bool(), Val::Variable(name.clone()))
                             }
                             None => {
                                 self.diagnose_unbound(name);
@@ -352,7 +352,7 @@ impl Generator {
             }
             Val::Thunk(comp) => {
                 let (cty, comp) = self.scope(|this| this.comp(comp.shape()));
-                (Ty::Thunk(Box::new(cty)), Val::thunk(Arc::new(comp)))
+                (Ty::thunk(cty), Val::thunk(Arc::new(comp)))
             }
             Val::List(elems) => {
                 let elem = self.solver.fresh_ty();
@@ -376,10 +376,10 @@ impl Generator {
                 let (payload_ty, payload) = self.val(payload, None);
                 let rest = self.solver.fresh_row();
                 (
-                    Ty::Variant(Row::Extend(
+                    Ty::variant(Row::extend(
                         Label::Case(label.to_string()),
-                        Box::new(payload_ty),
-                        Box::new(rest),
+                        payload_ty,
+                        rest,
                     )),
                     Val::Variant {
                         label: label.clone(),
@@ -424,10 +424,10 @@ impl Generator {
         let key = match key {
             Key::Label(label) => {
                 let tail = self.solver.fresh_row();
-                let record = Ty::Record(Row::Extend(
+                let record = Ty::record(Row::extend(
                     Label::Field(label.to_string()),
-                    Box::new(elem.clone()),
-                    Box::new(tail),
+                    elem.clone(),
+                    tail,
                 ));
                 self.solver
                     .equate(current_ty, &record, Reason::RecordFieldRead);
@@ -446,7 +446,7 @@ impl Generator {
                 self.solver
                     .equate(current_ty, &Ty::map(elem.clone()), Reason::MapKeyRead);
                 self.solver
-                    .equate(&key_ty, &Ty::String, Reason::MapIndexKey);
+                    .equate(&key_ty, &Ty::string(), Reason::MapIndexKey);
                 Key::Data(value)
             }
         };
@@ -471,29 +471,30 @@ impl Generator {
                 let (ty, value) = self.val(value, None);
                 let scalar = self.solver.fresh_kinded(Kind::SCALAR);
                 self.solver.equate(&ty, &scalar, Reason::Interpolation);
-                (Ty::String, Prim::Render(value))
+                (Ty::string(), Prim::Render(value))
             }
             Prim::Concat(parts) => {
                 let mut nodes = Vec::new();
                 for value in parts {
                     let (ty, value) = self.val(value, None);
-                    self.solver.equate(&ty, &Ty::String, Reason::Interpolation);
+                    self.solver
+                        .equate(&ty, &Ty::string(), Reason::Interpolation);
                     nodes.push(value);
                 }
-                (Ty::String, Prim::Concat(nodes.into()))
+                (Ty::string(), Prim::Concat(nodes.into()))
             }
             Prim::Decode(value) => {
                 let (ty, value) = self.val(value, None);
-                self.solver.equate(&ty, &Ty::Bytes, Reason::Capture);
-                (Ty::String, Prim::Decode(value))
+                self.solver.equate(&ty, &Ty::bytes(), Reason::Capture);
+                (Ty::string(), Prim::Decode(value))
             }
         }
     }
 
     fn not(&mut self, val: &Val) -> (Ty, Prim<Inferring>) {
         let (ty, val) = self.val(val, None);
-        self.solver.equate(&ty, &Ty::Bool, Reason::NotOperand);
-        (Ty::Bool, Prim::Not(val))
+        self.solver.equate(&ty, &Ty::bool(), Reason::NotOperand);
+        (Ty::bool(), Prim::Not(val))
     }
 
     fn binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> (Ty, Prim<Inferring>) {
@@ -508,10 +509,10 @@ impl Generator {
         self.solver.equate(&operand, &lhs_ty, why.clone());
         self.solver.equate(&operand, &rhs_ty, why.clone());
         if op == BinaryOp::Arith(ArithOp::Mod) {
-            self.solver.equate(&operand, &Ty::Int, why);
+            self.solver.equate(&operand, &Ty::int(), why);
         }
         let ty = match op {
-            BinaryOp::Eq(_) | BinaryOp::Compare(_) => Ty::Bool,
+            BinaryOp::Eq(_) | BinaryOp::Compare(_) => Ty::bool(),
             BinaryOp::Arith(_) => operand,
         };
         (ty, Prim::Binary(op, lhs, rhs))
@@ -565,22 +566,22 @@ mod tests {
         assert_eq!(generator.residual_uses.len(), 1);
         generator
             .solver
-            .equate(&first, &Ty::String, Reason::Argument);
+            .equate(&first, &Ty::string(), Reason::Argument);
         generator
             .env
-            .bind("imported".into(), Scheme::mono(Ty::Bool));
+            .bind("imported".into(), Scheme::mono(Ty::bool()));
         let (shadow, node) = generator.val(&Val::Variable("imported".into()), None);
         assert!(matches!(node, Val::Variable(_)));
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&second), Ty::String);
-        assert_eq!(solution.resolve_ty(&residual), Ty::String);
-        assert_eq!(solution.resolve_ty(&shadow), Ty::Bool);
+        assert_eq!(solution.resolve_ty(&second), Ty::string());
+        assert_eq!(solution.resolve_ty(&residual), Ty::string());
+        assert_eq!(solution.resolve_ty(&shadow), Ty::bool());
     }
 
     #[test]
     fn protected_values_import_the_contract_and_keep_the_original_site() {
         let solution = solved(Solver::new());
-        let site = Arc::new(solution.site(&Ty::String, UnitId::fresh()));
+        let site = Arc::new(solution.site(&Ty::string(), UnitId::fresh()));
         let mut generator = generator();
         let source = Val::Protected {
             value: Box::new(Val::String("text".into())),
@@ -596,7 +597,7 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&site, &kept));
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&ty), Ty::String);
+        assert_eq!(solution.resolve_ty(&ty), Ty::string());
     }
 
     #[test]
@@ -629,26 +630,26 @@ mod tests {
         let stored = generator.solver.generalise(&ty);
         let first = generator.solver.instantiate(&stored);
         let second = generator.solver.instantiate(&stored);
-        let expected = |ty| Ty::Thunk(Box::new(CompTy::arrows([Ty::argv()], CompTy::pure(ty))));
+        let expected = |ty| Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::pure(ty)));
         assert!(
             generator
                 .solver
-                .equate(&first, &expected(Ty::Int), Reason::Argument)
+                .equate(&first, &expected(Ty::int()), Reason::Argument)
         );
         assert!(
             !generator
                 .solver
-                .equate(&second, &expected(Ty::Bool), Reason::Argument)
+                .equate(&second, &expected(Ty::bool()), Reason::Argument)
         );
         let (store, errors) = generator.solver.refused();
         assert_eq!(errors.len(), 1);
-        assert_eq!(store.resolve_ty(&result), Ty::Int);
+        assert_eq!(store.resolve_ty(&result), Ty::int());
     }
 
     #[test]
     fn builtin_values_leave_declared_unknown_computations_unknown() {
         fn unknown(binders: &mut crate::ty::Binders) -> Ty {
-            Ty::Thunk(Box::new(CompTy::Var(binders.comp())))
+            Ty::thunk(CompTy::var(binders.comp()))
         }
         for boundary in [false, true] {
             let mut generator = generator();
@@ -661,7 +662,7 @@ mod tests {
             );
             let (ty, node) = generator.builtin_value(&entry, Some(at(1)));
             assert!(matches!(node, Val::Variable(_)));
-            let wanted = Ty::Thunk(Box::new(CompTy::arrows([Ty::Int], CompTy::pure(Ty::Bool))));
+            let wanted = Ty::thunk(CompTy::arrows([Ty::int()], CompTy::pure(Ty::bool())));
             assert!(generator.solver.equate(&ty, &wanted, Reason::Argument));
             let solution = solved(generator.solver);
             assert_solved_type(&solution.scratch(), &ty, &wanted);
@@ -681,7 +682,7 @@ mod tests {
             this.solver
                 .gate(&read, ArgvBoundary::InShell("echo".into()));
         });
-        generator.solver.equate(&ty, &Ty::Unit, Reason::Argument);
+        generator.solver.equate(&ty, &Ty::unit(), Reason::Argument);
         let errors = generator.solver.refused().1;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].pos, Some(at(3)));
@@ -708,8 +709,8 @@ mod tests {
         let (changed, _) = generator.index_step(&ty, &Key::Label("change".into()));
         let (kept, _) = generator.index_step(&ty, &Key::Label("keep".into()));
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&changed), Ty::String);
-        assert_eq!(solution.resolve_ty(&kept), Ty::Bool);
+        assert_eq!(solution.resolve_ty(&changed), Ty::string());
+        assert_eq!(solution.resolve_ty(&kept), Ty::bool());
     }
 
     #[test]
@@ -767,8 +768,8 @@ mod tests {
             .into(),
         ));
         let solution = solved(generator.solver);
-        assert_solved_type(&solution.scratch(), &list, &Ty::list(Ty::Int));
-        assert_solved_type(&solution.scratch(), &map, &Ty::map(Ty::Bool));
+        assert_solved_type(&solution.scratch(), &list, &Ty::list(Ty::int()));
+        assert_solved_type(&solution.scratch(), &map, &Ty::map(Ty::bool()));
     }
 
     #[test]
@@ -776,14 +777,14 @@ mod tests {
         for (key, target) in [
             (
                 Key::Label("field".into()),
-                Ty::Record(Row::Extend(
+                Ty::record(Row::extend(
                     Label::Field("field".into()),
-                    Box::new(Ty::Int),
-                    Box::new(Row::Empty),
+                    Ty::int(),
+                    Row::empty(),
                 )),
             ),
-            (Key::Position(0), Ty::list(Ty::Int)),
-            (Key::Data(Val::String("key".into())), Ty::map(Ty::Int)),
+            (Key::Position(0), Ty::list(Ty::int())),
+            (Key::Data(Val::String("key".into())), Ty::map(Ty::int())),
         ] {
             let mut generator = generator();
             let unknown = generator.solver.fresh_ty();
@@ -803,7 +804,7 @@ mod tests {
             ));
             assert!(generator.solver.equate(&unknown, &target, Reason::Argument));
             let solution = solved(generator.solver);
-            assert_eq!(solution.resolve_ty(&result), Ty::Int);
+            assert_eq!(solution.resolve_ty(&result), Ty::int());
         }
     }
 
@@ -831,25 +832,25 @@ mod tests {
         for (prim, expected) in [
             (
                 Prim::Binary(BinaryOp::Arith(ArithOp::Add), Val::Int(1), Val::Int(2)),
-                Ty::Int,
+                Ty::int(),
             ),
             (
                 Prim::Binary(BinaryOp::Compare(CompareOp::Lt), Val::Int(1), Val::Int(2)),
-                Ty::Bool,
+                Ty::bool(),
             ),
             (
                 Prim::Binary(BinaryOp::Eq(EqOp::Eq), Val::Bool(true), Val::Bool(false)),
-                Ty::Bool,
+                Ty::bool(),
             ),
             (
                 Prim::Negate(Val::Float(crate::data::Finite::new(1.5).unwrap())),
-                Ty::Float,
+                Ty::float(),
             ),
-            (Prim::Not(Val::Bool(false)), Ty::Bool),
-            (Prim::Render(Val::Int(1)), Ty::String),
+            (Prim::Not(Val::Bool(false)), Ty::bool()),
+            (Prim::Render(Val::Int(1)), Ty::string()),
             (
                 Prim::Concat(vec![Val::String("a".into()), Val::String("b".into())].into()),
-                Ty::String,
+                Ty::string(),
             ),
         ] {
             let mut generator = generator();
@@ -864,8 +865,8 @@ mod tests {
             .bind("bytes".into(), Scheme::mono(bytes.clone()));
         let (decoded, _) = generator.prim(&Prim::Decode(Val::Variable("bytes".into())));
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&bytes), Ty::Bytes);
-        assert_eq!(solution.resolve_ty(&decoded), Ty::String);
+        assert_eq!(solution.resolve_ty(&bytes), Ty::bytes());
+        assert_eq!(solution.resolve_ty(&decoded), Ty::string());
     }
 
     #[test]
@@ -883,10 +884,10 @@ mod tests {
     #[test]
     fn unbound_reads_suggest_values_not_handlers() {
         let mut generator = generator();
-        generator.env.bind("result".into(), Scheme::mono(Ty::Int));
+        generator.env.bind("result".into(), Scheme::mono(Ty::int()));
         generator.env.bind_handler(
             "resalt".into(),
-            Scheme::mono(Ty::Unit),
+            Scheme::mono(Ty::unit()),
             crate::typecheck::env::HandlerOrigin::Alias,
         );
         generator.val(&Val::Variable("reslt".into()), None);

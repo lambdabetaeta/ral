@@ -6,7 +6,10 @@
 //! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::{Role, Scheme};
-use super::{CompTy, CompTyVar, Grade, GradeVar, Head, Kind, Row, RowVar, Term, Ty, TyVar, Var};
+use super::{
+    CompTy, CompTyNode, CompTyVar, Grade, GradeVar, Head, Kind, Row, RowNode, RowVar, Term, Ty,
+    TyNode, TyVar, Var,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
@@ -54,8 +57,8 @@ struct Cycles {
 /// are finite, so the walk ends.
 #[derive(Default)]
 struct Assumed {
-    tys: HashSet<(*const Ty, *const Ty)>,
-    comps: HashSet<(*const CompTy, *const CompTy)>,
+    tys: HashSet<(Ty, Ty)>,
+    comps: HashSet<(CompTy, CompTy)>,
 }
 
 impl Cycles {
@@ -84,31 +87,39 @@ impl Cycles {
     }
 
     fn ty_eq(&self, a: &Ty, b: &Ty, seen: &mut Assumed) -> bool {
-        if !seen.tys.insert((a, b)) {
+        if !seen.tys.insert((a.clone(), b.clone())) {
             return true;
         }
-        match (a, b) {
-            (Ty::Var(v), _) if let Some(a) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
-            (_, Ty::Var(v)) if let Some(b) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
-            (Ty::List(x), Ty::List(y)) | (Ty::Map(x), Ty::Map(y)) => self.ty_eq(x, y, seen),
-            (Ty::Handle(g, x), Ty::Handle(h, y)) => g == h && self.ty_eq(x, y, seen),
-            (Ty::Record(x), Ty::Record(y)) | (Ty::Variant(x), Ty::Variant(y)) => {
+        match (a.node(), b.node()) {
+            (TyNode::Var(v), _) if let Some(a) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
+            (_, TyNode::Var(v)) if let Some(b) = self.ty_binding(*v) => self.ty_eq(a, b, seen),
+            (TyNode::List(x), TyNode::List(y)) | (TyNode::Map(x), TyNode::Map(y)) => {
+                self.ty_eq(x, y, seen)
+            }
+            (TyNode::Handle(g, x), TyNode::Handle(h, y)) => g == h && self.ty_eq(x, y, seen),
+            (TyNode::Record(x), TyNode::Record(y)) | (TyNode::Variant(x), TyNode::Variant(y)) => {
                 self.row_eq(x, y, seen)
             }
-            (Ty::Thunk(x), Ty::Thunk(y)) => self.comp_eq(x, y, seen),
+            (TyNode::Thunk(x), TyNode::Thunk(y)) => self.comp_eq(x, y, seen),
             _ => a == b,
         }
     }
 
     fn comp_eq(&self, a: &CompTy, b: &CompTy, seen: &mut Assumed) -> bool {
-        if !seen.comps.insert((a, b)) {
+        if !seen.comps.insert((a.clone(), b.clone())) {
             return true;
         }
-        match (a, b) {
-            (CompTy::Var(v), _) if let Some(a) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
-            (_, CompTy::Var(v)) if let Some(b) = self.comp_binding(*v) => self.comp_eq(a, b, seen),
-            (CompTy::Return(g, x), CompTy::Return(h, y)) => g == h && self.ty_eq(x, y, seen),
-            (CompTy::Fun(p, x), CompTy::Fun(q, y)) => {
+        match (a.node(), b.node()) {
+            (CompTyNode::Var(v), _) if let Some(a) = self.comp_binding(*v) => {
+                self.comp_eq(a, b, seen)
+            }
+            (_, CompTyNode::Var(v)) if let Some(b) = self.comp_binding(*v) => {
+                self.comp_eq(a, b, seen)
+            }
+            (CompTyNode::Return(g, x), CompTyNode::Return(h, y)) => {
+                g == h && self.ty_eq(x, y, seen)
+            }
+            (CompTyNode::Fun(p, x), CompTyNode::Fun(q, y)) => {
                 self.ty_eq(p, q, seen) && self.comp_eq(x, y, seen)
             }
             _ => a == b,
@@ -116,8 +127,8 @@ impl Cycles {
     }
 
     fn row_eq(&self, a: &Row, b: &Row, seen: &mut Assumed) -> bool {
-        match (a, b) {
-            (Row::Extend(l, f, x), Row::Extend(m, g, y)) => {
+        match (a.node(), b.node()) {
+            (RowNode::Extend(l, f, x), RowNode::Extend(m, g, y)) => {
                 l == m && self.ty_eq(f, g, seen) && self.row_eq(x, y, seen)
             }
             _ => a == b,
@@ -195,10 +206,10 @@ impl FmtCtx {
     }
 
     fn excludes_unit(&self, ty: &Ty) -> bool {
-        match ty {
-            Ty::Unit => false,
-            Ty::Var(v) => match self.cycles.ty_binding(*v) {
-                Some(binding) => !matches!(binding, Ty::Unit | Ty::Var(_)),
+        match ty.node() {
+            TyNode::Unit => false,
+            TyNode::Var(v) => match self.cycles.ty_binding(*v) {
+                Some(binding) => !matches!(binding.node(), TyNode::Unit | TyNode::Var(_)),
                 None => self.ty_kinds.get(v).is_some_and(|k| !k.admits(Head::Unit)),
             },
             _ => true,
@@ -206,13 +217,19 @@ impl FmtCtx {
     }
 
     fn visible_grade(&self, term: Term<'_>) -> Option<GradeVar> {
-        match term {
-            Term::Ty(Ty::Handle(Grade::Var(v), ty))
-            | Term::Comp(CompTy::Return(Grade::Var(v), ty))
-                if !self.excludes_unit(ty) =>
-            {
-                Some(*v)
-            }
+        let (grade, ty) = match term {
+            Term::Ty(ty) => match ty.node() {
+                TyNode::Handle(grade, ty) => (grade, ty),
+                _ => return None,
+            },
+            Term::Comp(cty) => match cty.node() {
+                CompTyNode::Return(grade, ty) => (grade, ty),
+                _ => return None,
+            },
+            Term::Row(_) => return None,
+        };
+        match grade {
+            Grade::Var(v) if !self.excludes_unit(ty) => Some(*v),
             _ => None,
         }
     }
@@ -255,25 +272,30 @@ impl FmtCtx {
                 .or_insert_with(|| pick(GRADE_LETTERS, idx));
         }
         match term {
-            Term::Ty(Ty::Var(v)) => {
-                let idx = self.ty_names.len();
-                self.ty_names
-                    .entry(*v)
-                    .or_insert_with(|| pick(TY_LETTERS, idx));
+            Term::Ty(ty) => {
+                if let TyNode::Var(v) = ty.node() {
+                    let idx = self.ty_names.len();
+                    self.ty_names
+                        .entry(*v)
+                        .or_insert_with(|| pick(TY_LETTERS, idx));
+                }
             }
-            Term::Comp(CompTy::Var(v)) => {
-                let idx = self.comp_names.len();
-                self.comp_names
-                    .entry(*v)
-                    .or_insert_with(|| pick(COMP_LETTERS, idx));
+            Term::Comp(cty) => {
+                if let CompTyNode::Var(v) = cty.node() {
+                    let idx = self.comp_names.len();
+                    self.comp_names
+                        .entry(*v)
+                        .or_insert_with(|| pick(COMP_LETTERS, idx));
+                }
             }
-            Term::Row(Row::Var(v)) => {
-                let idx = self.row_names.len();
-                self.row_names
-                    .entry(*v)
-                    .or_insert_with(|| pick(ROW_LETTERS, idx));
+            Term::Row(row) => {
+                if let RowNode::Var(v) = row.node() {
+                    let idx = self.row_names.len();
+                    self.row_names
+                        .entry(*v)
+                        .or_insert_with(|| pick(ROW_LETTERS, idx));
+                }
             }
-            _ => {}
         }
         term.children().for_each(|child| self.absorb(child));
     }
@@ -308,14 +330,14 @@ fn fmt_ty_in(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
 }
 
 fn fmt_ty_node(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
-    match ty {
-        Ty::Unit => "Unit".into(),
-        Ty::Bytes => "Bytes".into(),
-        Ty::Bool => "Bool".into(),
-        Ty::Int => "Integer".into(),
-        Ty::Float => "Float".into(),
-        Ty::String => "String".into(),
-        Ty::Handle(g, a) => {
+    match ty.node() {
+        TyNode::Unit => "Unit".into(),
+        TyNode::Bytes => "Bytes".into(),
+        TyNode::Bool => "Bool".into(),
+        TyNode::Int => "Integer".into(),
+        TyNode::Float => "Float".into(),
+        TyNode::String => "String".into(),
+        TyNode::Handle(g, a) => {
             let producer = fmt_producer(*g, a, ctx, open);
             if producer.contains(' ') {
                 format!("Handle ({producer})")
@@ -323,12 +345,12 @@ fn fmt_ty_node(ty: &Ty, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
                 format!("Handle {producer}")
             }
         }
-        Ty::Var(v) => ctx.ty_name(*v),
-        Ty::List(a) => format!("[{}]", fmt_ty_in(a, ctx, open)),
-        Ty::Map(a) => format!("Map {}", fmt_ty_in(a, ctx, open)),
-        Ty::Record(r) => format!("[{}]", fmt_row_in(r, ctx, open)),
-        Ty::Variant(r) => format!("[{}]", fmt_variant_row_in(r, ctx, open)),
-        Ty::Thunk(b) => format!("{{{}}}", fmt_comp_ty_in(b, ctx, open)),
+        TyNode::Var(v) => ctx.ty_name(*v),
+        TyNode::List(a) => format!("[{}]", fmt_ty_in(a, ctx, open)),
+        TyNode::Map(a) => format!("Map {}", fmt_ty_in(a, ctx, open)),
+        TyNode::Record(r) => format!("[{}]", fmt_row_in(r, ctx, open)),
+        TyNode::Variant(r) => format!("[{}]", fmt_variant_row_in(r, ctx, open)),
+        TyNode::Thunk(b) => format!("{{{}}}", fmt_comp_ty_in(b, ctx, open)),
     }
 }
 
@@ -355,8 +377,8 @@ fn fmt_row_with_sep(
         .fields()
         .map(|(l, ty)| format!("{l}: {}", fmt_ty_in(ty, ctx, open)))
         .collect();
-    let tail = match row.tail() {
-        Row::Var(v) => Some(match ctx.row_name(*v) {
+    let tail = match row.tail().node() {
+        RowNode::Var(v) => Some(match ctx.row_name(*v) {
             Some(name) => format!("{tail_sigil}...{name}"),
             None => format!("{tail_sigil}..."),
         }),
@@ -390,14 +412,14 @@ fn fmt_comp_ty_in(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
 }
 
 fn fmt_comp_ty_node(cty: &CompTy, ctx: &FmtCtx, open: &mut Vec<Open>) -> String {
-    match cty {
-        CompTy::Var(v) => ctx.comp_name(*v),
-        CompTy::Fun(a, b) => format!(
+    match cty.node() {
+        CompTyNode::Var(v) => ctx.comp_name(*v),
+        CompTyNode::Fun(a, b) => format!(
             "{} → {}",
             fmt_ty_in(a, ctx, open),
             fmt_comp_ty_in(b, ctx, open)
         ),
-        CompTy::Return(g, a) => fmt_producer(*g, a, ctx, open),
+        CompTyNode::Return(g, a) => fmt_producer(*g, a, ctx, open),
     }
 }
 
@@ -503,9 +525,9 @@ fn render_scheme(scheme: &Scheme) -> String {
         format!("∀{}. ", quant_parts.join(" "))
     };
 
-    let body = match &scheme.ty {
-        Ty::Thunk(cty) => fmt_comp_ty_ctx(cty, &ctx),
-        other => fmt_ty_ctx(other, &ctx),
+    let body = match scheme.ty.node() {
+        TyNode::Thunk(cty) => fmt_comp_ty_ctx(cty, &ctx),
+        _ => fmt_ty_ctx(&scheme.ty, &ctx),
     };
 
     format!("{prefix}{body}")
@@ -536,7 +558,7 @@ mod tests {
         let beta = CompTyVar(17);
         let scheme = Scheme {
             comps: [(beta, Role::Forall(()))].into(),
-            ..Scheme::mono(Ty::Thunk(Box::new(CompTy::Var(beta))))
+            ..Scheme::mono(Ty::thunk(CompTy::var(beta)))
         };
         assert_eq!(scheme.to_string(), "∀ϕ. ϕ");
     }
@@ -544,10 +566,10 @@ mod tests {
     #[test]
     fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
         let root = CompTyVar(29);
-        let binding = CompTy::pure(Ty::list(Ty::Thunk(Box::new(CompTy::Var(root)))));
+        let binding = CompTy::pure(Ty::list(Ty::thunk(CompTy::var(root))));
         let scheme = Scheme {
             comps: [(root, Role::Mu(binding.clone()))].into(),
-            ..Scheme::mono(Ty::Thunk(Box::new(binding)))
+            ..Scheme::mono(Ty::thunk(binding))
         };
         assert_eq!(scheme.to_string(), "μϕ. Returns [{ϕ}]");
     }
@@ -556,8 +578,8 @@ mod tests {
     fn fmt_scheme_binds_cyclic_ty_roots_by_mu() {
         let root = TyVar(17);
         let scheme = Scheme {
-            tys: [(root, Role::Mu(Ty::list(Ty::Var(root))))].into(),
-            ..Scheme::mono(Ty::list(Ty::Var(root)))
+            tys: [(root, Role::Mu(Ty::list(Ty::var(root))))].into(),
+            ..Scheme::mono(Ty::list(Ty::var(root)))
         };
         let rendered = scheme.to_string();
         assert_eq!(rendered, "μα. [α]");
@@ -566,7 +588,7 @@ mod tests {
     #[test]
     fn a_node_unrolled_below_its_root_prints_as_the_root() {
         let root = TyVar(17);
-        let list = Ty::list(Ty::Var(root));
+        let list = Ty::list(Ty::var(root));
         let deep = (0..9).fold(list.clone(), |ty, _| Ty::list(ty));
         let scheme = Scheme {
             tys: [(root, Role::Mu(list))].into(),
@@ -584,14 +606,10 @@ mod tests {
                 (weak, Role::Weak(Kind::ANY)),
             ]
             .into(),
-            ..Scheme::mono(Ty::Record(Row::Extend(
+            ..Scheme::mono(Ty::record(Row::extend(
                 Label::Field("a".into()),
-                Box::new(Ty::Var(bound)),
-                Box::new(Row::Extend(
-                    Label::Field("b".into()),
-                    Box::new(Ty::Var(weak)),
-                    Box::new(Row::Empty),
-                )),
+                Ty::var(bound),
+                Row::extend(Label::Field("b".into()), Ty::var(weak), Row::empty()),
             )))
         };
         assert_eq!(scheme.to_string(), "∀α. [a: α, b: _β]");
@@ -600,8 +618,8 @@ mod tests {
     #[test]
     fn fmt_variant_row_tails_have_a_backtick() {
         let row_var = RowVar(17);
-        let variant = Ty::Variant(Row::Var(row_var));
-        let record = Ty::Record(Row::Var(row_var));
+        let variant = Ty::variant(Row::var(row_var));
+        let record = Ty::record(Row::var(row_var));
 
         assert_eq!(variant.to_string(), "[`...]");
         assert_eq!(record.to_string(), "[...]");

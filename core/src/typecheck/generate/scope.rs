@@ -62,7 +62,7 @@ impl Generator {
                 ..
             }) => {
                 let (cty, node) = self.region(|this| this.arm(value, Arm::CatchAll, at));
-                (Ty::Thunk(Box::new(cty)), node)
+                (Ty::thunk(cty), node)
             }
             _ => self.val(value, at),
         };
@@ -174,14 +174,14 @@ impl Generator {
         let title = title.map(|title| {
             self.with_span(title.span, |this| {
                 let (ty, node) = this.val(&title.item, title.span);
-                this.solver.equate(&ty, &Ty::String, Reason::SpawnTitle);
+                this.solver.equate(&ty, &Ty::string(), Reason::SpawnTitle);
                 Spanned::with_span(title.span, node)
             })
         });
         let (cty, body) = self.scope_body(body);
         let producer = self.force_return_shape(&cty, Reason::ReturnShape);
         (
-            self.produces(Ty::Handle(producer.grade, Box::new(producer.ty))),
+            self.produces(Ty::handle(producer.grade, producer.ty)),
             CompKind::Spawn { title, body },
         )
     }
@@ -195,7 +195,7 @@ impl Generator {
         let cty = self.solver.fresh_comp();
         let (ty, node) = self.val(body, None);
         self.solver
-            .equate(&ty, &Ty::Thunk(Box::new(cty.clone())), Reason::ScopeBody);
+            .equate(&ty, &Ty::thunk(cty.clone()), Reason::ScopeBody);
         self.extract_return(&cty);
         (cty, node)
     }
@@ -224,7 +224,7 @@ mod tests {
     use super::*;
     use crate::ir::{Argv, CommandName, CommandWord, Pattern, Redirects};
     use crate::source::FileId;
-    use crate::ty::{Grade, UnitId};
+    use crate::ty::{CompTyNode, Grade, UnitId};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::generate::tests::{assert_solved_comp, assert_solved_type, solved};
     use crate::typecheck::readback::{Readback, exec_node};
@@ -281,7 +281,7 @@ mod tests {
                     if output {
                         CompTy::command()
                     } else {
-                        CompTy::pure(Ty::Int)
+                        CompTy::pure(Ty::int())
                     }
                 );
                 Readback::new(&solution, UnitId::fresh(), 0).comp(&Spanned::new(at(0), item));
@@ -315,11 +315,12 @@ mod tests {
         let (cty, item) = generator.audit(&block(command(1, "emit")));
         assert!(matches!(item, CompKind::Audit { .. }));
         let solution = solved(generator.solver);
-        let CompTy::Return(grade, result) = solution.resolve_comp(&cty) else {
+        let resolved = solution.resolve_comp(&cty);
+        let CompTyNode::Return(grade, result) = resolved.node() else {
             panic!("audit producer")
         };
         assert!(matches!(grade, Grade::Var(_)));
-        assert_solved_type(&solution.scratch(), &result, &audit_record(Ty::Unit));
+        assert_solved_type(&solution.scratch(), result, &audit_record(Ty::unit()));
     }
 
     #[test]
@@ -337,14 +338,15 @@ mod tests {
         };
         assert_eq!(title.span, Some(at(1)));
         let solution = solved(generator.solver);
-        let CompTy::Return(grade, result) = solution.resolve_comp(&cty) else {
+        let resolved = solution.resolve_comp(&cty);
+        let CompTyNode::Return(grade, result) = resolved.node() else {
             panic!("spawn producer")
         };
         assert!(matches!(grade, Grade::Var(_)));
         assert_solved_type(
             &solution.scratch(),
-            &result,
-            &Ty::Handle(Grade::Output, Box::new(Ty::Unit)),
+            result,
+            &Ty::handle(Grade::Output, Ty::unit()),
         );
 
         let mut generator = self::generator();
@@ -365,17 +367,17 @@ mod tests {
             keys: &[
                 Key {
                     label: "later",
-                    holds: Holds::At(Ty::String),
+                    holds: Holds::At(Ty::string),
                     reason: None,
                 },
                 Key {
                     label: "early",
-                    holds: Holds::At(Ty::Bool),
+                    holds: Holds::At(Ty::bool),
                     reason: None,
                 },
                 Key {
                     label: "required",
-                    holds: Holds::Required(Ty::String),
+                    holds: Holds::Required(Ty::string),
                     reason: None,
                 },
             ],
@@ -444,7 +446,7 @@ mod tests {
         assert!(
             generator
                 .solver
-                .equate(&unknown, &Ty::String, Reason::Argument)
+                .equate(&unknown, &Ty::string(), Reason::Argument)
         );
         let (store, errors) = generator.solver.refused();
         let [error] = &errors[..] else {
@@ -455,16 +457,16 @@ mod tests {
             TypeErrorKind::NotATable { key: "exec", .. }
         ));
         assert_eq!(error.pos, Some(at(2)));
-        assert_eq!(store.resolve_ty(&unknown), Ty::String);
+        assert_eq!(store.resolve_ty(&unknown), Ty::string());
     }
 
     #[test]
     fn within_installs_named_arms_only_for_its_body_and_keeps_arm_spans() {
         let mut generator = generator();
-        let original = Arc::new(Scheme::mono(Ty::Thunk(Box::new(CompTy::arrows(
+        let original = Arc::new(Scheme::mono(Ty::thunk(CompTy::arrows(
             [Ty::argv()],
-            CompTy::pure(Ty::Int),
-        )))));
+            CompTy::pure(Ty::int()),
+        ))));
         generator
             .env
             .bind_handler("tool".into(), Arc::clone(&original), HandlerOrigin::Alias);
@@ -499,7 +501,7 @@ mod tests {
         assert!(outer.origin == HandlerOrigin::Alias);
         assert!(generator.env.lookup_binding("args").is_none());
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_comp(&cty), CompTy::pure(Ty::Int));
+        assert_eq!(solution.resolve_comp(&cty), CompTy::pure(Ty::int()));
     }
 
     #[test]
@@ -530,7 +532,7 @@ mod tests {
     #[test]
     fn retained_protection_is_kept_beside_the_bind_and_call_holes_inside_scopes() {
         let closed = solved(Solver::new());
-        let site = Arc::new(closed.site(&Ty::Int, UnitId::fresh()));
+        let site = Arc::new(closed.site(&Ty::int(), UnitId::fresh()));
         let app = node(
             3,
             CompKind::App {
@@ -591,7 +593,7 @@ mod tests {
         assert!(matches!(head.item, CompKind::Lam { .. }));
         let (bound, call) = (*bound, *hole);
         let solution = solved(generator.solver);
-        assert_solved_comp(&solution.scratch(), &cty, &CompTy::pure(Ty::Int));
+        assert_solved_comp(&solution.scratch(), &cty, &CompTy::pure(Ty::int()));
         assert_eq!(solution.mode(bound), Mode::Run);
         assert_eq!(solution.splits(call), Vec::<usize>::new());
         let checked = Readback::new(&solution, UnitId::fresh(), 0).comp(&Spanned::new(at(0), item));
@@ -612,7 +614,7 @@ mod tests {
 
     #[test]
     fn protected_comp_checks_only_the_result_not_the_producer_grade() {
-        for (want, accepted) in [(Ty::Unit, true), (Ty::String, false)] {
+        for (want, accepted) in [(Ty::unit(), true), (Ty::string(), false)] {
             let closed = solved(Solver::new());
             let site = Arc::new(closed.site(&want, UnitId::fresh()));
             let mut generator = generator();
@@ -627,7 +629,7 @@ mod tests {
                 assert_eq!(errors.len(), 1, "{errors:?}");
                 assert!(matches!(errors[0].reason, Some(Reason::ProtectContract)));
                 assert_eq!(errors[0].pos, Some(at(1)));
-                assert_eq!(store.resolve_comp_ty(&cty), CompTy::command());
+                assert_eq!(store.resolve_comp_ty_graded(&cty), CompTy::command());
             }
         }
     }

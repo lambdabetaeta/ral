@@ -60,7 +60,7 @@ record!(typed RcSettings {
 
 impl Typed for Surface {
     fn ty() -> Ty {
-        Ty::String
+        Ty::string()
     }
 }
 
@@ -450,7 +450,7 @@ mod tests {
 
     fn unit_thunk(_: &mut ral_core::ty::Binders) -> ral_core::ty::Ty {
         use ral_core::typecheck::builtins::{pure, thunk};
-        thunk(pure(ral_core::ty::Ty::Unit))
+        thunk(pure(ral_core::ty::Ty::unit()))
     }
 
     /// Apply `rc_src` inside a dispatch with the REPL host, as the boot builtin

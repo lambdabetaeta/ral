@@ -140,7 +140,7 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
 }
 
 fn unit_thunk(_: &mut Binders) -> Ty {
-    thunk(pure(Ty::Unit))
+    thunk(pure(Ty::unit()))
 }
 
 #[test]

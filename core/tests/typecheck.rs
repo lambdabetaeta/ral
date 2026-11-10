@@ -11,7 +11,7 @@
 mod common;
 
 use ral_core::ir::{Comp, CompKind, GroupNode, Phrase, Toplevel, Unchecked, Val};
-use ral_core::ty::{CompTy, Grade, Ty};
+use ral_core::ty::{CompTyNode, Grade, Ty, TyNode};
 use ral_core::typecheck::contract::declared;
 use ral_core::typecheck::{Form, TypeErrorKind};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
@@ -506,13 +506,13 @@ fn a_non_function_case_arm_reports_its_known_payload_and_unknown_result() {
     let TypeErrorKind::TyMismatch { expected, actual } = &errs[0].kind else {
         panic!("expected a value type mismatch: {errs:?}")
     };
-    assert_eq!(expected.as_ref(), &Ty::Int);
-    let Ty::Thunk(body) = actual.as_ref() else {
+    assert_eq!(expected, &Ty::int());
+    let TyNode::Thunk(body) = actual.node() else {
         panic!("expected a handler thunk: {errs:?}")
     };
     assert!(
-        matches!(body.as_ref(), CompTy::Fun(arg, result)
-            if **arg == Ty::Unit && matches!(result.as_ref(), CompTy::Var(_))),
+        matches!(body.node(), CompTyNode::Fun(arg, result)
+            if *arg == Ty::unit() && matches!(result.node(), CompTyNode::Var(_))),
         "coverage fixes the payload but not the result: {errs:?}"
     );
 }
@@ -536,7 +536,7 @@ static TEST_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
     keys: &[
         ral_core::typecheck::contract::Key {
             label: "n",
-            holds: ral_core::typecheck::contract::Holds::At(Ty::Int),
+            holds: ral_core::typecheck::contract::Holds::At(Ty::int),
             reason: None,
         },
         ral_core::typecheck::contract::Key {
@@ -555,7 +555,7 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
     keys: &[
         ral_core::typecheck::contract::Key {
             label: "must",
-            holds: ral_core::typecheck::contract::Holds::Required(Ty::String),
+            holds: ral_core::typecheck::contract::Holds::Required(Ty::string),
             reason: None,
         },
         ral_core::typecheck::contract::Key {
@@ -1297,9 +1297,9 @@ fn value_join_syntaxes_preserve_shape_hints_and_blame() {
             let errs = raw_errors(&src);
             assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
             assert!(
-                matches!(&errs[0].kind, TypeErrorKind::CompTyMismatch {
-                    expected: CompTy::Return(g, _), actual: CompTy::Return(h, _),
-                } if g == h),
+                matches!(&errs[0].kind, TypeErrorKind::CompTyMismatch { expected, actual }
+                    if matches!((expected.node(), actual.node()),
+                        (CompTyNode::Return(g, _), CompTyNode::Return(h, _)) if g == h)),
                 "{src}: {errs:?}"
             );
             assert!(
@@ -1479,14 +1479,17 @@ fn number_kind_joins_keep_the_value_grade_in_both_orders() {
             let TypeErrorKind::CompTyMismatch { expected, actual } = &err.kind else {
                 panic!("expected a producer mismatch: {err:?}");
             };
-            let (command, value) = if matches!(expected, CompTy::Return(Grade::Output, _)) {
-                (expected, actual)
-            } else {
-                (actual, expected)
-            };
-            assert!(matches!(command, CompTy::Return(Grade::Output, ty) if **ty == Ty::Unit));
+            let (command, value) =
+                if matches!(expected.node(), CompTyNode::Return(Grade::Output, _)) {
+                    (expected, actual)
+                } else {
+                    (actual, expected)
+                };
             assert!(
-                matches!(value, CompTy::Return(grade, ty) if *grade != Grade::Output && matches!(**ty, Ty::Var(_)))
+                matches!(command.node(), CompTyNode::Return(Grade::Output, ty) if *ty == Ty::unit())
+            );
+            assert!(
+                matches!(value.node(), CompTyNode::Return(grade, ty) if *grade != Grade::Output && matches!(ty.node(), TyNode::Var(_)))
             );
             toplevel_ok(&src.replace("echo done", "return 0"));
         }
@@ -1509,14 +1512,16 @@ fn rejected_producer_equations_do_not_poison_later_command_joins() {
         let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
             panic!("expected a producer mismatch: {errs:?}");
         };
-        let (CompTy::Return(a, ta), CompTy::Return(b, tb)) = (expected, actual) else {
+        let (CompTyNode::Return(a, ta), CompTyNode::Return(b, tb)) =
+            (expected.node(), actual.node())
+        else {
             panic!("expected two producers: {errs:?}");
         };
         assert!(
             matches!(
-                (a, ta.as_ref(), b, tb.as_ref()),
-                (Grade::Value, Ty::Int, Grade::Var(_), Ty::Unit)
-                    | (Grade::Var(_), Ty::Unit, Grade::Value, Ty::Int)
+                (a, ta.node(), b, tb.node()),
+                (Grade::Value, TyNode::Int, Grade::Var(_), TyNode::Unit)
+                    | (Grade::Var(_), TyNode::Unit, Grade::Value, TyNode::Int)
             ),
             "only the Int producer's own payload entails Value: {errs:?}"
         );
@@ -1540,10 +1545,10 @@ fn record_command_default_conflict_is_reported_once_before_a_later_let() {
         panic!("expected a record-versus-command mismatch: {errs:?}");
     };
     assert!(
-        matches!((expected, actual),
-            (CompTy::Return(Grade::Value, record), CompTy::Return(Grade::Output, unit))
-            | (CompTy::Return(Grade::Output, unit), CompTy::Return(Grade::Value, record))
-            if matches!(record.as_ref(), Ty::Record(_)) && **unit == Ty::Unit),
+        matches!((expected.node(), actual.node()),
+            (CompTyNode::Return(Grade::Value, record), CompTyNode::Return(Grade::Output, unit))
+            | (CompTyNode::Return(Grade::Output, unit), CompTyNode::Return(Grade::Value, record))
+            if matches!(record.node(), TyNode::Record(_)) && *unit == Ty::unit()),
         "the default conflict, not the later let, must be reported: {errs:?}"
     );
 }
@@ -1567,17 +1572,18 @@ fn rejected_handle_equations_do_not_poison_a_later_await() {
         let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
             panic!("expected a producer mismatch: {errs:?}");
         };
-        let (CompTy::Return(_, a), CompTy::Return(_, b)) = (expected, actual) else {
+        let (CompTyNode::Return(_, a), CompTyNode::Return(_, b)) = (expected.node(), actual.node())
+        else {
             panic!("expected two handle producers: {errs:?}");
         };
-        let (Ty::Handle(a, ta), Ty::Handle(b, tb)) = (a.as_ref(), b.as_ref()) else {
+        let (TyNode::Handle(a, ta), TyNode::Handle(b, tb)) = (a.node(), b.node()) else {
             panic!("expected two handles: {errs:?}");
         };
         assert!(
             matches!(
-                (a, ta.as_ref(), b, tb.as_ref()),
-                (Grade::Value, Ty::Int, Grade::Var(_), Ty::Unit)
-                    | (Grade::Var(_), Ty::Unit, Grade::Value, Ty::Int)
+                (a, ta.node(), b, tb.node()),
+                (Grade::Value, TyNode::Int, Grade::Var(_), TyNode::Unit)
+                    | (Grade::Var(_), TyNode::Unit, Grade::Value, TyNode::Int)
             ),
             "only the Int handle's own payload entails Value: {errs:?}"
         );
@@ -1599,20 +1605,20 @@ fn numeric_spawn_handle_lists_keep_grade_type_pairing_in_both_orders() {
             let TypeErrorKind::TyMismatch { expected, actual } = &err.kind else {
                 panic!("expected a handle mismatch: {err:?}");
             };
-            let (command, value) = if matches!(expected.as_ref(), Ty::Handle(Grade::Output, _)) {
-                (expected.as_ref(), actual.as_ref())
+            let (command, value) = if matches!(expected.node(), TyNode::Handle(Grade::Output, _)) {
+                (expected.node(), actual.node())
             } else {
-                (actual.as_ref(), expected.as_ref())
+                (actual.node(), expected.node())
             };
-            assert!(matches!(command, Ty::Handle(Grade::Output, ty) if **ty == Ty::Unit));
-            let Ty::Handle(grade, ty) = value else {
+            assert!(matches!(command, TyNode::Handle(Grade::Output, ty) if *ty == Ty::unit()));
+            let TyNode::Handle(grade, ty) = value else {
                 panic!("expected a value-producing handle: {err:?}");
             };
             assert_ne!(*grade, Grade::Output);
             if variable {
-                assert!(matches!(**ty, Ty::Var(_)), "{err:?}");
+                assert!(matches!(ty.node(), TyNode::Var(_)), "{err:?}");
             } else {
-                assert_eq!(**ty, Ty::Int);
+                assert_eq!(*ty, Ty::int());
             }
             toplevel_ok(&src.replace("echo done", "return 0"));
         }

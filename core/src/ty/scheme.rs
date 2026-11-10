@@ -4,7 +4,9 @@
 //! fresh unification variables at each use site, giving let-polymorphism.
 
 use super::kind::Kind;
-use super::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Term, Ty, TyVar, Var};
+use super::{
+    CompTy, CompTyNode, CompTyVar, Grade, GradeVar, RowNode, RowVar, Term, Ty, TyNode, TyVar, Var,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Deref;
@@ -130,8 +132,8 @@ impl Scheme {
 
     /// How many parameters a block of this scheme takes, read off its type.
     pub(crate) fn arity(&self) -> usize {
-        match &self.ty {
-            Ty::Thunk(body) => body.arity(),
+        match self.ty.node() {
+            TyNode::Thunk(body) => body.arity(),
             _ => 0,
         }
     }
@@ -176,15 +178,27 @@ fn picked<V: Copy, M, B>(
 
 /// Every variable written in `term`, into `out`.
 pub(crate) fn collect_vars(term: Term<'_>, out: &mut BTreeSet<Var>) {
+    if term.is_ground() {
+        return;
+    }
     if let Some(Grade::Var(v)) = term.grade() {
         out.insert(Var::Grade(v));
     }
-    match term {
-        Term::Ty(Ty::Var(v)) => out.insert(Var::Ty(*v)),
-        Term::Comp(CompTy::Var(v)) => out.insert(Var::Comp(*v)),
-        Term::Row(Row::Var(v)) => out.insert(Var::Row(*v)),
-        _ => false,
+    let var = match term {
+        Term::Ty(ty) => match ty.node() {
+            TyNode::Var(v) => Some(Var::Ty(*v)),
+            _ => None,
+        },
+        Term::Comp(cty) => match cty.node() {
+            CompTyNode::Var(v) => Some(Var::Comp(*v)),
+            _ => None,
+        },
+        Term::Row(row) => match row.node() {
+            RowNode::Var(v) => Some(Var::Row(*v)),
+            _ => None,
+        },
     };
+    out.extend(var);
     for child in term.children() {
         collect_vars(child, out);
     }
@@ -253,7 +267,7 @@ impl Binders {
     /// # Panics
     /// If the type writes a variable `rule` did not draw here.
     pub(crate) fn close(rule: impl FnOnce(&mut Self) -> Ty) -> Closed {
-        let mut binders = Self(Scheme::mono(Ty::Unit));
+        let mut binders = Self(Scheme::mono(Ty::unit()));
         let ty = rule(&mut binders);
         Closed::new(Arc::new(Scheme { ty, ..binders.0 }))
             .unwrap_or_else(|error| panic!("builtin scheme: {error}"))

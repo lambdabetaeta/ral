@@ -16,7 +16,7 @@ fn check_with_stored(names: &[&str], src: &str) -> Vec<super::TypeError> {
     let elem = TyVar(0);
     let stored = stored(Scheme {
         tys: [(elem, Role::Weak(Kind::ANY))].into(),
-        ..Scheme::mono(Ty::list(Ty::Var(elem)))
+        ..Scheme::mono(Ty::list(Ty::var(elem)))
     });
     let schemes = SessionSchemes {
         bindings: names
@@ -83,10 +83,10 @@ fn identity_body() -> Arc<crate::ir::Comp> {
 }
 
 fn identity_ty(param: Ty) -> Ty {
-    Ty::Thunk(Box::new(crate::ty::CompTy::arrows(
+    Ty::thunk(crate::ty::CompTy::arrows(
         [param.clone()],
         crate::ty::CompTy::pure(param),
-    )))
+    ))
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn binding_value_scheme_quantifies_its_identity_parameter() {
     assert_eq!(quantified_tys(&scheme), 1);
     assert!(!scheme.has_weak());
     let mut u = super::Unifier::new();
-    for param in [Ty::Int, Ty::Bool] {
+    for param in [Ty::int(), Ty::bool()] {
         let instance = super::instantiate(&mut u, &scheme);
         u.unify_ty(&instance, &identity_ty(param)).unwrap();
     }
@@ -108,11 +108,11 @@ fn alias_arm_scheme_retains_its_polymorphic_result() {
     use crate::source::Spanned;
     use crate::ty::CompTy;
     let head = Binders::close(|binders| {
-        let variable = Ty::Var(binders.ty(Kind::ANY));
-        Ty::Thunk(Box::new(CompTy::arrows(
+        let variable = Ty::var(binders.ty(Kind::ANY));
+        Ty::thunk(CompTy::arrows(
             [Ty::argv()],
             CompTy::pure(identity_ty(variable)),
-        )))
+        ))
     });
     let schemes = SessionSchemes {
         aliases: vec![("identity-arm".into(), head)],
@@ -128,12 +128,12 @@ fn alias_arm_scheme_retains_its_polymorphic_result() {
     assert_eq!(quantified_tys(&scheme), 1);
     assert!(!scheme.has_weak());
     let mut u = super::Unifier::new();
-    for param in [Ty::Int, Ty::Bool] {
+    for param in [Ty::int(), Ty::bool()] {
         let instance = super::instantiate(&mut u, &scheme);
-        let wanted = Ty::Thunk(Box::new(CompTy::arrows(
+        let wanted = Ty::thunk(CompTy::arrows(
             [Ty::argv()],
             CompTy::pure(identity_ty(param)),
-        )));
+        ));
         u.unify_ty(&instance, &wanted).unwrap();
     }
 }
@@ -211,10 +211,10 @@ fn takes_reseeds_a_stored_schemes_weak_payload_before_instantiation() {
     let scheme = stored(Scheme {
         tys: [(residual, Role::Weak(Kind::ANY))].into(),
         grades: [grade].into(),
-        ..Scheme::mono(Ty::Thunk(Box::new(CompTy::arrows(
-            [Ty::Int],
-            CompTy::Return(Grade::Var(grade), Box::new(Ty::list(Ty::Var(residual)))),
-        ))))
+        ..Scheme::mono(Ty::thunk(CompTy::arrows(
+            [Ty::int()],
+            CompTy::ret(Grade::Var(grade), Ty::list(Ty::var(residual))),
+        )))
     });
     assert!(super::takes(&scheme, 1));
     assert!(!super::takes(&scheme, 0));

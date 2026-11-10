@@ -443,7 +443,7 @@ fn only_a_lone_exec_run_is_a_single_command() {
         (vec![], false),
         (vec![run(exec())], true),
         (vec![run(ret("v"))], false),
-        (vec![define("x", crate::ty::Ty::Int)], false),
+        (vec![define("x", crate::ty::Ty::int())], false),
         (vec![run(exec()), run(exec())], false),
     ] {
         assert_eq!(toplevel(phrases).is_single_command(), lone);
@@ -454,17 +454,17 @@ fn only_a_lone_exec_run_is_a_single_command() {
 fn the_last_let_of_a_name_wins_the_exported_scheme() {
     use crate::ty::{Binders, Ty};
     let unit = toplevel(vec![
-        define("x", Ty::Int),
+        define("x", Ty::int()),
         run(exec()),
-        define("y", Ty::String),
-        define("x", Ty::Bool),
+        define("y", Ty::string()),
+        define("x", Ty::bool()),
     ]);
     let scheme = |ty| Binders::close(|_| ty);
     assert_eq!(
         unit.exported_schemes(),
         [
-            ("x".to_string(), scheme(Ty::Bool)),
-            ("y".to_string(), scheme(Ty::String))
+            ("x".to_string(), scheme(Ty::bool())),
+            ("y".to_string(), scheme(Ty::string()))
         ]
     );
 }

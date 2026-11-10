@@ -282,7 +282,7 @@ mod tests {
         parent.set_var("nat".to_string(), partial_over(idle_handle()));
         let catch_all = block_over(&parent.env);
         let mut alias = HandlerEntry::ral_per_name("alias".into(), blk.clone());
-        alias.scheme = Some(crate::ty::Binders::close(|_| crate::ty::Ty::Unit));
+        alias.scheme = Some(crate::ty::Binders::close(|_| crate::ty::Ty::unit()));
         let named = HandlerEntry::ral_per_name("named".into(), blk.clone());
         parent
             .context

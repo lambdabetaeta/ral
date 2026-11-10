@@ -14,7 +14,7 @@ use crate::data::datum::{Datum, tag, untag};
 use crate::data::{Bytes, FOValue, Finite};
 use crate::shell::runtime::{Done, Owner, Sample, Value};
 use crate::ty::{Ty, Typed, closed_record};
-use crate::{record, variant};
+use crate::{memoized_ty, record, variant};
 
 /// One read of session state: the payload of `Frame::Probe`.
 ///
@@ -103,7 +103,7 @@ record!(WorkerRow {
 /// The ral record [`WorkerRow::ral_value`] builds, not the probe's encoding.
 impl Typed for WorkerRow {
     fn ty() -> Ty {
-        closed_record(&[
+        memoized_ty!(closed_record(&[
             ("id", u64::ty()),
             ("title", String::ty()),
             ("owner", Owner::ty()),
@@ -111,7 +111,7 @@ impl Typed for WorkerRow {
             ("started", i64::ty()),
             ("elapsed", Finite::ty()),
             ("settled", Option::<i64>::ty()),
-        ])
+        ]))
     }
 }
 

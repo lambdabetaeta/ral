@@ -371,7 +371,7 @@ mod durability_tests {
 
     fn scheme_panic_now(_: &mut crate::ty::Binders) -> crate::ty::Ty {
         use crate::typecheck::builtins::{pure, thunk};
-        thunk(pure(crate::ty::Ty::Unit))
+        thunk(pure(crate::ty::Ty::unit()))
     }
 
     static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =

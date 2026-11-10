@@ -19,7 +19,7 @@ fn builtin_panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) ->
 }
 
 fn scheme_panic_now(_: &mut Binders) -> Ty {
-    thunk(pure(Ty::Unit))
+    thunk(pure(Ty::unit()))
 }
 
 static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

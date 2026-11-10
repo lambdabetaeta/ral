@@ -1211,7 +1211,7 @@ fn a_timed_out_workers_done_poll_and_await_records_are_identical() {
     runtime.install_captured_builtins(
         &vec![BuiltinEntry::new(
             "timeout-now".into(),
-            |_| thunk(pure(crate::ty::Ty::Unit)),
+            |_| thunk(pure(crate::ty::Ty::unit())),
             "test-only deterministic worker timeout",
             BuiltinBody::Static(|_, mooring, shell| {
                 mooring.home.cancel(CancelCause::TimedOut);

@@ -25,7 +25,7 @@ use super::{BOUNDARY_BUILTINS, CORE_BUILTINS};
 use crate::Break;
 use crate::shell::runtime::{Map, Mooring, Value};
 use crate::test_helper::fresh_shell;
-use crate::ty::{CompTy, Grade, Row, Ty};
+use crate::ty::{CompTyNode, Grade, RowNode, Ty, TyNode};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
 /// satisfy, so the registry sweep cannot run them.  Each is exercised by
@@ -57,15 +57,15 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
 /// skipped).  `Ty::Var` is a polymorphic position — any value inhabits it,
 /// so a scalar stands in.
 fn inhabitant(ty: &Ty) -> Option<Value> {
-    Some(match ty {
-        Ty::Unit => Value::Unit,
-        Ty::Bool => Value::Bool(true),
-        Ty::Int | Ty::Var(_) => Value::Int(1),
-        Ty::Float => Value::Float(crate::data::Finite::new(1.5).expect("finite")),
-        Ty::String => Value::string("ab"),
-        Ty::Bytes => Value::bytes(vec![1, 2]),
-        Ty::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
-        Ty::Map(val) => {
+    Some(match ty.node() {
+        TyNode::Unit => Value::Unit,
+        TyNode::Bool => Value::Bool(true),
+        TyNode::Int | TyNode::Var(_) => Value::Int(1),
+        TyNode::Float => Value::Float(crate::data::Finite::new(1.5).expect("finite")),
+        TyNode::String => Value::string("ab"),
+        TyNode::Bytes => Value::bytes(vec![1, 2]),
+        TyNode::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
+        TyNode::Map(val) => {
             let pairs: Vec<(String, Value)> = vec![("k".into(), inhabitant(val)?)];
             Value::Map(Map::from(pairs))
         }
@@ -78,24 +78,24 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
 /// Does `value` inhabit the (resolved) declared return type?  A `Ty::Var`
 /// return is polymorphic — any value inhabits it.
 fn inhabits(value: &Value, ty: &Ty) -> bool {
-    match (ty, value) {
-        (Ty::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
-        (Ty::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
-        (Ty::Var(_), _)
-        | (Ty::Unit, Value::Unit)
-        | (Ty::Bool, Value::Bool(_))
-        | (Ty::Int, Value::Int(_))
+    match (ty.node(), value) {
+        (TyNode::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
+        (TyNode::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
+        (TyNode::Var(_), _)
+        | (TyNode::Unit, Value::Unit)
+        | (TyNode::Bool, Value::Bool(_))
+        | (TyNode::Int, Value::Int(_))
         // The checker promotes Int to Float at use sites; an Int result for
         // a Float position still inhabits it.
-        | (Ty::Float, Value::Float(_) | Value::Int(_))
-        | (Ty::String, Value::String(_))
-        | (Ty::Bytes, Value::Bytes(_))
-        | (Ty::Handle(..), Value::Handle(_))
+        | (TyNode::Float, Value::Float(_) | Value::Int(_))
+        | (TyNode::String, Value::String(_))
+        | (TyNode::Bytes, Value::Bytes(_))
+        | (TyNode::Handle(..), Value::Handle(_))
         // Record/Variant returns carry a row; a Map/Variant runtime value is
         // the honest first-order witness and the dedicated builtin tests
         // check the field shapes.
-        | (Ty::Record(_), Value::Map(_))
-        | (Ty::Variant(_), Value::Variant { .. }) => true,
+        | (TyNode::Record(_), Value::Map(_))
+        | (TyNode::Variant(_), Value::Variant { .. }) => true,
         _ => false,
     }
 }
@@ -104,21 +104,21 @@ fn inhabits(value: &Value, ty: &Ty) -> bool {
 /// Returns `None` for a scheme that is not a thunked function (e.g. a
 /// `pure` value scheme), which the sweep ignores.
 fn arg_and_return_types(ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
-    let Ty::Thunk(cty) = ty else {
+    let TyNode::Thunk(cty) = ty.node() else {
         return None;
     };
     let mut args = Vec::new();
-    let mut cur: &CompTy = cty;
+    let mut cur = cty;
     loop {
-        match cur {
-            CompTy::Fun(param, body) => {
-                args.push((**param).clone());
+        match cur.node() {
+            CompTyNode::Fun(param, body) => {
+                args.push(param.clone());
                 cur = body;
             }
-            CompTy::Return(_, ret) => {
-                return Some((args, (**ret).clone()));
+            CompTyNode::Return(_, ret) => {
+                return Some((args, ret.clone()));
             }
-            CompTy::Var(_) => return None,
+            CompTyNode::Var(_) => return None,
         }
     }
 }
@@ -159,31 +159,37 @@ fn every_scheme_reducer_inhabits_its_return_type() {
 
 /// Every producer reachable in `ty`, a `Return` or a handle, as `(grade, value)`.
 fn producers(ty: &Ty, out: &mut Vec<(Grade, Ty)>) {
-    match ty {
-        Ty::Thunk(cty) => {
-            let mut cur: &CompTy = cty;
-            while let CompTy::Fun(param, body) = cur {
+    match ty.node() {
+        TyNode::Thunk(cty) => {
+            let mut cur = cty;
+            while let CompTyNode::Fun(param, body) = cur.node() {
                 producers(param, out);
                 cur = body;
             }
-            if let CompTy::Return(grade, value) = cur {
-                out.push((*grade, (**value).clone()));
+            if let CompTyNode::Return(grade, value) = cur.node() {
+                out.push((*grade, value.clone()));
                 producers(value, out);
             }
         }
-        Ty::Handle(grade, value) => {
-            out.push((*grade, (**value).clone()));
+        TyNode::Handle(grade, value) => {
+            out.push((*grade, value.clone()));
             producers(value, out);
         }
-        Ty::List(a) | Ty::Map(a) => producers(a, out),
-        Ty::Record(row) | Ty::Variant(row) => {
+        TyNode::List(a) | TyNode::Map(a) => producers(a, out),
+        TyNode::Record(row) | TyNode::Variant(row) => {
             let mut cur = row;
-            while let Row::Extend(_, field, rest) = cur {
+            while let RowNode::Extend(_, field, rest) = cur.node() {
                 producers(field, out);
                 cur = rest;
             }
         }
-        Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Var(_) => {}
+        TyNode::Unit
+        | TyNode::Bytes
+        | TyNode::Bool
+        | TyNode::Int
+        | TyNode::Float
+        | TyNode::String
+        | TyNode::Var(_) => {}
     }
 }
 
@@ -206,7 +212,7 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
         let mut paired: std::collections::HashMap<Grade, Ty> = std::collections::HashMap::new();
         for (grade, value) in found {
             match grade {
-                Grade::Output => assert_eq!(value, Ty::Unit, "{name}: a command produces `()`"),
+                Grade::Output => assert_eq!(value, Ty::unit(), "{name}: a command produces `()`"),
                 Grade::Value => {}
                 Grade::Var(_) => {
                     let first = paired.entry(grade).or_insert_with(|| value.clone());
