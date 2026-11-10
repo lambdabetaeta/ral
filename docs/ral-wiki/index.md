@@ -394,6 +394,8 @@ design pages via the `against` stamp.
 - [[related/asynchronous-effects|asynchronous-effects]] — Ahman–Pretnar 2021/2024: one-way signals out, interrupts in, synchronous calls derived from both — the engine protocol's calculus; ral keeps `enquire` primitive for ordering, gives interrupts to the runtime alone, and adds the session scope at which a worker's signals wait.
 - [[related/gvisor|gvisor]] — Google's `runsc`: a userspace reimplementation of the Linux syscall ABI (Sentry + Gofer, each under its own seccomp allow-list) — what ral is instead (authority over OS primitives, two enforcers) and what [[decisions/260906_seccomp-is-a-typed-deny-set|the typed deny-set]] takes from it (typed rules, weakenings as first-class data, confining the confiner) versus what it does not (the Sentry itself, OCI plumbing).
 
+- [[related/process-lifetime-domains|process-lifetime-domains]] — Linux cgroups and PID namespaces, Windows Jobs, and the limits of examined macOS interfaces: identity-safe signalling, descendant containment, completion and owner-death cleanup are separate obligations; ral's current implementations do not yet establish one portable containment contract.
+
 - [[related/omnidirectional-type-inference|omnidirectional-type-inference]] — O'Brien, Rémy and Scherer, arXiv:2511.10343: suspended matches and context-known heads adopted; incremental instantiation, partial schemes and instance-to-definition propagation excluded. ral adds rank-bound defaults, not a transferred principality theorem.
 
 ## map/ — where things live
