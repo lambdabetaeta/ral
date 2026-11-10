@@ -23,6 +23,8 @@ impl TypeErrorKind {
     /// an accident of the call site, so no message may claim one side is right.
     pub fn render_message(&self) -> String {
         match self {
+            Self::ConflictingDefaults { .. } =>
+                "the same computation is run for its value by a binding and called as a function by an application".into(),
             Self::RecursiveRow => {
                 "infinite row: a record's field list would refer back to itself".into()
             }
@@ -161,6 +163,7 @@ impl TypeErrorKind {
     /// from the same types in the same order, so the `α` here is the `α` there.
     pub fn render_label(&self) -> String {
         match self {
+            Self::ConflictingDefaults { .. } => "both run and called as a function".into(),
             Self::RecursiveRow => "the type loops back into itself here".into(),
             Self::TypeTooDeep => "the type nests too deeply here".into(),
             Self::CyclicType { .. } => "a type that contains itself".into(),
@@ -229,8 +232,15 @@ impl TypeErrorKind {
 }
 
 impl TypeErrorKind {
-    /// Where a kind was imposed, unless the error already stands there.
+    /// A related use, unless the error already stands there.
     pub(crate) fn witness(&self, at: Option<Span>) -> Option<(Span, String)> {
+        if let Self::ConflictingDefaults { binding, call, .. } = self {
+            return conflicting_uses(*binding, *call)
+                .into_iter()
+                .find_map(|(span, text)| {
+                    Some((span.filter(|&span| Some(span) != at)?, text.into()))
+                });
+        }
         let Self::KindMismatch {
             found,
             kind,
@@ -612,8 +622,7 @@ impl TypeError {
     }
 }
 
-/// The guidance sentence, then the weak-variable note when `weak`, then the
-/// `()` note when `unit` and the error is about `()`.
+/// Guidance, then default, weak-variable and `()` notes when applicable.
 pub(super) fn hint(
     kind: &TypeErrorKind,
     reason: Option<&Reason>,
@@ -622,10 +631,54 @@ pub(super) fn hint(
 ) -> Option<String> {
     let lines: Vec<String> = guidance(kind, reason)
         .into_iter()
+        .chain(default_note(reason))
         .chain(weak.map(weak_note))
         .chain(unit.filter(|_| concerns_unit(kind)).map(unit_note))
         .collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// A default is chosen only because the enclosing definition left the head undecided.
+fn default_note(reason: Option<&Reason>) -> Option<String> {
+    match reason? {
+        Reason::Binding { defaulted_at: Some(_) } => Some(
+            "nothing in the enclosing definition makes the right-hand side a command or a function, so the binding runs it for its value".into(),
+        ),
+        Reason::Call { defaulted_at: Some(_), .. } => Some(
+            "nothing in the enclosing definition makes the head a computation returning a block, so the application calls it as a function".into(),
+        ),
+        _ => None,
+    }
+}
+
+/// The two uses a conflicting default cites, each with what it needs.
+fn conflicting_uses(
+    binding: Option<Span>,
+    call: Option<Span>,
+) -> [(Option<Span>, &'static str); 2] {
+    [
+        (binding, "binding needs a value-producing computation here"),
+        (call, "application needs a function here"),
+    ]
+}
+
+/// Both readings of a computation that is run and called, named as the
+/// program names it.  Elaboration writes `!$x` and a bare `x` alike, so
+/// neither spelling is quoted back.
+fn conflicting_defaults_hint(forced: Option<&str>, callee: Option<&str>) -> String {
+    let returns =
+        "if it returns a function, keep the binding and call the function it binds instead";
+    match (forced, callee) {
+        (Some(name), _) => format!(
+            "if `{name}` is a function, bind it with `${name}` rather than running it; {returns}"
+        ),
+        (None, Some(name)) => {
+            format!("if `{name}` is a function, bind it without running it; {returns}")
+        }
+        (None, None) => {
+            format!("if the computation is a function, bind it without running it; {returns}")
+        }
+    }
 }
 
 /// Whether an error is about `()` being used as something.
@@ -684,6 +737,12 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         }
     }
     let from_kind = match kind {
+        TypeErrorKind::TypeTooDeep => Some(
+            "reduce the type's nesting; composing functions that repeatedly wrap their input can exceed the supported depth".into(),
+        ),
+        TypeErrorKind::ConflictingDefaults { forced, callee, .. } => Some(
+            conflicting_defaults_hint(forced.as_deref(), callee.as_deref()),
+        ),
         TypeErrorKind::CommandNotFunction { .. } => Some(
             "a command head must be a function or a thunk; \
              a value here is data, not something you can invoke: pass it \
@@ -828,6 +887,15 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     }
 
     match reason? {
+        Reason::Binding { .. } => Some(
+            "a binding runs a value producer, captures a command's output, or keeps a function as a block; the bound value must agree with that choice".into(),
+        ),
+        Reason::Call { recursive_call: false, .. } => Some(
+            "an application needs a function, or a computation returning a block to call; its argument and result must agree with that function".into(),
+        ),
+        Reason::Head { .. } => Some(
+            "a call's head must be a block, not data: pass the value as an argument instead".into(),
+        ),
         Reason::ListPattern => Some(
             "the pattern `[a, b, ...]` only destructures a list: \
              the value being bound has to be a list of the same shape"
@@ -903,14 +971,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             }
             .to_string(),
         ),
-        Reason::PipelineStageShape => Some(
+        Reason::PipelineStageShape { .. } => Some(
             "a pipeline stage must be ready to run, not still waiting for an \
              argument: apply it to its argument (`f $x`) rather than piping \
              into it, or read the incoming bytes with a decoder such as \
              `from-line` if it should consume the stream instead"
                 .to_string(),
         ),
-        Reason::DiscardedValueShape => Some(
+        Reason::DiscardedValueShape { .. } => Some(
             "a discarded statement's value is thrown away, so it must be \
              ready to run, not still waiting for an argument: apply it to \
              what's left, or write `$name` if you meant to keep the function \
@@ -970,7 +1038,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              write `$name` if you meant to hand over the function itself"
                 .to_string(),
         ),
-        Reason::LetRecSelf => Some(
+        Reason::LetRecSelf | Reason::Call { recursive_call: true, .. } => Some(
             "a definition that calls itself is checked at one single type throughout \
              its own body, so every call it makes to itself must use the same argument \
              and result types as the rest of the definition"
@@ -995,9 +1063,9 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         // These constraints cannot fail on user input, already have a complete
         // diagnosis, or apply only to checker-inserted nodes.
         Reason::CaseScrutinee
+        | Reason::CaseCoverage { .. }
         | Reason::Negation
         | Reason::Interpolation
-        | Reason::AutoderefHead
         | Reason::ProtectContract
         | Reason::Vocabulary(_)
         | Reason::Capture => None,
@@ -1392,8 +1460,15 @@ impl TypeError {
         .unwrap_or_else(|| self.kind.render_message())
     }
 
-    /// The caret label: the kind's own, but for a redirect that met a function.
+    /// The caret label, specialised for a redirect or a conflicting use.
     fn label(&self) -> String {
+        if let TypeErrorKind::ConflictingDefaults { binding, call, .. } = &self.kind
+            && let Some((_, text)) = conflicting_uses(*binding, *call)
+                .into_iter()
+                .find(|&(span, _)| span.is_some() && span == self.pos)
+        {
+            return text.into();
+        }
         if self.is_redirect_shape() {
             return "this still needs arguments".into();
         }
@@ -1417,6 +1492,128 @@ mod tests {
         TypeErrorKind::CompTyMismatch {
             expected: CompTy::Return(grades.0, Box::new(expected)),
             actual: CompTy::Return(grades.1, Box::new(actual)),
+        }
+    }
+
+    fn conflicting_defaults(binding: Span, call: Span, pos: Option<Span>) -> TypeError {
+        TypeError {
+            pos,
+            kind: TypeErrorKind::ConflictingDefaults {
+                binding: Some(binding),
+                call: Some(call),
+                forced: Some("f".into()),
+                callee: Some("f".into()),
+            },
+            reason: None,
+            weak: None,
+            unit: None,
+        }
+    }
+
+    #[test]
+    fn conflicting_defaults_reports_both_uses_and_both_spellings() {
+        let binding = Span::new(crate::source::FileId(0), 10, 20);
+        let call = Span::new(crate::source::FileId(0), 30, 40);
+        for (primary, secondary, primary_text, secondary_text) in [
+            (binding, call, "binding", "application"),
+            (call, binding, "application", "binding"),
+        ] {
+            let report = conflicting_defaults(binding, call, Some(primary)).report();
+            assert_eq!(report.code, Some("T0080"));
+            assert!(report.message.contains("binding"));
+            assert!(report.message.contains("application"));
+            let at = report.at.unwrap();
+            assert_eq!(at.span, Some(primary));
+            assert!(at.text.contains(primary_text));
+            let also = report.also.unwrap();
+            assert_eq!(also.span, Some(secondary));
+            assert!(also.text.contains(secondary_text));
+            let hint = report.hint.unwrap();
+            assert!(
+                hint.contains("bind it with `$f` rather than running it;"),
+                "{hint}"
+            );
+            assert!(hint.contains("call the function it binds"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn conflicting_defaults_without_same_file_locations_still_explains_both_readings() {
+        let binding = Span::new(crate::source::FileId(0), 10, 20);
+        let call = Span::new(crate::source::FileId(1), 30, 40);
+        for pos in [Some(binding), Some(call), None] {
+            let report = conflicting_defaults(binding, call, pos).report();
+            assert!(report.also.is_none());
+            assert!(report.hint.is_some());
+        }
+        let error = TypeError {
+            pos: None,
+            kind: TypeErrorKind::ConflictingDefaults {
+                binding: None,
+                call: None,
+                forced: None,
+                callee: None,
+            },
+            reason: None,
+            weak: None,
+            unit: None,
+        };
+        assert!(error.report().also.is_none());
+        let hint = error.hint().unwrap();
+        assert!(hint.contains("if the computation is a function"), "{hint}");
+        assert!(!hint.contains('$'), "{hint}");
+    }
+
+    #[test]
+    fn type_too_deep_guidance_takes_priority_over_shape_reasons() {
+        for reason in [
+            Reason::Head {
+                name: Some("d10".into()),
+            },
+            Reason::Argument,
+            Reason::LetRecSelf,
+            Reason::Call {
+                defaulted_at: None,
+                recursive_call: true,
+            },
+        ] {
+            let hint = guidance(&TypeErrorKind::TypeTooDeep, Some(&reason)).unwrap();
+            assert!(hint.contains("reduce the type's nesting"), "{hint}");
+            assert!(!hint.contains("head must be a block"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn default_reasons_explain_the_head_their_definition_left_undecided() {
+        let closing = Span::new(crate::source::FileId(0), 0, 50);
+        for (reason, fragment) in [
+            (
+                Reason::Binding {
+                    defaulted_at: Some(closing),
+                },
+                "right-hand side a command or a function",
+            ),
+            (
+                Reason::Call {
+                    defaulted_at: Some(closing),
+                    recursive_call: false,
+                },
+                "head a computation returning a block",
+            ),
+        ] {
+            let hint = hint(&mismatch(Ty::Int, Ty::String), Some(&reason), None, None).unwrap();
+            assert!(hint.contains("nothing in the enclosing definition makes"));
+            assert!(hint.contains(fragment));
+        }
+        for reason in [
+            Reason::Binding { defaulted_at: None },
+            Reason::Call {
+                defaulted_at: None,
+                recursive_call: false,
+            },
+        ] {
+            let hint = hint(&mismatch(Ty::Int, Ty::String), Some(&reason), None, None).unwrap();
+            assert!(!hint.contains("nothing in the enclosing definition makes"));
         }
     }
 

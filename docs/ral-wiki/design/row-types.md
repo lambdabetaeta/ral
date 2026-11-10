@@ -18,8 +18,8 @@ a field met against it is an error — *no field `l` in this record*, or *this
 record needs `l`*, by which side lacks it. There is no slot that may be
 missing: an optional field is a variant's job
 ([[invariants/optionality-via-variants|optionality-via-variants]]), so the row
-algebra stays textbook and order-independence is a fact about the term rules
-alone ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
+algebra stays textbook: term rules state equations without observing a partial
+solution ([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
 
 - **Two label alphabets, one per type former** — `Label::Field` for `Record`,
   `Label::Case` for `Variant` (`core/src/ty.rs`) — and the two never
@@ -61,9 +61,17 @@ An *open* scrutinee row absorbs an arm label it has not been seen to construct
 principal row inference and not a gap in the proof: the row records what the
 program has shown, and the `case` is one more such showing.
 
-**Variants share the machinery.** A variant shares the occurs check, the
-recursion guards and the key machinery with records, and a variant's payload
-may itself be a record.
+**Row spines are finite; field types may be recursive.** Following fields and
+tail bindings ends at `Empty` or a free tail. A cycle through a field's type is
+not a cycle in that spine: `ρ = x: Record(ρ)` denotes the finite row `x: T`,
+where `T = μT. Record(x: T)`. A tail cycle such as `ρ = x: A | ρ` is refused.
+The [[decisions/260930_recursion-is-guarded-by-data|data guard]] governs recursive
+types; it does not prohibit a productive record in its own field. Stored field
+payloads have type roots so schemes and sites can represent these cycles without
+row μ-binders ([[internals/type-inference|type inference]]).
+
+**Variants share the machinery.** The same finite-spine rule and recursion
+guards apply to variants; a variant's payload may itself be a record.
 
 Scoped labels and the update rule are how ral expresses defaults at the level
 of data rather than argument lists, wherever the records in hand are known;

@@ -166,6 +166,7 @@ fn operation_name(comp: &CompKind) -> Option<FrameName> {
         CompKind::Exec(_) | CompKind::App { .. } | CompKind::Force(_) => return None,
         CompKind::Prim(Prim::Binary(op, ..)) => op.symbol(),
         CompKind::Native { entry, .. } => return Some(entry.0.decl.name.clone().into()),
+        &CompKind::BindingCall { hole, .. } => match hole {},
         CompKind::Prim(Prim::Negate(_)) => "-",
         CompKind::Prim(Prim::Not(_)) => "not",
         CompKind::Prim(Prim::Render(_)) => "str",
@@ -619,6 +620,7 @@ impl Machine {
 
             CompKind::Bind {
                 comp: rhs,
+                hole: (),
                 pattern: _,
                 rest: _,
             } => {
@@ -664,7 +666,11 @@ impl Machine {
                 self.step_case(scrutinee, arms, comp.span, env, shell)?
             }
 
-            CompKind::App { head, args } => {
+            CompKind::App {
+                head,
+                args,
+                hole: (),
+            } => {
                 let name = match &head.item {
                     CompKind::Force(val) => forced_name(val),
                     _ => None,
@@ -690,6 +696,8 @@ impl Machine {
                 let v = super::call::run_native(&entry.0, &args, None, comp.span, mooring, shell)?;
                 Focus::Return(Terminal::Value(v))
             }
+
+            &CompKind::BindingCall { hole, .. } => match hole {},
 
             CompKind::Pipeline { stages } => Focus::Return(Terminal::Value(
                 pipeline::PipeNode::run(stages, &env, STAGE_EVAL, mooring, shell)?,
@@ -1552,7 +1560,14 @@ mod tests {
             CompKind::Return(Val::Int(5)),
         ));
         let args = Box::new([Spanned::with_span(Some(span), Val::Int(1))]);
-        let app = Spanned::with_span(Some(span), CompKind::App { head, args });
+        let app = Spanned::with_span(
+            Some(span),
+            CompKind::App {
+                head,
+                args,
+                hole: (),
+            },
+        );
         let out = evaluate(
             Arc::new(app),
             shell.env.clone(),

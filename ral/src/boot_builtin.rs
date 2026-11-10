@@ -14,9 +14,8 @@ use ral_core::record;
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
 };
-use ral_core::ty::{Row, Scheme, Ty, Typed as _};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
+use ral_core::ty::{Binders, Row, Ty, Typed as _};
+use ral_core::typecheck::builtins::{fun, pure, thunk};
 use ral_core::{RegisterError, Shell, Value};
 use ral_core::{err, errln};
 use std::borrow::Cow;
@@ -39,13 +38,9 @@ static BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
 pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 
 /// The request row stays open; the answer distinguishes host refusals.
-fn scheme(u: &mut Unifier) -> Scheme {
-    let row = u.fresh_row_var();
-    mk_scheme(
-        &[],
-        &[(row, false)],
-        thunk(fun(Ty::Record(Row::Var(row)), pure(BootAnswer::ty()))),
-    )
+fn scheme(binders: &mut Binders) -> Ty {
+    let row = binders.row(false);
+    thunk(fun(Ty::Record(Row::Var(row)), pure(BootAnswer::ty())))
 }
 
 /// Register the builtin as the `Session "boot"` hook, over a shell whose surface

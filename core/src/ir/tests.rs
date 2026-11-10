@@ -39,6 +39,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
     };
     let bind = Spanned::synthetic(CompKind::Bind {
         comp: ret("r_bind_comp"),
+        hole: (),
         pattern: Arc::new(bind_pattern),
         rest: ret("r_bind_rest"),
     });
@@ -51,6 +52,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
     let app = Spanned::synthetic(CompKind::App {
         head: Arc::new(Spanned::synthetic(CompKind::Force(var("r_app_head")))),
         args: Box::new([svar("r_app_arg_first"), svar("r_app_arg_second")]),
+        hole: (),
     });
 
     let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
@@ -423,7 +425,8 @@ fn define(name: &str, ty: crate::ty::Ty) -> Spanned<Phrase> {
     Spanned::synthetic(Phrase::Define {
         pattern: Arc::new(Pattern::Name(name.into())),
         comp: ret("v"),
-        schemes: vec![(name.into(), Arc::new(crate::ty::Scheme::mono(ty)))],
+        hole: (),
+        schemes: vec![(name.into(), crate::ty::Binders::close(|_| ty))],
     })
 }
 
@@ -449,14 +452,14 @@ fn only_a_lone_exec_run_is_a_single_command() {
 
 #[test]
 fn the_last_let_of_a_name_wins_the_exported_scheme() {
-    use crate::ty::{Scheme, Ty};
+    use crate::ty::{Binders, Ty};
     let unit = toplevel(vec![
         define("x", Ty::Int),
         run(exec()),
         define("y", Ty::String),
         define("x", Ty::Bool),
     ]);
-    let scheme = |ty| Arc::new(Scheme::mono(ty));
+    let scheme = |ty| Binders::close(|_| ty);
     assert_eq!(
         unit.exported_schemes(),
         [

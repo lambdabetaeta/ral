@@ -487,6 +487,37 @@ fn a_target_of_comparable_kind_is_refused_with_the_kind_sentence() {
 }
 
 #[test]
+fn a_record_pattern_on_an_integer_list_reports_the_known_element_type() {
+    has_error("let [a: x] = [1, 2]", "couldn't match type [Integer]");
+}
+
+#[test]
+fn a_bare_block_condition_reports_its_known_boolean_result() {
+    has_error(
+        "if { return $[1 == 1] } { echo yes }",
+        "couldn't match type {Returns Bool} with type Bool",
+    );
+}
+
+#[test]
+fn a_non_function_case_arm_reports_its_known_payload_and_unknown_result() {
+    let errs = raw_errors("case `a () [`a: 7]");
+    assert_eq!(codes_of(&errs), ["T0010"]);
+    let TypeErrorKind::TyMismatch { expected, actual } = &errs[0].kind else {
+        panic!("expected a value type mismatch: {errs:?}")
+    };
+    assert_eq!(expected.as_ref(), &Ty::Int);
+    let Ty::Thunk(body) = actual.as_ref() else {
+        panic!("expected a handler thunk: {errs:?}")
+    };
+    assert!(
+        matches!(body.as_ref(), CompTy::Fun(arg, result)
+            if **arg == Ty::Unit && matches!(result.as_ref(), CompTy::Var(_))),
+        "coverage fixes the payload but not the result: {errs:?}"
+    );
+}
+
+#[test]
 fn a_boolean_computed_key_is_refused_as_a_non_string() {
     let src = "let k = $[1 < 2]\nlet f = { |m| $m[$k] }\nreturn ()";
     let errs = raw_errors(src);
@@ -1478,16 +1509,22 @@ fn rejected_producer_equations_do_not_poison_later_command_joins() {
         let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
             panic!("expected a producer mismatch: {errs:?}");
         };
-        let (CompTy::Return(a, _), CompTy::Return(b, _)) = (expected, actual) else {
+        let (CompTy::Return(a, ta), CompTy::Return(b, tb)) = (expected, actual) else {
             panic!("expected two producers: {errs:?}");
         };
-        assert!(matches!((a, b), (Grade::Var(_), Grade::Var(_))));
-        assert_ne!(a, b, "a rejected payload must not share grades: {errs:?}");
+        assert!(
+            matches!(
+                (a, ta.as_ref(), b, tb.as_ref()),
+                (Grade::Value, Ty::Int, Grade::Var(_), Ty::Unit)
+                    | (Grade::Var(_), Ty::Unit, Grade::Value, Ty::Int)
+            ),
+            "only the Int producer's own payload entails Value: {errs:?}"
+        );
     }
 }
 
 #[test]
-fn rejected_data_payload_equation_does_not_poison_a_later_let() {
+fn record_command_default_conflict_is_reported_once_before_a_later_let() {
     let src = "let broken = { |f g| \
                to-json !{map $f []}; \
                if true { g () } else { return [fn: { return () }] }; \
@@ -1495,15 +1532,20 @@ fn rejected_data_payload_equation_does_not_poison_a_later_let() {
                if true { f () } else { echo hi }; \
                let x = g (); return $x }";
     let errs = raw_errors(src);
-    assert_eq!(codes_of(&errs), ["T0074"], "{errs:?}");
-    assert!(matches!(
-        &errs[0].kind,
-        TypeErrorKind::KindMismatch {
-            found: ral_core::typecheck::KindFound::Type(ty),
-            kind,
-            ..
-        } if matches!(**ty, Ty::Thunk(_)) && *kind == ral_core::ty::Kind::DATA
-    ));
+    assert_eq!(codes_of(&errs), ["T0011"], "{errs:?}");
+    let span = errs[0].pos.expect("the conflicting application has a span");
+    assert_eq!((span.start, span.end), (123, 125));
+    assert_eq!(&src[span.start as usize..span.end as usize], "()");
+    let TypeErrorKind::CompTyMismatch { expected, actual } = &errs[0].kind else {
+        panic!("expected a record-versus-command mismatch: {errs:?}");
+    };
+    assert!(
+        matches!((expected, actual),
+            (CompTy::Return(Grade::Value, record), CompTy::Return(Grade::Output, unit))
+            | (CompTy::Return(Grade::Output, unit), CompTy::Return(Grade::Value, record))
+            if matches!(record.as_ref(), Ty::Record(_)) && **unit == Ty::Unit),
+        "the default conflict, not the later let, must be reported: {errs:?}"
+    );
 }
 
 #[test]
@@ -1528,13 +1570,16 @@ fn rejected_handle_equations_do_not_poison_a_later_await() {
         let (CompTy::Return(_, a), CompTy::Return(_, b)) = (expected, actual) else {
             panic!("expected two handle producers: {errs:?}");
         };
-        let (Ty::Handle(a, _), Ty::Handle(b, _)) = (a.as_ref(), b.as_ref()) else {
+        let (Ty::Handle(a, ta), Ty::Handle(b, tb)) = (a.as_ref(), b.as_ref()) else {
             panic!("expected two handles: {errs:?}");
         };
-        assert!(matches!((a, b), (Grade::Var(_), Grade::Var(_))));
-        assert_ne!(
-            a, b,
-            "a rejected handle payload must not share grades: {errs:?}"
+        assert!(
+            matches!(
+                (a, ta.as_ref(), b, tb.as_ref()),
+                (Grade::Value, Ty::Int, Grade::Var(_), Ty::Unit)
+                    | (Grade::Var(_), Ty::Unit, Grade::Value, Ty::Int)
+            ),
+            "only the Int handle's own payload entails Value: {errs:?}"
         );
     }
 }
@@ -1645,5 +1690,105 @@ fn decoder_results_cannot_join_commands_in_either_order() {
         let repaired = src.replace("echo a", "return !{echo a}");
         assert_eq!(scheme_at(&toplevel_ok(&repaired), 1), "String");
         assert_eq!(captures(&repaired), 1);
+    }
+}
+
+#[test]
+fn a_function_given_a_thunk_of_itself_keeps_the_argument_cycle_path() {
+    for (src, relation) in [
+        (
+            include_str!("../../tests/reject/a-function-given-a-thunk-of-itself.ral"),
+            "takes itself as an argument",
+        ),
+        (
+            include_str!("../../tests/reject/a-function-applied-to-itself.ral"),
+            "is applied to itself",
+        ),
+        (
+            include_str!("../../tests/reject/a-function-that-returns-itself.ral"),
+            "returns itself",
+        ),
+    ] {
+        let errs = raw_errors(src);
+        assert_eq!(codes_of(&errs), ["T0073"], "{src}: {errs:?}");
+        assert!(errs[0].message().contains(relation), "{src}: {errs:?}");
+    }
+}
+
+#[test]
+fn type_nesting_too_deep_by_doubling_does_not_accuse_the_head_of_being_data() {
+    let src = include_str!("../../tests/reject/type-nesting-too-deep-by-doubling.ral");
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0003"], "{errs:?}");
+    assert_error_in(src, &errs[0], "d10");
+    let hint = errs[0].hint().expect("depth guidance");
+    assert!(hint.contains("reduce the type's nesting"), "{hint}");
+    assert!(!hint.contains("head must be a block"), "{hint}");
+}
+
+#[test]
+fn recursive_calls_keep_monomorphic_advice_at_the_narrower_argument_spans() {
+    for (src, code, argument) in [
+        (
+            include_str!("../../tests/reject/inner-bind-keeps-the-enclosing-groups-join.ral"),
+            "T0011",
+            "0",
+        ),
+        (
+            include_str!("../../tests/reject/sibling-arms-grounding-apart.ral"),
+            "T0011",
+            "0",
+        ),
+        (
+            include_str!("../../tests/reject/late-byte-arm-beside-value-payload-arm-under-try.ral"),
+            "T0011",
+            "$v",
+        ),
+        (
+            include_str!("../../tests/reject/recursive-definition-single-self-type.ral"),
+            "T0010",
+            "\"s\"",
+        ),
+        (
+            include_str!(
+                "../../tests/reject/recursive-function-is-monomorphic-within-its-body.ral"
+            ),
+            "T0010",
+            "\"s\"",
+        ),
+        (
+            "let rec = { |n| if $[$n == 0] { return 0 } else { $rec \"s\" } }",
+            "T0010",
+            "\"s\"",
+        ),
+    ] {
+        let errs = raw_errors(src);
+        assert_eq!(codes_of(&errs), [code], "{src}: {errs:?}");
+        assert_error_in(src, &errs[0], argument);
+        assert!(
+            errs[0].hint().is_some_and(|hint| hint.contains(
+                "a definition that calls itself is checked at one single type throughout its own body"
+            )),
+            "{src}: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn recursive_body_context_does_not_relabel_nonrecursive_or_shadowed_calls() {
+    for src in [
+        "let int = { |x| return $[$x + 1] }; let f = { |n| let _ = !{f $n}; int \"s\" }",
+        "let f = { |n| let _ = !{f $n}; let f = { |x| return $[$x + 1] }; f \"s\" }",
+        "let f = { |n| if $[$n == 0] { return 0 } else { f $[$n - 1] } }; f \"s\"",
+        "let f = { |n| let _ = !{f $n}; return $[1 + \"s\"] }",
+    ] {
+        let errs = raw_errors(src);
+        assert_eq!(codes_of(&errs), ["T0010"], "{src}: {errs:?}");
+        assert!(
+            errs.iter().all(|err| !err
+                .hint()
+                .is_some_and(|hint| hint.contains("a definition that calls itself"))),
+            "{src}: {errs:?}"
+        );
     }
 }

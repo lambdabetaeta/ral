@@ -52,9 +52,18 @@ impl Shell {
     /// session scheme inferred and stored alongside, so the next run's check
     /// sees a type and the name is applyable at the prompt.  Other values
     /// carry no scheme.
-    pub fn bind_value(&mut self, name: String, value: Value) {
-        let scheme = self.value_scheme(&value);
+    ///
+    /// # Errors
+    /// A block fails type checking, including obligations checked at closure.
+    /// Nothing is installed on refusal.
+    pub fn bind_value(
+        &mut self,
+        name: String,
+        value: Value,
+    ) -> Result<(), Box<crate::typecheck::TypeError>> {
+        let scheme = self.value_scheme(&value)?;
         self.env.bind(name.into(), Binding { value, scheme });
+        Ok(())
     }
 
     /// Bind `name` → `value` as a plain scope variable, inferring no scheme.

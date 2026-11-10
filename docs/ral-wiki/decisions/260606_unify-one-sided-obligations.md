@@ -42,9 +42,11 @@ to discharge. This is the regular-tree / bisimulation completion of the
 procedure: it **unifies** the two anchorings rather than rejecting them, because
 they denote one and the same equi-recursive type.
 
-- **Rows stay inductive.** The recursive equality travels through field *types*
-  (ty/comp), which already carry the guard; there is no recursive-row key and no
-  recursive row.
+- **Row spines stay inductive.** The recursive equality travels through field
+  *types* (ty/comp), which carry the guard; no row μ-binder is needed.
+  Productive field-type recursion is not a tail cycle
+  ([[design/row-types|row types]],
+  [[decisions/261110_elaboration-is-decided-by-suspended-matches|scoped unifier amendment]]).
 - **The thesis holds, the corollary did not.** In CBPV, recursion lives at the
   computation level — the productive cycle closes through `Thunk(F …)`. But the
   *value* cycle can be pinned at a ty-var (a `Stream`-value-taking combinator),

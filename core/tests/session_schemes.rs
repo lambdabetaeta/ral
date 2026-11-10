@@ -18,7 +18,7 @@ use ral_core::ir::Phrase;
 use ral_core::shell::boot::HostSurface;
 use ral_core::shell::runtime::Settled;
 use ral_core::source::FileId;
-use ral_core::test_access::{binding_scheme as scheme_of, has_weak_residuals, scheme_is_closed};
+use ral_core::test_access::{binding_scheme as scheme_of, has_weak_residuals};
 use ral_core::{SessionSchemes, Shell, TypeError, Value};
 
 fn shell() -> Shell {
@@ -326,8 +326,7 @@ fn settled_weak_block_instantiates_at_both_grades_next_unit() {
     let Phrase::Define { schemes, .. } = &first.phrases[0].item else {
         panic!("expected a Define for f");
     };
-    let (_, scheme) = schemes.iter().find(|(name, _)| name == "f").unwrap();
-    assert!(scheme_is_closed(scheme));
+    assert!(schemes.iter().any(|(name, _)| name == "f"));
     compile_and_typecheck(
         "if true { f 1 } else { echo a }; let y = f 1",
         SessionSchemes::from_prelude(&first, surface.manifest()),
@@ -354,7 +353,6 @@ fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
         panic!("expected a Define for y");
     };
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
-    assert!(scheme_is_closed(scheme));
     assert!(has_weak_residuals(scheme));
     assert_eq!(scheme.to_string(), "_α");
 }
@@ -377,7 +375,6 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
         panic!("expected a Define for y");
     };
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
-    assert!(scheme_is_closed(scheme));
     assert!(!has_weak_residuals(scheme));
     // The quantified grade can still become a command (SPEC §17.3).
     assert_eq!(scheme.to_string(), "∀ν. Command[ν] Unit");
@@ -394,7 +391,6 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
         panic!("expected a Define for result");
     };
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "result").unwrap();
-    assert!(scheme_is_closed(scheme));
     assert_eq!(scheme.to_string(), "Unit");
 }
 
@@ -418,7 +414,6 @@ fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
         panic!("expected a Define for y");
     };
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "y").unwrap();
-    assert!(scheme_is_closed(scheme));
     assert!(has_weak_residuals(scheme));
     assert!(scheme.to_string().contains("run: {Command}"));
     assert!(!scheme.to_string().starts_with('∀'));
@@ -435,7 +430,6 @@ fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
         panic!("expected a Define for captured");
     };
     let (_, scheme) = schemes.iter().find(|(name, _)| name == "captured").unwrap();
-    assert!(scheme_is_closed(scheme));
     assert_eq!(scheme.to_string(), "String");
 }
 
@@ -587,7 +581,7 @@ fn returned_protected_decoders_retain_their_contract_when_host_bound() {
     let mut sh = shell();
     top_level(&mut sh, WEAK_DECODER).unwrap();
     let decoder = top_level(&mut sh, "return $decode").unwrap();
-    sh.bind_value("host_decode".into(), decoder);
+    sh.bind_value("host_decode".into(), decoder).unwrap();
     let scheme = scheme_of(&sh, "host_decode")
         .expect("a re-inferred scheme")
         .to_string();

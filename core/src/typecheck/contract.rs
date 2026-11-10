@@ -3,11 +3,11 @@
 //! A form's options and a contract file's return value are the same thing: a
 //! closed set of labels, each held at what its table says.  `within` and
 //! `grant` check theirs key by written key at the form, the bracket being
-//! syntax (`Inferencer::check_options`); an rc file, a capability profile
+//! syntax (`Generator::check_options`); an rc file, a capability profile
 //! and a plugin manifest are ascribed the table once inference has finished,
 //! as ML ascribes a signature (`ascribe`).  A table may hold another
 //! ([`Holds::Table`]), ascribed the same way from a queue `typecheck` drains
-//! once inference has finished (`drain_nested`).  The runtime doors —
+//! once inference has finished (`check_nested`).  The runtime doors —
 //! `apply_rc_key`, `LoadedPlugin::parse`, `decode_capability_map` — each keep
 //! their own `match` over the values; a table gives them only the *keyset*
 //! and the unknown-key wording, so that much is written once.  A door's own
@@ -26,8 +26,8 @@ use std::fmt;
 
 pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, GPU, NET, PLACE, SHELL};
 
-use super::env::InferCtx;
-use super::error::{Clash, Reason, Standing, TypeErrorKind};
+use super::error::{Clash, Reason, Standing, TypeError, TypeErrorKind};
+use super::solve::{Solution, sort_errors};
 use super::unify::Unifier;
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
@@ -53,8 +53,8 @@ pub enum Holds {
     Decoded,
     /// `within`'s catch-all handler, the one value inferred in context.
     CatchAll,
-    /// A shape minted fresh per occurrence, variables and all.
-    Shaped(fn(&mut Unifier) -> Ty),
+    /// A ground shape built per occurrence.
+    Shaped(fn() -> Ty),
     /// A nested table, whose optional keys no row can express: ascribed once
     /// inference has finished, and never constraining.
     Table(&'static Table),
@@ -77,11 +77,11 @@ pub(super) enum Held<'a> {
 impl Holds {
     /// What a value held here is done with.  Exhaustive, so a new way of
     /// holding a value cannot be ignored by the doors that apply it.
-    pub(super) fn held(&self, u: &mut Unifier) -> Held<'_> {
+    pub(super) fn held(&self) -> Held<'_> {
         match self {
             Self::At(ty) | Self::Required(ty) => Held::Unify(ty.clone()),
-            Self::CatchAll => Held::Unify(catch_all_ty(u)),
-            Self::Shaped(mint) => Held::Unify(mint(u)),
+            Self::CatchAll => Held::Unify(catch_all_ty()),
+            Self::Shaped(mint) => Held::Unify(mint()),
             Self::Table(table) => Held::Nested(table),
             Self::Refused(advice) => Held::Refuse(advice),
             Self::Decoded => Held::Nothing,
@@ -363,7 +363,7 @@ pub(super) fn catch_all_shape(body: CompTy) -> CompTy {
 }
 
 /// What the catch-all `handler:` is: `String → [String] → Command`.
-fn catch_all_ty(_u: &mut Unifier) -> Ty {
+fn catch_all_ty() -> Ty {
     Ty::Thunk(Box::new(catch_all_shape(CompTy::command())))
 }
 
@@ -471,17 +471,18 @@ pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
 /// as closed.  A return typed at a variable (`from-json`) stays on the runtime
 /// door; where the table admits one, a factory is held to a block of the
 /// options, and what it makes is ascribed as a direct return is.
+///
+/// # Errors
+/// Every refusal, sorted by position.
 pub(super) fn ascribe(
-    ctx: &mut InferCtx,
+    solution: &Solution,
     tail: Option<&Spanned<Phrase<()>>>,
     cty: Option<CompTy>,
     table: &'static Table,
-) {
-    // No returning phrase (an empty file, or one ending in a `let`) evaluates
-    // to `()`, and is judged as `return ()` is.
-    let resolved = match cty.map(|cty| ctx.unifier.resolve_comp_ty(&cty)) {
-        Some(CompTy::Return(_, value)) => ctx.unifier.resolve_ty(&value),
-        Some(_) => return,
+) -> Result<(), Vec<TypeError>> {
+    let resolved = match cty.map(|cty| solution.resolve_comp(&cty)) {
+        Some(CompTy::Return(_, value)) => solution.resolve_ty(&value),
+        Some(_) => return Ok(()),
         None => Ty::Unit,
     };
     let written = match tail.map(|phrase| &phrase.item) {
@@ -490,137 +491,180 @@ pub(super) fn ascribe(
         }
         _ => None,
     };
-    let saved = ctx.pos;
-    ctx.pos = tail.and_then(|phrase| phrase.span);
-    ascribe_value(ctx, resolved, table, written, table.factory);
-    ctx.pos = saved;
-}
-
-/// A finished value, resolved, against `table`: a record or `()` is its row,
-/// and where `factory` admits one, a block of the options making it.
-fn ascribe_value(
-    ctx: &mut InferCtx,
-    value: Ty,
-    table: &'static Table,
-    written: Option<&Val>,
-    factory: bool,
-) {
-    match value {
-        Ty::Record(row) => ascribe_row(ctx, &row, table, written),
-        Ty::Unit => ascribe_row(ctx, &Row::Empty, table, written),
-        Ty::Var(_) => {}
-        Ty::Thunk(body) if factory => ascribe_factory(ctx, &body, table),
-        found => ctx.diagnose(TypeErrorKind::ReturnNotRecord {
-            form: table.form,
-            found,
-            offered: table.offered(),
-        }),
+    let mut check = Ascription {
+        pos: tail.and_then(|phrase| phrase.span),
+        errors: Vec::new(),
+    };
+    check.value(solution.scratch(), resolved, table, written, table.factory);
+    if check.errors.is_empty() {
+        return Ok(());
     }
+    sort_errors(&mut check.errors);
+    Err(check.errors)
 }
 
-/// A factory: one parameter, the options, and the table's row as the value
-/// it makes.  Unified on a scratch copy, as a row is ascribed, so nothing
-/// constrains the program; what it makes is then ascribed as a direct return.
-fn ascribe_factory(ctx: &mut InferCtx, body: &CompTy, table: &'static Table) {
-    let mut scratch = ctx.unifier.clone();
-    scratch.at = ctx.pos;
+/// What a factory `body` makes, once it is held to a block of the options.
+fn made_by(scratch: &mut Unifier, body: &CompTy, at: Option<Span>) -> Result<Ty, TypeErrorKind> {
+    scratch.at = at;
     let made = scratch.fresh_ty();
     let factory = CompTy::arrows(
         [scratch.fresh_ty()],
         CompTy::Return(scratch.fresh_grade(), Box::new(made.clone())),
     );
-    match scratch.unify_comp_ty(&factory, body) {
-        Ok(()) => ascribe_value(ctx, scratch.resolve_ty(&made), table, None, false),
-        Err(kind) => ctx.report(kind, Reason::Factory),
-    }
+    scratch.unify_comp_ty(&factory, body)?;
+    Ok(scratch.resolve_ty(&made))
 }
 
-/// Each field on `row`'s spine against `table`, then every required key
-/// against the spine.
-fn ascribe_row(ctx: &mut InferCtx, row: &Row, table: &'static Table, written: Option<&Val>) {
-    let mut scratch = ctx.unifier.clone();
-    let phrase_pos = ctx.pos;
-    let mut present = Vec::new();
-    let mut rest = ctx.unifier.resolve_row(row);
-    while let Row::Extend(label, payload, tail) = rest {
-        rest = ctx.unifier.resolve_row(&tail);
-        let Label::Field(label) = label else {
-            continue;
-        };
-        present.push(label.clone());
-        ctx.pos = written.and_then(|w| written_at(w, &label)).or(phrase_pos);
-        scratch.at = ctx.pos;
-        let Some(key) = table.keys.iter().find(|k| k.label == label) else {
-            ctx.diagnose(TypeErrorKind::UnknownKey {
-                form: table.form,
-                key: label,
-                offered: table.offered(),
-            });
-            continue;
-        };
-        match key.holds.held(&mut scratch) {
-            Held::Unify(declared) => {
-                if let Err(clash) = unify_held(table, key)(&mut scratch, &declared, &payload) {
-                    ctx.report(clash.0, clash.1);
+struct Ascription {
+    pos: Option<Span>,
+    errors: Vec<TypeError>,
+}
+
+impl Ascription {
+    fn report(&mut self, kind: TypeErrorKind, reason: Option<Reason>) {
+        self.errors.push(TypeError {
+            pos: self.pos,
+            kind,
+            reason,
+            weak: None,
+            unit: None,
+        });
+    }
+
+    fn value(
+        &mut self,
+        mut scratch: Unifier,
+        value: Ty,
+        table: &'static Table,
+        written: Option<&Val>,
+        factory: bool,
+    ) {
+        match value {
+            Ty::Record(row) => self.row(scratch, &row, table, written),
+            Ty::Unit => self.row(scratch, &Row::Empty, table, written),
+            Ty::Var(_) => {}
+            Ty::Thunk(body) if factory => match made_by(&mut scratch, &body, self.pos) {
+                Ok(made) => self.value(scratch, made, table, None, false),
+                Err(kind) => self.report(kind, Some(Reason::Factory)),
+            },
+            found => self.report(
+                TypeErrorKind::ReturnNotRecord {
+                    form: table.form,
+                    found,
+                    offered: table.offered(),
+                },
+                None,
+            ),
+        }
+    }
+
+    /// One scratch holds every field of the row.
+    fn row(
+        &mut self,
+        mut scratch: Unifier,
+        row: &Row,
+        table: &'static Table,
+        written: Option<&Val>,
+    ) {
+        let phrase_pos = self.pos;
+        let mut present = Vec::new();
+        let mut rest = scratch.resolve_row(row);
+        while let Row::Extend(label, payload, tail) = rest {
+            let Label::Field(label) = label else {
+                rest = scratch.resolve_row(&tail);
+                continue;
+            };
+            present.push(label.clone());
+            self.pos = written.and_then(|w| written_at(w, &label)).or(phrase_pos);
+            if let Some(key) = table.keys.iter().find(|k| k.label == label) {
+                match key.holds.held() {
+                    Held::Unify(declared) => {
+                        scratch.at = self.pos;
+                        if let Err(clash) =
+                            unify_held(table, key)(&mut scratch, &declared, &payload)
+                        {
+                            self.report(clash.0, Some(clash.1));
+                        }
+                    }
+                    Held::Nested(sub) => {
+                        let inner = written.and_then(|w| written_field(w, &label));
+                        self.nested(&scratch, key.label, &payload, sub, inner.map(|v| &v.item));
+                    }
+                    Held::Refuse(advice) => self.report(
+                        TypeErrorKind::RefusedKey {
+                            form: table.form,
+                            key: key.label,
+                            advice,
+                        },
+                        None,
+                    ),
+                    Held::Nothing => {}
                 }
+            } else {
+                self.report(
+                    TypeErrorKind::UnknownKey {
+                        form: table.form,
+                        key: label,
+                        offered: table.offered(),
+                    },
+                    None,
+                );
             }
-            Held::Nested(sub) => {
-                let inner = written.and_then(|w| written_field(w, &label));
-                ascribe_nested(ctx, key.label, &payload, sub, inner.map(|v| &v.item));
+            rest = scratch.resolve_row(&tail);
+        }
+        self.pos = phrase_pos;
+        for key in table.keys {
+            if matches!(key.holds, Holds::Required(_)) && !present.iter().any(|l| l == key.label) {
+                self.report(
+                    TypeErrorKind::RowMissingField {
+                        label: key.label.to_string(),
+                    },
+                    None,
+                );
             }
-            Held::Refuse(advice) => ctx.diagnose(TypeErrorKind::RefusedKey {
-                form: table.form,
-                key: key.label,
-                advice,
-            }),
-            Held::Nothing => {}
         }
     }
-    ctx.pos = phrase_pos;
-    for key in table.keys {
-        if matches!(key.holds, Holds::Required(_)) && !present.iter().any(|l| l == key.label) {
-            ctx.diagnose(TypeErrorKind::RowMissingField {
-                label: key.label.to_string(),
-            });
+
+    fn nested(
+        &mut self,
+        store: &Unifier,
+        key: &'static str,
+        ty: &Ty,
+        table: &'static Table,
+        written: Option<&Val>,
+    ) {
+        match store.resolve_ty(ty) {
+            Ty::Record(row) => self.row(store.clone(), &row, table, written),
+            Ty::Var(_) => {}
+            found => self.report(
+                TypeErrorKind::NotATable {
+                    key,
+                    first: table.keys.first().map_or("", |k| k.label),
+                    found,
+                },
+                None,
+            ),
         }
     }
 }
 
-/// A nested table's value against `table`, as a record: a map and `()` are
-/// refused, and a type still unresolved is the runtime decoder's.
-fn ascribe_nested(
-    ctx: &mut InferCtx,
-    key: &'static str,
-    ty: &Ty,
-    table: &'static Table,
-    written: Option<&Val>,
-) {
-    match ctx.unifier.resolve_ty(ty) {
-        Ty::Record(row) => ascribe_row(ctx, &row, table, written),
-        Ty::Var(_) => {}
-        found => ctx.diagnose(TypeErrorKind::NotATable {
-            key,
-            first: table.keys.first().map_or("", |k| k.label),
-            found,
-        }),
-    }
-}
-
-/// Ascribe every queued nested table, each at its value's span.  Call once,
-/// after inference.
-pub(super) fn drain_nested(ctx: &mut InferCtx) {
-    let saved = ctx.pos;
+/// Queued tables are checked during closure, before any successful export.
+pub(super) fn check_nested(store: &Unifier, nested: Vec<NestedCheck>) -> Vec<TypeError> {
+    let mut check = Ascription {
+        pos: None,
+        errors: Vec::new(),
+    };
     for NestedCheck {
         key,
         table,
         ty,
         pos,
-    } in std::mem::take(&mut ctx.nested)
+    } in nested
     {
-        ctx.pos = pos;
-        ascribe_nested(ctx, key, &ty, table, None);
+        check.pos = pos;
+        check.nested(store, key, &ty, table, None);
     }
-    ctx.pos = saved;
+    check.errors
 }
 
 #[cfg(test)]
@@ -708,5 +752,53 @@ mod tests {
         }
         let manifest = declared(Form::Manifest);
         assert!(manifest.offered().len() < manifest.keys.len());
+    }
+    #[test]
+    fn ascription_uses_one_scratch_for_shared_row_payloads_without_constraining_the_solution() {
+        use crate::ty::{CompTy, Label, Row, Ty};
+        use crate::typecheck::solve::Solver;
+        static TABLE: super::Table = super::Table {
+            form: "test",
+            factory: false,
+            keys: &[
+                super::Key {
+                    label: "a",
+                    holds: Holds::At(Ty::Bool),
+                    reason: None,
+                },
+                super::Key {
+                    label: "b",
+                    holds: Holds::At(Ty::String),
+                    reason: None,
+                },
+            ],
+        };
+        let mut solver = Solver::new();
+        let payload = solver.fresh_ty();
+        let row = ["a", "b"]
+            .into_iter()
+            .rev()
+            .fold(Row::Empty, |tail, label| {
+                Row::Extend(
+                    Label::Field(label.into()),
+                    Box::new(payload.clone()),
+                    Box::new(tail),
+                )
+            });
+        let Ok(solution) = solver.close() else {
+            panic!("an unconstrained unit closes");
+        };
+        let errors = super::ascribe(&solution, None, Some(CompTy::pure(Ty::Record(row))), &TABLE)
+            .expect_err("the shared payload is refused");
+        assert_eq!(
+            errors.len(),
+            1,
+            "the shared payload cannot be both Bool and String"
+        );
+        assert!(matches!(
+            errors[0].kind,
+            super::TypeErrorKind::TyMismatch { .. }
+        ));
+        assert_eq!(solution.resolve_ty(&payload), payload);
     }
 }

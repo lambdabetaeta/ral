@@ -383,7 +383,7 @@ and ends itself after its idle interval (five hours by default)
   `type`/`grant`/`model` rows *inside* that record stay open for the
   same reason one level down. Every family door refuses a block or a handle at
   any depth of its argument (`first_order`), so the type variables its argument
-  mentions are `data` and its row variables deep (`family_scheme` in `harness.rs`;
+  mentions are `data` and its row variables deep (`argument_row` in `harness.rs`;
   [[decisions/260930_operators-are-kinded|operators-are-kinded]]).
   `` `start [prompt: …, name: …, type: …, grant: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, with an owed report notice

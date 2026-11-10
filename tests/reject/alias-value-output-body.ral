@@ -1,6 +1,6 @@
 # codes: T0011
 # status: 1
-# at: 5:1
+# at: 5:11
 # contains: couldn't match type Command with type Returns Integer
 alias foo { |args| return 3 }
 return ()

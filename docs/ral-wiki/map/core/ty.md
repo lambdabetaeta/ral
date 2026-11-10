@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d56977ff
-generated_at_date: 2026-11-03
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_date: 2026-11-10
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
 
@@ -10,13 +10,24 @@ covers_paths: [core/src/ty.rs, core/src/ty/]
 [[map/core/ir|IR]] and the [[map/core/typecheck|checker]]: the IR's schemes and
 sites name it, and nothing in it reads a unifier or a runtime value.
 
-- `ty.rs`: `Ty`, `CompTy`, `Grade`, `Row`, `Label` and the unification-variable
-  newtypes; `TAG_PREFIX`, the sigil of a tag, written once.
+- `ty.rs`: `Ty`, `CompTy`, `Grade`, `Row`, `Label`, the unification-variable
+  newtypes, `Var` (a variable of any sort) and `Term` (a term of any sort);
+  `TAG_PREFIX`, the sigil of a tag, written once.
 - `ty/kind.rs`: `Kind`, the closed set of predicates a type variable carries
   (`number`, `comparable`, `scalar`, `sized`, `data`), their meet, and what a
   head is.
-- `ty/scheme.rs`: `Scheme`, a type under quantifiers, and the weak-variable
-  sets a scheme did not quantify.
+- `ty/scheme.rs`: `Scheme { ty, tys, comps, rows, grades }`, one map per sort
+  from variable to `Role<M, B>::{Forall(M), Weak(M), Mu(B)}`. `M` is what
+  minting a fresh variable of that sort needs (a type's `Kind`, a row's deep
+  bit), `B` the sort's μ-binding: `Ty`, `CompTy`, and the uninhabited `NoMu`
+  for rows, since a cycle through a row is rooted at a type or computation.
+  Grades are a set, only ever quantified. A role is thus of its variable's
+  sort by construction. `Weak` records a rank-zero residual for reseeding;
+  ranks themselves live in the checker. `Closed` is a scheme writing no variable it
+  gives no role, constructed only by settlement, `Binders::close` (a builtin's
+  own binder supply) or checked deserialisation. Equality is structural.
+  There are no partial schemes or cached environment free variables
+  ([[invariants/schemes-leave-closed|schemes leave closed]]).
 - `ty/exec_arg.rs`: `RefusedArg`, the shapes `execve(2)` has no argument for, one
   match on a `Head`.
 - `ty/typed.rs`: `Typed`, a `Datum` whose encoding has a ral type derived from
@@ -37,12 +48,13 @@ sites name it, and nothing in it reads a unifier or a runtime value.
   a new session snapshots ([[map/core/shell-state|shell-state]]). The checker
   builds a `Site` (`typecheck/site.rs`), one fresh `UnitId` per unit, and the
   runtime walks it against the running session's table (`shell/runtime/admit.rs`).
-  Free type/computation nodes and row tails retain weakness; open row tails and
-  free grades retain canonical ids. Projections share the graph and unit while
-  selecting another root. Reinstantiation freshens each identity once, preserving
+  Free type/computation nodes, open row tails and free grades retain canonical
+  ids; the first three also retain rank-zero weakness. Projections share the graph
+  and unit while selecting another root. Reinstantiation freshens each identity once, preserving
   sharing, cycles, kinds and grades; quantified `comparable` parameters do not
-  acquire session fixings. `Site::scheme` rebuilds a closed contract in a scratch
-  unifier for delayed protection wrappers ([[map/core/evaluator|evaluator]]).
+  acquire session fixings. `Site::scheme` enters a scratch region before
+  instantiation, exits, then generalises and settles a closed contract for delayed
+  protection wrappers ([[map/core/evaluator|evaluator]]).
 
 `Str`, the shared immutable string a `Value::String` holds, lives in
 `core/src/data/string.rs`, exported as `data::Str`.

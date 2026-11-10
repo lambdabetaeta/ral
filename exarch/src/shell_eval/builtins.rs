@@ -14,9 +14,8 @@ use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
 use ral_core::shell::builtins::util::regex_err;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Observed, Settled};
 use ral_core::text::rank;
-use ral_core::ty::{Scheme, Ty, closed_record};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
+use ral_core::ty::{Binders, Ty, closed_record};
+use ral_core::typecheck::builtins::{fun, pure, thunk};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -895,31 +894,27 @@ fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<LexicalPath> {
     Ok(root)
 }
 
-fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(
+fn scheme_grep_files(_: &mut Binders) -> Ty {
+    thunk(fun(
+        Ty::String,
+        fun(
             Ty::String,
-            fun(
-                Ty::String,
-                pure(Ty::list(closed_record(&[
-                    ("file", Ty::String),
-                    ("line", Ty::Int),
-                    ("text", Ty::String),
-                ]))),
-            ),
-        )),
-    )
+            pure(Ty::list(closed_record(&[
+                ("file", Ty::String),
+                ("line", Ty::Int),
+                ("text", Ty::String),
+            ]))),
+        ),
+    ))
 }
 
 /// `view-text :: Str → Int → Int → F [[line: Int, text: Str]]`
-fn scheme_view_text(_u: &mut Unifier) -> Scheme {
+fn scheme_view_text(_: &mut Binders) -> Ty {
     scheme_view_range(&[("line", Ty::Int), ("text", Ty::String)])
 }
 
 /// `view-hash :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]`
-fn scheme_view_hash(_u: &mut Unifier) -> Scheme {
+fn scheme_view_hash(_: &mut Binders) -> Ty {
     scheme_view_range(&[
         ("line", Ty::Int),
         ("hash", Ty::String),
@@ -928,60 +923,40 @@ fn scheme_view_hash(_u: &mut Unifier) -> Scheme {
 }
 
 /// `Str → Int → Int → F [row]` — both readers' shape, over the row each carries.
-fn scheme_view_range(row: &[(&str, Ty)]) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(
-            Ty::String,
-            fun(Ty::Int, fun(Ty::Int, pure(Ty::list(closed_record(row))))),
-        )),
-    )
+fn scheme_view_range(row: &[(&str, Ty)]) -> Ty {
+    thunk(fun(
+        Ty::String,
+        fun(Ty::Int, fun(Ty::Int, pure(Ty::list(closed_record(row))))),
+    ))
 }
 
 /// `edit-hash :: Str → [[hash: Str, line: Str]] → F Unit`
-fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(
-            Ty::String,
-            fun(
-                Ty::list(closed_record(&[("hash", Ty::String), ("line", Ty::String)])),
-                pure(Ty::Unit),
-            ),
-        )),
-    )
+fn scheme_edit_hash(_: &mut Binders) -> Ty {
+    thunk(fun(
+        Ty::String,
+        fun(
+            Ty::list(closed_record(&[("hash", Ty::String), ("line", Ty::String)])),
+            pure(Ty::Unit),
+        ),
+    ))
 }
 
 /// `edit-replace :: Str → Str → Str → F Unit`
-fn scheme_edit_replace(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(
-            Ty::String,
-            fun(Ty::String, fun(Ty::String, pure(Ty::Unit))),
-        )),
-    )
+fn scheme_edit_replace(_: &mut Binders) -> Ty {
+    thunk(fun(
+        Ty::String,
+        fun(Ty::String, fun(Ty::String, pure(Ty::Unit))),
+    ))
 }
-fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::Int, fun(Ty::String, pure(Ty::list(Ty::String))))),
-    )
+fn scheme_explore_dir(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::Int, fun(Ty::String, pure(Ty::list(Ty::String)))))
 }
-fn scheme_find_files(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::String, fun(Ty::String, pure(Ty::list(Ty::String))))),
-    )
+fn scheme_find_files(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::String, fun(Ty::String, pure(Ty::list(Ty::String)))))
 }
 
-fn scheme_skill(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+fn scheme_skill(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::String, pure(Ty::String)))
 }
 
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
@@ -1034,8 +1009,8 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     Ok(Value::string(format!("// skill root: {place}\n\n{body}")))
 }
 
-fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(pure(Ty::String)))
+fn scheme_skill_list(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::String))
 }
 
 /// `skill-list` — every discoverable skill, one `name: description` per line,

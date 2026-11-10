@@ -7,7 +7,6 @@ use super::value::Value;
 use super::{Closure, Shell};
 use std::borrow::Cow;
 use std::fmt;
-use std::sync::Arc;
 use strum::IntoStaticStr;
 
 use super::flow::Settled;
@@ -38,7 +37,7 @@ pub struct HandlerEntry {
     pub(crate) thunk: Value,
     /// The arm's closed scheme, kept only on alias entries: their frames
     /// outlive the installing run and must seed the next run's check.
-    pub(crate) scheme: Option<Arc<crate::ty::Scheme>>,
+    pub(crate) scheme: Option<crate::ty::Closed>,
 }
 
 impl HandlerEntry {
@@ -80,7 +79,7 @@ impl HandlerEntry {
         .map_err(|error| refused_arm(label, &error, closure.comp().span, shell))?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
-            entry.scheme = Some(Arc::new(scheme));
+            entry.scheme = Some(scheme);
         }
         Ok(entry)
     }
@@ -323,7 +322,7 @@ impl HandlerStack {
 
     /// The installed alias arms' schemes, outermost first — the alias half of
     /// the seed `Shell::session_schemes` hands the next run's check.
-    pub(crate) fn alias_schemes(&self) -> Vec<(String, Arc<crate::ty::Scheme>)> {
+    pub(crate) fn alias_schemes(&self) -> Vec<(String, crate::ty::Closed)> {
         self.iter()
             .filter(|f| f.kind == FrameKind::Alias)
             .flat_map(|f| f.entries.iter())

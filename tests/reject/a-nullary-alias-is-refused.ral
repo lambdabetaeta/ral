@@ -1,5 +1,5 @@
 # codes: T0011
 # status: 1
-# at: 5:1
+# at: 5:15
 # contains: its one parameter is the argv
 alias greet { echo hi }

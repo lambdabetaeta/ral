@@ -1205,13 +1205,13 @@ fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
 fn a_timed_out_workers_done_poll_and_await_records_are_identical() {
     use crate::data::datum::Datum as _;
     use crate::shell::runtime::Done;
-    use crate::typecheck::builtins::{mk_scheme, pure, thunk};
+    use crate::typecheck::builtins::{pure, thunk};
 
     let mut runtime = crate::test_helper::core_runtime();
     runtime.install_captured_builtins(
         &vec![BuiltinEntry::new(
             "timeout-now".into(),
-            |_| mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit))),
+            |_| thunk(pure(crate::ty::Ty::Unit)),
             "test-only deterministic worker timeout",
             BuiltinBody::Static(|_, mooring, shell| {
                 mooring.home.cancel(CancelCause::TimedOut);

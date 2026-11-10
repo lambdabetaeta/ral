@@ -1,8 +1,7 @@
 use super::*;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
-use ral_core::ty::{Scheme, Ty};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
+use ral_core::ty::{Binders, Ty};
+use ral_core::typecheck::builtins::{pure, thunk};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -140,8 +139,8 @@ fn a_late_recording_fault_keeps_the_already_published_report() {
     }
 }
 
-fn unit_thunk(_unifier: &mut Unifier) -> Scheme {
-    mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
+fn unit_thunk(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::Unit))
 }
 
 #[test]

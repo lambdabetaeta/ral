@@ -85,8 +85,8 @@ fn span_cases() -> Vec<SpanCase> {
         ),
         // Each `Prim::Index` keeps its key's span.
         c("let r = [a: 1]\nreturn $r[a][b]", "[b]", "field-on-int"),
-        // String as command head: the whole call carries a Call span.
-        c("'foo' bar baz", "'foo' bar baz", "string-as-head"),
+        // The string in head position, not its arguments, is the offending value.
+        c("'foo' bar baz", "'foo'", "string-as-head"),
         // Force a non-thunk: with `span` on `Ast::Force`, the caret
         // narrows to just the `!operand` extent.
         c(

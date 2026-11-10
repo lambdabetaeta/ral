@@ -1,437 +1,242 @@
 ---
-generated_at_commit: b1ba0713
-verified_at_commit: b1ba0713
-verified_at_date: 2026-11-03
-anchors: [Inferencer, Key, infer_index_step, Unifier, Kind, Kinded, admit, unite_tys, Pairs, bind_ty, bind_comp_ty, unify_row, infer_update, CachedFreeVars, WeakVars, mark_weak, reseed_weak, settle_weak, infer_record_val, infer_map_val, generalize, instantiate, freeze_toplevel, Pending, SessionSchemes, extract_return, force_return_shape, stage_root_stdin_feed, InferCtx, head_class, arm, join_arms, rhs_bound_ty, unify_producers, stage_writes]
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_date: 2026-11-10
+anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
 
-# Type inference: the algorithm
+# Type inference: constraints, closure, readback
 
-[[design/types|The type system]] states *what* is well-typed; this is *how*
-`core/src/typecheck/` infers it — constraint-based Hindley–Milner over the CBPV
-[[map/core/ir|IR]] after [[internals/compilation-ladder|elaboration]].
+**The checker generates without reading a solution, solves by rank, then reads
+back one checked tree.** Hindley–Milner inference runs over the CBPV
+[[map/core/ir|IR]], after surface [[map/core/elaboration|elaboration]]. The
+architecture is fixed by
+[[decisions/261110_elaboration-is-decided-by-suspended-matches|suspended matches]];
+[[design/types|types]] states the type language, and
+[[map/core/typecheck|typecheck]] locates its implementation.
 
-**The Inferencer builds checked IR beside its types.** `infer.rs` traverses
-`Val` / `Comp`, allocating fresh type, computation and row variables and
-emitting unification constraints as it constructs pending nodes.
-`infer_case` is kept whole by decision
-([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Builtin
-signatures enter through per-builtin rules carried with the body
-([[internals/builtins-registry|builtins registry]]: `fixed_arity`,
-`builtin_type_hint`), the one source of a table entry's arity
-([[invariants/fixed-arity|fixed-arity]]). The base-frame manifest's rows have no
-arity at all: their schemes are seeded into the checker's env at boot, so a base
-frame is looked up as a handler is
-([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+## Generation has no observations
 
-**A name is known statically, or it is refused.** A `$name` resolves against the
-lexical and session bindings, then the value builtins, then the language's own
-`true` and `false` (`LANGUAGE_CONSTANTS`, typed `Bool`); a miss is
-`UnboundVariable` (T0071), never a fresh variable, and its hint ranks the nearest
-names in scope by edit distance (`text::near_names`, shared with the record-key
-decoder). The runtime's "undefined variable" survives only as a defensive
-error. The same rule holds at a head: a binding met as a bare head is applied at
-its thunk's computation type, a binding of still-unknown type is taken to be a
-thunk, and a binding of anything else is `HeadBoundToValue` (T0072) —
-`instantiate_comp` never mints a computation variable for it. A bound bare
-head is elaborated as `Force` of the variable; the `App` rule reads its type
-under `Reason::AutoderefHead`, including when it is still an unsolved variable,
-so it does not suggest a `!` operator the user never wrote. A variable head in `App`
-(`$date +%s`) is named the same way: a user's own `let ls = …` then `ls /tmp`
-is told of the binding and of `^ls`, not of a `!` it never wrote; the hint
-offers `^ls` conditionally, since the checker never reads `PATH`. T0072 stands on the
-head's own span (`Ast::Call`'s head is `Spanned`) and names the value's shape
-(`describe`), never its full type, which for a record can run to kilobytes.
+The generator writes equations and builds a *pending tree*, not an elaborated
+verdict from a partially solved type.
 
-**A block argument is checked last, and against its own call.** `apply_args_capped`
-unifies the arrow spine from the arguments in source order, but a `Val::Thunk`
-argument contributes only `Thunk(α)` on that pass; its body is inferred after
-the loop, against the `α` the spine has since ground. `check_comp` then pushes
-that expectation inwards: a `Lam` met with a known `Fun` binds the parameter to
-the type the expectation names instead of a fresh variable. Synthesis in source
-order would check the body of `map { |x| … } $xs` while the element type was
-still free. Read rules do not depend on that knowledge: `map { |x| $x[$x] } [1]`
-and the same lambda extracted into a `let` are both refused by immediate
-unification. Everything else has nothing to push inwards and is inferred as
-ever, the caller unifying.
+- The solver owns the private unifier. Instantiation and contract import
+  return unknowns; a scheme is an opaque token to generation. Syntax and
+  builtin declarations may supply known structure.
+- `Solver::binding(rhs, forced)` returns a fresh binder and a `BindHole`;
+  `Solver::call()` returns a `CallHole`, and `argument(call, head, callee,
+  arg, …)` the result of that call's next argument. Each suspends a match that
+  carries its hole and, for diagnostics, the variable it scrutinises when the
+  program names one.
+- An equation answers only whether it held, to suppress a secondary complaint
+  after refusal. This is not an observation that selects a successful typing
+  or elaboration rule.
+- A lambda checked against an expectation first writes an arrow equation,
+  then checks its body with the fresh parameter and result. Literal block
+  arguments are generated after the other arguments; argument matches always
+  form a left-to-right chain.
+- Joins check each arm against a fresh result and equate the results. Arguments
+  and handler producers also unify directly: no implicit capture there.
+- Key form selects the projection equation immediately: a written label demands
+  a record slot, a literal position a list, a computed string a map. Reads
+  introduce neither suspended matches nor weakness
+  ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
+- A bare head resolves as binding, value builtin, handler, external. A binding
+  is required to be a thunk by equation, with named-head provenance for T0072;
+  an unbound `$name` is T0071, never a fresh unknown.
 
-**The Unifier solves types and rows at once** (`unify.rs`):
+## Two matches choose elaboration
 
-- *Value and computation types* are equi-recursive, but **every cycle must cross
-  data**: binding a variable to a structure that reaches it along `U`, `→`, `F`
-  and `Handle` alone is refused as `CyclicType` (T0073) by a search at the two
-  bind sites (`bind_ty`, `bind_comp_ty`), which stops at a list, map, record or
-  variant ([[decisions/260930_recursion-is-guarded-by-data|recursion-is-guarded-by-data]]).
-  A cyclic scheme prints with a μ. Termination of unifying the cycles that remain rests on
-  a co-inductive guard (`Pairs`): re-entering an in-progress equality obligation
-  is an immediate success — the cyclic fixed point. The guard memoizes symmetric
-  {ty, comp}-var *root pairs* **and** *one-sided* obligations — a var root against
-  a finite structural key of the other side — so the same equi-recursive type
-  anchored at a ty-var on one side and a comp-var on the other still converges
-  rather than overflowing the stack
-  ([[decisions/260606_unify-one-sided-obligations|unify-one-sided-obligations]]).
-  `row_key` fingerprints each slot's type. The depth of a key is a resource
-  bound no key closes (below).- *Rows* unify by the Rémy rewrite (`unify_row`): an occurs check guards the
-  tail variable, then mismatched labels are permuted past one another into a
-  shared fresh tail ([[design/row-types|row-types]]). The A field met against
-  `Empty` is an error: `Empty` says every label off the spine is absent, so the
-  record on the `Extend` side has a label the other lacks, and the arm that
-  matched the pair owns the message, being the only frame that knows the label.
-  A label on both sides unifies its two types.
+**Only a known scrutinee head selects a branch, and the solver records the
+choice on the match's hole.** Readback reads those decisions; it never matches
+a head again.
 
-**A literal's kind is syntax, and a key's form picks the projection rule.**
-The parser classifies a bracketed literal, so the checker has one rule per IR
-constructor — `infer_record_val` and `infer_map_val`: a record's fields each
-keep their own slot in a row, a map's values share one element type, and the
-two types unify only with their own kind
-([[design/records-and-maps|records-and-maps]]). A record literal with a spread is an
-**update** of one base (`infer_update`): it demands of the base a slot
-at each written label, at a fresh payload with nothing imposed on it, and
-returns those labels at the types written over the base's own tail. So a field
-may change its type, a spread never adds a label, and the result is flat.
-All written keys, including constant double-quoted strings, name record fields;
-any computed key makes a map, as does the explicit `[:, …]` opener.
+- The binding match `bound τ C`: an arrow binds its thunk (`Mode::Thunk`);
+  `F^p A` binds `A` by running (`Mode::Run`); `F^w Unit` captures output and
+  binds `String` (`Mode::Capture`). A free computation or grade suspends. A
+  payload whose head or kind excludes `Unit` entails grade `p`.
+- `bound` never reads the binder type `τ` to select its branch. A use demanding
+  `String` cannot decide whether the RHS should be captured.
+- The argument match `apply C A D`: an arrow equates its parameter with `A`
+  and result with `D`. A producer requires its payload to be a thunk, records
+  a split before this argument, and continues matching that thunk's
+  computation.
+- Producer-only thunk cycles are refused by the data-guarded cycle check, so
+  returned-thunk peeling cannot traverse such a cycle forever.
+- Global producer improvement entails `p` for every registered returner or
+  handle pair whose payload head or kind excludes `Unit`, not only those at
+  binding matches. A unit payload alone does not entail either grade.
+- A suspended match waits under the root of its scrutinee. Every public
+  constraint is one operation followed by one `propagate`, which drains the
+  roots the store touched: it improves the producer pairs on them and
+  re-steps their waiters, until nothing is touched. A match that still waits
+  is filed under its root's current representative. At rest every suspended
+  scrutinee is an unknown; everything its match mentions has rank no greater
+  than that unknown's.
 
-Indexing matches the IR's `Key`, never the shape of a `Val`:
+Holes are phase annotations of the IR. The pending tree is
+`Inferring`-phase: `CompKind::Bind` and `Phrase::Define` carry a `BindHole`,
+and `CompKind::App` and `CompKind::BindingCall` (a bare head bound in scope)
+carry a `CallHole`. In `Checked`, the evaluator's phase, those annotations are
+`()` and `BindingCall`'s is uninhabited, so no hole reaches the evaluator.
 
-- `Label(l)` unifies the target with `[l: α | ρ]`, under `RecordFieldRead`.
-- `Position(n)` unifies it with `[α]`, under `ListPositionRead`.
-- `Data(v)` unifies it with `Map α`, under `MapKeyRead`, and `v` with
-  `String`, under `MapIndexKey`.
+## Ranks determine the closing boundary
 
-`infer_index_step` applies each rule immediately. There is no deferred read
-constraint, shape default, special generalisation parameter or index-made weak
-variable. `nth : ∀α ν. Integer → [α] → Command[ν] α` handles computed list positions, so
-both map and list helpers retain their element polymorphism. The surface is
-one to one with the formal core's primitive `index (fld ℓ)`, `index (pos k)`
-and `index key`
-([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
+**Rank is region depth, with the unit at zero.** Every union-find root has a
+rank, bound or free.
 
-**Capture is decided by the type.** `CompTy::Return(Grade, Ty)` carries a grade
-— `Value`, `Output` or a variable — in a fourth atomic union-find beside the
-type, computation and row stores, quantified by `generalize` (`Scheme.grade_vars`)
-and never weak. A *command* — an external, `^name`, a path head, a value row that
-writes, or a handler arm standing in for one — is `Return(Output, Unit)`,
-printed `Command`; `CompTy::command()` builds it and `CompTy::pure` is
-`Return(Value, _)`. `Unifier::unify_producers` meets the grade/type pair for returners and handles.
-`Output` immediately refuses an opposing type that cannot admit `Unit`.
-For output-capable grades, a Unit-capable variable or differing Unit capability
-requires payload validation before grades join, so failed equations leave no
-hazardous aliases. Pairs containing known `Value` and other safe pairs keep
-grade-first unification. The inferred invariant is `F^w A ⇒ A = Unit`:
-all rules introduce output at unit and preserve the pairing
-([[design/capture|grades and capture]]). `CompKind::Capture` checks its body
-as a command and produces bytes at a fresh grade.
+- Fresh unknowns take the rank in force. Unification retains the lower rank;
+  binding lowers a structure's reachable unknowns. A suspended match lowers
+  everything it mentions to its scrutinee's rank.
+- A `let` region includes both its RHS and pattern equations. On exit the
+  solver defaults the still-young matches, propagates, then returns to the
+  outer rank. Generalisation quantifies reachable unknowns above that outer rank,
+  one ordered map per sort; all pattern binders use the solved pattern.
+- A match on an older scrutinee survives an inner exit. This prevents an inner
+  binding from committing an enclosing parameter's elaboration.
+- An unresolved producer grade lowers its payload dependency to its rank,
+  not conversely. A fresh grade beside a weak, Unit-capable payload can still
+  generalise. Structural lowering from a weak root still reaches every grade
+  inside it, including those in returned thunks. Young pairs retire before
+  generalisation; instantiation registers fresh pairs, so improvement never
+  mutates quantified definitions.
+- The defaults are equations chosen together: an unresolved binding becomes
+  `F^p α` and binds `α`; a free binding grade becomes `p`; both record
+  `Mode::Run`. An unresolved argument becomes an arrow and records no further
+  split. The default's reason carries `defaulted_at`, the closing span.
+- A binding and an argument match waiting on one root have incompatible
+  defaults: T0080 (`ConflictingDefaults { binding, call, forced, callee }`)
+  cites both uses, and its hint names the variable the binding forces or the
+  call applies, when there is one. Each chosen default
+  replaces its match with the complete branch equations, so a failed default
+  is not replayed. A refused region retires unresolved young matches; this
+  recovery exports no typing result.
+- Successful exit leaves no young match. Instantiation copies quantified
+  unknowns, so later uses cannot choose a definition's elaboration. No partial
+  schemes or retained region tree are needed.
 
-- `head_class` (`infer.rs`, beside `exec_comp_ty`) resolves a bare head by the
-  order checker and runtime share: `Binding`, `Value(entry)`, `Arm`, `External`.
-- `rhs_bound_ty`, shared by `Bind` and `Define`, reads the resolved RHS:
-  `Fun` binds a thunk; `Return(Output, Unit)` captures and binds `String`;
-  `Return(Value, a)` binds `a`; a free grade fixes to `Value`, and a
-  computation variable opens to `Return(Value, fresh)`. The last case is
-  the sole default. `infer_let` applies the returned `Bound` directly to the
-  RHS node it inferred.
-- `produces` pairs a fresh grade with a value type for `return`, primitives,
-  `~`, capture and handled alias statements. `Decl::scheme` freshens ordinary
-  builtin result grades; boundaries keep `p`, commands `w`, and already
-  graded results keep their grade. `spawn` and `audit` also produce at fresh
-  grades. A free unit producer can unify with `w` without a runtime term.
-- `apply_args_capped` checks a literal block against its parameter through
-  `demand_block`, then unifies with the parameter as expected. A block in
-  hand meets the parameter directly; neither gets a capture wrapper.
-- `redirected` forces an outer return shape under `Reason::RedirectShape`.
-  Stdout gets a fresh result grade at the same payload type, leaving the
-  input grade alone; stdin, stderr and `2>&1` preserve it.
-- Each inference rule returns its node beside its type. `infer_let` builds
-  `cap M to d. decode d` for a captured RHS and `return (thunk M)` for a
-  function RHS (Let-fun). No later pass decides these rewrites.
+A recursive group is checked once, in a region of its own, at its first
+projection: members are bound monomorphically, and each member's type is
+generalised on exit. The generator caches the member schemes with the pending
+group by source identity; every projection, the first included, instantiates
+its member's scheme. No group variable reaches a sibling region, so regions
+form a stack. Readback memoises rebuilt groups by pending identity.
 
-**Returned-thunk application is explicit in the checked tree.**
-`autoderef_thunk_return` records every argument position before which a
-returned thunk must be forced. Positions may repeat when several thunks are
-unwrapped before one argument. `apply_args_capped` returns the positions with
-the inferred argument nodes; the `App` or binding-resolved `Exec` rule builds
-`App(head, prefix) to h. App(Force h, suffix)`, repeated as needed. Redirects
-wrap the whole split call; binding capture also wraps the whole. A
-re-inferred checked tree records no further split
-([[invariants/ir-pure-cbpv|the IR invariant]]).
+## Weakness is rank zero
 
-**Bind and statement rules remain distinct.** `Seq` uses statement inference
-without generalisation; `Bind` uses the let rule. Lambdas bind monomorphic
-names; destructuring binds follow the whole lambda chain. Options are record
-nodes whose entries are checked in written span order.
+**A boundary result has one type per unit because no `let` can quantify rank
+zero.** Lowering the result to zero also lowers everything that meets it;
+`WeakSource` carries diagnostic provenance, not a separate generalisation rule.
+This is the rank formulation of
+[[decisions/260930_a-let-generalises-what-is-not-weak|a let generalises what is not weak]].
 
-`let x = f` with `f = { hostname }`, `let x = !$t` and `let x = g 5` capture
-when their resolved RHS is a command. `let x = map { |f| echo $f } $xs`
-instead streams each callback's output and binds unit elements.
+- A scheme's `Role::Weak` entries are its unquantified value, computation and
+  row residuals, with their kinds/deep bits. Grades also carry ranks but have
+  no weak role: a scheme's grades are a set, all quantified.
+- `settle_weak` substitutes residual images and resolves grades throughout the
+  body and all μ-equations, preserving local ∀/μ names. It quantifies remaining
+  free grades and returns a `Closed`; closure is checked syntactically over the
+  whole graph.
+- A new unit re-seeds stored weak residuals at zero and simultaneously
+  alpha-renames local binders into disjoint names. No foreign live id is read
+  ([[invariants/schemes-leave-closed|schemes leave closed]]).
+- There is no value restriction and no environment free-variable scan.
 
-**Arms meet fresh results, then unify in source order.** `join_arms` checks
-each arm against `Fun(params…, ρᵢ)`, with a fresh result and the parameter
-types supplied by the form. It then unifies each `ρᵢ` with the join as the
-expected side, in source order. `infer_case` supplies known payload types;
-`infer_try` uses the same join, as does `?`. There is no coercion, target
-verdict or reordering. A failure blames the later arm; its hint distinguishes
-that arm from the earlier command or value. An `else`-less `if` wraps its
-body as `{ body; () }`, whose fresh unit grade can join either producer kind.
+## Unit closure precedes every export
 
-**One shape rule, `force_return_shape`, does the work an adjacency rule used to.**
-`extract_return` (`infer.rs`) resolves a `CompTy` to its return type, unifying
-against a freshly minted `Return` (fresh grade and type) when it is still a variable. `infer_pipeline`
-forces **every** stage through it under `Reason::PipelineStageShape`: a stage
-typed `Fun` is a function still waiting for an argument, and the diagnostic says
-to apply it rather than pipe into it. A stage feeds the next by writing, so
-`stage_writes` unifies every stage but the last with `F^ε Unit` at its own grade
-(any grade is accepted) and refuses a decoder by its own mark (`stage_decoder`,
-`DecoderMidPipeline`, T0078). The pipeline's type is the last stage's; its value
-is its final stage's, and the stage types are recorded for the structural REPL
-along the way. The rule's one other premise reads no type at all:
-`stage_root_stdin_feed` looks at a non-first stage's root redirects, and a `< f`
-or `<< w` binding fd 0 there is `DeadPipeEdge` (T0070) — the feed answers the
-stage's reads for its whole run, so the wire's producer writes for nobody
-([[design/pipelines|pipelines]]).
+A unit is `typecheck` or one of the one-shot sessions `alias_arm_scheme`,
+`catch_all_stands_in`, `binding_value_scheme`. A REPL phrase starts with its
+predecessors' closed schemes.
 
-**An arm stands in for the head it replaces.** `Inferencer::arm(block, arm)`
-checks a handler or alias arm: it takes the parameters its slot hands it, read
-off its type, and produces what `standsFor(name)` produces — the scheme of the
-base frame or arm already in force under `name`, else `[String] → Command`. An
-arm for `curl` therefore has a command's value, its output (a `()`-returning stub
-is admitted when its grade is free and captures `""`), and one for `detach` returns
-what `detach` returns; the installed scheme has the head's producer kind. A refusal is `Reason::StandsIn(Standing)`, with
-`Standing::{Command, Own, EveryCommand}` for a command, a head's own scheme and
-the catch-all handler. The run-time install doors apply the same rule, over
-what the arm's closure captured (`Shell::closure_schemes`)
-(`HandlerEntry::vet` through `alias_arm_scheme`, and the catch-all through
-`catch_all_stands_in`) and render the same sentence (`shell::runtime::refused_arm`).
+- Seeding occurs at rank zero from `SessionSchemes`: bindings, alias schemes
+  and the host's builtin `Manifest`. A builtin declaration caches one closed
+  scheme and its curry spine; it never receives the live unifier.
+- A one-shot enters a region before checking its body, exits before
+  generalising a stored scheme, and closes the unit before settlement/export.
+  The catch-all stores no scheme. `Site::scheme` likewise enters its scratch
+  region before instantiating the site.
+- A top-level `Run` introduces no region. `Solver::close` defaults rank zero,
+  checks final-head argv gates and queued nested tables, and attaches `()`
+  notes. It returns a `Solution` only when the unit has no errors, and then
+  every hole is decided; otherwise the errors, sorted stably by source span.
+- A `Solution` is read-only: decisions (`mode`, `splits`), resolution, sites,
+  settlement and a `scratch` copy of the store. A return contract is ascribed
+  only after successful closure, on a scratch copy; no table enters the
+  solution.
+- Gates refuse known `Unit` at in-shell argv boundaries and the declared
+  refused shapes at OS argv boundaries. A still-free head remains a runtime
+  question; spread elements are not statically gated. The runtime distinction
+  for arbitrary handlers is documented in `docs/SPEC.md` §6.6, not closed by
+  this inference architecture.
+- A unit with errors is discarded before readback or scheme export.
 
-**The `()` note.** `TyEnv` records, for a name `let` bound to what a call
-returned (`note_called`, `called_head`), the callee; a read of that name at type
-`()` is noted in `InferCtx.unit_reads`, and an error raised at that span whose
-kind concerns `()` gains a sentence that `deploy` returns `()` and that
-`| from-line` captures what it prints (`TypeError.unit`, `UnitCall`); the pipe
-takes everything a stage writes, so the remedy is operationally right. `()` is
-neither a word nor an interpolant: its kind is `scalar`.
+## Readback fixes terms and sites
 
-**Principality is the textbook result, with its limits stated.** It is principal
-against a declarative system whose generalised kinds are *proper* — neither
-empty nor a single nullary head — which `unite_tys` enforces by refusing an
-empty meet and binding a one-head meet (`{ |x| $[$x + 1]; length $x }` is refused
-at the meet, though it is bound and never used), and which holds of the schemes
-in the environment and the builtins. Failures are data: a failure escaping a
-generalised right-hand side carries a closed error type, so no generalised
-variable escapes with it. Only the bind rule defaults a free grade. Arguments, handler producers and
-join results unify without adaptation; joins retain source-order blame.
+**A successful closed solution supplies every elaboration choice.** Readback
+replaces each `BindHole` by its `Mode` — run, thunk, or capture/decode — and
+each `CallHole` by explicit bind/force segments before its split indices
+(ascending, repeats allowed). A `BindingCall` becomes an `Exec`, its
+redirects fused when unsplit and wrapping the whole call when split. Capture
+wraps the whole RHS. See
+[[design/capture|capture]] and
+[[invariants/ir-pure-cbpv|the checked IR invariant]].
 
-Reads impose ordinary equalities immediately; no read constraint
-is drained at the unit's end. Shape verdicts — the
-pipeline stage forcing, the sequence tail — are introduction-rule choices, not joins.
+- A boundary's solved type (`Exec.site`, a `Ty` while inferring) is
+  snapshotted under the unit's `UnitId`. On a protected value,
+  `Membrane::Kept(site)` preserves a checked tree's site and unit;
+  `Membrane::Imported(ty)` keeps the membrane only when the contract has
+  delayed parts. `CompKind::Protect.site` is `Arc<Site>` in every phase: only
+  runtime membranes build it, and the checker re-checks it as kept.
+- Sites preserve sharing, cycles, kinds and canonical free identities in all
+  four sorts, not necessarily ground types. A membrane admits nothing by
+  itself; `Toplevel.admits` records imported residual names' first-use types
+  for readmission before execution.
+- Readback settles each definition's schemes into `Closed`. The prelude bake,
+  live scope and sealed seed transport those same schemes
+  ([[decisions/260603_session-scheme-continuity|session scheme continuity]]).
+- Re-checking a checked tree accepts it and inserts no further elaboration
+  (`readback.rs`: `elaborated_capture_and_repeated_splits_reinfer_unchanged`).
+  Raw unifier ids in schemes and sites are not canonical, so a re-checked tree
+  need not be `==` to the original.
 
-**The row algebra is textbook.** A slot is a label and a type, so the Rémy
-rewrite is unitary and principality over rows is the standard Hindley–Milner
-result. The two rules that build a row from a program — the closed literal and
-the update — mint every payload fresh or as written, and nothing else writes
-into a row.
+## Unification and the scope of the claims
 
-No declared table reaches the unifier. A form's options are consulted key by
-written key at the form, and a contract file's return is ascribed its table
-after inference, in a scratch copy of the unifier, never entering the store
-([[decisions/260930_a-table-never-enters-the-unifier|a-table-never-enters-the-unifier]]).
-So two tables naming one label at two types cannot let the order of two
-constraints decide a verdict.
+The underlying equations retain the type system's existing constraints.
 
-**One obligation is carried rather than discharged, and it is not a theorem.**
-*Recursion*: the **policy is chosen and the proof is owed**. The occurs check descends through payloads as well as along the spine.
-The alternative — occurs along the spine only — would admit
-`ρ = (x: Record(ρ) ; Empty)`, a cycle anchored at no type or
-computation variable: `apply_row_inner` carries no row-root guard,
-`cyclic_roots_in_ty` cannot find it, and `Scheme` has no `row_bindings` to
-snapshot it into. So spine-only is not an edit to the occurs check but a third
-recursive sort, and this tree takes the descending policy.
+- Value/computation cycles must cross data; `Pairs` guards repeated recursive
+  equalities, including one-sided anchors
+  ([[decisions/260606_unify-one-sided-obligations|one-sided obligations]]).
+- Rows use Rémy rewrite over finite spines. The occurs check follows only tail
+  edges; productive recursion through field types is admitted
+  ([[design/row-types|row types]]). Every stored field payload has a type root,
+  reusing an existing variable or aliasing a structured type, so every new cycle
+  has a type/computation anchor understood by schemes and sites. No row
+  μ-binder is needed.
+- Row binding checks depth and deep-data obligations before introducing
+  aliases, then lowers the stored row to its owner's rank with weak provenance.
+  Labels, duplicate order and the terminal tail retain their identity. Rémy's
+  shared-tail label-multiset safeguard still refuses impossible finite spines;
+  a label against an empty row is an error, not implicit row extension.
+- Kinds meet at union, refuse an empty meet and fix a single nullary head.
+  Deep kinds constrain reachable types/rows. Instantiation preserves declared
+  kinds and freshens all quantified sorts and cycle roots.
+- `unify_producers` preserves `F^w A ⇒ A = Unit`, validating unsafe payload
+  combinations before grades can alias. Grades classify producers, not effects.
+- The unification depth ceiling is a resource bound, not a termination proof.
 
-`MAX_UNIFY_DEPTH` is a **resource bound and not a termination result**. What
-is guaranteed throughout is a graceful `TypeTooDeep` rather than a blown stack.
+The architecture is intended to make accepted trees independent of constraint
+visit order. Defaults are language choices, not a claim of principal
+elaboration; diagnostic contents may depend on traversal.
 
-**Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
-the inferencer takes the type's free variables minus those still free in the
-environment and closes over the difference into a `Scheme`, each quantifier
-list sorted by variable id so a scheme — and the letters its `Display` prints it
-under — is a function of the type alone; `instantiate` refreshes a scheme's
-bound variables at each use. A pattern's binders generalise together: the
-pattern's shape is solved first, then each binder's type is closed over the
-environment, so acceptance does not depend on sibling order
-(`let [a, [b]] = []` and `let [[b], a] = []` are both refused when `a` is later
-used as a number); the Agda `to⟨ p ⟩` does the same. Generalisation walks the
-type structurally and unbudgeted, where unification charges a depth ceiling:
-the walks are linear in a type the source built one constructor per statement,
-and only unification descends past what the parser saw
-([[invariants/term-depth|term-depth]]). The order
-follows the SCC
-structure the elaborator found — a non-recursive group generalises at its binding
-point, a mutually recursive group stays monomorphic until its fixed point — which
-is what keeps generalisation sound. A type error aborts with a positioned
-expected-vs-inferred message (`ty/fmt.rs`), where a computation reads
-`Returns A`, `Command`, or `Command[ν] A`. A free grade is hidden as
-`Returns A` when its paired type excludes unit; schemes quantify only visible
-grades. `{ echo hi }` is `{Command}` and `{ 'hi' }` is `{Returns String}`.
+- Recursive-row regressions vary equation order, orientation, allocation order
+  and rank for the productive-record witness; each keeps its regular solution
+  and residual sharing.
+- Producer regressions preserve independently quantified instance grades over
+  shared weak payloads, while structural lowering still reaches grades inside
+  weak returned thunks. Failed payload equations do not fix another producer's
+  grade. Diagnostics retain solved nested types and recursive-call provenance.
+- These tests do not prove complete unifier confluence. The Agda elaborator
+  does not mechanise this schedule.
 
-**Deep types are checked without a guard, and checking them is superlinear.**
-The shape that reaches the structural walks without ever charging `deeper()`
-nests one constructor per binding (`let x1 = [f: x0]`, `let x2 = [f: x1]`, and
-so on). Under `ral --check`, release build, 8 MB stack:
-
-| nesting depth | wall clock | result |
-| --- | --- | --- |
-| 20,000 | ~1s | exit 0 |
-| 50,000 | 54s | exit 0 |
-| 150,000 | 11min | exit 0 |
-
-- *No overflow and no `TypeTooDeep`* at 293x `MAX_UNIFY_DEPTH`: the unify
-  budget never fires on this shape, and the walks survive alone.
-- *Cost is superlinear*: 3x the depth is 12x the time, consistent with
-  generalisation at each binding walking a type grown one constructor per
-  binding, Θ(N²) visits (inferred from the curve, not profiled). A 50,000-deep
-  type needs a 50,000-line file, so it is recorded, not urgent.
-
-**Weak variables are the one subtraction.** `generalize` quantifies every
-variable of the type that is neither free in the environment nor *weak*. A
-variable of any sort — type, computation or row — is weak once
-`Unifier::mark_weak` has said so, and the mark is permanent for the unit:
-`Store::unite` hands it to the survivor, and a variable of any sort
-unified with a weak one, even one already fixed to a structure, becomes weak, so
-a later mismatch is still seen; binding a weak variable to a structure makes
-every variable of the structure weak, with the same source — so the weak set is
-the image of the weak seeds under the accumulated substitution. A scheme or binding keeps a weak variable as itself
-(`apply_ty_keeping_weak`) until its unit ends. A weak
-variable is treated as free in the environment, so a `let` over it is
-monomorphic in it, and the scheme lists it in `Scheme.weak` instead of
-quantifying it; its `Display` prints it `_α` after the binders.
-There is no value restriction: a `let` of anything generalises
-([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
-Only a checked boundary call marks its result
-([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]);
-the rule places `Pending::Open(ty)` on the constructed call. After inference
-and ascription succeed, freeze snapshots that result as a `Site` on the call.
-A site's graph preserves type and computation roots, and canonical
-free row-tail and grade ids. Reinstantiation freshens each identity once across
-the whole graph, so checking module exports in one scratch unifier keeps the
-same sharing constraints as direct unification.
-`settle_weak` closes a scheme at its unit's end: simultaneous substitution
-updates live weak-variable images and resolves residual grades throughout the
-body and all μ-equations, even with no weak variables. Local ∀/μ names stay
-opaque. Remaining free grades are quantified and cached grade residuals cleared.
-Cycles reached through the live weak images are snapshotted (`cyclic_bindings`),
-so `μα. Map α` survives the unit without resolving a local binder as a live slot.
-
-**A type variable carries a kind** (`kind.rs`): a set of admissible heads and a
-deep bit, and a row variable a deep bit alone. The unconstrained `any` has every
-head; five are named — `number` (`+ - * /`, unary `-`), `comparable` (`<`, `lt`,
-`gt`, `sort-list`, `int`, `float`), `scalar` (each interpolation part), `sized`
-(`length`, `is-empty`) and `data`, every head but a block and a handle, *deep*
-(`==`, `!=`, `str`, the encoders). The unifier holds them beside the store, on
-the free variable's root: `Kinded { kind, witness }`, the witness being the span
-in force (`Unifier::at`, set by `InferCtx` before it unifies or instantiates)
-when the kind last narrowed. `unite_tys` unites at the meet and refuses an empty
-one, citing both witnesses; a meet with one nullary head binds the variable to
-it. `admit` runs at `bind_ty` and checks the head, and a deep kind walks the
-structure (`data_ty`, `data_row`, with a visited set for a data cycle) and
-imposes `data` on each free variable and deep bit it reaches; a row variable that
-is deep imposes the same on whatever it is later bound to (`admit_row`). A
-refusal is `KindMismatch` (T0074), which `explain.rs` words by the kind and
-guides by the reason, and which `diagnostic.rs` draws with a second caret at the
-witness. A kinded variable still free at the end of a unit needs no default.
-Operators take a fresh kinded variable and unify both operands with it
-(`infer_binary`), and so does each interpolation part; `%` is `Int → Int → Int`.
-A scheme quantifies `(TyVar, Kind)` and `(RowVar, bool)` and prints `∀α:number.`;
-instantiation re-mints each, and a weak residual keeps its kind
-([[decisions/260930_operators-are-kinded|operators-are-kinded]]).
-
-Kinds do not select read rules. The written key already determines the
-required head; a conflicting kind is refused by ordinary unification.
-
-**The quantifier is the prefix, not a binder.** A `Scheme` is the body's
-ordinary `Ty` under a ∀-prefix of four `Vec`s of variable ids — value
-(`ty_vars`), computation (`comp_ty_vars`), row (`row_vars`) and grade
-(`grade_vars`) sorts, each a
-`u32`-tagged unifier root (`scheme.rs`). There is
-no binder node and no de Bruijn index: a variable is
-**bound iff it is listed**.
-
-- *Elimination is substitution-with-freshening.* `instantiate` mints a fresh id
-  in the current unifier for every listed variable and substitutes it through
-  the body, so capture is impossible by construction — the fresh ids did not
-  exist before the call.
-- *Recursive types are not syntax but μ-equations attached to the prefix.*
-  `comp_ty_bindings` / `ty_bindings` carry `(root, applied-binding)` pairs for
-  each cycle in the body; `instantiate` re-ties them in fresh union-find slots,
-  so two uses of one recursive scheme never share a cycle root.
-- Because the prefix is nominal-by-listing, an open scheme leaving its minting
-  unifier aliases another's variables: see [[invariants/schemes-leave-closed|schemes-leave-closed]].
-- *The residual cache stores seeds, not stable roots.* `CachedFreeVars` holds
-  ids a scheme did **not** quantify. `env_free_vars` resolves each through the
-  current unifier, following unions and structural bindings across all four
-  sorts rather than assuming an id is still an unbound canonical root.
-- *Closure is syntactic over the whole graph.* Every variable in the body and
-  every μ-equation must be quantified, a μ-root or a listed weak residual;
-  resolving against a live unifier could hide an escaping id as ground.
-
-**The verdict survives into the next run.** Inference builds each
-`Phrase::Define` with its harvested per-name schemes, still unsettled.
-Successful freeze applies `settle_weak` and asserts closure over the whole
-scheme graph before it leaves the unit. A pipeline carries no per-stage type
-annotations. The next run's check is seeded from the live session — one `SessionSchemes` (the scope's
-name→scheme map plus the alias arms' schemes) — so a name bound in run *N* is
-checked at its inferred scheme in run *N+1*; a host binding without a stored
-scheme is `None` and infers afresh
-([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-
-A residual *weak* variable is the exception to that closure, and it is kept
-across units rather than quantified: the scheme records it (`Scheme.weak`), a
-unit settles its `Define` schemes before they are stored (`settle_weak`, so a
-residual the unit fixed is stored as what it was fixed to), and `seed_env`
-re-seeds each residual of a stored scheme as a fresh weak variable of the next
-unit's unifier (`reseed_weak`). Reseeding simultaneously alpha-renames every
-local ∀/μ binder, including row and grade binders, to names disjoint from the
-fresh weak residuals; otherwise a new residual could be captured by an old
-binder with the same numeric id. The name is then used at one type in the next
-unit, as it was in the defining one, and no foreign id is ever read.
-
-**Sites freeze once the unit succeeds.** IR site parameters default to
-`Arc<Site>`; inference builds `Comp<Pending>` and `Val<Pending>` instead.
-`Pending::Open(ty)` becomes a snapshot under the final unifier.
-`Pending::Kept(site)` preserves an existing checked site's `Arc`, including
-its unit identity. Only `Val::Protected` uses `Pending::Imported(ty)`:
-freeze snapshots the occurrence's type and drops that membrane unless
-`Site::has_delayed` reaches a thunk or handle. Boundary values are built as
-blocks holding saturated calls, and under-applied boundary calls are
-η-expanded during inference, not freeze.
-
-An imported residual used as an `Exec` head instead becomes
-`Force(Protected { Variable(name), site: Open(ty) })`; its protection stays.
-These execution-head and value-occurrence rules are distinct. Snapshot graphs
-preserve canonical row/grade identities and whether remaining variables are
-weak or quantified; freezing does not make all types ground.
-
-A membrane admits nothing. Freeze constructs `Toplevel.admits` from
-`InferCtx.residual_uses`, snapshotting each imported name's first-use type
-in first-use order. These readmissions share one fresh `UnitId` with all new
-sites and run before the first phrase. Weak variables are shared across the
-unit, so the first-use type covers every occurrence. `InferCtx.unit_reads`
-instead supplies diagnostics for names bound to unit-valued calls.
-
-Inference memoises member types and the pending `Arc<GroupNode>` by source
-group identity; freeze memoises final groups by pending `Arc` identity. Every
-projection therefore shares the group in both phases. An erroneous unit's
-built IR is discarded whole without freezing, and one-shot inference sessions
-discard the IR they build.
-
-Recursive wrapping carries delayed obligations through containers, thunk
-arguments/results (`CompKind::Protect`), and handle views at
-`await`, ready `poll`, and `race`, without forcing or consuming them at import.
-Only weak `comparable` identities acquire session fixings; a quantified
-parameter remains fresh on every call. Generated wrappers capture the raw value
-with a closed scheme rebuilt from the contract in a scratch unifier.
-Re-inference also checks protection nodes against their contracts,
-preserving weak results and the raw computation's grade when a host rebinds a
-returned wrapper.
-
-See also [[design/types|types]]; map [[map/core/typecheck|typecheck]]. Judgments:
-`docs/SPEC.md` §17.3.
+See [[related/omnidirectional-type-inference|the suspended-match comparison]]
+and `docs/SPEC.md` §§17.3–17.7.

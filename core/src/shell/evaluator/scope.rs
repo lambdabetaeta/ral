@@ -222,9 +222,9 @@ mod tests {
         panic!("scope test: deliberate mid-body panic")
     }
 
-    fn panic_now_scheme(_u: &mut crate::typecheck::Unifier) -> crate::ty::Scheme {
-        use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
+    fn panic_now_scheme(_: &mut crate::ty::Binders) -> crate::ty::Ty {
+        use crate::typecheck::builtins::{pure, thunk};
+        thunk(pure(crate::ty::Ty::Unit))
     }
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

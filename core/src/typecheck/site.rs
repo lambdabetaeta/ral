@@ -9,7 +9,7 @@
 
 use super::unify::{Unifier, WeakSource};
 use crate::ty::{
-    CompTy, CompTyVar, Fields, Grade, GradeShape, Id, Label, Node, Row, RowVar, Scheme, Shape,
+    Closed, CompTy, CompTyVar, Fields, Grade, GradeShape, Id, Label, Node, Row, RowVar, Shape,
     Site, Tail, Ty, TyVar, UnitId,
 };
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ impl Site {
                     }
                     u.bind_ty_root(tys[&id], free);
                 }
-                Shape::FreeComp { weak } => {
+                Shape::FreeComp { weak, .. } => {
                     let free = u.fresh_comp_ty();
                     if *weak {
                         u.mark_weak(&Ty::Thunk(Box::new(free.clone())), &WeakSource::Residual);
@@ -137,14 +137,12 @@ impl Site {
     }
 
     /// Close a contract in its own namespace before it enters another checker.
-    pub(crate) fn scheme(&self) -> Arc<Scheme> {
+    pub(crate) fn scheme(&self) -> Closed {
         let mut u = Unifier::new();
+        u.enter();
         let ty = self.instantiate(&mut u);
-        Arc::new(super::generalize::generalize(
-            &u,
-            &super::env::TyEnv::new(),
-            &ty,
-        ))
+        u.exit();
+        super::generalize::settle_weak(&u, Arc::new(super::generalize::generalize(&u, &ty)))
     }
 
     /// The module door's view of the exports the script uses.
@@ -173,11 +171,11 @@ impl Exports {
     pub(crate) fn fits(
         &mut self,
         name: &str,
-        scheme: &Arc<Scheme>,
+        scheme: &Closed,
     ) -> Option<Result<(), (String, String)>> {
         let u = &mut self.u;
         let want = field_ty(u, self.row.as_ref()?, name)?;
-        let scheme = super::reseed_weak(u, Arc::clone(scheme));
+        let scheme = super::reseed_weak(u, scheme);
         let have = super::instantiate(u, &scheme);
         let expected = u.apply_ty(&want);
         Some(
@@ -308,6 +306,7 @@ impl Build<'_> {
         }
         let shape = match &*u.head_comp_ty(cty) {
             CompTy::Var(v) => Shape::FreeComp {
+                var: u.comp_root(*v).0,
                 weak: u.is_weak_comp(*v),
             },
             CompTy::Return(grade, a) => {
@@ -350,7 +349,9 @@ impl Build<'_> {
 mod tests {
     use super::*;
     use crate::source::{FileId, Span};
-    use crate::ty::{Kind, closed_record, closed_variant, open_record, open_variant};
+    use crate::ty::{
+        Binders, Kind, Role, closed_record, closed_variant, open_record, open_variant,
+    };
 
     /// `ty` as `u` solved it, frozen and instantiated into a fresh unifier.
     fn thaw(u: &Unifier, ty: &Ty) -> (Unifier, Ty) {
@@ -377,7 +378,7 @@ mod tests {
         for (i, name) in ["a", "b"].into_iter().enumerate() {
             let direct = u.unify_ty(&have[i], &want[i]).is_ok();
             let exported = exports
-                .fits(name, &Arc::new(Scheme::mono(have[i].clone())))
+                .fits(name, &Binders::close(|_| have[i].clone()))
                 .expect("named export")
                 .is_ok();
             // The first pair always unifies (its open row absorbs the extra label); the
@@ -388,9 +389,150 @@ mod tests {
     }
 
     #[test]
+    fn recursive_row_payload_sites_preserve_cycles_residuals_and_comparable_identity() {
+        for weak in [false, true] {
+            let mut u = Unifier::new();
+            u.enter();
+            let rho = u.fresh_row_var();
+            let residual = u.fresh_row_var();
+            let item = u.fresh_kinded(Kind::COMPARABLE);
+            let inner = open_record(&[("item", item.clone()), ("mirror", item.clone())], rho);
+            let Ty::Record(proposed) = open_record(&[("next", inner.clone())], residual) else {
+                unreachable!()
+            };
+            u.unify_row(&Row::Var(rho), &proposed).unwrap();
+            if weak {
+                u.mark_weak(&inner, &WeakSource::Residual);
+            }
+            let unit = UnitId::fresh();
+            let site = Site::snapshot(&u, &inner, unit);
+            let sibling = Site::snapshot(&u, &item, unit);
+            let bytes = postcard::to_allocvec(&site).unwrap();
+            let stored: Site = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(site, stored);
+            let mut node = site.root;
+            for _ in 0..4 {
+                let Shape::Record(fields) = &site.nodes[node].shape else {
+                    panic!("record node")
+                };
+                let field = |name: &str| {
+                    fields
+                        .labels
+                        .iter()
+                        .find(|(label, _)| label == name)
+                        .unwrap()
+                        .1
+                };
+                assert_eq!(fields.labels.len(), 3);
+                assert_eq!(field("item"), field("mirror"));
+                assert_eq!(
+                    site.nodes[field("item")].shape,
+                    sibling.nodes[sibling.root].shape
+                );
+                assert!(
+                    matches!(fields.tail, Tail::Open { var, deep: false, weak: w } if var == residual.0 && w == weak)
+                );
+                node = field("next");
+                let Shape::Record(next_fields) = &site.nodes[node].shape else {
+                    panic!("recursive record node")
+                };
+                assert_eq!(
+                    next_fields
+                        .labels
+                        .iter()
+                        .find(|(label, _)| label == "next")
+                        .unwrap()
+                        .1,
+                    node
+                );
+            }
+            assert!(site.same_unit(&sibling));
+            let mut next = Unifier::new();
+            next.enter();
+            let first = stored.instantiate(&mut next);
+            let second = stored.instantiate(&mut next);
+            for (instance, rigid) in [(&first, Ty::Int), (&second, Ty::String)] {
+                let Ty::Record(row) = next.resolve_ty(instance) else {
+                    panic!("record")
+                };
+                let fields = row
+                    .fields()
+                    .map(|(l, ty)| (l.name().to_owned(), ty.clone()))
+                    .collect::<HashMap<_, _>>();
+                next.unify_ty(&fields["item"], &rigid).unwrap();
+                assert_eq!(next.apply_ty(&fields["mirror"]), rigid);
+                let Ty::Record(recursive) = next.resolve_ty(&fields["next"]) else {
+                    panic!("recursive record")
+                };
+                let nested = recursive
+                    .fields()
+                    .map(|(l, ty)| (l.name().to_owned(), ty.clone()))
+                    .collect::<HashMap<_, _>>();
+                assert_eq!(next.apply_ty(&nested["item"]), rigid);
+                let round_trip =
+                    Site::snapshot(&next, instance, UnitId::fresh()).instantiate(&mut next);
+                next.unify_ty(instance, &round_trip).unwrap();
+            }
+            assert!(next.unify_ty(&first, &second).is_err());
+        }
+    }
+
+    #[test]
+    fn inhabited_recursive_variant_row_payloads_round_trip() {
+        let mut u = Unifier::new();
+        let rho = u.fresh_row_var();
+        let row = Row::Extend(
+            Label::Case("stop".into()),
+            Box::new(Ty::Unit),
+            Box::new(Row::Extend(
+                Label::Case("more".into()),
+                Box::new(Ty::Variant(Row::Var(rho))),
+                Box::new(Row::Empty),
+            )),
+        );
+        u.unify_row(&Row::Var(rho), &row).unwrap();
+        let ty = Ty::Variant(Row::Var(rho));
+        let site = Site::snapshot(&u, &ty, UnitId::fresh());
+        let stop = crate::shell::runtime::Value::Variant {
+            label: "stop".into(),
+            payload: None,
+        };
+        let more = |value| crate::shell::runtime::Value::Variant {
+            label: "more".into(),
+            payload: Some(Box::new(value)),
+        };
+        let fixings = crate::ty::Fixings::default();
+        site.admit(&stop, &fixings).unwrap();
+        site.admit(&more(more(stop.clone())), &fixings).unwrap();
+        assert!(
+            site.admit(&more(crate::shell::runtime::Value::Int(1)), &fixings)
+                .is_err()
+        );
+        let (mut next, imported) = thaw(&u, &ty);
+        next.unify_ty(
+            &imported,
+            &closed_variant(&[("stop", Ty::Unit), ("more", imported.clone())]),
+        )
+        .unwrap();
+        assert_ne!(next.cyclic_roots_in_ty(&imported).1, []);
+        let (mut last, round_trip) = thaw(&next, &imported);
+        Site::snapshot(&last, &round_trip, UnitId::fresh())
+            .admit(&more(stop), &fixings)
+            .unwrap();
+        assert!(
+            last.unify_ty(
+                &round_trip,
+                &closed_variant(&[("stop", Ty::Int), ("more", round_trip.clone())])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn contract_schemes_preserve_weakness_in_every_sort() {
         for weak in [false, true] {
             let mut u = Unifier::new();
+            u.enter();
             let item = Ty::Var(u.fresh_kinded_var(crate::ty::Kind::COMPARABLE));
             let body = u.fresh_comp_ty();
             let row = u.fresh_row_var();
@@ -398,17 +540,21 @@ mod tests {
                 ("item", item),
                 ("body", Ty::Thunk(Box::new(body))),
                 ("row", open_record(&[], row)),
+                ("grade", Ty::Handle(u.fresh_grade(), Box::new(Ty::Unit))),
             ]);
             if weak {
                 u.mark_weak(&ty, &WeakSource::Residual);
             }
             let scheme = Site::snapshot(&u, &ty, UnitId::fresh()).scheme();
-            assert_eq!(scheme.ty_vars.len(), usize::from(!weak));
-            assert_eq!(scheme.comp_ty_vars.len(), usize::from(!weak));
-            assert_eq!(scheme.row_vars.len(), usize::from(!weak));
-            assert_eq!(scheme.weak.tys.len(), usize::from(weak));
-            assert_eq!(scheme.weak.comps.len(), usize::from(weak));
-            assert_eq!(scheme.weak.rows.len(), usize::from(weak));
+            assert_eq!(
+                (
+                    scheme.tys.values().map(Role::is_weak).collect::<Vec<_>>(),
+                    scheme.comps.values().map(Role::is_weak).collect::<Vec<_>>(),
+                    scheme.rows.values().map(Role::is_weak).collect::<Vec<_>>(),
+                    scheme.grades.len(),
+                ),
+                (vec![weak], vec![weak], vec![weak], 1)
+            );
         }
     }
 
@@ -569,7 +715,7 @@ mod tests {
     fn exports_without_a_named_field_have_nothing_to_fit() {
         let mut u = Unifier::new();
         let tail = u.fresh_row_var();
-        let int = Arc::new(Scheme::mono(Ty::Int));
+        let int = Binders::close(|_| Ty::Int);
         for (ty, name) in [
             (Ty::Int, "a"),
             (closed_record(&[("a", Ty::Int)]), "other"),
@@ -581,7 +727,7 @@ mod tests {
         let mut exports =
             Site::snapshot(&u, &closed_record(&[("a", Ty::Int)]), UnitId::fresh()).exports();
         assert!(matches!(exports.fits("a", &int), Some(Ok(()))));
-        let string = Arc::new(Scheme::mono(Ty::String));
+        let string = Binders::close(|_| Ty::String);
         assert!(matches!(exports.fits("a", &string), Some(Err(_))));
     }
 }

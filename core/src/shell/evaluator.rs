@@ -12,7 +12,7 @@ pub(crate) mod val;
 use crate::ir::{Comp, Pattern, Phrase};
 use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Spanned;
-use crate::ty::Scheme;
+use crate::ty::Closed;
 use std::sync::Arc;
 
 pub use crate::shell::exec::capture::with_capture;
@@ -84,6 +84,7 @@ pub(crate) fn run_phrases(
                 Phrase::Define {
                     pattern,
                     comp,
+                    hole: (),
                     schemes,
                 } => ran
                     .define(pattern, comp, schemes, mode, mooring, shell)
@@ -116,7 +117,7 @@ impl Ran {
         &mut self,
         pattern: &Pattern,
         comp: &Arc<Comp>,
-        schemes: &[(String, Arc<Scheme>)],
+        schemes: &[(String, Closed)],
         mode: Mode,
         mooring: &Mooring,
         shell: &mut Shell,
@@ -127,7 +128,7 @@ impl Ran {
             let scheme = schemes
                 .iter()
                 .find(|(n, _)| **n == *name)
-                .map(|(_, scheme)| Arc::clone(scheme));
+                .map(|(_, scheme)| scheme.clone());
             let binding = Binding { value, scheme };
             if session {
                 shell.note_define(&name, &binding);

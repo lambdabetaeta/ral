@@ -18,9 +18,8 @@ use ral_core::engine::EngineInstaller;
 use ral_core::own::{OwnDir, TestDir};
 use ral_core::process::ScopeNode;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
-use ral_core::ty::{Scheme, Ty};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
+use ral_core::ty::{Binders, Ty};
+use ral_core::typecheck::builtins::{pure, thunk};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -542,8 +541,8 @@ pub(crate) fn builtin_test_clear_block_forever(
     }
 }
 
-pub(crate) fn scheme_test_clear_block_forever(_u: &mut Unifier) -> Scheme {
-    mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
+pub(crate) fn scheme_test_clear_block_forever(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::Unit))
 }
 
 static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

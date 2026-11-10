@@ -38,7 +38,7 @@ pub(crate) enum Shape {
     Free { var: u32, kind: Kind, weak: bool },
     Return(GradeShape, Id),
     Fun(Id, Id),
-    FreeComp { weak: bool },
+    FreeComp { var: u32, weak: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

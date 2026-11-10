@@ -1,7 +1,7 @@
 # codes: T0011
 # status: 1
-# at: 6:9
-# contains: couldn't match type Command with type Returns Integer
+# at: 5:25
+# contains: couldn't match type Returns Integer with type Command
 let h = { |v| try { !{f $v} } { |_| return 5 } }
 let f = { |n| return $h; echo x }
 return ()

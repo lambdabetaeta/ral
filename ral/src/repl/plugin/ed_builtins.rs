@@ -15,10 +15,9 @@ use ral_core::fact::FailureCode as _;
 use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{
-    CompTy, Grade, Kind, Scheme, Ty, Typed, closed_record, closed_variant, open_record,
+    Binders, CompTy, Grade, Kind, Ty, Typed, closed_record, closed_variant, open_record,
 };
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{fun, graded, mk_scheme as scheme, pure, thunk};
+use ral_core::typecheck::builtins::{fun, pure, thunk};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -355,89 +354,64 @@ pub fn builtin_ed_state(
 // that owns the call function.  This is a static host extension: plugins
 // remain dynamic source/alias/hook loaders above this surface.
 
-fn scheme_ed_get(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(pure(EditorSnapshot::ty())))
+fn scheme_ed_get(_: &mut Binders) -> Ty {
+    thunk(pure(EditorSnapshot::ty()))
 }
 
-fn scheme_unit_thunk(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(pure(Ty::Unit)))
+fn scheme_unit_thunk(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::Unit))
 }
 
-fn scheme_ed_set(_u: &mut Unifier) -> Scheme {
+fn scheme_ed_set(_: &mut Binders) -> Ty {
     let field = |ty| closed_variant(&[("keep", Ty::Unit), ("set", ty)]);
     let record = closed_record(&[("text", field(Ty::String)), ("cursor", field(Ty::Int))]);
-    scheme(&[], &[], thunk(fun(record, pure(Ty::Unit))))
+    thunk(fun(record, pure(Ty::Unit)))
 }
 
-fn scheme_string_to_bool(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::Bool))))
+fn scheme_string_to_bool(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::String, pure(Ty::Bool)))
 }
 
-fn scheme_string_string_to_string(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String)))),
-    )
+fn scheme_string_string_to_string(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String))))
 }
 
-fn scheme_highlight(u: &mut Unifier) -> Scheme {
-    let rest = u.fresh_row_var();
+fn scheme_highlight(binders: &mut Binders) -> Ty {
     let span = open_record(
         &[("start", Ty::Int), ("end", Ty::Int), ("style", Ty::String)],
-        rest,
+        binders.row(false),
     );
-    scheme(
-        &[],
-        &[(rest, false)],
-        thunk(fun(Ty::list(span), pure(Ty::Unit))),
-    )
+    thunk(fun(Ty::list(span), pure(Ty::Unit)))
 }
 
-fn scheme_history(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        thunk(fun(Ty::String, fun(Ty::Int, pure(Ty::list(Ty::String))))),
-    )
+fn scheme_history(_: &mut Binders) -> Ty {
+    thunk(fun(Ty::String, fun(Ty::Int, pure(Ty::list(Ty::String)))))
 }
 
-fn scheme_parse(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], thunk(pure(CommandAt::ty())))
+fn scheme_parse(_: &mut Binders) -> Ty {
+    thunk(pure(CommandAt::ty()))
 }
 
 /// `_ed-tui :: ∀ε α. U(F^ε α) → F [output: Str, status: Int]` — absorbs its
 /// body, whatever it produces; the output is the record's.
-fn scheme_tui(u: &mut Unifier) -> Scheme {
-    let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
-    let body = CompTy::Return(Grade::Var(ev), Box::new(Ty::Var(av)));
-    graded(
-        &[ev],
-        scheme(
-            &[(av, Kind::ANY)],
-            &[],
-            thunk(fun(
-                thunk(body),
-                pure(closed_record(&[
-                    ("output", Ty::String),
-                    ("status", Ty::Int),
-                ])),
-            )),
-        ),
-    )
+fn scheme_tui(binders: &mut Binders) -> Ty {
+    let a = Ty::Var(binders.ty(Kind::ANY));
+    let body = CompTy::Return(Grade::Var(binders.grade()), Box::new(a));
+    thunk(fun(
+        thunk(body),
+        pure(closed_record(&[
+            ("output", Ty::String),
+            ("status", Ty::Int),
+        ])),
+    ))
 }
 
-fn scheme_state(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
-    let a = Ty::Var(av);
-    scheme(
-        &[(av, Kind::DATA)],
-        &[],
-        thunk(fun(
-            a.clone(),
-            fun(thunk(fun(a.clone(), pure(a.clone()))), pure(a)),
-        )),
-    )
+fn scheme_state(binders: &mut Binders) -> Ty {
+    let a = Ty::Var(binders.ty(Kind::DATA));
+    thunk(fun(
+        a.clone(),
+        fun(thunk(fun(a.clone(), pure(a.clone()))), pure(a)),
+    ))
 }
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
@@ -563,9 +537,9 @@ mod tests {
     #[test]
     fn a_result_only_variable_in_the_editor_surface_is_a_boundary() {
         for entry in ED_BUILTINS.iter().chain(super::super::load::BUILTINS) {
-            let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
+            let scheme = ral_core::test_access::builtin_scheme(entry);
             assert!(
-                !ral_core::test_access::has_result_only_var(&scheme) || entry.decl.is_boundary(),
+                !ral_core::test_access::has_result_only_var(scheme) || entry.decl.is_boundary(),
                 "{}: a result only its own call determines, and it is no boundary",
                 entry.decl.name
             );

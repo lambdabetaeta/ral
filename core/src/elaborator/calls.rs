@@ -120,6 +120,7 @@ impl Elaborator {
                 CompKind::App {
                     head: Arc::new(head_comp),
                     args,
+                    hole: (),
                 }
             )
         };

@@ -39,7 +39,7 @@ with state to carry — so the run's mooring arrives beside the shell
 ([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
 enquires, or starts a nested run parented under the run that called it. The
 type-rule facet is a `BuiltinTypeRule`, which is a scheme factory —
-`fn(&mut Unifier) -> Scheme` — and nothing else. The streaming reducer
+`fn(&mut Binders) -> Ty`, closed by `Binders::close` — and nothing else. The streaming reducer
 `fold-lines` is an ordinary one whose factory (`scheme::fold_lines`) is a
 plain scheme ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. Beside it sits an optional diagnostic facet,

@@ -115,6 +115,7 @@ impl Elaborator {
                     Phrase::Define {
                         pattern: Arc::new(pattern.item.clone()),
                         comp: Arc::new(rhs),
+                        hole: (),
                         schemes: (),
                     },
                 );

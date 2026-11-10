@@ -204,6 +204,10 @@ impl Hook {
 
 #[derive(Debug, Clone)]
 pub enum RegisterError {
+    Typecheck {
+        name: HookName,
+        error: Box<crate::typecheck::TypeError>,
+    },
     NotFunction {
         name: HookName,
         actual: String,
@@ -230,6 +234,9 @@ impl RegisterError {
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Typecheck { name, error } => {
+                write!(f, "cannot register '{name}' as a hook: {error}")
+            }
             Self::NotFunction { name, actual, .. } => {
                 write!(
                     f,
@@ -289,7 +296,7 @@ impl Shell {
     /// is a function of the arity `sig` expects.
     ///
     /// # Errors
-    /// Whatever [`Hook::validate`] raises.
+    /// A block fails type checking, or whatever [`Hook::validate`] raises.
     pub fn vet_hook(
         &self,
         name: &HookName,
@@ -297,7 +304,12 @@ impl Shell {
         sig: HookSig,
         policy: DefaultPolicy,
     ) -> Result<Hook, RegisterError> {
-        let scheme = self.value_scheme(&value);
+        let scheme = self
+            .value_scheme(&value)
+            .map_err(|error| RegisterError::Typecheck {
+                name: name.clone(),
+                error,
+            })?;
         let hook = Hook {
             binding: Binding { value, scheme },
             sig,

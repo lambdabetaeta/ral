@@ -275,7 +275,9 @@ impl RcPlan {
         }
         // Bindings, functions included, are lexical: applyable at the prompt.
         for (k, v) in &self.bindings {
-            shell.bind_value(k.to_string(), v.into_owned());
+            shell
+                .bind_value(k.to_string(), v.into_owned())
+                .map_err(|error| Error::new(format!("rc binding '{k}': {error}")))?;
         }
         for entry in self.aliases {
             shell.commit_alias(entry);
@@ -446,9 +448,9 @@ mod tests {
         apply_rc_inner(rc_src).0
     }
 
-    fn unit_thunk(_u: &mut ral_core::typecheck::Unifier) -> ral_core::Scheme {
-        use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(ral_core::ty::Ty::Unit)))
+    fn unit_thunk(_: &mut ral_core::ty::Binders) -> ral_core::ty::Ty {
+        use ral_core::typecheck::builtins::{pure, thunk};
+        thunk(pure(ral_core::ty::Ty::Unit))
     }
 
     /// Apply `rc_src` inside a dispatch with the REPL host, as the boot builtin

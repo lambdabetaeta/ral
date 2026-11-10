@@ -286,6 +286,7 @@ pub fn elaborate(
                     let define = Phrase::Define {
                         pattern: Arc::new(Pattern::Name(name)),
                         comp: Arc::new(rhs),
+                        hole: (),
                         schemes: (),
                     };
                     Spanned::with_span(span, define)

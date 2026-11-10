@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b1ba0713
-generated_at_date: 2026-11-03
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_date: 2026-11-10
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -20,13 +20,21 @@ session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
 
-IR types that can contain sites are generic over `S = Arc<Site>`: `Val`,
-`CompKind`, `Prim`, `Exec`, their operand types and shared-node aliases.
-`Val::Protected.site` and `CompKind::Protect.site` hold `S`, and `Exec.site`
-holds `Option<S>`. Inference builds these with `S = Pending`; successful
-freeze converts them to the default final IR. `Toplevel` is always final.
-`Prim::map_operands` converts `Prim<S>` to `Prim<T>` for freeze, preserving
-operand spans; inference's individual sub-rules retain their own operand order.
+**The tree is indexed by a phase.** `Val`, `CompKind`, `Prim`, `Exec`, their
+operand types and shared-node aliases take `P: Phase = Checked`, a trait with
+one associated type per annotated position: `Bind` (a `CompKind::Bind`'s or
+`Phrase::Define`'s right-hand side), `Call` (a `CompKind::App`),
+`BindingCall` (a `CompKind::BindingCall`), `Boundary` (`Exec.site`, an
+`Option<P::Boundary>`) and `Membrane` (`Val::Protected.site`). `Checked`, the
+phase the evaluator runs, has `Bind = Call = ()`, an uninhabited
+`BindingCall` and `Boundary = Membrane = Arc<Site>`. The checker's own
+`Inferring` phase holds holes and types there
+([[map/core/typecheck|typecheck]]); readback alone turns it into `Checked`.
+`CompKind::Protect.site` is `Arc<Site>` in every phase. `Serial` is the phases
+whose trees serialise: the skipped annotations default, sites cross. `Toplevel`
+is always checked. `Prim::map_operands` converts `Prim<P>` to `Prim<Q>`,
+preserving operand spans; inference's individual sub-rules retain their own
+operand order.
 
 Values, computations and shared nodes:
 
@@ -79,13 +87,15 @@ constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 - `Lam` binds one `Name`; destructuring parameters use `Bind` after the
   lambda chain. `Pattern::{Wildcard, Name, List, Record}` and `FieldPattern`
   are defined in `ir/pattern.rs`.
-- `App { head, args: Box<[Spanned<Val>]> }` applies a computation to values,
-  with no spread. `Bind` takes a pattern; `Seq` discards a computation's
-  result without generalisation.
+- `App { head, args: Box<[Spanned<Val>]>, hole }` applies a computation to
+  values, with no spread. `Bind` takes a pattern and a `hole`; `Seq` discards
+  a computation's result without generalisation. Holes are skipped by serde.
 - `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`, `Gather`,
-  `Audit`, `Tilde`, `Protect` and `Native` form the shell layer.
+  `Audit`, `Tilde`, `Protect`, `Native` and `BindingCall` form the shell layer.
   `Native { entry: NativeEntry, args: Box<[Val]> }` is runtime-only and
-  skipped by serde; `NativeEntry` compares entries by name.
+  skipped by serde; `NativeEntry` compares entries by name. `BindingCall` is a
+  bare head bound in scope while the checker decides its splits; readback
+  makes it an `Exec`, and it cannot occur in a checked tree.
 - `Within.opts` and `Grant.caps` are `Arc<FieldsNode>`, the same nodes as
   record literals. `Within.handlers` stays separate syntax; `None` and an
   explicitly empty handler list install different scopes.
@@ -93,10 +103,10 @@ constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 
 **The checker builds explicit verdicts into the IR.** Inference constructs
-nodes beside their types; freeze snapshots their pending sites and settles
-schemes only after the unit succeeds. Frozen site graphs may retain free weak
-variables and delayed obligations. Every evaluated `Toplevel` has passed this
-check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
+nodes beside their types; readback applies the solution's decisions,
+snapshots sites and settles schemes only after the unit succeeds. Site graphs
+may retain free weak variables and delayed obligations. Every evaluated
+`Toplevel` has passed this check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
 
 - `CompKind::Pipeline` is a struct variant `{ stages }`. The form's value is
   its final stage's. There is no per-stage type field, because every
@@ -117,7 +127,7 @@ check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 - `Prim::Index { target, key }` carries one `Spanned<Key>`:
   `Label(Str)`, `Position(usize)` or `Data(Val)`. The key's form is explicit;
-  no pass infers it from a `Val`. Freeze and `Mentions` traverse only
+  no pass infers it from a `Val`. Readback and `Mentions` traverse only
   `Data`; the checker requires a record, list or map, respectively.
   An index chain is a sequence of these primitives joined by binds.
 - `Exec { head, argv, redirects, site }` is an external or builtin call;
@@ -129,9 +139,9 @@ check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   other half: read that `Bytes` value as text, one trailing terminator dropped
   and a strict UTF-8 decode, which is the partial step — the kernel's `decode`
   takes a value, so it reads a bound variable rather than nesting a `Comp`.
-  [[map/core/typecheck|typecheck]]'s `infer_let` composes capture and decode
-  as `Capture(body) to x. Prim::Decode(x)` around each command RHS
-  a binding captures, and `Mentions`' walk descends into the `Capture`
+  [[map/core/typecheck|typecheck]]'s readback composes capture and decode
+  (`captured_string`) as `Capture(body) to x. Prim::Decode(x)` around each
+  command RHS a binding captures, and `Mentions`' walk descends into the `Capture`
   and the `Bind`. The reading is a node and not a command so that its meaning
   is fixed where the checker writes it
   ([[design/capture|grades and capture]],
@@ -139,11 +149,10 @@ check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   [[design/types|types]]). Neither has surface syntax.
 
 - `Val::Protected { value, site }` carries a contract's delayed obligations.
-  An imported weak value occurrence is built with `Pending::Imported(ty)`;
-  freeze keeps its membrane only if the snapshot reaches a thunk or handle
-  (`Site::has_delayed`). An imported `Exec` head instead forces a protected
-  variable with `Pending::Open(ty)`, whose protection stays. Re-inferred
-  protection uses `Pending::Kept(site)` to preserve the checked site.
+  While inferring, an imported weak value occurrence or `Exec` head carries
+  `Membrane::Imported(ty)`; readback keeps the membrane only if the snapshot
+  reaches a thunk or handle (`Site::has_delayed`). Re-inferred protection uses
+  `Membrane::Kept(site)` to preserve the checked site.
   Forming a membrane admits nothing; it does not run a thunk or consume a handle.
   `CompKind::Protect { body, site }` checks and wraps the body's returned value,
   so generated thunk wrappers can guard arguments and results at their actual
@@ -155,8 +164,9 @@ check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   generalisation of Levy's `rec x. M`, which is a group of one. `group`'s occ
   is the union of every member's mentions, computed once when the elaborator
   builds the `GroupNode`; every `Rec` projection of one group shares that one
-  `Arc`. Inference memoises member types and the pending group by source
-  `Arc` identity; freeze memoises the final group by pending `Arc` identity.
+  `Arc`. Inference checks a group once and memoises its member schemes and
+  pending group by source `Arc` identity; readback memoises the checked group
+  by pending `Arc` identity.
   Each rebuilt group's occ is computed from its own shape.
 
 Every verdict
@@ -173,10 +183,11 @@ The IR owns the vocabulary it shares with the AST (`ir/pattern.rs`,
 `Display`), `BinaryOp` (`Arith`/`Compare`/`Eq`, each category its own enum), and
 `Redirects` with its stream-once binding. A pattern binds names, never carries
 a computation, so there is no parser syntax for elaboration to strip out
-([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, S = Arc<Site>>`
-is indexed first by schemes, then sites: elaboration yields `Unchecked`
-(`Phrase<()>`); inference returns `Phrase<DefineSchemes, Pending>` carrying
-unsettled schemes. Only successful freeze makes a final `Toplevel`, so the
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, P = Checked>`
+is indexed first by schemes, then phase: elaboration yields `Unchecked`
+(`Phrase<()>`, checked-phase terms without schemes); inference returns
+`Phrase<LiveSchemes, Inferring>` carrying unsettled schemes. `DefineSchemes`
+holds `Closed` schemes. Only successful readback makes a `Toplevel`, so the
 evaluator cannot be handed unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
 spreads (`positional()`, `arity()`). Value application instead has a fixed
 slice of arguments.

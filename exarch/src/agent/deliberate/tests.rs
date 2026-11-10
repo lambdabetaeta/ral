@@ -13,9 +13,8 @@ use crate::record::{ChildStatus, Commit, Display, Publish, Record, Transcript};
 use genai::chat::ChatRole;
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
-use ral_core::ty::{Scheme, Ty};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
+use ral_core::ty::{Binders, Ty};
+use ral_core::typecheck::builtins::{pure, thunk};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -241,8 +240,8 @@ fn builtin_t2_cancel_now(
     Ok(Value::Unit)
 }
 
-fn scheme_t2_cancel_now(_u: &mut Unifier) -> Scheme {
-    mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
+fn scheme_t2_cancel_now(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::Unit))
 }
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]

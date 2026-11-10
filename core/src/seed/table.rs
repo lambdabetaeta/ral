@@ -58,7 +58,7 @@ pub(crate) struct SerialEnvSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialBinding {
     pub value: SerialValue,
-    pub(crate) scheme: Option<crate::ty::Scheme>,
+    pub(crate) scheme: Option<crate::ty::Closed>,
 }
 
 /// One row per interned environment, in discovery order;
@@ -131,7 +131,7 @@ impl InternCtx {
                         k.to_string(),
                         SerialBinding {
                             value: SerialValue::from_runtime(&b.value, &mut self)?,
-                            scheme: b.scheme.as_deref().cloned(),
+                            scheme: b.scheme.clone(),
                         },
                     ))
                 })
@@ -212,7 +212,7 @@ impl WireDecoder {
                         Name::from(k.as_str()),
                         Binding {
                             value: b.value.clone().into_runtime(&dec)?,
-                            scheme: b.scheme.clone().map(Arc::new),
+                            scheme: b.scheme.clone(),
                         },
                     ))
                 })

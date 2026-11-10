@@ -45,3 +45,11 @@ recursion, which types every self-application.
 
 Refines [[decisions/260606_unify-one-sided-obligations|unify-one-sided-obligations]],
 whose "no occurs check" is now "no occurs check through data".
+
+## Row spines and recursive fields
+
+**Rows are inductive in their spines, not in their field types.** A productive
+cycle through a record or variant field satisfies this decision; a cycle of
+row tails does not denote a finite row. Stored payloads use ordinary type
+anchors, not row μ-binders. See [[design/row-types|row types]] and the
+[[decisions/261110_elaboration-is-decided-by-suspended-matches|scoped unifier amendment]].

@@ -22,10 +22,10 @@ static ENTRIES: [BuiltinEntry; 1] = [BuiltinEntry::new(
 )];
 pub(crate) static BUILTINS: &[BuiltinEntry] = &ENTRIES;
 
-fn scheme(_u: &mut ral_core::typecheck::Unifier) -> ral_core::ty::Scheme {
+fn scheme(_: &mut ral_core::ty::Binders) -> ral_core::ty::Ty {
     use ral_core::ty::Ty;
-    use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
-    mk_scheme(&[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+    use ral_core::typecheck::builtins::{fun, pure, thunk};
+    thunk(fun(Ty::String, pure(Ty::String)))
 }
 
 pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {

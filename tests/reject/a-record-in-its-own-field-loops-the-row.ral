@@ -1,5 +1,0 @@
-# codes: T0002
-# status: 1
-# at: 5:54
-# contains: infinite row: a record's field list would refer back to itself
-let f = { |r| let [a: x] = $r; let [b: y] = $x; [$r, $x] }

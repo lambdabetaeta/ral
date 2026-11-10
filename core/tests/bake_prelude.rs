@@ -32,7 +32,7 @@ fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&ral_core::ir::Comp)) {
 
 /// The (name, scheme) pairs on an annotated toplevel's `Phrase::Define`s, in
 /// phrase order.
-fn schemes_on_defines(top: &Toplevel) -> Vec<(String, std::sync::Arc<ral_core::Scheme>)> {
+fn schemes_on_defines(top: &Toplevel) -> Vec<(String, ral_core::ty::Closed)> {
     top.phrases
         .iter()
         .flat_map(|phrase| match &phrase.item {

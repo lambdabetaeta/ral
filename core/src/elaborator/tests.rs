@@ -102,6 +102,7 @@ fn lambda_parameter_binds_preserve_written_shadowing() {
                 comp: rhs,
                 pattern,
                 rest,
+                ..
             } = &body.item
             else {
                 panic!("expected a parameter bind: {body:?}");
@@ -216,7 +217,7 @@ fn explicit_value_head_elaborates_to_app() {
     // A value head is forced, as a bound name is: nothing forces implicitly.
     let ast = parse("$map $upper ['a']").expect("parse");
     let comp = elaborate_one(&ast, [], None);
-    let CompKind::App { head, args } = &comp.item else {
+    let CompKind::App { head, args, .. } = &comp.item else {
         panic!("expected app, got {:?}", comp.item);
     };
     let CompKind::Force(Val::Variable(name)) = &head.item else {
@@ -718,6 +719,7 @@ fn hoisted(comp: &Comp) -> (&Comp, &Pattern, &Comp) {
         comp: rhs,
         pattern,
         rest,
+        ..
     } = &comp.item
     else {
         panic!("expected a Bind over a hoisted read, got {:?}", comp.item);

@@ -351,17 +351,16 @@ impl Shell {
     /// The closed session scheme for a value binding — `None` for anything
     /// but a block. Shared by [`Self::bind_value`] and
     /// [`Self::register_hook`], which differ only in what they do with it.
+    /// Refused blocks return their diagnostic without exporting a scheme.
     pub(crate) fn value_scheme(
         &self,
         value: &crate::shell::runtime::Value,
-    ) -> Option<Arc<crate::ty::Scheme>> {
+    ) -> Result<Option<crate::ty::Closed>, Box<crate::typecheck::TypeError>> {
         let crate::shell::runtime::Value::Thunk(closure) = value else {
-            return None;
+            return Ok(None);
         };
-        Some(Arc::new(crate::typecheck::binding_value_scheme(
-            closure.comp(),
-            self.closure_schemes(closure),
-        )))
+        crate::typecheck::binding_value_scheme(closure.comp(), self.closure_schemes(closure))
+            .map(Some)
     }
 }
 

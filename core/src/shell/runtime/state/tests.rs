@@ -31,3 +31,30 @@ fn nursery_round_trips_a_forked_session() {
         "the bequest must carry the parent's lexical scope"
     );
 }
+
+#[test]
+fn refused_host_blocks_install_neither_bindings_nor_hooks() {
+    use crate::ir::{CommandName, CommandWord, CompKind, Exec, Val, ValListElem};
+    use crate::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig, RegisterError};
+    use crate::source::Spanned;
+    let mut shell = crate::test_helper::core_shell();
+    let body = Spanned::synthetic(CompKind::Exec(Exec {
+        head: CommandWord::External(CommandName::Bare("echo".into())),
+        argv: vec![ValListElem::Single(Spanned::synthetic(Val::Unit))].into(),
+        redirects: crate::ir::Redirects::default(),
+        site: None,
+    }));
+    let value = Value::Thunk(Closure::closed(body));
+    shell.bind_value("host".into(), Value::Int(7)).unwrap();
+    let error = shell.bind_value("host".into(), value.clone()).unwrap_err();
+    assert_eq!(error.kind.code(), "T0057");
+    assert_eq!(shell.scope_lookup("host"), Some(&Value::Int(7)));
+    let name = HookName::session("refused");
+    let error = shell
+        .register_hook(name.clone(), value, HookSig::Block, DefaultPolicy::denied())
+        .unwrap_err();
+    assert!(
+        matches!(error, RegisterError::Typecheck { error, .. } if error.kind.code() == "T0057")
+    );
+    assert!(!shell.has_hook(&name));
+}

@@ -27,9 +27,8 @@ use ral_core::data::datum::Datum;
 use ral_core::error::Error;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled};
 use ral_core::ty::Site;
-use ral_core::ty::{Kind, Row, RowVar, Scheme, Ty, TyVar, Typed as _, closed_record, open_variant};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{fun, mk_scheme as scheme, pure, thunk};
+use ral_core::ty::{Binders, Kind, Row, RowVar, Ty, Typed as _, closed_record, open_variant};
+use ral_core::typecheck::builtins::{fun, pure, thunk};
 use ral_core::{Shell, SpawnGrant, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -122,18 +121,12 @@ fn fork_then_enquire(
     ask(AGENTS, request(claim), mooring, shell)
 }
 
-/// A family builtin's scheme.  `first_order` refuses a block or handle at any
-/// depth of the argument, so the type variables the argument mentions are
-/// data and its row variables deep; `answers` are the result's, which the
-/// boundary admits against what it sent.
-fn family_scheme(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> Scheme {
-    let vars: Vec<_> = data
-        .iter()
-        .map(|&v| (v, Kind::DATA))
-        .chain(answers.iter().map(|&v| (v, Kind::ANY)))
-        .collect();
-    let rows: Vec<_> = rows.iter().map(|&v| (v, true)).collect();
-    scheme(&vars, &rows, ty)
+/// A row a family's argument mentions.  `first_order` refuses a block or
+/// handle at any depth of the argument, so its rows are deep and its type
+/// variables `Kind::DATA`; an answer's are any type, which the boundary admits
+/// against what it sent.
+fn argument_row(binders: &mut Binders) -> RowVar {
+    binders.row(true)
 }
 
 /// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | stop Str | dismiss Str | reply β | read Str | ρ4> → F α`
@@ -160,45 +153,40 @@ fn family_scheme(data: &[TyVar], answers: &[TyVar], rows: &[RowVar], ty: Ty) -> 
 /// vocabulary's decoders, which enumerate the legal labels.
 /// `reply`'s `β` is likewise trusted first-order data, checked at the boundary
 /// rather than by the row.
-fn scheme_agents(u: &mut Unifier) -> Scheme {
-    let type_row = u.fresh_row_var();
-    let grant_row = u.fresh_row_var();
-    let model_row = u.fresh_row_var();
-    let tag_row = u.fresh_row_var();
-    let reply_ty = u.fresh_tyvar();
-    let answer_ty = u.fresh_tyvar();
-    family_scheme(
-        &[reply_ty],
-        &[answer_ty],
-        &[type_row, grant_row, model_row, tag_row],
-        thunk(fun(
-            open_variant(
-                &[
-                    ("list", Ty::Unit),
-                    (
-                        "start",
-                        closed_record(&[
-                            ("prompt", Ty::String),
-                            ("name", Ty::String),
-                            ("type", Ty::Variant(Row::Var(type_row))),
-                            ("grant", Ty::Variant(Row::Var(grant_row))),
-                            ("model", Ty::Variant(Row::Var(model_row))),
-                        ]),
-                    ),
-                    (
-                        "message",
-                        closed_record(&[("to", Ty::String), ("text", Ty::String)]),
-                    ),
-                    ("stop", Ty::String),
-                    ("dismiss", Ty::String),
-                    ("reply", Ty::Var(reply_ty)),
-                    ("read", Ty::String),
-                ],
-                tag_row,
-            ),
-            pure(Ty::Var(answer_ty)),
-        )),
-    )
+fn scheme_agents(binders: &mut Binders) -> Ty {
+    let type_row = argument_row(binders);
+    let grant_row = argument_row(binders);
+    let model_row = argument_row(binders);
+    let tag_row = argument_row(binders);
+    let reply_ty = binders.ty(Kind::DATA);
+    let answer_ty = binders.ty(Kind::ANY);
+    thunk(fun(
+        open_variant(
+            &[
+                ("list", Ty::Unit),
+                (
+                    "start",
+                    closed_record(&[
+                        ("prompt", Ty::String),
+                        ("name", Ty::String),
+                        ("type", Ty::Variant(Row::Var(type_row))),
+                        ("grant", Ty::Variant(Row::Var(grant_row))),
+                        ("model", Ty::Variant(Row::Var(model_row))),
+                    ]),
+                ),
+                (
+                    "message",
+                    closed_record(&[("to", Ty::String), ("text", Ty::String)]),
+                ),
+                ("stop", Ty::String),
+                ("dismiss", Ty::String),
+                ("reply", Ty::Var(reply_ty)),
+                ("read", Ty::String),
+            ],
+            tag_row,
+        ),
+        pure(Ty::Var(answer_ty)),
+    ))
 }
 
 /// `exarch-schedules :: ∀ρ1 ρ2. <list | add [trigger: Variant ρ1, label: Str, prompt: Str] | remove Str | ρ2> → F [[label: Str, trigger: Str, next-s: Int, fires: Int]]`
@@ -209,32 +197,27 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
 /// inside it so an unrecognised trigger reaches the decoder, which names the
 /// legal shapes. `label` is a plain `Str` — every schedule names
 /// itself, so there is no shape left to leave open.
-fn scheme_schedules(u: &mut Unifier) -> Scheme {
-    let trigger_row = u.fresh_row_var();
-    let tag_row = u.fresh_row_var();
-    family_scheme(
-        &[],
-        &[],
-        &[trigger_row, tag_row],
-        thunk(fun(
-            open_variant(
-                &[
-                    ("list", Ty::Unit),
-                    (
-                        "add",
-                        closed_record(&[
-                            ("trigger", Ty::Variant(Row::Var(trigger_row))),
-                            ("label", Ty::String),
-                            ("prompt", Ty::String),
-                        ]),
-                    ),
-                    ("remove", Ty::String),
-                ],
-                tag_row,
-            ),
-            pure(Ty::list(ScheduleInfo::ty())),
-        )),
-    )
+fn scheme_schedules(binders: &mut Binders) -> Ty {
+    let trigger_row = argument_row(binders);
+    let tag_row = argument_row(binders);
+    thunk(fun(
+        open_variant(
+            &[
+                ("list", Ty::Unit),
+                (
+                    "add",
+                    closed_record(&[
+                        ("trigger", Ty::Variant(Row::Var(trigger_row))),
+                        ("label", Ty::String),
+                        ("prompt", Ty::String),
+                    ]),
+                ),
+                ("remove", Ty::String),
+            ],
+            tag_row,
+        ),
+        pure(Ty::list(ScheduleInfo::ty())),
+    ))
 }
 
 /// `exarch-pins :: ∀α ρ1^d ρ2^d. <set [key: Str, body: <| ρ1>] | clear Str | read Str | list | ρ2> → F α`
@@ -248,33 +231,28 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
 /// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
 /// checked, since only the desk's own decoder can judge whether the card
 /// read back matches the shape it expects.
-fn scheme_pins(u: &mut Unifier) -> Scheme {
-    let card_row = u.fresh_row_var();
-    let tag_row = u.fresh_row_var();
-    let answer_ty = u.fresh_tyvar();
-    family_scheme(
-        &[],
-        &[answer_ty],
-        &[card_row, tag_row],
-        thunk(fun(
-            open_variant(
-                &[
-                    (
-                        "set",
-                        closed_record(&[
-                            ("key", Ty::String),
-                            ("body", Ty::Variant(Row::Var(card_row))),
-                        ]),
-                    ),
-                    ("clear", Ty::String),
-                    ("read", Ty::String),
-                    ("list", Ty::Unit),
-                ],
-                tag_row,
-            ),
-            pure(Ty::Var(answer_ty)),
-        )),
-    )
+fn scheme_pins(binders: &mut Binders) -> Ty {
+    let card_row = argument_row(binders);
+    let tag_row = argument_row(binders);
+    let answer_ty = binders.ty(Kind::ANY);
+    thunk(fun(
+        open_variant(
+            &[
+                (
+                    "set",
+                    closed_record(&[
+                        ("key", Ty::String),
+                        ("body", Ty::Variant(Row::Var(card_row))),
+                    ]),
+                ),
+                ("clear", Ty::String),
+                ("read", Ty::String),
+                ("list", Ty::Unit),
+            ],
+            tag_row,
+        ),
+        pure(Ty::Var(answer_ty)),
+    ))
 }
 
 /// One item as both `` exarch-context `survey `` and `` exarch-transcript `index `` name
@@ -291,17 +269,12 @@ fn scheme_pins(u: &mut Unifier) -> Scheme {
 /// One answer for both tags: an edit changes what is addressable, so the
 /// survey the transition leaves behind is what the next edit must be written
 /// against.
-fn scheme_context(u: &mut Unifier) -> Scheme {
-    let tag_row = u.fresh_row_var();
-    family_scheme(
-        &[],
-        &[],
-        &[tag_row],
-        thunk(fun(
-            open_variant(&[("survey", Ty::Unit), ("evict", Evict::ty())], tag_row),
-            pure(Survey::ty()),
-        )),
-    )
+fn scheme_context(binders: &mut Binders) -> Ty {
+    let tag_row = argument_row(binders);
+    thunk(fun(
+        open_variant(&[("survey", Ty::Unit), ("evict", Evict::ty())], tag_row),
+        pure(Survey::ty()),
+    ))
 }
 
 /// `exarch-transcript :: ∀α ρ. <index | read [turns: [Int]] | grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`
@@ -320,28 +293,23 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
 /// misspelling is a type error rather than a call that reaches the host
 /// naming nothing. `grep`'s is closed too: `turns` is `` `all `` or `` `only [Int] ``, so
 /// absence is data.
-fn scheme_transcript(u: &mut Unifier) -> Scheme {
-    let tag_row = u.fresh_row_var();
-    let answer_ty = u.fresh_tyvar();
-    family_scheme(
-        &[],
-        &[answer_ty],
-        &[tag_row],
-        thunk(fun(
-            open_variant(
-                &[
-                    ("index", Ty::Unit),
-                    ("read", Reading::ty()),
-                    (
-                        "grep",
-                        closed_record(&[("pattern", Ty::String), ("turns", Turns::ty())]),
-                    ),
-                ],
-                tag_row,
-            ),
-            pure(Ty::Var(answer_ty)),
-        )),
-    )
+fn scheme_transcript(binders: &mut Binders) -> Ty {
+    let tag_row = argument_row(binders);
+    let answer_ty = binders.ty(Kind::ANY);
+    thunk(fun(
+        open_variant(
+            &[
+                ("index", Ty::Unit),
+                ("read", Reading::ty()),
+                (
+                    "grep",
+                    closed_record(&[("pattern", Ty::String), ("turns", Turns::ty())]),
+                ),
+            ],
+            tag_row,
+        ),
+        pure(Ty::Var(answer_ty)),
+    ))
 }
 
 // A named array, not a promoted temporary: rustc refuses promotion once an

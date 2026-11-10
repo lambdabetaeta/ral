@@ -20,10 +20,65 @@ use crate::data::Str;
 use crate::path::TildePath;
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::fmt::Debug;
+use std::sync::Arc;
+
+// ── Phases ──────────────────────────────────────────────────────────────
+
+/// What each annotated position of a tree holds: [`Checked`] in a tree the
+/// evaluator runs, the checker's own phase while it infers one.
+pub trait Phase: Debug + Clone + PartialEq {
+    /// How a [`CompKind::Bind`]'s or a `Define`'s right-hand side is bound.
+    type Bind: Debug + Clone + PartialEq;
+    /// Where a [`CompKind::App`] forces a returned block between arguments.
+    type Call: Debug + Clone + PartialEq;
+    /// A [`CompKind::BindingCall`]'s; uninhabited once checked.
+    type BindingCall: Debug + Clone + PartialEq;
+    /// The type an [`Exec`]'s door admits a value against.
+    type Boundary: Debug + Clone + PartialEq;
+    /// A [`Val::Protected`]'s contract.
+    type Membrane: Debug + Clone + PartialEq;
+}
+
+/// A phase whose trees serialise: bind and call notes are skipped and read
+/// back as their defaults, while boundary and membrane sites are written out.
+pub trait Serial:
+    Phase<
+        Bind: Default,
+        Call: Default,
+        Boundary: Serialize + DeserializeOwned,
+        Membrane: Serialize + DeserializeOwned,
+    >
+{
+}
+
+impl<P> Serial for P where
+    P: Phase<
+            Bind: Default,
+            Call: Default,
+            Boundary: Serialize + DeserializeOwned,
+            Membrane: Serialize + DeserializeOwned,
+        >
+{
+}
+
+/// No holes: every elaboration is explicit in the tree.  The elaborator's
+/// output shares this phase with the checker's, which alone carries sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checked {}
+
+impl Phase for Checked {
+    type Bind = ();
+    type Call = ();
+    type BindingCall = Infallible;
+    type Boundary = Arc<Site>;
+    type Membrane = Arc<Site>;
+}
 
 // ── Values ──────────────────────────────────────────────────────────────
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// An identifier the IR binds or mentions: a variable, a pattern name, a
 /// bare command head, a variant label. Shared, not copied — a bind, a
@@ -131,19 +186,19 @@ impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
     }
 }
 
-pub type ThunkNode<S = Arc<Site>> = Node<Arc<Comp<S>>>;
-pub type GroupNode<S = Arc<Site>> = Node<Box<[(Name, Arc<Comp<S>>)]>>;
-pub type ListNode<S = Arc<Site>> = Node<Box<[Spanned<Val<S>>]>>;
+pub type ThunkNode<P = Checked> = Node<Arc<Comp<P>>>;
+pub type GroupNode<P = Checked> = Node<Box<[(Name, Arc<Comp<P>>)]>>;
+pub type ListNode<P = Checked> = Node<Box<[Spanned<Val<P>>]>>;
 /// Entries sorted by key, stably; equal keys are the checker's to refuse.
-pub type FieldsNode<S = Arc<Site>> = Node<Box<[(Name, Spanned<Val<S>>)]>>;
+pub type FieldsNode<P = Checked> = Node<Box<[(Name, Spanned<Val<P>>)]>>;
 
-impl<S> Mentions for Arc<Comp<S>> {
+impl<P: Phase> Mentions for Arc<Comp<P>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         self.as_ref().mentions(out);
     }
 }
 
-impl<S> Mentions for Box<[(Name, Arc<Comp<S>>)]> {
+impl<P: Phase> Mentions for Box<[(Name, Arc<Comp<P>>)]> {
     // Every member's: the group is one unit.
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for (_name, member) in self {
@@ -152,7 +207,7 @@ impl<S> Mentions for Box<[(Name, Arc<Comp<S>>)]> {
     }
 }
 
-impl<S> Mentions for Box<[Spanned<Val<S>>]> {
+impl<P: Phase> Mentions for Box<[Spanned<Val<P>>]> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for elem in self {
             elem.item.mentions(out);
@@ -160,7 +215,7 @@ impl<S> Mentions for Box<[Spanned<Val<S>>]> {
     }
 }
 
-impl<S> Mentions for Box<[(Name, Spanned<Val<S>>)]> {
+impl<P: Phase> Mentions for Box<[(Name, Spanned<Val<P>>)]> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for (_key, value) in self {
             value.item.mentions(out);
@@ -209,7 +264,8 @@ impl CommandName {
 /// literals exist so that `$[…]` lowers into plain `Bind` sequences rather
 /// than round-tripping through string parsing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Val<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub enum Val<P: Phase = Checked> {
     Unit,
     String(Str),
     Int(i64),
@@ -218,13 +274,13 @@ pub enum Val<S = Arc<Site>> {
     Variable(Name),
     /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
     /// ρ|occ(M)⟩`.
-    Thunk(Arc<ThunkNode<S>>),
+    Thunk(Arc<ThunkNode<P>>),
     /// A plain list literal: no spread, so every element is here already.
-    List(Arc<ListNode<S>>),
+    List(Arc<ListNode<P>>),
     /// `[key: val, …]`: static labels, no spread.
-    Record(Arc<FieldsNode<S>>),
+    Record(Arc<FieldsNode<P>>),
     /// `[:, key: val, …]`: keys written out, no spread.
-    Map(Arc<FieldsNode<S>>),
+    Map(Arc<FieldsNode<P>>),
     /// The label has no leading backtick; a bare tag carries `Unit`.
     Variant {
         label: Name,
@@ -233,20 +289,21 @@ pub enum Val<S = Arc<Site>> {
     /// Checker-inserted protection at an instantiation site.
     Protected {
         value: Box<Self>,
-        site: S,
+        site: P::Membrane,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Key<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub enum Key<P: Phase = Checked> {
     Label(Str),
     Position(usize),
-    Data(Val<S>),
+    Data(Val<P>),
 }
 
-impl<S> Val<S> {
+impl<P: Phase> Val<P> {
     /// `thunk M`, from an already-built `M`.
-    pub(crate) fn thunk(comp: Arc<Comp<S>>) -> Self {
+    pub(crate) fn thunk(comp: Arc<Comp<P>>) -> Self {
         Self::Thunk(Node::new(comp))
     }
 
@@ -267,15 +324,16 @@ impl<S> Val<S> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ValListElem<S = Arc<Site>> {
-    Single(Spanned<Val<S>>),
+#[serde(bound = "P: Serial")]
+pub enum ValListElem<P: Phase = Checked> {
+    Single(Spanned<Val<P>>),
     /// `...x`, spliced into the surrounding list, its `...` included in an argument span.
-    Spread(Spanned<Val<S>>),
+    Spread(Spanned<Val<P>>),
 }
 
-impl<S> ValListElem<S> {
+impl<P: Phase> ValListElem<P> {
     /// The slot's value, whichever form the slot takes.
-    pub(crate) fn slot(&self) -> &Spanned<Val<S>> {
+    pub(crate) fn slot(&self) -> &Spanned<Val<P>> {
         match self {
             Self::Single(v) | Self::Spread(v) => v,
         }
@@ -283,27 +341,29 @@ impl<S> ValListElem<S> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum MapEntryV<S = Arc<Site>> {
-    Entry(Spanned<Val<S>>, Spanned<Val<S>>),
-    Spread(Spanned<Val<S>>),
+#[serde(bound = "P: Serial")]
+pub enum MapEntryV<P: Phase = Checked> {
+    Entry(Spanned<Val<P>>, Spanned<Val<P>>),
+    Spread(Spanned<Val<P>>),
 }
 
 /// A command's argv — the same slots a list literal has, a `...` splicing a
 /// list in place.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "P: Serial")]
 #[serde(transparent)]
-pub struct Argv<S = Arc<Site>>(Vec<ValListElem<S>>);
+pub struct Argv<P: Phase = Checked>(Vec<ValListElem<P>>);
 
-impl<S> Default for Argv<S> {
+impl<P: Phase> Default for Argv<P> {
     fn default() -> Self {
         Self(Vec::new())
     }
 }
 
-impl<S> Argv<S> {
+impl<P: Phase> Argv<P> {
     /// The slots as a literal positional list, or `None` if any is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
-    pub(crate) fn positional(&self) -> Option<Vec<&Spanned<Val<S>>>> {
+    pub(crate) fn positional(&self) -> Option<Vec<&Spanned<Val<P>>>> {
         self.0
             .iter()
             .map(|e| match e {
@@ -319,42 +379,42 @@ impl<S> Argv<S> {
     }
 }
 
-impl<S> std::ops::Deref for Argv<S> {
-    type Target = [ValListElem<S>];
-    fn deref(&self) -> &[ValListElem<S>] {
+impl<P: Phase> std::ops::Deref for Argv<P> {
+    type Target = [ValListElem<P>];
+    fn deref(&self) -> &[ValListElem<P>] {
         &self.0
     }
 }
 
-impl<S> From<Vec<ValListElem<S>>> for Argv<S> {
-    fn from(elems: Vec<ValListElem<S>>) -> Self {
+impl<P: Phase> From<Vec<ValListElem<P>>> for Argv<P> {
+    fn from(elems: Vec<ValListElem<P>>) -> Self {
         Self(elems)
     }
 }
 
-impl<S> FromIterator<ValListElem<S>> for Argv<S> {
-    fn from_iter<I: IntoIterator<Item = ValListElem<S>>>(iter: I) -> Self {
+impl<P: Phase> FromIterator<ValListElem<P>> for Argv<P> {
+    fn from_iter<I: IntoIterator<Item = ValListElem<P>>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl<S> Extend<ValListElem<S>> for Argv<S> {
-    fn extend<I: IntoIterator<Item = ValListElem<S>>>(&mut self, iter: I) {
+impl<P: Phase> Extend<ValListElem<P>> for Argv<P> {
+    fn extend<I: IntoIterator<Item = ValListElem<P>>>(&mut self, iter: I) {
         self.0.extend(iter);
     }
 }
 
-impl<S> IntoIterator for Argv<S> {
-    type Item = ValListElem<S>;
-    type IntoIter = std::vec::IntoIter<ValListElem<S>>;
+impl<P: Phase> IntoIterator for Argv<P> {
+    type Item = ValListElem<P>;
+    type IntoIter = std::vec::IntoIter<ValListElem<P>>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
 }
 
-impl<'a, S> IntoIterator for &'a Argv<S> {
-    type Item = &'a ValListElem<S>;
-    type IntoIter = std::slice::Iter<'a, ValListElem<S>>;
+impl<'a, P: Phase> IntoIterator for &'a Argv<P> {
+    type Item = &'a ValListElem<P>;
+    type IntoIter = std::slice::Iter<'a, ValListElem<P>>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
@@ -373,37 +433,44 @@ pub struct Toplevel {
 }
 
 /// A `Phrase::Define`'s names, each with its checker-closed scheme.
-pub type DefineSchemes = Vec<(String, Arc<crate::ty::Scheme>)>;
+pub type DefineSchemes = Vec<(String, crate::ty::Closed)>;
 
 /// One top-level statement, checked unless `D` says it is not: the schemes
 /// are the checker's, so elaboration holds none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Phrase<D = DefineSchemes, S = Arc<Site>> {
+#[serde(bound(
+    serialize = "D: Serialize, P: Serial",
+    deserialize = "D: Deserialize<'de>, P: Serial"
+))]
+pub enum Phrase<D = DefineSchemes, P: Phase = Checked> {
     /// `let p = M` at the top level: run M, extend the session environment.
     /// `schemes` has one entry per name `pattern` binds, closed and
     /// generalised by the checker — a destructuring `let` carries one per
     /// component.
     Define {
         pattern: Arc<Pattern>,
-        comp: Arc<Comp<S>>,
+        comp: Arc<Comp<P>>,
+        #[serde(skip)]
+        hole: P::Bind,
         schemes: D,
     },
     /// Any other statement.
-    Run(Arc<Comp<S>>),
+    Run(Arc<Comp<P>>),
 }
 
 /// What elaboration yields, and the checker alone turns into a [`Toplevel`].
 pub type Unchecked = Vec<Spanned<Phrase<()>>>;
 
-impl<S> CompKind<S> {
+impl<P: Phase<Bind = ()>> CompKind<P> {
     /// `comp` to `pattern`, then `rest`.
     pub(crate) fn bind(
         pattern: Pattern,
-        comp: impl Into<Arc<Comp<S>>>,
-        rest: impl Into<Arc<Comp<S>>>,
+        comp: impl Into<Arc<Comp<P>>>,
+        rest: impl Into<Arc<Comp<P>>>,
     ) -> Self {
         Self::Bind {
             comp: comp.into(),
+            hole: (),
             pattern: Arc::new(pattern),
             rest: rest.into(),
         }
@@ -428,7 +495,7 @@ impl Toplevel {
 
     /// The scheme each top-level name was closed at, the last `let` of a name
     /// winning as it does in the environment the phrases build.
-    pub(crate) fn exported_schemes(&self) -> Vec<(String, Arc<crate::ty::Scheme>)> {
+    pub(crate) fn exported_schemes(&self) -> Vec<(String, crate::ty::Closed)> {
         let last: std::collections::BTreeMap<_, _> = self
             .phrases
             .iter()
@@ -437,7 +504,7 @@ impl Toplevel {
                 Phrase::Run(_) => None,
             })
             .flatten()
-            .map(|(name, scheme)| (name.clone(), Arc::clone(scheme)))
+            .map(|(name, scheme)| (name.clone(), scheme.clone()))
             .collect();
         last.into_iter().collect()
     }
@@ -459,9 +526,9 @@ impl Toplevel {
 
 /// A computation with the source span elaboration gave it — the type the
 /// evaluator interprets.
-pub type Comp<S = Arc<Site>> = Spanned<CompKind<S>>;
+pub type Comp<P = Checked> = Spanned<CompKind<P>>;
 
-impl<S> Comp<S> {
+impl<P: Phase> Comp<P> {
     /// The λ this code opens with, through a `Rec` projection.  Syntax, not
     /// type: a block of function type need not open with one, so only a
     /// description of a value reads it.
@@ -474,7 +541,7 @@ impl<S> Comp<S> {
     }
 }
 
-impl<S> Mentions for Comp<S> {
+impl<P: Phase> Mentions for Comp<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         match &self.item {
             CompKind::Lam { param: _, body }
@@ -482,6 +549,7 @@ impl<S> Mentions for Comp<S> {
             | CompKind::Protect { body, .. } => body.mentions(out),
             CompKind::Bind {
                 comp,
+                hole: _,
                 pattern: _,
                 rest,
             }
@@ -489,9 +557,23 @@ impl<S> Mentions for Comp<S> {
                 comp.mentions(out);
                 rest.mentions(out);
             }
-            CompKind::App { head, args } => {
+            CompKind::App {
+                head,
+                args,
+                hole: _,
+            } => {
                 head.mentions(out);
                 args.mentions(out);
+            }
+            CompKind::BindingCall {
+                head,
+                args,
+                redirects,
+                hole: _,
+            } => {
+                out.push(head);
+                args.mentions(out);
+                redirects.mentions(out);
             }
             CompKind::Exec(exec) => {
                 exec.head.mentions(out);
@@ -568,7 +650,7 @@ impl<S> Mentions for Comp<S> {
     }
 }
 
-impl<S> Mentions for Val<S> {
+impl<P: Phase> Mentions for Val<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         match self {
             Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
@@ -582,7 +664,7 @@ impl<S> Mentions for Val<S> {
     }
 }
 
-impl<S> Mentions for [ValListElem<S>] {
+impl<P: Phase> Mentions for [ValListElem<P>] {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for elem in self {
             elem.slot().item.mentions(out);
@@ -601,7 +683,7 @@ impl Mentions for CommandWord {
     }
 }
 
-impl<S> Mentions for Redirects<Val<S>> {
+impl<P: Phase> Mentions for Redirects<Val<P>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for v in self.operands() {
             v.mentions(out);
@@ -612,16 +694,17 @@ impl<S> Mentions for Redirects<Val<S>> {
 /// The CBPV computation category — the evaluator steps a program by
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum CompKind<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub enum CompKind<P: Phase = Checked> {
     // CBPV core.
     /// return V — produce a value.
-    Return(Val<S>),
+    Return(Val<P>),
     /// force V — run a thunk.
-    Force(Val<S>),
+    Force(Val<P>),
     /// λ — evaluates to a closure.
     Lam {
         param: Name,
-        body: Arc<Comp<S>>,
+        body: Arc<Comp<P>>,
     },
     /// `M V₁ … Vₙ`, `n ≥ 1`: the arguments are pushed, then `head` runs —
     /// taken when the head is a value (`$f x`, `{ |x| body } x`, a bound
@@ -629,151 +712,166 @@ pub enum CompKind<S = Arc<Site>> {
     /// property of application; trailing ones become a
     /// [`CompKind::Redirect`] around it.
     App {
-        head: Arc<Comp<S>>,
-        args: Box<[Spanned<Val<S>>]>,
+        head: Arc<Comp<P>>,
+        args: Box<[Spanned<Val<P>>]>,
+        #[serde(skip)]
+        hole: P::Call,
     },
     /// M to p. N: run `comp`, bind its result, continue with `rest`.
     Bind {
-        comp: Arc<Comp<S>>,
+        comp: Arc<Comp<P>>,
+        #[serde(skip)]
+        hole: P::Bind,
         pattern: Arc<Pattern>,
-        rest: Arc<Comp<S>>,
+        rest: Arc<Comp<P>>,
     },
     /// M ⨟ N: run `first`, discard its result, continue with `rest`.
     Seq {
-        first: Arc<Comp<S>>,
-        rest: Arc<Comp<S>>,
+        first: Arc<Comp<P>>,
+        rest: Arc<Comp<P>>,
     },
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
     Rec {
-        group: Arc<GroupNode<S>>,
+        group: Arc<GroupNode<P>>,
         index: usize,
     },
     /// `if V T E` with `V : Bool` and `T, E : U C`; the chosen arm is forced.
     /// Every form that suspends a command takes a thunk, so an arm is a literal
     /// block or a thunk in hand.
     If {
-        cond: Spanned<Val<S>>,
-        then: Spanned<Val<S>>,
-        else_: Spanned<Val<S>>,
+        cond: Spanned<Val<P>>,
+        then: Spanned<Val<P>>,
+        else_: Spanned<Val<P>>,
     },
     /// Levy's sum eliminator: one arm per tag, each a thunk of a function of
     /// the payload.  The alternatives are a finite list fixed at parse time, so
     /// exhaustiveness is always decided statically.
     Case {
-        scrutinee: Spanned<Val<S>>,
-        arms: Vec<CaseArm<S>>,
+        scrutinee: Spanned<Val<P>>,
+        arms: Vec<CaseArm<P>>,
     },
     /// `try BODY HANDLER` — catch an error out of `body` and pass it to
     /// `handler`, a thunk of one argument.
     Try {
-        body: Val<S>,
-        handler: Val<S>,
+        body: Val<P>,
+        handler: Val<P>,
     },
     /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
     /// it replaces the body's outcome.
     Guard {
-        body: Val<S>,
-        cleanup: Val<S>,
+        body: Val<P>,
+        cleanup: Val<P>,
     },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
-    Capture(Arc<Comp<S>>),
-    Prim(Prim<S>),
+    Capture(Arc<Comp<P>>),
+    Prim(Prim<P>),
     // Shell layer.
     /// Shell command invocation, and the effect boundary — nothing outside
     /// this variant reaches the dispatch chain or an external program.
     /// Redirects live on the call, not around it: they are installed once the
     /// head is admitted, and the capture wrap goes around them.
-    Exec(Exec<S>),
+    Exec(Exec<P>),
     /// Two or more concurrent stages: stdout of stage N feeds stdin of stage N+1.
     Pipeline {
-        stages: Vec<Arc<Comp<S>>>,
+        stages: Vec<Arc<Comp<P>>>,
     },
     /// Redirect frame for a body that cannot fuse its own redirects — a
     /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
     /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
     Redirect {
-        body: Arc<Comp<S>>,
-        redirects: Redirects<Val<S>>,
+        body: Arc<Comp<P>>,
+        redirects: Redirects<Val<P>>,
     },
     /// `within OPTS BODY` — install the option overrides in `opts`, written
     /// out pair by pair, for the duration of `body`.  `handlers` is not
     /// among them: its labels are the names it binds in `body`, so the arms
     /// are syntax and `None` is a `within` that wrote none.
     Within {
-        opts: Arc<FieldsNode<S>>,
-        handlers: Option<Vec<HandlerArmV<S>>>,
-        body: Val<S>,
+        opts: Arc<FieldsNode<P>>,
+        handlers: Option<Vec<HandlerArmV<P>>>,
+        body: Val<P>,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant {
-        caps: Arc<FieldsNode<S>>,
-        body: Val<S>,
+        caps: Arc<FieldsNode<P>>,
+        body: Val<P>,
     },
     /// `spawn [TITLE] BODY` — run `body` on a worker of its own and return its
     /// handle; the title names it to people.
     Spawn {
-        title: Option<Spanned<Val<S>>>,
-        body: Val<S>,
+        title: Option<Spanned<Val<P>>>,
+        body: Val<P>,
     },
     /// `gather BODY` — run `body`, owning the workers spawned inside it:
     /// they are joined at its return and ended at its halt.
     Gather {
-        body: Val<S>,
+        body: Val<P>,
     },
     /// `audit BODY` — record an audit subtree over `body` and reify it as a
     /// `[outcome: `ok v | `err e, trail]` record.
     Audit {
-        body: Val<S>,
+        body: Val<P>,
     },
     /// A `~` or `~/x` in value position: the home directory with the suffix
     /// appended. Never a value, since reading the store is an effect.
     Tilde(TildePath),
-    /// Checker-inserted protection at an instantiation site.
+    /// A runtime membrane's check of what `body` returns.
     Protect {
-        body: Arc<Comp<S>>,
-        site: S,
+        body: Arc<Comp<P>>,
+        site: Arc<Site>,
     },
     /// A builtin run on the values `args` name: the body of a native's code,
     /// which forcing the native builds.  Never elaborated, so never serialised;
-    /// last, since a skipped variant shifts the wire index of every one after.
+    /// last with [`Self::BindingCall`], since a skipped variant shifts the wire
+    /// index of every one after.
     #[serde(skip)]
     Native {
         entry: NativeEntry,
-        args: Box<[Val<S>]>,
+        args: Box<[Val<P>]>,
+    },
+    /// A bare head bound in scope, called with `args` while the checker
+    /// decides its splits; readback makes it an [`Exec`].
+    #[serde(skip)]
+    BindingCall {
+        head: Name,
+        args: Box<[Spanned<Val<P>>]>,
+        redirects: Redirects<Val<P>>,
+        hole: P::BindingCall,
     },
 }
 
 /// A fixed operation on values: no name is looked up and nothing runs inside it;
 /// it may fail.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Prim<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub enum Prim<P: Phase = Checked> {
     /// Arithmetic, comparison, or equality.
-    Binary(BinaryOp, Val<S>, Val<S>),
+    Binary(BinaryOp, Val<P>, Val<P>),
     /// Numeric negation, without choosing a zero's type.
-    Negate(Val<S>),
-    Not(Val<S>),
+    Negate(Val<P>),
+    Not(Val<P>),
     /// Scalar rendering for interpolation.
-    Render(Val<S>),
-    Concat(Box<[Val<S>]>),
+    Render(Val<P>),
+    Concat(Box<[Val<P>]>),
     /// Drop one trailing line terminator, then decode strict UTF-8.
-    Decode(Val<S>),
+    Decode(Val<P>),
     Index {
-        target: Val<S>,
-        key: Spanned<Key<S>>,
+        target: Val<P>,
+        key: Spanned<Key<P>>,
     },
     Update {
-        base: Spanned<Val<S>>,
-        fields: Box<[(Name, Spanned<Val<S>>)]>,
+        base: Spanned<Val<P>>,
+        fields: Box<[(Name, Spanned<Val<P>>)]>,
     },
-    List(Box<[ValListElem<S>]>),
-    Map(Box<[MapEntryV<S>]>),
+    List(Box<[ValListElem<P>]>),
+    Map(Box<[MapEntryV<P>]>),
 }
 
-impl<S> Prim<S> {
-    pub fn operands(&self) -> impl Iterator<Item = &Val<S>> {
+impl<P: Phase> Prim<P> {
+    pub fn operands(&self) -> impl Iterator<Item = &Val<P>> {
         let mut operands = Vec::new();
         match self {
             Self::Binary(_, lhs, rhs) => operands.extend([lhs, rhs]),
@@ -804,12 +902,12 @@ impl<S> Prim<S> {
         operands.into_iter()
     }
 
-    pub(crate) fn map_operands<T>(
+    pub(crate) fn map_operands<T: Phase>(
         &self,
-        mut f: impl FnMut(&Val<S>, Option<Span>) -> Val<T>,
+        mut f: impl FnMut(&Val<P>, Option<Span>) -> Val<T>,
     ) -> Prim<T> {
         let mut spanned =
-            |value: &Spanned<Val<S>>| Spanned::with_span(value.span, f(&value.item, value.span));
+            |value: &Spanned<Val<P>>| Spanned::with_span(value.span, f(&value.item, value.span));
         match self {
             Self::Binary(op, lhs, rhs) => Prim::Binary(*op, f(lhs, None), f(rhs, None)),
             Self::Negate(value) => Prim::Negate(f(value, None)),
@@ -862,9 +960,10 @@ impl<S> Prim<S> {
 /// One arm of a `within [handlers: …]`: the command name it stands in for,
 /// and the value installed under it.  Arms are syntax, as [`CaseArm`]s are.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HandlerArmV<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub struct HandlerArmV<P: Phase = Checked> {
     pub name: String,
-    pub value: Spanned<Val<S>>,
+    pub value: Spanned<Val<P>>,
 }
 
 /// One arm of a [`CompKind::Case`]: a tag and a thunk of a function of its
@@ -873,9 +972,10 @@ pub struct HandlerArmV<S = Arc<Site>> {
 /// The label is stored bare, as [`Val::Variant`] stores it, so matching is a
 /// string comparison and not a row-label round trip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CaseArm<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub struct CaseArm<P: Phase = Checked> {
     pub tag: Spanned<String>,
-    pub(crate) body: Spanned<Val<S>>,
+    pub(crate) body: Spanned<Val<P>>,
 }
 
 /// A builtin as [`CompKind::Native`] holds it, equal by name:
@@ -891,17 +991,18 @@ impl PartialEq for NativeEntry {
 
 /// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Exec<S = Arc<Site>> {
+#[serde(bound = "P: Serial")]
+pub struct Exec<P: Phase = Checked> {
     pub(crate) head: CommandWord,
     /// Each element crosses rendered, whichever boundary it reaches — a
     /// handler arm, a base frame, or the syscall itself.
-    pub(crate) argv: Argv<S>,
-    pub(crate) redirects: Redirects<Val<S>>,
+    pub(crate) argv: Argv<P>,
+    pub(crate) redirects: Redirects<Val<P>>,
     /// The type the checker solved at a boundary call, which its door admits
     /// the value it lets in against.  Unchecked, `None` everywhere; checked,
     /// `None` means no boundary head, since that is decided by name resolution
     /// at run time.
-    pub(crate) site: Option<S>,
+    pub(crate) site: Option<P::Boundary>,
 }
 
 /// Dispatch shape of an [`Exec`] head — a variant rather than a flag on

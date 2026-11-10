@@ -1,40 +1,41 @@
 //! Hindley-Milner inference over the CBPV IR: value types on `Val`,
 //! computation types on `Comp`, polymorphism by let-generalisation.
 //!
-//! Seeding and entry points live here; the inference rules live in `infer`.
+//! Seeding and entry points live here; the rules generate constraints, then read back a closed solution.
 
 pub mod builtins;
 pub mod contract;
 mod env;
 mod error;
 mod explain;
-mod freeze;
 mod generalize;
-mod grade;
-pub(crate) mod infer;
-mod scope;
+mod generate;
+mod readback;
 #[cfg(test)]
 mod session_tests;
 mod site;
+mod solve;
 mod unify;
 
 pub use self::builtins::{Decl, Manifest, builtin_type_hint};
 pub use self::contract::{Form, Table};
-pub use self::env::{InferCtx, TyEnv};
-pub use self::error::{CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind};
+pub use self::error::{
+    CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind, UnderAppliedBuiltin,
+};
 pub(crate) use self::explain::{
     NO_STATUS_REGISTER, hyphen_boundary, hyphen_boundary_hint, spread_into_application,
 };
-pub use self::unify::Unifier;
+pub(crate) use self::unify::Unifier;
 
-use self::env::HandlerOrigin;
-use self::generalize::{generalize, settle_weak};
 #[cfg(any(test, feature = "test-util"))]
-pub(crate) use self::generalize::{has_result_only_var, scheme_is_closed};
+pub(crate) use self::generalize::has_result_only_var;
 pub(crate) use self::generalize::{instantiate, reseed_weak};
+use self::generate::{Generator, call::Arm};
+use self::readback::Readback;
+use self::solve::Solver;
 use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
-use crate::ty::{CompTy, Scheme, Ty, UnitId};
+use crate::ty::{Closed, CompTy, Ty, UnitId};
 use std::sync::Arc;
 
 /// What a form holds its programs' own return value to: the declared
@@ -54,8 +55,8 @@ pub type ReturnContract = &'static Table;
 /// all, unsoundly.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
-    pub(crate) bindings: Vec<(String, Option<Arc<Scheme>>)>,
-    pub(crate) aliases: Vec<(String, Arc<Scheme>)>,
+    pub(crate) bindings: Vec<(String, Option<Closed>)>,
+    pub(crate) aliases: Vec<(String, Closed)>,
     pub(crate) builtins: Manifest,
 }
 
@@ -83,89 +84,27 @@ impl SessionSchemes {
     }
 }
 
-/// No filter: natives never arrive in this harvest (the bindings walk is
-/// user scopes only), and a binding sharing a native's name shadows it, as
-/// at runtime.
-///
-/// The manifest's argv half seeds handlers, because that is what a base frame
-/// is: an arm on a name, reached in command position, taking an argv.  It goes
-/// in first, so a user arm installed over one shadows it here as it does at
-/// runtime — and it is not removable by `unalias`, there being no frame under
-/// it to fall back to.
-fn seed_env(
-    env: &mut TyEnv,
-    schemes: SessionSchemes,
-    u: &mut Unifier,
-) -> Vec<(String, Arc<Scheme>)> {
-    env.builtins = schemes.builtins;
-    let frames: Vec<(String, Scheme)> = env
-        .builtins
-        .base_frames()
-        .map(|decl| (decl.name.as_ref().to_string(), decl.scheme(u)))
-        .collect();
-    for (name, scheme) in frames {
-        env.bind_handler(name, scheme, HandlerOrigin::Within);
-    }
-    let mut residuals = Vec::new();
-    for (name, scheme) in schemes.bindings {
-        let scheme = if let Some(scheme) = scheme {
-            reseed_weak(u, scheme)
-        } else {
-            let ty = u.fresh_ty();
-            u.mark_weak(&ty, &self::unify::WeakSource::Host(name.as_str().into()));
-            Arc::new(Scheme::mono(ty))
-        };
-        // Any binding with weak residuals is re-admitted against its first use
-        // here; delayed parts are guarded per occurrence with pending sites.
-        if !scheme.weak.is_empty() {
-            residuals.push((name.clone(), Arc::clone(&scheme)));
-        }
-        env.bind(name, scheme);
-    }
-    for (name, scheme) in schemes.aliases {
-        env.bind_handler(name, reseed_weak(u, scheme), HandlerOrigin::Alias);
-    }
-    residuals
+fn seeded_generator(schemes: SessionSchemes) -> Generator {
+    let mut solver = Solver::new();
+    let (env, residuals) = solver.seed(schemes);
+    Generator::new(solver, env, residuals)
 }
 
-/// Build a fresh `(InferCtx, TyEnv)` pair seeded from `schemes` — the common
-/// core of every inference session, `typecheck` included.
-fn seeded_session(schemes: SessionSchemes) -> (InferCtx, TyEnv) {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    ctx.residuals = seed_env(&mut env, schemes, &mut ctx.unifier);
-    (ctx, env)
+/// The first of a refused unit's errors.
+fn first_error(errors: Vec<TypeError>) -> Box<TypeError> {
+    Box::new(
+        errors
+            .into_iter()
+            .next()
+            .expect("a refused unit has an error"),
+    )
 }
 
-/// Run `f` inside a fresh one-shot inference session over `schemes` — closed
-/// against its own unifier, and dropped when `f` returns so its variable ids
-/// cannot alias a later run's. Constructed IR is discarded without freezing.
-fn one_shot_inference<R>(
-    schemes: SessionSchemes,
-    f: impl FnOnce(&mut infer::Inferencer) -> R,
-) -> R {
-    let (mut ctx, mut env) = seeded_session(schemes);
-    let mut inferencer = infer::Inferencer {
-        ctx: &mut ctx,
-        env: &mut env,
-    };
-    f(&mut inferencer)
-}
-
-/// Close `cty` into a session-independent `Thunk` scheme: solve the session,
-/// generalize, and assert nothing escaped. Shared by [`alias_arm_scheme`] and
-/// [`binding_value_scheme`] — the only two entry points that persist a scheme
-/// past their one-shot session.
-fn close_thunk_scheme(
-    inferencer: &mut infer::Inferencer,
-    cty: CompTy,
-    invariant: &'static str,
-) -> Scheme {
-    let thunk_ty = Ty::Thunk(Box::new(cty));
-    let scheme = generalize(&inferencer.ctx.unifier, &TyEnv::new(), &thunk_ty);
-    let scheme = Arc::unwrap_or_clone(settle_weak(&inferencer.ctx.unifier, Arc::new(scheme)));
-    self::generalize::debug_assert_scheme_closed(&scheme, invariant);
-    scheme
+/// Exit the inference region before generalising, and export only after closure.
+fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Box<TypeError>> {
+    let scheme = generator.solver.generalise(&Ty::Thunk(Box::new(cty)));
+    let solution = generator.solver.close().map_err(first_error)?;
+    Ok(solution.settle(Arc::new(scheme)))
 }
 
 /// Type-check `phrases`, seeding from the live session.
@@ -193,20 +132,16 @@ pub fn typecheck(
     schemes: SessionSchemes,
     contract: Option<ReturnContract>,
 ) -> Result<Toplevel, Vec<TypeError>> {
-    let (mut ctx, mut env) = seeded_session(schemes);
-
-    let (pending, tail) = infer::infer_toplevel(&mut ctx, &mut env, phrases);
-    contract::drain_nested(&mut ctx);
-    if ctx.errors.is_empty()
-        && let Some(table) = contract
-    {
-        contract::ascribe(&mut ctx, phrases.last(), tail, table);
+    let mut generator = seeded_generator(schemes);
+    let (pending, tail) = generator.phrases(phrases);
+    let solution = generator.solver.close()?;
+    if let Some(table) = contract {
+        contract::ascribe(&solution, phrases.last(), tail, table)?;
     }
-    if !ctx.errors.is_empty() {
-        return Err(ctx.errors);
-    }
-    let unit = UnitId::fresh();
-    Ok(freeze::freeze_toplevel(&pending, &ctx, unit))
+    Ok(
+        Readback::new(&solution, UnitId::fresh(), generator.synth_counter)
+            .toplevel(&pending, &generator.residual_uses),
+    )
 }
 
 /// Type-check the prelude IR against `manifest`, returning the annotated
@@ -232,7 +167,7 @@ pub fn bake_prelude(phrases: &[Spanned<Phrase<()>>], manifest: &Manifest) -> Top
 
 /// The scheme for a handler arm, computed by `HandlerEntry::vet` at install
 /// and persisted only on alias frames, which outlive their run: the arm rule
-/// ([`infer::Inferencer::arm`]) over the closure's comp, closed against its
+/// ([`Generator::arm`]) over the closure's comp, closed against its
 /// own unifier so a later run's check can be seeded with it.
 ///
 /// # Errors
@@ -241,17 +176,11 @@ pub(crate) fn alias_arm_scheme(
     head: &str,
     arm: &Arc<Comp>,
     schemes: SessionSchemes,
-) -> Result<Scheme, Box<TypeError>> {
-    one_shot_inference(schemes, |inferencer| {
-        let (verdict, _) =
-            inferencer.arm(&Val::thunk(Arc::clone(arm)), infer::Arm::Named(head), None);
-        let cty = verdict.map_err(|(_, error)| error)?;
-        Ok(close_thunk_scheme(
-            inferencer,
-            cty,
-            "alias-arm scheme must leave no variable free",
-        ))
-    })
+) -> Result<Closed, Box<TypeError>> {
+    let mut generator = seeded_generator(schemes);
+    let (cty, _) =
+        generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::Named(head), None));
+    close_thunk_scheme(generator, cty)
 }
 
 /// The computed catch-all's vet — `within [handler: $k]` — by the arm rule,
@@ -264,30 +193,28 @@ pub(crate) fn catch_all_stands_in(
     arm: &Arc<Comp>,
     schemes: SessionSchemes,
 ) -> Result<(), Box<TypeError>> {
-    one_shot_inference(schemes, |inferencer| {
-        let (verdict, _) = inferencer.arm(&Val::thunk(Arc::clone(arm)), infer::Arm::CatchAll, None);
-        verdict.map(drop).map_err(|(_, error)| error)
-    })
+    let mut generator = seeded_generator(schemes);
+    generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::CatchAll, None));
+    generator.solver.close().map(drop).map_err(first_error)
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`):
 /// the closure's comp inferred as written, closed against its own unifier.
-pub(crate) fn binding_value_scheme(body: &Comp, schemes: SessionSchemes) -> Scheme {
-    one_shot_inference(schemes, |inferencer| {
-        let (cty, _) = inferencer.with_scope(|this| this.infer_comp(body));
-        close_thunk_scheme(
-            inferencer,
-            cty,
-            "binding-value scheme must leave no variable free",
-        )
-    })
+pub(crate) fn binding_value_scheme(
+    body: &Comp,
+    schemes: SessionSchemes,
+) -> Result<Closed, Box<TypeError>> {
+    let mut generator = seeded_generator(schemes);
+    let (cty, _) = generator.region(|this| this.scope(|this| this.comp(body)));
+    close_thunk_scheme(generator, cty)
 }
 
 /// Whether a block of `scheme` takes `n` arguments and then produces: its
 /// type is met, as an arm's is, so a type still a variable there fits.
-pub(crate) fn takes(scheme: &Scheme, n: usize) -> bool {
+pub(crate) fn takes(scheme: &Closed, n: usize) -> bool {
     let mut u = Unifier::new();
-    let Ty::Thunk(body) = instantiate(&mut u, scheme) else {
+    let scheme = reseed_weak(&mut u, scheme);
+    let Ty::Thunk(body) = instantiate(&mut u, &scheme) else {
         return false;
     };
     let params: Vec<Ty> = (0..n).map(|_| u.fresh_ty()).collect();

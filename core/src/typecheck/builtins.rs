@@ -5,28 +5,24 @@
 //! factories it picks from — base frames included, which name one directly —
 //! and the record shapes the record-valued builtins share.
 //!
-//! A scheme factory allocates its unifier vars fresh, so the scheme it returns
-//! needs no renaming pass.
+//! Scheme factories draw their variables from a local [`Binders`] supply,
+//! independent of any inference session.
 
-use super::env::TyEnv;
-use super::generalize::generalize;
-use super::unify::Unifier;
 use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::protocol::probe::WorkerRow;
 use crate::ty::{
-    CachedFreeVars, CompTy, Grade, GradeVar, Kind, Row, RowVar, Scheme, Ty, TyVar, Typed, WeakVars,
-    closed_record, closed_variant,
+    Binders, Closed, CompTy, Grade, Kind, Row, Ty, Typed, closed_record, closed_variant,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
-/// How the type checker types a registered builtin: a scheme factory, run
-/// fresh against a live [`Unifier`].
+/// How the type checker types a registered builtin: its type, under binders
+/// it draws from the supply it is handed.
 ///
 /// A base frame names one directly, the same as any value builtin — an argv
 /// is one argument of one type, not a list of slots to diagnose one by one.
-pub(crate) type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
+pub(crate) type BuiltinTypeRule = fn(&mut Binders) -> Ty;
 
 /// Extra non-typing behaviour a builtin's [`Decl`] carries: which diagnostic
 /// an over-application or a literal misuse earns.
@@ -61,7 +57,7 @@ pub enum Convention {
 pub(crate) const LANGUAGE_CONSTANTS: [(&str, bool); 2] = [("true", true), ("false", false)];
 
 /// What a row's type rule fixes once: its curry depth and whether it settles
-/// at `Unit`.  One instantiation serves both.
+/// at `Unit`.
 #[derive(Debug, Clone, Copy)]
 struct Spine {
     arity: usize,
@@ -69,7 +65,7 @@ struct Spine {
 }
 
 impl Spine {
-    fn of(decl: &Decl) -> Self {
+    fn of(scheme: &Closed) -> Self {
         fn settled(ct: &CompTy) -> (usize, Option<&Ty>) {
             match ct {
                 CompTy::Fun(_, body) => {
@@ -80,9 +76,9 @@ impl Spine {
                 CompTy::Var(_) => (0, None),
             }
         }
-        match decl.scheme(&mut Unifier::new()).ty {
+        match &scheme.ty {
             Ty::Thunk(inner) => {
-                let (arity, ty) = settled(&inner);
+                let (arity, ty) = settled(inner);
                 Self {
                     arity,
                     settles_at_unit: matches!(ty, Some(Ty::Unit)),
@@ -110,6 +106,7 @@ pub struct Decl {
     /// Set only by the boundary constructor: a call of the row carries a
     /// [`crate::ty::Site`].
     pub(crate) boundary: bool,
+    scheme: OnceLock<Closed>,
     spine: OnceLock<Spine>,
 }
 
@@ -128,6 +125,7 @@ impl Decl {
             type_rule,
             diagnostic: BuiltinDiagnostic::None,
             boundary,
+            scheme: OnceLock::new(),
             spine: OnceLock::new(),
         }
     }
@@ -136,27 +134,29 @@ impl Decl {
         self.boundary
     }
 
-    /// The row's type, with a fresh grade on ordinary results.
-    pub fn scheme(&self, u: &mut Unifier) -> Scheme {
-        let mut scheme = (self.type_rule)(u);
-        if !self.is_boundary()
-            && let Ty::Thunk(body) = &mut scheme.ty
-        {
-            let mut tail = body.as_mut();
-            while let CompTy::Fun(_, body) = tail {
-                tail = body.as_mut();
-            }
-            if let CompTy::Return(grade @ Grade::Value, _) = tail {
-                let v = u.fresh_grade_var();
-                *grade = Grade::Var(v);
-                scheme.grade_vars.push(v);
-            }
-        }
-        scheme
+    /// The row's closed type, with a quantified grade on ordinary results.
+    pub fn scheme(&self) -> &Closed {
+        self.scheme.get_or_init(|| {
+            Binders::close(|binders| {
+                let mut ty = (self.type_rule)(binders);
+                if !self.is_boundary()
+                    && let Ty::Thunk(body) = &mut ty
+                {
+                    let mut tail = body.as_mut();
+                    while let CompTy::Fun(_, body) = tail {
+                        tail = body.as_mut();
+                    }
+                    if let CompTy::Return(grade @ Grade::Value, _) = tail {
+                        *grade = Grade::Var(binders.grade());
+                    }
+                }
+                ty
+            })
+        })
     }
 
     fn spine(&self) -> Spine {
-        *self.spine.get_or_init(|| Spine::of(self))
+        *self.spine.get_or_init(|| Spine::of(self.scheme()))
     }
 
     /// The curry depth of the row's type: the argument count a `$name`
@@ -241,32 +241,6 @@ impl Manifest {
     }
 }
 
-/// Build a [`Scheme`] from its quantified vars and body.
-///
-/// Each type variable comes with its [`Kind`], each row variable with whether
-/// it is deep.  Public so host crates can write their own scheme arms without
-/// touching `Scheme`'s internals.
-pub fn mk_scheme(ty_vars: &[(TyVar, Kind)], row_vars: &[(RowVar, bool)], ty: Ty) -> Scheme {
-    Scheme {
-        ty_vars: ty_vars.to_vec(),
-        comp_ty_vars: vec![],
-        row_vars: row_vars.to_vec(),
-        grade_vars: vec![],
-        ty,
-        comp_ty_bindings: vec![],
-        ty_bindings: vec![],
-        cached_fv: Some(CachedFreeVars::default()),
-        weak: WeakVars::default(),
-    }
-}
-
-/// [`mk_scheme`] over unconstrained variables and shallow rows.
-pub fn mk_plain_scheme(ty_vars: &[TyVar], row_vars: &[RowVar], ty: Ty) -> Scheme {
-    let kinded: Vec<_> = ty_vars.iter().map(|&v| (v, Kind::ANY)).collect();
-    let rows: Vec<_> = row_vars.iter().map(|&v| (v, false)).collect();
-    mk_scheme(&kinded, &rows, ty)
-}
-
 pub fn thunk(cty: CompTy) -> Ty {
     Ty::Thunk(Box::new(cty))
 }
@@ -280,18 +254,9 @@ pub fn command() -> CompTy {
     CompTy::command()
 }
 
-/// `scheme`, quantifying `grades` too.  Public, as [`mk_scheme`] is: a host
-/// row that absorbs a block names the grade it runs at.
-pub fn graded(grades: &[GradeVar], scheme: Scheme) -> Scheme {
-    Scheme {
-        grade_vars: grades.to_vec(),
-        ..scheme
-    }
-}
-
 // ── Scheme DSL ──────────────────────────────────────────────────────
 //
-// `scheme!` writes a builtin's polytype declaratively: `<tv>` declares fresh
+// `scheme!` writes a builtin's polytype declaratively: `<tv>` draws fresh
 // type vars, `[...]` params curry left-to-right, `pure` means a thunked
 // constant, and `writes` a command in place of a result.  Each arm is
 // labelled with the spelling it accepts.
@@ -327,14 +292,14 @@ macro_rules! scheme {
     // The two expansions: `tail` past the curried parameters, under no type
     // variable, or one of the kind declared.
     (@ $name:ident: [$($p:expr),*] => $tail:expr) => {
-        pub fn $name(_u: &mut Unifier) -> Scheme {
-            mk_plain_scheme(&[], &[], thunk(CompTy::arrows([$($p),*], $tail)))
+        pub fn $name(_: &mut Binders) -> Ty {
+            thunk(CompTy::arrows([$($p),*], $tail))
         }
     };
     (@ $name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] => $tail:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            $(let $tv = u.fresh_tyvar();)+
-            mk_scheme(&[$(($tv, $kind)),+], &[], thunk(CompTy::arrows([$($p),*], $tail)))
+        pub fn $name(binders: &mut Binders) -> Ty {
+            $(let $tv = binders.ty($kind);)+
+            thunk(CompTy::arrows([$($p),*], $tail))
         }
     };
 }
@@ -388,9 +353,8 @@ pub(crate) fn poll_variant(value_ty: Ty) -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, DirEntry, ErrorRecord, FileInfo, Grade, GradeVar, Kind, Receipt, Row, Scheme, Ty,
-        TyEnv, TyVar, Unifier, WorkerRow, command, fun, generalize, graded, mk_plain_scheme,
-        mk_scheme, poll_variant, pure, thunk,
+        Binders, CompTy, DirEntry, ErrorRecord, FileInfo, Grade, Kind, Receipt, Row, Ty, WorkerRow,
+        command, fun, poll_variant, pure, thunk,
     };
     use crate::ty::Typed as _;
 
@@ -405,13 +369,9 @@ pub mod scheme {
     /// `pub`: a host declares its own [`BuiltinEntry`](crate::shell::runtime::BuiltinEntry)
     /// over this scheme under its own name; see
     /// [`crate::shell::builtins::SURFACE_BUILTIN`].
-    pub fn surface_op(u: &mut Unifier) -> Scheme {
-        let row = u.fresh_row_var();
-        mk_plain_scheme(
-            &[],
-            &[row],
-            thunk(fun(Ty::Variant(Row::Var(row)), pure(Ty::Unit))),
-        )
+    pub fn surface_op(binders: &mut Binders) -> Ty {
+        let row = binders.row(false);
+        thunk(fun(Ty::Variant(Row::Var(row)), pure(Ty::Unit)))
     }
 
     // keys :: ∀α. Map<α> → F [Str]
@@ -420,24 +380,17 @@ pub mod scheme {
     // has :: ∀α. Map<α> → Str → F Bool
     scheme!(has<av: Kind::ANY>: [Ty::map(Ty::Var(av)), Ty::String] -> Ty::Bool);
 
-    /// `map :: ∀ε ν α β. U(α → F^ε β) → [α] → F^ν [β]` — outer ν generalized by `Decl::scheme`.
-    pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
-        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
-        let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        graded(
-            &[ev],
-            mk_plain_scheme(
-                &[av, bv],
-                &[],
-                thunk(fun(
-                    thunk(fun(
-                        a.clone(),
-                        CompTy::Return(Grade::Var(ev), Box::new(b.clone())),
-                    )),
-                    fun(Ty::list(a), pure(Ty::list(b))),
-                )),
-            ),
-        )
+    /// `map :: ∀ε ν α β. U(α → F^ε β) → [α] → F^ν [β]` — outer ν quantified by `Decl::scheme`.
+    pub(crate) fn map_op(binders: &mut Binders) -> Ty {
+        let (a, b) = (
+            Ty::Var(binders.ty(Kind::ANY)),
+            Ty::Var(binders.ty(Kind::ANY)),
+        );
+        let step = CompTy::Return(Grade::Var(binders.grade()), Box::new(b.clone()));
+        thunk(fun(
+            thunk(fun(a.clone(), step)),
+            fun(Ty::list(a), pure(Ty::list(b))),
+        ))
     }
 
     // filter :: ∀α. U(α → F Bool) → [α] → F [α]
@@ -448,38 +401,29 @@ pub mod scheme {
 
     /// `each :: ∀ε α β. U(α → F^ε β) → [α] → F Unit` — the block's output
     /// streams, whatever it produces.
-    pub(crate) fn each_op(u: &mut Unifier) -> Scheme {
-        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
-        let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        graded(
-            &[ev],
-            mk_plain_scheme(
-                &[av, bv],
-                &[],
-                thunk(fun(
-                    thunk(fun(a.clone(), CompTy::Return(Grade::Var(ev), Box::new(b)))),
-                    fun(Ty::list(a), pure(Ty::Unit)),
-                )),
-            ),
-        )
+    pub(crate) fn each_op(binders: &mut Binders) -> Ty {
+        let (a, b) = (
+            Ty::Var(binders.ty(Kind::ANY)),
+            Ty::Var(binders.ty(Kind::ANY)),
+        );
+        let step = CompTy::Return(Grade::Var(binders.grade()), Box::new(b));
+        thunk(fun(
+            thunk(fun(a.clone(), step)),
+            fun(Ty::list(a), pure(Ty::Unit)),
+        ))
     }
 
     /// `fold :: ∀ε α β. U(β → α → F^ε β) → β → [α] → F β`
-    pub(crate) fn fold_op(u: &mut Unifier) -> Scheme {
-        let (av, bv, ev) = (u.fresh_tyvar(), u.fresh_tyvar(), u.fresh_grade_var());
-        let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let step = CompTy::Return(Grade::Var(ev), Box::new(b.clone()));
-        graded(
-            &[ev],
-            mk_plain_scheme(
-                &[av, bv],
-                &[],
-                thunk(fun(
-                    thunk(fun(b.clone(), fun(a.clone(), step))),
-                    fun(b.clone(), fun(Ty::list(a), pure(b))),
-                )),
-            ),
-        )
+    pub(crate) fn fold_op(binders: &mut Binders) -> Ty {
+        let (a, b) = (
+            Ty::Var(binders.ty(Kind::ANY)),
+            Ty::Var(binders.ty(Kind::ANY)),
+        );
+        let step = CompTy::Return(Grade::Var(binders.grade()), Box::new(b.clone()));
+        thunk(fun(
+            thunk(fun(b.clone(), fun(a.clone(), step))),
+            fun(b.clone(), fun(Ty::list(a), pure(b))),
+        ))
     }
 
     // sort-list-by :: ∀α β:comparable. U(α → F β) → [α] → F [α]
@@ -522,74 +466,62 @@ pub mod scheme {
     // ── Streaming reducers ───────────────────────────────────────────────
 
     /// `fold-lines :: ∀ε α. U(α → Str → F^ε α) → α → F α`
-    pub(crate) fn fold_lines(u: &mut Unifier) -> Scheme {
-        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
-        let a = Ty::Var(av);
-        let step = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
-        graded(
-            &[ev],
-            mk_plain_scheme(
-                &[av],
-                &[],
-                thunk(fun(
-                    thunk(fun(a.clone(), fun(Ty::String, step))),
-                    fun(a.clone(), pure(a)),
-                )),
-            ),
-        )
+    pub(crate) fn fold_lines(binders: &mut Binders) -> Ty {
+        let a = Ty::Var(binders.ty(Kind::ANY));
+        let step = CompTy::Return(Grade::Var(binders.grade()), Box::new(a.clone()));
+        thunk(fun(
+            thunk(fun(a.clone(), fun(Ty::String, step))),
+            fun(a.clone(), pure(a)),
+        ))
     }
 
     // ── Concurrency ──────────────────────────────────────────────────────
 
     /// `∀ε α. body(Handle^ε α, F^ε α, α)`: a scheme over one handle, its
     /// grade and value quantified.
-    fn on_handle(u: &mut Unifier, body: impl FnOnce(Ty, CompTy, Ty) -> CompTy) -> Scheme {
-        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
-        let a = Ty::Var(av);
-        let handle = Ty::Handle(Grade::Var(ev), Box::new(a.clone()));
-        let produce = CompTy::Return(Grade::Var(ev), Box::new(a.clone()));
-        graded(
-            &[ev],
-            mk_plain_scheme(&[av], &[], thunk(body(handle, produce, a))),
-        )
+    fn on_handle(binders: &mut Binders, body: impl FnOnce(Ty, CompTy, Ty) -> CompTy) -> Ty {
+        let (a, e) = (Ty::Var(binders.ty(Kind::ANY)), Grade::Var(binders.grade()));
+        let handle = Ty::Handle(e, Box::new(a.clone()));
+        let produce = CompTy::Return(e, Box::new(a.clone()));
+        thunk(body(handle, produce, a))
     }
 
     /// `watch :: ∀ε α. String → U(F^ε α) → F (Handle^ε α)`: the block runs
     /// in a worker, its lines streamed, whatever it produces.
-    pub(crate) fn watch(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, body, _| {
+    pub(crate) fn watch(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, body, _| {
             fun(Ty::String, fun(thunk(body), pure(handle)))
         })
     }
 
     /// `is-done :: ∀ε α. Handle^ε α → F Bool`: whether execution has ended.
-    pub(crate) fn is_done(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, _, _| fun(handle, pure(Ty::Bool)))
+    pub(crate) fn is_done(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, _, _| fun(handle, pure(Ty::Bool)))
     }
 
     /// `await :: ∀ε α. Handle^ε α → F^ε α`: the block, run here.
-    pub(crate) fn await_op(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, body, _| fun(handle, body))
+    pub(crate) fn await_op(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, body, _| fun(handle, body))
     }
 
     /// `poll :: ∀ε α. Handle^ε α → F <running: {stdout, stderr, elapsed} | stopping: {elapsed} | ready: {stdout, stderr, elapsed, outcome: <ok: α | err: ErrRecord>} | consumed: {elapsed}>`
-    pub(crate) fn poll(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, _, a| fun(handle, pure(poll_variant(a))))
+    pub(crate) fn poll(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, _, a| fun(handle, pure(poll_variant(a))))
     }
 
     /// `race :: ∀ε α. [Handle^ε α] → F^ε α`: the winner, run here.
-    pub(crate) fn race(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, body, _| fun(Ty::list(handle), body))
+    pub(crate) fn race(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, body, _| fun(Ty::list(handle), body))
     }
 
     /// `first-settled :: ∀ε α. [Handle^ε α] → F Int`: which settled first.
-    pub(crate) fn first_settled(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, _, _| fun(Ty::list(handle), pure(Ty::Int)))
+    pub(crate) fn first_settled(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, _, _| fun(Ty::list(handle), pure(Ty::Int)))
     }
 
     /// `cancel :: ∀ε α. Handle^ε α → F Unit`
-    pub(crate) fn cancel_op(u: &mut Unifier) -> Scheme {
-        on_handle(u, |handle, _, _| fun(handle, pure(Ty::Unit)))
+    pub(crate) fn cancel_op(binders: &mut Binders) -> Ty {
+        on_handle(binders, |handle, _, _| fun(handle, pure(Ty::Unit)))
     }
 
     // workers :: F [WorkerRow]
@@ -600,20 +532,20 @@ pub mod scheme {
     /// A base frame's type: an argv in, the computation the frame names out.
     /// One shape for the whole argv half of the manifest — a frame differs
     /// from its siblings only in the result it names.
-    fn base_frame(ty_vars: &[TyVar], result: CompTy) -> Scheme {
-        mk_plain_scheme(ty_vars, &[], thunk(fun(Ty::argv(), result)))
+    fn base_frame(result: CompTy) -> Ty {
+        thunk(fun(Ty::argv(), result))
     }
 
     /// `echo :: [Str] → Command` — join the argv with single spaces and write it
     /// with a trailing newline.
-    pub(crate) fn echo(_u: &mut Unifier) -> Scheme {
-        base_frame(&[], command())
+    pub(crate) fn echo(_: &mut Binders) -> Ty {
+        base_frame(command())
     }
 
     /// `detach :: [Str] → F [pid: Int, desc: Str]` — the receipt of a process this
     /// session stops owning.
-    pub fn detach(_u: &mut Unifier) -> Scheme {
-        base_frame(&[], pure(Receipt::ty()))
+    pub fn detach(_: &mut Binders) -> Ty {
+        base_frame(pure(Receipt::ty()))
     }
 
     // ── First-class constants / queries ──────────────────────────────────
@@ -632,13 +564,9 @@ pub mod scheme {
 
     /// `use :: ∀ρ. Str → F [ | ρ]` — an open record, since a module's bindings
     /// are heterogeneous and reached by name.
-    pub fn use_op(u: &mut Unifier) -> Scheme {
-        let rv = u.fresh_row_var();
-        mk_plain_scheme(
-            &[],
-            &[rv],
-            thunk(fun(Ty::String, pure(Ty::Record(Row::Var(rv))))),
-        )
+    pub fn use_op(binders: &mut Binders) -> Ty {
+        let row = binders.row(false);
+        thunk(fun(Ty::String, pure(Ty::Record(Row::Var(row)))))
     }
 
     // ── Terminal, help & encoders ────────────────────────────────────────
@@ -663,24 +591,20 @@ pub mod scheme {
     scheme!(from_string: pure Ty::String);
     scheme!(from_lines: pure Ty::list(Ty::String));
     /// `from-json`, `env` :: ∀α. F α — whatever the source holds.
-    pub fn from_json(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        mk_plain_scheme(&[av], &[], thunk(pure(Ty::Var(av))))
+    pub fn from_json(binders: &mut Binders) -> Ty {
+        thunk(pure(Ty::Var(binders.ty(Kind::ANY))))
     }
 
     /// `from-json-at` :: ∀α. [String] → F α — the value at a path, whatever it
     /// holds.
-    pub fn from_json_at(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
+    pub fn from_json_at(binders: &mut Binders) -> Ty {
         let tokens = Ty::list(Ty::String);
-        mk_plain_scheme(&[av], &[], thunk(fun(tokens, pure(Ty::Var(av)))))
+        thunk(fun(tokens, pure(Ty::Var(binders.ty(Kind::ANY)))))
     }
 
     /// `from-jsonl`, `from-csv` :: ∀α. F \[α\] — a list of whatever each line holds.
-    pub fn from_jsonl(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let records = Ty::list(Ty::Var(av));
-        mk_plain_scheme(&[av], &[], thunk(pure(records)))
+    pub fn from_jsonl(binders: &mut Binders) -> Ty {
+        thunk(pure(Ty::list(Ty::Var(binders.ty(Kind::ANY)))))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────
@@ -699,14 +623,13 @@ pub mod scheme {
 
     /// `alias :: String → U(comp) → F Unit`.
     ///
-    /// The block's own computation type is unconstrained here (only its
-    /// arity is checked elsewhere), so the comp var it mints must be
-    /// quantified through [`generalize`]: [`mk_scheme`] cannot quantify one,
-    /// its `comp_ty_bindings` being always empty.
-    pub(crate) fn alias(u: &mut Unifier) -> Scheme {
-        let block = u.fresh_comp_ty();
-        let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
-        generalize(u, &TyEnv::new(), &thunk(body))
+    /// The block's computation type is unconstrained; its binder is quantified.
+    pub(crate) fn alias(binders: &mut Binders) -> Ty {
+        let block = binders.comp();
+        thunk(fun(
+            Ty::String,
+            fun(thunk(CompTy::Var(block)), pure(Ty::Unit)),
+        ))
     }
     scheme!(unalias: [Ty::String] -> Ty::Unit);
 
@@ -716,50 +639,31 @@ pub mod scheme {
 
     /// `∀ε α. F^ε α`: a divergent computation inhabits every producer type,
     /// so it joins whatever the other arm of an `if` is, a command included.
-    fn divergent(u: &mut Unifier) -> (TyVar, GradeVar, CompTy) {
-        let (av, ev) = (u.fresh_tyvar(), u.fresh_grade_var());
-        (
-            av,
-            ev,
-            CompTy::Return(Grade::Var(ev), Box::new(Ty::Var(av))),
-        )
+    fn divergent(binders: &mut Binders) -> CompTy {
+        let a = Ty::Var(binders.ty(Kind::ANY));
+        CompTy::Return(Grade::Var(binders.grade()), Box::new(a))
     }
 
-    pub(crate) fn fail(u: &mut Unifier) -> Scheme {
-        let (av, ev, never) = divergent(u);
-        graded(
-            &[ev],
-            mk_plain_scheme(&[av], &[], thunk(fun(Ty::String, never))),
-        )
+    pub(crate) fn fail(binders: &mut Binders) -> Ty {
+        thunk(fun(Ty::String, divergent(binders)))
     }
 
-    pub(crate) fn raise(u: &mut Unifier) -> Scheme {
-        let (av, ev, never) = divergent(u);
-        graded(
-            &[ev],
-            mk_plain_scheme(&[av], &[], thunk(fun(ErrorRecord::ty(), never))),
-        )
+    pub(crate) fn raise(binders: &mut Binders) -> Ty {
+        thunk(fun(ErrorRecord::ty(), divergent(binders)))
     }
 
-    pub(crate) fn describe(_u: &mut Unifier) -> Scheme {
-        mk_plain_scheme(&[], &[], thunk(fun(ErrorRecord::ty(), pure(Ty::String))))
-    }
+    scheme!(describe: [ErrorRecord::ty()] -> Ty::String);
 
     /// `exit`/`quit` :: ∀ε α. Int → F^ε α — a status, and no return.
     /// The elaborator sugars bare `exit` to `exit 0`.
-    pub(crate) fn exit(u: &mut Unifier) -> Scheme {
-        let (av, ev, never) = divergent(u);
-        graded(
-            &[ev],
-            mk_plain_scheme(&[av], &[], thunk(fun(Ty::Int, never))),
-        )
+    pub(crate) fn exit(binders: &mut Binders) -> Ty {
+        thunk(fun(Ty::Int, divergent(binders)))
     }
 
     /// `∀ε α. F^ε α` — nullary; for a host builtin that never returns (a
     /// test-only Rust panic trigger, say).
-    pub fn diverges(u: &mut Unifier) -> Scheme {
-        let (av, ev, never) = divergent(u);
-        graded(&[ev], mk_plain_scheme(&[av], &[], thunk(never)))
+    pub fn diverges(binders: &mut Binders) -> Ty {
+        thunk(divergent(binders))
     }
 }
 
@@ -769,8 +673,7 @@ pub mod scheme {
 /// even though no `$name` can hold it.  `None` only for a name the manifest
 /// does not carry.
 pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
-    let mut u = Unifier::new();
-    Some(manifest.get(name)?.scheme(&mut u).to_string())
+    Some(manifest.get(name)?.scheme().to_string())
 }
 
 #[cfg(test)]
@@ -804,6 +707,16 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.push(set(&["a"]));
         manifest.push(set(&["b", "a"]));
+    }
+
+    #[test]
+    fn a_manifest_handle_shares_its_rows_and_their_cached_schemes() {
+        let mut manifest = Manifest::default();
+        manifest.push(set(&["a"]));
+        let handle = manifest.clone();
+        let warmed = handle.value("a").expect("row").scheme();
+        let cached = manifest.value("a").expect("row").scheme.get();
+        assert!(cached.is_some_and(|cached| std::ptr::eq(cached, warmed)));
     }
 
     /// A `[arg]` in a doc synopsis (before the em dash) reads as optional, and

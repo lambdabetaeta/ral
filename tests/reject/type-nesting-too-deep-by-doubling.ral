@@ -1,6 +1,6 @@
 # codes: T0003
 # status: 1
-# at: 16:5
+# at: 16:1
 # contains: type nesting exceeds the supported depth
 # ten doublings nest a list 1024 deep
 let d1 = { |x| return [$x] }

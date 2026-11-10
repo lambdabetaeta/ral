@@ -451,15 +451,14 @@ pub(in crate::repl) mod harness {
     use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
     use crate::repl::plugin::{PluginRuntime, lock};
     use ral_core::carrier::IdentityTransport;
-    use ral_core::ty::{Scheme, Ty};
-    use ral_core::typecheck::Unifier;
-    use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
+    use ral_core::ty::{Binders, Ty};
+    use ral_core::typecheck::builtins::{fun, pure, thunk};
     use std::sync::{Arc, Mutex};
 
     /// The sink's type: an argv in, `Unit` out — the base-frame convention,
     /// since the sink takes whatever a hook body hands it, however much of it.
-    fn sink_scheme(_u: &mut Unifier) -> Scheme {
-        mk_scheme(&[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
+    fn sink_scheme(_: &mut Binders) -> Ty {
+        thunk(fun(Ty::argv(), pure(Ty::Unit)))
     }
 
     /// A test-only sink base frame: `record` appends its argument values into

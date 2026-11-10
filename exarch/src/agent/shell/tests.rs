@@ -7,9 +7,8 @@ use crate::provider::scripted::{Reply, Script};
 use crate::record::Voice;
 use ral_core::process::DurableRoot;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
-use ral_core::ty::{Scheme, Ty};
-use ral_core::typecheck::Unifier;
-use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
+use ral_core::ty::{Binders, Ty};
+use ral_core::typecheck::builtins::{pure, thunk};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -19,8 +18,8 @@ fn builtin_panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) ->
     panic!("a4 test: deliberate mid-eval panic");
 }
 
-fn scheme_panic_now(_u: &mut Unifier) -> Scheme {
-    mk_scheme(&[], &[], thunk(pure(Ty::Unit)))
+fn scheme_panic_now(_: &mut Binders) -> Ty {
+    thunk(pure(Ty::Unit))
 }
 
 static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(

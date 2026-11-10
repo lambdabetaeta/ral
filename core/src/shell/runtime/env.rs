@@ -3,7 +3,7 @@
 use crate::ir::{Name, Occ};
 use crate::shell::runtime::Value;
 use crate::shell::runtime::signature::Signature;
-use crate::ty::Scheme;
+use crate::ty::Closed;
 use either::Either;
 use rustc_hash::FxBuildHasher;
 use std::sync::{Arc, LazyLock};
@@ -15,7 +15,7 @@ pub struct Binding {
     pub value: Value,
     /// Shared, not owned: a scheme dwarfs the value it describes, and every
     /// `bind` into a shared environment copies a whole node of these.
-    pub(crate) scheme: Option<Arc<Scheme>>,
+    pub(crate) scheme: Option<Closed>,
 }
 
 /// Past [`SMALL`] entries, ρ is a persistent hash map; every key here is a
@@ -260,7 +260,7 @@ impl Env {
     /// Every bound name with its scheme, ρ then Σ's prelude, ρ wins.  Seeds
     /// the next run's check: a name without a scheme is checked as a bare
     /// name.
-    pub(crate) fn binding_schemes(&self, sig: &Signature) -> Vec<(String, Option<Arc<Scheme>>)> {
+    pub(crate) fn binding_schemes(&self, sig: &Signature) -> Vec<(String, Option<Closed>)> {
         self.fold_union(sig, |b| b.scheme.clone())
     }
 }

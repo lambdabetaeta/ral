@@ -1,6 +1,6 @@
 # codes: T0011
 # status: 1
-# at: 6:1
+# at: 6:12
 # contains: couldn't match
 # contains: stands in for the `echo` in force
 alias echo { |args| fold-lines { |a l| fail 'callback never runs' } 0 }

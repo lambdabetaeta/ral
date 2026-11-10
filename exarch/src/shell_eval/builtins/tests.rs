@@ -180,9 +180,9 @@ fn a_family_builtin_refuses_a_block_in_its_argument_statically() {
 #[test]
 fn a_result_only_variable_in_the_exarch_tables_is_a_boundary() {
     for entry in EXARCH_BUILTINS.iter().chain(harness::HARNESS_BUILTINS) {
-        let scheme = ral_core::test_access::builtin_scheme(entry, &mut Unifier::new());
+        let scheme = ral_core::test_access::builtin_scheme(entry);
         assert!(
-            !ral_core::test_access::has_result_only_var(&scheme) || entry.decl.is_boundary(),
+            !ral_core::test_access::has_result_only_var(scheme) || entry.decl.is_boundary(),
             "{}: a result only its own call determines, and it is no boundary",
             entry.decl.name
         );

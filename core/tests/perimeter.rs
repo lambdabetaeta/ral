@@ -16,13 +16,13 @@
 
 mod common;
 
-use ral_core::Scheme;
 use ral_core::compile::compile_and_typecheck;
 use ral_core::ir::Phrase;
 use ral_core::source::FileId;
 use ral_core::test_access::{has_result_only_var, has_weak_residuals};
+use ral_core::ty::Closed;
 
-fn defined(src: &str) -> Vec<(String, std::sync::Arc<Scheme>)> {
+fn defined(src: &str) -> Vec<(String, Closed)> {
     let shell = common::fresh_shell();
     let top = compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, None, None)
         .unwrap_or_else(|e| panic!("{src:?} must check: {e}"));

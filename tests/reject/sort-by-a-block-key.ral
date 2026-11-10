@@ -1,5 +1,5 @@
 # codes: T0074
 # status: 1
-# at: 5:21
+# at: 5:34
 # contains: this is a block, but a number or text is needed
 echo !{sort-list-by { |_| return { return 1 } } [1, 2]}

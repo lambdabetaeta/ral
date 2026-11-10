@@ -15,10 +15,7 @@ fn ground(ty: &Ty) -> Site {
 fn weak_comparable(u: &mut Unifier) -> Ty {
     let v = u.fresh_kinded(Kind::COMPARABLE);
     let Ty::Var(root) = v else { unreachable!() };
-    u.mark_weak_vars(&crate::ty::WeakVars {
-        tys: [(root, Kind::COMPARABLE)].into(),
-        ..Default::default()
-    });
+    u.mark_residual(crate::ty::Var::Ty(root));
     v
 }
 
@@ -261,7 +258,8 @@ fn a_site_round_trips_with_its_unit() {
 
 #[test]
 fn a_module_closure_is_held_to_its_scheme() {
-    use crate::typecheck::builtins::{fun, mk_plain_scheme, pure, thunk};
+    use crate::ty::Binders;
+    use crate::typecheck::builtins::{fun, pure, thunk};
     let mut u = Unifier::new();
     let block = |param: Ty, result: Ty| thunk(fun(param, pure(result)));
     let ty = closed_record(&[("f", block(Ty::Int, Ty::Int))]);
@@ -270,12 +268,8 @@ fn a_module_closure_is_held_to_its_scheme() {
         "f",
         crate::shell::runtime::block_over(&crate::shell::runtime::Env::new()),
     )]);
-    let scheme_of = |param: Ty, result: Ty| {
-        vec![(
-            "f".to_owned(),
-            Arc::new(mk_plain_scheme(&[], &[], block(param, result))),
-        )]
-    };
+    let scheme_of =
+        |param: Ty, result: Ty| vec![("f".to_owned(), Binders::close(|_| block(param, result)))];
     assert!(
         site.admit_module(&record, &scheme_of(Ty::Int, Ty::Int), &Fixings::default())
             .is_ok()

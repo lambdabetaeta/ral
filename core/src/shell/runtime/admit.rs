@@ -8,9 +8,8 @@
 use crate::shell::runtime::{Break, Error, Map, Settled, Shell, Value};
 use crate::source::Span;
 use crate::sync::LockExt as _;
-use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Scheme, Shape, Side, Site, Tail, UnitId};
+use crate::ty::{Closed, Fields, Fixed, Fixings, Id, Kind, Shape, Side, Site, Tail, UnitId};
 use std::fmt::{self, Write as _};
-use std::sync::Arc;
 
 // ── Fixings ─────────────────────────────────────────────────────────────
 
@@ -265,7 +264,7 @@ impl Site {
     pub fn admit_module(
         &self,
         record: &Value,
-        schemes: &[(String, Arc<Scheme>)],
+        schemes: &[(String, Closed)],
         fixings: &Fixings,
     ) -> Result<(), Mismatch> {
         self.admit(record, fixings)?;

@@ -1,5 +1,5 @@
-# codes: T0074 T0011
+# codes: T0011 T0074
 # status: 1
-# at: 5:43
+# at: 5:27
 # contains: couldn't match
 within [handlers: [mycmd: { |args| return $[$args[0] + 1] }]] { mycmd 1 }

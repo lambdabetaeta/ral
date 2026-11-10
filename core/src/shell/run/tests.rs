@@ -41,10 +41,10 @@ fn install_body(
     name: &'static str,
     body: impl Fn(&Mooring, &mut Shell) -> Settled<Value> + Send + Sync + 'static,
 ) {
-    use crate::typecheck::builtins::{mk_scheme, pure, thunk};
+    use crate::typecheck::builtins::{pure, thunk};
     let entry = crate::shell::runtime::BuiltinEntry::new(
         std::borrow::Cow::Borrowed(name),
-        |_| mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit))),
+        |_| thunk(pure(crate::ty::Ty::Unit)),
         "test-only: act from inside the run.",
         crate::shell::runtime::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
             body(mooring, shell)
@@ -758,9 +758,9 @@ fn builtin_panic_now(
     panic!("run-door test: deliberate mid-eval panic");
 }
 
-fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::ty::Scheme {
-    use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-    mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
+fn scheme_panic_now(_: &mut crate::ty::Binders) -> crate::ty::Ty {
+    use crate::typecheck::builtins::{pure, thunk};
+    thunk(pure(crate::ty::Ty::Unit))
 }
 
 static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =

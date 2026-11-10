@@ -98,6 +98,7 @@ impl Site {
                 let call = Val::thunk(Arc::new(Spanned::synthetic(CompKind::App {
                     head: Arc::new(force),
                     args: Box::new([Spanned::synthetic(Val::Variable(checked.clone()))]),
+                    hole: (),
                 })));
                 // Form the next wrapper only after beta: even an arrow cycle is guarded.
                 let tail = Spanned::synthetic(CompKind::Force(Val::Protected {

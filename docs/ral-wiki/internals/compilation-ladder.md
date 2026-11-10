@@ -1,8 +1,8 @@
 ---
-generated_at_commit: b1ba0713
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
 verified_at_commit: b1ba0713
 verified_at_date: 2026-11-03
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, freeze_toplevel, Pending, Capture, captured_string, Bound]
+anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed]
 ---
 
 # The compilation ladder: source to typed IR
@@ -38,41 +38,42 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → checked IR.** Each Hindley–Milner inference rule returns its type
-  beside the node it builds ([[design/types|types]]). Binding capture,
-  Let-fun, returned-thunk splits and boundary η-expansion are constructed
-  where their rules decide them; the tree carries pending sites until the
-  unit succeeds.
+  beside the node it builds ([[design/types|types]]), in the `Inferring`
+  phase: bindings and calls carry holes, boundaries their types. Boundary
+  η-expansion is built at its rule; binding capture, Let-fun and
+  returned-thunk splits are decided by suspended matches and applied by
+  readback once the unit succeeds
+  ([[internals/type-inference|type-inference]]).
 
   - Each `Phrase::Define` carries its harvested per-name `Scheme`s unsettled.
-    The successful unit's freeze settles weak references and residual grades
-    with `settle_weak` and checks closure, so the schemes outlive the per-run unifier
+    The successful unit's readback settles weak references and residual grades
+    with `settle_weak` into `Closed`, so the schemes outlive the per-run unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
   - A `Pipeline` carries nothing per stage: every interior edge is a byte pipe
     allocated from position, so there is nothing to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
-  - Boundary calls carry `Pending::Open(ty)`; freeze snapshots their solved
-    types as `Site`s. These graphs can retain weak variables and delayed
-    obligations, not just ground types.
-  - A command captured by a binding is wrapped immediately as
+  - Boundary calls carry their solved type; readback snapshots it as a
+    `Site`. These graphs can retain weak variables and delayed obligations,
+    not just ground types.
+  - A binding whose mode is `Mode::Capture` is read back as
     `cap M to d. decode d` (`CompKind::Capture`, `Prim::Decode`, built by
     `captured_string`)
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
   - An application through a returned thunk is split into explicit
-    `M to h. force h · V` segments, once per unwrapped thunk
+    `M to h. force h · V` segments, once per recorded split
     ([[invariants/ir-pure-cbpv|the IR invariant]]).
 
   Generalisation happens at each `Bind`, not `Seq`, along the SCC structure the
   elaborator already found. A non-recursive group generalises at its own
-  binding point. A mutually recursive group stays monomorphic until its fixed
-  point.
+  binding point. A mutually recursive group is checked once, monomorphic
+  within itself, and generalised as its region closes.
 
   An arrow-typed right-hand side is bound unrun, as its thunk:
-  `rhs_bound_ty` returns `Bound::Thunked`, and `infer_let` builds
-  `return (thunk M)` (Let-fun, SPEC §17.5).
+  `Mode::Thunk` reads back as `return (thunk M)` (Let-fun, SPEC §17.5).
 
-  Only a binding inserts a capture: `rhs_bound_ty` reads the resolved RHS,
-  and `infer_let` applies `Bound::Captured` to its constructed RHS;
-  arguments and joins only unify
+  Only a binding inserts a capture: its match reads the RHS's head, and
+  readback applies `Mode::Capture` to the checked RHS; arguments and joins
+  only unify
   ([[internals/type-inference|type-inference]],
   [[design/capture|grades and capture]]).
 
@@ -94,14 +95,14 @@ variable — `from-json` — or a manifest factory's `Thunk` is left to its
 loader's runtime check, which dispatches off the same table.
 
 After inference, nested checks and return-contract ascription succeed,
-`freeze_toplevel` maps the pending tree to the final `Toplevel`. One fresh
-`UnitId` identifies all new site snapshots and the first-use readmissions in
+`Readback::toplevel` maps the pending tree to the checked `Toplevel`. One
+`UnitId` identifies all site snapshots and the first-use readmissions in
 `Toplevel.admits`. Imported value membranes survive only when their solved
 contract has delayed parts; existing checked sites are kept unchanged.
-Inference and freeze each memoise recursive groups by `Arc` identity, so
+Inference and readback each memoise recursive groups by `Arc` identity, so
 projections share one group through both phases. An erroneous unit is refused
-whole and its built IR discarded without freezing; one-shot inference sessions
-also discard their built IR.
+whole and its pending IR discarded; one-shot inference sessions also discard
+their pending IR.
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one

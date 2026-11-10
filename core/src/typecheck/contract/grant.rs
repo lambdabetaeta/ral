@@ -10,7 +10,6 @@ use crate::authority::grant::freeze::{Anchor, Selector};
 use crate::authority::policy::{EditorVerb, Gpu, Net, ShellVerb};
 use crate::ty::Ty;
 use crate::typecheck::error::Reason;
-use crate::typecheck::unify::Unifier;
 use strum::VariantArray;
 
 /// `grant`'s options.
@@ -245,26 +244,26 @@ fn exec_target_row() -> Tags {
         .collect()
 }
 
-fn net(_: &mut Unifier) -> Ty {
+fn net() -> Ty {
     NET.ty()
 }
 
-fn gpu(_: &mut Unifier) -> Ty {
+fn gpu() -> Ty {
     GPU.ty()
 }
 
-fn editor(_: &mut Unifier) -> Ty {
+fn editor() -> Ty {
     Ty::list(EDITOR.ty())
 }
 
-fn shell(_: &mut Unifier) -> Ty {
+fn shell() -> Ty {
     Ty::list(SHELL.ty())
 }
 
-fn places(_: &mut Unifier) -> Ty {
+fn places() -> Ty {
     Ty::list(PLACE.ty())
 }
 
-fn exec_targets(_: &mut Unifier) -> Ty {
+fn exec_targets() -> Ty {
     Ty::list(EXEC_TARGET.ty())
 }

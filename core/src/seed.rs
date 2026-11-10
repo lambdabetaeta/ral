@@ -22,7 +22,6 @@ use crate::shell::runtime::{
 use crate::source::SourceDb;
 use crate::ty::Fixings;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use table::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
 
 mod table;
@@ -34,7 +33,7 @@ mod table;
 /// thunk at install.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WireHandlerFrame {
-    entries: Vec<(String, SerialValue, Option<crate::ty::Scheme>)>,
+    entries: Vec<(String, SerialValue, Option<crate::ty::Closed>)>,
     catch_all: Option<SerialValue>,
     kind: FrameKind,
 }
@@ -48,7 +47,7 @@ impl WireHandlerFrame {
                 Ok((
                     entry.name.as_ref().to_string(),
                     SerialValue::from_runtime(&entry.thunk, ctx)?,
-                    entry.scheme.as_deref().cloned(),
+                    entry.scheme.clone(),
                 ))
             })
             .collect::<Result<_, Error>>()?;
@@ -70,7 +69,7 @@ impl WireHandlerFrame {
             .map(|(name, value, scheme)| {
                 value.into_runtime(dec).map(|v| {
                     let mut entry = HandlerEntry::ral_per_name(name, v);
-                    entry.scheme = scheme.map(Arc::new);
+                    entry.scheme = scheme;
                     entry
                 })
             })
@@ -224,6 +223,7 @@ mod tests {
     use crate::source::Spanned;
     use crate::sync::LockExt as _;
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     /// The runtime a parent and its children are built over.
     fn runtime() -> crate::Runtime {
@@ -282,7 +282,7 @@ mod tests {
         parent.set_var("nat".to_string(), partial_over(idle_handle()));
         let catch_all = block_over(&parent.env);
         let mut alias = HandlerEntry::ral_per_name("alias".into(), blk.clone());
-        alias.scheme = Some(Arc::new(crate::ty::Scheme::mono(crate::ty::Ty::Unit)));
+        alias.scheme = Some(crate::ty::Binders::close(|_| crate::ty::Ty::Unit));
         let named = HandlerEntry::ral_per_name("named".into(), blk.clone());
         parent
             .context
@@ -320,6 +320,7 @@ mod tests {
                 "has".into(),
             )))),
             args: Box::new([Spanned::synthetic(Val::Variable("held".into()))]),
+            hole: (),
         }));
         let node = ThunkNode::new(Arc::clone(&call));
         Value::Thunk(Closure::new(call, node.occ(), &env))

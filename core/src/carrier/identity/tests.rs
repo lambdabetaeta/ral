@@ -369,9 +369,9 @@ mod durability_tests {
         panic!("transport test: deliberate mid-eval panic");
     }
 
-    fn scheme_panic_now(_u: &mut crate::typecheck::Unifier) -> crate::ty::Scheme {
-        use crate::typecheck::builtins::{mk_scheme, pure, thunk};
-        mk_scheme(&[], &[], thunk(pure(crate::ty::Ty::Unit)))
+    fn scheme_panic_now(_: &mut crate::ty::Binders) -> crate::ty::Ty {
+        use crate::typecheck::builtins::{pure, thunk};
+        thunk(pure(crate::ty::Ty::Unit))
     }
 
     static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =

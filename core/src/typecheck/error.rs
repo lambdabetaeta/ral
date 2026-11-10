@@ -4,7 +4,7 @@
 use super::contract::Vocab;
 use crate::ir::BinaryOp;
 use crate::source::Span;
-use crate::ty::{CompTy, Kind, Label, RefusedArg, Ty};
+use crate::ty::{CompTy, Kind, Label, RefusedArg, Row, Ty};
 
 /// What an arm stands in for, which decides what it must produce.
 #[derive(Debug, Clone)]
@@ -20,6 +20,14 @@ pub enum Standing {
 /// A failed constraint with the reason it was raised under; boxed, being large.
 pub(super) type Clash = Box<(TypeErrorKind, Reason)>;
 
+/// A builtin still waiting for arguments where a ready computation is needed.
+#[derive(Debug, Clone)]
+pub struct UnderAppliedBuiltin {
+    pub name: String,
+    pub expected: usize,
+    pub got: usize,
+}
+
 /// Why the inferencer demanded that two types agree.
 ///
 /// Present exactly on constraint failures; a direct diagnosis stands alone
@@ -27,6 +35,22 @@ pub(super) type Clash = Box<(TypeErrorKind, Reason)>;
 /// composed in `explain.rs`.
 #[derive(Debug, Clone)]
 pub enum Reason {
+    /// A right-hand side against the value its binding receives.
+    Binding {
+        /// Where closing the enclosing definition chose the default, if it did.
+        defaulted_at: Option<Span>,
+    },
+    /// A call's head against its next argument and result.
+    Call {
+        /// Where closing the enclosing definition chose the default, if it did.
+        defaulted_at: Option<Span>,
+        /// The callee names a member of the recursive group being checked.
+        recursive_call: bool,
+    },
+    /// A call's head against the thunk shape it must have.
+    Head {
+        name: Option<String>,
+    },
     ListPattern,
     RecordPattern,
     Argument,
@@ -36,12 +60,16 @@ pub enum Reason {
     CatchAllParams,
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
     /// argument is not a computation that can run.
-    PipelineStageShape,
+    PipelineStageShape {
+        builtin: Option<UnderAppliedBuiltin>,
+    },
     /// A discarded statement forced to `Return` shape: its value is thrown
     /// away, so it must be ready to run, not a `Fun` still waiting for an
     /// argument — [`PipelineStageShape`](Self::PipelineStageShape)'s sibling
     /// for a non-tail `Seq` part and the program's own value.
-    DiscardedValueShape,
+    DiscardedValueShape {
+        builtin: Option<UnderAppliedBuiltin>,
+    },
     /// A redirect scopes a ready computation, not a future application.
     RedirectShape,
     /// An unresolved computation forced to `Return` shape to read its value.
@@ -73,6 +101,11 @@ pub enum Reason {
     /// The `case` arms against one another, where exactly one of them runs.
     CaseArms,
     CaseScrutinee,
+    /// The scrutinee's solved row against the labels the arms cover.
+    CaseCoverage {
+        scrutinee: Row,
+        arms: Vec<Label>,
+    },
     ListElem,
     ListSpread,
     MapKey,
@@ -113,9 +146,6 @@ pub enum Reason {
     ListPositionRead,
     /// A computed key reads a map.
     MapKeyRead,
-    /// A call's head, or a thunk its head returned, pinned to `Thunk` so the
-    /// call can force it.
-    AutoderefHead,
     LetRecSelf,
 }
 
@@ -151,8 +181,8 @@ pub enum SpreadHead {
     Applied,
 }
 
-/// How a refused binding would close on itself without crossing data: the
-/// edge by which the search met the variable it started from.
+/// How a refused binding closes on itself without crossing data.
+/// An argument path stays an argument path through nested thunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CycleVia {
     Applied,
@@ -170,9 +200,18 @@ pub enum KindFound {
 }
 
 /// The structural cause of a type error, raised by the unifier or inferencer.
-/// `InferCtx` attaches the span; `diagnostic.rs` renders it.
+/// The solver attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
 pub enum TypeErrorKind {
+    /// A binding runs, and a call applies, one computation nothing else decides.
+    ConflictingDefaults {
+        binding: Option<Span>,
+        call: Option<Span>,
+        /// The variable the binding forces, when it forces one.
+        forced: Option<String>,
+        /// The call's head, when it is a variable.
+        callee: Option<String>,
+    },
     RecursiveRow,
     /// Nesting past the unifier's depth ceiling — a stack-overflow guard.
     TypeTooDeep,
@@ -336,9 +375,89 @@ pub enum TypeErrorKind {
 }
 
 impl TypeErrorKind {
+    /// Translate a failed equation using only its solved types and provenance.
+    pub fn reported(self, reason: &Reason) -> Self {
+        match (reason, &self) {
+            (Reason::Head { name }, Self::TyMismatch { expected, actual }) => {
+                let ty = match (&**expected, &**actual) {
+                    (Ty::Thunk(_), other) | (other, Ty::Thunk(_))
+                        if !matches!(other, Ty::Thunk(_)) =>
+                    {
+                        other.clone()
+                    }
+                    _ => return self,
+                };
+                match name {
+                    Some(name) => Self::HeadBoundToValue {
+                        name: name.clone(),
+                        ty,
+                    },
+                    None => Self::CommandNotFunction { ty },
+                }
+            }
+            (Reason::CaseScrutinee, Self::TyMismatch { expected, actual }) => {
+                let ty = match (&**expected, &**actual) {
+                    (Ty::Variant(_), other) | (other, Ty::Variant(_))
+                        if !matches!(other, Ty::Variant(_)) =>
+                    {
+                        other.clone()
+                    }
+                    _ => return self,
+                };
+                Self::CaseOnNonVariant { ty }
+            }
+            (
+                Reason::CaseCoverage { scrutinee, arms },
+                Self::RowExtraField { .. } | Self::RowMissingField { .. },
+            ) => {
+                let produced: Vec<_> = scrutinee.fields().map(|(label, _)| label).collect();
+                let missing: Vec<_> = produced
+                    .iter()
+                    .copied()
+                    .filter(|label| !arms.contains(label))
+                    .map(ToString::to_string)
+                    .collect();
+                let extra: Vec<_> = if scrutinee.is_open() {
+                    Vec::new()
+                } else {
+                    arms.iter()
+                        .filter(|label| !produced.contains(label))
+                        .map(ToString::to_string)
+                        .collect()
+                };
+                if missing.is_empty() && extra.is_empty() {
+                    self
+                } else {
+                    Self::CaseNotExhaustive { missing, extra }
+                }
+            }
+            (
+                Reason::PipelineStageShape {
+                    builtin: Some(builtin),
+                }
+                | Reason::DiscardedValueShape {
+                    builtin: Some(builtin),
+                },
+                Self::CompTyMismatch { expected, actual },
+            ) if matches!(
+                (expected, actual),
+                (CompTy::Fun(..), CompTy::Return(..)) | (CompTy::Return(..), CompTy::Fun(..))
+            ) =>
+            {
+                Self::BuiltinArity {
+                    name: builtin.name.clone(),
+                    expected: builtin.expected,
+                    got: builtin.got,
+                }
+            }
+            _ => self,
+        }
+    }
+
     /// Stable per-phase error code (`T####`).
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ConflictingDefaults { .. } => "T0080",
             Self::RecursiveRow => "T0002",
             Self::TypeTooDeep => "T0003",
             Self::CyclicType { .. } => "T0073",
@@ -410,6 +529,267 @@ impl std::fmt::Display for TypeError {
         match self.pos {
             Some(sp) => write!(f, "@{}..{}: {}", sp.start, sp.end, msg),
             None => write!(f, "{msg}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ty::{Grade, RowVar};
+
+    fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
+        TypeErrorKind::TyMismatch {
+            expected: Box::new(expected),
+            actual: Box::new(actual),
+        }
+    }
+
+    #[test]
+    fn reported_head_failures_name_bound_values_or_unnamed_heads() {
+        let thunk = Ty::Thunk(Box::new(CompTy::pure(Ty::Unit)));
+        for (expected, actual) in [(&thunk, &Ty::String), (&Ty::String, &thunk)] {
+            for name in [Some("f".to_string()), None] {
+                let reported = mismatch(expected.clone(), actual.clone())
+                    .reported(&Reason::Head { name: name.clone() });
+                match (name, reported) {
+                    (Some(want), TypeErrorKind::HeadBoundToValue { name, ty }) => {
+                        assert_eq!(name, want);
+                        assert_eq!(ty, Ty::String);
+                    }
+                    (None, TypeErrorKind::CommandNotFunction { ty }) => {
+                        assert_eq!(ty, Ty::String);
+                    }
+                    (_, other) => panic!("not a head diagnosis: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reported_case_scrutinee_failures_name_the_non_variant() {
+        let variant = Ty::Variant(Row::Empty);
+        for (expected, actual) in [(&variant, &Ty::Int), (&Ty::Int, &variant)] {
+            let reported =
+                mismatch(expected.clone(), actual.clone()).reported(&Reason::CaseScrutinee);
+            assert!(matches!(
+                reported,
+                TypeErrorKind::CaseOnNonVariant { ty: Ty::Int }
+            ));
+            assert_eq!(reported.code(), "T0032");
+        }
+    }
+
+    #[test]
+    fn reported_case_coverage_uses_both_label_sets_and_respects_open_rows() {
+        let row = |tags: &[&str], tail| {
+            tags.iter().rev().fold(tail, |rest, tag| {
+                Row::Extend(
+                    Label::Case((*tag).into()),
+                    Box::new(Ty::Unit),
+                    Box::new(rest),
+                )
+            })
+        };
+        let labels = |tags: &[&str]| -> Vec<Label> {
+            tags.iter().map(|tag| Label::Case((*tag).into())).collect()
+        };
+        let strings = |tags: &[&str]| -> Vec<String> {
+            labels(tags).iter().map(ToString::to_string).collect()
+        };
+        for (scrutinee, arms, missing, extra) in [
+            (row(&["a", "b"], Row::Empty), vec!["a"], vec!["b"], vec![]),
+            (row(&["a"], Row::Empty), vec!["a", "b"], vec![], vec!["b"]),
+            (
+                row(&["a"], Row::Empty),
+                vec!["b", "c"],
+                vec!["a"],
+                vec!["b", "c"],
+            ),
+            (
+                row(&["a", "b"], Row::Var(RowVar(0))),
+                vec!["a", "c"],
+                vec!["b"],
+                vec![],
+            ),
+        ] {
+            let reason = Reason::CaseCoverage {
+                scrutinee,
+                arms: labels(&arms),
+            };
+            for failure in [
+                TypeErrorKind::RowMissingField {
+                    label: "irrelevant".into(),
+                },
+                TypeErrorKind::RowExtraField {
+                    label: Label::Case("irrelevant".into()),
+                    known: vec![],
+                },
+            ] {
+                let reported = failure.reported(&reason);
+                assert_eq!(reported.code(), "T0030");
+                let TypeErrorKind::CaseNotExhaustive {
+                    missing: got_missing,
+                    extra: got_extra,
+                } = reported
+                else {
+                    panic!("not a coverage diagnosis: {reported:?}");
+                };
+                assert_eq!(got_missing, strings(&missing));
+                assert_eq!(got_extra, strings(&extra));
+            }
+        }
+        for (scrutinee, arms) in [
+            (row(&["a", "b"], Row::Empty), vec!["a", "b"]),
+            (row(&["a"], Row::Var(RowVar(0))), vec!["a", "b"]),
+        ] {
+            let reason = Reason::CaseCoverage {
+                scrutinee,
+                arms: labels(&arms),
+            };
+            assert!(matches!(
+                TypeErrorKind::RowMissingField { label: "unchanged".into() }.reported(&reason),
+                TypeErrorKind::RowMissingField { label } if label == "unchanged"
+            ));
+        }
+    }
+
+    #[test]
+    fn reported_shape_failures_name_under_applied_builtins_only() {
+        let producer = CompTy::pure(Ty::Unit);
+        let function = CompTy::arrows([Ty::Int], producer.clone());
+        for (expected, actual) in [(&function, &producer), (&producer, &function)] {
+            for pipeline in [false, true] {
+                for builtin in [false, true] {
+                    let context = builtin.then(|| UnderAppliedBuiltin {
+                        name: "add".into(),
+                        expected: 2,
+                        got: 1,
+                    });
+                    let reason = if pipeline {
+                        Reason::PipelineStageShape { builtin: context }
+                    } else {
+                        Reason::DiscardedValueShape { builtin: context }
+                    };
+                    let reported = TypeErrorKind::CompTyMismatch {
+                        expected: expected.clone(),
+                        actual: actual.clone(),
+                    }
+                    .reported(&reason);
+                    if builtin {
+                        assert!(matches!(reported, TypeErrorKind::BuiltinArity {
+                            name, expected: 2, got: 1,
+                        } if name == "add"));
+                    } else {
+                        assert!(matches!(reported, TypeErrorKind::CompTyMismatch { .. }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reported_preserves_failures_that_are_not_the_reason_target() {
+        let reasons = [
+            Reason::Head {
+                name: Some("f".into()),
+            },
+            Reason::Head { name: None },
+            Reason::CaseScrutinee,
+            Reason::CaseCoverage {
+                scrutinee: Row::Empty,
+                arms: vec![],
+            },
+            Reason::PipelineStageShape {
+                builtin: Some(UnderAppliedBuiltin {
+                    name: "add".into(),
+                    expected: 2,
+                    got: 1,
+                }),
+            },
+            Reason::DiscardedValueShape {
+                builtin: Some(UnderAppliedBuiltin {
+                    name: "add".into(),
+                    expected: 2,
+                    got: 1,
+                }),
+            },
+            Reason::Binding { defaulted_at: None },
+            Reason::Call {
+                defaulted_at: None,
+                recursive_call: false,
+            },
+            Reason::Argument,
+        ];
+        for reason in reasons {
+            assert!(matches!(
+                mismatch(Ty::Int, Ty::String).reported(&reason),
+                TypeErrorKind::TyMismatch { expected, actual }
+                    if *expected == Ty::Int && *actual == Ty::String
+            ));
+            assert!(matches!(
+                TypeErrorKind::CyclicType {
+                    via: CycleVia::Applied
+                }
+                .reported(&reason),
+                TypeErrorKind::CyclicType {
+                    via: CycleVia::Applied
+                }
+            ));
+            assert!(matches!(
+                TypeErrorKind::CompTyMismatch {
+                    expected: CompTy::pure(Ty::Int),
+                    actual: CompTy::Return(Grade::Output, Box::new(Ty::Unit)),
+                }
+                .reported(&reason),
+                TypeErrorKind::CompTyMismatch { .. }
+            ));
+        }
+    }
+    type Verdict<'a> = Option<(&'a [&'a str], &'a [&'a str])>;
+    #[test]
+    fn coverage_names_missing_arms_and_extra_arms_of_a_closed_row_only() {
+        let row = |tags: &[&str], tail: Row| {
+            tags.iter().rev().fold(tail, |rest, tag| {
+                Row::Extend(
+                    Label::Case((*tag).into()),
+                    Box::new(Ty::Unit),
+                    Box::new(rest),
+                )
+            })
+        };
+        let arms = |tags: &[&str]| -> Vec<Label> {
+            tags.iter().map(|t| Label::Case((*t).into())).collect()
+        };
+        let strings =
+            |tags: &[&str]| -> Vec<String> { arms(tags).iter().map(Label::to_string).collect() };
+        let open = || Row::Var(crate::ty::RowVar(0));
+        let cases: [(Row, &[&str], Verdict); 6] = [
+            (row(&["a", "b"], Row::Empty), &["a", "b"], None),
+            (row(&["a", "b"], Row::Empty), &["a"], Some((&["b"], &[]))),
+            (row(&["a"], Row::Empty), &["a", "b"], Some((&[], &["b"]))),
+            (
+                row(&["a"], Row::Empty),
+                &["b", "c"],
+                Some((&["a"], &["b", "c"])),
+            ),
+            (row(&["a"], open()), &["a", "b"], None),
+            (row(&["a", "b"], open()), &["a", "c"], Some((&["b"], &[]))),
+        ];
+        for (scrutinee, arm_tags, expected) in cases {
+            let got = match (TypeErrorKind::RowMissingField {
+                label: "witness".into(),
+            })
+            .reported(&Reason::CaseCoverage {
+                scrutinee: scrutinee.clone(),
+                arms: arms(arm_tags),
+            }) {
+                TypeErrorKind::CaseNotExhaustive { missing, extra } => Some((missing, extra)),
+                TypeErrorKind::RowMissingField { .. } => None,
+                other => panic!("not a coverage verdict: {other:?}"),
+            };
+            let want = expected.map(|(missing, extra)| (strings(missing), strings(extra)));
+            assert_eq!(got, want, "{scrutinee:?} against {arm_tags:?}");
         }
     }
 }

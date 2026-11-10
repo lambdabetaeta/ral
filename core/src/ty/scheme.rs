@@ -4,92 +4,128 @@
 //! fresh unification variables at each use site, giving let-polymorphism.
 
 use super::kind::Kind;
-use super::{CompTy, CompTyVar, GradeVar, RowVar, Ty, TyVar};
+use super::{CompTy, CompTyVar, Grade, GradeVar, Row, RowVar, Term, Ty, TyVar, Var};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 
-/// The free variables a scheme did *not* quantify, being already free in the
-/// environment.  `env_free_vars` reads these rather than re-walking the type;
-/// every set is empty for a fully-generalised scheme.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(clippy::struct_field_names)] // one set per variable sort; the sort is the prefix.
-pub struct CachedFreeVars {
-    pub(crate) ty_fv: BTreeSet<TyVar>,
-    #[serde(default)]
-    pub(crate) comp_fv: BTreeSet<CompTyVar>,
-    pub(crate) row_fv: BTreeSet<RowVar>,
-    pub(crate) grade_fv: BTreeSet<GradeVar>,
+/// What a scheme's variable is: `M` is what minting a fresh one of its sort
+/// needs, `B` its sort's μ-binding.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Role<M, B> {
+    /// `∀`: minted fresh at each instantiation.
+    Forall(M),
+    /// One type for the whole unit that made the scheme, never quantified; a
+    /// later unit reseeds it as a fresh weak variable
+    /// (`generalize::reseed_weak`) instead of reading a foreign id.
+    Weak(M),
+    /// The root of a cycle, which cannot be a plain quantifier: instantiation
+    /// mints a fresh root and binds it to this, so two instantiations never
+    /// share the cycle's union-find slot.
+    Mu(B),
 }
 
-/// The weak variables a scheme mentions and did not quantify: one type per
-/// unit, so a later unit re-seeds each as a fresh weak variable
-/// (`generalize::reseed_weak`) instead of reading a foreign id.  A type
-/// variable keeps its kind, and a row variable its deep bit.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WeakVars {
-    pub(crate) tys: BTreeMap<TyVar, Kind>,
-    pub(crate) comps: BTreeSet<CompTyVar>,
-    pub(crate) rows: BTreeMap<RowVar, bool>,
-}
+impl<M: Copy, B> Role<M, B> {
+    pub(crate) const fn is_weak(&self) -> bool {
+        matches!(self, Self::Weak(_))
+    }
 
-impl WeakVars {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.tys.is_empty() && self.comps.is_empty() && self.rows.is_empty()
+    pub(crate) fn forall(&self) -> Option<M> {
+        match *self {
+            Self::Forall(meta) => Some(meta),
+            Self::Weak(_) | Self::Mu(_) => None,
+        }
+    }
+
+    pub(crate) const fn mu(&self) -> Option<&B> {
+        match self {
+            Self::Mu(binding) => Some(binding),
+            Self::Forall(_) | Self::Weak(_) => None,
+        }
+    }
+
+    /// This role with its μ-binding through `f`.
+    pub(crate) fn map_mu<C>(&self, f: impl FnOnce(&B) -> C) -> Role<M, C> {
+        match self {
+            Self::Forall(meta) => Role::Forall(*meta),
+            Self::Weak(meta) => Role::Weak(*meta),
+            Self::Mu(binding) => Role::Mu(f(binding)),
+        }
     }
 }
 
-/// A polymorphic type scheme: `forall (alpha_1:k_1) ... (alpha_n:k_n), gamma_1 ... gamma_l, rho_1 ... rho_k, epsilon_1 ... epsilon_m. A`.
+/// Uninhabited: a cycle through a row is rooted at a type or a computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum NoMu {}
+
+/// A polymorphic type scheme: `ty` under the roles of its variables.
 ///
-/// Quantifies value types, computation types, rows and grades at once.
-///
-/// A variable caught in a cycle cannot be a plain quantifier, so
-/// `comp_ty_bindings` and `ty_bindings` snapshot it as `(original root,
-/// applied binding)`; instantiation mints a fresh id per entry and re-binds
-/// it, so two instantiations never share the cycle's union-find slot.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// One map per sort, so a role is always of its variable's sort.  A grade is
+/// only ever quantified: settlement quantifies what is left of it.  Ordered,
+/// so a scheme — and the letters it prints under — is a function of the type.
+/// Keyed by bare ids, which JSON writes as string keys.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Scheme {
-    pub(crate) ty_vars: Vec<(TyVar, Kind)>,
-    #[serde(default)]
-    pub(crate) comp_ty_vars: Vec<CompTyVar>,
-    pub(crate) row_vars: Vec<(RowVar, bool)>,
-    pub(crate) grade_vars: Vec<GradeVar>,
     pub(crate) ty: Ty,
-    #[serde(default)]
-    pub(crate) comp_ty_bindings: Vec<(CompTyVar, CompTy)>,
-    #[serde(default)]
-    pub(crate) ty_bindings: Vec<(TyVar, Ty)>,
-    /// `None` while the residuals can still move: a monomorphic scheme's free
-    /// variables shift as unification proceeds, so only `generalize` and the
-    /// closed builtin schemes may fill this in.
-    pub(crate) cached_fv: Option<CachedFreeVars>,
-    /// Shared with every other use in the unit, never quantified.
-    #[serde(default)]
-    pub(crate) weak: WeakVars,
+    pub(crate) tys: BTreeMap<TyVar, Role<Kind, Ty>>,
+    pub(crate) comps: BTreeMap<CompTyVar, Role<(), CompTy>>,
+    /// A deep row's every field is `data`.
+    pub(crate) rows: BTreeMap<RowVar, Role<bool, NoMu>>,
+    pub(crate) grades: BTreeSet<GradeVar>,
 }
 
 impl Scheme {
     /// A scheme with nothing quantified.
-    pub(crate) fn mono(ty: Ty) -> Self {
+    pub(crate) const fn mono(ty: Ty) -> Self {
         Self {
-            ty_vars: vec![],
-            comp_ty_vars: vec![],
-            row_vars: vec![],
-            grade_vars: vec![],
             ty,
-            comp_ty_bindings: vec![],
-            ty_bindings: vec![],
-            cached_fv: None,
-            weak: WeakVars::default(),
+            tys: BTreeMap::new(),
+            comps: BTreeMap::new(),
+            rows: BTreeMap::new(),
+            grades: BTreeSet::new(),
         }
     }
-    /// True when instantiation has work to do.  Cyclic bindings count: a
-    /// scheme with no quantifiers but a captured cycle still needs fresh roots.
+
+    /// True when instantiation has work to do.  A μ-equation counts: a scheme
+    /// with no quantifiers but a captured cycle still needs fresh roots.
     pub(crate) fn is_poly(&self) -> bool {
-        !self.ty_vars.is_empty()
-            || !self.comp_ty_vars.is_empty()
-            || !self.row_vars.is_empty()
-            || !self.grade_vars.is_empty()
-            || !self.comp_ty_bindings.is_empty()
-            || !self.ty_bindings.is_empty()
+        !self.grades.is_empty()
+            || self.tys.values().any(|role| !role.is_weak())
+            || self.comps.values().any(|role| !role.is_weak())
+            || self.rows.values().any(|role| !role.is_weak())
+    }
+
+    pub(crate) fn has_weak(&self) -> bool {
+        self.weak().next().is_some()
+    }
+
+    /// The weak residuals, in sort order.
+    pub(crate) fn weak(&self) -> impl Iterator<Item = Var> + '_ {
+        picked(&self.tys, Var::Ty, Role::is_weak)
+            .chain(picked(&self.comps, Var::Comp, Role::is_weak))
+            .chain(picked(&self.rows, Var::Row, Role::is_weak))
+    }
+
+    /// The `∀`-bound variables, in sort order.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn quantified(&self) -> impl Iterator<Item = Var> + '_ {
+        picked(&self.tys, Var::Ty, |role| role.forall().is_some())
+            .chain(picked(&self.comps, Var::Comp, |role| {
+                role.forall().is_some()
+            }))
+            .chain(picked(&self.rows, Var::Row, |role| role.forall().is_some()))
+            .chain(self.grades.iter().copied().map(Var::Grade))
+    }
+
+    /// Whether `var` has a role here.
+    pub(crate) fn binds(&self, var: Var) -> bool {
+        match var {
+            Var::Ty(v) => self.tys.contains_key(&v),
+            Var::Comp(v) => self.comps.contains_key(&v),
+            Var::Row(v) => self.rows.contains_key(&v),
+            Var::Grade(v) => self.grades.contains(&v),
+        }
     }
 
     /// How many parameters a block of this scheme takes, read off its type.
@@ -99,4 +135,158 @@ impl Scheme {
             _ => 0,
         }
     }
+
+    /// Every variable written in the body and the μ-equations — syntactically,
+    /// so no live slot can hide a dangling id by resolving it.
+    pub(crate) fn syntactic_vars(&self) -> BTreeSet<Var> {
+        let terms = std::iter::once(Term::Ty(&self.ty))
+            .chain(self.tys.values().filter_map(Role::mu).map(Term::Ty))
+            .chain(self.comps.values().filter_map(Role::mu).map(Term::Comp));
+        let mut out = BTreeSet::new();
+        for term in terms {
+            collect_vars(term, &mut out);
+        }
+        out
+    }
+
+    /// The variables written here that have no role here: ones a unifier owns.
+    pub(crate) fn foreign(&self) -> impl Iterator<Item = Var> + '_ {
+        self.syntactic_vars()
+            .into_iter()
+            .filter(|&var| !self.binds(var))
+    }
+
+    /// What [`Closed::new`] checks.
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.foreign().next().is_none()
+    }
+}
+
+/// The variables of `vars` whose role `pick` admits, in order.
+fn picked<V: Copy, M, B>(
+    vars: &BTreeMap<V, Role<M, B>>,
+    var: fn(V) -> Var,
+    pick: fn(&Role<M, B>) -> bool,
+) -> impl Iterator<Item = Var> + '_ {
+    vars.iter()
+        .filter(move |(_, role)| pick(role))
+        .map(move |(&v, _)| var(v))
+}
+
+/// Every variable written in `term`, into `out`.
+pub(crate) fn collect_vars(term: Term<'_>, out: &mut BTreeSet<Var>) {
+    if let Some(Grade::Var(v)) = term.grade() {
+        out.insert(Var::Grade(v));
+    }
+    match term {
+        Term::Ty(Ty::Var(v)) => out.insert(Var::Ty(*v)),
+        Term::Comp(CompTy::Var(v)) => out.insert(Var::Comp(*v)),
+        Term::Row(Row::Var(v)) => out.insert(Var::Row(*v)),
+        _ => false,
+    };
+    for child in term.children() {
+        collect_vars(child, out);
+    }
+}
+
+/// A scheme no unifier owns any part of: every variable it writes is one of
+/// its own.  Only such a scheme leaves the unit that made it, since the next
+/// unit's ids restart at zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closed(Arc<Scheme>);
+
+impl Closed {
+    /// # Errors
+    /// `scheme` writes a variable it gives no role.
+    pub(crate) fn new(scheme: Arc<Scheme>) -> Result<Self, String> {
+        let foreign = scheme.foreign().next();
+        match foreign {
+            Some(var) => Err(format!(
+                "scheme `{scheme}` is not closed: it writes {var:?}, which it neither quantifies, anchors by μ, nor records as weak"
+            )),
+            None => Ok(Self(scheme)),
+        }
+    }
+
+    /// The scheme as a unit's environment holds it.
+    pub(crate) fn scheme(&self) -> &Arc<Scheme> {
+        &self.0
+    }
+}
+
+impl Deref for Closed {
+    type Target = Scheme;
+
+    fn deref(&self) -> &Scheme {
+        &self.0
+    }
+}
+
+impl fmt::Display for Closed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl serde::Serialize for Closed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Closed {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(Arc::new(Scheme::deserialize(deserializer)?)).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A builtin scheme's own binder supply, borrowing no inference session:
+/// each binder distinct within its sort, and quantified.  Its body is the
+/// rule's, set by [`Binders::close`].
+#[derive(Debug)]
+pub struct Binders(Scheme);
+
+impl Binders {
+    /// The scheme `rule`'s type is under the binders it drew.
+    ///
+    /// # Panics
+    /// If the type writes a variable `rule` did not draw here.
+    pub(crate) fn close(rule: impl FnOnce(&mut Self) -> Ty) -> Closed {
+        let mut binders = Self(Scheme::mono(Ty::Unit));
+        let ty = rule(&mut binders);
+        Closed::new(Arc::new(Scheme { ty, ..binders.0 }))
+            .unwrap_or_else(|error| panic!("builtin scheme: {error}"))
+    }
+
+    pub fn ty(&mut self, kind: Kind) -> TyVar {
+        draw(&mut self.0.tys, TyVar, Role::Forall(kind))
+    }
+
+    pub fn comp(&mut self) -> CompTyVar {
+        draw(&mut self.0.comps, CompTyVar, Role::Forall(()))
+    }
+
+    /// A deep row's every field is `data`.
+    pub fn row(&mut self, deep: bool) -> RowVar {
+        draw(&mut self.0.rows, RowVar, Role::Forall(deep))
+    }
+
+    pub fn grade(&mut self) -> GradeVar {
+        let v = GradeVar(next_id(self.0.grades.len()));
+        self.0.grades.insert(v);
+        v
+    }
+}
+
+/// A fresh binder of `vars`' sort, given `role`.
+fn draw<V: Ord + Copy, R>(vars: &mut BTreeMap<V, R>, id: fn(u32) -> V, role: R) -> V {
+    let v = id(next_id(vars.len()));
+    vars.insert(v, role);
+    v
+}
+
+/// Binders are drawn in order from zero, so their count is the next id.
+fn next_id(drawn: usize) -> u32 {
+    u32::try_from(drawn).expect("fewer than 2^32 binders")
 }

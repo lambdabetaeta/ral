@@ -16,8 +16,10 @@ pub use exec_arg::RefusedArg;
 pub use fmt::{FmtCtx, fmt_comp_ty_ctx, fmt_ty_ctx};
 pub(crate) use kind::Head;
 pub use kind::Kind;
-pub use scheme::Scheme;
-pub(crate) use scheme::{CachedFreeVars, WeakVars};
+pub(crate) use scheme::Role;
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) use scheme::collect_vars;
+pub use scheme::{Binders, Closed, Scheme};
 pub(crate) use site::{Fields, Fixed, GradeShape, Id, Node, Shape, Side, Tail, UnitId};
 pub use site::{Fixings, Site};
 pub use typed::{
@@ -47,9 +49,18 @@ pub struct RowVar(pub u32);
 )]
 pub struct CompTyVar(pub u32);
 
+/// A variable of any of the four sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Var {
+    Ty(TyVar),
+    Comp(CompTyVar),
+    Row(RowVar),
+    Grade(GradeVar),
+}
+
 /// Value types (`A` in CBPV).  `Var` is a unification variable, gone by the
 /// end of inference.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Ty {
     Unit,
     Bytes,
@@ -112,7 +123,7 @@ impl Ty {
 ///
 /// `Empty` says *every label not on the spine is absent*.  The field type is
 /// boxed because `Ty → Row → Ty` has no indirection anywhere else on the cycle.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
     Extend(Label, Box<Ty>, Box<Self>),
@@ -203,7 +214,7 @@ pub enum Grade {
 }
 
 /// Computation types (`B` in CBPV).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CompTy {
     /// `F A` under a grade: `F^p A` returns a value `A`; `F^w Unit` is a
     /// command, whose value is its output.
@@ -283,42 +294,11 @@ impl<'a> Term<'a> {
     }
 }
 
-/// A computation type's curry spine: its parameters, and what is past them.
-#[derive(Debug, Clone)]
-pub(crate) struct Spine {
-    pub(crate) params: Vec<Ty>,
-    pub(crate) tail: CompTy,
-}
-
-impl Spine {
-    /// What is produced once every parameter is supplied, if that is settled.
-    pub(crate) fn producer(&self) -> Option<Producer> {
-        Producer::of(&self.tail)
-    }
-
-    /// The same parameters over another tail.
-    pub(crate) fn over(self, tail: CompTy) -> CompTy {
-        CompTy::arrows(self.params, tail)
-    }
-}
-
 /// A `Return` taken apart: the grade, and the value past it.
 #[derive(Debug, Clone)]
 pub(crate) struct Producer {
     pub(crate) grade: Grade,
     pub(crate) ty: Ty,
-}
-
-impl Producer {
-    pub(crate) fn of(cty: &CompTy) -> Option<Self> {
-        match cty {
-            CompTy::Return(grade, ty) => Some(Self {
-                grade: *grade,
-                ty: (**ty).clone(),
-            }),
-            _ => None,
-        }
-    }
 }
 
 impl From<Producer> for CompTy {

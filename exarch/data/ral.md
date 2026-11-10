@@ -12,7 +12,7 @@ A string argument stays one argument: its contents are never implicitly split, g
 
 ## Values and computations
 
-`ral` separates values from computations. `let x = …` runs the computation on its right and binds the result; an argument or record field needs a value. The forms to remember are:
+`ral` separates values from computations. `let x = …` runs a value producer and binds its result, captures an output command, or packages an unapplied function as a block without running it. An argument or record field needs a value. The forms to remember are:
 
 - `$x` retrieves a bound value.
 - `{ … }` packages a computation as a block, without running it.
@@ -20,7 +20,7 @@ A string argument stays one argument: its contents are never implicitly split, g
 - `$[ … ]` evaluates arithmetic or Boolean expressions. Boolean negation is `not`: `$[not !{is-file $path}]`. `!` always means forcing.
 - `( … )` never groups: pass a call's result as `!{…}`, e.g. `for !{take 30 $xs} { |x| … }`, or `let` it first.
 
-A computation can return a value and can write bytes to stdout. `let` binds the returned value of a computation such as `length` or `from-json`. For a byte-writing command such as `date` or `echo`, it instead captures stdout as a `String`, removing one trailing line terminator if present:
+A computation can return a value and can write bytes to stdout. `let` follows its right-hand side's type, not whether it happens to print: `echo pre; return 5` returns an integer while writing `pre`. `let` binds the returned value of a computation such as `length` or `from-json`. For an output command such as `date` or `echo`, it instead captures stdout as a `String`, removing one trailing line terminator if present:
 
     let today = date +%F                 # captured stdout: String
     let body  = from-string < notes.txt  # returned value: String
@@ -32,6 +32,14 @@ This also works through blocks and functions: `let f = { hostname }; let host = 
 Only `let` captures; `!{…}` in a value position is hoisted into a `let`. Elsewhere a command runs and writes: in `if`, `case` and `try` arms, and in blocks run by `map`, `each` or `par`. `map { |f| echo $f } [1, 2]` prints `1` and `2` and returns `[(), ()]`. To collect output as values, return it: `map { |f| return !{echo $f} } [1, 2]`. Arms are all commands or all return values; an arm ending in `return ()` can join either. A block passed where a value is wanted must return one.
 
 In `explain`, `Returns a` returns a value, `Command` produces output, and `Command[ν] a` is either, as `ν` is chosen.
+
+Inference may wait for context: an inner `let` need not decide an enclosing parameter's type immediately. When the owning `let` right-hand side or script/tool call has been checked, an unresolved binding defaults to running a value producer, not capturing. An unresolved call defaults to a function, without first running a producer to obtain one. Later calls cannot change an already-defined helper's choice; demanding a `String` from a bound name does not itself request capture.
+
+If binding and application still need conflicting defaults for the same unknown computation, the program is refused in either statement order. Spell out which you mean:
+
+    let g = { |f| let a = !$f; let b = f 1; return $b }  # ambiguous: refused
+    let g = { |f| let a = $f; let b = f 1; return $b }   # f is a function block
+    let g = { |f| let h = !$f; let b = h 1; return $b }  # f returns a function block
 
 Use forcing to put a computation in a value position:
 

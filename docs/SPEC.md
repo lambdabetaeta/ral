@@ -1387,10 +1387,12 @@ An argument list is the flat sequence of arguments that a base handler, a
 handler or alias arm, or a bundled or external command receives. Its type is
 `List String`.
 
-A base handler and a handler or alias arm receive it rendered. ral converts
-every argument with the text conversion of *Display*, the same conversion `str`
-performs and `echo` writes. That conversion is total, so no argument is refused
-there, and nothing crosses an argument list as an unrendered ral value:
+A handler or alias arm receives rendered strings. In-shell argument rendering
+uses the text conversion of *Display*, the same conversion `str` exposes and
+`echo` writes. That conversion has a text form for every value; admission to
+an argument list is a separate rule. Bytes, collections, blocks and handles
+can be rendered inside the shell, and nothing crosses a user handler's
+argument list as an unrendered ral value:
 
 ```ral
 echo hello [a: 1]             # hello [a: 1]
@@ -1429,25 +1431,33 @@ The same `...` marker also builds a list (`[1, ...$middle, 4]`) and matches the
 tail of one (`[first, ...rest]`). Those are the forms of *Lists* and *Patterns*:
 they construct and destructure a list, and neither forms an argument list.
 
-Operating-system arguments must become text, and there the conversion is partial
-rather than total. ral formats strings, integers, floats, Booleans, `Unit`, and
-tagged values. `Unit` becomes the argument `()`. ral rejects bytes, lists, maps,
-records, blocks, functions, builtins, and handles. Spread a list, and
-send bytes through a byte pipe or decode them first.
+`Unit` is nothing, not a word: the checker refuses it at both the in-shell
+and operating-system argv boundaries. Write `'()'` for the text. Other shapes
+are admitted inside the shell. The OS boundary is narrower: it admits strings,
+integers, floats, Booleans and tagged values, but refuses bytes, lists, maps,
+records, blocks, functions, builtins and handles as single arguments. Spread a
+list, and send bytes through a byte pipe or decode them first.
 
-ral reports that rejection before execution when the argument's type states the
-shape, so nothing is started:
+The checker judges a single argument's final type head after the unit has
+solved and defaulted (§17.3), not the head known when visiting the call. If
+that head is refused at the relevant boundary, the unit is rejected before
+execution, so nothing is started:
 
 ```ral
 let r = [a: 1]
 cat $r                        # error: cannot pass [a: Integer] as an argument to `cat`
 ```
 
-Where the type does not state it — a parameter, or a value decoded at run time —
-the shape is known only to the run, and ral reports the same rejection at the
-call instead. A spread's elements are always reported at the call, because how
-many arguments a spread contributes is known only then, and an empty spread
-contributes none.
+A head still free at unit closure leaves the shape to runtime; being a
+parameter or a decoded value alone does not defer the check if the unit fixes
+its head. Spread elements are handled at the call, since how many arguments a
+spread contributes is known only then; an empty spread contributes none.
+
+At runtime, an OS call checks each argument against the same refused shapes,
+and `echo` independently refuses `Unit`. Arbitrary handler arms currently
+render a `Unit` known only at runtime, including one supplied by a spread,
+rather than enforcing the checker's `Unit` refusal universally. The total
+display conversion must not be mistaken for uniform argv admission.
 
 Arguments are never split, globbed, or parsed again. A string containing spaces
 remains one argument.
@@ -1587,12 +1597,20 @@ become a pipeline's: every earlier stage feeds the next by writing (§7.1).
 
 In statement position, byte output goes to standard output unless a redirect sends it elsewhere.
 
-What `let` binds is decided by type (§6.8). A command that writes — an
-external, a builtin that writes, or a handler arm standing in for one — has type
-`Command`. Only when it is a `let`'s whole right-hand side does the checker
-wrap it in a **capture frame**. A `!{…}` in a value
-position is hoisted into an ordinary `let` and follows the same rule.
-Arguments and control-flow arms are never implicitly captured.
+What `let` binds is decided by type (§6.8), not by what the checker knows
+when it first visits the binding. A command — an external, a builtin declared
+to write, or a handler arm standing in for one — has type `Command`. Only
+when it is a `let`'s whole right-hand side does the checker wrap it in a
+**capture frame**. A function right-hand side is kept unrun as a block; a
+value producer is run for its value.
+
+If the right-hand side's type is unresolved, that choice waits for constraints
+in the region that owns the unknown. Only when that region closes does an
+undecided binding default to running for a value (§17.5). Thus a later
+constraint in the same region can establish that an earlier binding captures.
+Incompatible binding and application defaults are refused, not prioritized.
+A `!{…}` in a value position is hoisted into an ordinary `let` and follows
+the same rule. Arguments and control-flow arms are never implicitly captured.
 
 The capture frame has three rules:
 
@@ -1633,8 +1651,9 @@ let answer = !{ echo first; echo second }
 ```
 
 A stdout redirect gives the result a fresh grade at the same value type:
-`M > f : F_ν A` for `M : F_ε A`. It does not constrain ε. A binding fixes
-that fresh grade to `p`, so `let saved = to-json 1 > f` binds `()`.
+`M > f : F_ν A` for `M : F_ε A`. It does not constrain ε. If no other
+constraint decides ν in its owning region, a binding defaults it to `p`, so
+`let saved = to-json 1 > f` binds `()`.
 
 Captures nest. Output goes to the nearest enclosing sink, which inside a
 capture is that capture's buffer. A `let` inside a captured block captures its
@@ -5544,8 +5563,9 @@ atomic and never weak.
 **Only commands, boundaries and value demands fix a grade.**
 
 - Commands introduce `w`.
-- A `let` fixes a free grade to `p` (§17.5); a builtin parameter demanding a
-  value, such as `filter`'s block, also requires `p`.
+- A binding defaults an undecided grade to `p` only at the close of its
+  owning region (§17.5). A non-unit payload can entail `p` before then.
+  A builtin parameter demanding a value, such as `filter`'s block, requires `p`.
 - Boundary results are `p`: checked-boundary JSON/CSV decoders, `use` and
   other checked doors supply data. A free boundary grade would let a command
   join type that data `Unit` and admit a program whose supplied value then
@@ -5572,31 +5592,50 @@ quantified variable whose kind excludes unit. Only visible grades appear in
 `∀α ν. {α → Command[ν] α}`. `Handle_ε A` keeps a suspended producer's grade;
 `await : Handle_ε A -> F_ε A`, printed with the same producer notation.
 
-The checker is Hindley-Milner with value-, computation-, and row-level
-unification variables. Let-bound names are generalized against the current
-environment and instantiated freshly at use sites. A variable marked *weak* is
-treated as free in the environment: the mark is permanent for the unit, is
-inherited by any variable unified with a weak one, and is never quantified, so
-every use of the name shares one type for it. There is no value restriction. A
-scheme that leaves a weak variable unquantified keeps it weak in later runs, where
-it is re-seeded as a fresh weak variable. A *boundary* — a place where a
-value of a shape the program did not decide enters typed code: the checked
-JSON/CSV decoders, `env`, `use`, the exarch host's answers, `_ed-state` — makes the
-variables of its result weak and records the result type on the call. Once the
-unit is solved that type is frozen as a *site* on the call, which the boundary
-admits the value against: each position's head, each free variable's kind, and
-for one `comparable` variable, number or text, agreed across the unit. A
-session data binding with weak residuals is admitted once per unit, before it
-runs, against the type of its first use there; every use shares that type. An
-occurrence whose type reaches a thunk or a handle also retains recursive
-protection: a thunk's arguments and results are checked when it runs, and a
-handle's payload when exposed by `await`, ready `poll`, or `race`. Importing a
-delayed value neither forces it nor consumes a handle. Only weak `comparable`
-identities acquire session-wide number-or-text fixings; universally quantified
-parameters remain fresh at each instantiation. Recursive groups are
-inferred against monomorphic self-bindings, then generalized after those
-self-bindings leave the environment. Runtime-created top-level bindings carry
-their closed schemes into later runs.
+The checker is Hindley-Milner with unknowns in four sorts: value types,
+computation types, rows and grades. Let-bound names are generalized by rank
+(§17.5) and their quantified variables are instantiated freshly at use sites.
+There is no value restriction.
+
+**Ranks express ownership.** The unit has rank zero. Entering a region raises
+the rank in force by one; a fresh unknown takes that rank. Every root, bound
+or free, retains a rank. Unification keeps the lower rank, and binding an
+unknown to a structure lowers all reachable unknowns to at most its rank.
+A suspended match likewise lowers everything it mentions to the rank of its
+scrutinee. In a region of rank r, an unknown of rank r is *young*; one of
+lower rank is *old*. A `let` right-hand side and its pattern form a region;
+so do an `alias` or `within` arm and a recursive group. A lambda's lexical
+scope alone is not a region.
+
+**Weak means rank zero, not a propagated mark.** A *boundary* — a place where
+a value of a shape the program did not decide enters typed code: the checked
+JSON/CSV decoders, `env`, `use`, the exarch host's answers, `_ed-state` — puts
+its result's unknowns at rank zero and records the result type on the call.
+No `let` generalizes rank zero, and unification lowers whatever meets it to
+zero. The result therefore has **one type per unit**. `WeakSource` retains
+provenance for mismatch notes; a scheme's weak roles list the value-,
+computation- and row-level rank-zero residuals it carries into another unit.
+Grades also have ranks, but a scheme has no weak grade: residual grades are
+settled before export, and what remains of them is quantified.
+
+Once the unit is solved, the boundary's type is frozen as a *site* on the
+call, which admits the value against each position's head, each free
+variable's kind, and, for one `comparable` variable, number or text agreed
+across the unit. A session data binding with weak residuals is admitted once
+per unit, before it runs, against its solved type there; every use shares
+that type. Residuals are re-seeded at rank zero in the next unit, preserving
+their kinds and sharing. An occurrence whose type reaches a thunk or a handle
+also retains recursive protection: a thunk's arguments and results are
+checked when it runs, and a handle's payload when exposed by `await`, ready
+`poll`, or `race`. Importing a delayed value neither forces it nor consumes a
+handle. Only weak `comparable` identities acquire session-wide number-or-text
+fixings; universally quantified parameters remain fresh at each instantiation.
+A recursive group is inferred once, at its first projection, in a region of
+its own: against monomorphic self-bindings, each member then generalized as
+the region closes. Every projection, the first included, instantiates its
+member's scheme, so no member's unknowns reach a sibling region and regions
+form a stack. Runtime-created top-level bindings carry closed schemes into
+later units.
 
 A value-type variable carries a *kind*: a set of admissible heads and a *deep*
 bit. A row variable carries a deep bit alone. The unconstrained kind `any` has
@@ -5628,14 +5667,17 @@ variable. `nth : ∀α ν. Integer → [α] → Command[ν] α` reads a computed
 sacrificing polymorphism.
 
 A stored scheme is closed over its whole graph: body and recursive equations.
-All variables are quantified, recursive roots, or listed weak residuals.
+All variables are quantified, recursive roots, or listed weak residuals. A
+scheme leaves its unit only as `Closed`, constructed only by settlement, a
+builtin's own binder supply, or checked deserialization. Each sort has its
+own roles: a row has no recursive equation, since every cycle is rooted at a
+value or computation type, and a grade is only ever quantified.
 Cross-unit reseeding alpha-renames local binders and weak residuals
 simultaneously, without capture; settlement substitutes live weak-variable
 images and resolves residual grades through the whole graph, even with no weak
 variables, without interpreting local ∀/μ binder names as unifier slots.
-It quantifies remaining free grades and clears cached grade residuals.
-Cached environment residual ids are resolved through the current unifier,
-since later constraints may unite them or bind them to structures.
+It quantifies remaining free grades. No environment free-variable scan or
+cached environment free-variable set participates in generalization.
 
 The principal judgments are:
 
@@ -5646,6 +5688,25 @@ The principal judgments are:
 Γ ⊢ M ⇝ C ; K                      inference with constraints K
 K ⊢ C1 ~ C2                        unification
 ```
+
+**Generation, solving and readback are separate.** Generation writes equations,
+instantiations, regions, the suspended matches of §17.5, `weak τ` (rank-zero
+lowering), and `gate τ` obligations. It builds a pending tree without resolving
+an unknown or inspecting a scheme's type. Instantiation and the two matches
+return unknowns, not their solved heads; only syntax and declarations supply
+known structure. An equation may report whether it held, solely to suppress
+a second complaint after the unit has already been refused.
+
+The solver settles equations and matches while the unit is open. Holes are
+annotations of the IR's inferring phase: every `let` RHS carries a binding
+hole, and every application, a bare binding call included, a call hole. In
+the checked phase these annotations are empty, and a bare binding call cannot
+occur, so no hole survives in a checked tree. Discharging or defaulting a
+match records its decision on its hole (§17.5). Closure produces a read-only
+solution only when the unit has no errors and every hole is decided; readback
+applies those decisions, freezes sites and settles schemes. Runtime protection
+is unchanged. A refused unit exports neither a checked tree nor a stored
+scheme.
 
 Types are regular trees, and every cycle crosses a data edge: a list element, a
 map element, a record field, or a variant payload. The edges `U`, `->`, `F` and
@@ -5658,7 +5719,13 @@ and a provenance reason, such as argument application, pipeline stage shape,
 conditional branches, fallback branches, `try` arms, scope body, handler
 shape, or the handler a `case` arm names. Diagnostics
 render the structural mismatch together with that provenance; provenance does
-not change the unification relation.
+not change the unification relation. A match's branch failure is blamed at its
+binding or application, under `Reason::Binding` or `Reason::Call`. A default
+also retains the span at which it was chosen (`defaulted_at`) and explains
+which head nothing in the enclosing definition established. Errors are stably
+sorted by source span at unit closure; their discovery order is not their
+report order. Diagnostic wording and blame
+need not be independent of constraint order.
 
 Representative rules are:
 
@@ -5679,6 +5746,14 @@ Representative rules are:
 -------------------------------- App
 Γ ⊢c M v : C
 ```
+
+`App` is the rule for an explicit core application. Source application also
+allows returned thunks; generation uses `apply C A D` (§17.5), and readback
+inserts the explicit forces and binds needed to reach this rule. Checking a
+lambda against an expected computation writes `expected ≐ A -> D` with fresh
+A and D before checking its body under the monomorphic parameter A. Other
+computations are generated, then equated with the expectation; no rule reads
+a solved head to decide how to check.
 
 Pattern inference recursively constrains list elements to one element type,
 record fields to their labelled types, and a list rest name to `List A`. A
@@ -5723,11 +5798,20 @@ class(c) = row(σ)    σ ⊑ A1 -> ... -> An -> C    Γ ⊢v ai : Ai
 ```
 
 `Γ ⊢ ā : argv` says every element renders as text, and a spread spreads a list.
+For a single argv argument, generation records `gate τ` rather than deciding
+from the head known at that visit. After rank-zero defaults at unit closure,
+the gate judges the final head: `Unit` is refused for all argv calls; bytes,
+lists, records, maps, thunks and handles are additionally refused at the OS
+boundary. A head still free leaves the question to the runtime check (§6.6).
+The gate imposes no kind and does not constrain a parameter at every later
+instantiation. Thus `{ |x| echo $x; return [$x, ()] }` is refused statically,
+as is its statement transposition: both solve x to `Unit` before the gate.
+
 Every nonempty redirect list requires `Γ ⊢c M : F_ε A` at the outermost
 computation: a function still awaiting arguments is refused, rather than
 redirecting its eventual result. Redirect operands are checked in both fused
-calls and redirect scopes. An unresolved computation opens with a fresh input
-grade. A redirect of standard output has type `F_ν A` for a fresh ν:
+calls and redirect scopes. Generation writes `C ≐ F_ε A` with fresh ε and A
+rather than inspecting C's current head. A redirect of standard output has type `F_ν A` for a fresh ν:
 its bytes go to the file, and the payload type is preserved. This does not
 constrain ε; other uses of `M` retain its original grade. Stdin and stderr redirects, and `2>&1`, leave the grade alone.
 
@@ -5754,7 +5838,10 @@ fail at the decode. `'3' | cat` and `[1, 2, 3] | f` are refused because a value
 in stage position writes nothing to the pipe; `each { |x| echo $x } $xs | cat`
 is accepted, since `each` streams what its body writes. A stage whose type is
 `A -> C` is still waiting for an argument and is rejected as well, and the
-diagnostic says to apply it rather than pipe into it.
+diagnostic says to apply it rather than pipe into it. Generation requires each
+stage C to satisfy `C ≐ F_ε A` with fresh ε and A; the non-final payload
+additionally satisfies `A ≐ Unit`. These are equations, not decisions made
+from a partially solved type.
 A stage whose root carries `< f` or `<< value` is rejected: the feed answers that
 stage's reads for its whole run, so the producer before it writes for nobody
 (§7.4). Each premise reads one stage, never a pair.
@@ -5803,9 +5890,155 @@ catch (§8.8).
 
 ### 17.5. Capture at a binding boundary
 
-**Only a binding implicitly turns output into a value.** The right-hand side's resolved
-type decides capture, through abstraction and application as well as inline
-commands. The checker inserts these terms, which no program can name:
+**Only a binding implicitly turns output into a value.** Binding and
+application are suspended matches: they wait for the head of a computation
+type, then add the equations of that branch. Generation cannot choose from a
+partially solved type. Here τ ranges over value types, β is a computation
+unknown, ν a grade, and `≐` is an equation in the appropriate sort.
+
+```text
+bound τ C = match C {
+    A -> D  => τ ≐ U (A -> D)                     -- thunk
+  | F_ν A   => match ν {
+                   p => τ ≐ A                    -- run
+                 | w => τ ≐ String               -- capture
+               }
+}
+
+apply C A D = match C {
+    A' -> D' => A ≐ A', D ≐ D'                    -- no split
+  | F_ν B    => B ≐ U β; apply β A D              -- one split, β fresh
+}
+```
+
+`bound τ C` relates the type C of a right-hand side to the type τ of its
+bound value. It never reads τ to decide a branch. For `F_ν A` with ν free,
+there is one entailed *improvement*: if A excludes `Unit`, set `ν ≐ p` and
+run for A. A excludes `Unit` when it has another head, or is an unknown whose
+kind does not admit `Unit`. This follows from `F_w A ⇒ A = Unit`, not from a
+default. Otherwise the match waits for ν. In particular, `τ ≐ String` beside
+`bound τ (F_ν Unit)` does not select capture: the branch may not justify its
+own scrutinee.
+
+`apply C A D` relates a head C, an argument A and a result D. An arrow
+consumes the argument directly. A producer cannot consume it: its payload
+must be a thunk `U β`, and application continues at β. If the payload is not
+a thunk, that equation fails. Readback inserts `M to h. force h v` before
+this argument, a *split*; several returned thunks can require several splits
+before one argument. Peeling terminates because cycles through `F` and `U`
+alone are refused (§17.3). An n-argument call generates n matches in a
+left-to-right chain, each result becoming the next head. Builtins within
+their declared arity have a known arrow spine and need only equations.
+
+A match discharges at a known head only when its scrutinee has that head in
+every solution of its owning region's constraints, with suspended matches set
+aside. There is no backward reading of a branch and no propagation from an
+instance back into its definition. The solver repeatedly discharges known
+heads and lowers everything mentioned by each remaining match to its
+scrutinee's rank. At rest, every suspended scrutinee is an unknown: β, or the
+grade ν of a binding. A binding mentions its right-hand side and binder; an
+application mentions its head, argument and result.
+
+**Defaults are simultaneous at region closure.** First settle the region.
+Collect all still-suspended matches on young scrutinees (rank r in a closing
+region of rank r), identifying scrutinees by their canonical roots. Compute
+the following defaults before adding any of their equations:
+
+| suspended match | default equations | elaboration |
+| --- | --- | --- |
+| `apply β A D` | `β ≐ A -> D` | no split |
+| `bound τ β` | `β ≐ F_p α`, `τ ≐ α`, with α fresh | run |
+| `bound τ (F_ν A)` | `ν ≐ p`, `τ ≐ A` | run |
+
+Add that one set of equations together, then settle again. No default creates
+a new match; any match awakened into further suspension has an old
+scrutinee, so one round suffices. A successful region leaves no young match
+suspended. A match on an old scrutinee remains for the region of that
+scrutinee's rank, even if its binding is inside a region that has already
+closed. Lowering its binder, argument and result prevents premature
+generalization. Nothing outside a successfully closed region can later choose
+an elaboration for one of its quantified unknowns: instantiation copies them.
+
+If a canonical scrutinee has both `bound` and `apply` waiting on it, their
+defaults disagree. Neither is prioritized: the region is refused with
+`ConflictingDefaults` (`T0080`), citing both uses and both explicit readings,
+named by the variable the binding forces or the call applies when there is one.
+For example, this is refused in either statement order:
+
+```ral
+{ |f| let a = !$f; let b = f 1; return $b }
+```
+
+Choose the intended reading explicitly:
+
+```ral
+{ |f| let a = $f; let b = f 1; return $b }  # f : {Integer -> Returns α}
+{ |f| let h = !$f; let b = h 1; return $b } # f : {Returns {Integer -> Returns α}}
+```
+
+Those type comments show the defaulted readings. A failed default equation is
+also an error. Recovery retires rejected or otherwise unresolved young matches
+without selecting branches and restores the enclosing rank; this supplies no
+typing or elaboration result, and a refused unit is never read back.
+
+**Generalization is by rank.** At an enclosing rank r, `let q = M; N` first
+opens rank r+1 around inference of `M : C`, `bound τ C` with τ fresh, and
+the pattern q at τ, collecting the pattern's binder types. It closes that
+region before generalizing any binder. Schematically, the first line is
+generated inside that region; the rest follows its successful closure:
+
+```text
+Γ ⊢c M : C    bound τ C    Γ ⊢p q : τ ⇒ Δ
+σx = Gen_Γ(Δ(x))  (x ∈ names(q))    Γ, {x:σx | x ∈ names(q)} ⊢c N : D
+-------------------------------------------------------------------- Let
+Γ ⊢c let q = M ; N : D
+```
+
+For each collected type A, `Gen_Γ(A)` means:
+
+```text
+Gen_Γ(A) = ∀ { a ∈ FV(A) | rank(a) > r }. A
+```
+
+Here `FV` follows the solved type graph, in all four sorts; kinds and recursive
+equations are retained in the scheme (§17.3). This is not subtraction of
+`FV(Γ)`: the subscript records the enclosing context at rank r, not an
+environment scan. The quantified unknowns are those still owned by the just-closed region. Rank-zero
+unknowns and unknowns lowered to an enclosing region are not quantified. All
+pattern types are constrained before any binder is generalized. N is then
+inferred with those schemes, freshly instantiated at each use.
+
+For example, `let k = { |g| g 1 }` defaults g's unknown computation head to
+an arrow without choosing the result computation's head or grade.
+`let v = g 1` also creates a binding match on the result: it waits for the
+owning region and, if still undecided there, defaults to a value producer.
+A grade disagreement elsewhere remains a mismatch of `Command` against
+`Returns A`.
+
+**A unit closes rank zero.** A unit is one `typecheck` session, or one of the
+one-shot sessions `alias_arm_scheme`, `catch_all_stands_in` and
+`binding_value_scheme`. A top-level `Run` opens no region: its unknowns are
+rank zero, all its remaining matches default at unit closure, and its report
+is never captured. A REPL phrase is a unit whose predecessors are closed
+schemes; a script can therefore refuse shared boundary uses that separate
+REPL units admit (§17.3).
+
+A one-shot session seeds its environment at rank zero and enters a region
+before inferring or checking its body. It exits that region, generalizes any
+scheme to be stored at enclosing rank zero, then closes the unit. Only success
+settles and exports the scheme; `catch_all_stands_in` stores none.
+`Site::scheme` likewise enters its scratch region before instantiation, exits,
+then generalizes. Opening a region around an already inferred type is too late.
+After rank-zero defaults, closure judges gates (§17.3), checks nested tables
+and attaches `()` notes. A return contract is ascribed only after successful
+closure, before readback.
+
+**Readback makes the chosen branch explicit.** A match records its decision
+on its hole when it is discharged or defaulted: a binding its mode (thunk,
+run, capture), an argument each split it performs. Readback elaborates from
+these decisions alone; it never re-reads a head. The binding branches above
+elaborate M respectively to `return (thunk M)` (Let-fun), M (Let), or ⌈M⌉
+(Let-cap). The checker inserts these terms, which no program can name:
 
 ```text
 Γ ⊢c M : F_w Unit                      Γ ⊢v v : Bytes
@@ -5816,51 +6049,26 @@ commands. The checker inserts these terms, which no program can name:
 ⌈M⌉ = capture M to d . decode d        the capture and decoding of a command
 ```
 
-`capture M` returns the exact bytes written by `M`, ignoring its unit value.
+`capture M` returns the exact bytes written by M, ignoring its unit value.
 `decode` drops one trailing LF or CRLF and strictly decodes UTF-8, as
 `from-line` does; invalid UTF-8 is an error naming `from-bytes` as the way to
-keep binary data. The enclosing binding fixes the result grade to `p`.
+keep binary data. These internal producer grades are fresh; they do not
+choose the binding branch.
 
 This is the sole coercion: `let x = M` captures the whole RHS exactly when it
 resolves to `F_w Unit`. Arguments, control-flow arms and handler arms only
 unify with their demands. They are not wrapped or implicitly captured.
-A tail `Run` is never coerced. A value-position `!{…}` is a hoisted `let`,
-so it follows the binding rule too.
-
-The bind rule:
-
-```text
-Γ ⊢c M : F_p A    Γ, p : Gen_Γ(A) ⊢c N : C
-------------------------------------------- Let
-Γ ⊢c let p = M ; N : C
-
-Γ ⊢c M : F_w Unit    Γ, p : String ⊢c N : C
---------------------------------------------- Let-cap
-Γ ⊢c let p = M ; N : C        elaborated  ⌈M⌉ to p . N
-
-Γ ⊢c M : A -> C    Γ, p : Gen_Γ(U (A -> C)) ⊢c N : C'
------------------------------------------------------- Let-fun
-Γ ⊢c let p = M ; N : C'        elaborated  return (thunk M) to p . N
-
-Γ ⊢c M : F_ε̂ A      ε̂ := p, then Let
-Γ ⊢c M : β          β ~ F_p α, then Let
-```
-
-A `let` is a demand for a value, which is the only place a grade variable is
-defaulted: `let k = { |g| g 1 }` is `∀α ν. {{Integer -> Command[ν] α} -> Command[ν] α}` and
-defaults nothing, while `let v = g 1` with `g` of that parameter type fixes
-`ν := p`. A grade disagreement elsewhere is a mismatch of `Command` against
-`Returns A`.
-
+A value-position `!{…}` is a hoisted `let`, so it follows the binding rule too.
 The user-facing rule is §6.8's: **a command's value is its output; a `let`
-binds it.**
+binds it.** The elaborator's hoists are ordinary binds, so
+`let x = cat f | grep "a$p"` captures the pipeline, and
+`"today: !{date +%F}"` interpolates the date. `let _ = cmd` captures and drops:
+a surface `_` is a fresh name, not a discard.
 
-`Gen_Γ` quantifies the variables, grade variables included, that are neither
-free in `Γ` nor weak (§17.3). A top-level `let` is a bind; a top-level run is a
-statement, tail included, and its own report is never captured. The
-elaborator's hoists are ordinary binds, so `let x = cat f | grep "a$p"` captures
-the pipeline, and `"today: !{date +%F}"` interpolates the date. `let _ = cmd`
-captures and drops: a surface `_` is a fresh name, not a discard.
+The intended independence property is that constraint traversal or solving
+order does not change acceptance or a successful checked tree. Defaults are
+choices, so no principal-elaboration claim follows. This account is not a
+mechanized soundness or independence proof.
 
 A right-hand side of type `A -> C` is a function, and the binder receives it
 unrun, as `thunk M` (Let-fun), at any depth: forcing it runs `M`'s effects up to
@@ -5906,10 +6114,17 @@ atom is refused at elaboration (§17.1). The arms are joined by the rule below:
 ```
 
 Here `C` is the **join** of arm result types `R1 ... Rn`, after the arm's
-parameters. Each arm is checked against its own fresh result. A `case`
-supplies known scrutinee payload types before checking the body. The results
-then unify with the join as expected, in source order. There is no coercion,
-verdict selection or reordering; a failure blames the later arm.
+parameters. Each arm is checked against its own fresh result, then each result
+is equated with C. A `case` first equates its scrutinee with `Variant ρ` and ρ
+with the closed row of arm labels at fresh payload types. Those equations
+supply the payloads to the arms before their bodies are checked; they do not
+require a read of the scrutinee's current type.
+
+Ordinary generation checks and joins arms in source order for diagnostic
+blame; a failed join blames the later arm. That traversal order does not
+select a coercion or a verdict. An unresolved binding or application inside an
+arm follows §17.5: a match on an old scrutinee can remain pending across an
+inner `let` and be decided by equations elsewhere in the owning region.
 
 `if $c { hostname } else { echo b }` is one `Command`, captured once by an
 enclosing `let`. A command and a returned value do not join, even if that
@@ -5919,11 +6134,24 @@ For Bool, use `succeeds { … }`; for other data, decode or return the required
 value, or write values out with `echo` so all arms are commands.
 
 A fresh unit producer can join either grade. Thus
-`if $c { echo hi } else { return () }` is a command; a unit producer whose
-grade was fixed to `p` by a `let` cannot join the command. For example,
-`let twice = { |f| let _ = !$f; !$f }` fixes its callback to `p`, so
+`if $c { echo hi } else { return () }` is a command. A unit producer whose
+grade has already been fixed to `p` in a closed definition cannot join the
+command: `let twice = { |f| let _ = !$f; !$f }` defaults its callback to `p`
+when twice's right-hand-side region closes, so
 `if $c { twice { return () } } else { echo a }` is refused. End the first
 arm with `return ()` to give it a fresh unit producer.
+
+That is distinct from an inner binding waiting on an enclosing parameter:
+
+```ral
+let g = { |f| let y = !$f; if true { !$f } else { echo a } }
+```
+
+The match for y is old at the inner binding's close. The join establishes f's
+computation as a command in g's region, so y captures. Moving that join before
+the binding does not change the choice. Uses of y do not choose its branch:
+`{ |f| if true { !$f } else { return () }; let y = !$f; upper $y }` is
+refused, not made into a capture by `upper`'s demand for text.
 
 `guard`, `within` and `grant` preserve their body's type (§17.7). Additional
 `elsif` arms nest, each `else` holding the next `if` as a thunk. A conditional
@@ -5983,12 +6211,16 @@ grade included.
 `guard`'s cleanup runs for its effects and failures alone: its value is
 discarded, what it writes goes to the current output, and its type is not
 joined with the body's. The scope-body, handler-shape, and arm-result
-constraints retain ordinary diagnostic provenance and source spans.
+constraints are equations against fresh shape unknowns and retain ordinary
+diagnostic provenance and source spans. Scope bodies preserve types without
+reading a partial solution.
 
 `within` additionally types known option fields and installs schemes for
-literal handler entries while checking its body. `grant` types known capability
-fields. Unknown, spread, or dynamic option keys remain subject to runtime
-decoding.
+literal handler entries while checking its body. Each installed arm is checked
+inside its own region, closed before its scheme is generalized by rank; a match
+on an old scrutinee still belongs to the enclosing region (§17.5). The catch-all
+is likewise checked in a region. `grant` types known capability fields.
+Unknown, spread, or dynamic option keys remain subject to runtime decoding.
 
 An arm stands in for the head it names, and is checked against what that head
 is. `standsFor(c)` is the scheme of the base frame or arm already in force under
@@ -6013,9 +6245,15 @@ frame that writes, has `echo`'s own scheme. An arm for `detach`, a base frame
 that returns, has `detach`'s scheme and returns a receipt. A call through an arm
 types as its head does. The catch-all stands in for every command in its block,
 so `{ |name args| cd $name }` is valid. An arm installed at run time, by `alias` or from a bundle, is checked by
-the same rule when it is installed. The rule reads the arm's type, never its
-spelling: `{ forward 'git' }` is an arm when `forward 'git'` is a function of
-the argv, and `{ echo hi }`, whose type takes no parameter, is not.
+the same rule when it is installed. Generation first equates the arm with a
+thunk taking the slot's parameters and producing a fresh result, then equates
+that result with what the replaced head produces. It does not coerce the arm
+or inspect a partial solution. An equation's success flag only suppresses a
+second complaint when the slot shape has already failed. The constraint is on
+the arm's type, never its spelling: `{ forward 'git' }` is an arm when
+`forward 'git'` is a function of the argv, and `{ echo hi }`, whose type takes
+no parameter, is not. The install-time one-shot checks must also close
+successfully before any scheme is stored (§17.5).
 
 ### 17.8. Operational outcomes
 
@@ -6154,29 +6392,34 @@ children are torn down and reaped before their cancelled computation returns.
 
 ### 17.9. Grounding and execution
 
-Each inference rule builds its checked node beside its type. A binding
-immediately constructs capture/decode (§17.5) or Let-fun; application constructs
-returned-thunk bind/force segments, and boundary calls are saturated or
-η-expanded at their inference rule. Imported residual execution heads force a
-protected variable; imported value occurrences receive pending membranes.
+Each inference rule builds its pending node beside its type. A binding or
+call node carries its hole (§17.3); boundary calls are saturated or η-expanded
+at their inference rule and carry their result type. Imported residual
+execution heads force a protected variable; imported value occurrences carry
+their solved type as a membrane.
 
-Once inference, nested checks and return-contract ascription succeed, one fold
-freezes the sites and settles the `Define` schemes. IR site parameters default
-to `Arc<Site>`; during inference they hold `Pending`: `Open(ty)` becomes a
-snapshot, `Kept(site)` preserves an existing checked site, and `Imported(ty)`
-occurs only on a protected value, whose membrane remains only if the snapshot
-has delayed obligations. Frozen contracts may retain free weak variables and
-delayed types; they need not be ground. One fresh unit identity serves all new
-site snapshots and the first-use readmissions in `Toplevel.admits`. These
-readmissions precede execution and are distinct from diagnostics for names
-bound to unit-valued calls.
+Once closure, nested checks and return-contract ascription succeed, one fold
+reads the tree back in the checked phase. A binding hole becomes Let-fun, Let
+or capture/decode (§17.5); a call hole becomes returned-thunk bind/force
+segments before the recorded arguments. Boundary types become site snapshots.
+A protected value's membrane is a checked tree's kept site, or an imported
+type, which remains only if its snapshot has delayed obligations. The
+membrane check `Protect` always holds a site: only runtime membranes build
+it, and inference keeps it. Frozen contracts may retain free weak variables
+and delayed types; they need not be ground. One unit identity serves all site
+snapshots and the first-use readmissions in `Toplevel.admits`. Re-checking a
+checked tree accepts it and inserts no further elaboration; raw variable ids
+are not canonical, so the re-checked tree need not be equal to it. These
+readmissions precede execution and are distinct from diagnostics for names bound to unit-valued
+calls.
 
-Freeze applies `settle_weak` to the schemes carried by each `Phrase::Define`
-and checks closure. It makes no capture or type-inference decisions. Inference
-and freeze each memoise recursive groups by `Arc` identity, so their projections
-share one group. A unit with errors is refused whole and its built IR discarded
-without freezing; one-shot inference sessions also discard their built IR.
-Pipelines carry no per-stage type annotations.
+Readback applies `settle_weak` to the schemes carried by each
+`Phrase::Define`, producing closed schemes. It makes no capture or
+type-inference decisions of its own. Inference and readback each memoise
+recursive groups by `Arc` identity, so their projections share one group. A
+unit with errors is refused whole and its pending IR discarded; one-shot
+inference sessions also discard their pending IR. Pipelines carry no
+per-stage type annotations.
 
 The machine decides nothing about capture: it runs the `capture` the checker
 wrote. The capture frame has three rules, with `buf` a fresh buffer and `prev`

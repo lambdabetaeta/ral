@@ -1,6 +1,6 @@
-# codes: T0011
+# codes: T0010
 # status: 1
 # at: 6:4
-# contains: incompatible shapes
+# contains: couldn't match type Unit with type {ϕ}
 let b = { echo hi }
 $b extra

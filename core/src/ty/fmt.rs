@@ -5,9 +5,9 @@
 //! name in both, so callers first build one [`FmtCtx`] over everything they
 //! are about to render: it mints Greek letters in first-appearance order.
 
-use super::scheme::{Scheme, WeakVars};
-use super::{CompTy, CompTyVar, Grade, GradeVar, Head, Kind, Row, RowVar, Term, Ty, TyVar};
-use std::collections::{HashMap, HashSet};
+use super::scheme::{Role, Scheme};
+use super::{CompTy, CompTyVar, Grade, GradeVar, Head, Kind, Row, RowVar, Term, Ty, TyVar, Var};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 // One alphabet per kind of unification variable, kept disjoint so a letter
@@ -154,18 +154,23 @@ impl FmtCtx {
 
     /// A weak variable is named after the quantified ones, with a leading `_`:
     /// it is one type for the whole unit, not a binder.
-    fn name_weak(&mut self, weak: &WeakVars) {
-        for v in weak.tys.keys() {
-            let name = format!("_{}", pick(TY_LETTERS, self.ty_names.len()));
-            self.ty_names.insert(*v, name);
-        }
-        for v in &weak.comps {
-            let name = format!("_{}", pick(COMP_LETTERS, self.comp_names.len()));
-            self.comp_names.insert(*v, name);
-        }
-        for v in weak.rows.keys() {
-            let name = format!("_{}", pick(ROW_LETTERS, self.row_names.len()));
-            self.row_names.insert(*v, name);
+    fn name_weak(&mut self, weak: impl Iterator<Item = Var>) {
+        for var in weak {
+            match var {
+                Var::Ty(v) => {
+                    let name = format!("_{}", pick(TY_LETTERS, self.ty_names.len()));
+                    self.ty_names.insert(v, name);
+                }
+                Var::Comp(v) => {
+                    let name = format!("_{}", pick(COMP_LETTERS, self.comp_names.len()));
+                    self.comp_names.insert(v, name);
+                }
+                Var::Row(v) => {
+                    let name = format!("_{}", pick(ROW_LETTERS, self.row_names.len()));
+                    self.row_names.insert(v, name);
+                }
+                Var::Grade(_) => {}
+            }
         }
     }
 
@@ -428,47 +433,49 @@ impl fmt::Display for Scheme {
 }
 
 fn render_scheme(scheme: &Scheme) -> String {
-    // Roots of cyclic bindings are named after the plain vars; they bind by `μ`, not `∀`.
-    let mut ty_order: Vec<TyVar> = scheme.ty_vars.iter().map(|&(v, _)| v).collect();
-    for (root, _) in &scheme.ty_bindings {
-        if !ty_order.contains(root) {
-            ty_order.push(*root);
-        }
-    }
-    let mut comp_order: Vec<CompTyVar> = scheme.comp_ty_vars.clone();
-    for (root, _) in &scheme.comp_ty_bindings {
-        if !comp_order.contains(root) {
-            comp_order.push(*root);
-        }
-    }
+    let forall_tys = foralls(&scheme.tys);
+    let forall_comps: Vec<CompTyVar> = foralls(&scheme.comps)
+        .into_iter()
+        .map(|(v, ())| v)
+        .collect();
+    let forall_rows = foralls(&scheme.rows);
+    let cycles = Cycles {
+        tys: mus(&scheme.tys),
+        comps: mus(&scheme.comps),
+    };
 
+    // Roots of cyclic bindings are named after the plain vars; they bind by `μ`, not `∀`.
+    let ty_order: Vec<TyVar> = forall_tys
+        .iter()
+        .map(|&(v, _)| v)
+        .chain(cycles.tys.iter().map(|&(v, _)| v))
+        .collect();
+    let comp_order: Vec<CompTyVar> = forall_comps
+        .iter()
+        .copied()
+        .chain(cycles.comps.iter().map(|&(v, _)| v))
+        .collect();
+    let row_order: Vec<RowVar> = forall_rows.iter().map(|&(v, _)| v).collect();
     let mut ctx = FmtCtx {
         ty_names: names_in_order(&ty_order, TY_LETTERS),
         comp_names: names_in_order(&comp_order, COMP_LETTERS),
-        row_names: names_in_order(
-            &scheme.row_vars.iter().map(|&(v, _)| v).collect::<Vec<_>>(),
-            ROW_LETTERS,
-        ),
-        ty_kinds: scheme.ty_vars.iter().copied().collect(),
+        row_names: names_in_order(&row_order, ROW_LETTERS),
+        ty_kinds: forall_tys.iter().copied().collect(),
         grade_names: HashMap::new(),
-        cycles: Cycles {
-            tys: scheme.ty_bindings.clone(),
-            comps: scheme.comp_ty_bindings.clone(),
-        },
+        cycles,
     };
     let mut visible = HashSet::new();
     ctx.visible_grades(Term::Ty(&scheme.ty), &mut Vec::new(), &mut visible);
-    let grade_order: Vec<_> = scheme
-        .grade_vars
+    let grade_order: Vec<GradeVar> = scheme
+        .grades
         .iter()
         .copied()
         .filter(|v| visible.contains(v))
         .collect();
     ctx.grade_names = names_in_order(&grade_order, GRADE_LETTERS);
-    ctx.name_weak(&scheme.weak);
+    ctx.name_weak(scheme.weak());
 
-    let quant_parts: Vec<String> = scheme
-        .ty_vars
+    let quant_parts: Vec<String> = forall_tys
         .iter()
         .map(|(v, kind)| {
             let name = &ctx.ty_names[v];
@@ -478,14 +485,9 @@ fn render_scheme(scheme: &Scheme) -> String {
                 format!("{name}:{kind}")
             }
         })
-        .chain(
-            scheme
-                .comp_ty_vars
-                .iter()
-                .map(|v| ctx.comp_names[v].clone()),
-        )
+        .chain(forall_comps.iter().map(|v| ctx.comp_names[v].clone()))
         .chain(grade_order.iter().map(|v| ctx.grade_names[v].clone()))
-        .chain(scheme.row_vars.iter().map(|(v, deep)| {
+        .chain(forall_rows.iter().map(|(v, deep)| {
             let name = &ctx.row_names[v];
             if *deep {
                 format!("{name}^d")
@@ -509,6 +511,20 @@ fn render_scheme(scheme: &Scheme) -> String {
     format!("{prefix}{body}")
 }
 
+/// The `∀`-bound variables of `vars`, each with its meta.
+fn foralls<V: Copy, M: Copy, B>(vars: &BTreeMap<V, Role<M, B>>) -> Vec<(V, M)> {
+    vars.iter()
+        .filter_map(|(&v, role)| Some((v, role.forall()?)))
+        .collect()
+}
+
+/// The μ-roots of `vars`, each with its binding.
+fn mus<V: Copy, M: Copy, B: Clone>(vars: &BTreeMap<V, Role<M, B>>) -> Vec<(V, B)> {
+    vars.iter()
+        .filter_map(|(&v, role)| Some((v, role.mu()?.clone())))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Label;
@@ -519,7 +535,7 @@ mod tests {
     fn fmt_scheme_shows_quantified_comp_vars() {
         let beta = CompTyVar(17);
         let scheme = Scheme {
-            comp_ty_vars: vec![beta],
+            comps: [(beta, Role::Forall(()))].into(),
             ..Scheme::mono(Ty::Thunk(Box::new(CompTy::Var(beta))))
         };
         assert_eq!(scheme.to_string(), "∀ϕ. ϕ");
@@ -530,7 +546,7 @@ mod tests {
         let root = CompTyVar(29);
         let binding = CompTy::pure(Ty::list(Ty::Thunk(Box::new(CompTy::Var(root)))));
         let scheme = Scheme {
-            comp_ty_bindings: vec![(root, binding.clone())],
+            comps: [(root, Role::Mu(binding.clone()))].into(),
             ..Scheme::mono(Ty::Thunk(Box::new(binding)))
         };
         assert_eq!(scheme.to_string(), "μϕ. Returns [{ϕ}]");
@@ -540,7 +556,7 @@ mod tests {
     fn fmt_scheme_binds_cyclic_ty_roots_by_mu() {
         let root = TyVar(17);
         let scheme = Scheme {
-            ty_bindings: vec![(root, Ty::list(Ty::Var(root)))],
+            tys: [(root, Role::Mu(Ty::list(Ty::Var(root))))].into(),
             ..Scheme::mono(Ty::list(Ty::Var(root)))
         };
         let rendered = scheme.to_string();
@@ -553,7 +569,7 @@ mod tests {
         let list = Ty::list(Ty::Var(root));
         let deep = (0..9).fold(list.clone(), |ty, _| Ty::list(ty));
         let scheme = Scheme {
-            ty_bindings: vec![(root, list)],
+            tys: [(root, Role::Mu(list))].into(),
             ..Scheme::mono(deep)
         };
         assert_eq!(scheme.to_string(), "μα. [α]");
@@ -563,11 +579,11 @@ mod tests {
     fn fmt_scheme_names_a_weak_residual_after_the_binders() {
         let (bound, weak) = (TyVar(3), TyVar(4));
         let scheme = Scheme {
-            ty_vars: vec![(bound, Kind::ANY)],
-            weak: WeakVars {
-                tys: [(weak, Kind::ANY)].into(),
-                ..WeakVars::default()
-            },
+            tys: [
+                (bound, Role::Forall(Kind::ANY)),
+                (weak, Role::Weak(Kind::ANY)),
+            ]
+            .into(),
             ..Scheme::mono(Ty::Record(Row::Extend(
                 Label::Field("a".into()),
                 Box::new(Ty::Var(bound)),

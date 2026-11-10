@@ -32,8 +32,9 @@ use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
 use crate::shell::runtime::{BuiltinEntry, Mooring, Settled, Shell};
-use crate::ty::{Scheme, Ty};
+use crate::ty::{Closed, Scheme, Ty, Var};
 use crate::typecheck::Unifier;
+use std::sync::Arc;
 
 /// The thunk a case arm forces: its literal block, or a thunk in hand.
 pub fn case_arm_val(arm: &CaseArm) -> &Val {
@@ -56,10 +57,9 @@ pub fn exec_has_redirects(exec: &Exec) -> bool {
     !exec.redirects.is_empty()
 }
 
-/// The scheme a builtin's type rule mints against `unifier` — the rule
-/// itself is core's, so a caller runs it rather than holding it.
-pub fn builtin_scheme(entry: &BuiltinEntry, unifier: &mut Unifier) -> Scheme {
-    entry.decl.scheme(unifier)
+/// The builtin's cached closed scheme.
+pub fn builtin_scheme(entry: &BuiltinEntry) -> &Closed {
+    entry.decl.scheme()
 }
 
 /// The real paths the fs projection reads, baseline, run places and support
@@ -185,7 +185,7 @@ pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or
 /// bound without one.
-pub fn binding_scheme(shell: &Shell, name: &str) -> Option<std::sync::Arc<Scheme>> {
+pub fn binding_scheme(shell: &Shell, name: &str) -> Option<Closed> {
     shell
         .session_schemes()
         .bindings
@@ -259,8 +259,8 @@ pub fn workers(transport: &IdentityTransport) -> Vec<crate::shell::runtime::Work
 
 /// The site of a boundary call whose result the checker solved as `ty`: what a
 /// test hands a door it calls directly, bypassing the checker.
-pub fn site_of(ty: &Ty) -> std::sync::Arc<crate::ty::Site> {
-    std::sync::Arc::new(crate::ty::Site::snapshot(
+pub fn site_of(ty: &Ty) -> Arc<crate::ty::Site> {
+    Arc::new(crate::ty::Site::snapshot(
         &Unifier::new(),
         ty,
         crate::ty::UnitId::fresh(),
@@ -273,13 +273,23 @@ pub fn has_result_only_var(scheme: &Scheme) -> bool {
     crate::typecheck::has_result_only_var(scheme)
 }
 
-/// Whether every scheme variable is quantified, cyclic, or weak.
-pub fn scheme_is_closed(scheme: &Scheme) -> bool {
-    crate::typecheck::scheme_is_closed(scheme)
-}
-
 /// Whether a scheme leaves weak variables unquantified — the mark a boundary's
 /// result carries into a stored binding.
 pub fn has_weak_residuals(scheme: &Scheme) -> bool {
-    !scheme.weak.is_empty()
+    scheme.has_weak()
+}
+
+/// The variables a scheme quantifies, in order.
+pub fn quantified(scheme: &Scheme) -> Vec<Var> {
+    scheme.quantified().collect()
+}
+
+/// The weak residuals a scheme records, in order.
+pub fn weak_residuals(scheme: &Scheme) -> Vec<Var> {
+    scheme.weak().collect()
+}
+
+/// The constraint provenance of a diagnostic, for elaboration evidence tests.
+pub fn type_error_reason(error: &crate::typecheck::TypeError) -> Option<&crate::typecheck::Reason> {
+    error.reason.as_ref()
 }

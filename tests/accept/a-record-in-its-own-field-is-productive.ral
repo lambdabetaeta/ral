@@ -1,0 +1,1 @@
+let f = { |r| let [a: x] = $r; let [b: y] = $x; [$r, $x] }

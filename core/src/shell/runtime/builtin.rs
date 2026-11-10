@@ -282,7 +282,6 @@ mod tests {
     use crate::shell::builtins::{
         BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SURFACE_BUILTIN, WATCH_BUILTIN,
     };
-    use crate::typecheck::Unifier;
 
     /// The soundness perimeter: a value of a type the program did not decide
     /// enters typed code only through a boundary.  A row whose scheme
@@ -309,8 +308,8 @@ mod tests {
         let detach: &[BuiltinEntry] = &[];
         for entry in sets.into_iter().flatten().chain(detach) {
             let name = entry.decl.name.as_ref();
-            let scheme = entry.decl.scheme(&mut Unifier::new());
-            let casts = crate::typecheck::has_result_only_var(&scheme);
+            let scheme = entry.decl.scheme();
+            let casts = crate::typecheck::has_result_only_var(scheme);
             let allowed = entry.decl.is_boundary() || DIVERGENT.contains(&name);
             assert!(
                 !casts || allowed,

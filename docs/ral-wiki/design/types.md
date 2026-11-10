@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d56977ff
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
 ---
 
 # The type system: Hindley–Milner with rows
@@ -85,16 +85,21 @@ together with the one value type it is paired with, so output appears only at
 `Unifier::unify_producers` (`core/src/typecheck/unify.rs`) refuses an output pair
 against a type whose kind excludes `Unit`; returners and handles share this check.
 `every_scheme_pairs_a_grade_with_one_value_type` in `core/src/shell/builtins/tests.rs`
-checks builtin schemes; `rhs_bound_ty` in `core/src/typecheck/grade.rs` asserts
-that a captured command's payload is `Unit`. Pairing is an inference invariant,
+checks builtin schemes. Global producer improvement entails `p` whenever a
+returner or handle payload's head or kind excludes `Unit`, even without a
+binding match; this is not a default. An unresolved grade lowers its payload
+dependency to its rank, not conversely: a weak, Unit-capable payload leaves a
+fresh grade generalisable. Structural lowering still reaches grades inside
+weak roots. Young dependencies retire before generalisation so later
+improvement affects instances, not quantified definitions
+([[internals/type-inference|type inference]]). Pairing is an inference invariant,
 not a restriction on declarative type formation. Grades are atomic — a grade
-variable binds only to `p` or `w` — so there is no occurs check, no kind, and a
-grade is never weak.
+variable binds only to `p` or `w` — so there is no occurs check or kind. Grades
+have ranks but are not weak scheme entries.
 
-Every external command is `F^w Unit` (`external_exec_comp_ty` in
-`core/src/typecheck/infer.rs`). A head has one class (`HeadClass`, same file,
-beside `exec_comp_ty`): a binding, a value row, an arm standing in for a head, or
-an external, in the lookup order the runtime shares.
+Every external command is `F^w Unit`. Head classification in
+`core/src/typecheck/generate/call.rs` follows the runtime's lookup order:
+a binding, a value builtin, an arm standing in for a head, or an external.
 
 ## One coercion, at `let`
 
@@ -104,10 +109,17 @@ without wrappers ([[design/capture|grades and capture]]).
 
 - A function right-hand side binds unrun as `return (thunk M)` (Let-fun).
 - `F^w Unit` is captured and binds `String`; `F^p A` binds `A`.
-- `F^ν A` fixes `ν := p`; a computation variable unifies with `F^p α`.
-  This local rule is the sole grade default; no value type is defaulted.
-- `infer_let` applies `rhs_bound_ty`'s decision to its inferred node,
-  constructing the explicit capture/decode or Let-fun terms immediately.
+- An unknown computation head or a grade not decided by producer improvement
+  suspends `bound τ C`; the binder's demanded type never selects the branch.
+  A match on an enclosing parameter survives inner lets, with all its mentions
+  lowered to the scrutinee's rank.
+- Closing the owning region defaults its unresolved binding matches together:
+  `F^ν A` fixes `ν := p`; a computation variable unifies with `F^p α`.
+  No value type is defaulted. An unresolved application defaults to an arrow;
+  conflicting defaults on one unknown are refused with both uses.
+- Only after successful unit closure does readback insert capture/decode or
+  Let-fun terms. Generation emits equations and pending holes, not adaptations
+  ([[decisions/261110_elaboration-is-decided-by-suspended-matches|suspended matches]]).
 
 Commands introduce `w`; builtin parameters demanding values and boundary
 results introduce `p`. Other term producers and ordinary builtin results have
@@ -143,7 +155,7 @@ value is its final stage's, always
 ## An arm stands in for what it is
 
 `standsFor(c)` is the scheme of the base frame or arm already in force under
-`c`, and `[String] → Command` for anything else (`Inferencer::arm`). An
+`c`, and `[String] → Command` for anything else (`Generator::arm`). An
 arm for `curl` therefore has a command's value, its output; an arm for `detach`
 returns what `detach` returns. A `()`-returning stub for an external is admitted
 when its grade is free and captures `""`; the installed scheme has the head's producer
@@ -151,7 +163,7 @@ kind, so a call through the arm types as the head does. A mismatch is
 `Reason::StandsIn`, with a sentence naming what the arm stands in for and what
 to write. The catch-all `handler:` stands in for every command in its block. The
 checker at the literal arm and the run-time vet at install (`alias_arm_scheme`,
-`catch_all_stands_in`) apply the same rule (`Inferencer::arm`). Its parameters
+`catch_all_stands_in`) apply the same rule (`Generator::arm`). Its parameters
 are its slot's, and are read off its type, never its spelling (SPEC §17.7).
 
 ## Branching is HM over thunks, joined by grade
@@ -186,7 +198,9 @@ The capture rule is stable through abstraction and application:
 `let f = { hostname }; let x = f` binds the host name, like
 `let x = hostname`. Only a bind defaults a free grade; arguments and joins
 impose ordinary equalities. Capture placement is local to the resolved
-right-hand side ([[design/capture|grades and capture]]).
+right-hand side; unresolved choices wait for the owning region's closure, and
+readback inserts adaptations only after successful unit closure
+([[design/capture|grades and capture]]).
 
 **Principality is relative to proper kinds.** Inference is principal against a
 declarative system in which every generalised kind is *proper*: not empty, and

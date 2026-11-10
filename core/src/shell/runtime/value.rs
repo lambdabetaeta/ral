@@ -325,6 +325,7 @@ fn fmt_lambda(param: &crate::ir::Name, body: &crate::ir::Comp) -> String {
         .collect();
     while let CompKind::Bind {
         comp: rhs,
+        hole: (),
         pattern,
         rest,
     } = &comp.item

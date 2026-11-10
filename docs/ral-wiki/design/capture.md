@@ -1,7 +1,8 @@
 # Grades and capture: values at `let`
 
-**Only a `let` implicitly turns a command's output into a value.** The rule reads the
-right-hand side's resolved type, so it works through blocks, calls and names:
+**Only a `let` implicitly turns a command's output into a value.** A suspended
+match waits for the right-hand side's computation head and producer grade;
+successful unit readback inserts the chosen adaptation. It works through blocks, calls and names:
 `let f = { hostname }; let host = f` binds the host name.
 
 ## Grades classify producers, not effects
@@ -24,7 +25,8 @@ A *grade* says how a computation produces its result, not whether it writes.
 
 - **`w`: commands.** Externals, base frames such as `echo`, and builtin
   results declared `Command`.
-- **`p`: value demands and boundaries.** A `let` fixes a free grade; builtin
+- **`p`: value demands and boundaries.** A `let` defaults an undecided grade
+  when its owning region closes; builtin
   parameters such as `filter`'s predicate demand a value. Checked-boundary
   decoders (JSON/CSV), `use` and other checked boundaries supply data, so
   their result grade is `p`: joining with a command must not turn that
@@ -50,13 +52,22 @@ The same rule governs local binds, top-level definitions and hoisted `!{…}`.
 - **Function:** bind unrun as `return (thunk M)` (Let-fun).
 - **`F^w Unit`:** insert `capture M to d. decode d`; bind a `String`.
 - **`F^p A`:** bind `A`.
-- **Free grade or computation:** fix `F^ν A` to `F^p A`, or unify the
-  computation variable with `F^p α`, then bind it. This is the sole default.
+- **Free grade or computation:** suspend. A payload excluding `Unit` entails
+  grade `p`; otherwise wait for the scrutinee's region to close, then default
+  `F^ν A` to `F^p A`, or the computation variable to `F^p α`, and bind its value.
+
+**The binder's demanded type does not select capture.** `bound τ C` reads `C`,
+not `τ`; a use demanding `String` cannot solve the grade backwards. A match on
+an enclosing parameter remains suspended across inner lets: everything it
+mentions is lowered to that parameter's rank. Defaults at one rank are chosen
+together. An unresolved `apply` defaults to an arrow without a split; a shared
+unknown with both binding and application defaults is refused, not prioritised
+([[decisions/261110_elaboration-is-decided-by-suspended-matches|suspended matches]]).
 
 Nothing else coerces: arguments and handler arms unify with their demands;
 `if`, `case`, `try` and `?` arms each meet a fresh result, then those results
-unify with the join in source order. A failure blames the later arm. A tail
-`Run` is never captured.
+unify with the join. Source order selects diagnostic blame, not an adaptation.
+A tail `Run` is never captured.
 
 ## Blocks run as written
 
@@ -112,6 +123,9 @@ short spellings.
 | `sort-list-by { \|f\| echo $f } $xs`; `group-by`, `median-by` with a command key | refused, argument hint |
 | `let g = { \|f\| let y = !$f; return $y }; g { echo hi }` | refused, argument hint |
 | `let twice = { \|f\| let _ = !$f; !$f }`; `if $c { twice { return () } } else { echo a }` | refused, join hint |
+| `let g = { \|f\| let y = !$f; if true { !$f } else { echo a } }` | `y` captures; transposing the statements selects the same adaptation |
+| `let g = { \|f\| f 1; if true { !$f } else { return { \|n\| echo $n } } }` | one returned-thunk split; likewise with the conditional bound before the call |
+| `let g = { \|f\| let a = !$f; let b = f 1; return $b }` | refused, conflicting defaults in either order |
 
 For a command where a value is required, return an explicit capture
 (`{ return !{…} }`) or bind it first. Use `succeeds { … }` for a yes/no answer,
@@ -128,8 +142,8 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 - `CompKind::Capture` returns `Bytes`; `Prim::Decode` drops one trailing LF
   or CRLF and strictly decodes UTF-8. Invalid text fails; use `from-bytes`
   to keep binary data. Neither term has surface syntax.
-- `rhs_bound_ty` returns `Bound::Captured` or `Bound::Thunked`;
-  `infer_let` applies it immediately to the right-hand side it inferred.
+- The solver records a binding's `Mode::{Run, Capture, Thunk}` from the RHS
+  head; readback applies it at the binding hole only after unit closure.
 - A stand-in runs whole under its caller's capture. A fresh unit-returning
   stub for an external is a command and captures `""`.
 - A capture reaching the 16 MiB buffer cap fails rather than bind a prefix.
