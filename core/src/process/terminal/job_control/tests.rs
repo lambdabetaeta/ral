@@ -48,7 +48,6 @@ fn input_follows_every_requested_placement() {
                 .expect("permit");
             for (placement, readable) in [
                 (Placement::Inherit, true),
-                (Placement::NewLeader, false),
                 (Placement::NewSession, false),
                 (
                     Placement::Join(Membership::new(
@@ -66,7 +65,6 @@ fn input_follows_every_requested_placement() {
                     matches!(placement.input(), TerminalInput::Readable),
                     readable
                 );
-                #[cfg(unix)]
                 if matches!(placement, Placement::Tenant(_)) {
                     assert!(matches!(
                         placement.step(),

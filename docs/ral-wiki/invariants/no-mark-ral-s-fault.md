@@ -4,14 +4,16 @@
 without the mark, one of ral's own steps failed.** The last pre-exec step of
 every Unix spawn writes one byte on a close-on-exec socket
 (`spawn_with_pgid_after`, `core/src/process/group/unix.rs`). The `execve` that
-follows can then fail only as the program's own failure, and `std`'s errno
-already says which.
+follows can then fail only as that image's own failure, and `std`'s errno
+already says which. If the image is a launcher, `fork` attributes that error
+to it, never a later payload report's error.
 
 - **The mark is one byte on a close-on-exec socketpair.** The parent reads its
   end without waiting (`attributed`, `recv` with `DONTWAIT`): the mark precedes
   the `errno` that `std` has already read, so a byte absent is a byte never
   written. With the mark, the error is `SpawnError::Exec`, hence
-  `Unstarted::Program`. Without it, `SpawnError::Prepare`: the fork, the
+  `Unstarted::Program` at `fork`; launcher attribution happens before any
+  report is heard. Without it, `SpawnError::Prepare`: the fork, the
   placement, a `pre_exec` hook of any caller, or `std`'s own steps before them
   (a NUL in an argument).
 - **The closure owns the socket.** The pre-exec closure is `move`, so the fd it

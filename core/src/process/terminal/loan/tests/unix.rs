@@ -1,34 +1,33 @@
 use super::*;
-use crate::process::{ChildHandle, Group, Placement};
+use crate::process::{ChildHandle, Launch, Leader, StdioSpec};
 use crate::test_helper::terminal::{self, Checkpoint, Mode, PrivatePty};
-use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcgetpgrp, tcsetattr, tcsetpgrp};
+use rustix::termios::{LocalModes, tcgetattr, tcgetpgrp, tcsetpgrp};
+#[cfg(target_os = "linux")]
+use rustix::termios::{OptionalActions, tcsetattr};
 
 /// Own a fresh leader until its last kill; reap only after killing the group.
 /// This also tears down mode-changing children on an assertion failure.
 struct ModeChild {
     child: Option<ChildHandle>,
-    group: Pgid,
+    leader: Leader,
 }
 
 impl ModeChild {
     fn spawn(pty: &PrivatePty, script: &str) -> (Self, Checkpoint) {
         let (observer, child_end) = terminal::checkpoints().unwrap();
-        let mut command = std::process::Command::new("/bin/sh");
-        command
+        let mut launch = Launch::new("/bin/sh");
+        launch
             .args(["-c", script])
-            .stdin(pty.slave().try_clone().unwrap())
-            .stdout(child_end.into_stdio())
-            .stderr(std::process::Stdio::inherit());
-        let (child, group) = crate::process::spawn_with_pgid(&mut command, &Placement::NewLeader)
+            .stdin(StdioSpec::from_owned(pty.slave().try_clone().unwrap()))
+            .stdout(StdioSpec::from_owned(std::os::fd::OwnedFd::from(child_end)))
+            .stderr(StdioSpec::Inherit);
+        let spawned = launch
+            .spawn_leader(&DurableRoot::default().child())
             .expect("spawn a private mode-changing group");
-        drop(command); // Do not keep the child's checkpoint endpoint open.
-        let Group::Owns(group) = group else {
-            panic!("NewLeader must own its fresh group");
-        };
         (
             Self {
-                child: Some(ChildHandle::from_std(child)),
-                group,
+                child: Some(spawned.child),
+                leader: spawned.group,
             },
             observer,
         )
@@ -36,7 +35,7 @@ impl ModeChild {
 
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            self.group.kill();
+            self.leader.pgid().kill();
             let _ = child.kill();
             child.reap().expect("reap the killed mode-changing child");
         }
@@ -58,8 +57,8 @@ fn successful_loan(pty: &PrivatePty, foreign_foreground: bool) {
         ready.expect(b'R').unwrap();
         // The fixture blocks SIGTTOU on this helper thread. The captured
         // foreground belongs to a live child, not the helper's own group.
-        tcsetpgrp(pty.slave(), child.group.as_pid()).unwrap();
-        assert_ne!(child.group.as_pid(), helper_group);
+        tcsetpgrp(pty.slave(), child.leader.pgid().as_pid()).unwrap();
+        assert_ne!(child.leader.pgid().as_pid(), helper_group);
         Some((child, ready))
     } else {
         None
@@ -75,9 +74,12 @@ fn successful_loan(pty: &PrivatePty, foreign_foreground: bool) {
     );
     checkpoint.expect(b'R').unwrap();
     terminal = prepared
-        .lend(child.group)
+        .lend(&child.leader)
         .unwrap_or_else(|(_, error)| panic!("real handoff refused: {error}"));
-    assert_eq!(tcgetpgrp(pty.slave()).unwrap(), child.group.as_pid());
+    assert_eq!(
+        tcgetpgrp(pty.slave()).unwrap(),
+        child.leader.pgid().as_pid()
+    );
     checkpoint.release_line().unwrap();
     checkpoint.expect(b'M').unwrap();
     let changed = tcgetattr(pty.slave()).unwrap();
@@ -135,7 +137,7 @@ fn handoff_resumes_a_group_stopped_before_it_received_the_terminal() {
             let deadline = Instant::now() + terminal::WAIT;
             loop {
                 if waitid(
-                    WaitId::Pid(child.group.as_pid()),
+                    WaitId::Pid(child.leader.pgid().as_pid()),
                     WaitIdOptions::STOPPED | WaitIdOptions::NOHANG,
                 )
                 .unwrap()
@@ -147,7 +149,7 @@ fn handoff_resumes_a_group_stopped_before_it_received_the_terminal() {
                 std::thread::sleep(Duration::from_millis(1));
             }
             terminal = prepared
-                .lend(child.group)
+                .lend(&child.leader)
                 .unwrap_or_else(|(_, error)| panic!("real handoff refused: {error}"));
             checkpoint.expect(b'R').unwrap();
             child.stop();
@@ -175,7 +177,7 @@ fn a_refused_handoff_keeps_modes_guarded_until_after_the_child_is_reaped() {
             let first = tcgetattr(pty.slave()).unwrap();
             assert!(!first.local_modes.contains(LocalModes::ECHO));
             assert!(first.local_modes.contains(LocalModes::ICANON));
-            let error = match retained.take().unwrap().lend(child.group) {
+            let error = match retained.take().unwrap().lend(&child.leader) {
                 Err((prepared, error)) => {
                     retained = Some(prepared);
                     error
@@ -206,6 +208,7 @@ fn a_refused_handoff_keeps_modes_guarded_until_after_the_child_is_reaped() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn guarded_reclaim_restores_modes_without_hearing_any_gesture() {
     terminal::isolated(

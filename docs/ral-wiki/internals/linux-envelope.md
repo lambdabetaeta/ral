@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f26144e0
-verified_at_commit: f26144e0
+generated_at_commit: 40af72fb
+verified_at_commit: 40af72fb
 verified_at_date: 2026-11-09
-anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read, Launch::spawn, Placement, PreparedTerminalLoan::guard, TerminalHold]
+anchors: [Binds, render_objects, bwrap_argv, bwrap_command, Slot, HostEnvelope, render_dev, GpuNodes, cgroup_tree, Baseline, Pinned, pin_envelope, InfoFd, Layer, Shown, Deny::read, EnvelopedLaunch, EnvelopedLaunch::spawn, Launch::born, ProgramLaunch, Placement, PreparedTerminalLoan::guard, TerminalHold]
 ---
 
 # The Linux envelope
@@ -52,7 +52,7 @@ the filesystem**
   before that `setsid`, when a signal to the group would be lost. The
   payload holds a second copy of the writer, which bwrap does not name, until its
   handoff sweep, so the read ends only once the group exists or the
-  envelope has died, and `Launch::spawn` returns no sooner. An empty record
+  envelope has died, and `EnvelopedLaunch::spawn` returns no sooner. An empty record
   means bwrap died before reporting; an unreadable or malformed one makes
   the spawn kill and reap the envelope, then return an error.
 - **A deny line names a host pid.** The seccomp record carries the denied
@@ -63,9 +63,19 @@ the filesystem**
   within microseconds of its start, and every descendant born later, go
   unclaimed
   ([[internals/an-external-end-to-end#Whose deny lines a failure owns|an-external-end-to-end]]).
-- **Process groups and terminal responsibility are separate.** `Launch::spawn`
-  alone steps an envelope `NewLeader`, whatever placement was requested, and
-  returns the payload's separate-session group as `Group::Enveloped`. No loan
+- **A failed birth kills the group it named.** `Launch::born` asks for the
+  payload's group before it hears the report. A refusal, a vanished envelope
+  or a stop after that kills the payload's group, then the monitor's, and
+  only then reaps the monitor. Without a pid namespace the monitor's death
+  reaches the supervisor and its program alone; the group kill reaches what
+  the program forked
+  ([[invariants/a-group-id-is-held-until-its-last-kill|a-group-id-is-held-until-its-last-kill]]).
+- **The envelope is a launch type, not a placement flag.** `EnvelopedLaunch`
+  owns its inner launch and the naming of its payload's group; the inner
+  launch holds the report and the diagnostics file under bwrap's name. Its
+  spawn calls `Launch::born` with `Step::NewLeader`, whatever placement was
+  requested, and lands on `Group::Enveloped`, the payload's separate-session
+  group. `Confinement::denial_pids` claims denial pids from that group. No loan
   targets an envelope. A requested `Tenant` keeps readable terminal stdin and
   consumes its pre-spawn capture through `PreparedTerminalLoan::guard`: an
   opaque `TerminalHold` restores modes on settlement or drop without key
@@ -355,7 +365,7 @@ any confinement.
   writable by ral's uid, the remedy is a root-owned bwrap (the distro package).
 - **A host with no bwrap** is reported by `linux::envelope` at the first launch
   that needs one, and refused as `sandbox::unavailable`. The launch's
-  `Envelope::program` names the binary only for the wording of a spawn failure.
+  `Launcher` names the binary only for the wording of a spawn failure.
 
 Pinned by `authority::sandbox::linux::tests::render::the_launcher_is_the_pinned_envelope_and_never_a_name`,
 `::the_envelope_binary_is_read_only_inside_every_envelope`,

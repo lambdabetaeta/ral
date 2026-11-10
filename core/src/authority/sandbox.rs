@@ -55,7 +55,7 @@ pub use reexec::pinned_arg0;
 // enters the host sandbox through `serve_warrant` before running its payload.
 #[cfg(unix)]
 pub(crate) use carriers::carriers;
-pub(crate) use launch::{Confinement, Image, Ownership, interpreter_of};
+pub(crate) use launch::{Confinement, Image, Ownership, ProgramLaunch, interpreter_of};
 #[cfg(target_os = "macos")]
 pub use macos::ALREADY_PROFILED;
 #[cfg(unix)]

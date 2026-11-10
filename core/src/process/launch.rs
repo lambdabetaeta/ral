@@ -11,8 +11,6 @@
 use crate::environ::ChildEnv;
 use crate::error::Error;
 #[cfg(unix)]
-use crate::process::report::Testimony;
-#[cfg(unix)]
 use crate::process::site::Surface;
 #[cfg(unix)]
 use crate::site::site;
@@ -37,11 +35,51 @@ pub(crate) struct Launch {
     pub(super) setup: ChildSetup,
     /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
-    confined: Option<Confined>,
-    /// The envelope's own stderr, which the parent reads back.
+    launcher: Option<Launcher>,
+}
+
+/// What a confined launch execs in the program's place: blamed by `name`
+/// when it cannot start, and believed through its trampoline's report.
+#[cfg(unix)]
+struct Launcher {
+    name: &'static str,
+    report: crate::process::report::Report,
+    /// An envelope's own stderr, which is not the payload's.
     #[cfg(target_os = "linux")]
     diagnostics: Option<std::fs::File>,
 }
+
+#[cfg(unix)]
+impl Launcher {
+    /// The first word, once the fork has left the child the writer's only
+    /// copies. `piped` reads the stderr a launcher shares with its program.
+    fn heard(
+        self,
+        scope: &crate::process::Scope,
+        piped: impl FnOnce() -> Option<String>,
+    ) -> Result<crate::process::report::Testimony, Unstarted> {
+        let Self {
+            name,
+            report,
+            #[cfg(target_os = "linux")]
+            diagnostics,
+        } = self;
+        let mut testimony = report.forked();
+        testimony.first(scope, || {
+            #[cfg(target_os = "linux")]
+            if let Some(file) = &diagnostics {
+                return vanished(name, envelope::file_said(file));
+            }
+            vanished(name, piped())
+        })?;
+        Ok(testimony)
+    }
+}
+
+/// Asked once after the fork for an envelope's payload group, answering only
+/// once that group exists or the envelope is gone: `Ok(None)` is an envelope
+/// that died before reporting.
+type PayloadPgid = Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, String> + Send>;
 
 /// The child's steps between fork and exec, prepared in the parent. The
 /// order they are configured in is irrelevant: [`ChildSetup::install`] fixes
@@ -103,88 +141,15 @@ impl ChildSetup {
     }
 }
 
-#[cfg(unix)]
-type PayloadPgid = Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, String> + Send>;
-
-/// A confinement envelope: a separate binary that runs the target in turn,
-/// in a session of its own.  Only such a backend declares one.  Windows has
-/// none: its confinement is creation-time state on the target itself.
-#[cfg(unix)]
-pub(crate) struct Envelope {
-    pub(crate) program: &'static str,
-    /// `None` where the envelope reports no payload group: no `--info-fd`
-    /// (a surrendered launch) or a backend without one.  Otherwise asked
-    /// once, after the fork, for the payload's own process group, and
-    /// answering only once the payload is in it or gone; its `Ok(None)` is an
-    /// envelope that died before reporting; an error kills and reaps it.
-    pub(crate) payload_pgid: Option<PayloadPgid>,
-}
-
-/// Reserved high slots for the payload, and independent envelope stdio.
-/// The slots are allocated before spawning, never over an exec-error pipe.
 #[cfg(target_os = "linux")]
-pub(crate) struct EnvelopeStdio {
-    pub(crate) payload: [std::os::fd::OwnedFd; 3],
-    pub(crate) null: std::os::fd::OwnedFd,
-    pub(crate) error: std::os::fd::OwnedFd,
-    pub(crate) diagnostics: std::fs::File,
-}
-
-/// The child-side part of [`EnvelopeStdio`]: the payload's reserved slots and
-/// the envelope's own endpoints.
+mod envelope;
 #[cfg(target_os = "linux")]
-struct EnvelopeStreams {
-    payload: [std::os::fd::OwnedFd; 3],
-    null: std::os::fd::OwnedFd,
-    error: std::os::fd::OwnedFd,
-}
-
+use envelope::EnvelopeStreams;
 #[cfg(target_os = "linux")]
-impl EnvelopeStreams {
-    /// Save the final payload streams, then give the envelope its own
-    /// endpoints. Only dup2/ioctl: no allocation or locks after fork.
-    ///
-    /// # Safety
-    /// Only in the forked child, between fork and exec: it replaces fds 0–2
-    /// and the reserved slots, which it only borrows.
-    unsafe fn capture(&self) -> std::io::Result<()> {
-        use std::os::fd::AsRawFd;
-        // SAFETY: every target is a reserved slot or a standard stream of
-        // this child, never an exec-error pipe.
-        unsafe {
-            for (source, target) in [0, 1, 2].into_iter().zip(&self.payload) {
-                if libc::dup2(source, target.as_raw_fd()) < 0 {
-                    // A closed inherited stream refuses preparation. An absent
-                    // slot is not a marker: bwrap could reuse it.
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            // bwrap discovers the host tty from its actual stdout and binds it
-            // as /dev/console. Tty lifetime is shared; pipe EOF/EPIPE is not.
-            let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
-            let tty_stdout = libc::ioctl(1, libc::TCGETS, termios.as_mut_ptr()) == 0;
-            let sources = [&self.null, &self.null, &self.error];
-            for (target, source) in [0, 1, 2].into_iter().zip(sources) {
-                if target == 1 && tty_stdout {
-                    continue;
-                }
-                if libc::dup2(source.as_raw_fd(), target) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        }
-    }
-}
+pub(crate) use envelope::{EnvelopeStdio, EnvelopedLaunch};
 
-/// A confined launch's trampoline: the report it makes on its program, and
-/// the envelope that runs it, where one does.  Forked, the report is the
-/// parent's read end.
-#[cfg(unix)]
-pub(crate) struct Confined<R = crate::process::report::Report> {
-    pub(crate) report: R,
-    pub(crate) envelope: Option<Envelope>,
-}
+mod landing;
+pub(crate) use landing::Leader;
 
 /// A confined launch's token, described: the projection its spawn stamps and
 /// mints into an `AppContainer` token, and the image that token must load.
@@ -217,10 +182,20 @@ impl From<crate::process::Cancellation> for Unstarted {
     }
 }
 
+/// A child created, its jail, and `H`, what is left to hear of it.
+type Created<H> = Result<
+    (
+        crate::process::ChildHandle,
+        Option<crate::process::jail::JailCgroup>,
+        H,
+    ),
+    Unstarted,
+>;
+
 /// A child born, and where it landed.
-pub(crate) struct Spawned {
+pub(crate) struct Spawned<G> {
     pub(crate) child: crate::process::ChildHandle,
-    pub(crate) group: crate::process::Group,
+    pub(crate) group: G,
     pub(crate) terminal: crate::process::TerminalHold,
     /// The guest jail's cgroup, whatever `apply_guest_jail` staged.
     pub(crate) jail: Option<crate::process::jail::JailCgroup>,
@@ -358,14 +333,6 @@ impl Launch {
 
 #[cfg(unix)]
 impl Launch {
-    /// Whether an envelope stands between ral and the program, whose payload
-    /// then leads a session of its own.
-    pub(crate) fn enveloped(&self) -> bool {
-        self.confined
-            .as_ref()
-            .is_some_and(|confined| confined.envelope.is_some())
-    }
-
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         let cmd = site!(Surface::ProcessLaunch, std::process::Command::new(program));
         Self::from_command(cmd)
@@ -381,33 +348,25 @@ impl Launch {
             cmd,
             setup: ChildSetup::default(),
             jail: None,
-            confined: None,
-            #[cfg(target_os = "linux")]
-            diagnostics: None,
+            launcher: None,
         }
     }
 
-    /// Retain the reserved slots; installation captures the final stdio.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn envelope_stdio(&mut self, stdio: EnvelopeStdio) {
-        let EnvelopeStdio {
-            payload,
-            null,
-            error,
-            diagnostics,
-        } = stdio;
-        self.setup.streams = Some(EnvelopeStreams {
-            payload,
-            null,
-            error,
-        });
-        self.diagnostics = Some(diagnostics);
-    }
-
-    /// Run under the trampoline `confined` describes.
-    pub(crate) fn confine(&mut self, confined: Confined) -> &mut Self {
-        self.confined = Some(confined);
-        self
+    /// Adopt the trampoline's command and its report together.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn trampolined(
+        cmd: std::process::Command,
+        report: crate::process::report::Report,
+    ) -> Self {
+        Self {
+            launcher: Some(Launcher {
+                name: "ral's sandbox trampoline",
+                report,
+                #[cfg(target_os = "linux")]
+                diagnostics: None,
+            }),
+            ..Self::from_command(cmd)
+        }
     }
 
     pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
@@ -499,94 +458,37 @@ impl Launch {
         (cmd, jail)
     }
 
-    /// Spawn with `placement` under `scope`, and on a confined launch read
-    /// what its trampoline says of the start. An envelope always leads its
-    /// own group; its payload's group, named once it exists, is where the
-    /// child lands. A tenant hands over the terminal only to its fresh
-    /// leader, or retains a restoration-only guard for an envelope.
-    ///
-    /// # Errors
-    /// [`Unstarted`]: the program's own `execve`; a refusal for the fork,
-    /// any of ral's pre-exec steps, or any failure of the envelope or
-    /// trampoline; or a stop on `scope` before the fork or before the
-    /// trampoline spoke.  Any child is then killed and reaped.
-    pub(crate) fn spawn(
+    /// Fork under `step`: the child, its jail, and what is left to hear of
+    /// it, the launcher's first word where one runs in the program's place.
+    fn create(
         self,
-        placement: crate::process::Placement,
+        step: crate::process::group::Step,
         scope: &crate::process::Scope,
-    ) -> Result<Spawned, Unstarted> {
-        use crate::process::{Group, Placement, TerminalHold};
-        let enveloped = self.enveloped();
+    ) -> Created<impl FnOnce(&mut crate::process::ChildHandle) -> Result<(), Unstarted>> {
         scope.poll()?;
         let Self {
             mut cmd,
             setup,
             jail,
-            confined,
-            #[cfg(target_os = "linux")]
-            diagnostics,
+            launcher,
         } = self;
         setup.install(&mut cmd);
-        let ((child, group), confined) = fork(cmd, confined, |cmd| {
-            let placement = if enveloped {
-                &Placement::NewLeader
-            } else {
-                &placement
-            };
-            crate::process::spawn_with_pgid(cmd, placement)
+        let child = fork(cmd, launcher.as_ref(), |cmd| {
+            crate::process::spawn_with_pgid(cmd, step)
         })?;
-        let mut child = crate::process::ChildHandle::from_std(child);
-        #[cfg(target_os = "linux")]
-        child.envelope_stderr(diagnostics);
-        let payload = match confined.map(|confined| confined.hear(&mut child, scope)) {
-            None => None,
-            Some(Ok(payload)) => payload,
-            Some(Err(unstarted)) => {
-                let why = discarded(child, &group, unstarted);
-                // A refused launch may already have changed terminal modes.
-                drop(placement);
-                drop(jail);
-                return Err(why);
-            }
+        let hear = move |child: &mut crate::process::ChildHandle| {
+            let Some(launcher) = launcher else {
+                return Ok(());
+            };
+            let testimony = launcher.heard(scope, || child.stderr_said())?;
+            // Kept for the reaper, which amends the child's end by it.
+            #[cfg(target_os = "linux")]
+            child.testify(testimony);
+            #[cfg(not(target_os = "linux"))]
+            drop(testimony);
+            Ok(())
         };
-        let group = match group {
-            Group::Owns(envelope) if enveloped => Group::Enveloped(payload.unwrap_or(envelope)),
-            group => group,
-        };
-        let terminal = match placement {
-            Placement::Tenant(prepared) if enveloped => prepared.guard(),
-            Placement::Tenant(prepared) => {
-                // Tenant lowered to setpgid(0, 0): this child's pid is a fresh
-                // leader in ral's session, never a joined or enveloped group.
-                let leader = crate::process::Pgid::from_raw(
-                    i32::try_from(child.id()).expect("a child pid fits in i32"),
-                )
-                .expect("a child pid is positive");
-                match prepared.lend(leader) {
-                    Ok(terminal) => terminal,
-                    Err((prepared, error)) => {
-                        let why = discarded(
-                            child,
-                            &group,
-                            Unstarted::Refused(Error::io(
-                                "could not hand over the terminal to the command's process group",
-                                &error,
-                            )),
-                        );
-                        drop(prepared);
-                        drop(jail);
-                        return Err(why);
-                    }
-                }
-            }
-            _ => TerminalHold::default(),
-        };
-        Ok(Spawned {
-            child,
-            group,
-            terminal,
-            jail,
-        })
+        Ok((crate::process::ChildHandle::from_std(child), jail, hear))
     }
 
     /// Spawn *detached* by double fork: the survivor is this process's
@@ -607,33 +509,25 @@ impl Launch {
         self,
         scope: &crate::process::Scope,
     ) -> Result<crate::process::group::Survivor, Unstarted> {
+        scope.poll()?;
         let Self {
             mut cmd,
             setup,
             jail,
-            confined,
-            #[cfg(target_os = "linux")]
-            diagnostics,
+            launcher,
         } = self;
         assert!(
             jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
-        scope.poll()?;
         setup.install(&mut cmd);
-        let (survivor, confined) = fork(cmd, confined, crate::process::group::spawn_detached)?;
-        if let Some(confined) = confined {
-            let launcher = confined.launcher();
-            let Confined { mut report, .. } = confined;
-            report.first(scope, || {
-                #[cfg(target_os = "linux")]
-                let said = diagnostics
-                    .as_ref()
-                    .and_then(crate::process::child::file_said);
-                #[cfg(not(target_os = "linux"))]
-                let said = None;
-                vanished(launcher, said)
-            })?;
+        let survivor = fork(
+            cmd,
+            launcher.as_ref(),
+            crate::process::group::spawn_detached,
+        )?;
+        if let Some(launcher) = launcher {
+            launcher.heard(scope, || None)?;
         }
         Ok(survivor)
     }
@@ -648,113 +542,64 @@ impl Launch {
     /// reaper hands it to every waiter.
     #[cfg(test)]
     pub(crate) fn output(mut self) -> Result<std::process::Output, Unstarted> {
-        use std::io::Read;
-        use std::os::unix::process::ExitStatusExt;
         self.stdout(StdioSpec::Piped).stderr(StdioSpec::Piped);
         let unstopped = crate::process::DurableRoot::default().child();
-        let Spawned { mut child, .. } =
-            self.spawn(crate::process::Placement::Inherit, &unstopped)?;
-        let drain = |pipe: Option<Box<dyn Read + Send>>| {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                if let Some(mut pipe) = pipe {
-                    let _ = pipe.read_to_end(&mut bytes);
-                }
-                bytes
-            })
-        };
-        let (stdout, stderr) = (drain(child.take_stdout()), drain(child.take_stderr()));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let watch = child.into_watch(tx, std::convert::identity);
-        let outcome = rx.recv().expect("the reaper reports every watched exit");
-        let _ = watch.reap();
-        let raw = match outcome {
-            crate::process::WaitOutcome::Exited(code) => code << 8,
-            crate::process::WaitOutcome::Signaled(signal) => signal.number(),
-        };
-        Ok(std::process::Output {
-            status: std::process::ExitStatus::from_raw(raw),
-            stdout: stdout.join().expect("the stdout drain"),
-            stderr: stderr.join().expect("the stderr drain"),
-        })
+        Ok(output(
+            self.spawn(crate::process::Placement::Inherit, &unstopped)?,
+        ))
     }
 }
 
-/// Fork, then release the parent's child-only descriptors before hearing
-/// the payload. The report's writer must remain open across the fork only.
+#[cfg(all(test, unix))]
+fn output(spawned: Spawned<crate::process::Group>) -> std::process::Output {
+    use std::io::Read;
+    use std::os::unix::process::ExitStatusExt;
+    let Spawned { mut child, .. } = spawned;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let (stdout, stderr) = (drain(child.take_stdout()), drain(child.take_stderr()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watch = child.into_watch(tx, std::convert::identity);
+    let outcome = rx.recv().expect("the reaper reports every watched exit");
+    let _ = watch.reap();
+    let raw = match outcome {
+        crate::process::WaitOutcome::Exited(code) => code << 8,
+        crate::process::WaitOutcome::Signaled(signal) => signal.number(),
+    };
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(raw),
+        stdout: stdout.join().expect("the stdout drain"),
+        stderr: stderr.join().expect("the stderr drain"),
+    }
+}
+
+/// Fork, then release the parent's child-only descriptors before anything
+/// is heard. A failed `execve` is the program's own, unless `launcher` was
+/// to run in its place: then it is the launcher's, and a refusal.
 #[cfg(unix)]
 fn fork<T>(
     mut cmd: std::process::Command,
-    confined: Option<Confined>,
+    launcher: Option<&Launcher>,
     spawn: impl FnOnce(&mut std::process::Command) -> Result<T, crate::process::SpawnError>,
-) -> Result<(T, Option<Confined<Testimony>>), Unstarted> {
+) -> Result<T, Unstarted> {
+    use crate::process::SpawnError::{Exec, Prepare};
     let forked = spawn(&mut cmd);
     drop(cmd);
-    let confined = confined.map(Confined::forked);
-    match forked {
-        Ok(born) => Ok((born, confined)),
-        Err(e) => Err(unforked(e, confined.as_ref().map(Confined::launcher))),
-    }
-}
-
-#[cfg(unix)]
-impl Confined {
-    fn forked(self) -> Confined<Testimony> {
-        Confined {
-            report: self.report.forked(),
-            envelope: self.envelope,
-        }
-    }
-}
-
-#[cfg(unix)]
-impl<R> Confined<R> {
-    /// What runs in the program's place.
-    fn launcher(&self) -> &'static str {
-        self.envelope
-            .as_ref()
-            .map_or("ral's sandbox trampoline", |envelope| envelope.program)
-    }
-}
-
-#[cfg(unix)]
-impl Confined<Testimony> {
-    /// Hear `child`'s start from its trampoline, a stop on `scope` ending the
-    /// wait: its payload's group, where the envelope names one.  On Linux the
-    /// child keeps the testimony for its end.
-    fn hear(
-        self,
-        child: &mut crate::process::ChildHandle,
-        scope: &crate::process::Scope,
-    ) -> Result<Option<crate::process::Pgid>, Unstarted> {
-        let launcher = self.launcher();
-        let Self {
-            mut report,
-            envelope,
-        } = self;
-        let payload = match envelope.and_then(|envelope| envelope.payload_pgid) {
-            Some(ask) => ask().map_err(unavailable)?,
-            None => None,
-        };
-        report.first(scope, || vanished(launcher, child.stderr_said()))?;
-        #[cfg(target_os = "linux")]
-        child.testify(report);
-        Ok(payload)
-    }
-}
-
-/// A spawn that made no child: ral's step before the `execve`, or the
-/// `execve`, the program's own unless `launcher` was to run in its place.
-#[cfg(unix)]
-fn unforked(e: crate::process::SpawnError, launcher: Option<&'static str>) -> Unstarted {
-    use crate::process::SpawnError::{Exec, Prepare};
-    match (e, launcher) {
-        (Prepare(e), _) => unprepared(e),
-        (Exec(e), None) => Unstarted::Program(e),
-        (Exec(e), Some(launcher)) => Unstarted::Refused(unavailable(format!(
-            "cannot start {launcher}: {e}; the command never ran"
+    forked.map_err(|error| match (error, launcher) {
+        (Prepare(error), _) => unprepared(error),
+        (Exec(error), None) => Unstarted::Program(error),
+        (Exec(error), Some(launcher)) => Unstarted::Refused(unavailable(format!(
+            "cannot start {}: {error}; the command never ran",
+            launcher.name
         ))),
-    }
+    })
 }
 
 /// `launcher`, ended before its trampoline spoke; `said`, what it left on a
@@ -785,29 +630,107 @@ fn unprepared(why: impl std::fmt::Display) -> Unstarted {
     )))
 }
 
-/// Kill the owned group before reaping: the unreaped leader pins its ID.
-/// Never retain that numeric group ID for a later drain-join kill callback.
-fn discarded(
-    mut child: crate::process::ChildHandle,
-    group: &crate::process::Group,
-    why: Unstarted,
-) -> Unstarted {
-    if let Some(group) = group.owned() {
-        group.kill();
+/// A child created and not yet landed. Unless it lands, its drop kills every
+/// group named for it, then the child, and reaps it: no exit from a birth
+/// leaves either alive. No group ID is kept for a kill after the reap.
+struct Unlanded<'a> {
+    child: &'a mut crate::process::ChildHandle,
+    /// An envelope's payload group, once named. Nothing pins it.
+    payload: Option<crate::process::Pgid>,
+    /// The fresh group the child leads and, unreaped, pins.
+    led: Option<crate::process::Pgid>,
+}
+
+impl Unlanded<'_> {
+    /// Ask an envelope for its payload's group, and hold the answer.
+    fn name(&mut self, payload: Option<PayloadPgid>) -> Result<(), Unstarted> {
+        self.payload = payload.map_or(Ok(None), |ask| ask()).map_err(unavailable)?;
+        Ok(())
     }
-    let _ = child.kill();
-    let _ = child.reap();
-    #[cfg(windows)]
-    if let Some(group) = group.owned() {
-        crate::process::release_win_group(group.as_raw());
+
+    /// Landed: the child and its groups are their collector's from here.
+    fn landed(self) {
+        std::mem::forget(self);
     }
-    why
+}
+
+impl Drop for Unlanded<'_> {
+    fn drop(&mut self) {
+        let groups = [self.payload, self.led];
+        for group in groups.into_iter().flatten() {
+            group.kill();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.reap();
+        #[cfg(windows)]
+        for group in groups.into_iter().flatten() {
+            crate::process::release_win_group(group.as_raw());
+        }
+    }
+}
+
+impl Launch {
+    /// One birth for every landing: create the child under `step`, name its
+    /// envelope's `payload` group before anything is heard, hear its
+    /// launcher, then `land` on the child's own pgid and the payload's.
+    ///
+    /// A failed birth tears its child down, and only then drops `request`,
+    /// restoring what it saved, and after it the jail.
+    fn born<R, G>(
+        self,
+        step: crate::process::group::Step,
+        request: R,
+        scope: &crate::process::Scope,
+        payload: Option<PayloadPgid>,
+        land: impl FnOnce(
+            R,
+            crate::process::Pgid,
+            Option<crate::process::Pgid>,
+        ) -> Result<(G, crate::process::TerminalHold), (R, Unstarted)>,
+    ) -> Result<Spawned<G>, Unstarted> {
+        let (mut child, jail, hear) = self.create(step, scope)?;
+        let own = crate::process::Pgid::from_raw(
+            i32::try_from(child.id()).expect("a child pid fits in i32"),
+        )
+        .expect("a child pid is positive");
+        let mut unlanded = Unlanded {
+            child: &mut child,
+            payload: None,
+            led: step.leads().then_some(own),
+        };
+        let heard = unlanded.name(payload).and_then(|()| hear(unlanded.child));
+        let landed = match heard {
+            Ok(()) => land(request, own, unlanded.payload),
+            Err(why) => Err((request, why)),
+        };
+        match landed {
+            Ok((group, terminal)) => {
+                unlanded.landed();
+                Ok(Spawned {
+                    child,
+                    group,
+                    terminal,
+                    jail,
+                })
+            }
+            Err((request, why)) => {
+                drop(unlanded);
+                drop(request);
+                drop(jail);
+                Err(why)
+            }
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 #[path = "launch/terminal_tests.rs"]
 mod terminal_tests;
+
+#[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod regression_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -900,12 +823,10 @@ mod tests {
     /// `program` run under a trampoline that is never told anything.
     fn confined(program: &str) -> Launch {
         let (reader, writer) = crate::process::cloexec_socketpair().expect("socketpair");
-        let mut launch = Launch::new(program);
-        launch.confine(super::Confined {
-            report: crate::process::report::Report::new(reader, writer.into()),
-            envelope: None,
-        });
-        launch
+        Launch::trampolined(
+            Launch::new(program).cmd,
+            crate::process::report::Report::new(reader, writer.into()),
+        )
     }
 
     /// Confinement changes whose the `execve` is, never whose ral's own
@@ -947,22 +868,20 @@ mod tests {
             drop(witness.started());
             let mut launch = Launch::new("/bin/sh");
             launch.args(["-c", "exit 0"]);
-            launch.confine(super::Confined {
-                report: crate::process::report::Report::new(reader, writer.into()),
-                envelope: Some(super::Envelope {
-                    program: "/bin/sh",
-                    payload_pgid: None,
-                }),
-            });
+            let launch = super::EnvelopedLaunch::synthetic(
+                launch.cmd,
+                "/bin/sh",
+                None,
+                crate::process::report::Report::new(reader, writer.into()),
+            );
             let mut spawned = launch.spawn(placement, &unstopped()).unwrap();
             let pid = spawned.child.id();
             let status = spawned.child.reap().expect("reap envelope");
             assert!(status.success(), "{status:?}");
-            assert!(matches!(
-                spawned.group,
-                crate::process::Group::Enveloped(group)
-                    if group.as_raw() == i32::try_from(pid).unwrap()
-            ));
+            assert_eq!(
+                spawned.group.owned().map(crate::process::Pgid::as_raw),
+                Some(i32::try_from(pid).unwrap())
+            );
         }
     }
 
@@ -1105,23 +1024,13 @@ impl Launch {
         self
     }
 
-    /// Confine under `scope`, then lower through `CreateProcessW` and spawn
-    /// with the requested process-group placement: the child, and where it
-    /// landed.  The jail cgroup is always `None`: Linux guests only.  The
-    /// token goes straight from the confinement to `CreateProcessW`.
-    ///
-    /// # Errors
-    /// [`Unstarted`]: `CreateProcessW`'s own failure, the program's; a
-    /// refusal for the confinement, for a `.bat`/`.cmd` program and for any
-    /// of ral's steps: a NUL in an argument, path or environment entry,
-    /// handle admission, or a Job Object that cannot take the child or its
-    /// process budget; or a stop on `scope` before, during or after the
-    /// confinement, short of `CreateProcessW`.
-    pub(crate) fn spawn(
+    /// Create the child under `step`. Windows has no launcher to hear and
+    /// no jail.
+    fn create(
         mut self,
-        placement: crate::process::Placement,
+        step: crate::process::group::Step,
         scope: &crate::process::Scope,
-    ) -> Result<Spawned, Unstarted> {
+    ) -> Created<impl FnOnce(&mut crate::process::ChildHandle) -> Result<(), Unstarted>> {
         scope.poll()?;
         let caps = self
             .confined
@@ -1135,37 +1044,8 @@ impl Launch {
             })
             .transpose()?;
         scope.poll()?;
-        let (child, group) = windows::spawn(&mut self, &placement, caps.as_ref())?;
-        let terminal = match placement {
-            crate::process::Placement::Tenant(prepared) => {
-                let leader = crate::process::Pgid::from_raw(
-                    i32::try_from(child.id()).expect("a child pid fits in i32"),
-                )
-                .expect("a child pid is positive");
-                match prepared.lend(leader) {
-                    Ok(terminal) => terminal,
-                    Err((prepared, error)) => {
-                        let why = discarded(
-                            child,
-                            &group,
-                            Unstarted::Refused(Error::io(
-                                "could not hand over the terminal to the command's process group",
-                                &error,
-                            )),
-                        );
-                        drop(prepared);
-                        return Err(why);
-                    }
-                }
-            }
-            _ => crate::process::TerminalHold::default(),
-        };
-        Ok(Spawned {
-            child,
-            group,
-            terminal,
-            jail: None,
-        })
+        let child = windows::spawn(&mut self, step, caps.as_ref())?;
+        Ok((child, None, |_: &mut crate::process::ChildHandle| Ok(())))
     }
 }
 
@@ -1254,8 +1134,9 @@ mod windows {
         EnvEdit, Launch, SecurityCapabilitiesAttr, StdioSpec, Unstarted, unprepared, windows_args,
     };
     use crate::error::Error;
+    use crate::process::ChildHandle;
+    use crate::process::group::Step;
     use crate::process::outcome::KILL_EXIT_CODE;
-    use crate::process::{ChildHandle, Placement};
     use std::ffi::{OsStr, OsString};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -1283,16 +1164,16 @@ mod windows {
 
     pub(super) fn spawn(
         launch: &mut Launch,
-        placement: &Placement,
+        step: Step,
         caps: Option<&SecurityCapabilitiesAttr>,
-    ) -> Result<(ChildHandle, crate::process::Group), Unstarted> {
+    ) -> Result<ChildHandle, Unstarted> {
         reject_batch(&launch.program)?;
-        let prepared = crate::process::group::prepare_group(placement)
+        let prepared = crate::process::group::prepare_group(step)
             .map_err(|e| Error::new(format!("cannot prepare the child's Job Object: {e}")))?;
-        match launched(launch, placement, &prepared, caps) {
+        match launched(launch, step, &prepared, caps) {
             Ok(child) => {
-                let group = crate::process::group::register_prepared_group(prepared, &child);
-                Ok((child, group))
+                crate::process::group::register_prepared_group(prepared, &child);
+                Ok(child)
             }
             Err(err) => {
                 crate::process::group::close_prepared_group(prepared);
@@ -1305,7 +1186,7 @@ mod windows {
     /// group's, or one made for it alone to carry a grant's process budget.
     fn launched(
         launch: &mut Launch,
-        placement: &Placement,
+        step: Step,
         prepared: &crate::process::group::PreparedGroup,
         caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<ChildHandle, Unstarted> {
@@ -1324,7 +1205,7 @@ mod windows {
                 crate::process::limits::unbudgeted("cannot cap the child's Job Object").into(),
             );
         }
-        let created = spawn_inner(launch, placement, job.is_some(), caps)?;
+        let created = spawn_inner(launch, step, job.is_some(), caps)?;
         if let Some(job) = job {
             created.enter(job)?;
         }
@@ -1394,7 +1275,7 @@ mod windows {
 
     fn spawn_inner(
         launch: &mut Launch,
-        placement: &Placement,
+        step: Step,
         suspended: bool,
         caps: Option<&SecurityCapabilitiesAttr>,
     ) -> Result<Created, Unstarted> {
@@ -1478,13 +1359,7 @@ mod windows {
 
         let mut flags =
             launch.creation_flags | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-        if matches!(
-            placement,
-            Placement::NewLeader
-                | Placement::Tenant(_)
-                | Placement::NewSession
-                | Placement::Join(_)
-        ) {
+        if !matches!(step, Step::Inherit) {
             flags |= CREATE_NEW_PROCESS_GROUP;
         }
         if suspended {

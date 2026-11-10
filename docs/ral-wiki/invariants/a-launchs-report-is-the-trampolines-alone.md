@@ -37,9 +37,13 @@ write them.
 - **The writer is lent by number and closed by the parent at the fork.** The
   parent's copy of the writer (`Report::new`, kept by `Handoff::keep`) stays
   open past the spawn because the one `pre_exec` of `Handoff::install` clears
-  close-on-exec on that number; `Report::forked` then drops it on every path
-  (`fork`, `core/src/process/launch.rs`, before the spawn's result is
-  examined, for `spawn` and `spawn_detached` alike). EOF then means every copy
+  close-on-exec on that number. `fork` drops the command immediately after
+  spawning, releasing child-only descriptors. `Launcher::heard` then calls
+  `Report::forked`, for `Launch::born` and `spawn_detached` alike. A launch's
+  one `Launcher` holds the report: `Launch::trampolined` fixes a direct
+  trampoline's, and `EnvelopedLaunch` its envelope's mandatory one. No mutable
+  configuration can add another.
+  EOF then means every copy
   in the child's tree is closed; a parent still holding one would turn every
   EOF into a hang.
 - **The trampoline marks the report close-on-exec after its descriptor sweep**

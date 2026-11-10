@@ -5,7 +5,7 @@ use std::io;
 use super::keys::KeyAttribution;
 use super::lease::TerminalPermit;
 use crate::process::cancel::{CancelCause, ScopeNode};
-use crate::process::{Pgid, Signal};
+use crate::process::{Leader, Signal};
 
 #[cfg(unix)]
 #[path = "loan/unix.rs"]
@@ -29,17 +29,16 @@ impl PreparedTerminalLoan {
         }
     }
 
-    /// The caller supplies a fresh leader in ral's session. Refusal retains
-    /// the state until any mode-changing child has been torn down.
-    pub(crate) fn lend(self, leader: Pgid) -> Result<TerminalHold, (Self, io::Error)> {
-        match sys::hand_over(leader) {
+    /// Refusal retains state until any mode-changing child is torn down.
+    pub(crate) fn lend(self, leader: &Leader) -> Result<TerminalHold, (Self, io::Error)> {
+        match sys::hand_over(leader.pgid()) {
             Ok(()) => Ok(self.into_lent()),
             Err(error) => Err((self, error)),
         }
     }
 
     /// An envelope keeps restoration responsibility without a handoff.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub(in crate::process) fn guard(self) -> TerminalHold {
         TerminalHold(Hold::Guarded(self.saved))
     }
@@ -89,7 +88,7 @@ enum Hold {
     #[default]
     Unheld,
     /// Modes restored on drop, nothing handed over, no key heard back.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     Guarded(sys::Saved),
     Lent(TerminalLoan),
 }
@@ -100,7 +99,7 @@ impl TerminalHold {
         match &mut self.0 {
             Hold::Lent(loan) => loan.hear(signal),
             Hold::Unheld => {}
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             Hold::Guarded(_) => {}
         }
     }
@@ -109,7 +108,7 @@ impl TerminalHold {
         match &self.0 {
             Hold::Lent(loan) => loan.pressed(),
             Hold::Unheld => None,
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             Hold::Guarded(_) => None,
         }
     }
@@ -118,7 +117,7 @@ impl TerminalHold {
         match self.0 {
             Hold::Lent(loan) => loan.reclaim(last),
             Hold::Unheld => {}
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             Hold::Guarded(saved) => drop(saved),
         }
     }

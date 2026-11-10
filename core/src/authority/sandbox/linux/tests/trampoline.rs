@@ -115,7 +115,7 @@ fn run_trampoline(
     )
     .expect("the launch builds");
     let mut launch = bwrapped(cmd, info, stdio, report);
-    launch.stdin(crate::process::StdioSpec::Null);
+    launch.launch_mut().stdin(crate::process::StdioSpec::Null);
     launch.output()
 }
 

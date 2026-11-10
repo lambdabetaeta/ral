@@ -1254,13 +1254,8 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     let mut cmd = own.command();
     cmd.args(slots.argv());
     handoff.install(&mut cmd);
-    let mut launch = crate::process::Launch::from_command(cmd);
-    launch
-        .confine(crate::process::launch::Confined {
-            report,
-            envelope: None,
-        })
-        .stdin(crate::process::StdioSpec::Null);
+    let mut launch = crate::process::Launch::trampolined(cmd, report);
+    launch.stdin(crate::process::StdioSpec::Null);
     let ran = launch.output();
     drop(withheld);
     let Err(Unstarted::Refused(why)) = ran else {

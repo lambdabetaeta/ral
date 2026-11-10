@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f26144e0
-verified_at_commit: f26144e0
+generated_at_commit: 40af72fb
+verified_at_commit: 40af72fb
 verified_at_date: 2026-11-09
-anchors: [StartFailure, StartFailure::settle, Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, Placement::command, TerminalAccess::reach, TerminalHold, PreparedTerminalLoan::lend, discarded, Drains::join_under, SpawnError, spawn_with_pgid_after, attributed, unforked, unprepared, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+anchors: [StartFailure, StartFailure::settle, Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, Placement::land, Placement::command, TerminalAccess::reach, TerminalHold, PreparedTerminalLoan::lend, Unlanded, Drains::join_under, SpawnError, spawn_with_pgid_after, attributed, fork, Launcher, Launch::born, Leader, EnvelopedLaunch, ProgramLaunch, unprepared, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
@@ -40,7 +40,7 @@ is [[design/exec|exec]]; what a confined launch adds is
   removes if the built launch is dropped, and Linux's bwrap host probe, which
   waits on bwrap children once per process. Whatever may be stopped, Windows'
   stamps and token and the wait for a trampoline's first word, is
-  `Launch::spawn`'s, under the scope `start` hands it. On Unix the scope is read
+  the direct or enveloped spawn's, under the scope `start` hands it. On Unix the scope is read
   once, before the fork; on Windows before confining and again just before the
   child is made, so a wall that expired during minutes of stamping is found
   before the child exists. So `start` is the one place a launch is stopped or
@@ -51,11 +51,11 @@ is [[design/exec|exec]]; what a confined launch adds is
 ## How a start fails
 
 **`Unstarted` says whose failure it was, and the answer is never inferred from
-an `errno`.** `Launch::spawn` and `spawn_detached` return nothing else.
+an `errno`.** Direct and enveloped spawns return the same failure type.
 
 Which of the three cases a failure is, and so whom it blames, is
 [[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]].
-`Stopped` arises from `Launch::spawn`'s poll, `dacl::cancelled` and
+`Stopped` arises from `Launch::born`'s poll, `dacl::cancelled` and
 `Testimony::first`.
 
 - **`Program` is read as the program's.** `Program::exec_error` turns it into the same
@@ -65,15 +65,22 @@ Which of the three cases a failure is, and so whom it blames, is
 - **The mark decides it**: a spawn error that the child's last pre-exec step
   did not precede is ral's
   ([[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]). `SpawnError` is
-  `Prepare` or `Exec`, and `unforked` reads it: a `Prepare` failure is always
-  ral's own (`unprepared`), whatever stands in the program's place; only an
-  `Exec` failure depends on confinement. When a confining launcher runs in the
-  program's place, its `Exec` failure is the launcher's, `Refused`.
-- **A discarded child is killed and reaped** (`discarded`). A refusal after the
+  `Prepare` or `Exec`, and `fork` reads it: a `Prepare` failure is always
+  ral's own (`unprepared`), whatever stands in the program's place. `Exec`
+  is `Program`, unless the launch holds a `Launcher` to run in the program's
+  place: then it is that launcher's, and `Refused`. Only the fork is read so.
+  A payload report's `Program(errno)` is heard afterwards and is never
+  rewritten as a launcher refusal.
+- **A discarded child is killed and reaped** (`Unlanded`). A refusal after the
   fork, such as an unnameable payload group or a refused report, leaves no
-  running child behind. The owned group is killed before reaping its leader,
-  whose unreaped pid pins the group ID. `detach` leaves its survivor: it is
-  never killed.
+  running child behind. `born` holds the created child in an `Unlanded`, names
+  an envelope's payload group into it before it hears anything, and retains
+  the applied `Step` and request until landing completes. Unless the child
+  lands, the guard's drop kills the payload's group, then the child's own
+  fresh group when `Step::leads()`, before reaping the child, whose unreaped
+  pid pins the group it leads: no exit from a birth skips it. `born` then
+  drops the request, restoring captured state, and releases the jail. `detach` leaves its survivor: it is never
+  killed.
 - **A refused terminal handoff may follow effects.** `Launch::spawn` lends a
   direct tenant's fresh group after exec. Refusal retains the captured guard
   through group kill and child kill/reap, then restores state and releases the
@@ -187,12 +194,17 @@ its `denial_pids` the moment the spawn returns, and `ending` hands `exit_error` 
 `Shell::group_owner` gathers stage membership or session facts once;
 `Placement::command` selects `Join`, permitted `Tenant`, interactive `Inherit`
 or headless `NewSession`. `Placement::input` determines the requested terminal
-stdin before `Source::offered` interprets it. `Launch::spawn` alone applies the
-envelope rule: it steps `NewLeader` regardless of request and returns the
-payload's group as `Enveloped`. An eligible envelope's `Tenant` keeps readable
+stdin before `Source::offered` interprets it. `Placement::land` derives every
+ordinary direct `Group` from that request, after the platform has applied its
+`Step`; platform code builds no group. Linux's `EnvelopedLaunch::spawn` calls
+`born` with `Step::NewLeader` and lands on `Group::Enveloped`, the payload's
+group; `Confinement::denial_pids` reads `payload_pids` from it. An eligible
+envelope's `Tenant` keeps readable
 stdin and a restoration-only hold, without handoff or key attribution.
-Otherwise the direct tenant lends to its child's new leader; `Pgid` itself
-proves only positivity, not provenance. `Spawned.terminal` carries the opaque
+Otherwise the direct tenant's landing mints a `Leader` and lends to `&Leader`.
+The certificate proves fresh-group birth in ral's session, not liveness;
+`spawn_leader` returns the same certificate to the anchor beside its child pin.
+`Spawned<G>` varies only its group field. `Spawned.terminal` carries the opaque
 hold to collection, which reclaims it before jail settlement and pump joins.
 Nothing downstream recomputes the landing ([[invariants/a-child-lands-once|a-child-lands-once]]);
 what each landing lets a collector signal is

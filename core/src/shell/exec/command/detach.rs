@@ -46,13 +46,14 @@ impl Prepared {
             program,
         } = self;
         launch
+            .launch_mut()
             .stdin(StdioSpec::Null)
             .stdout(StdioSpec::Null)
             .stderr(StdioSpec::Null);
-        match launch
+        let survivor = launch
             .spawn_detached(scope)
-            .map_err(|why| program.unstarted(why, &confinement))?
-        {
+            .map_err(|why| program.unstarted(why, &confinement))?;
+        match survivor {
             Survivor::Named(pid) => Ok(pid),
             Survivor::Unnamed(why) => Err(Error::new(format!(
                 "detach: '{}' is running, but its pid is unknown: {why}",

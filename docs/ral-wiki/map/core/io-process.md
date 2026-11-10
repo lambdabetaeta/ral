@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e04cf89b
+generated_at_commit: 40af72fb
 generated_at_date: 2026-11-09
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
@@ -258,11 +258,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   reaper's `waitid`, the one funnel
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
   the pid side).
-- `group.rs` — `Pgid` / `Placement` and the platform `spawn_with_pgid`
-  family (`group/unix.rs`) for process-group placement, and the two facts of
-  who signals a group: `Membership` (a joined pipeline group and its stage
+- `group.rs` — `Pgid`, `Placement` and the process-private `Step`; Unix
+  `spawn_with_pgid` (`group/unix.rs`) applies the step and returns only the
+  child, while Windows prepares and registers its Job without building `Group`.
+  `launch/landing.rs` derives the direct landing once, from the request.
+  The two facts of who signals a group are `Membership` (a joined pipeline group and its stage
   scope) and `Group` (`Owns(Pgid)`, signalled and killed whole;
-  `Enveloped(Pgid)`, a confining envelope's payload's, killed whole apart from
+  `Enveloped(Pgid)` (Linux only), a confining envelope's payload's, killed whole apart from
   every group ral addresses; `Joins(Membership)`; or `Shares`, ral's own,
   whose children go by pid; who may signal is fixed in
   [[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]). A pgid is signalled directly by `kill(-pgid, …)`,
@@ -280,9 +282,9 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
     `Source::offered` is the io-facing interpretation, replacing only a
     withheld `Source::Terminal` with `Empty`, never a pipe or file.
   - `terminal/loan.rs` — infallible `PreparedTerminalLoan::capture` before
-    spawn; `lend(Pgid)` after birth returns an opaque hold, or the intact
-    preparation with its OS error. `Pgid` proves positivity only; callers
-    establish a fresh leader in ral's session. Unix `guard` is process-scoped:
+    spawn; `lend(&Leader)` after birth returns an opaque hold, or the intact
+    preparation with its OS error. Only a certified fresh group leader in
+    ral's session can receive a loan. Linux `guard` is process-scoped:
     an envelope retains restoration responsibility without a handoff.
     `TerminalHold` exposes only empty `Default`, `hear`, `pressed` and
     consuming `reclaim`; its representation and `TerminalLoan` are private.
@@ -321,7 +323,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `launch.rs` — the owned launch value and its platform interpreters, and the
   two births, returning `Unstarted` when no kept child is handed to the caller
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]):
-  `spawn`, which hands back a `Spawned` (the child, its `Group`
+  `spawn`, which hands back a `Spawned<Group>` (the child, its `Group`
   ([[invariants/a-child-lands-once|a-child-lands-once]]), its opaque
   `TerminalHold` and any jail cgroup),
   and the `cfg(unix)` `spawn_detached`, a double-fork whose grandchild is reparented
@@ -339,12 +341,29 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   suspended create → Job Object assignment → resume, and the widened
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
-  `spawn` alone enforces envelope placement as `NewLeader`, whatever was
-  requested. A direct `Tenant` lends after spawn; an enveloped tenant keeps a
-  restoration-only guard. A refused handoff kills the owned group before
-  reaping its leader, then restores state and releases the jail before returning
-  `Unstarted::Refused`; the shell joins all already-started drains before
-  reporting it. The child may already have run.
+  `born` is the one kept-birth body for every platform, over a per-platform
+  `create`: it names an envelope's payload group, hears the launcher, and
+  lands, retaining the applied step, child, request and jail throughout. The
+  child is held in an `Unlanded` until it lands: dropped otherwise, it kills
+  the payload's group and the child's fresh group while the unreaped child
+  pins the one it leads, then kills/reaps the child. `born` then drops the
+  request to restore captured state and releases the jail. `born_direct`
+  (`launch/landing.rs`) is the birth with no payload to name. A Unix launch holds at most one `Launcher` (name, report, and on Linux
+  the diagnostics file); `Launcher::heard` reads its first word for kept and
+  detached births alike. `fork` releases child-only descriptors and maps
+  `SpawnError`, reading an exec failure as the launcher's where there is one,
+  never a payload report's errno.
+  The shell joins already-started drains before reporting a failure.
+  - `launch/landing.rs` — `Placement::land` builds every direct `Group` once.
+    `spawn_leader` returns `Spawned<Leader>` with an empty terminal hold;
+    `Leader` certifies fresh-group birth in ral's session, not liveness.
+    Its constructor is private to these two completions.
+  - `launch/envelope.rs` (Linux only) — `EnvelopedLaunch` owns its inner
+    `Launch`, whose `Launcher` it fixes with the mandatory `Report` and
+    diagnostics file, and the naming of its payload's group. Its spawn calls
+    `born` with `Step::NewLeader` and lands on `Group::Enveloped` with a
+    restoration-only tenant hold. Direct Unix trampoline launches fix their
+    `Launcher` in `Launch::trampolined`; configuration cannot add one.
   The whole stop-work flow — the
   `ReaderGone < Interrupted < Cancelled < TimedOut < Terminated < Aborted`
   order — is narrated in

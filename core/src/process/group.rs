@@ -18,16 +18,20 @@ use super::signal::KILL;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub(crate) use unix::{SpawnError, Survivor, spawn_detached, spawn_with_pgid};
+pub(crate) use unix::Survivor;
+#[cfg(unix)]
+pub(super) use unix::{SpawnError, spawn_detached, spawn_with_pgid};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(all(windows, test))]
 pub(crate) use windows::is_known_group;
 #[cfg(windows)]
-pub(crate) use windows::{
+pub(crate) use windows::release_win_group;
+#[cfg(windows)]
+pub(super) use windows::{
     PreparedGroup, close_prepared_group, prepare_group, prepared_job, register_prepared_group,
-    release_win_group, set_active_process_limit,
+    set_active_process_limit,
 };
 #[cfg(windows)]
 pub use windows::{ReapStatus, break_pipeline_group, try_reap_leader};
@@ -45,7 +49,6 @@ pub use windows::{ReapStatus, break_pipeline_group, try_reap_leader};
 pub struct Pgid(NonZeroI32);
 
 impl Pgid {
-    #[cfg_attr(not(any(target_os = "linux", windows, test)), allow(dead_code))]
     pub(crate) fn from_raw(raw: i32) -> Option<Self> {
         NonZeroI32::new(raw)
             .filter(|raw| raw.is_positive())
@@ -54,11 +57,6 @@ impl Pgid {
 
     pub(crate) const fn as_raw(self) -> i32 {
         self.0.get()
-    }
-
-    #[cfg(unix)]
-    pub(crate) const fn from_pid(pid: rustix::process::Pid) -> Self {
-        Self(pid.as_raw_nonzero())
     }
 
     #[cfg(unix)]
@@ -105,9 +103,6 @@ impl Pgid {
 pub(crate) enum Placement {
     /// Inherit the parent's pgid — no `setpgid` call.
     Inherit,
-    /// Lead a fresh group (`setpgid(0, 0)`), keeping the parent's session and
-    /// controlling terminal.
-    NewLeader,
     /// Lead a fresh *session* (`setsid`): with no controlling terminal, the
     /// child cannot signal — through the shared tty or `tcgetpgrp` — whatever
     /// owns one.  Its pgid still equals its pid, so `kill(-pgid, …)` still
@@ -121,28 +116,33 @@ pub(crate) enum Placement {
     Tenant(PreparedTerminalLoan),
 }
 
-#[cfg(unix)]
 impl Placement {
     /// What the child does before `execve`, without borrowing terminal state
     /// or cloning a membership's scope into the child.
     pub(super) fn step(&self) -> Step {
         match self {
             Self::Inherit => Step::Inherit,
-            Self::NewLeader | Self::Tenant(_) => Step::NewLeader,
+            Self::Tenant(_) => Step::NewLeader,
             Self::NewSession => Step::NewSession,
             Self::Join(membership) => Step::Join(membership.group()),
         }
     }
 }
 
-/// The resource-free placement operation owned by a Unix `pre_exec` closure.
-#[cfg(unix)]
+/// The resource-free placement operation applied at birth.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Step {
     Inherit,
     NewLeader,
     NewSession,
     Join(Pgid),
+}
+
+impl Step {
+    /// Whether a failed birth must kill the child's whole fresh group.
+    pub(super) const fn leads(self) -> bool {
+        matches!(self, Self::NewLeader | Self::NewSession)
+    }
 }
 
 /// A pipeline group joined, and the stage scope whose every cause the
@@ -176,7 +176,7 @@ pub(crate) enum Group {
     /// A confining envelope's payload's, which the envelope's session keeps
     /// apart from every group ral addresses: signalled and killed whole.  The
     /// envelope itself is nobody's to address.
-    #[cfg_attr(windows, allow(dead_code, reason = "Windows has no envelope"))]
+    #[cfg(target_os = "linux")]
     Enveloped(Pgid),
     /// A pipeline's, whose owner delivers what the stage holds.
     Joins(Membership),
@@ -188,8 +188,19 @@ impl Group {
     /// The group signalled and killed whole, an owner's alone.
     pub(crate) const fn owned(&self) -> Option<Pgid> {
         match self {
-            Self::Owns(group) | Self::Enveloped(group) => Some(*group),
+            Self::Owns(group) => Some(*group),
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(group) => Some(*group),
             Self::Joins(_) | Self::Shares => None,
+        }
+    }
+
+    /// An envelope's payload group, which no signal to another group reaches.
+    pub(crate) const fn enveloped(&self) -> Option<Pgid> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(payload) => Some(*payload),
+            Self::Owns(_) | Self::Joins(_) | Self::Shares => None,
         }
     }
 
@@ -198,7 +209,9 @@ impl Group {
     /// interrupt, the tty's Ctrl-C having reached that group whole.
     pub(crate) fn owes(&self, cause: CancelCause) -> bool {
         match self {
-            Self::Owns(_) | Self::Enveloped(_) => true,
+            Self::Owns(_) => true,
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(_) => true,
             Self::Joins(m) => m.owes(cause),
             Self::Shares => cause != CancelCause::Interrupted,
         }
@@ -215,7 +228,6 @@ mod tests {
         Membership::new(Pgid::from_raw(1).expect("1 is positive"), stage.clone())
     }
 
-    #[cfg(unix)]
     #[test]
     fn placement_step_keeps_only_group_operations() {
         fn copied<T: Copy>(value: T) -> T {
@@ -223,10 +235,6 @@ mod tests {
         }
 
         assert!(matches!(copied(Placement::Inherit.step()), Step::Inherit));
-        assert!(matches!(
-            copied(Placement::NewLeader.step()),
-            Step::NewLeader
-        ));
         assert!(matches!(
             copied(Placement::NewSession.step()),
             Step::NewSession
@@ -287,6 +295,7 @@ mod tests {
         );
         let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().child()));
         assert_eq!(Group::Owns(nine).owned(), Some(nine));
+        #[cfg(target_os = "linux")]
         assert_eq!(Group::Enveloped(nine).owned(), Some(nine));
         assert_eq!(Group::Joins(stage).owned(), None);
         assert_eq!(Group::Shares.owned(), None);
@@ -295,8 +304,10 @@ mod tests {
     #[test]
     fn an_owner_owes_every_cause() {
         let pgid = Pgid::from_raw(1).expect("1 is positive");
-        for group in [Group::Owns(pgid), Group::Enveloped(pgid)] {
-            assert!(CancelCause::VARIANTS.iter().all(|&c| group.owes(c)));
+        for &cause in CancelCause::VARIANTS {
+            assert!(Group::Owns(pgid).owes(cause));
+            #[cfg(target_os = "linux")]
+            assert!(Group::Enveloped(pgid).owes(cause));
         }
     }
 

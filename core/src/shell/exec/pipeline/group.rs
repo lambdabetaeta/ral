@@ -10,9 +10,11 @@
 //! Windows a group a pipeline or a lone external owns is a `Job`.
 
 use super::collect::Event;
+#[cfg(windows)]
+use crate::process::Pgid;
 use crate::process::{
-    Group, Membership, Pgid, Placement, PreparedTerminalLoan, Scope, Spawned, TerminalHold,
-    TerminalInput, Unstarted,
+    Group, Leader, Membership, PreparedTerminalLoan, Scope, Spawned, TerminalHold, TerminalInput,
+    Unstarted,
 };
 use crate::shell::runtime::{Break, Error, Settled};
 use std::sync::mpsc::Sender;
@@ -45,7 +47,7 @@ impl PipelineGroup {
         let anchor = AnchorProcess::spawn(tx)?;
         let (terminal, input) = match prepared {
             None => (TerminalHold::default(), TerminalInput::Withheld),
-            Some(prepared) => match prepared.lend(anchor.pgid) {
+            Some(prepared) => match prepared.lend(&anchor.leader) {
                 Ok(terminal) => (terminal, TerminalInput::Readable),
                 Err((prepared, error)) => {
                     crate::dbg_trace!("pipeline terminal handoff", "{error}");
@@ -59,7 +61,7 @@ impl PipelineGroup {
         };
         let group = Self::Owns {
             #[cfg(windows)]
-            job: Job::owning(anchor.pgid),
+            job: Job::owning(anchor.leader.pgid()),
             anchor,
         };
         Ok((group, terminal, input))
@@ -74,14 +76,14 @@ impl PipelineGroup {
     /// answers to the outermost owner's stage scope.
     pub(super) fn membership(&self, stage: &Scope) -> Membership {
         match self {
-            Self::Owns { anchor, .. } => Membership::new(anchor.pgid, stage.clone()),
+            Self::Owns { anchor, .. } => Membership::new(anchor.leader.pgid(), stage.clone()),
             Self::Joins(membership) => membership.clone(),
         }
     }
 
     pub(super) fn group(&self) -> Group {
         match self {
-            Self::Owns { anchor, .. } => Group::Owns(anchor.pgid),
+            Self::Owns { anchor, .. } => Group::Owns(anchor.leader.pgid()),
             Self::Joins(membership) => Group::Joins(membership.clone()),
         }
     }
@@ -139,7 +141,7 @@ pub(super) struct AnchorProcess {
     child: crate::process::Watch,
     #[cfg(windows)]
     child: crate::process::ChildHandle,
-    pgid: Pgid,
+    leader: Leader,
     /// The anchor reads this to EOF; closing it is how `end` ends it.
     release: Option<os_pipe::PipeWriter>,
     /// Blocks reading the anchor's stdout — one byte per swallowed signal —
@@ -161,6 +163,7 @@ fn anchor_error(e: std::io::Error) -> Error {
 }
 
 /// `Child::drop` neither kills nor reaps, so a child not handed on goes here.
+#[cfg(unix)]
 fn discard(child: &mut crate::process::ChildHandle) {
     let _ = child.kill();
     let _ = child.reap();
@@ -192,23 +195,18 @@ impl AnchorProcess {
         // ral's own process, so no stop ends its birth: each stage's start
         // sees one.
         let unstoppable = crate::process::DurableRoot::default().child();
-        let Spawned {
-            mut child, group, ..
-        } = cmd
-            .spawn(Placement::NewLeader, &unstoppable)
-            .map_err(|unstarted| match unstarted {
-                Unstarted::Program(e) => Break::from(anchor_error(e)),
-                Unstarted::Refused(refusal) => Break::from(refusal),
-                Unstarted::Stopped(stop) => Break::from(stop),
-            })?;
-        let Group::Owns(pgid) = group else {
-            discard(&mut child);
-            return Err(Error::new("pipeline anchor: failed to establish a process group").into());
-        };
+        let Spawned { child, group, .. } =
+            cmd.spawn_leader(&unstoppable)
+                .map_err(|unstarted| match unstarted {
+                    Unstarted::Program(e) => Break::from(anchor_error(e)),
+                    Unstarted::Refused(refusal) => Break::from(refusal),
+                    Unstarted::Stopped(stop) => Break::from(stop),
+                })?;
         #[cfg(unix)]
         let (child, reporter) = {
             use std::io::{ErrorKind, Read};
 
+            let mut child = child;
             let mut ready = [0u8; 1];
             let readiness = report.read_exact(&mut ready).and_then(|()| {
                 if ready == [0] {
@@ -236,7 +234,7 @@ impl AnchorProcess {
         };
         Ok(Self {
             child,
-            pgid,
+            leader: group,
             release: Some(release),
             #[cfg(unix)]
             reporter: Some(reporter),

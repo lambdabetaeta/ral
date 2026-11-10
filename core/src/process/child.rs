@@ -21,8 +21,6 @@ pub struct ChildHandle {
     /// What a Linux supervisor will say of its program's end.
     #[cfg(target_os = "linux")]
     testimony: Option<super::report::Testimony>,
-    #[cfg(target_os = "linux")]
-    envelope_stderr: Option<std::fs::File>,
 }
 
 enum ChildRepr {
@@ -39,8 +37,6 @@ impl ChildHandle {
             repr: ChildRepr::Std(child),
             #[cfg(target_os = "linux")]
             testimony: None,
-            #[cfg(target_os = "linux")]
-            envelope_stderr: None,
         }
     }
 
@@ -56,22 +52,12 @@ impl ChildHandle {
         self.testimony = Some(testimony);
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn envelope_stderr(&mut self, file: Option<std::fs::File>) {
-        self.envelope_stderr = file;
-    }
-
-    /// What the dead launcher left on its diagnostic file or piped stderr,
-    /// never waiting for more; `None` where neither exists or it said nothing.
+    /// What the dead launcher left on its piped stderr, never waiting for
+    /// more; `None` where it is not piped or said nothing.
     #[cfg(unix)]
     pub(crate) fn stderr_said(&mut self) -> Option<String> {
-        #[cfg(target_os = "linux")]
-        if let Some(file) = self.envelope_stderr.as_ref() {
-            return file_said(file);
-        }
         let ChildRepr::Std(child) = &mut self.repr;
-        let stderr = child.stderr.take()?;
-        pipe_said(stderr)
+        pipe_said(child.stderr.take()?)
     }
 
     pub fn id(&self) -> u32 {
@@ -174,44 +160,4 @@ fn pipe_said(pipe: impl std::io::Read + std::os::fd::AsFd) -> Option<String> {
     let _ = pipe.take(4096).read_to_end(&mut said);
     let said = String::from_utf8_lossy(&said).trim().to_owned();
     (!said.is_empty()).then_some(said)
-}
-
-/// Startup diagnostics from an envelope's anonymous file. `read_at` leaves
-/// the shared writer offset alone, even while a descendant is still writing.
-#[cfg(target_os = "linux")]
-pub(super) fn file_said(file: &std::fs::File) -> Option<String> {
-    use std::os::unix::fs::FileExt;
-    let mut bytes = [0; 4096];
-    let count = loop {
-        match file.read_at(&mut bytes, 0) {
-            Ok(count) => break count,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
-        }
-    };
-    let said = String::from_utf8_lossy(&bytes[..count]).trim().to_owned();
-    (!said.is_empty()).then_some(said)
-}
-
-#[cfg(all(test, target_os = "linux"))]
-#[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests {
-    #[test]
-    fn envelope_diagnostics_read_from_zero_without_moving_the_writer() {
-        use std::io::{Seek, Write};
-        let mut writer = std::fs::File::from(
-            rustix::fs::memfd_create("diagnostics-test", rustix::fs::MemfdFlags::CLOEXEC)
-                .expect("diagnostic memfd"),
-        );
-        writer.write_all(b"REFUSED").unwrap();
-        let reader = writer.try_clone().unwrap();
-        assert_eq!(super::file_said(&reader).as_deref(), Some("REFUSED"));
-        assert_eq!(writer.stream_position().unwrap(), 7);
-        writer.write_all(&[b'x'; 4096]).unwrap();
-        assert_eq!(super::file_said(&reader).unwrap().len(), 4096);
-        assert_eq!(writer.stream_position().unwrap(), 4103);
-        // Reading/dropping the parent's owner does not break later writes.
-        drop(reader);
-        writer.write_all(b"still writable").unwrap();
-    }
 }

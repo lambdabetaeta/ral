@@ -177,8 +177,8 @@ as it stands (`Placement::input`, interpreted by `Source::offered`).
 
 - `Inherit`, `Join` and `Tenant` offer terminal stdin: ral's own group, a
   stage whose owner chose its source, or a fresh group lent the foreground.
-- `NewLeader` and `NewSession` withhold it: an unlent background group or a
-  headless session reads EOF instead of a startup terminal.
+- `NewSession` withholds it: a headless session reads EOF instead of a
+  startup terminal.
 - Pipes and files are unchanged by either input decision.
 - An envelope obeys the requested input decision even though its payload
   lands in a separate session. An eligible `Tenant` therefore keeps readable
@@ -249,12 +249,13 @@ stopped with `SIGTTIN`.
   | session without a permit, interactive | `Inherit` | ral's own group |
   | session without a permit, non-interactive | `NewSession` | headless session and group |
 
-  `Launch::spawn` alone steps every envelope `NewLeader`, regardless of the
-  request. A requested tenant then keeps captured state for restoration,
+  `EnvelopedLaunch::spawn` steps every envelope `Step::NewLeader`, regardless
+  of the request. A requested tenant then keeps captured state for restoration,
   without handing foreground to the envelope or attributing its keys.
-  Direct tenants lower to `NewLeader` and lend to the child's pid after spawn.
-  `Pgid` proves positivity, not freshness or session provenance; the two
-  handoff sites establish those preconditions by construction.
+  Direct tenants lower to `Step::NewLeader`. `PreparedTerminalLoan::lend`
+  accepts only `&Leader`, a certificate minted from that fresh child's pid
+  in ral's own session. `Launch::spawn_leader` gives the pipeline anchor the
+  same certificate; its unreaped child must still pin the ID.
 - **A pipeline selects input at its handoff boundary.** It captures before
   spawning its anchor and lends only after the anchor reports readiness.
   Success selects readable input; no permit or refusal selects withheld input,
@@ -297,7 +298,7 @@ and `ending`
   the world: a guest jail's cgroup, which `JailCgroup::drop` removes if the
   built launch is dropped, and Linux's bwrap host probe, which waits on bwrap
   children once per process. Every step that can be stopped runs in `start`,
-  through `Launch::spawn`, under the run's scope. On Unix the spawn reads the
+  through the direct or enveloped spawn, under the run's scope. On Unix the spawn reads the
   scope once before the fork and then waits for the trampoline's first word
   under it; on Windows it reads the scope before the confinement, which
   stamps ACLs, and again before `CreateProcessW`. A launch is spent by its

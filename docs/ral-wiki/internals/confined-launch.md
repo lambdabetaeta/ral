@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 3e3fbc84
-verified_at_commit: 257c6c00
+generated_at_commit: 40af72fb
+verified_at_commit: 40af72fb
 verified_at_date: 2026-11-09
-anchors: [sandboxed_command, Command::prepare, ChildSetup::install, Entry::prepare, Entry::enter, EnvelopeStreams::capture, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, unforked, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
+anchors: [sandboxed_command, Command::prepare, ChildSetup::install, Entry::prepare, Entry::enter, EnvelopeStreams::capture, serve_warrant, Warrant, Slot, Handoff, EnvelopeStdio, Landlocked, Envelope, unavailable, Unstarted, fork, Launcher, Launcher::heard, Launch::born, EnvelopedLaunch, ProgramLaunch, vanished, Testimony, Witness, Confined, supervise, SessionSandbox, ensure_frozen_grant, ensure_unreachable, fs_capability_name, lock_inheritance]
 ---
 
 # Launching a confined command
@@ -21,7 +21,7 @@ confinement. Why it is per command is
 [[internals/capability-enforcement|capability-enforcement]].
 
 **Building describes; the spawn confines** ([[design/exec|exec]]). Everything
-that may be stopped runs in `Launch::spawn` (`spawn_detached`), under the
+that may be stopped runs in the direct or enveloped spawn (`spawn_detached`), under the
 run's scope; the build waits on nothing a stop must end.
 
 - **Unix builds** render the projection, open the binds, create the Landlock
@@ -276,7 +276,9 @@ the refusal says the sandbox is why** (`sandbox::unavailable`).
 - **A launcher that fails to exec is the envelope's failure, never the
   target's.** `prepare`'s probe has already found the target on `PATH`, so a
   spawn error of a confined launch's launcher, `ENOENT` included, is `Refused`
-  (`unforked`, on an `Exec` failure), worded as the sandbox being unavailable
+  (`fork` reads an `Exec` failure as the launcher's wherever the launch holds
+  one, and nothing later), worded as the sandbox being unavailable. A later payload report's
+  `unstarted(errno)` stays `Program` with its errno unchanged
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]]).
 - **An envelope that ends before its trampoline speaks is a refusal too**,
   worded with its stderr (`vanished`): on Linux this is a separate anonymous
@@ -285,11 +287,16 @@ the refusal says the sandbox is why** (`sandbox::unavailable`).
   without moving the writer's offset; those contents serve startup refusals,
   not forwarding of later diagnostics. Detached writers need no living reader.
   The read limit does not bound the file's storage.
-- **The launch records which envelope it execs** (an `Envelope`, held in its
-  `Confined` beside the report, and read back by
-  `Confined::launcher`). Only a backend whose envelope is a separate binary sets
-  one; Windows has none. Blame is read off what the launcher did, not
-  re-derived from the shell's state.
+- **The launch records what it execs.** A Unix `Launch` holds at most one
+  `Launcher`: the name blamed when it cannot start, the report believed about
+  the program, and on Linux the envelope's diagnostics file.
+  `Launch::trampolined` fixes macOS's at construction; Linux's
+  `EnvelopedLaunch` fixes its own under the envelope's name and keeps the
+  naming of the payload's group. `Launcher::heard` is the one reading of a
+  first word, for `Launch::born` and `spawn_detached` alike. Windows keeps
+  its token's `Confined` on a direct launch. `Confinement::launch` returns
+  `ProgramLaunch`, whose `spawn` and `spawn_detached` are the one dispatch.
+  Blame is not re-derived from the shell's state.
 
 ## Related rules
 

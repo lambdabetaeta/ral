@@ -40,7 +40,7 @@ impl Placement {
     pub(crate) fn input(&self) -> TerminalInput {
         match self {
             Self::Inherit | Self::Join(_) | Self::Tenant(_) => TerminalInput::Readable,
-            Self::NewLeader | Self::NewSession => TerminalInput::Withheld,
+            Self::NewSession => TerminalInput::Withheld,
         }
     }
 }

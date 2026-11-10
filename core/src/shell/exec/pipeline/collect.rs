@@ -783,13 +783,11 @@ impl Started {
         // Lone collection takes the hold before registering; pipeline stages
         // join their owner and therefore arrive with an empty hold.
         drop(terminal);
-        let payload = match group {
-            Group::Enveloped(payload) if Some(payload) != collector_owned => Some(payload),
-            Group::Enveloped(_) | Group::Owns(_) | Group::Joins(_) | Group::Shares => None,
-        };
         LiveExternal {
             watch: slot.watch(child),
-            payload,
+            payload: group
+                .enveloped()
+                .filter(|payload| Some(*payload) != collector_owned),
             end: ExternalEnd {
                 drain: Drain { jail, drains },
                 settlement: Settlement {
@@ -808,7 +806,7 @@ impl Started {
         #[cfg(windows)]
         let job = match self.spawned.group {
             Group::Owns(leader) => Some(super::group::Job::owning(leader)),
-            Group::Enveloped(_) | Group::Joins(_) | Group::Shares => None,
+            Group::Joins(_) | Group::Shares => None,
         };
         let mut collect = CollectState::lone(self, since, shell);
         collect.drive();
@@ -823,7 +821,10 @@ impl Started {
 /// What the collector waits a lone external out to before it settles it: its
 /// raw end, and the cause it sent.
 #[cfg(all(test, unix))]
-pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<CancelCause>) {
+pub(crate) fn lone_end(
+    spawned: Spawned<Group>,
+    shell: &Shell,
+) -> (WaitOutcome, Option<CancelCause>) {
     let started = Started {
         shown: "test".into(),
         spawned,
@@ -840,7 +841,11 @@ pub(crate) fn lone_end(spawned: Spawned, shell: &Shell) -> (WaitOutcome, Option<
 
 /// Settle a process test's launch through the production terminal-return boundary.
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) fn collect_spawned(spawned: Spawned, since: Instant, shell: &Shell) -> Settled<()> {
+pub(crate) fn collect_spawned(
+    spawned: Spawned<Group>,
+    since: Instant,
+    shell: &Shell,
+) -> Settled<()> {
     Started {
         shown: "test".into(),
         spawned,

@@ -1249,7 +1249,7 @@ mod stdio {
 mod foreground {
     use super::super::*;
     use crate::io::{Sink, Source};
-    use crate::process::{TerminalAccess, TerminalLease};
+    use crate::process::{Launch, TerminalAccess, TerminalLease};
     use crate::test_helper::terminal::{self, Mode};
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::FileExt as _;
@@ -1383,7 +1383,7 @@ mod foreground {
                         .prepare(&[Value::string("30")], Ownership::Kept, &shell)
                         .expect("prepare sleep");
                 let pid_file = tempfile::tempfile().expect("pid file");
-                command.launch = marked_sleep(&pid_file, MARKER);
+                command.launch = ProgramLaunch::Direct(marked_sleep(&pid_file, MARKER));
                 let (mut observer, blocker) = terminal::checkpoints().expect("sink checkpoints");
                 let blocker = Mutex::new(blocker);
                 let (capture, bytes) = crate::io::new_buffer();
@@ -2131,6 +2131,7 @@ pub(in crate::shell::exec) fn joined_startup_report(
     report: crate::process::report::Report,
 ) -> super::Prepared {
     use super::*;
+    use crate::process::Launch;
     let mooring = Mooring::adrift();
     let mut prepared = Command::from_name(&CommandName::Path("/bin/sh".into()), &shell.context)
         .lookup(&shell.context.grants, shell.baseline())
@@ -2138,12 +2139,8 @@ pub(in crate::shell::exec) fn joined_startup_report(
         .expect("admit shell")
         .prepare(&[], Ownership::Kept, shell)
         .expect("prepare shell");
-    let mut launch = Launch::new("/bin/sh");
-    launch.args(["-c", script]);
-    launch.confine(crate::process::launch::Confined {
-        report,
-        envelope: None,
-    });
-    prepared.launch = launch;
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", script]);
+    prepared.launch = ProgramLaunch::Direct(Launch::trampolined(command, report));
     prepared
 }

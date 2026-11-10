@@ -247,12 +247,14 @@ fn spawn_stage_with_grandchild(
     } else {
         "sleep 30 & echo $!"
     };
-    let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.args(["-c", script]);
-    cmd.stdout(std::process::Stdio::piped());
-    let (mut child, _group) = crate::process::spawn_with_pgid(&mut cmd, &joining(group))
-        .expect("spawn /bin/sh under the group's pgid");
-    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut launch = crate::process::Launch::new("/bin/sh");
+    launch.args(["-c", script]);
+    launch.stdout(crate::process::StdioSpec::Piped);
+    let mut child = launch
+        .spawn(joining(group), &DurableRoot::default().child())
+        .expect("spawn /bin/sh under the group's pgid")
+        .child;
+    let mut stdout = child.take_stdout().expect("stdout piped");
     let mut pid_line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -269,7 +271,7 @@ fn spawn_stage_with_grandchild(
         .trim()
         .parse()
         .expect("a pid");
-    (crate::process::ChildHandle::from_std(child), pid)
+    (child, pid)
 }
 
 #[cfg(unix)]
@@ -383,10 +385,12 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
     let joiner =
         PipelineGroup::joining(owner.membership(&crate::process::DurableRoot::default().child()));
 
-    let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.args(["-c", "sleep 30"]);
-    let (child, _group) = crate::process::spawn_with_pgid(&mut cmd, &joining(&owner))
-        .expect("spawn /bin/sh under the owner's pgid");
+    let mut launch = crate::process::Launch::new("/bin/sh");
+    launch.args(["-c", "sleep 30"]);
+    let child = launch
+        .spawn(joining(&owner), &DurableRoot::default().child())
+        .expect("spawn /bin/sh under the owner's pgid")
+        .child;
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut collect = CollectState::new(
@@ -402,7 +406,7 @@ fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
             ix: 0,
             tx: tx.clone(),
         },
-        crate::process::ChildHandle::from_std(child),
+        child,
     ));
     drop(tx);
 
@@ -1471,7 +1475,7 @@ fn drive_settles_a_stage_whose_producer_unwound() {
 // ── A lone external: `Prepared::run`'s one child ───────────────────
 //
 // The collector waits on it as on the one stage of the group it landed in:
-// one it leads (`NewLeader`), a stage's it joined, or ral's own (`Inherit`).
+// one it leads (`spawn_leader`), a stage's it joined, or ral's own (`Inherit`).
 
 /// A shell whose current scope is `scope`.
 #[cfg(unix)]
@@ -1481,28 +1485,40 @@ fn lone_shell(scope: &Scope) -> Shell {
     shell
 }
 
-/// `cmd` spawned under `placement`, and where it landed.
-#[cfg(unix)]
-fn spawned(cmd: &mut std::process::Command, placement: &crate::process::Placement) -> Spawned {
-    let (child, group) = crate::process::spawn_with_pgid(cmd, placement).expect("spawn");
-    Spawned {
-        child: crate::process::ChildHandle::from_std(child),
+/// Retain the child pin while adapting a certified leader for collection.
+fn owned(spawned: Spawned<crate::process::Leader>) -> Spawned<Group> {
+    let Spawned {
+        child,
         group,
-        jail: None,
-        terminal: TerminalHold::default(),
+        terminal,
+        jail,
+    } = spawned;
+    Spawned {
+        child,
+        group: Group::Owns(group.pgid()),
+        terminal,
+        jail,
     }
+}
+
+#[cfg(unix)]
+fn spawned(launch: crate::process::Launch) -> Spawned<Group> {
+    owned(
+        launch
+            .spawn_leader(&DurableRoot::default().child())
+            .expect("spawn"),
+    )
 }
 
 /// An explicit capture pipe, connected and drained under `scope` before
 /// spawning, as a launch is.
 #[cfg(unix)]
 fn captured(
-    cmd: std::process::Command,
-    placement: crate::process::Placement,
+    mut launch: crate::process::Launch,
+    placement: Option<crate::process::Placement>,
     scope: &Scope,
     stdin: crate::process::StdioSpec,
-) -> (Spawned, Drains) {
-    let mut launch = crate::process::Launch::from_command(cmd);
+) -> (Spawned<Group>, Drains) {
     let (sink, _) = crate::io::new_buffer();
     let drains = Connection::new(&Source::Empty, &sink, &Sink::Stderr)
         .expect("connection")
@@ -1510,20 +1526,27 @@ fn captured(
         .start(scope)
         .expect("drain threads");
     launch.stdin(stdin);
-    let spawned = launch.spawn(placement, scope).expect("spawn");
+    let spawned = match placement {
+        Some(placement) => launch.spawn(placement, scope).expect("spawn"),
+        None => owned(launch.spawn_leader(scope).expect("spawn leader")),
+    };
     (spawned, drains)
 }
 
 /// A checkpoint-blocked descendant holds stdout after its parent exits.
 #[cfg(unix)]
 fn captured_descendant(
-    placement: crate::process::Placement,
+    placement: Option<crate::process::Placement>,
     scope: &Scope,
     interrupt: bool,
-) -> (Spawned, Drains, crate::test_helper::terminal::Checkpoint) {
+) -> (
+    Spawned<Group>,
+    Drains,
+    crate::test_helper::terminal::Checkpoint,
+) {
     let (observer, descendant) = crate::test_helper::terminal::checkpoints().expect("descendant");
     let ending = if interrupt { "kill -INT $$" } else { "exit 0" };
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = crate::process::Launch::new("/bin/sh");
     cmd.args([
         "-c",
         &format!("set -e; exec 3<&0; (printf R >&3; IFS= read -r release <&3) & {ending}"),
@@ -1538,7 +1561,7 @@ fn captured_descendant(
 }
 
 /// `spawned`, born of an unconfined start: it claims no deny line.
-fn unconfined(spawned: Spawned, name: &str, drains: Drains) -> Started {
+fn unconfined(spawned: Spawned<Group>, name: &str, drains: Drains) -> Started {
     Started {
         shown: name.into(),
         spawned,
@@ -1549,14 +1572,13 @@ fn unconfined(spawned: Spawned, name: &str, drains: Drains) -> Started {
 
 /// Lone and pipeline registration differ only in whether the collector
 /// already owns the payload's group. Never address that group twice.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
     for owns_payload in [false, true] {
-        let mut child = spawned(
-            std::process::Command::new("/bin/sh").args(["-c", "exit 0"]),
-            &crate::process::Placement::NewLeader,
-        );
+        let mut launch = crate::process::Launch::new("/bin/sh");
+        launch.args(["-c", "exit 0"]);
+        let mut child = spawned(launch);
         let payload = child.group.owned().unwrap();
         // This child stands in for the payload; the addressing relation,
         // not confinement itself, is the witness here.
@@ -1598,9 +1620,9 @@ fn ready_pid(ready: &std::path::Path) -> i32 {
 #[cfg(unix)]
 #[test]
 fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
-    let mut cmd = std::process::Command::new("/bin/sleep");
+    let mut cmd = crate::process::Launch::new("/bin/sleep");
     cmd.arg("30");
-    let lone = spawned(&mut cmd, &crate::process::Placement::NewLeader);
+    let lone = spawned(cmd);
 
     let striker = DurableRoot::default().child();
     let shell = lone_shell(&striker);
@@ -1729,23 +1751,25 @@ fn assert_walled_within_2s(src: &str) {
 #[cfg(unix)]
 #[test]
 fn interrupt_tears_down_external_subprocess_tree() {
-    use crate::process::Placement;
-
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = crate::process::Launch::new("/bin/sh");
     cmd.args(["-c", "sleep 30 & echo $!; wait"])
-        .stdout(std::process::Stdio::piped());
+        .stdout(crate::process::StdioSpec::Piped);
 
-    let (mut child, group) = crate::process::spawn_with_pgid(&mut cmd, &Placement::NewLeader)
-        .expect("spawn /bin/sh under new pgid");
+    let Spawned {
+        mut child,
+        group,
+        terminal,
+        jail,
+    } = spawned(cmd);
     assert!(
         matches!(group, crate::process::Group::Owns(_)),
-        "NewLeader yields a group the child owns"
+        "spawn_leader yields a group the child owns"
     );
 
     // Take stdout before handing the child over: with no stdout sink planned
     // the collector would drop it.  `echo $!` flushes at startup, so the
     // reader thread returns long before teardown.
-    let stdout = child.stdout.take().expect("piped stdout");
+    let stdout = child.take_stdout().expect("piped stdout");
     let reader = std::thread::spawn(move || {
         use std::io::BufRead;
         let mut line = String::new();
@@ -1753,10 +1777,10 @@ fn interrupt_tears_down_external_subprocess_tree() {
         line
     });
     let lone = Spawned {
-        child: crate::process::ChildHandle::from_std(child),
+        child,
         group,
-        jail: None,
-        terminal: TerminalHold::default(),
+        terminal,
+        jail,
     };
 
     let striker = DurableRoot::default().child();
@@ -1806,11 +1830,11 @@ fn interrupt_tears_down_external_subprocess_tree() {
 #[cfg(unix)]
 #[test]
 fn wait_revives_an_ownerless_sigstopped_child() {
-    let mut cmd = std::process::Command::new("/bin/sleep");
+    let mut cmd = crate::process::Launch::new("/bin/sleep");
     cmd.arg("0.2");
-    let lone = spawned(&mut cmd, &crate::process::Placement::NewLeader);
+    let lone = spawned(cmd);
     let crate::process::Group::Owns(pgid) = lone.group else {
-        panic!("NewLeader yields a tracked pgid");
+        panic!("spawn_leader yields a tracked pgid");
     };
     rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
         .expect("SIGSTOP the sleep");
@@ -1836,7 +1860,7 @@ fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
     for (strike_stage, expected) in [(false, 1), (true, 0)] {
         let dir = tempfile::tempdir().expect("a temp dir");
         let (hits, ready) = (dir.path().join("hits"), dir.path().join("ready"));
-        let mut cmd = std::process::Command::new("/bin/sh");
+        let mut cmd = crate::process::Launch::new("/bin/sh");
         cmd.args([
             "-c",
             &format!(
@@ -1846,19 +1870,22 @@ fn a_members_waiter_signals_only_what_its_owner_does_not_deliver() {
             ),
         ]);
         // Its own group stands in for the pipeline's it joined.
-        let (child, group) =
-            crate::process::spawn_with_pgid(&mut cmd, &crate::process::Placement::NewLeader)
-                .expect("spawn the trapper");
+        let Spawned {
+            child,
+            group,
+            terminal,
+            jail,
+        } = spawned(cmd);
         let crate::process::Group::Owns(pgid) = group else {
-            panic!("NewLeader yields a group the child owns");
+            panic!("spawn_leader yields a group the child owns");
         };
         let stage = DurableRoot::default().child();
         let own = stage.child();
         let lone = Spawned {
-            child: crate::process::ChildHandle::from_std(child),
+            child,
             group: crate::process::Group::Joins(Membership::new(pgid, Scope::clone(&stage))),
-            jail: None,
-            terminal: TerminalHold::default(),
+            terminal,
+            jail,
         };
         let shell = lone_shell(&own);
         let striker = std::thread::spawn(move || {
@@ -1888,7 +1915,7 @@ fn a_child_sharing_rals_group_is_sent_no_second_interrupt() {
     for (cause, expected) in [(CancelCause::Interrupted, 0), (CancelCause::TimedOut, 1)] {
         let dir = tempfile::tempdir().expect("a temp dir");
         let (hits, ready) = (dir.path().join("hits"), dir.path().join("ready"));
-        let mut cmd = std::process::Command::new("/bin/sh");
+        let mut cmd = crate::process::Launch::new("/bin/sh");
         cmd.args([
             "-c",
             &format!(
@@ -1897,7 +1924,12 @@ fn a_child_sharing_rals_group_is_sent_no_second_interrupt() {
                 ready.display()
             ),
         ]);
-        let lone = spawned(&mut cmd, &crate::process::Placement::Inherit);
+        let lone = cmd
+            .spawn(
+                crate::process::Placement::Inherit,
+                &DurableRoot::default().child(),
+            )
+            .expect("spawn");
 
         let scope = DurableRoot::default().child();
         let shell = lone_shell(&scope);
@@ -1940,7 +1972,7 @@ fn a_stopped_member_of_a_lone_group_hears_its_grace_signal() {
         ),
     )
     .expect("write the member's script");
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = crate::process::Launch::new("/bin/sh");
     cmd.args([
         "-c",
         &format!(
@@ -1948,7 +1980,7 @@ fn a_stopped_member_of_a_lone_group_hears_its_grace_signal() {
             member.display()
         ),
     ]);
-    let lone = spawned(&mut cmd, &crate::process::Placement::NewLeader);
+    let lone = spawned(cmd);
 
     let scope = DurableRoot::default().child();
     let shell = lone_shell(&scope);
@@ -1972,7 +2004,7 @@ fn a_stopped_member_of_a_lone_group_hears_its_grace_signal() {
 fn a_dropped_lone_collector_never_joins_its_pumps() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let pidfile = dir.path().join("survivor");
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = crate::process::Launch::new("/bin/sh");
     cmd.args([
         "-c",
         &format!("sleep 30 & echo $! > {}; exec sleep 30", pidfile.display()),
@@ -1981,7 +2013,7 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
     let shell = lone_shell(&scope);
     let (lone, drains) = captured(
         cmd,
-        crate::process::Placement::Inherit,
+        Some(crate::process::Placement::Inherit),
         &shell.scope,
         crate::process::StdioSpec::Null,
     );
@@ -2004,9 +2036,9 @@ fn a_dropped_lone_collector_never_joins_its_pumps() {
 #[cfg(unix)]
 #[test]
 fn a_lone_leader_is_reaped_only_once_settled() {
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = crate::process::Launch::new("/bin/sh");
     cmd.args(["-c", "exit 3"]);
-    let lone = spawned(&mut cmd, &crate::process::Placement::NewLeader);
+    let lone = spawned(cmd);
     let pid = lone.child.id();
     let alive = || unsafe { libc::kill(pid.cast_signed(), 0) } == 0;
 
@@ -2041,11 +2073,11 @@ fn an_external_is_hinted_from_its_own_pids() {
             .then(|| crate::process::limits::failure_hint(128))
             .flatten();
 
-        let mut cmd = std::process::Command::new("/bin/sh");
+        let mut cmd = crate::process::Launch::new("/bin/sh");
         cmd.args(["-c", "exit 128"]);
         let started = Started {
             shown: "sh".into(),
-            spawned: spawned(&mut cmd, &crate::process::Placement::NewLeader),
+            spawned: spawned(cmd),
             denial_pids: denial_pids(confined),
             drains: Drains::default(),
         };
@@ -2097,8 +2129,7 @@ fn a_lone_tenants_key_is_struck_before_its_pumps_are_joined() {
             let frame = DurableRoot::default().child();
             let shell = lone_shell(&frame);
             let terminal = assumed_terminal(&frame);
-            let (mut lone, drains, mut descendant) =
-                captured_descendant(crate::process::Placement::NewLeader, &shell.scope, true);
+            let (mut lone, drains, mut descendant) = captured_descendant(None, &shell.scope, true);
             lone.terminal = terminal;
 
             let mut collect =
@@ -2158,7 +2189,7 @@ fn a_pipelines_terminal_returns_before_its_pumps_are_joined() {
             )
             .expect("change modes while held");
             let (Spawned { child, .. }, drains, mut descendant) =
-                captured_descendant(joining(&group), &shell.scope, false);
+                captured_descendant(Some(joining(&group)), &shell.scope, false);
             let slot = Slot { ix: 0, tx };
             let stage = LiveExternal {
                 watch: slot.watch(child),
@@ -2232,11 +2263,9 @@ fn a_lone_externals_windows_job_is_released() {
             .join("cmd.exe");
     let mut launch = crate::process::Launch::new(cmd);
     launch.args(["/c", "exit 0"]);
-    let lone = launch
-        .spawn(crate::process::Placement::NewLeader, &shell.scope)
-        .expect("spawn cmd.exe");
+    let lone = owned(launch.spawn_leader(&shell.scope).expect("spawn cmd.exe"));
     let crate::process::Group::Owns(leader) = lone.group else {
-        panic!("NewLeader registers a group");
+        panic!("spawn_leader registers a group");
     };
     assert!(crate::process::group::is_known_group(leader.as_raw()));
 

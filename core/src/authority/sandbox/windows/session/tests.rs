@@ -492,7 +492,10 @@ fn confined(
 fn spawn_after_confinement<T: Send>(
     launch: crate::process::Launch,
     before_create: impl FnOnce() -> T + Send,
-) -> (Result<crate::process::Spawned, Unstarted>, T) {
+) -> (
+    Result<crate::process::Spawned<crate::process::Group>, Unstarted>,
+    T,
+) {
     use crate::process::spawn_lock::test_phase;
     use std::sync::mpsc;
     use std::time::Duration;

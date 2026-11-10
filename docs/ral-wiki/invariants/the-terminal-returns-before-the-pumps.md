@@ -13,8 +13,9 @@ attributing a key; callers never inspect the hold's representation.
   a kill of the owned group. On unwind the collector kills unobserved stages,
   then its opaque hold restores on drop, with no pump join.
 - A returned start failure has the same settlement obligation. For a refused
-  handoff, `Launch::spawn` retains the preparation while killing the owned
-  group before reaping its leader, then killing/reaping the child. Only then
+  handoff or refused report, `Launch::born` retains the request while killing
+  an envelope's named payload group and any fresh group its applied `Step`
+  leads, then killing/reaping the child. Only then
   does it restore state and release the jail. `Prepared::start` returns
   `StartFailure`, owning its reason and drains. A lone run settles before
   propagating the reason; a pipeline rolls back and joins, returning its

@@ -29,7 +29,7 @@ mod terminal;
 
 pub(crate) use outcome::{Signal, WaitOutcome};
 
-pub(crate) use launch::{Launch, Spawned, StdioSpec, Unstarted};
+pub(crate) use launch::{Launch, Leader, Spawned, StdioSpec, Unstarted};
 pub use terminal::RequestedTerminalAccess;
 pub(crate) use terminal::{
     GroupOwner, PreparedTerminalLoan, TerminalAccess, TerminalHold, TerminalInput, TerminalLease,
@@ -62,7 +62,7 @@ pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 #[cfg(unix)]
 pub(crate) use fork::{Forked, fork, reap};
 #[cfg(unix)]
-pub(crate) use group::{SpawnError, spawn_with_pgid};
+use group::{SpawnError, spawn_with_pgid};
 #[cfg(unix)]
 pub(crate) use signal::reset_child_signals;
 #[cfg(unix)]

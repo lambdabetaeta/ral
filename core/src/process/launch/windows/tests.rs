@@ -1,4 +1,5 @@
 use super::*;
+use crate::process::Placement;
 
 mod inheritance;
 

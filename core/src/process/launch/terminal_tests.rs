@@ -14,7 +14,7 @@ use std::time::Instant;
 
 /// Before the collector takes ownership, even a failed checkpoint assertion
 /// must kill the payload group before reaping its monitor.
-struct Pending(Option<Spawned>);
+struct Pending(Option<Spawned<Group>>);
 
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -68,23 +68,23 @@ fn envelope_restores_modes(pty: &PrivatePty, cancel: bool) {
             shell.context.cwd(),
         )
         .unwrap_or_else(|why| panic!("real Linux envelope launch unavailable: {why}"));
-    assert!(
-        launch.enveloped(),
-        "this regression requires the real envelope"
-    );
     let (mut checkpoint, payload) = terminal::checkpoints().unwrap();
     launch
+        .launch_mut()
         .stdin(StdioSpec::from_owned(pty.slave().try_clone().unwrap()))
         .stderr(StdioSpec::Null);
     // The payload, not bwrap, owns this checkpoint.
-    launch.cmd.stdout(payload.into_stdio());
+    launch.launch_mut().cmd.stdout(payload.into_stdio());
     let since = Instant::now();
     let spawned = launch
         .spawn(Placement::Tenant(prepared), &shell.scope)
         .unwrap_or_else(|why| panic!("real Linux envelope could not start: {why:?}"));
     let mut pending = Pending(Some(spawned));
     let spawned = pending.0.as_mut().unwrap();
-    assert!(matches!(spawned.group, Group::Enveloped(_)));
+    assert!(
+        spawned.group.enveloped().is_some(),
+        "this regression requires the real envelope"
+    );
     checkpoint
         .expect(b'M')
         .expect("payload changed terminal modes");

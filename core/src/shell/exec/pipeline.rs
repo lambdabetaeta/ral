@@ -444,13 +444,15 @@ mod tests {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let (group, _, _) =
                     PipelineGroup::prepare(tx.clone(), None).expect("anchor spawns");
-                let mut cmd = std::process::Command::new("/bin/sh");
+                let mut cmd = crate::process::Launch::new("/bin/sh");
                 cmd.args(["-c", &trapper.script()]);
-                let (child, _) = crate::process::spawn_with_pgid(
-                    &mut cmd,
-                    &crate::process::Placement::Join(group.membership(&frame)),
-                )
-                .expect("spawn the trapper into the group");
+                let child = cmd
+                    .spawn(
+                        crate::process::Placement::Join(group.membership(&frame)),
+                        &frame,
+                    )
+                    .expect("spawn the trapper into the group")
+                    .child;
                 let mut collect = CollectState::new(
                     rx,
                     group.group(),
@@ -466,10 +468,7 @@ mod tests {
                     mooring.cleanup_grace,
                     std::time::Instant::now(),
                 );
-                collect.push(StageHandle::for_test(
-                    Slot { ix: 0, tx },
-                    crate::process::ChildHandle::from_std(child),
-                ));
+                collect.push(StageHandle::for_test(Slot { ix: 0, tx }, child));
                 let pid = trapper.pid();
                 // As the tty delivers a key: to the whole group, the anchor included.
                 group

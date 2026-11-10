@@ -15,9 +15,13 @@ name.
   does not reap it (`StageHandle::file_external_end` reaps through
   `Arc::try_unwrap`, which fails while the pin holds a reference); `settle_lone`
   drops the pin after `drained`, once no kill addresses the group.
-- A returned failed start has no collector pin to inherit. `Launch::spawn`'s
-  `discarded` kills the owned group **before** killing/reaping the child, while
-  the leader still pins its ID. A refused terminal handoff retains saved state
+- A returned failed start has no collector pin to inherit. `Launch::born`
+  gives its `Unlanded` guard the child's pgid exactly when its applied
+  `Step::leads()`; there is no landed `Group` yet. The guard's drop kills that
+  fresh group **before** killing/reaping the child, while the leader still
+  pins its ID. An envelope's payload group, named before
+  anything was heard, is killed first of all: it has no pin, and its monitor
+  is still unreaped. A refused terminal handoff retains saved state
   through this teardown, then restores and releases the jail. A failed joined
   launch leaves the borrowed group to its enclosing owner. `StartFailure`
   retains the drains until caller settlement; a pipeline rolls back while its

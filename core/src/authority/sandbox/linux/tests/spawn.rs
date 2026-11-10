@@ -2,18 +2,17 @@ use super::*;
 use crate::environ::ChildEnv;
 
 /// `sh -c script` confined under `unrestricted()` through the path a
-/// real command takes, `Launch::spawn` and then the collector, the group
+/// real command takes, `EnvelopedLaunch::spawn` and then the collector, the group
 /// the spawn named, and a shell whose current scope is `scope`, for the
 /// collector to read.  Callers skip first where no envelope builds.
 fn spawn_confined(
     script: &str,
     scope: &crate::process::Scope,
 ) -> (
-    crate::process::Spawned,
+    crate::process::Spawned<crate::process::Group>,
     crate::process::Pgid,
     crate::shell::runtime::Shell,
 ) {
-    use crate::process::{Group, Placement};
     let mut shell = crate::test_helper::core_shell();
     shell.scope = scope.clone();
     let launch = crate::authority::sandbox::Confinement::Projected(Box::new(unrestricted()))
@@ -25,11 +24,9 @@ fn spawn_confined(
         )
         .expect("build confined launch");
     let spawned = launch
-        .spawn(Placement::NewLeader, scope)
+        .spawn(crate::process::Placement::Inherit, scope)
         .expect("spawn confined sh");
-    let Group::Enveloped(pgid) = spawned.group else {
-        panic!("a kept launch names its payload's group");
-    };
+    let pgid = (spawned.group.enveloped()).expect("a projected Linux launch is enveloped");
     (spawned, pgid, shell)
 }
 
@@ -381,12 +378,13 @@ fn an_owned_stdout_terminal_remains_the_envelopes_console() {
     .expect("build a tty launch");
     let terminal = HostPty::open();
     launch
+        .launch_mut()
         .stdin(StdioSpec::Null)
         .stdout(StdioSpec::from_owned(terminal.slave.try_clone().unwrap()))
         .stderr(StdioSpec::Null);
     let spawned = launch
         .spawn(
-            Placement::NewLeader,
+            Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
         )
         .expect("spawn with owned tty stdout");
@@ -394,8 +392,8 @@ fn an_owned_stdout_terminal_remains_the_envelopes_console() {
     let watch = spawned.child.into_watch(tx, std::convert::identity);
     let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
     if outcome.is_err() {
-        if let Some(pgid) = spawned.group.owned() {
-            pgid.kill();
+        if let Some(payload) = spawned.group.owned() {
+            payload.kill();
         }
         watch.kill();
     }
@@ -435,6 +433,7 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let (cwd, request) = (crate::test_helper::process_cwd(), probe::request(&args));
         launch
+            .launch_mut()
             .stdin(crate::process::StdioSpec::from_owned(
                 late.slave.try_clone().unwrap(),
             ))
@@ -518,8 +517,8 @@ fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
 
 /// T3 (design doc §6): the grace signal must reach the confined payload's
 /// own session, not bwrap's mortal monitor.  Spawns through the same
-/// `Launch` + collector path a real command takes, so the `--info-fd`
-/// leader in `Launch::spawn` is exercised end to end, then cancels with
+/// `EnvelopedLaunch` + collector path a real command takes, so the `--info-fd`
+/// leader in `EnvelopedLaunch::spawn` is exercised end to end, then cancels with
 /// `Explicit` and checks the trap ran well inside `TEARDOWN_GRACE`.
 ///
 /// The trap's `exit 0` makes the outcome a plain exit; the file is the
@@ -670,9 +669,9 @@ fn ended(program: &Admitted, args: &[String]) -> Option<crate::process::WaitOutc
             shell.context.cwd(),
         )
         .expect("build confined launch");
-    launch.stdin(crate::process::StdioSpec::Null);
+    launch.launch_mut().stdin(crate::process::StdioSpec::Null);
     let Spawned { child, .. } = launch
-        .spawn(Placement::NewLeader, &shell.scope)
+        .spawn(Placement::Inherit, &shell.scope)
         .expect("spawn the confined program");
     let (tx, rx) = std::sync::mpsc::channel();
     let watch = child.into_watch(tx, std::convert::identity);
@@ -790,16 +789,19 @@ fn assert_stream_closure(
         Ownership::Kept,
     )
     .expect("build confined launch");
-    launch.limit_session(crate::process::ChildLimits {
-        open_files,
-        ..Default::default()
-    });
     launch
+        .launch_mut()
+        .limit_session(crate::process::ChildLimits {
+            open_files,
+            ..Default::default()
+        });
+    launch
+        .launch_mut()
         .stdin(StdioSpec::from_owned(input))
         .stdout(StdioSpec::from_owned(output))
         .stderr(StdioSpec::from_owned(error));
     let Spawned { child, group, .. } = launch
-        .spawn(Placement::NewLeader, &shell.scope)
+        .spawn(Placement::Inherit, &shell.scope)
         .expect("spawn the confined program");
     let (tx, rx) = channel();
     let watch = child.into_watch(tx, std::convert::identity);
@@ -847,8 +849,8 @@ fn assert_stream_closure(
     // Both waits are bounded; kill before reaping on any failure so the
     // regression itself cannot leave a test hanging on the acknowledgement.
     if outcome.is_none() {
-        if let Some(pgid) = group.owned() {
-            pgid.kill();
+        if let Some(payload) = group.owned() {
+            payload.kill();
         }
         watch.kill();
     }

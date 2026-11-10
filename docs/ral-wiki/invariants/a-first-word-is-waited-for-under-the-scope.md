@@ -3,12 +3,15 @@
 **The parent's wait for the trampoline's first word is a cancellable wait: it
 reads the start's scope between slices of `POLL_SLICE`, and a stop ends
 it.** `Testimony::first` (`core/src/process/report.rs`) is that wait. The scope
-is the one the start hands the spawn (`Launch::spawn`, `spawn_detached`), the
+is the one the start hands the direct or enveloped spawn (`spawn_detached`), the
 run's own; a launch is built under none.
 
 - **On a stop, the child is discarded and the result is `Stopped`.** The child
-  is killed and reaped (`discarded`, `core/src/process/launch.rs`); the launch
-  never became a program. `Stopped` reaches the run as its stop, with the cause
+  is killed and reaped (`Launch::born` drops its `Unlanded`,
+  `core/src/process/launch.rs`), and before it the payload's group its envelope
+  named: a program may already run behind a silent report, and without a pid
+  namespace what it forked would outlive the monitor. The launch never became
+  a program. `Stopped` reaches the run as its stop, with the cause
   and owner of the scope that struck.
 - **`detach` leaves its survivor.** A detached launch waits for the same word
   under the same scope, but its child is nobody's to kill: a stop ends the wait

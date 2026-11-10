@@ -60,7 +60,8 @@ fn an_unreadable_info_record_refuses_the_spawn() {
 
 #[test]
 fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
-    use crate::process::{Launch, Placement};
+    use crate::process::Placement;
+    use crate::process::launch::EnvelopedLaunch;
     use std::sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -77,24 +78,22 @@ fn a_truncated_info_record_refuses_spawn_and_reaps_the_envelope() {
     let pid = Arc::new(AtomicI32::new(0));
     let child_pid = pid.clone();
     let info = record(br#"{"child-pid":"#);
-    let mut launch = Launch::from_command(command);
     let (report, report_writer) = crate::process::cloexec_socketpair().unwrap();
-    launch.confine(crate::process::launch::Confined {
-        report: crate::process::report::Report::new(report, report_writer.into()),
-        envelope: Some(crate::process::launch::Envelope {
-            program: "bwrap",
-            payload_pgid: Some(Box::new(move || {
-                let mut line = String::new();
-                std::io::BufReader::new(reader)
-                    .read_line(&mut line)
-                    .unwrap();
-                child_pid.store(line.trim().parse().unwrap(), Ordering::SeqCst);
-                info.payload_pgid()
-            })),
-        }),
-    });
+    let launch = EnvelopedLaunch::synthetic(
+        command,
+        "bwrap",
+        Some(Box::new(move || {
+            let mut line = String::new();
+            std::io::BufReader::new(reader)
+                .read_line(&mut line)
+                .unwrap();
+            child_pid.store(line.trim().parse().unwrap(), Ordering::SeqCst);
+            info.payload_pgid()
+        })),
+        crate::process::report::Report::new(report, report_writer.into()),
+    );
     let Err(crate::process::Unstarted::Refused(why)) = launch.spawn(
-        Placement::NewLeader,
+        Placement::Inherit,
         &crate::process::DurableRoot::default().child(),
     ) else {
         panic!("spawn must refuse");

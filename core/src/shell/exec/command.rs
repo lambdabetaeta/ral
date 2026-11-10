@@ -13,13 +13,13 @@
 use super::redirect::with_redirects;
 use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{self, Admitted, Baseline, GrantStack};
-use crate::authority::sandbox::{Confinement, Image, Ownership};
+use crate::authority::sandbox::{Confinement, Image, Ownership, ProgramLaunch};
 use crate::error::Error;
 use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
 use crate::io::child::{Connection, Drains};
 use crate::ir::{CommandName, Redirects};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
-use crate::process::{CancelCause, Launch, Placement, Scope, Spawned, Unstarted, WaitOutcome};
+use crate::process::{CancelCause, Group, Placement, Scope, Spawned, Unstarted, WaitOutcome};
 use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell, Value};
 use crate::source::Span;
 use crate::ty::RefusedArg;
@@ -416,20 +416,22 @@ impl Command<Result<Admitted, Error>> {
         let image = Image::from(admitted);
         let mut launch = confinement.launch(&image, &args, ownership, shell.context.cwd())?;
         // Use the shell's cwd: ral's `cd` never calls `chdir`.
-        launch.situate(
+        launch.launch_mut().situate(
             shell
                 .context
                 .env_overrides()
                 .for_child(shell.context.cwd(), shell.has_active_capabilities()),
         );
         #[cfg(unix)]
-        launch.limit_session(shell.session.child_limits);
+        launch
+            .launch_mut()
+            .limit_session(shell.session.child_limits);
         // Grant limits apply after session limits.
         if shell.has_active_capabilities() {
-            launch.limit_resources()?;
+            launch.launch_mut().limit_resources()?;
         }
         #[cfg(seccomp)]
-        confinement.apply_guest_jail(&mut launch, ownership, shell.context.grants.net())?;
+        confinement.apply_guest_jail(launch.launch_mut(), ownership, shell.context.grants.net())?;
         Ok(Prepared {
             launch,
             confinement,
@@ -464,7 +466,7 @@ fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Err
 
 /// A launch, ready except for its streams.
 pub(crate) struct Prepared {
-    launch: Launch,
+    launch: ProgramLaunch,
     confinement: Confinement,
     program: Program,
 }
@@ -504,7 +506,7 @@ impl Prepared {
             confinement,
             program,
         } = self;
-        let drains = (io.install(&mut launch).start(scope))
+        let drains = (io.install(launch.launch_mut()).start(scope))
             .map_err(|e| Break::from(program.io_error("start output drains", &e)))?;
         let spawned = match launch.spawn(placement, scope) {
             Ok(spawned) => spawned,
@@ -534,7 +536,7 @@ impl Prepared {
 #[must_use = "collect or register the started command so its child is reaped"]
 pub(crate) struct Started {
     pub(crate) shown: String,
-    pub(crate) spawned: Spawned,
+    pub(crate) spawned: Spawned<Group>,
     /// The PIDs whose kernel sandbox denials belong to this child, or
     /// `None` if no sandbox confines it.
     pub(crate) denial_pids: Option<HashSet<u32>>,

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e04cf89b
+generated_at_commit: 40af72fb
 generated_at_date: 2026-11-09
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
@@ -705,7 +705,15 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
 - `Launch::new` (`process/launch.rs`) builds the unsandboxed external exec
   image; `Command::prepare` reaches it directly when no projection is
   active.
-- `launch.rs` (`sandboxed_command`) — the per-command launcher.
+- `launch.rs` (`Confinement::launch`, `ProgramLaunch`, `sandboxed_command`) —
+  the per-command launcher. `ProgramLaunch` is `Direct(Launch)` or, on Linux,
+  `Enveloped(EnvelopedLaunch)`; `launch_mut` configures either inner launch,
+  and `spawn` and `spawn_detached` dispatch once. `Confinement::denial_pids`
+  names the pids whose kernel denials a spawned child owns.
+  Unconfined and guest-jail launches are always direct. macOS builds a direct
+  `Launch::trampolined` with its report fixed at construction; Windows keeps
+  its direct launch and token description. Linux `bwrapped` and `enveloped`
+  return the envelope's own launch type, with mandatory report and diagnostics.
   `Command::prepare` (`shell/exec/command.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child, the `Admitted`'s program: a `Program::File`
@@ -810,7 +818,7 @@ and the VM wall. The seccomp deny-set and offline namespace bind descendants.
   the context's absolute `CwdPath` bytes, while every rendered
   name refuses a position that is not Unicode rather than go lossy into
   bwrap's argv. A malformed or unreadable `InfoFd` record makes
-  `Launch::spawn` kill and reap the envelope before returning its error;
+  `EnvelopedLaunch::spawn` kill and reap the envelope before returning its error;
   an empty record means bwrap died before reporting its payload. Windows builds the
   target's `Launch` directly with a `Confined` describing its token, and
   every `Launch::spawn` runs `windows::session::confine`, which stamps and returns its

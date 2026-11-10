@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e04cf89b
+verified_at_commit: 40af72fb
 verified_at_date: 2026-11-09
-anchors: [StartFailure, StartFailure::settle, PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalHold, PreparedTerminalLoan, PreparedTerminalLoan::lend, GroupOwner, Shell::group_owner, Placement, Placement::command, Placement::input, TerminalInput, Source::offered, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, TerminalAccess::reach, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
+anchors: [StartFailure, StartFailure::settle, PipeNode, PipeNode::run, Prepared::start, Prepared::run, Connection, PendingDrains, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Heard, Event::Wrote, SettleOnDrop, Effect, Effect::KillStage, Effect::CancelAll, Event::AnchorDied, step, StageObservation, End, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::recv, CollectState::escalate, CollectState::cancel_all, CollectState::addresses, Address, kill_live, stronger, rank, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::membership, Group, Leader, Launch::spawn_leader, EnvelopedLaunch, Placement::land, Membership, Membership::owes, AnchorProcess, ChildHandle, into_watch, Watch, Drains::join_under, TerminalHold, PreparedTerminalLoan, PreparedTerminalLoan::lend, GroupOwner, Shell::group_owner, Placement, Placement::command, Placement::input, TerminalInput, Source::offered, CollectState::vacate, PipelineGroup::end_anchor, TerminalLease, TerminalAccess::reach, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Started::collect, Started::register, CollectState::lone, CollectState::settle_lone, drained, AnchorProcess::end, Group::owned, Group::owes, Job, Job::drain, JailCgroup::kill]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -161,7 +161,7 @@ cannot race the anchor's handler installation.
 its stage's membership with readable input and an empty hold. An owning
 pipeline consumes any `TerminalPermit` with `PreparedTerminalLoan::capture`
 **before the anchor exists**. `PipelineGroup::prepare` lends only after the
-zero byte and witness readiness, to the anchor's fresh pgid in ral's session,
+zero byte and witness readiness, to the anchor's certified `Leader` in ral's session,
 and returns `(group, TerminalHold, TerminalInput)`:
 
 - success retains the opaque hold and selects `Readable`;
@@ -173,8 +173,9 @@ and returns `(group, TerminalHold, TerminalInput)`:
 
 The collector owns the hold. `LaunchCx.input` stores the chosen input for
 both direct and thread stages, without inspecting the hold or recomputing
-permission at each launch. `Pgid` proves positivity only; the two handoff
-callers establish freshness and session membership by their spawn paths.
+permission at each launch. `AnchorProcess::spawn` uses `spawn_leader` and
+keeps its `Leader` beside the child pin. `lend(&Leader)` accepts that
+fresh-group birth certificate, not an arbitrary pgid or session leader.
 With the terminal settled before user code exists, no start-gate frame is
 needed.
 
@@ -259,7 +260,7 @@ its descendants; the reaper watches the leader, not every descendant, so
 resuming the leader alone cannot complete the handoff.
 
 A standalone command's `Started::collect`, beside it, takes the opaque
-`Spawned.terminal` established by `Launch::spawn` and builds
+`Spawned.terminal` established by the direct or enveloped spawn and builds
 `CollectState::lone` (slot 0, no thread stage, so no cleanup grace to grant). It runs the same `drive` as any pipeline, then `settle_lone` settles it
 as a command ends. No other wait on an external exists: the
 reaper's `Watch` posts its exit as `Event::Ended` and one `cancel_all` tears it
@@ -270,8 +271,9 @@ nothing else ([[invariants/a-process-group-is-its-owners-to-signal|a-process-gro
 The code facts behind each landing:
 
 - An `Owns` child leads a group of one with no anchor. An enveloped child is
-  stepped `NewLeader` by `Launch::spawn` whatever placement was requested.
-  Its payload leads a separate session's group, returned as `Group::Enveloped`,
+  stepped `Step::NewLeader` by `EnvelopedLaunch::spawn` whatever placement was
+  requested. Its payload leads a separate session's group, returned as a pgid
+  and wrapped by `Prepared::start` as Linux-only `Group::Enveloped`,
   which neither bwrap's pid nor the pipeline's group can reach. A requested
   `Tenant` becomes a restoration-only hold: readable stdin, no handoff, no
   key attribution.
@@ -329,7 +331,7 @@ once no stage is live, then runs the same `drained` per external
 (`StageEnd::settle`), its pin being the anchor, held to the group's drop.
 
 **A failed start owns its drains until the caller can settle them.**
-`Launch::spawn` owns child cleanup; `Prepared::start` returns `StartFailure`
+`Launch::born` owns kept-child cleanup; `Prepared::start` returns `StartFailure`
 with its reason and drains. A direct tenant's refused handoff may follow exec
 and emitted bytes: it kills the owned group while the unreaped leader pins the
 ID, kills/reaps the child, then restores the retained preparation and releases

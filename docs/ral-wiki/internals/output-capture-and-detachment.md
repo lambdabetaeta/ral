@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f26144e0
-verified_at_commit: f26144e0
+generated_at_commit: 40af72fb
+verified_at_commit: 40af72fb
 verified_at_date: 2026-11-09
-anchors: [StartFailure, StartFailure::settle, Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, Prepared::start, Launch::spawn, TerminalHold, drained, Started::collect, spawn_child, Placement::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
+anchors: [StartFailure, StartFailure::settle, Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, Prepared::start, Launch::born, Launch::spawn_detached, EnvelopedLaunch::spawn_detached, ProgramLaunch, TerminalHold, drained, Started::collect, spawn_child, Placement::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
 # Output capture and detachment
@@ -78,8 +78,9 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   audit/surface publication timing. A lone run settles immediately; a pipeline
   first rolls back and joins, even if no stage
   registered. A handoff or confinement refusal can follow exec and output:
-  `Launch::spawn` kills only a group it owns before reaping its child, restores
-  retained terminal state, and releases the jail. A joined child's descendants
+  `Launch::born` kills an envelope's named payload group and the fresh group
+  its applied step leads, and no other, before reaping its child; it then
+  restores retained terminal state and releases the jail. A joined child's descendants
   remain its enclosing owner's responsibility, so drain settlement cannot
   block that owner's launch rollback. The failed-start join has an empty kill
   callback; it never addresses a numeric group ID after reap.
@@ -264,7 +265,8 @@ of the child's pgid.
   exactly as it judges any exec and a head a handler in scope intercepts is
   refused, birthing nothing: a handler runs inside this session, so there is
   nothing to detach (to run the real program, `^name`). Only the last act
-  differs: `Launch::spawn_detached` **double-forks**. The intermediate exits at
+  differs: `Prepared::detach` matches `ProgramLaunch` to the direct or
+  enveloped `spawn_detached`. The inner `Launch::spawn_detached` **double-forks**. The intermediate exits at
   once and hands the grandchild's pid back over a pipe, so no collector
   ever records the pgid its kills address. Reaching the same lifetime by
   hiding a worker outside the session's `DurableRoot` cancel scope was
@@ -281,6 +283,11 @@ of the child's pgid.
   the session never waited and cannot. The survivor is *mute*: a program worth
   outliving a session keeps its own log, and the only way to learn whether it is
   still alive is to probe what it serves.
+- **A report failure surrenders too.** Direct trampoline and enveloped
+  launches hear the first word after detached birth. A refusal or stop returns
+  an error without killing the survivor; an envelope asks for no payload pgid.
+  Launcher attribution applies only to the fork's own exec error, not to the
+  payload's later `unstarted(errno)`.
 - **A successful spawn means the grandchild exec'd.** A later failure to reap
   the intermediate or recover the pid is `Survivor::Unnamed`: the user is told
   a program runs that nothing can stop by pid.

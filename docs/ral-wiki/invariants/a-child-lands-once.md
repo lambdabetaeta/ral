@@ -1,11 +1,10 @@
 # A child lands once
 
-**Where a child landed is decided once, before it is born, and carried as a
-value.** `spawn_with_pgid` (`core/src/process/group/unix.rs`) returns the
-child's `Group` with the child, and `Spawned.group` hands it from the spawn to
-every later reader (`core/src/process/launch.rs`). The same type is what a
-collector holds: nothing converts between a landing and a group, and nothing
-recomputes one. What each landing allows a collector to signal is
+**Placement is requested once; the birth applies its step, and one completion
+builds the landing carried to every later reader.** `Placement::land`
+(`core/src/process/launch/landing.rs`) derives every ordinary direct `Group`.
+Platform code applies `Step` and registers platform resources, but builds no
+`Group`. What each landing lets a collector signal is
 [[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]].
 
 - **Requested placement is one decision.** `Shell::group_owner` supplies stage
@@ -13,38 +12,53 @@ recomputes one. What each landing allows a collector to signal is
   selects `Join`, `Tenant`, `Inherit` or `NewSession`; `Placement::input`
   determines terminal stdin from the request. A pipeline selects its input
   once from its anchor handoff result and stores it for every stage.
-- **The spawn owns envelope placement.** `Launch::spawn` steps an envelope
-  `NewLeader` whatever was requested. A requested `Tenant` retains readable
-  stdin and an opaque restoration-only hold, not a handoff or key attribution.
-- **`spawn_with_pgid` is the one derivation.** `Join` carries its membership
-  into `Joins`; `NewLeader`, `NewSession` and direct `Tenant` own the child's
-  group; `Inherit` shares. An envelope's payload group, named once it exists,
-  becomes `Enveloped` (the envelope's own group where it names none); Windows'
-  spawn returns its own. `Tenant` lowers only to the fresh-leader step, but
-  `Pgid` itself proves positivity only: freshness and same-session placement
-  remain handoff call-site preconditions, not typed provenance guarantees.
-- **A launch is spent by its spawn.** `Launch::spawn` and `spawn_detached`
-  take the launch by value, so a second spawn is unwritable. The spawn moves
-  the confinement out of the launch, so a second spawn on the same `Command`
-  would find none, and would read bwrap's exit as the program's; the `pre_exec`
-  hooks, likewise, cannot be applied twice.
-- **A failed command handoff retains its guard through teardown.**
-  `Launch::spawn` kills the owned group while its leader still pins the ID,
-  kills/reaps the child, restores saved state, then releases the jail.
-  `Prepared::start` returns a `StartFailure` owning its reason and drains,
-  naming the handoff and OS error without claiming the command never ran.
-  The caller settles before reporting; a pipeline first rolls back and joins
-  so a joined child's descendants cannot block owner teardown. Settlement
-  never kills by group ID after reap. A pipeline instead lends before any stage exists:
-  its mode-inert anchor needs no teardown before restoration on refusal, and
-  the pipeline proceeds with terminal input withheld.
+- **The direct landing follows that request.** `Inherit` shares; `NewSession`
+  owns the child's group; `Join` carries its membership into `Joins`; `Tenant`
+  mints a `Leader`, lends to it and returns `Owns` with the opaque terminal
+  hold. Non-tenants return an empty hold. `Spawned<Group>` carries the result.
+- **A terminal handoff requires typed provenance.** `Leader` certifies birth
+  leading a fresh group in ral's own session, not liveness. Its constructor is
+  private to `landing.rs`: only the tenant completion and `spawn_leader` mint
+  it, each from the child pid its `Step::NewLeader` just grouped. It is neither
+  `Clone` nor `Copy`. `PreparedTerminalLoan::lend` accepts only `&Leader`;
+  a pgid, membership or session leader cannot be converted into one. The
+  caller must still retain the unreaped child to pin the ID.
+- **The envelope owns its placement.** Linux's `EnvelopedLaunch::spawn` calls
+  `Launch::born` with `Step::NewLeader` regardless of request and hands it the
+  naming of the payload's group; its landing is Linux-only `Group::Enveloped`
+  on that group, or on the monitor's where the envelope names none. A
+  requested `Tenant` retains readable stdin and a restoration-only hold,
+  without handoff or key attribution. `Confinement::denial_pids` reads the
+  payload's pids from the landed group.
+- **The anchor receives a certificate, not an ordinary group.**
+  `Launch::spawn_leader` returns `Spawned<Leader>` with an empty terminal hold.
+  `AnchorProcess` keeps the certificate beside its child pin; the pipeline
+  lends only after readiness. There is no runtime check that an ordinary
+  `Group` happened to be `Owns`.
+- **A launch is spent by its spawn.** Direct and enveloped spawns take their
+  launch by value. `Spawned<G>` varies only its group field; terminal
+  responsibility stays opaque, and nothing downstream recomputes placement.
+- **One birth serves every landing and platform.** `Launch::born` creates
+  the child, names an envelope's payload group, hears the launcher and lands,
+  in that order; its landing receives the child's own pgid and the payload's.
+  `born_direct` is the same birth with no payload to name: its landing
+  receives the child's pgid alone, so a direct landing cannot be handed a
+  payload group it would not address.
+- **Failed birth retains the request through teardown.** `born` keeps the
+  applied step, child, request and jail until the report and landing finish.
+  The child is held in an `Unlanded` until it lands. Dropped unlanded, the
+  guard kills the payload's group if one was named, then the child's fresh
+  group exactly when `Step::leads()`, while its unreaped leader pins the ID,
+  then kills/reaps the child; an exit `born` does not write still tears down. Only then does dropping the request
+  restore saved state, followed by jail release. The shell settles already-started drains before reporting;
+  a pipeline first rolls back and joins. No drain callback retains a reaped
+  group ID. An anchor handoff refusal can restore immediately: no stage
+  exists and the anchor never changes modes, so input is withheld instead.
 
-**Why.** Who may signal what is the safety of every teardown: a kill aimed at a
-group the child does not lead hits a stranger, and one aimed at a pid the child
-shares misses its tree. A landing recomputed in several places, from the policy
-asked for, the leader answered and the envelope's shape, is several chances to
-disagree; a value carried from the one place that knows cannot be recomputed
-wrongly.
+**Why.** A group kill must address a group the child actually leads, and a
+terminal loan must address a fresh leader in ral's session. Deriving the
+landing once prevents platform disagreement; the certificate prevents an
+arbitrary numeric pgid from receiving a loan. Neither replaces the child pin.
 
 See [[invariants/a-process-limit-binds-before-the-child-runs|a-process-limit-binds-before-the-child-runs]],
 [[internals/an-external-end-to-end|an-external-end-to-end]] and

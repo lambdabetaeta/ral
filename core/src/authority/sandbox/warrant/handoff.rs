@@ -492,7 +492,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_closed_inherited_stream_refuses_envelope_preparation() {
-        use crate::process::{Launch, Placement, Unstarted};
+        use crate::process::launch::EnvelopedLaunch;
+        use crate::process::report::Report;
+        use crate::process::{Placement, Unstarted};
         let mut handoff = Handoff::default();
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
         let mut cmd = Command::new("/bin/sh");
@@ -504,8 +506,14 @@ mod tests {
                 Ok(())
             });
         }
-        let mut launch = Launch::from_command(cmd);
-        launch.envelope_stdio(stdio);
+        let (reader, writer) = crate::process::cloexec_socketpair().expect("report socket");
+        let launch = EnvelopedLaunch::new(
+            cmd,
+            stdio,
+            "/bin/sh",
+            None,
+            Report::new(reader, writer.into()),
+        );
         let result = launch.spawn(
             Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
@@ -520,7 +528,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn envelope_capture_uses_final_redirections_before_low_nofile() {
-        use crate::process::{Launch, StdioSpec};
+        use crate::process::StdioSpec;
+        use crate::process::launch::EnvelopedLaunch;
+        use crate::process::report::{Report, Witness};
         let mut handoff = Handoff::default();
         let (stdio, [_, output, error]) = handoff.streams().expect("reserve stream slots");
         let mut cmd = Command::new("/bin/sh");
@@ -532,16 +542,27 @@ mod tests {
             ),
         ]);
         handoff.install(&mut cmd);
-        let mut launch = Launch::from_command(cmd);
-        launch.stdin(StdioSpec::Null);
-        // Deliberately configure capture last. Installation must merge and
-        // fill the high slots before lowering the descriptor limit.
-        launch.limit_session(crate::process::ChildLimits {
-            open_files: Some(64),
-            ..Default::default()
-        });
-        launch.dup_stdout_to_stderr();
-        launch.envelope_stdio(stdio);
+        let (reader, writer) = crate::process::cloexec_socketpair().expect("report socket");
+        let witness = Witness::new(writer.try_clone().expect("clone report writer").into())
+            .expect("a report is a socket");
+        drop(witness.started());
+        let mut launch = EnvelopedLaunch::new(
+            cmd,
+            stdio,
+            "/bin/sh",
+            None,
+            Report::new(reader, writer.into()),
+        );
+        launch.launch_mut().stdin(StdioSpec::Null);
+        // Installation must merge and fill the high slots before lowering
+        // the descriptor limit.
+        launch
+            .launch_mut()
+            .limit_session(crate::process::ChildLimits {
+                open_files: Some(64),
+                ..Default::default()
+            });
+        launch.launch_mut().dup_stdout_to_stderr();
         let output = launch.output().expect("spawn the envelope stand-in");
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"OUTERR");
@@ -551,7 +572,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn envelope_diagnostics_survive_a_null_payload_stderr() {
-        use crate::process::{Launch, Placement, StdioSpec, Unstarted};
+        use crate::process::launch::EnvelopedLaunch;
+        use crate::process::report::Report;
+        use crate::process::{Placement, StdioSpec, Unstarted};
         use std::os::fd::AsFd;
         let mut handoff = Handoff::default();
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
@@ -563,13 +586,10 @@ mod tests {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "printf ENVELOPE-REFUSED >&2; exit 1"]);
         handoff.install(&mut cmd);
-        let mut launch = Launch::from_command(cmd);
-        launch.envelope_stdio(stdio);
-        launch.confine(crate::process::launch::Confined {
-            report: crate::process::report::Report::new(reader, kept),
-            envelope: None,
-        });
+        let mut launch =
+            EnvelopedLaunch::new(cmd, stdio, "/bin/sh", None, Report::new(reader, kept));
         launch
+            .launch_mut()
             .stdin(StdioSpec::Null)
             .stdout(StdioSpec::Null)
             .stderr(StdioSpec::Null);

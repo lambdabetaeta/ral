@@ -586,9 +586,7 @@ mod tests {
             kept.limits = JailLimits::default();
             let mut failed = crate::process::Launch::new("/nonexistent/ral-jail-test");
             failed.apply_guest_jail(&kept).unwrap();
-            let Err(crate::process::Unstarted::Program(e)) =
-                failed.spawn(crate::process::Placement::NewLeader, &unstopped)
-            else {
+            let Err(crate::process::Unstarted::Program(e)) = failed.spawn_leader(&unstopped) else {
                 panic!("a program that does not exist is not born");
             };
             assert_eq!(e.kind(), io::ErrorKind::NotFound);

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f26144e0
+generated_at_commit: 40af72fb
 generated_at_date: 2026-11-09
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -72,7 +72,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   for `prepare`, so the 127/126 verdict is
   reported inside the command's record and redirects and beats a bad
   argument. `prepare(args, ownership, shell)` vets argv and builds a
-  `Prepared`: the `Launch`, its `Confinement`, and the `Program` it starts,
+  `Prepared`: the `ProgramLaunch`, its `Confinement`, and the `Program` it starts,
   which outlives the consumed launch to explain a failed start.
   `Prepared::start` installs an owned `io::child::Connection`, starts the
   drains from their owned readers, then spawns, so a thread creation failure
@@ -80,7 +80,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   its `Program::unstarted` reason and drains. A standalone `run` titles the
   terminal first and settles a failed start before propagating its reason;
   `PipeNode::finish` rolls back and joins before settling those drains, even
-  when no stage registered. `Started` owns the resulting `Spawned`, its `denial_pids` and the
+  when no stage registered. `start` spawns through `ProgramLaunch::spawn` and
+  takes `Confinement::denial_pids` of the result: a confined direct child's
+  pid, or `payload_pids` of a Linux envelope's `Group::Enveloped`. `Started`
+  owns the resulting
+  `Spawned<Group>`, its `denial_pids` and the
   running `Drains` until `collect` or `register` (`pipeline/collect.rs`)
   consumes it; registration cannot fail. Building describes and starting acts
   ([[design/exec|exec]]). `uutils.rs`
@@ -112,7 +116,8 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     command lookup, admission and preparation (`Ownership::Surrendered`) up to
     the one act that differs, `Prepared::detach`, private to that file:
     the child is born by
-    `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its
+    the matching direct or enveloped `spawn_detached`
+    ([[map/core/io-process|io-process]]), so its
     pgid is never observed here and nothing can signal, await, or reap it.
     What replaces the handle is a first-order `{pid, desc}` receipt. The
     birthing frame's projection is rendered into the launch exactly as for a
@@ -138,10 +143,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     permitted session to `Tenant`, and an unpermitted session to `Inherit`
     when interactive or `NewSession` otherwise. Capture precedes spawn.
     `Placement::input` permits `Inherit`, `Join` and `Tenant`, withholding
-    `NewLeader` and `NewSession`. Enveloping changes only the actual landing:
-    `Launch::spawn` alone enforces `NewLeader`; an eligible envelope retains
+    `NewSession`. Enveloping changes only the actual landing:
+    `EnvelopedLaunch::spawn` enforces `Step::NewLeader`; an eligible envelope retains
     readable stdin and a restoration-only hold, even in a script.
-    The direct tenant handoff belongs to `Launch::spawn`, not collection.
+    The direct tenant handoff belongs to `Placement::land`, not collection;
+    `lend(&Leader)` requires the fresh-group birth certificate.
     Refusal kills the group while its leader pins the ID, kills/reaps the child,
     restores state, and releases the jail; the caller then settles the
     `StartFailure` drains with no later numeric-ID kill before returning the

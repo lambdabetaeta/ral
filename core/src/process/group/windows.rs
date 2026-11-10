@@ -12,7 +12,7 @@
 //! (`shell::exec::pipeline::group`), a pipeline's or a lone external's;
 //! pipeline stages borrow the pipeline's.
 
-use super::{Group, Membership, Pgid, Placement};
+use super::{Pgid, Step};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
@@ -138,14 +138,14 @@ mod win_groups {
         }
     }
 
-    pub(crate) enum PreparedGroup {
+    pub(in crate::process) enum PreparedGroup {
         None,
         NewLeader {
             job: HANDLE,
             completion_port: HANDLE,
         },
         Join {
-            membership: super::Membership,
+            leader: super::Pgid,
             job: HANDLE,
         },
     }
@@ -158,12 +158,10 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `DuplicateHandle` on purpose: see the comment there"
     )]
-    pub(super) fn prepare(placement: &super::Placement) -> std::io::Result<PreparedGroup> {
-        match placement {
-            super::Placement::Inherit => Ok(PreparedGroup::None),
-            super::Placement::NewLeader
-            | super::Placement::NewSession
-            | super::Placement::Tenant(_) => {
+    pub(super) fn prepare(step: super::Step) -> std::io::Result<PreparedGroup> {
+        match step {
+            super::Step::Inherit => Ok(PreparedGroup::None),
+            super::Step::NewLeader | super::Step::NewSession => {
                 let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
@@ -181,8 +179,8 @@ mod win_groups {
                     completion_port,
                 })
             }
-            super::Placement::Join(membership) => {
-                let leader = membership.group().as_raw();
+            super::Step::Join(pgid) => {
+                let leader = pgid.as_raw();
                 // `state.job` is the registry's, not ours: the lock is all that
                 // keeps `release` from closing it before the `DuplicateHandle`.
                 let groups = GROUPS.lock_ignore_poison();
@@ -201,10 +199,7 @@ mod win_groups {
                 if job.is_null() {
                     return Err(std::io::Error::last_os_error());
                 }
-                Ok(PreparedGroup::Join {
-                    membership: membership.clone(),
-                    job,
-                })
+                Ok(PreparedGroup::Join { leader: pgid, job })
             }
         }
     }
@@ -256,11 +251,11 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `CloseHandle` on purpose: see the comment there"
     )]
-    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> super::Group {
+    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) {
         let child_pid = child.id();
         let child_handle = child.raw_process_handle();
         match prepared {
-            PreparedGroup::None => super::Group::Shares,
+            PreparedGroup::None => {}
             PreparedGroup::NewLeader {
                 job,
                 completion_port,
@@ -278,10 +273,9 @@ mod win_groups {
                         all_done: false,
                     },
                 ));
-                super::Group::Owns(super::Pgid::from_raw(leader_pid).expect("a pid is positive"))
             }
-            PreparedGroup::Join { membership, job } => {
-                let leader = membership.group().as_raw();
+            PreparedGroup::Join { leader, job } => {
+                let leader = leader.as_raw();
                 // Lock held across the `CloseHandle` below: this duplicate may be
                 // the handle whose close trips `KILL_ON_JOB_CLOSE`, which must not
                 // interleave with a concurrent `release` of the same job.
@@ -296,7 +290,6 @@ mod win_groups {
                 unsafe {
                     CloseHandle(job);
                 }
-                super::Group::Joins(membership)
             }
         }
     }
@@ -560,26 +553,26 @@ pub(crate) fn is_known_group(leader: i32) -> bool {
     groups.iter().any(|(p, _)| *p == leader)
 }
 
-pub(crate) type PreparedGroup = win_groups::PreparedGroup;
+pub(in crate::process) type PreparedGroup = win_groups::PreparedGroup;
 
-pub(crate) fn prepare_group(placement: &Placement) -> std::io::Result<PreparedGroup> {
-    win_groups::prepare(placement)
+pub(in crate::process) fn prepare_group(step: Step) -> std::io::Result<PreparedGroup> {
+    win_groups::prepare(step)
 }
 
-pub(crate) fn prepared_job(prepared: &PreparedGroup) -> Option<HANDLE> {
+pub(in crate::process) fn prepared_job(prepared: &PreparedGroup) -> Option<HANDLE> {
     win_groups::prepared_job(prepared)
 }
 
-pub(crate) fn close_prepared_group(prepared: PreparedGroup) {
+pub(in crate::process) fn close_prepared_group(prepared: PreparedGroup) {
     win_groups::close_prepared(prepared);
 }
 
-/// Register `child` in the group `prepared` for it: where it landed.
-pub(crate) fn register_prepared_group(
+/// Register `child` in its prepared Job and member list.
+pub(in crate::process) fn register_prepared_group(
     prepared: PreparedGroup,
     child: &crate::process::ChildHandle,
-) -> Group {
-    win_groups::register(prepared, child)
+) {
+    win_groups::register(prepared, child);
 }
 
 // ── Group wait/signal primitives ────────────────────────────────────────────

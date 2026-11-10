@@ -2,7 +2,7 @@
 
 **A collector signals or kills a process group only if it owns it; every other
 child is addressed by pid.** Ownership is where the child *landed*: `Group` is
-`Owns(Pgid)`, `Enveloped(Pgid)`, `Joins(Membership)` or `Shares`
+`Owns(Pgid)`, Linux-only `Enveloped(Pgid)`, `Joins(Membership)` or `Shares`
 (`core/src/process/group.rs`), and a collector reads its authority from nothing
 else. This page is the one home of what each landing means. That a landing is
 decided once is [[invariants/a-child-lands-once|a-child-lands-once]].
@@ -18,7 +18,8 @@ decided once is [[invariants/a-child-lands-once|a-child-lands-once]].
   group is the stage owner's: the collector addresses its externals by pid, and
   `Group::owes`, through `Membership::owes`, decides what its collector may
   signal: a cause only when it is stronger than the stage scope already holds.
-  The `Membership` rides the `PgidPolicy::Join` the child was placed by.
+  The `Membership` rides the `Placement::Join` that `Placement::land` turns
+  into `Group::Joins` after the platform applies its step.
 - **`Shares`**: ral's own group. The child is addressed by pid, never with
   `kill(-pgid)`, and gets Ctrl-C once, the terminal's, and never again by pid:
   `owes` is every cause but `Interrupted`.

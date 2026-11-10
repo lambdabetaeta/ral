@@ -168,7 +168,7 @@ fn start_granted<R>(
         let started = command
             .start(
                 Connection::new(&Source::Empty, &discard, &discard).unwrap(),
-                Placement::NewLeader,
+                Placement::Inherit,
                 &shell.scope,
             )
             .unwrap_or_else(|broke| panic!("the confined sh must start: {broke:?}"));
@@ -246,7 +246,7 @@ fn run_after(
     )
     .expect("the launch builds");
     between();
-    launch.stdin(crate::process::StdioSpec::Null);
+    launch.launch_mut().stdin(crate::process::StdioSpec::Null);
     launch.output()
 }
 

@@ -12,7 +12,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-fn capture(spawned: Result<crate::process::Spawned, Unstarted>) -> std::io::Result<Output> {
+fn capture(
+    spawned: Result<crate::process::Spawned<crate::process::Group>, Unstarted>,
+) -> std::io::Result<Output> {
     let mut child = match spawned {
         Ok(spawned) => spawned.child,
         Err(Unstarted::Program(e)) => return Err(e),

@@ -29,6 +29,8 @@ use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::error::Error;
 use crate::path::{CwdPath, RealPath};
+#[cfg(target_os = "linux")]
+use crate::process::launch::EnvelopedLaunch;
 #[cfg(unix)]
 use crate::process::report::Report;
 use std::borrow::Cow;
@@ -66,6 +68,55 @@ pub(crate) enum Confinement {
     Guest(&'static crate::process::jail::GuestJail),
 }
 
+pub(crate) enum ProgramLaunch {
+    Direct(crate::process::Launch),
+    #[cfg(target_os = "linux")]
+    Enveloped(EnvelopedLaunch),
+}
+
+impl ProgramLaunch {
+    pub(crate) fn launch_mut(&mut self) -> &mut crate::process::Launch {
+        match self {
+            Self::Direct(launch) => launch,
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(launch) => launch.launch_mut(),
+        }
+    }
+
+    pub(crate) fn spawn(
+        self,
+        placement: crate::process::Placement,
+        scope: &crate::process::Scope,
+    ) -> Result<crate::process::Spawned<crate::process::Group>, crate::process::Unstarted> {
+        match self {
+            Self::Direct(launch) => launch.spawn(placement, scope),
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(launch) => launch.spawn(placement, scope),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn spawn_detached(
+        self,
+        scope: &crate::process::Scope,
+    ) -> Result<crate::process::group::Survivor, crate::process::Unstarted> {
+        match self {
+            Self::Direct(launch) => launch.spawn_detached(scope),
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(launch) => launch.spawn_detached(scope),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn output(self) -> Result<std::process::Output, crate::process::Unstarted> {
+        match self {
+            Self::Direct(launch) => launch.output(),
+            #[cfg(target_os = "linux")]
+            Self::Enveloped(launch) => launch.output(),
+        }
+    }
+}
+
 impl Confinement {
     pub(crate) fn of(grants: &GrantStack, baseline: &Baseline, admitted: &Admitted) -> Self {
         // Guests disable unprivileged user namespaces, so they cannot nest bwrap.
@@ -91,14 +142,14 @@ impl Confinement {
         args: &[Cow<'_, str>],
         ownership: Ownership,
         cwd: &CwdPath,
-    ) -> Result<crate::process::Launch, Error> {
+    ) -> Result<ProgramLaunch, Error> {
         match self {
             Self::Projected(projection) => {
                 sandboxed_command(projection, image, args, ownership, cwd)
             }
-            Self::Unconfined => image.launch(args),
+            Self::Unconfined => image.launch(args).map(ProgramLaunch::Direct),
             #[cfg(seccomp)]
-            Self::Guest(_) => image.launch(args),
+            Self::Guest(_) => image.launch(args).map(ProgramLaunch::Direct),
         }
     }
 
@@ -132,16 +183,18 @@ impl Confinement {
     }
 
     /// The PIDs to look for in the kernel's sandbox-denial log, or `None`
-    /// when nothing confines `spawned`: the child's, or inside an envelope,
-    /// the payload's host PIDs. Taken at spawn, while the processes are
-    /// still alive.
-    pub(crate) fn denial_pids(&self, spawned: &crate::process::Spawned) -> Option<HashSet<u32>> {
+    /// when nothing confines `spawned`: the child's, or behind an envelope
+    /// the payload's host PIDs. Taken at spawn, while the processes live.
+    pub(crate) fn denial_pids(
+        &self,
+        spawned: &crate::process::Spawned<crate::process::Group>,
+    ) -> Option<HashSet<u32>> {
         if !self.is_confined() {
             return None;
         }
         #[cfg(target_os = "linux")]
-        if let crate::process::Group::Enveloped(payload) = &spawned.group {
-            return Some(super::payload_pids(*payload));
+        if let Some(payload) = spawned.group.enveloped() {
+            return Some(super::payload_pids(payload));
         }
         Some(HashSet::from([spawned.child.id()]))
     }
@@ -246,14 +299,15 @@ fn sandboxed_command(
     args: &[Cow<'_, str>],
     ownership: Ownership,
     cwd: &CwdPath,
-) -> Result<crate::process::Launch, Error> {
+) -> Result<ProgramLaunch, Error> {
     #[cfg(target_os = "linux")]
     {
         linux_sandboxed_command(projection, image, args, ownership, cwd)
+            .map(ProgramLaunch::Enveloped)
     }
     #[cfg(target_os = "macos")]
     {
-        macos_sandboxed_command(projection, image, args)
+        macos_sandboxed_command(projection, image, args).map(ProgramLaunch::Direct)
     }
     #[cfg(windows)]
     {
@@ -268,7 +322,7 @@ fn sandboxed_command(
             projection: projection.clone(),
             image: loaded,
         });
-        Ok(launch)
+        Ok(ProgramLaunch::Direct(launch))
     }
 }
 
@@ -305,7 +359,7 @@ fn linux_sandboxed_command(
     args: &[Cow<'_, str>],
     ownership: Ownership,
     cwd: &CwdPath,
-) -> Result<crate::process::Launch, Error> {
+) -> Result<EnvelopedLaunch, Error> {
     let bwrap = super::linux::envelope().map_err(super::unavailable)?;
     let own = super::reexec::own().map_err(Error::new)?;
     let env = Envelope::probe(bwrap, own);
@@ -323,7 +377,7 @@ pub(super) fn enveloped(
     args: &[Cow<'_, str>],
     chdir: Option<&CwdPath>,
     ownership: Ownership,
-) -> Result<crate::process::Launch, Error> {
+) -> Result<EnvelopedLaunch, Error> {
     let rendered = projection.rendered().map_err(Error::new)?;
     let shown = super::linux::Shown::of(&rendered).map_err(Error::new)?;
     let mut handoff = Handoff::default();
@@ -349,18 +403,15 @@ pub(super) fn bwrapped(
     info: Option<super::linux::InfoFd>,
     stdio: crate::process::launch::EnvelopeStdio,
     report: Report,
-) -> crate::process::Launch {
-    let mut launch = crate::process::Launch::from_command(cmd);
-    launch.envelope_stdio(stdio);
-    // A host package rather than part of ral, so it may simply be absent.
-    launch.confine(crate::process::launch::Confined {
+) -> EnvelopedLaunch {
+    EnvelopedLaunch::new(
+        cmd,
+        stdio,
+        // A host package rather than part of ral, so it may simply be absent.
+        super::linux::BWRAP,
+        info.map(|fd| Box::new(move || fd.payload_pgid()) as _),
         report,
-        envelope: Some(crate::process::launch::Envelope {
-            program: super::linux::BWRAP,
-            payload_pgid: info.map(|fd| Box::new(move || fd.payload_pgid()) as _),
-        }),
-    });
-    launch
+    )
 }
 
 /// macOS: re-exec the pinned ral, with the compiled profile in its warrant,
@@ -396,12 +447,7 @@ pub(super) fn trampoline(
     let mut cmd = own.command();
     cmd.args(slots.argv());
     handoff.install(&mut cmd);
-    let mut launch = crate::process::Launch::from_command(cmd);
-    launch.confine(crate::process::launch::Confined {
-        report,
-        envelope: None,
-    });
-    launch
+    crate::process::Launch::trampolined(cmd, report)
 }
 
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
@@ -1143,7 +1189,7 @@ mod tests {
             return;
         }
         for program in [sh(), Program::Tool("ls")] {
-            let launch = linux_sandboxed_command(
+            let mut launch = linux_sandboxed_command(
                 &restrictive(),
                 &image(program),
                 &["-l".into()],
@@ -1151,7 +1197,7 @@ mod tests {
                 &CwdPath::new("/".into()).expect("absolute cwd"),
             )
             .expect("build Linux command");
-            let cmd = launch.command();
+            let cmd = launch.launch_mut().command();
             assert!(
                 cmd.get_program()
                     .to_string_lossy()
@@ -1159,7 +1205,7 @@ mod tests {
                 "the launcher is the fd-pinned envelope, never a name PATH resolves: {:?}",
                 cmd.get_program()
             );
-            let args = argv(&launch);
+            let args = argv(launch.launch_mut());
             let [
                 opt,
                 options,

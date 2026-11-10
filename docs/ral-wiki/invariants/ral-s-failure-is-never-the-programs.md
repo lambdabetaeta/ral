@@ -21,7 +21,9 @@ This page is the one home of that claim.
   confined or not (`unprepared`: "ral could not prepare the command's process").
   Only a failure of the `execve` itself depends on confinement: where a
   launcher was to run in the program's place, its failure to exec is
-  `Refused`.
+  `Refused`. `fork` reads only its own exec error so, where the launch holds
+  a `Launcher`, before any report is heard or landing completed. A payload's
+  `unstarted(errno)` remains `Program` for kept and detached launches.
 - **On Windows only `CreateProcessW`'s own error is `Program`**; a `.bat` or
   `.cmd`, a NUL in an argument, handle admission and a Job Object that will not
   take the child are `Refused`.
