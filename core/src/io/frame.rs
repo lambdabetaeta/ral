@@ -2,54 +2,39 @@
 //! channel — the sealed engine seed and the engine wire in
 //! [`crate::protocol::channel`].
 
+use crate::data::json::{self, JsonDecode, JsonEncode};
+use crate::fact::{
+    FrameEncodeFailure, FrameEncodeFailureTooLarge, FrameFailure, FrameFailurePartial,
+    FrameFailureTooLarge, FramePart,
+};
 use crate::own::OwnDir;
 use crate::path::{Visibility, XdgKind, shown};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
-/// The frame fuse, stated once and judged by both ends: the encoder refuses a
-/// frame past it, with a sentence, before a byte is written, so the wire stays
-/// whole; the reader still severs on an oversize frame, a peer protocol
-/// violation.
-fn fuse(len: usize) -> io::Result<u32> {
+fn fuse(len: usize) -> Result<u32, FrameEncodeFailureTooLarge> {
     match u32::try_from(len) {
         Ok(len) if len <= MAX_FRAME_LEN => Ok(len),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "frame: a frame of {len} bytes exceeds the maximum frame length of \
-                 {MAX_FRAME_LEN} bytes"
-            ),
-        )),
+        _ => Err(FrameEncodeFailureTooLarge {
+            actual: len.into(),
+            limit: u64::from(MAX_FRAME_LEN).into(),
+        }),
     }
 }
 
-/// A body the fuse has passed, and its length prefix.
 pub(crate) struct Encoded {
     len: u32,
     body: Vec<u8>,
 }
 
-/// Serialise and fuse, with no I/O: an `Err` is the writer's fault and leaves
-/// the wire untouched. Encode and decode both grow their stack onto the heap
-/// rather than capping depth: a frame nests as deep as the data or IR it
-/// carries, and only the fuse bounds it.
-pub(crate) fn encode<T: Serialize>(value: &T) -> io::Result<Encoded> {
-    let mut body = Vec::new();
-    value
-        .serialize(serde_stacker::Serializer::new(
-            &mut serde_json::Serializer::new(&mut body),
-        ))
-        .map_err(io::Error::other)?;
-    Ok(Encoded {
-        len: fuse(body.len())?,
-        body,
-    })
+pub(crate) fn encode<T: JsonEncode + ?Sized>(value: &T) -> Result<Encoded, FrameEncodeFailure> {
+    let body = json::to_vec(value).map_err(FrameEncodeFailure::Json)?;
+    let len = fuse(body.len()).map_err(FrameEncodeFailure::TooLarge)?;
+    Ok(Encoded { len, body })
 }
 
 /// Length prefix, body, flush: only I/O can fail here.
@@ -59,52 +44,99 @@ pub(crate) fn put<W: Write + ?Sized>(w: &mut W, frame: &Encoded) -> io::Result<(
     w.flush()
 }
 
-pub(crate) fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(
-    r: &mut R,
-) -> io::Result<Option<T>> {
-    read_body(r)?.map(|body| decode_body(&body)).transpose()
+/// Raw-dump evidence is report-only, separate from the frame's portable cause.
+#[derive(Debug)]
+pub enum FrameDump {
+    Written(PathBuf),
+    Failed(io::Error),
 }
 
-/// `Ok(None)` is a clean EOF at a frame boundary, not a truncated frame.
-fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    let mut got = 0;
-    while got < 4 {
-        match r.read(&mut len_buf[got..]) {
-            // A signal cut the read before any byte moved: retry rather than
-            // abandon the channel.
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-            Ok(0) if got == 0 => return Ok(None),
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "frame: partial frame length",
-                ));
-            }
-            Ok(n) => got += n,
+/// Portable framing failure with separate, report-only raw-dump evidence.
+#[derive(Debug)]
+pub struct FrameReadError {
+    pub cause: FrameFailure,
+    pub dump: Option<FrameDump>,
+}
+
+impl From<FrameFailure> for FrameReadError {
+    fn from(cause: FrameFailure) -> Self {
+        Self { cause, dump: None }
+    }
+}
+
+impl fmt::Display for FrameReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.cause.describe())?;
+        match &self.dump {
+            None => Ok(()),
+            Some(FrameDump::Written(path)) => write!(f, " (raw frame written to {})", shown(path)),
+            Some(FrameDump::Failed(error)) => write!(f, " (raw frame not kept: {error})"),
         }
     }
-    let len = fuse(u32::from_le_bytes(len_buf) as usize)?;
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body)?;
+}
+impl std::error::Error for FrameReadError {}
+
+pub(crate) fn read_frame<R: Read + ?Sized, T: JsonDecode>(
+    reader: &mut R,
+) -> Result<Option<T>, FrameReadError> {
+    read_body(reader)?
+        .map(|body| decode_body(&body))
+        .transpose()
+}
+
+/// Retry interrupted reads and count the bytes before EOF explicitly.
+fn read_part<R: Read + ?Sized>(reader: &mut R, bytes: &mut [u8]) -> Result<usize, FrameFailure> {
+    let mut got = 0;
+    while got < bytes.len() {
+        match reader.read(&mut bytes[got..]) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(FrameFailure::Io(super::failure(&error))),
+            Ok(0) => break,
+            Ok(count) => got += count,
+        }
+    }
+    Ok(got)
+}
+
+fn partial(part: FramePart, got: usize, expected: usize) -> FrameReadError {
+    FrameFailure::Partial(FrameFailurePartial {
+        part,
+        got: got.into(),
+        expected: expected.into(),
+    })
+    .into()
+}
+
+/// `Ok(None)` is clean EOF between frames, not a truncated prefix or body.
+fn read_body<R: Read + ?Sized>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameReadError> {
+    let mut prefix = [0; 4];
+    match read_part(reader, &mut prefix)? {
+        0 => return Ok(None),
+        4 => {}
+        got => return Err(partial(FramePart::Length, got, 4)),
+    }
+    let len = fuse(u32::from_le_bytes(prefix) as usize).map_err(|size| {
+        FrameReadError::from(FrameFailure::TooLarge(FrameFailureTooLarge {
+            actual: size.actual,
+            limit: size.limit,
+        }))
+    })?;
+    let mut body = vec![0; len as usize];
+    let got = read_part(reader, &mut body)?;
+    if got != body.len() {
+        return Err(partial(FramePart::Body, got, body.len()));
+    }
     Ok(Some(body))
 }
 
-/// A failed decode dumps the raw body and names the dump in the error.
-fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
-    let mut de = serde_json::Deserializer::from_slice(body);
-    // Unbounded depth is safe: `serde_stacker` grows the stack onto the heap.
-    de.disable_recursion_limit();
-    match T::deserialize(serde_stacker::Deserializer::new(&mut de))
-        .and_then(|value| de.end().map(|()| value))
-    {
-        Ok(value) => Ok(value),
-        Err(e) => Err(io::Error::other(match dump_frame(body) {
-            Ok(path) => format!("{e} (raw frame written to {})", shown(&path)),
-            Err(dump) => format!("{e} (raw frame not kept: {dump})"),
-        })),
-    }
+fn decode_body<T: JsonDecode>(body: &[u8]) -> Result<T, FrameReadError> {
+    json::from_slice(body).map_err(|cause| FrameReadError {
+        cause: FrameFailure::Json(cause),
+        dump: Some(match dump_frame(body) {
+            Ok(path) => FrameDump::Written(path),
+            Err(error) => FrameDump::Failed(error),
+        }),
+    })
 }
 
 /// The body kept in the program's state directory under a fresh name, and
@@ -121,6 +153,24 @@ fn dump_frame(body: &[u8]) -> io::Result<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct TestJson<T>(T);
+    impl<T: serde::de::DeserializeOwned> JsonDecode for TestJson<T> {
+        fn decode_json(value: json::JsonRef<'_, '_>) -> Result<Self, crate::fact::DecodeFailure> {
+            json::decode_structural(value)
+        }
+    }
+    impl<T: Serialize> JsonEncode for TestJson<T> {
+        fn encode_json(
+            &self,
+            format: json::JsonFormat,
+        ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+            Ok(json::serialize_structural(self, format))
+        }
+    }
+
     #[cfg(unix)]
     use crate::host::test_support::with_var;
 
@@ -142,24 +192,41 @@ mod tests {
     #[test]
     fn read_frame_retries_a_signal_interrupted_length_read() {
         let mut framed = Vec::new();
-        put(&mut framed, &encode(&"hello").unwrap()).unwrap();
+        put(&mut framed, &encode(&TestJson("hello")).unwrap()).unwrap();
         let mut reader = InterruptOnce {
             bytes: std::io::Cursor::new(framed),
             interrupted: false,
         };
-        let value: Option<String> = read_frame(&mut reader).unwrap();
-        assert_eq!(value.as_deref(), Some("hello"));
+        let value: Option<TestJson<String>> = read_frame(&mut reader).unwrap();
+        assert_eq!(value.map(|value| value.0), Some("hello".into()));
+    }
+
+    #[test]
+    fn read_frame_retries_a_signal_interrupted_body_read() {
+        let frame = encode(&TestJson("hello")).unwrap();
+        let mut reader = io::Cursor::new(frame.len.to_le_bytes()).chain(InterruptOnce {
+            bytes: io::Cursor::new(frame.body),
+            interrupted: false,
+        });
+        let value: Option<TestJson<String>> = read_frame(&mut reader).unwrap();
+        assert_eq!(value.map(|value| value.0), Some("hello".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frame_encoding_preserves_typed_path_refusals_without_writing() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = crate::path::EnginePath::Host(
+            std::ffi::OsString::from_vec(b"/bad\xff".to_vec()).into(),
+        );
+        assert!(matches!(encode(&path), Err(FrameEncodeFailure::Json(_))));
     }
 
     #[test]
     fn an_oversized_length_is_refused_before_the_body_is_allocated() {
         let mut reader = std::io::Cursor::new(vec![0xFF; 4]);
-        let err = read_frame::<_, String>(&mut reader).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string().contains("exceeds the maximum frame length"),
-            "unexpected diagnostic: {err}"
-        );
+        let err = read_frame::<_, TestJson<String>>(&mut reader).unwrap_err();
+        assert!(matches!(err.cause, FrameFailure::TooLarge(_)));
     }
 
     /// Both ends judge a body by the one fuse, so an oversized frame fails
@@ -168,23 +235,59 @@ mod tests {
     fn the_fuse_is_the_same_at_both_ends() {
         assert_eq!(fuse(MAX_FRAME_LEN as usize).unwrap(), MAX_FRAME_LEN);
         let err = fuse(MAX_FRAME_LEN as usize + 1).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string().contains("exceeds the maximum frame length"),
-            "unexpected diagnostic: {err}"
-        );
+        assert_eq!(err.actual.to_u64(), u64::from(MAX_FRAME_LEN) + 1);
+        assert_eq!(err.limit.to_u64(), u64::from(MAX_FRAME_LEN));
     }
 
     #[test]
     fn a_truncated_length_is_not_a_clean_hangup() {
         let mut empty = std::io::Cursor::new(Vec::new());
-        let value: Option<String> = read_frame(&mut empty).unwrap();
+        let value: Option<TestJson<String>> = read_frame(&mut empty).unwrap();
         assert_eq!(value, None, "EOF at a frame boundary is an orderly close");
 
         let mut partial = std::io::Cursor::new(vec![0x02, 0x00]);
-        let err = read_frame::<_, String>(&mut partial).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        assert_eq!(err.to_string(), "frame: partial frame length");
+        let err = read_frame::<_, TestJson<String>>(&mut partial).unwrap_err();
+        assert_eq!(
+            err.cause,
+            FrameFailure::Partial(FrameFailurePartial {
+                part: FramePart::Length,
+                got: 2_usize.into(),
+                expected: 4_usize.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn dump_failure_does_not_change_the_authoritative_frame_cause() {
+        let cause = FrameFailure::Partial(FrameFailurePartial {
+            part: FramePart::Body,
+            got: 1_usize.into(),
+            expected: 2_usize.into(),
+        });
+        let error = FrameReadError {
+            cause: cause.clone(),
+            dump: Some(FrameDump::Failed(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            ))),
+        };
+        assert_eq!(error.cause, cause);
+        assert!(error.to_string().contains("raw frame not kept"));
+    }
+
+    #[test]
+    fn partial_body_retains_the_number_of_received_bytes() {
+        let mut bytes = 8_u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"abc");
+        let error = read_frame::<_, TestJson<String>>(&mut io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(
+            error.cause,
+            FrameFailure::Partial(FrameFailurePartial {
+                part: FramePart::Body,
+                got: 3_usize.into(),
+                expected: 8_usize.into(),
+            })
+        );
+        assert!(error.dump.is_none());
     }
 
     #[test]
@@ -194,9 +297,10 @@ mod tests {
         let mut framed = fuse(nest.len()).unwrap().to_le_bytes().to_vec();
         framed.extend_from_slice(nest.as_bytes());
 
-        let deep: serde_json::Value = read_frame(&mut std::io::Cursor::new(framed.clone()))
-            .unwrap()
-            .expect("a whole frame decodes");
+        let deep: TestJson<serde_json::Value> =
+            read_frame(&mut std::io::Cursor::new(framed.clone()))
+                .unwrap()
+                .expect("a whole frame decodes");
         let mut again = Vec::new();
         put(&mut again, &encode(&deep).unwrap()).unwrap();
         assert_eq!(again, framed);
@@ -250,21 +354,17 @@ mod tests {
         let base = crate::path::utf8(state.path()).unwrap();
         let err = with_var("XDG_STATE_HOME", Some(base), || {
             let mut framed = Vec::new();
-            put(&mut framed, &encode(&"not a number").unwrap()).unwrap();
+            put(&mut framed, &encode(&TestJson("not a number")).unwrap()).unwrap();
             let mut reader = std::io::Cursor::new(framed);
-            read_frame::<_, u32>(&mut reader).unwrap_err()
+            read_frame::<_, TestJson<u32>>(&mut reader).unwrap_err()
         });
 
-        let message = err.to_string();
-        let path = message
-            .rsplit_once("written to ")
-            .and_then(|(_, tail)| tail.strip_suffix(')'))
-            .expect("error names the dump path");
-        assert!(
-            std::path::Path::new(path).starts_with(state.path()),
-            "the dump lands in the state directory: {path}"
-        );
-        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        assert!(matches!(err.cause, FrameFailure::Json(_)));
+        let Some(FrameDump::Written(path)) = err.dump else {
+            panic!("dump was not retained")
+        };
+        assert!(path.starts_with(state.path()));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "dump must not be group/world-readable");
     }
 }

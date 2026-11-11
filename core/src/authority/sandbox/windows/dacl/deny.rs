@@ -40,9 +40,10 @@ use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::super::local::Local;
-use super::acl::{win32_err, win32_err_str};
+use super::acl::{win32_err, win32_io};
 use super::{DaclError, cancelled};
 use crate::authority::sandbox::TOKEN;
+use crate::fact::{AccessCheckOperation, DaclOperation};
 use crate::path::{Kind, LeafMode, Located, RealPath};
 use crate::process::cancel::Scope;
 
@@ -85,7 +86,7 @@ impl ContainerAccess {
             )
         } == 0
         {
-            return Err(failed("AuthzInitializeResourceManager"));
+            return Err(failed(AccessCheckOperation::InitializeResourceManager));
         }
         let mut access = Self {
             manager,
@@ -95,7 +96,7 @@ impl ContainerAccess {
         // SAFETY: the current-process pseudo-handle needs no closing; `token`
         // is an out-param whose handle we then own.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
-            return Err(failed("OpenProcessToken"));
+            return Err(failed(AccessCheckOperation::OpenProcessToken));
         }
         // SAFETY: the call succeeded, so `token` is a fresh handle we own.
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
@@ -115,7 +116,7 @@ impl ContainerAccess {
             )
         } == 0
         {
-            return Err(failed("AuthzInitializeContextFromToken"));
+            return Err(failed(AccessCheckOperation::InitializeContextFromToken));
         }
         // SAFETY: `package` and every capability SID are live for the call,
         // which copies them into the context.
@@ -123,7 +124,7 @@ impl ContainerAccess {
             AuthzSetAppContainerInformation(access.client, package, count, capabilities.as_ptr())
         } == 0
         {
-            return Err(failed("AuthzSetAppContainerInformation"));
+            return Err(failed(AccessCheckOperation::SetAppContainerInformation));
         }
         Ok(access)
     }
@@ -149,7 +150,7 @@ impl ContainerAccess {
             )
         };
         if rc != ERROR_SUCCESS {
-            return Err(win32_err(path, "GetSecurityInfo", rc));
+            return Err(win32_err(path, DaclOperation::GetSecurityInfo, rc));
         }
         // SAFETY: the successful query transferred the descriptor allocation.
         let sd = unsafe { Local::<c_void>::from_raw(sd) };
@@ -181,14 +182,14 @@ impl ContainerAccess {
         } == 0
         {
             return Err(DaclError::AccessCheck {
-                op: "AuthzAccessCheck",
+                op: AccessCheckOperation::Check,
                 error: io::Error::last_os_error(),
             });
         }
         match error {
             ERROR_SUCCESS => Ok(granted),
             ERROR_ACCESS_DENIED => Ok(0),
-            rc => Err(win32_err(path, "AuthzAccessCheck", rc)),
+            rc => Err(win32_err(path, DaclOperation::AccessCheck, rc)),
         }
     }
 }
@@ -285,8 +286,5 @@ pub(crate) fn ensure_unreachable(
 }
 
 fn walk_error(path: &Path, error: &io::Error) -> DaclError {
-    win32_err_str(
-        path,
-        &format!("cannot check what the sandbox could reach beneath an exclusion: {error}"),
-    )
+    win32_io(path, DaclOperation::WalkExclusion, error)
 }

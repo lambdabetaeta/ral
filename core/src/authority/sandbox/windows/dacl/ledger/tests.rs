@@ -166,3 +166,47 @@ fn recovery_deletes_dead_sessions_profiles() {
         );
     });
 }
+
+#[test]
+fn ledger_json_preserves_os_string_bytes_and_struct_policies() {
+    let ledger = Ledger {
+        run_id: "fixture".into(),
+        pid: 7,
+        image_name: OsString::from_wide(&[0xd800, 0x61]),
+        started_at_filetime: u64::MAX,
+        profiles: vec!["profile".into()],
+    };
+    let bytes = json::to_vec_pretty(&ledger).unwrap();
+    assert_eq!(bytes, serde_json::to_vec_pretty(&ledger).unwrap());
+    let decoded: Ledger = json::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.image_name, ledger.image_name);
+    assert_eq!(decoded.started_at_filetime, u64::MAX);
+    let positional = br#"["fixture",7,{"Windows":[55296,97]},18446744073709551615,[]]"#;
+    assert_eq!(
+        json::from_slice::<Ledger>(positional).unwrap().image_name,
+        ledger.image_name
+    );
+    let duplicate = br#"{"run_id":"a","run_id":"b","pid":1,"image_name":{"Windows":[]},"started_at_filetime":0,"profiles":[]}"#;
+    assert!(
+        matches!(json::from_slice::<Ledger>(duplicate), Err(crate::fact::JsonInputFailure::Decode(failure)) if *failure.cause == crate::fact::DecodeCause::DuplicateField("run_id".into()))
+    );
+}
+
+#[test]
+fn corrupt_ledger_is_typed_and_recovery_keeps_its_quarantine_policy() {
+    with_scoped_state_dir(|| {
+        let dir = ledger_dir().unwrap();
+        std::fs::write(dir.path().join("fixture.json"), b"{}").unwrap();
+        assert!(matches!(
+            read_ledger(&dir, "fixture.json"),
+            Err(DaclError::LedgerParse {
+                cause: crate::fact::JsonInputFailure::Decode(_),
+                ..
+            })
+        ));
+        let report = recover_orphaned_state().unwrap();
+        assert_eq!(report.files_processed, 1);
+        assert_eq!(report.errors.len(), 1);
+        assert!(dir.path().join("fixture.json.corrupt").exists());
+    });
+}

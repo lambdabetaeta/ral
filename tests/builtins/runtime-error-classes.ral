@@ -8,15 +8,10 @@ let assert_eq = { |name expected actual|
     }
 }
 
-# Check the failure class without pinning refusal prose.
+# A refusal fails with status 1; check that without pinning refusal prose.
 let refusal = { |body|
     try { !$body; fail 'ran' } { |e|
-        case $e[reason] [
-            `raised: { |_| return () },
-            `process: { |_| fail 'unexpected external failure' },
-            `timed-out: { |_| fail 'unexpected timeout' },
-            `cancelled: { |_| fail 'unexpected cancellation' }
-        ]
+        if $[$e[status] != 1] { fail "unexpected status $e[status]" }
         return [frame: $e[frame]]
     }
 }

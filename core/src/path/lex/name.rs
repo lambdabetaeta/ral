@@ -85,6 +85,14 @@ impl std::fmt::Display for NotUtf8 {
 
 impl std::error::Error for NotUtf8 {}
 
+impl From<&NotUtf8> for crate::fact::PathFailure {
+    fn from(error: &NotUtf8) -> Self {
+        Self::NotUnicode(crate::fact::PathFailureNotUnicode {
+            shown: crate::path::shown(&error.0),
+        })
+    }
+}
+
 /// `path`'s native spelling as text, when it is UTF-8.
 ///
 /// The one conversion for a path that must travel as a string and be lifted back

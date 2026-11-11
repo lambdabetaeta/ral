@@ -89,7 +89,7 @@ fn inherit_and_restrict_pass_the_grant_door() {
             ),
         );
         assert!(
-            result.contains("`model") && !result.contains("`grant"),
+            result.contains("field \"model\"") && !result.contains("field \"grant\""),
             "{grant}: {result}"
         );
         no_children(&session);
@@ -128,7 +128,7 @@ fn an_empty_role_name_is_refused() {
         &mut session,
         r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
     );
-    assert!(result.contains("non-empty"), "{result}");
+    assert!(result.contains("provider role cannot be empty"), "{result}");
     no_children(&session);
 }
 
@@ -774,10 +774,212 @@ fn a_run_with_no_fork_door_refuses_in_its_own_words() {
         panic!("well-formed source must run")
     };
     match ending.into_settled() {
-        Err(Break::Error(e)) => assert_eq!(
-            e.describe(),
-            "exarch-agents: this host adopts no forked sessions"
-        ),
+        Err(Break::Error(e)) => {
+            assert_eq!(
+                e.reason,
+                ral_core::fact::Reason::State(Box::new(ral_core::fact::StateFailure::NoForks))
+            );
+            assert_eq!(e.describe(), "this host cannot fork an engine");
+        }
         other => panic!("expected the no-fork-door refusal, got {other:?}"),
+    }
+}
+
+mod typed_boundaries {
+    use super::super::*;
+    use ral_core::fact::{
+        DataStep, DecodeCause, Found, NonData, OpaqueKind, ShapeFailure, ValueShape,
+    };
+    use ral_core::process::CancelCause;
+    use ral_core::protocol::Run;
+    use ral_core::shell::run::RunRequest;
+    use ral_core::shell::runtime::{Break, EnquiryDesk, Escape, Stop};
+    use ral_core::source::SourceOrigin;
+
+    fn shell() -> Shell {
+        let mut runtime = ral_core::test_helper::core_runtime();
+        for set in crate::shell_eval::builtins::host_surface().statics {
+            runtime.install_builtins(set);
+        }
+        Shell::root(runtime.into(), ral_core::test_helper::process_cwd())
+    }
+
+    fn error<T>(result: Settled<T>) -> Error {
+        match result {
+            Err(Break::Error(error)) => error,
+            _ => panic!("catchable refusal"),
+        }
+    }
+
+    #[test]
+    fn first_order_keeps_the_opaque_leaf_and_root_or_nested_position() {
+        let native = Value::Native(Arc::new(HARNESS_BUILTINS[0].clone()));
+        for (value, nested) in [(native.clone(), false), (Value::list(vec![native]), true)] {
+            let error = error(first_order("exarch-agents", &value));
+            assert_eq!(
+                error.reason,
+                Reason::Invalid(Box::new(InvalidFailure::new(
+                    "exarch-agents".into(),
+                    InvalidCause::NonData(NonData {
+                        leaf: OpaqueKind::Function,
+                        nested
+                    }),
+                )))
+            );
+            assert_eq!(error.hints(), []);
+        }
+    }
+
+    #[test]
+    fn malformed_requests_keep_the_original_decode_path() {
+        let mut shell = shell();
+        let word = Value::variant("remove", Some(Value::Int(7)));
+        let cause = DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+            expected: ral_core::fact::Expected::Shape(ValueShape::String),
+            found: Found::Int(7),
+        }))
+        .payload("remove");
+        let error = error(builtin_family::<Schedules>(
+            &[word],
+            &Mooring::adrift(),
+            &mut shell,
+        ));
+        assert_eq!(
+            error.reason,
+            decode_error("exarch-schedules", ProtocolData::Request, cause).reason
+        );
+    }
+
+    #[test]
+    fn agents_model_failures_keep_their_path_after_inherit_and_restrict_grants() {
+        use ral_core::data::datum::tag;
+        use ral_core::fact::UnknownTag;
+
+        let shell = shell();
+        for grant in [
+            tag("inherit", None),
+            tag(
+                "restrict",
+                Some(FOValue::Map {
+                    entries: vec![("net".into(), tag("offline", None))],
+                }),
+            ),
+        ] {
+            for (model, cause) in [
+                (
+                    tag("guess", None),
+                    DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                        tag: "guess".into(),
+                        offered: vec!["inherit".into(), "role".into()],
+                    })),
+                ),
+                (
+                    tag("role", Some(String::new().encode())),
+                    DecodeFailure::new(DecodeCause::EmptyProviderRole).payload("role"),
+                ),
+            ] {
+                let word = Value::from(tag(
+                    "start",
+                    Some(FOValue::Map {
+                        entries: vec![
+                            ("prompt".into(), "hi".to_string().encode()),
+                            ("name".into(), "helper".to_string().encode()),
+                            ("type".into(), tag("amnemon", None)),
+                            ("grant".into(), grant.clone()),
+                            ("model".into(), model),
+                        ],
+                    }),
+                ));
+                let error = error(agents(&[word], &Mooring::adrift(), &shell));
+                assert_eq!(
+                    error.reason,
+                    decode_error(
+                        "exarch-agents",
+                        ProtocolData::Request,
+                        cause.field("model").payload("start"),
+                    )
+                    .reason
+                );
+                assert_eq!(error.context(), None);
+                assert_eq!(error.hints(), []);
+            }
+        }
+    }
+
+    struct Answers(Settled<FOValue>);
+    impl EnquiryDesk for Answers {
+        fn enquire(&self, _: FOValue, _: &ral_core::process::Scope) -> Settled<FOValue> {
+            self.0.clone()
+        }
+    }
+
+    fn enquire(answer: Settled<FOValue>) -> Settled<Value> {
+        let request = RunRequest {
+            desk: Some(Arc::new(Answers(answer))),
+            ..Run::captured("exarch-pins `list", SourceOrigin::named("<typed-enquiry>")).into()
+        };
+        shell().run(request).expect_ran().into_settled()
+    }
+
+    #[test]
+    fn a_malformed_answer_keeps_answer_identity_and_its_element_path() {
+        let answer = FOValue::List {
+            items: vec![FOValue::Int { value: 3 }],
+        };
+        let error = error(enquire(Ok(answer)));
+        let Reason::Protocol(failure) = error.reason else {
+            panic!("protocol answer failure")
+        };
+        let ProtocolFailure::Decode(failure) = *failure else {
+            panic!("decode failure")
+        };
+        assert_eq!(failure.kind, ProtocolData::Answer);
+        assert_eq!(failure.operation, "exarch-pins");
+        assert_eq!(failure.cause.path, [DataStep::Index(0usize.into())]);
+        assert_eq!(
+            *failure.cause.cause,
+            DecodeCause::Shape(ShapeFailure {
+                expected: ral_core::fact::Expected::Shape(ValueShape::String),
+                found: Found::Int(3)
+            })
+        );
+    }
+
+    #[test]
+    fn an_enquiry_preserves_existing_errors_exits_and_stops() {
+        let original = Error::new(Reason::State(Box::new(StateFailure::NoDesk)))
+            .with_context("host context")
+            .with_hint("situational advice");
+        let got = error(enquire(Err(original.clone().into())));
+        assert_eq!(got.reason, original.reason);
+        assert_eq!(got.context(), original.context());
+        assert_eq!(got.hints(), original.hints());
+        assert!(matches!(
+            enquire(Err(Escape::Exit(42).into())),
+            Err(Break::Escape(Escape::Exit(42)))
+        ));
+        let stop = Stop {
+            cause: CancelCause::TimedOut,
+            owner: None,
+            at: None,
+        };
+        assert!(matches!(
+            enquire(Err(Escape::Stopped(stop).into())),
+            Err(Break::Escape(Escape::Stopped(Stop {
+                cause: CancelCause::TimedOut,
+                ..
+            })))
+        ));
+    }
+
+    #[test]
+    fn a_missing_fork_is_a_state_refusal_before_enquiry() {
+        let error = error(fork_then_enquire(
+            SpawnGrant::Inherit,
+            &Mooring::adrift(),
+            &shell(),
+            |_| Request::Agents(Agents::List),
+        ));
+        assert_eq!(error.reason, Reason::State(Box::new(StateFailure::NoForks)));
     }
 }

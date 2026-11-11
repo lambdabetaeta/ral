@@ -26,10 +26,15 @@ fn transient_surfaces_without_nudge() {
     let mut nudges = Nudges::new(true);
     let log = fresh_log();
     let error = ProviderError::Transient {
-        cause: "model response headers timed out".into(),
+        cause: ral_core::fact::RetryableProviderCause::Service(ral_core::fact::ServiceFailure {
+            service: "test-service".into(),
+            operation: ral_core::fact::ServiceOperation::Chat,
+            context: vec![],
+            cause: Box::new(ral_core::fact::ServiceCause::StreamTimeout(
+                ral_core::fact::StreamTimeoutKind::Headers,
+            )),
+        }),
         attempts: 3,
-        body: None,
-        status: None,
     };
     assert!(
         nudges.react(Err(&error), &facts(), &log).is_none(),
@@ -81,9 +86,19 @@ fn a_stalled_truncation_gets_its_own_message_and_cause() {
     let mut nudges = Nudges::new(true);
     let log = fresh_log();
     let error = ProviderError::Truncated {
-        cause: Box::new(CutShort::Stalled(ProviderError::local_transient(
-            "model response body read timed out",
-        ))),
+        cause: Box::new(CutShort::Stalled(ProviderError::Transient {
+            cause: ral_core::fact::RetryableProviderCause::Service(
+                ral_core::fact::ServiceFailure {
+                    service: "test-service".into(),
+                    operation: ral_core::fact::ServiceOperation::Chat,
+                    context: vec![],
+                    cause: Box::new(ral_core::fact::ServiceCause::StreamTimeout(
+                        ral_core::fact::StreamTimeoutKind::Read,
+                    )),
+                },
+            ),
+            attempts: 1,
+        })),
     };
     assert_eq!(
         nudges.react(Err(&error), &facts(), &log),
@@ -436,7 +451,7 @@ fn pending_helpers_suppress_repairs_without_spending_or_consuming_pin_edges() {
     for outcome in [
         Outcome::Empty,
         Outcome::Stopped {
-            reason: "early".into(),
+            reason: ral_core::fact::ProviderStop::Unclassified("early".into()),
         },
         Outcome::Complete,
     ] {

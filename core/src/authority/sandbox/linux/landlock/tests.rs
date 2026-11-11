@@ -55,27 +55,46 @@ fn only_the_two_absence_errnos_read_as_a_kernel_without_landlock() {
 /// a failed probe tells nothing, so it refuses every launch.
 #[test]
 fn an_exec_restricting_grant_is_refused_without_landlock() {
-    let why = plan(&restricted(), Landlock::Absent)
-        .expect_err("a restricted exec grant needs Landlock")
-        .to_string();
+    let error =
+        plan(&restricted(), Landlock::Absent).expect_err("a restricted exec grant needs Landlock");
+    let why = error.describe();
     assert!(
         why.starts_with("sandbox confinement unavailable: "),
         "{why}"
     );
-    assert!(why.contains("Landlock") && why.contains("5.13"), "{why}");
+    assert!(
+        why.contains("Landlock") && why.contains("refuses rather than run them unchecked"),
+        "{why}"
+    );
+    assert!(
+        error
+            .reason
+            .advice()
+            .iter()
+            .any(|advice| advice.contains("5.13"))
+    );
+    assert!(!why.contains("5.13"), "version guidance belongs to advice");
+    assert!(error.plain().contains("5.13"));
+    assert!(error.hints().is_empty(), "intrinsic advice is not stored");
     assert_eq!(
         plan(&ExecProjection::Unrestricted, Landlock::Absent).expect("nothing to enforce"),
         None
     );
     for exec in [restricted(), ExecProjection::Unrestricted] {
-        let why = plan(&exec, Landlock::Unprobed(libc::EPERM))
-            .expect_err("a failed probe is not a kernel without Landlock")
-            .to_string();
+        let error = plan(&exec, Landlock::Unprobed(libc::EPERM))
+            .expect_err("a failed probe is not a kernel without Landlock");
+        let why = error.describe();
         assert!(
             why.starts_with("sandbox confinement unavailable: "),
             "{why}"
         );
-        assert!(why.contains("probe failed"), "{why}");
+        assert!(
+            why.contains("probe failed")
+                && why.contains("does not establish that Landlock is absent"),
+            "{why}"
+        );
+        assert_eq!(error.reason.advice(), [] as [String; 0]);
+        assert!(!error.plain().contains("5.13"));
     }
 }
 
@@ -726,4 +745,27 @@ fn a_socket_write_grant_admits_only_its_opened_file() {
     })
     .unwrap();
     assert_eq!(seen, [real(&path)]);
+}
+
+#[test]
+fn ruleset_projection_retains_each_intrinsic_stage_and_admit_source() {
+    use crate::fact::{IoCause, IoLeaf, PathIoLeaf, RulesetFailure};
+    let native = || io::Error::from_raw_os_error(libc::EPERM);
+    assert!(
+        matches!(RulesetFailure::from(RulesetError::Create(native())), RulesetFailure::Create(cause) if cause.raw == Some(libc::EPERM))
+    );
+    assert!(
+        matches!(RulesetFailure::from(RulesetError::Restrict(native())), RulesetFailure::Restrict(cause) if cause.raw == Some(libc::EPERM))
+    );
+    let source = IoCause::new(IoLeaf::Path(PathIoLeaf::NotHeld));
+    assert!(
+        matches!(RulesetFailure::from(RulesetError::admit("/fixture", io::Error::other(source.clone()))), RulesetFailure::Admit(failure)
+        if failure.name == "/fixture" && *failure.cause == source)
+    );
+    assert_eq!(
+        RulesetFailure::from(RulesetError::Open(OpenError::Linked("/fixture".into()))),
+        RulesetFailure::Open(crate::fact::ProjectionOpenFailure::Linked(
+            "/fixture".into()
+        ))
+    );
 }

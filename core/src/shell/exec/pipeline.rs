@@ -265,7 +265,8 @@ mod tests {
                         let settled = node.finish(Err(failure), &mooring, &mut shell);
                         assert_eq!(matches!(settled, Err(Break::Escape(_))), cancelled);
                         if let Err(Break::Error(error)) = &settled {
-                            assert!(error.describe().contains("checkpoint refusal"));
+                            assert!(matches!(&error.reason, crate::fact::Reason::Launch(failure)
+                                if matches!(**failure, crate::fact::LaunchFailure::Warrant(crate::fact::WarrantFailure::Magic))));
                         }
                         done_tx.send(settled.is_err()).expect("settled failure");
                     });
@@ -279,7 +280,9 @@ mod tests {
                         home.cancel(CancelCause::Aborted);
                         // Keep the report open: cancellation, not EOF, ends first().
                     } else {
-                        witness.refused("checkpoint refusal after descendant startup");
+                        witness.refused(&crate::fact::LaunchFailure::Warrant(
+                            crate::fact::WarrantFailure::Magic,
+                        ));
                     }
                     failed_rx
                         .recv_timeout(WAIT)

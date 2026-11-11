@@ -45,7 +45,7 @@ impl SpawnGrant {
     ///
     /// # Errors
     /// Whatever `narrow` refuses a base with, or the capability decoder's own
-    /// sentence for a restriction record it will not read.
+    /// typed refusal for a restriction record it will not read.
     pub fn layer(&self, narrow: GrantNarrower, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
         match self {
             Self::Inherit => Ok(GrantLayer::root()),
@@ -70,6 +70,26 @@ impl SpawnGrant {
     }
 }
 
+impl crate::data::json::JsonDecode for SpawnGrant {
+    fn decode_json(
+        value: crate::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        crate::data::json::decode_structural::<crate::seed::json::RawSpawnGrant>(value)?.validate()
+    }
+}
+
+impl crate::data::json::JsonEncode for SpawnGrant {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(crate::data::json::serialize_structural(
+            &crate::seed::json::RawSpawnGrant::from_value(self),
+            format,
+        ))
+    }
+}
+
 // Unix-only: a frozen `cwd` reads with `\` separators on Windows.
 #[cfg(all(test, unix))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
@@ -77,6 +97,9 @@ mod tests {
     use super::*;
     use crate::authority::policy::{FsAllow, FsOp};
     use crate::environ::EnvVars;
+    use crate::fact::{
+        ExarchFailure, HostFailure, PolicyFailure, PolicyFailureUnknownBase, Reason,
+    };
     use crate::shell::grant::decode_capability_map;
     use crate::shell::runtime::Value;
 
@@ -144,8 +167,14 @@ mod tests {
         let decoder = decode_capability_map(&record, "grant", &ctx)
             .expect_err("the decoder refuses it first");
         assert!(!decoder.hints().is_empty(), "the refusal carries a hint");
-        assert_eq!(refusal.to_string(), decoder.to_string());
-        assert_eq!(refusal.hints(), decoder.hints(), "the hint survives");
+        assert_eq!(refusal.reason, decoder.reason);
+        assert_eq!(refusal.context(), decoder.context());
+        assert_eq!(
+            refusal.hints(),
+            decoder.hints(),
+            "stored hints survive separately"
+        );
+        assert_eq!(refusal.reason.advice(), decoder.reason.advice());
     }
 
     #[test]
@@ -168,7 +197,7 @@ mod tests {
                 .layer(unreachable_narrower, &cwd("/work/proj"))
                 .expect_err("an argument policy must not decode");
             let said = refusal.describe();
-            assert!(said.contains(&format!("unknown key '{key}'")), "{said}");
+            assert!(said.contains(&format!("unknown field \"{key}\"")), "{said}");
             assert!(
                 (refusal.hints().iter())
                     .any(|h| h.contains("argument restrictions are no longer supported")),
@@ -189,7 +218,14 @@ mod tests {
         if base == "tight" {
             Ok(offline())
         } else {
-            Err(Error::new(base))
+            Err(Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+                ExarchFailure::Policy(PolicyFailure::UnknownBase(PolicyFailureUnknownBase {
+                    name: base.into(),
+                    offered: vec!["tight".into()],
+                })),
+            ))))
+            .with_context("policy base")
+            .with_hint("check the selected project policy"))
         }
     }
 
@@ -204,10 +240,9 @@ mod tests {
         let refusal = SpawnGrant::Base("loose".into())
             .layer(tight_only, &ctx)
             .expect_err("the narrower refuses `loose`");
-        assert_eq!(
-            refusal.describe(),
-            "loose",
-            "the narrower's refusal is the layer's, verbatim"
-        );
+        let original = tight_only("loose", &ctx).unwrap_err();
+        assert_eq!(refusal.reason, original.reason);
+        assert_eq!(refusal.context(), Some("policy base"));
+        assert_eq!(refusal.hints(), original.hints());
     }
 }

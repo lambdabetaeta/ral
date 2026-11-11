@@ -1,5 +1,4 @@
-use std::io;
-
+use crate::dial::DialError;
 use crate::error::{Error, GuestConsole};
 use crate::spec::MachineSpec;
 
@@ -29,12 +28,12 @@ pub struct Booted {
 
 pub trait Machine: Send {
     /// # Errors
-    /// Returns the error from connecting to the guest's factory port.
-    fn dial_engine(&self) -> io::Result<Socket>;
+    /// Returns the typed failure from connecting to the guest's factory port.
+    fn dial_engine(&self) -> Result<Socket, DialError>;
 
     /// # Errors
-    /// Returns [`io::ErrorKind::Unsupported`] or the backend's dial error.
-    fn connect_guest(&self, port: u32) -> io::Result<Socket>;
+    /// Returns [`DialError::Unsupported`] or the backend's typed dial failure.
+    fn connect_guest(&self, port: u32) -> Result<Socket, DialError>;
 
     fn console(&self) -> GuestConsole;
 

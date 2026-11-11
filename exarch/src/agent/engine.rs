@@ -8,6 +8,11 @@ use crate::shell_eval::{builtins, deferred_sink};
 use crate::site::{Silent, site};
 use ral_core::carrier::{IdentityTransport, ProbeError, Severed, Transport};
 use ral_core::engine::EngineInstaller;
+use ral_core::error::Error;
+use ral_core::fact::{
+    ConnectionFault, ConnectionFaultProbeRejected, EngineCause, EngineFailure, EngineStep,
+    ExarchFailure, HostFailure, ProbeSubject, Reason,
+};
 use ral_core::path::EnginePath;
 use ral_core::protocol::{Attach, EngineSpec, Root};
 use std::sync::Arc;
@@ -112,12 +117,18 @@ impl Engine {
     }
     pub(crate) fn read<T>(
         &self,
+        subject: ProbeSubject,
         probe: impl FnOnce(&dyn Transport) -> Result<T, ProbeError>,
     ) -> Result<T, Severed> {
         let transport = self.transport();
         probe(transport).map_err(|e| match e {
             ProbeError::Severed(cause) => cause,
-            ProbeError::Rejected(why) => transport.sever(Severed::Faulted(why)),
+            ProbeError::Rejected(cause) => transport.sever(Severed::Faulted(
+                ConnectionFault::ProbeRejected(ConnectionFaultProbeRejected {
+                    probe: subject,
+                    cause,
+                }),
+            )),
         })
     }
     /// End this engine; `Err` if its teardown is uncertified.
@@ -157,6 +168,21 @@ impl Body {
         }
     }
 }
+pub(crate) fn failure(step: EngineStep, lost: &Severed) -> Error {
+    match lost {
+        Severed::Refused(wire) => wire.to_error(),
+        lost => Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+            ExarchFailure::Engine(EngineFailure {
+                step,
+                cause: EngineCause::Connection(
+                    lost.connection_failure()
+                        .expect("only Refused has no connection failure"),
+                ),
+            }),
+        )))),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;

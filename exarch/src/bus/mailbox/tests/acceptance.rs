@@ -349,7 +349,12 @@ fn random_cell_operations_keep_queue_equal_to_mail_and_file_replay_equal_to_cell
             step!(registry.ring("clock", &address));
             assert!(matches!(step!(mailbox.next(QUIET)), Next::Ended));
             assert_eq!(std::fs::read(dir.path().join(RECORD)).unwrap(), before);
-            step!(publish(&address, ChildStatus::Failed("ended".into())));
+            step!(publish(
+                &address,
+                ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                    ral_core::fact::HelperFailure::EndedBeforeReporting
+                ))
+            ));
             assert!(turn >= 29 * 6);
             replay_is_cell(&mailbox, &journal);
             replay_is_cell(&parent, &parent_journal);
@@ -405,7 +410,16 @@ fn a_poisoned_cell_latches_an_actionable_failure_and_refuses_posts() {
         "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log",
         address.0.id
     );
-    assert_eq!(address.transact(|_| ()).unwrap_err().to_string(), expected);
+    let failure = address.transact(|_| ()).unwrap_err();
+    assert_eq!(failure.to_string(), expected);
+    assert_eq!(
+        failure.failure(),
+        ral_core::fact::RecordingFailure::CellPoisoned(
+            ral_core::fact::RecordingFailureCellPoisoned {
+                agent: address.0.id.get().into()
+            },
+        )
+    );
     assert_eq!(address.status().err().unwrap().to_string(), expected);
     assert!(!address.is_live());
     assert!(matches!(address.post(surface()), Err(Refused::Ended)));

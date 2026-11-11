@@ -49,20 +49,7 @@ pub(crate) fn reserved_device_refusal(path: &[u8], rules: PathRules) -> Option<S
     if !is_reserved_device_stem(stem) {
         return None;
     }
-    // Display only: the text names the component, it does not decide on it.
-    let last = String::from_utf8_lossy(last);
-    Some(if stem.eq_ignore_ascii_case(b"nul") {
-        format!(
-            "`{last}` is a DOS device name, which ral does not treat as a device. \
-             Did you mean `\\\\.\\NUL`? \
-             (A file named `{last}` would be unusable from most Windows tools.)"
-        )
-    } else {
-        format!(
-            "`{last}` is a reserved DOS device name, \
-             and ral refuses reserved device names as file names"
-        )
-    })
+    Some(String::from_utf8_lossy(last).into_owned())
 }
 
 /// A final component as Win32 reads it: trailing dots and blanks dropped,
@@ -186,17 +173,14 @@ mod tests {
     }
 
     #[test]
-    fn nul_refusal_names_the_component_and_the_discard() {
+    fn reserved_device_refusal_retains_only_the_component() {
         assert_eq!(
             reserved_device_refusal(br"C:\x\NUL", W).as_deref(),
-            Some(
-                r"`NUL` is a DOS device name, which ral does not treat as a device. Did you mean `\\.\NUL`? (A file named `NUL` would be unusable from most Windows tools.)"
-            )
+            Some("NUL")
         );
-        let verbatim = reserved_device_refusal(br"\\?\C:\denied\nul.txt", W).unwrap();
-        assert!(
-            verbatim.starts_with("`nul.txt` is a DOS device name"),
-            "{verbatim}"
+        assert_eq!(
+            reserved_device_refusal(br"\\?\C:\denied\nul.txt", W).as_deref(),
+            Some("nul.txt")
         );
     }
 
@@ -204,9 +188,7 @@ mod tests {
     fn other_reserved_names_suggest_no_discard() {
         assert_eq!(
             reserved_device_refusal(b"COM1.log", W).as_deref(),
-            Some(
-                "`COM1.log` is a reserved DOS device name, and ral refuses reserved device names as file names"
-            )
+            Some("COM1.log")
         );
     }
 }

@@ -62,6 +62,53 @@ mod request {
         Context::under_grants(grants)
     }
 
+    #[test]
+    fn path_exhaustion_keeps_the_first_fact_unchanged_and_context_separate() {
+        use crate::fact::{Denial, SingleOrNested, Withholding};
+        let first = Denial::exec_run(
+            "tool".into(),
+            Withholding::MissingAllowance(SingleOrNested::Single),
+        );
+        let failure = |at: &str| LookupFailure::Refused {
+            at: at.into(),
+            denial: Box::new(first.clone()),
+            exhaustion: None,
+        };
+        let selected = search_error(vec![
+            LookupFailure::ABSENT,
+            failure("first"),
+            failure("later"),
+        ]);
+        let LookupFailure::Refused {
+            at,
+            denial,
+            exhaustion,
+        } = selected
+        else {
+            panic!("first refusal");
+        };
+        assert_eq!(at, "first");
+        assert_eq!(*denial, first);
+        assert!(matches!(
+            exhaustion,
+            Some(PathExhaustion::NoAllowedDirectory)
+        ));
+        let blocked = search_error(vec![
+            failure("first"),
+            LookupFailure::Missing(Missing::NotRunnable(NotRunnable {
+                found: "later".into(),
+                why: Unrunnable::NotExecutable,
+            })),
+        ]);
+        assert!(matches!(
+            blocked,
+            LookupFailure::Refused {
+                exhaustion: None,
+                ..
+            }
+        ));
+    }
+
     fn path_name(file: &Path) -> CommandName {
         CommandName::Path(file.to_string_lossy().into_owned())
     }
@@ -76,11 +123,8 @@ mod request {
             Err(LookupFailure::Missing(Missing::NotRunnable(details))) => {
                 panic!("expected a host file, got {details:?}");
             }
-            Err(LookupFailure::Refused { at, denial }) => {
-                panic!(
-                    "expected a host file, refused {at}: {}",
-                    denial.error.describe()
-                );
+            Err(LookupFailure::Refused { at, denial, .. }) => {
+                panic!("expected a host file, refused {at}: {}", denial.describe());
             }
         }
     }
@@ -174,13 +218,13 @@ mod request {
         let ctx = under(ExecGrant::default());
         for file in [tmp.path().join("missing"), tmp.path().join("absent/tool")] {
             let command = Command::from_name(&path_name(&file), &ctx);
-            let Err(LookupFailure::Refused { at, denial }) =
+            let Err(LookupFailure::Refused { at, denial, .. }) =
                 command.lookup(&ctx.grants, &Baseline::default()).state
             else {
                 panic!("an empty exec allowance refuses even an absent name");
             };
             assert_eq!(at, path::shown(&file));
-            assert!(denial.error.describe().contains("exec `allow` list"));
+            assert!(denial.describe().contains("exec `allow` list"));
         }
     }
 
@@ -219,7 +263,7 @@ mod request {
         ]
         .map(|file| {
             let refusal = denied(&file);
-            assert!(refusal.error.describe().contains("not readable"));
+            assert!(refusal.describe().contains("not readable"));
             (file, refusal)
         });
         #[cfg(unix)]
@@ -228,19 +272,14 @@ mod request {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::copy(&source, &file).unwrap();
             let after = denied(&file);
+            assert_eq!(before.describe(), after.describe(), "{}", file.display());
+            assert_eq!(before.advice(), after.advice(), "{}", file.display());
             assert_eq!(
-                before.error.describe(),
-                after.error.describe(),
+                before.audit_check(),
+                after.audit_check(),
                 "{}",
                 file.display()
             );
-            assert_eq!(
-                before.error.hints(),
-                after.error.hints(),
-                "{}",
-                file.display()
-            );
-            assert_eq!(before.check, after.check, "{}", file.display());
         }
     }
 
@@ -918,14 +957,25 @@ mod vet {
                 (e, shell.local.audit.close(scope))
             });
             assert!(e.describe().contains("denied by active grant"), "{e:?}");
-            let [grant, bare] = e.hints() else {
-                panic!("the grant's hint, then the bare-name lead: {:?}", e.hints());
+            let [bare] = e.hints() else {
+                panic!("only the bare-name lead is contextual: {:?}", e.hints());
+            };
+            let advice = e.reason.advice();
+            let [grant] = advice.as_slice() else {
+                panic!("the denial supplies its remedy");
             };
             assert_eq!(
                 &**bare,
                 format!("'{name}' is not in any PATH directory the grant allows")
             );
-            assert_ne!(grant, bare);
+            let rendered = e.render(shell.sources(), None, shell.exit_hints());
+            assert!(
+                rendered.find(grant).unwrap() < rendered.find(&**bare).unwrap(),
+                "{rendered}"
+            );
+            assert_eq!(rendered.matches(grant).count(), 1, "{rendered}");
+            assert_eq!(rendered.matches(&**bare).count(), 1, "{rendered}");
+            assert_ne!(grant.as_str(), &**bare);
             assert!(!grant.contains("#'") && !bare.contains("#'"), "{e:?}");
             let [observation] = trail.as_slice() else {
                 panic!("only the first refusal is recorded: {trail:?}");
@@ -971,14 +1021,13 @@ mod vet {
                 )
             });
             assert!(e.describe().contains("denied by active grant"), "{e:?}");
-            assert_eq!(e.hints().len(), 1, "{dirs:?}: {:?}", e.hints());
+            assert!(e.hints().is_empty(), "intrinsic advice is not cached");
+            assert_eq!(e.reason.advice().len(), 1);
             if dirs.len() == 1 {
                 assert!(e.describe().contains("is excluded by"), "{e:?}");
                 assert_eq!(
-                    e.hints(),
-                    [Box::<str>::from(
-                        crate::authority::remedy::remove_the_exclusion()
-                    )]
+                    e.reason.advice(),
+                    [crate::authority::remedy::remove_the_exclusion().to_owned()]
                 );
             }
         }
@@ -1135,6 +1184,48 @@ mod vet {
         });
     }
 
+    #[test]
+    fn rejected_argv_keeps_the_argument_index_and_head() {
+        let error =
+            check_argv("tool", &[Value::string("okay"), Value::List(vec![].into())]).unwrap_err();
+        let Reason::Invalid(failure) = &error.reason else {
+            panic!("typed argv shape");
+        };
+        assert_eq!(failure.path, [crate::fact::DataStep::Index(1usize.into())]);
+        assert!(matches!(
+            &failure.cause,
+            crate::fact::InvalidCause::Shape(crate::fact::ShapeFailure {
+                found: crate::fact::Found::List,
+                ..
+            })
+        ));
+        assert_eq!(error.hints(), []);
+        assert_eq!(
+            error.describe(),
+            "cannot pass a list as argument at index 1 to `tool`"
+        );
+        assert_eq!(error.reason.advice(), [RefusedArg::List.remedy("tool")]);
+        assert!(error.plain().contains(&RefusedArg::List.remedy("tool")));
+    }
+
+    #[test]
+    fn a_nul_in_argv_is_refused_with_its_argument_number() {
+        use crate::fact::{LaunchFailure, PrepareCause, PrepareFailure, PrepareInvalid};
+        let error =
+            check_argv("tool", &[Value::string("okay"), Value::string("a\0b")]).unwrap_err();
+        let Reason::Launch(failure) = &error.reason else {
+            panic!("a NUL argument is a launch refusal");
+        };
+        assert!(matches!(
+            **failure,
+            LaunchFailure::Prepare(PrepareFailure {
+                step: PrepareStep::Argv,
+                subject: PrepareSubject::Argument(n),
+                cause: PrepareCause::Invalid(PrepareInvalid::Nul),
+            }) if n == 2usize.into()
+        ));
+    }
+
     /// A value and its type earn one verdict: the property the shared
     /// classification exists to hold.  The `Thunk` and `Handle` pairs need an
     /// `Env`, and are paired end to end instead
@@ -1180,6 +1271,36 @@ mod stdio {
     #[cfg(unix)]
     use crate::process::{DurableRoot, Scope};
     use crate::process::{StdioSpec, TerminalInput};
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_connection_failure_names_preparation_not_duplication_of_the_program() {
+        use super::super::*;
+        let mut shell = crate::test_helper::core_shell();
+        let prepared = Command::from_name(&CommandName::Path("/bin/sh".into()), &shell.context)
+            .lookup(&shell.context.grants, shell.baseline())
+            .admit(&Mooring::adrift(), &mut shell)
+            .unwrap()
+            .prepare(&[], Ownership::Kept, &shell)
+            .unwrap();
+        let cause = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        let error = prepared.connection_error(&cause);
+        assert_eq!(
+            error.reason,
+            Reason::Launch(Box::new(crate::fact::LaunchFailure::Prepare(
+                crate::fact::PrepareFailure {
+                    step: crate::fact::PrepareStep::Stdio,
+                    subject: crate::fact::PrepareSubject::Program("/bin/sh".into()),
+                    cause: crate::fact::PrepareCause::Io(Box::new(crate::io::failure(&cause))),
+                }
+            )))
+        );
+        assert!(
+            error
+                .describe()
+                .starts_with("ral could not connect standard streams for program '/bin/sh':")
+        );
+    }
 
     #[test]
     fn offered_withholds_only_terminal_input_and_borrows_other_sources() {
@@ -1323,7 +1444,7 @@ mod foreground {
     fn assert_handoff_refusal(refusal: &Error) {
         let described = refusal.describe();
         assert!(
-            described.contains("could not hand over the terminal"),
+            described.contains("could not hand the terminal"),
             "{refusal}"
         );
         assert!(
@@ -1776,7 +1897,7 @@ mod process {
             let e = Error::from_raw_os_error(libc::E2BIG);
             assert_eq!(
                 unwithheld(&e, &tool, None),
-                not_runnable(Unrunnable::Io(e.to_string()))
+                not_runnable(Unrunnable::Io(Box::new(crate::io::failure(&e))))
             );
         }
 
@@ -1819,7 +1940,7 @@ mod process {
             });
             assert_eq!(
                 other.reason,
-                not_runnable(Unrunnable::Io(e2big.to_string()))
+                not_runnable(Unrunnable::Io(Box::new(crate::io::failure(&e2big))))
             );
             assert!(other.hints().is_empty(), "{:?}", other.hints());
         }

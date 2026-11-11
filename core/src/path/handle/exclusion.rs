@@ -42,7 +42,7 @@ impl Hold {
         self.handle.as_deref()
     }
 
-    fn unheld(trace: Trace) -> Self {
+    pub(super) fn unheld(trace: Trace) -> Self {
         Self {
             trace,
             #[cfg(unix)]
@@ -136,8 +136,8 @@ impl<'de> Deserialize<'de> for Hold {
 /// was a link, what the link reached.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Excluded {
-    named: Hold,
-    target: Option<Hold>,
+    pub(super) named: Hold,
+    pub(super) target: Option<Hold>,
 }
 
 impl Excluded {

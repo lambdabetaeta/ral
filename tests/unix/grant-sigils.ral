@@ -1,7 +1,7 @@
 # Test: `cwd` and `gitdir` places freeze once, at the grant
 
 let denial = { |body|
-    try { !$body; return 'ALLOWED' } { |e| return !{describe $e} }
+    try { !$body; return 'ALLOWED' } { |e| return $e[message] }
 }
 let root = temp-dir
 let dir-a = "$root/a"

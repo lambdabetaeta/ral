@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-verified_at_date: 2026-10-27
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_date: 2026-11-10
 anchors: [GrantStack, admit, Admitted, Flag, SandboxProjection, ExecProjection, for_kernel, FreezeCtx, Denial, refused, record_check, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, SpawnGrant]
 ---
 
@@ -56,12 +56,12 @@ that took a `Context`.
   so `ExecRule`, `kernel` and `from_kernel` are gone; Seatbelt reads the table
   in `precedence` order, Landlock and the envelope read it as the guard does.
   The projection takes a `GrantStack` and a `Resolver`, never a `Shell`.
-- **The guard is `guard` (rank 7).** `enforce` words the model's refusals and
-  returns a typed `Denial { check, error }`; `Shell::refused` mints its
-  `Break` and records it through `Shell::record_check`, the one door for a
-  check, with no `Mooring`, so on the trail alone. An exec refusal
-  (`Shell::check_exec`) passes its call's `Mooring` to the same door and so
-  broadcasts.
+- **The guard is `guard` (rank 7).** `enforce` projects the model's refusals
+  into a typed `Denial` containing only portable request/cause facts.
+  `Shell::refused` records its derived check through `Shell::record_check`,
+  with no `Mooring`, so on the trail alone, then mints `Reason::Denied` and its
+  `Break`. An exec refusal (`Shell::exec_refused`) passes its call's `Mooring`
+  to the same observation door and so broadcasts.
 - **A grant string becomes a `FrozenPath` in `guard::freeze`**, against one
   `FreezeCtx` (`Shell::freeze_ctx`, owned `env` and `cwd`): `path`,
   `paths`, `absolute`. `FrozenPath::from_surface` is the one minting door, and
@@ -118,6 +118,6 @@ by a host: `Shell::decode_grant` is it against the receiving shell's own anchor
 value, not a route into a layer.
 
 **Amended 2026-11-07 by [[decisions/261105_the-error-record|the-error-record]].**
-The guard and the freezer return `Error`; `PolicyError` and `Refusal` are gone,
-and `Denial { check, error: Error }` pairs the check to record with the error
-that refuses. A refusal enters control flow through `From<Error> for Break`.
+The freezer returns a typed `Error`; the guard returns a data-only `Denial`.
+The shell projects its audit check and constructs the error. A refusal enters
+control flow through `From<Error> for Break`.

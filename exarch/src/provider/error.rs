@@ -1,28 +1,28 @@
-//! Provider-boundary failures, and the classifier that maps genai's typed
-//! errors onto them.
-//!
-//! Classification is structural: [`Fault`] walks an error's variants down to the
-//! leaf that decides recovery, never scraping a `Display` string. The retry
-//! driver in `retry.rs` keys its backoff on the resulting variant, and the
-//! record log carries the variant itself.
+//! Retry-facing carriers; portable projections retain causes before rendering.
+
+mod projection;
+#[cfg(test)]
+mod tests;
 
 use super::reset;
 use super::retry::Recovery;
 use crate::clock;
 use jiff::Timestamp;
+pub use projection::{provider_stop, reqwest_failure, service_from_reqwest};
+use ral_core::fact::{
+    Count, CredentialFailure, ProviderCancelSite, ProviderContext, ProviderFailure,
+    ProviderInstant, ProviderLeaf, ProviderLeafApi, ProviderLeafOutputCap, ProviderLeafOverflow,
+    ProviderLeafTransient, ProviderLimit, ProviderRefusal, ProviderRefusalCause,
+    ProviderRefusalCauseHeld, RecordingFailure, RetryableProviderCause,
+    RetryableProviderCauseStreamEndedWithoutEnd, ServiceFailure,
+};
 use regex::Regex;
 use reqwest::StatusCode;
-use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::sync::LazyLock;
+use std::{fmt, sync::LazyLock};
 
-/// A provider's JSON error frame, boxed: `genai` turns on `serde_json`'s
-/// `preserve_order`, so a `Value` is 72 bytes here, and three variants carry
-/// one — the width every provider call's success path pays for.
 type Body = Box<serde_json::Value>;
 
-/// Where in a request's life a cancel landed, so the UI can pin the blame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CancelSite {
@@ -41,75 +41,42 @@ impl fmt::Display for CancelSite {
     }
 }
 
-/// Structured failure at the provider boundary.  The variant alone tells the
-/// retry loop whether to back off, so misclassifying one is expensive.
-///
-/// Recorded as it is: the log's `Forensic::ProviderError` carries this very
-/// value, so every renderer reads one shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderError {
-    /// The caller could not certify the request's prerequisites. Never retried.
-    Unavailable(String),
-    /// Cancelled in flight.
+    Unavailable(#[serde(with = "ral_core::data::datum::as_datum")] RecordingFailure),
     Cancelled(CancelSite),
-    /// Retryable with the same payload: network, stream, or 5xx.  `attempts`
-    /// is the total made before giving up, stamped by `retry.rs`.
     Transient {
-        cause: String,
+        #[serde(with = "ral_core::data::datum::as_datum")]
+        cause: RetryableProviderCause,
         attempts: u32,
-        /// The provider's JSON error frame when it sent one; `None` leaves
-        /// the renderer only `cause`.
-        body: Option<Body>,
-        /// The HTTP status when this came from a 5xx response; `None` for a
-        /// transport fault (connect/timeout/DNS) or a locally-raised fault,
-        /// neither of which ever reached one.  What `summary`/the
-        /// TUI headline key their label on.
-        status: Option<u16>,
     },
-    /// HTTP 429, whole. [`Refusal::recovery`] alone decides whether the retry
-    /// loop waits it out in place.
     Refused(Refusal),
-    /// A terminal provider response: auth, bad request, model not found.
-    /// Stream errors may carry no HTTP status. Never retried.
-    ///
-    /// The failing endpoint is [`extract_url`] of `message`, not a field — a
-    /// stored copy could disagree with the message beside it.
     Api {
-        status: Option<u16>,
         model: String,
-        message: String,
-        body: Option<Body>,
+        #[serde(with = "ral_core::data::datum::as_datum")]
+        cause: ServiceFailure,
     },
-    /// The request outgrew the window the serving endpoint enforces, whatever it
-    /// lists.  Never retried by `retry.rs`; `Agent::deliberate` recovers once.
     Overflow {
         model: String,
-        /// The serving provider, when a gateway named it.
         provider: Option<String>,
         sent: Option<u64>,
         limit: Option<u64>,
-        /// The window exarch was working to, before the overflow narrowed it;
-        /// stamped by the agent's overflow relief transaction.
         listed: Option<u64>,
-        body: Option<Body>,
+        #[serde(with = "ral_core::data::datum::as_datum")]
+        cause: Box<ServiceFailure>,
     },
-    /// The turn was cut off short of the model finishing.  Raised by
-    /// `Agent::deliberate` *after* it appends the partial
-    /// assistant message, so a re-prompt keeps that work as context.  Boxed:
-    /// a stall's cause is a `ProviderError` in turn.
-    Truncated { cause: Box<CutShort> },
-    /// Anything else, rendered raw.
-    Other(String),
+    Truncated {
+        cause: Box<CutShort>,
+    },
+    Terminal(#[serde(with = "ral_core::data::datum::as_datum")] ServiceFailure),
+    Credential(#[serde(with = "ral_core::data::datum::as_datum")] CredentialFailure),
 }
 
-/// What a 429 names as run out — which is also what it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Limit {
-    /// A rate over one model: every 429 not known to say otherwise.
     Rate,
-    /// The plan's allowance, over the whole account.
     Allowance,
 }
 
@@ -122,24 +89,17 @@ impl Limit {
     }
 }
 
-/// A 429 as the provider stated it. How to recover is the retry policy's
-/// reading of it ([`Refusal::recovery`]), never part of it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Refusal {
     pub limit: Limit,
-    /// The latest instant it names for asking again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<Timestamp>,
-    /// When it was read: the instant its named wait runs from.
     pub received: Timestamp,
-    pub cause: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<Body>,
+    #[serde(with = "ral_core::data::datum::as_datum")]
+    pub cause: ProviderRefusalCause,
 }
 
 impl Refusal {
-    /// Its label, and the reset when the retry loop does not wait for it:
-    /// `usage limit reached until Tue 14:05`.
     pub fn headline(&self) -> String {
         match self.recovery() {
             Recovery::Deferred(at) => format!("{} until {}", self.limit.label(), clock::local(at)),
@@ -147,43 +107,63 @@ impl Refusal {
         }
     }
 
-    /// Received now, naming a reset `resets_in` later if given.
+    /// An unsent request gated by an earlier observed reset.
+    pub fn held(
+        limit: Limit,
+        resets_at: Option<Timestamp>,
+        received: Timestamp,
+        service: &str,
+        model: &str,
+    ) -> Self {
+        Self {
+            limit,
+            resets_at,
+            received,
+            cause: ProviderRefusalCause::Held(ProviderRefusalCauseHeld {
+                service: service.to_owned(),
+                model: model.to_owned(),
+            }),
+        }
+    }
+
+    pub fn failure(&self) -> ProviderRefusal {
+        let instant = |at: Timestamp| ProviderInstant {
+            seconds: at.as_second(),
+            subsec_nanoseconds: at.subsec_nanosecond(),
+        };
+        ProviderRefusal {
+            limit: match self.limit {
+                Limit::Rate => ProviderLimit::Rate,
+                Limit::Allowance => ProviderLimit::Allowance,
+            },
+            resets_at: self.resets_at.map(instant),
+            received: instant(self.received),
+            cause: self.cause.clone(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(limit: Limit, resets_in: Option<std::time::Duration>) -> Self {
         let received = Timestamp::now();
-        Self {
+        Self::held(
             limit,
-            resets_at: resets_in.map(|wait| received + wait),
+            resets_in.map(|wait| received + wait),
             received,
-            cause: "429".into(),
-            body: None,
-        }
+            "fixture",
+            "m",
+        )
     }
 }
 
-/// Why an assistant turn ended before the model chose to stop.
-///
-/// The two have different remedies — a cap is the user's ceiling to raise, a
-/// stall is nobody's to fix and is survived — so they are one type with two
-/// arms rather than one reason string the reader has to interpret.
+/// Live recursion stays outside the portable Typed graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutShort {
-    /// The output ceiling, under the provider's own raw stop reason.
     OutputCap { stop_reason: String },
-    /// The stream broke after text or reasoning had already reached the
-    /// caller.  The failure rides along whole — a stall is a provider error
-    /// that arrived too late to retry, and the user is owed the same detail
-    /// either way.
     Stalled(ProviderError),
 }
 
 impl ProviderError {
-    /// The failure that broke the stream, for a truncation the streamed prefix
-    /// survived — and `None` for every failure that ends the turn.  The one
-    /// place that reading is derived: the TUI fold, synod's seam and the
-    /// headless printer all grade a stall below a fatal error, and each asks
-    /// here rather than re-matching the shape.
     pub fn stall_cause(&self) -> Option<&Self> {
         match self {
             Self::Truncated { cause } => match cause.as_ref() {
@@ -194,112 +174,381 @@ impl ProviderError {
         }
     }
 
-    /// Short human label for the failure's kind.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Cancelled(_) => "cancelled",
-            Self::Transient { status, .. } => transient_label(*status),
+            Self::Transient { .. } => transient_label(self.status()),
             Self::Refused(r) => r.limit.label(),
             Self::Api { .. } => "api error",
             Self::Overflow { .. } => "context too long",
             Self::Truncated { .. } => "truncated",
-            Self::Other(_) => "provider error",
+            Self::Terminal(_) | Self::Credential(_) => "provider error",
             Self::Unavailable(_) => "recording unavailable",
         }
     }
 
-    /// A fault this boundary raised itself, having never reached a response:
-    /// retryable, and with neither a status nor a provider body to show.
-    pub(crate) fn local_transient(cause: impl Into<String>) -> Self {
+    pub fn stream_ended_without_end(service: &str, model: &str) -> Self {
         Self::Transient {
-            cause: cause.into(),
+            cause: RetryableProviderCause::StreamEndedWithoutEnd(
+                RetryableProviderCauseStreamEndedWithoutEnd {
+                    service: service.to_owned(),
+                    model: model.to_owned(),
+                },
+            ),
             attempts: 1,
-            body: None,
-            status: None,
         }
     }
 
-    /// Classify a typed genai error into a provider-boundary failure.
-    ///
-    /// The whole verdict rests on the leaf [`Fault::of`] recovers, never on
-    /// the `Display` string.
-    pub fn from_genai(err: &genai::Error, model: &str) -> Self {
-        let msg = err.to_string();
-        match Fault::of(err) {
+    /// `service` is the selected account's configured name, never inferred from an error.
+    pub fn from_genai(error: &genai::Error, service: &str, model: &str) -> Self {
+        let cause = projection::genai_failure(error, service);
+        match Fault::of(error) {
             Fault::Response {
-                status: Some(status),
+                status,
                 headers,
                 body,
-            } if status == StatusCode::TOO_MANY_REQUESTS => {
-                Self::refused(headers, body, msg, model)
+            } => {
+                let body = body.as_deref();
+                if status == Some(StatusCode::TOO_MANY_REQUESTS) {
+                    if body.is_some_and(reset::unwaitable) {
+                        return Self::Api {
+                            model: model.to_owned(),
+                            cause,
+                        };
+                    }
+                    let received = Timestamp::now();
+                    return Self::Refused(Refusal {
+                        limit: body.map_or(Limit::Rate, reset::limit),
+                        resets_at: reset::at(
+                            headers,
+                            body,
+                            cause.body().unwrap_or_default(),
+                            received,
+                        ),
+                        received,
+                        cause: ProviderRefusalCause::Service(cause),
+                    });
+                }
+                if status.is_some_and(|status| status.is_server_error()) {
+                    return Self::Transient {
+                        cause: RetryableProviderCause::Service(cause),
+                        attempts: 1,
+                    };
+                }
+                let text = body
+                    .and_then(body_message)
+                    .or_else(|| cause.body().map(str::to_owned))
+                    .unwrap_or_default();
+                match overflow(body, &text) {
+                    Some((sent, limit)) => Self::Overflow {
+                        model: model.to_owned(),
+                        provider: body
+                            .and_then(error_object)
+                            .and_then(|o| o.get("provider"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        sent,
+                        limit,
+                        listed: None,
+                        cause: Box::new(cause),
+                    },
+                    None => Self::Api {
+                        model: model.to_owned(),
+                        cause,
+                    },
+                }
             }
-            Fault::Response {
-                status: Some(status),
-                body,
-                ..
-            } if status.is_server_error() => Self::Transient {
-                cause: msg,
+            Fault::Transport => Self::Transient {
+                cause: RetryableProviderCause::Service(cause),
                 attempts: 1,
-                body,
-                status: Some(status.as_u16()),
             },
-            Fault::Response { status, body, .. } => match overflow(body.as_deref(), &msg) {
-                Some((sent, limit)) => Self::Overflow {
-                    model: model.to_string(),
-                    provider: body
-                        .as_deref()
-                        .and_then(error_object)
-                        .and_then(|o| o.get("provider"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
-                    sent,
-                    limit,
-                    listed: None,
-                    body,
-                },
-                None => Self::Api {
-                    status: status.map(|s| s.as_u16()),
-                    model: model.to_string(),
-                    message: msg,
-                    body,
-                },
-            },
-            Fault::Transport(detail) => Self::Transient {
-                cause: detail.unwrap_or(msg),
-                attempts: 1,
-                body: None,
-                status: None,
-            },
-            Fault::Terminal(inner) => Self::Other(inner.unwrap_or(msg)),
+            Fault::Terminal => Self::Terminal(cause),
         }
     }
 
-    /// A 429: a quota spent, which no wait clears, or a refusal stated whole.
-    fn refused(
-        headers: Option<&HeaderMap>,
-        body: Option<Body>,
-        cause: String,
-        model: &str,
-    ) -> Self {
-        if body.as_deref().is_some_and(reset::unwaitable) {
-            return Self::Api {
-                status: Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
-                model: model.to_string(),
-                message: cause,
-                body,
+    /// Flatten only the live truncation links, retaining their order and count.
+    pub fn failure(&self) -> ProviderFailure {
+        let mut context = Vec::new();
+        let mut current = self;
+        let leaf = loop {
+            break match current {
+                Self::Truncated { cause } => match cause.as_ref() {
+                    CutShort::Stalled(inner) => {
+                        context.push(ProviderContext::Truncated);
+                        current = inner;
+                        continue;
+                    }
+                    CutShort::OutputCap { stop_reason } => {
+                        ProviderLeaf::OutputCap(ProviderLeafOutputCap {
+                            stop_reason: stop_reason.clone(),
+                        })
+                    }
+                },
+                Self::Unavailable(cause) => ProviderLeaf::Unavailable(cause.clone()),
+                Self::Cancelled(site) => ProviderLeaf::Cancelled(match site {
+                    CancelSite::BeforeRequest => ProviderCancelSite::BeforeRequest,
+                    CancelSite::MidStream => ProviderCancelSite::MidStream,
+                    CancelSite::Backoff => ProviderCancelSite::Backoff,
+                }),
+                Self::Transient { cause, attempts } => {
+                    ProviderLeaf::Transient(ProviderLeafTransient {
+                        cause: cause.clone(),
+                        attempts: Count::from_u64(u64::from(*attempts)),
+                    })
+                }
+                Self::Refused(cause) => ProviderLeaf::Refused(cause.failure()),
+                Self::Api { model, cause } => ProviderLeaf::Api(ProviderLeafApi {
+                    model: model.clone(),
+                    cause: cause.clone(),
+                }),
+                Self::Overflow {
+                    model,
+                    provider,
+                    sent,
+                    limit,
+                    listed,
+                    cause,
+                } => ProviderLeaf::Overflow(ProviderLeafOverflow {
+                    model: model.clone(),
+                    provider: provider.clone(),
+                    sent: sent.map(Count::from_u64),
+                    limit: limit.map(Count::from_u64),
+                    listed: listed.map(Count::from_u64),
+                    cause: cause.as_ref().clone(),
+                }),
+                Self::Terminal(cause) => ProviderLeaf::Terminal(cause.clone()),
+                Self::Credential(cause) => ProviderLeaf::Credential(cause.clone()),
             };
+        };
+        ProviderFailure { context, leaf }
+    }
+
+    pub fn service_failure(&self) -> Option<&ServiceFailure> {
+        match self {
+            Self::Transient {
+                cause: RetryableProviderCause::Service(cause),
+                ..
+            }
+            | Self::Api { cause, .. }
+            | Self::Terminal(cause)
+            | Self::Refused(Refusal {
+                cause: ProviderRefusalCause::Service(cause),
+                ..
+            }) => Some(cause),
+            Self::Overflow { cause, .. } => Some(cause.as_ref()),
+            _ => None,
         }
-        let received = Timestamp::now();
-        Self::Refused(Refusal {
-            limit: body.as_deref().map_or(Limit::Rate, reset::limit),
-            resets_at: reset::at(headers, body.as_deref(), &cause, received),
-            received,
-            cause,
-            body,
-        })
+    }
+
+    /// Response status only; a reqwest transport error is not a received response.
+    pub fn status(&self) -> Option<u16> {
+        let service = self.service_failure()?;
+        if matches!(
+            service.cause.as_ref(),
+            ral_core::fact::ServiceCause::Reqwest(_)
+        ) {
+            return None;
+        }
+        match service.cause.as_ref() {
+            ral_core::fact::ServiceCause::Genai(ral_core::fact::GenaiFailure::ChatResponse(
+                response,
+            )) => serde_json::from_str(&response.body)
+                .ok()
+                .as_ref()
+                .and_then(json_status_code)
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .map(|status| status.as_u16()),
+            _ => service
+                .status()
+                .and_then(|status| u16::try_from(status).ok()),
+        }
+    }
+
+    /// Presentation/classification view; the original response remains in the service cause.
+    pub fn body(&self) -> Option<Box<serde_json::Value>> {
+        serde_json::from_str(self.service_failure()?.body()?)
+            .ok()
+            .map(unwrap_relay)
+            .map(Box::new)
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        self.service_failure()?.endpoint()
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Cancelled(site) => format!("cancelled {site}"),
+            Self::Transient { cause, .. } if self.status().is_none() => {
+                format!("connection failed: {}", first_line(&cause.describe()))
+            }
+            Self::Transient { .. } => {
+                with_body_message(transient_label(self.status()), self.body().as_deref())
+            }
+            Self::Refused(r) => with_body_message(&r.headline(), self.body().as_deref()),
+            Self::Api { cause, .. } => {
+                let detail = self
+                    .body()
+                    .as_deref()
+                    .and_then(body_message)
+                    .unwrap_or_else(|| first_line(&cause.describe()).to_owned());
+                match self.status() {
+                    Some(status) => format!("api error {status}: {detail}"),
+                    None => format!("api error: {detail}"),
+                }
+            }
+            Self::Overflow {
+                provider,
+                sent,
+                limit,
+                ..
+            } => {
+                let host = provider
+                    .as_deref()
+                    .map_or(String::new(), |p| format!(" for {p}"));
+                let counts = match (sent, limit) {
+                    (Some(s), Some(l)) => format!(": {s} tokens sent, {l} allowed"),
+                    (Some(s), None) => format!(": {s} tokens sent"),
+                    (None, Some(l)) => format!(": {l} tokens allowed"),
+                    (None, None) => String::new(),
+                };
+                format!("context too long{host}{counts}")
+            }
+            Self::Truncated { cause } => format!("reply cut off: {}", cause.summary()),
+            Self::Terminal(cause) => first_line(&cause.describe()).to_owned(),
+            Self::Credential(cause) => first_line(&cause.describe()).to_owned(),
+            Self::Unavailable(cause) => first_line(&cause.describe()).to_owned(),
+        }
     }
 }
 
+impl CutShort {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::OutputCap { stop_reason } => format!("output cap ({stop_reason})"),
+            Self::Stalled(cause) => format!("stream stalled ({})", cause.summary()),
+        }
+    }
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.summary())
+    }
+}
+impl std::error::Error for ProviderError {}
+
+/// Recovery policy reads live typed sources, separately from evidence capture.
+enum Fault<'a> {
+    Response {
+        status: Option<StatusCode>,
+        headers: Option<&'a reqwest::header::HeaderMap>,
+        body: Option<Body>,
+    },
+    Transport,
+    Terminal,
+}
+
+impl<'a> Fault<'a> {
+    fn of(error: &'a genai::Error) -> Self {
+        match error {
+            genai::Error::HttpError {
+                status,
+                headers,
+                body,
+                ..
+            } => Self::http(*status, Some(headers), body),
+            genai::Error::WebModelCall { webc_error, .. }
+            | genai::Error::WebAdapterCall { webc_error, .. } => Self::of_webc(webc_error),
+            genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
+            genai::Error::ChatResponse { body, .. } => Self::Response {
+                status: json_status_code(body).and_then(|code| StatusCode::from_u16(code).ok()),
+                headers: None,
+                body: Some(Box::new(unwrap_relay(body.clone()))),
+            },
+            genai::Error::ChatReqHasNoMessages { .. }
+            | genai::Error::LastChatMessageIsNotUser { .. }
+            | genai::Error::MessageRoleNotSupported { .. }
+            | genai::Error::MessageContentTypeNotSupported { .. }
+            | genai::Error::JsonModeWithoutInstruction
+            | genai::Error::VerbosityParsing { .. }
+            | genai::Error::ReasoningParsingError { .. }
+            | genai::Error::ServiceTierParsing { .. }
+            | genai::Error::PromptCacheRetentionParsing { .. }
+            | genai::Error::NoChatResponse { .. }
+            | genai::Error::InvalidJsonResponseElement { .. }
+            | genai::Error::RequiresApiKey { .. }
+            | genai::Error::NoAuthResolver { .. }
+            | genai::Error::NoAuthData { .. }
+            | genai::Error::ModelMapperFailed { .. }
+            | genai::Error::ChatResponseGeneration { .. }
+            | genai::Error::StreamParse { .. }
+            | genai::Error::Resolver { .. }
+            | genai::Error::AdapterNotSupported { .. }
+            | genai::Error::CacheBreakpointNoEligibleContent { .. }
+            | genai::Error::AdapterKindMismatch { .. }
+            | genai::Error::Internal(_)
+            | genai::Error::ClientBuildFail { .. }
+            | genai::Error::JsonValueExt(_)
+            | genai::Error::SerdeJson(_) => Self::Terminal,
+        }
+    }
+
+    fn of_webc(error: &'a genai::webc::Error) -> Self {
+        match error {
+            genai::webc::Error::ResponseFailedStatus {
+                status,
+                headers,
+                body,
+            } => Self::http(*status, Some(headers), body),
+            genai::webc::Error::Reqwest(error) => Self::of_reqwest(error),
+            genai::webc::Error::ResponseFailedNotJson { .. }
+            | genai::webc::Error::ResponseFailedInvalidJson { .. }
+            | genai::webc::Error::JsonValueExt(_) => Self::Terminal,
+        }
+    }
+
+    fn of_boxed(error: &'a (dyn std::error::Error + 'static)) -> Self {
+        if let Some(error) = error.downcast_ref::<genai::Error>() {
+            return Self::of(error);
+        }
+        if error.is::<genai::webc::StreamTimeout>() {
+            return Self::Transport;
+        }
+        if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+            return Self::of_reqwest(error);
+        }
+        Self::Terminal
+    }
+
+    fn of_reqwest(error: &reqwest::Error) -> Self {
+        if error.is_connect()
+            || error.is_timeout()
+            || error.is_request()
+            || error.is_body()
+            || error.is_decode()
+        {
+            Self::Transport
+        } else {
+            Self::Terminal
+        }
+    }
+
+    fn http(
+        status: StatusCode,
+        headers: Option<&'a reqwest::header::HeaderMap>,
+        body: &str,
+    ) -> Self {
+        Self::Response {
+            status: Some(status),
+            headers,
+            body: serde_json::from_str(body)
+                .ok()
+                .map(unwrap_relay)
+                .map(Box::new),
+        }
+    }
+}
 /// Each provider's phrasing of a context overflow, naming `sent` and `limit`.
 static OVERFLOW_PHRASINGS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
     [
@@ -333,119 +582,6 @@ fn overflow(body: Option<&serde_json::Value>, msg: &str) -> Option<(Option<u64>,
         })
 }
 
-/// The leaf of a genai error that decides how the boundary recovers.  The walk
-/// is total — the `_ => Terminal` floor means a genai variant added upstream
-/// surfaces raw instead of being silently misclassified.
-enum Fault<'a> {
-    /// A provider error response; an SSE frame need not name an HTTP status.
-    Response {
-        status: Option<StatusCode>,
-        headers: Option<&'a HeaderMap>,
-        body: Option<Body>,
-    },
-    /// A `reqwest` fault that never reached a status — connect, timeout, a
-    /// body that dropped or would not decode.  Retryable.
-    ///
-    /// The payload is [`root_cause`]: reqwest maps *every* mid-stream body
-    /// failure through one `Display` string ("error decoding response body"),
-    /// so without the leaf under it a reset peer, an h2 `GOAWAY` and this
-    /// client's own read timeout are one indistinguishable message.
-    Transport(Option<String>),
-    /// Neither status nor transport: a request built wrong, an auth gap, a 2xx
-    /// whose body was not the JSON genai required.  Retrying only re-loses.
-    /// The payload is the unwrapped cause's own message, when one was found,
-    /// so `Other` skips genai's wrapper text.
-    Terminal(Option<String>),
-}
-
-impl<'a> Fault<'a> {
-    fn of(err: &'a genai::Error) -> Self {
-        match err {
-            genai::Error::HttpError {
-                status,
-                body,
-                headers,
-                ..
-            } => Self::http(*status, Some(headers), body),
-            genai::Error::WebModelCall { webc_error, .. }
-            | genai::Error::WebAdapterCall { webc_error, .. } => Self::of_webc(webc_error),
-            genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
-            genai::Error::ChatResponse { body, .. } => Fault::Response {
-                status: json_status_code(body).and_then(|code| StatusCode::from_u16(code).ok()),
-                headers: None,
-                body: Some(Box::new(unwrap_relay(body.clone()))),
-            },
-            _ => Fault::Terminal(None),
-        }
-    }
-
-    fn of_webc(err: &'a genai::webc::Error) -> Self {
-        match err {
-            genai::webc::Error::ResponseFailedStatus {
-                status,
-                headers,
-                body,
-            } => Self::http(*status, Some(headers), body),
-            genai::webc::Error::Reqwest(e) => Self::of_reqwest(e),
-            _ => Fault::Terminal(None),
-        }
-    }
-
-    /// A `WebStream` boxes its cause: a `genai::Error`, walked in turn, genai's
-    /// own `StreamTimeout`, or a bare `reqwest::Error`.  Anything else is
-    /// terminal, its own message kept.
-    fn of_boxed(err: &'a (dyn std::error::Error + 'static)) -> Self {
-        if let Some(genai) = err.downcast_ref::<genai::Error>() {
-            return Fault::of(genai);
-        }
-        if let Some(timeout) = err.downcast_ref::<genai::webc::StreamTimeout>() {
-            return Fault::Transport(Some(timeout.to_string()));
-        }
-        if let Some(reqwest) = err.downcast_ref::<reqwest::Error>() {
-            return Self::of_reqwest(reqwest);
-        }
-        Fault::Terminal(Some(err.to_string()))
-    }
-
-    /// Only the fault classes a re-issue can plausibly clear count as
-    /// transport; a builder or redirect fault is the caller's to fix.
-    fn of_reqwest(err: &reqwest::Error) -> Self {
-        if err.is_connect()
-            || err.is_timeout()
-            || err.is_request()
-            || err.is_body()
-            || err.is_decode()
-        {
-            Fault::Transport(root_cause(err))
-        } else {
-            Fault::Terminal(None)
-        }
-    }
-
-    fn http(status: StatusCode, headers: Option<&'a HeaderMap>, body: &str) -> Self {
-        Fault::Response {
-            status: Some(status),
-            headers,
-            body: serde_json::from_str(body)
-                .ok()
-                .map(|b| Box::new(unwrap_relay(b))),
-        }
-    }
-}
-
-/// The deepest `source` under an error: the one link that names what actually
-/// went wrong, every wrapper above it being generic.  `None` when the error is
-/// its own root.
-pub(crate) fn root_cause(err: &(dyn std::error::Error + 'static)) -> Option<String> {
-    let mut leaf = None;
-    let mut source = err.source();
-    while let Some(link) = source {
-        leaf = Some(link.to_string());
-        source = link.source();
-    }
-    leaf
-}
-
 /// The error-detail object inside a provider JSON body.  Providers wrap
 /// differently — `OpenAI` nests the detail under `error`, Anthropic sends
 /// `{"type":"error","error":{…}}`: so this is the single home of the
@@ -475,11 +611,9 @@ fn error_object_mut(
 /// A gateway's relay envelope, replaced by the upstream body it carries.
 /// `OpenRouter` answers an upstream provider's failure with a frame of its own
 /// — `{"error":{"message":"Provider returned error","metadata":{"raw":"…"}}}` —
-/// whose `raw` is that provider's own body, verbatim, as a JSON string.  The
-/// envelope names no fault the inner body does not, so the boundary keeps the
-/// inner body and carries the upstream provider's name across as `provider`;
-/// otherwise every reader — the classifier, `summary`, the TUI readout — gets
-/// "Provider returned error" and a wall of escaped JSON.
+/// whose `raw` is that provider's own body, verbatim, as a JSON string. This
+/// view carries the upstream provider's name as `provider`; the service cause
+/// retains the original envelope.
 fn unwrap_relay(body: serde_json::Value) -> serde_json::Value {
     let Some(metadata) = error_object(&body).and_then(|o| o.get("metadata")) else {
         return body;
@@ -506,74 +640,6 @@ fn json_status_code(body: &serde_json::Value) -> Option<u16> {
         .get("code")
         .and_then(serde_json::Value::as_u64)
         .and_then(|c| u16::try_from(c).ok())
-}
-
-impl ProviderError {
-    /// One line, for a failure crossing an agent boundary as a flat string —
-    /// the `AgentOutcome::Failed` a parent receives from a sub-agent.  The TUI's
-    /// structured block is unreachable there and [`fmt::Display`] splices the raw
-    /// HTTP `Body:` JSON into `cause`, so this prefers the provider's own parsed
-    /// message and falls back to the kind label.
-    pub fn summary(&self) -> String {
-        match self {
-            Self::Cancelled(site) => format!("cancelled {site}"),
-            Self::Transient {
-                cause,
-                body: None,
-                status: None,
-                ..
-            } => format!("{}: {}", transient_label(None), first_line(cause)),
-            Self::Transient { body, status, .. } => {
-                with_body_message(transient_label(*status), body.as_deref())
-            }
-            Self::Refused(r) => with_body_message(&r.headline(), r.body.as_deref()),
-            Self::Api {
-                status,
-                message,
-                body,
-                ..
-            } => {
-                let detail = body
-                    .as_deref()
-                    .and_then(body_message)
-                    .unwrap_or_else(|| first_line(message).to_string());
-                match status {
-                    Some(s) => format!("api error {s}: {detail}"),
-                    None => format!("api error: {detail}"),
-                }
-            }
-            Self::Overflow {
-                provider,
-                sent,
-                limit,
-                ..
-            } => {
-                let host = provider
-                    .as_deref()
-                    .map_or(String::new(), |p| format!(" for {p}"));
-                let counts = match (sent, limit) {
-                    (Some(s), Some(l)) => format!(": {s} tokens sent, {l} allowed"),
-                    (Some(s), None) => format!(": {s} tokens sent"),
-                    (None, Some(l)) => format!(": {l} tokens allowed"),
-                    (None, None) => String::new(),
-                };
-                format!("context too long{host}{counts}")
-            }
-            Self::Truncated { cause } => format!("reply cut off: {}", cause.summary()),
-            Self::Other(s) | Self::Unavailable(s) => first_line(s).to_string(),
-        }
-    }
-}
-
-impl CutShort {
-    /// One line naming the cut and what it was: the remedy is the renderer's
-    /// business, not this string's.
-    pub fn summary(&self) -> String {
-        match self {
-            Self::OutputCap { stop_reason } => format!("output cap ({stop_reason})"),
-            Self::Stalled(cause) => format!("stream stalled ({})", cause.summary()),
-        }
-    }
 }
 
 /// `Transient`'s kind label, shared with the TUI's structured renderer: a 5xx
@@ -641,635 +707,7 @@ pub(crate) fn body_detail(body: &str) -> String {
     }
 }
 
-/// The trailing lines a multi-line cause carries are genai's
-/// `Cause:`/`Status:`/`Body:` framing, which the summary deliberately drops.
+/// Presentation stays on one line; stored evidence remains whole.
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s).trim_end()
-}
-
-/// The flat [`Self::summary`] is the only rendering; the structured block is
-/// the renderer's, not this impl's.
-impl fmt::Display for ProviderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.summary())
-    }
-}
-
-impl std::error::Error for ProviderError {}
-
-/// The first `https?://…` in `msg`, so the renderer can label the endpoint that
-/// failed.  A trailing `)` or `,` is trimmed, so genai's `for url (https://…)`
-/// shape gives back the bare URL.
-pub(crate) fn extract_url(msg: &str) -> Option<String> {
-    let i = msg.find("http://").or_else(|| msg.find("https://"))?;
-    let tail = &msg[i..];
-    let end = tail
-        .find(|c: char| c.is_whitespace() || c == ')' || c == ',')
-        .unwrap_or(tail.len());
-    Some(tail[..end].to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::retry::Wait;
-    use genai::ModelIden;
-    use genai::adapter::AdapterKind;
-    use reqwest::header::HeaderValue;
-    use std::time::Duration;
-
-    /// The classifier never reads the adapter kind, so it is arbitrary.
-    fn iden(model: &str) -> ModelIden {
-        ModelIden::new(AdapterKind::Anthropic, model)
-    }
-
-    /// The non-streamed (`exec_chat`) failure shape genai returns, which
-    /// carries its status only as a typed `StatusCode`.
-    fn web_model_call(status: StatusCode, headers: HeaderMap) -> genai::Error {
-        genai::Error::WebModelCall {
-            model_iden: iden("m"),
-            webc_error: genai::webc::Error::ResponseFailedStatus {
-                status,
-                body: String::new(),
-                headers: Box::new(headers),
-            },
-        }
-    }
-
-    /// The streaming failure shape: the initial non-2xx becomes an `HttpError`
-    /// boxed as `WebStream`'s cause, as `resp.stream.next()` yields it.
-    fn web_stream_http(status: StatusCode, headers: HeaderMap) -> genai::Error {
-        genai::Error::WebStream {
-            model_iden: iden("m"),
-            cause: "stream open failed".into(),
-            error: Box::new(genai::Error::HttpError {
-                status,
-                canonical_reason: status.canonical_reason().unwrap_or("").into(),
-                body: String::new(),
-                headers: Box::new(headers),
-            }),
-        }
-    }
-
-    /// A gateway's envelope is not the error: the upstream body inside
-    /// `metadata.raw` is, and the relaying provider's name survives with it.
-    #[test]
-    fn from_genai_unwraps_gateway_relay_envelope() {
-        let e = ProviderError::from_genai(
-            &genai::Error::HttpError {
-                status: StatusCode::BAD_REQUEST,
-                canonical_reason: "Bad Request".into(),
-                body: r#"{"error":{"code":"400","message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"unsupported schema keyword\",\"param\":\"tools\",\"type\":\"invalid_request_error\"}}","provider_name":"ModelRun"}}}"#.into(),
-                headers: Box::new(HeaderMap::new()),
-            },
-            "m",
-        );
-        assert_eq!(
-            e.summary(),
-            "api error 400: unsupported schema keyword",
-            "the relayed message should replace the envelope's"
-        );
-        let ProviderError::Api { body: Some(b), .. } = &e else {
-            panic!("expected Api with a body, got {e:?}")
-        };
-        let obj = error_object(b).expect("unwrapped body keeps an error object");
-        assert_eq!(
-            obj.get("param").and_then(serde_json::Value::as_str),
-            Some("tools")
-        );
-        assert_eq!(
-            obj.get("provider").and_then(serde_json::Value::as_str),
-            Some("ModelRun"),
-            "the relaying provider's name is the one thing the envelope owns"
-        );
-    }
-
-    fn web_stream_timeout(timeout: genai::webc::StreamTimeout) -> genai::Error {
-        genai::Error::WebStream {
-            model_iden: iden("m"),
-            cause: "stream failed".into(),
-            error: Box::new(timeout),
-        }
-    }
-
-    #[test]
-    fn from_genai_classifies_stream_timeouts_as_transient() {
-        use genai::webc::StreamTimeout;
-        for timeout in [StreamTimeout::Read, StreamTimeout::Headers] {
-            let e = ProviderError::from_genai(&web_stream_timeout(timeout), "m");
-            assert!(
-                matches!(&e, ProviderError::Transient { cause, .. } if *cause == timeout.to_string()),
-                "got {e:?}"
-            );
-        }
-        let e = ProviderError::from_genai(&web_stream_timeout(StreamTimeout::Read), "m");
-        assert_eq!(
-            e.summary(),
-            "connection failed: model response body read timed out"
-        );
-    }
-
-    /// A boxed cause with no typed leaf must not be retried on a
-    /// `Display`-string guess.
-    #[test]
-    fn from_genai_classifies_web_stream_unknown_cause_as_other() {
-        let e = ProviderError::from_genai(
-            &genai::Error::WebStream {
-                model_iden: iden("gpt-5.4"),
-                cause: "error sending request for url".into(),
-                error: Box::<dyn std::error::Error + Send + Sync>::from(
-                    "error sending request for url",
-                ),
-            },
-            "gpt-5.4",
-        );
-        assert!(
-            matches!(e, ProviderError::Other(_)),
-            "a WebStream with no typed leaf is terminal, got {e:?}"
-        );
-    }
-
-    /// Its `Display` mentions "body", the word a substring heuristic would have
-    /// seized on to retry it; the structural walk reads the variant and does not.
-    #[test]
-    fn from_genai_classifies_non_json_response_as_other() {
-        let e = ProviderError::from_genai(
-            &genai::Error::WebModelCall {
-                model_iden: iden("m"),
-                webc_error: genai::webc::Error::ResponseFailedNotJson {
-                    content_type: "text/html".into(),
-                    body: "<html>200 but not JSON</html>".into(),
-                },
-            },
-            "m",
-        );
-        assert!(
-            matches!(e, ProviderError::Other(_)),
-            "a non-JSON 2xx body is terminal, got {e:?}"
-        );
-    }
-
-    /// The wait comes straight off the structured header, not the message text.
-    #[test]
-    fn from_genai_classifies_429_rate_limit() {
-        let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("7"));
-        let e = ProviderError::from_genai(
-            &web_model_call(StatusCode::TOO_MANY_REQUESTS, headers),
-            "gpt-5.5",
-        );
-        match e {
-            ProviderError::Refused(r) => {
-                assert_eq!(r.limit, Limit::Rate);
-                assert_eq!(
-                    r.recovery(),
-                    Recovery::InPlace(Wait::patient(Duration::from_secs(7)))
-                );
-            }
-            other => panic!("expected Refused, got {other:?}"),
-        }
-    }
-
-    /// genai's streaming `HttpError` carries its own response headers, not
-    /// just `ResponseFailedStatus`'s — so a 429 hit mid-stream honors the
-    /// server's `retry-after` exactly as a non-streamed one does.
-    #[test]
-    fn from_genai_classifies_429_rate_limit_via_web_stream_http() {
-        let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("11"));
-        let e = ProviderError::from_genai(
-            &web_stream_http(StatusCode::TOO_MANY_REQUESTS, headers),
-            "gpt-5.5",
-        );
-        match e {
-            ProviderError::Refused(r) => {
-                assert_eq!(
-                    r.recovery(),
-                    Recovery::InPlace(Wait::patient(Duration::from_secs(11)))
-                );
-            }
-            other => panic!("expected Refused, got {other:?}"),
-        }
-    }
-
-    /// A long wait with nothing said about an allowance is a rate, deferred:
-    /// the ceiling decides recovery, never the cause.
-    #[test]
-    fn from_genai_classifies_a_long_bare_retry_after_as_a_deferred_rate() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            HeaderValue::from_static("600"),
-        );
-        let e = ProviderError::from_genai(
-            &web_model_call(StatusCode::TOO_MANY_REQUESTS, headers),
-            "gpt-5.5",
-        );
-        let ProviderError::Refused(r) = &e else {
-            panic!("expected Refused, got {e:?}");
-        };
-        assert_eq!(r.limit, Limit::Rate);
-        assert!(matches!(r.recovery(), Recovery::Deferred(_)));
-        assert!(
-            e.summary().starts_with("rate limited until "),
-            "{}",
-            e.summary()
-        );
-    }
-
-    fn too_many_requests(body: &serde_json::Value) -> ProviderError {
-        ProviderError::from_genai(
-            &genai::Error::HttpError {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                canonical_reason: "Too Many Requests".into(),
-                body: body.to_string(),
-                headers: Box::new(HeaderMap::new()),
-            },
-            "m",
-        )
-    }
-
-    /// A reset hours off is stated whole, as the allowance the body names: the
-    /// retry policy defers it.
-    #[test]
-    fn from_genai_classifies_a_usage_limit_with_a_named_reset_as_a_deferred_allowance() {
-        let resets_at = Timestamp::now().as_second() + 5 * 3600;
-        let e = too_many_requests(&serde_json::json!({
-            "error": {
-                "type": "usage_limit_reached",
-                "resets_at": resets_at,
-                "plan_type": "plus",
-            }
-        }));
-        match e {
-            ProviderError::Refused(r) => {
-                assert_eq!(r.limit, Limit::Allowance);
-                assert_eq!(r.resets_at.map(Timestamp::as_second), Some(resets_at));
-                assert!(matches!(r.recovery(), Recovery::Deferred(_)));
-            }
-            other => panic!("expected Refused, got {other:?}"),
-        }
-    }
-
-    /// The plan route names no reset, so its cap is surfaced at once.
-    #[test]
-    fn from_genai_classifies_a_plan_cap_without_a_reset_as_api() {
-        let e = too_many_requests(&serde_json::json!({
-            "error": {
-                "code": "subscription_sharing_usage_limit_exceeded",
-                "message": "You have hit your usage limit.",
-            }
-        }));
-        assert!(
-            matches!(
-                e,
-                ProviderError::Api {
-                    status: Some(429),
-                    ..
-                }
-            ),
-            "got {e:?}"
-        );
-    }
-
-    /// A quota spent is cleared by no wait, so it must not be retried or scheduled.
-    #[test]
-    fn from_genai_classifies_insufficient_quota_as_api() {
-        let e = too_many_requests(&serde_json::json!({
-            "error": {"type": "insufficient_quota", "message": "You exceeded your quota"}
-        }));
-        assert!(
-            matches!(
-                e,
-                ProviderError::Api {
-                    status: Some(429),
-                    ..
-                }
-            ),
-            "got {e:?}"
-        );
-    }
-
-    /// The verbose `Display` would land a wall of JSON in a parent agent's
-    /// one-line breadcrumb.
-    #[test]
-    fn summary_reads_body_message_not_the_json_wall() {
-        let e = ProviderError::Refused(Refusal {
-            cause: "Web stream error for model 'glm-5.2 (adapter: OpenAI)'.\n\
-                    Cause: HTTP error.\nStatus: 429 Too Many Requests\nBody:\n  \
-                    {\"error\":{\"message\":\"Weekly usage limit reached. Resets in 4 days.\"}}"
-                .into(),
-            body: Some(Box::new(serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "GoUsageLimitError",
-                    "message": "Weekly usage limit reached. Resets in 4 days.",
-                },
-            }))),
-            ..Refusal::for_test(Limit::Rate, None)
-        });
-        let s = e.summary();
-        assert_eq!(
-            s,
-            "rate limited: Weekly usage limit reached. Resets in 4 days."
-        );
-        assert!(
-            !s.contains('{'),
-            "summary must not leak the raw JSON body: {s}"
-        );
-        assert!(!s.contains('\n'), "summary must stay one line: {s}");
-    }
-
-    /// Never the verbose `cause` — the breadcrumb has no room for it.
-    #[test]
-    fn summary_without_body_is_the_kind_label() {
-        let e = ProviderError::Refused(Refusal {
-            cause: "Web stream error.\nStatus: 429".into(),
-            ..Refusal::for_test(Limit::Rate, None)
-        });
-        assert_eq!(e.summary(), "rate limited");
-    }
-
-    /// A hard 400 on the streaming path must not classify `Transient`, or the
-    /// retry loop burns its whole budget on an unfixable request.
-    #[test]
-    fn from_genai_classifies_400_wrapped_in_web_stream_error() {
-        let e = ProviderError::from_genai(
-            &web_stream_http(StatusCode::BAD_REQUEST, HeaderMap::new()),
-            "deepseek-v4-pro",
-        );
-        match e {
-            ProviderError::Api { status, model, .. } => {
-                assert_eq!(status, Some(400));
-                assert_eq!(model, "deepseek-v4-pro");
-            }
-            other => panic!("expected Api, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn from_genai_classifies_unknown_as_other() {
-        let e = ProviderError::from_genai(
-            &genai::Error::ChatReqHasNoMessages {
-                model_iden: iden("gpt-5.5"),
-            },
-            "gpt-5.5",
-        );
-        match e {
-            ProviderError::Other(s) => assert!(s.contains("no messages")),
-            other => panic!("expected Other, got {other:?}"),
-        }
-    }
-
-    /// A mid-stream SSE frame in `OpenRouter`'s shape: the status is read out
-    /// of the JSON body and routed like any other 4xx.
-    #[test]
-    fn from_genai_classifies_json_body_4xx_as_api() {
-        let e = ProviderError::from_genai(
-            &genai::Error::ChatResponse {
-                model_iden: iden("anthropic/claude-opus-4"),
-                body: serde_json::json!({"error": {"code": 400, "message": "bad request"}}),
-            },
-            "anthropic/claude-opus-4",
-        );
-        match e {
-            ProviderError::Api { status, model, .. } => {
-                assert_eq!(status, Some(400));
-                assert_eq!(model, "anthropic/claude-opus-4");
-            }
-            other => panic!("expected Api, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stream_error_keeps_its_body_without_an_http_status() {
-        use crate::record::fault::{Datum, Readout};
-
-        let message = "The ChatGPT user has reached their Subscription Sharing usage limit. \
-                       Ask the user to try again after their usage limit resets or use an API key instead.";
-        let body = serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "code": "subscription_sharing_usage_limit_exceeded",
-                "message": message,
-                "param": null,
-            },
-            "sequence_number": 2,
-        });
-        for boxed in [false, true] {
-            let mut err = genai::Error::ChatResponse {
-                model_iden: iden("gpt-6.1-sol"),
-                body: body.clone(),
-            };
-            if boxed {
-                err = genai::Error::WebStream {
-                    model_iden: iden("gpt-6.1-sol"),
-                    cause: "stream failed".into(),
-                    error: Box::new(err),
-                };
-            }
-            let error = ProviderError::from_genai(&err, "gpt-6.1-sol");
-            assert!(matches!(&error, ProviderError::Api { status: None, .. }));
-            assert_eq!(error.summary(), format!("api error: {message}"));
-            let saved = serde_json::to_value(&error).expect("recordable error");
-            assert_eq!(saved["api"]["body"], body);
-            let readout = Readout::fatal(&error);
-            let fields: Vec<_> = readout
-                .fields
-                .into_iter()
-                .map(|field| {
-                    let Datum::Text(value) = field.datum else {
-                        panic!("unexpected wait")
-                    };
-                    (field.label, value)
-                })
-                .collect();
-            assert_eq!(
-                fields,
-                [
-                    ("model".into(), "gpt-6.1-sol".into()),
-                    ("type".into(), "invalid_request_error".into()),
-                    (
-                        "code".into(),
-                        "subscription_sharing_usage_limit_exceeded".into()
-                    ),
-                    ("message".into(), message.into()),
-                ]
-            );
-        }
-    }
-
-    #[test]
-    fn from_genai_classifies_json_body_status_in_both_shapes() {
-        let route = |body| {
-            ProviderError::from_genai(
-                &genai::Error::ChatResponse {
-                    model_iden: iden("m"),
-                    body,
-                },
-                "m",
-            )
-        };
-        let nested = route(serde_json::json!({"error": {"code": 429}}));
-        assert!(
-            matches!(nested, ProviderError::Refused(_)),
-            "a JSON 429 must route to Refused, got {nested:?}"
-        );
-        let flat = route(serde_json::json!({"code": 503}));
-        assert!(
-            matches!(flat, ProviderError::Transient { .. }),
-            "a flat JSON 503 must route to Transient, got {flat:?}"
-        );
-        let codeless = route(serde_json::json!({"message": "no code"}));
-        assert!(
-            matches!(
-                codeless,
-                ProviderError::Api {
-                    status: None,
-                    body: Some(_),
-                    ..
-                }
-            ),
-            "a JSON body with no code is terminal, got {codeless:?}"
-        );
-    }
-
-    /// `ResponseFailedStatus` renders its status as `"… status code '503'"`,
-    /// with no machine-parseable token — classification must read the typed
-    /// `StatusCode` or the backoff loop never retries a non-streamed 5xx.
-    #[test]
-    fn from_genai_classifies_a_non_streamed_5xx_as_transient() {
-        let e = ProviderError::from_genai(
-            &web_model_call(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()),
-            "anthropic/claude-opus-4",
-        );
-        assert!(
-            matches!(e, ProviderError::Transient { .. }),
-            "a non-streamed 503 must classify Transient, got {e:?}"
-        );
-    }
-
-    #[test]
-    fn body_detail_reads_nested_json_error() {
-        let body = r#"{"error":{"message":"invalid api key"}}"#;
-        assert_eq!(body_detail(body), "invalid api key");
-    }
-
-    #[test]
-    fn body_detail_reads_flat_json_error() {
-        let body = r#"{"message":"model not found"}"#;
-        assert_eq!(body_detail(body), "model not found");
-    }
-
-    #[test]
-    fn body_detail_caps_a_json_message_too() {
-        let long = "x".repeat(BODY_DETAIL_CAP + 50);
-        let body = serde_json::json!({ "error": { "message": long } }).to_string();
-        let out = body_detail(&body);
-        assert_eq!(out.chars().count(), BODY_DETAIL_CAP + 1);
-        assert!(out.ends_with('\u{2026}'));
-    }
-
-    #[test]
-    fn body_detail_names_an_html_page_instead_of_spilling_it() {
-        let body = "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>";
-        assert_eq!(
-            body_detail(body),
-            "the endpoint returned a web page, not an error message"
-        );
-    }
-
-    #[test]
-    fn body_detail_falls_back_to_first_line_of_plain_text() {
-        let body =
-            "\nupstream connect error or disconnect/reset before headers\nsome more detail\n";
-        assert_eq!(
-            body_detail(body),
-            "upstream connect error or disconnect/reset before headers"
-        );
-    }
-
-    #[test]
-    fn body_detail_caps_a_long_first_line() {
-        let line = "x".repeat(BODY_DETAIL_CAP + 50);
-        let expected = format!("{}…", "x".repeat(BODY_DETAIL_CAP));
-        assert_eq!(body_detail(&line), expected);
-    }
-
-    #[test]
-    fn body_detail_names_an_empty_body() {
-        assert_eq!(body_detail(""), "the endpoint sent no detail");
-        assert_eq!(body_detail("   \n  "), "the endpoint sent no detail");
-    }
-
-    fn http_400(body: &str) -> genai::Error {
-        genai::Error::HttpError {
-            status: StatusCode::BAD_REQUEST,
-            canonical_reason: "Bad Request".into(),
-            body: body.into(),
-            headers: Box::new(HeaderMap::new()),
-        }
-    }
-
-    /// The incident: a gateway relaying an endpoint whose window is smaller
-    /// than the one the catalog lists.
-    #[test]
-    fn from_genai_classifies_a_relayed_vllm_overflow() {
-        let raw = r#"{"object":"error","message":"Failed to create completion, non-200 status code returned. Text: '{\"object\":\"error\",\"message\":\"The input (250015 tokens) is longer than the model's context length (250000 tokens).\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}'","type":"context_length_exceeded"}"#;
-        let body = serde_json::json!({"error": {
-            "code": "400",
-            "message": "Provider returned error",
-            "metadata": {"raw": raw, "provider_name": "InferenceNet"},
-        }});
-        let e = ProviderError::from_genai(&http_400(&body.to_string()), "z-ai/glm-5.3");
-        assert!(
-            matches!(
-                &e,
-                ProviderError::Overflow {
-                    sent: Some(250_015),
-                    limit: Some(250_000),
-                    provider: Some(p),
-                    ..
-                } if p == "InferenceNet"
-            ),
-            "got {e:?}"
-        );
-        assert_eq!(
-            e.summary(),
-            "context too long for InferenceNet: 250015 tokens sent, 250000 allowed"
-        );
-    }
-
-    #[test]
-    fn from_genai_classifies_an_anthropic_overflow() {
-        let e = ProviderError::from_genai(
-            &http_400(
-                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
-            ),
-            "claude",
-        );
-        assert!(
-            matches!(
-                e,
-                ProviderError::Overflow {
-                    sent: Some(210_000),
-                    limit: Some(200_000),
-                    ..
-                }
-            ),
-            "got {e:?}"
-        );
-    }
-
-    #[test]
-    fn from_genai_keeps_an_ordinary_400_an_api_error() {
-        let e = ProviderError::from_genai(
-            &http_400(
-                r#"{"error":{"message":"unsupported schema keyword","type":"invalid_request_error"}}"#,
-            ),
-            "m",
-        );
-        assert!(matches!(e, ProviderError::Api { .. }), "got {e:?}");
-    }
 }

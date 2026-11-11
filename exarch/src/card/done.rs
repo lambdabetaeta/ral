@@ -94,7 +94,7 @@ pub fn settled_text(
 mod tests {
     use super::*;
     use ral_core::process::CancelCause;
-    use ral_core::shell::runtime::{ErrorRecord, Reason};
+    use ral_core::shell::runtime::{ErrorFact, Reason};
 
     fn done(outcome: Done) -> FOValue {
         DoneEvent {
@@ -111,11 +111,14 @@ mod tests {
         let named = |outcome| Some((7, "building".to_string(), Duration::from_secs(192), outcome));
         for outcome in [
             Done::Ok(()),
-            Done::Err(ErrorRecord::new(
-                Reason::Raised("boom".into()),
-                "run".into(),
-                ral_core::test_helper::site(),
-            )),
+            Done::Err(
+                ErrorFact::new(
+                    Reason::raised("boom"),
+                    "run".into(),
+                    ral_core::test_helper::site(),
+                )
+                .record(),
+            ),
             Done::Panic("kaput".into()),
             Done::Exited(3),
             Done::Stopped(CancelCause::Cancelled),
@@ -131,11 +134,14 @@ mod tests {
                 Some(7),
                 "building",
                 Some(Duration::from_secs(192)),
-                &Done::Err(ErrorRecord::new(
-                    Reason::Raised("build failed".into()),
-                    "run".into(),
-                    ral_core::test_helper::site(),
-                ))
+                &Done::Err(
+                    ErrorFact::new(
+                        Reason::raised("build failed"),
+                        "run".into(),
+                        ral_core::test_helper::site(),
+                    )
+                    .record()
+                )
             ),
             "errand #7 (building) finished after 3 mins 12 secs (failed): build failed"
         );

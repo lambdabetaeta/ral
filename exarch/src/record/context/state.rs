@@ -4,6 +4,11 @@
 use super::Context;
 use crate::record::{QuiesceReason, Recorded, ToolResult, Transcript};
 use genai::chat::{ChatMessage, ChatRole};
+use ral_core::fact::{
+    ContextFailure, ContextFailureDuplicateToolResult, ContextFailureMutation,
+    ContextFailureToolResultCount, ContextFailureUnknownToolResult, ContextOperation, ContextState,
+    ContextStateAwaitingToolResults,
+};
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -65,21 +70,20 @@ impl Context {
         }
     }
 
-    /// What the session is waiting for, in the user's vocabulary — used only
-    /// in refusal messages, never matched on. Each phrase completes "the
-    /// session is …".
-    pub(crate) fn waiting_for(&self) -> String {
-        match &self.state {
-            State::ReadyForUser => "ready for your next prompt".to_string(),
-            State::AwaitingAssistantAfterUser => "waiting for the model's reply".to_string(),
-            State::AwaitingToolResults { pending_ids } => match pending_ids.len() {
-                1 => "waiting for 1 tool result".to_string(),
-                n => format!("waiting for {n} tool results"),
-            },
-            State::AwaitingAssistantAfterToolResults => {
-                "waiting for the model to read the tool results".to_string()
+    pub(crate) fn mutation_failure(&self, operation: ContextOperation) -> ContextFailure {
+        let state = match &self.state {
+            State::ReadyForUser => ContextState::ReadyForUser,
+            State::AwaitingAssistantAfterUser => ContextState::AwaitingAssistantAfterUser,
+            State::AwaitingToolResults { pending_ids } => {
+                ContextState::AwaitingToolResults(ContextStateAwaitingToolResults {
+                    pending: pending_ids.len().into(),
+                })
             }
-        }
+            State::AwaitingAssistantAfterToolResults => {
+                ContextState::AwaitingAssistantAfterToolResults
+            }
+        };
+        ContextFailure::Mutation(ContextFailureMutation { operation, state })
     }
 
     /// The records a [`QuiesceReason`] quiesce still owes, for the caller to
@@ -215,22 +219,27 @@ fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Trans
 pub(crate) fn validate_result_ids(
     pending_ids: &[String],
     results: &[ToolResult],
-) -> Result<(), String> {
+) -> Result<(), ContextFailure> {
     if pending_ids.len() != results.len() {
-        return Err(format!(
-            "tool result count mismatch: expected {}, got {}",
-            pending_ids.len(),
-            results.len()
+        return Err(ContextFailure::ToolResultCount(
+            ContextFailureToolResultCount {
+                expected: pending_ids.len().into(),
+                got: results.len().into(),
+            },
         ));
     }
     let expected: HashSet<&str> = pending_ids.iter().map(String::as_str).collect();
     let mut seen: HashSet<&str> = HashSet::with_capacity(results.len());
     for r in results {
         if !expected.contains(r.id.as_str()) {
-            return Err(format!("unknown tool result id {}", r.id));
+            return Err(ContextFailure::UnknownToolResult(
+                ContextFailureUnknownToolResult { id: r.id.clone() },
+            ));
         }
         if !seen.insert(r.id.as_str()) {
-            return Err(format!("duplicate tool result id {}", r.id));
+            return Err(ContextFailure::DuplicateToolResult(
+                ContextFailureDuplicateToolResult { id: r.id.clone() },
+            ));
         }
     }
     Ok(())

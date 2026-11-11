@@ -47,24 +47,13 @@ impl Standing {
         .into_iter()
         .filter_map(|(limit, until)| Some((limit, until?)))
         .max_by_key(|&(_, until)| until)?;
-        let service = &account.service.name;
-        let cause = match limit {
-            Limit::Allowance => {
-                format!("nothing was sent: {service}'s plan allowance is spent until it resets")
-            }
-            Limit::Rate => {
-                format!(
-                    "nothing was sent: {model} on {service} is held until its rate limit resets"
-                )
-            }
-        };
-        let refusal = Refusal {
+        let refusal = Refusal::held(
             limit,
-            resets_at: Some(until),
-            received: now,
-            cause,
-            body: None,
-        };
+            Some(until),
+            now,
+            account.service.name.as_str(),
+            model,
+        );
         matches!(refusal.recovery(), Recovery::Deferred(_)).then_some(refusal)
     }
 }
@@ -242,11 +231,11 @@ mod tests {
         let Err(ProviderError::Refused(refusal)) = admit(Limit::Allowance, hour, "b") else {
             panic!("an allowance holds every model");
         };
-        assert!(
-            refusal.cause.contains("nothing was sent"),
-            "{}",
-            refusal.cause
-        );
+        assert!(matches!(
+            refusal.cause,
+            ral_core::fact::ProviderRefusalCause::Held(ref held)
+                if held.service == account.service.name.as_str() && held.model == "b"
+        ));
         assert!(admit(Limit::Rate, hour, "a").is_err());
         assert!(admit(Limit::Rate, hour, "b").is_ok());
         assert!(admit(Limit::Allowance, now + Duration::from_secs(10), "a").is_ok());

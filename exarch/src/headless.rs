@@ -109,7 +109,7 @@ impl<'a> Headless<'a> {
                 self.reply = Some(value);
                 Ok(())
             }
-            Some(ChildStatus::Failed(reason)) => Err(reason),
+            Some(ChildStatus::Failed(reason)) => Err(reason.to_string()),
             Some(ChildStatus::Stopped) => Err("the agent was stopped".into()),
             None => Err(self
                 .fault

@@ -97,6 +97,25 @@ impl Head {
     }
 }
 
+impl From<Head> for crate::fact::DataHead {
+    fn from(head: Head) -> Self {
+        match head {
+            Head::Unit => Self::Unit,
+            Head::Bool => Self::Bool,
+            Head::Int => Self::Int,
+            Head::Float => Self::Float,
+            Head::String => Self::String,
+            Head::Bytes => Self::Bytes,
+            Head::List => Self::List,
+            Head::Map => Self::Map,
+            Head::Record => Self::Record,
+            Head::Variant => Self::Variant,
+            Head::Thunk => Self::Thunk,
+            Head::Handle => Self::Handle,
+        }
+    }
+}
+
 const fn heads(of: &[Head]) -> u16 {
     let (mut set, mut i) = (0, 0);
     while i < of.len() {
@@ -192,6 +211,19 @@ impl Kind {
             .into_iter()
             .find(|h| self.heads == h.bit())
             .and_then(Head::nullary)
+    }
+}
+
+impl From<Kind> for crate::fact::DataKind {
+    fn from(kind: Kind) -> Self {
+        Self {
+            heads: Head::ALL
+                .into_iter()
+                .filter(|head| kind.admits(*head))
+                .map(Into::into)
+                .collect(),
+            deep: kind.is_deep(),
+        }
     }
 }
 

@@ -95,7 +95,7 @@ impl Transport {
         tokio::select! {
             biased;
             () = super::retry::wait_for_cancel(cancel) => Err(cancelled()),
-            result = credential.prepare() => result.map_err(super::ProviderError::Other),
+            result = credential.prepare() => result.map_err(super::ProviderError::Credential),
         }
     }
 
@@ -475,6 +475,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(handle.snapshot().access_token, "live");
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_keeps_the_credential_cause() {
+        use ral_core::fact::{CredentialCause, CredentialStoreOperation};
+        let state = ral_core::own::OwnDir::for_test("credential-prepare").unwrap();
+        let store = (*state).clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            oauth::commit_for_test(&store, &token(Login::Grok, "live"))
+        })
+        .await
+        .unwrap();
+        let transport = Transport::build(&Login::Grok.service(), "m", &Credential::OAuth(handle));
+        {
+            use std::io::Write as _;
+            let mut file = state.open_write("oauth.json").unwrap();
+            file.set_len(0).unwrap();
+            file.write_all(b"{").unwrap();
+        }
+        let cancel = ral_core::process::DurableRoot::default().child();
+        assert!(matches!(
+            transport.prepare(&cancel).await,
+            Err(super::super::ProviderError::Credential(ref failure))
+                if matches!(failure.cause, CredentialCause::Store(ref store) if store.operation == CredentialStoreOperation::Read)
+        ));
     }
 
     #[test]

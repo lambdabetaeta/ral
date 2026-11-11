@@ -88,7 +88,7 @@ impl<A: Lists> Dir<A> {
             }
             Kind::Symlink => Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                format!("{} is a link, not a directory", shown(name.as_os_str())),
+                crate::fact::PathIoLeaf::NotDirectory(shown(name.as_os_str())),
             )),
             _ => Err(io::ErrorKind::NotADirectory.into()),
         }

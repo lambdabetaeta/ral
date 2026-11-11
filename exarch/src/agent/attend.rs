@@ -4,18 +4,18 @@ use crate::agent::arrival::Prompt;
 use crate::agent::engine::Engine;
 use crate::agent::nursery::Teardown;
 use crate::agent::outcome::{Fault, Outcome};
-use crate::agent::{Agent, EngineLost, nudge};
-use crate::bus::{
-    AgentOutcome, ENDED_BEFORE_REPORTING, Emitter, Next, Rest, WORKER_PANIC_PREFIX, panic_msg,
-};
+use crate::agent::{Agent, nudge};
+use crate::bus::{AgentOutcome, Emitter, Next, Rest, WORKER_PANIC_PREFIX, panic_msg};
 use crate::clock;
 use crate::provider::{Limit, ProviderError, Recovery};
-use crate::record::{AgentState, ChildStatus, Forensic, QuiesceReason, Transient, Unavailable};
+use crate::record::{
+    AgentState, ChildFailure, ChildStatus, Forensic, QuiesceReason, Transient, Unavailable,
+};
 use crate::schedule::Trigger;
+use ral_core::fact::{HelperFailure, ScheduleFailure, ScheduleFailureRecording};
 use ral_core::process::Scope;
 
 const RESUME_LABEL: &str = "provider-reset";
-const NO_REPLY_REASON: &str = "ended without calling `reply`";
 
 impl Agent {
     pub(crate) fn run(mut self, emit: &Emitter) -> Teardown {
@@ -86,16 +86,20 @@ impl Agent {
                     Err(error)
                 }
                 Err(Fault::Severed(cause)) => {
-                    return AgentOutcome::Failed(
-                        EngineLost::running(&cause, self.run_dir()).to_string(),
-                    );
+                    return AgentOutcome::Failed(ChildFailure::severed(&cause));
                 }
                 Err(Fault::Unavailable(failure)) => {
-                    return AgentOutcome::Failed(failure.to_string());
+                    return AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::Recording(
+                        failure.failure(),
+                    )));
                 }
-                Err(Fault::Refused(why) | Fault::Panicked(why)) => {
+                Err(Fault::Refused(why)) => {
+                    self.note_error(&why.describe());
+                    return AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::Context(why)));
+                }
+                Err(Fault::Panicked(why)) => {
                     self.note_error(&why);
-                    return AgentOutcome::Failed(why);
+                    return AgentOutcome::Failed(ChildFailure::Panicked(why));
                 }
             };
             let final_outcome = agent_outcome(&outcome);
@@ -112,12 +116,14 @@ impl Agent {
             if exchange.is_cancelled() || self.mailbox.has_input() {
                 return final_outcome;
             }
-            let workers_idle = match self.engine().read(|transport| transport.workers()) {
+            let workers_idle = match self
+                .engine()
+                .read(ral_core::fact::ProbeSubject::Workers, |transport| {
+                    transport.workers()
+                }) {
                 Ok(workers) => workers.is_empty(),
                 Err(cause) => {
-                    return AgentOutcome::Failed(
-                        EngineLost::running(&cause, self.run_dir()).to_string(),
-                    );
+                    return AgentOutcome::Failed(ChildFailure::severed(&cause));
                 }
             };
             let facts = nudge::Facts {
@@ -180,9 +186,10 @@ impl Agent {
             self.report(if stopped {
                 ChildStatus::Stopped
             } else {
-                ChildStatus::Failed(
-                    last.map_or_else(|| NO_REPLY_REASON.into(), AgentOutcome::reason),
-                )
+                ChildStatus::Failed(last.map_or_else(
+                    || ChildFailure::Cause(HelperFailure::NoReply),
+                    AgentOutcome::reason,
+                ))
             });
         }
     }
@@ -203,8 +210,8 @@ impl Agent {
             .unwrap_or_else(|_| self.handle.parent().is_some())
         {
             let reason = severed.as_ref().map_or_else(
-                || ENDED_BEFORE_REPORTING.to_string(),
-                |cause| EngineLost::running(cause, self.run_dir()).to_string(),
+                || ChildFailure::Cause(HelperFailure::EndedBeforeReporting),
+                ChildFailure::severed,
             );
             self.report(ChildStatus::Failed(reason));
         }
@@ -256,11 +263,23 @@ impl Agent {
             .transact(|txn| {
                 body.schedules
                     .unschedule(txn, RESUME_LABEL)
-                    .map_err(|why| why.to_string())?;
+                    .map_err(|failure| {
+                        ScheduleFailure::Recording(ScheduleFailureRecording {
+                            label: Some(RESUME_LABEL.into()),
+                            trigger: Some(Trigger::At(resets_at).describe()),
+                            cause: failure.failure(),
+                        })
+                    })?;
                 body.schedules
                     .schedule(txn, Trigger::At(resets_at), prompt, RESUME_LABEL.into())
             })
-            .map_err(|why| why.to_string())
+            .map_err(|failure| {
+                ScheduleFailure::Recording(ScheduleFailureRecording {
+                    label: Some(RESUME_LABEL.into()),
+                    trigger: Some(Trigger::At(resets_at).describe()),
+                    cause: failure.failure(),
+                })
+            })
             .flatten();
         match scheduled {
             Ok(_) => self.note(format!(
@@ -270,8 +289,9 @@ impl Agent {
                 clock::hms(clock::until(resets_at, now).as_secs())
             )),
             Err(refusal) => self.note_error(&format!(
-                "{}: the resume could not be scheduled: {refusal}",
-                limit.label()
+                "{}: the resume could not be scheduled: {}",
+                limit.label(),
+                refusal.describe()
             )),
         }
     }
@@ -293,10 +313,14 @@ impl Agent {
 fn agent_outcome(result: &Result<Outcome, ProviderError>) -> AgentOutcome {
     match result {
         Ok(Outcome::Replied) => AgentOutcome::Replied,
-        Ok(Outcome::Complete | Outcome::Empty) => AgentOutcome::Failed(NO_REPLY_REASON.into()),
+        Ok(Outcome::Complete | Outcome::Empty) => {
+            AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::NoReply))
+        }
         Ok(Outcome::Stopped { reason }) => AgentOutcome::Stopped(reason.clone()),
         Ok(Outcome::Cancelled) => AgentOutcome::Cancelled,
-        Err(error) => AgentOutcome::Failed(error.summary()),
+        Err(error) => AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::Provider(
+            error.failure(),
+        ))),
     }
 }
 
@@ -324,3 +348,29 @@ pub(crate) mod hooks {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
+
+#[cfg(test)]
+mod typed_outcome_tests {
+    use super::*;
+    use ral_core::fact::ProviderStop;
+
+    #[test]
+    fn settlement_projects_before_provider_diagnostics_are_rendered() {
+        for outcome in [Outcome::Complete, Outcome::Empty] {
+            assert!(matches!(
+                agent_outcome(&Ok(outcome)),
+                AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::NoReply))
+            ));
+        }
+        let stop = ProviderStop::StopSequence("raw-stop-code".into());
+        assert!(
+            matches!(agent_outcome(&Ok(Outcome::Stopped { reason: stop.clone() })),
+            AgentOutcome::Stopped(found) if found == stop)
+        );
+        let error = ProviderError::stream_ended_without_end("service-a", "model-a");
+        let expected = error.failure();
+        assert!(matches!(agent_outcome(&Err(error)), AgentOutcome::Failed(
+            ChildFailure::Cause(HelperFailure::Provider(found))
+        ) if found == expected));
+    }
+}

@@ -1971,7 +1971,9 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
+ "value-ext",
  "webpki-roots",
  "windows-sys 0.61.2",
 ]
@@ -5604,6 +5606,7 @@ dependencies = [
  "serde_stacker",
  "sha2 0.11.1",
  "shlex",
+ "stacker",
  "strsim",
  "strum",
  "tempfile",

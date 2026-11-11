@@ -28,6 +28,7 @@
 //! headless binary, and our children are arbitrary host tools that read
 //! package-readable system paths and touch window-station API incidentally.
 
+use crate::fact::{PrepareCause, PrepareFailure, PrepareStep, PrepareSubject};
 use std::io;
 use std::ptr;
 use std::sync::Arc;
@@ -51,12 +52,33 @@ const fn hresult_from_win32(code: u32) -> i32 {
     ((code & 0x0000_FFFF) | (0x7 << 16) | 0x8000_0000).cast_signed()
 }
 
-fn hresult_err(context: &str, hr: i32) -> io::Error {
-    io::Error::other(format!(
-        "{context} failed: hresult=0x{:08X}",
-        hr.cast_unsigned()
-    ))
+#[derive(Debug)]
+pub(crate) enum AppContainerError {
+    Io(io::Error),
+    NoCapabilitySid(String),
 }
+
+impl AppContainerError {
+    pub(super) fn cause(&self) -> crate::fact::PrepareCause {
+        match self {
+            Self::Io(e) => crate::fact::PrepareCause::Io(Box::new(crate::io::failure(e))),
+            Self::NoCapabilitySid(name) => crate::fact::PrepareCause::Invalid(
+                crate::fact::PrepareInvalid::NoCapabilitySid(name.clone()),
+            ),
+        }
+    }
+}
+impl From<io::Error> for AppContainerError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+impl std::fmt::Display for AppContainerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.cause().describe())
+    }
+}
+impl std::error::Error for AppContainerError {}
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -77,12 +99,12 @@ unsafe fn wide_ptr_to_string(ptr: *const u16) -> String {
 
 // after mxc wxc_common/string_util.rs::sid_to_string
 /// Render a `PSID` in `S-1-…` form, freeing the OS-allocated output string.
-fn sid_to_string(sid: PSID) -> io::Result<String> {
+fn sid_to_string(sid: PSID) -> Result<String, AppContainerError> {
     let mut out: *mut u16 = ptr::null_mut();
     // SAFETY: `sid` is valid for the call; `out` is a valid out-param.
     let ok = unsafe { ConvertSidToStringSidW(sid, &raw mut out) };
     if ok == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::last_os_error().into());
     }
     // SAFETY: ConvertSidToStringSidW transferred the terminated string.
     let out = unsafe { Local::from_raw(out) };
@@ -129,7 +151,7 @@ impl AppContainerProfile {
     /// session left behind by deriving its SID from the name. `name` must be
     /// a valid `AppContainer` profile name — non-empty, at most 64 UTF-16
     /// code units — which `session` mints from the shell session id.
-    pub(crate) fn create_or_reuse(name: &str) -> io::Result<Self> {
+    pub(crate) fn create_or_reuse(name: &str) -> Result<Self, PrepareFailure> {
         let name_wide = to_wide(name);
         let display_wide = to_wide("ral sandboxed command");
         let desc_wide =
@@ -161,14 +183,19 @@ impl AppContainerProfile {
                 DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &raw mut derived)
             };
             if hr2 < 0 {
-                return Err(hresult_err(
-                    "DeriveAppContainerSidFromAppContainerName",
-                    hr2,
-                ));
+                return Err(PrepareFailure {
+                    step: PrepareStep::AppContainerProfileDeriveSid,
+                    subject: PrepareSubject::Capability(name.to_owned()),
+                    cause: PrepareCause::Hresult(hr2),
+                });
             }
             sid = derived;
         } else if hr < 0 {
-            return Err(hresult_err("CreateAppContainerProfile", hr));
+            return Err(PrepareFailure {
+                step: PrepareStep::AppContainerProfileCreate,
+                subject: PrepareSubject::Capability(name.to_owned()),
+                cause: PrepareCause::Hresult(hr),
+            });
         }
 
         Ok(Self {
@@ -194,16 +221,30 @@ impl AppContainerProfile {
         dead_code,
         reason = "the profile SID's string form has no caller left in the lib now that stamps target capability SIDs; the round-trip test reads it, and it is the natural spelling of a profile's identity should one be needed again"
     )]
-    pub(crate) fn sid_string(&self) -> io::Result<String> {
+    pub(crate) fn sid_string(&self) -> Result<String, AppContainerError> {
         sid_to_string(self.sid.sid())
     }
 
     // after mxc appcontainer_runner.rs::delete_app_container_profile
     /// Delete the registration; staged launches retain their SID allocation.
-    pub(crate) fn delete(self) -> io::Result<()> {
+    pub(crate) fn delete(self) -> Result<(), DeleteProfileFailure> {
         delete_profile_by_name(&self.name)
     }
 }
+
+#[derive(Debug)]
+pub(crate) struct DeleteProfileFailure(i32);
+
+impl std::fmt::Display for DeleteProfileFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DeleteAppContainerProfile failed: hresult=0x{:08X}",
+            self.0.cast_unsigned()
+        )
+    }
+}
+impl std::error::Error for DeleteProfileFailure {}
 
 // after mxc appcontainer_runner.rs::delete_app_container_profile
 /// Delete a registered profile by name alone — `dacl`'s boot sweep reclaiming
@@ -211,12 +252,12 @@ impl AppContainerProfile {
 /// hand. The ledger is written before the OS-level create, so a recorded name
 /// may never have been registered; that caller swallows the error rather than
 /// this one guessing which HRESULT means "never there".
-pub(crate) fn delete_profile_by_name(name: &str) -> io::Result<()> {
+pub(crate) fn delete_profile_by_name(name: &str) -> Result<(), DeleteProfileFailure> {
     let name_wide = to_wide(name);
     // SAFETY: `name_wide` is null-terminated and outlives the call.
     let hr = unsafe { DeleteAppContainerProfile(name_wide.as_ptr()) };
     if hr < 0 {
-        return Err(hresult_err("DeleteAppContainerProfile", hr));
+        return Err(DeleteProfileFailure(hr));
     }
     Ok(())
 }
@@ -243,7 +284,7 @@ impl OwnedCapabilitySid {
     /// Derivation is a pure function of the name, so the same grant resolves to
     /// the same SID in every session, which is what lets a stamp outlive the
     /// session that paid for it.
-    pub(crate) fn from_capability_name(name: &str) -> io::Result<Self> {
+    pub(crate) fn from_capability_name(name: &str) -> Result<Self, AppContainerError> {
         let wide_name = to_wide(name);
 
         let mut capability_sids: *mut PSID = ptr::null_mut();
@@ -263,7 +304,7 @@ impl OwnedCapabilitySid {
                 &raw mut capability_sid_count,
             );
             if ok == 0 {
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::last_os_error().into());
             }
 
             let group_sids = Local::from_raw(group_sids);
@@ -273,9 +314,7 @@ impl OwnedCapabilitySid {
             let capability_sids = Local::from_raw(capability_sids);
 
             if capability_sid_count == 0 {
-                return Err(io::Error::other(format!(
-                    "no capability SID returned for '{name}'"
-                )));
+                return Err(AppContainerError::NoCapabilitySid(name.to_owned()));
             }
 
             let result_sid = Local::from_raw(*capability_sids.as_ptr());
@@ -295,7 +334,7 @@ impl OwnedCapabilitySid {
 
     /// The SID in `S-1-15-3-…` string form: the spelling `dacl` writes into an
     /// ACE.
-    pub(crate) fn sid_string(&self) -> io::Result<String> {
+    pub(crate) fn sid_string(&self) -> Result<String, AppContainerError> {
         sid_to_string(self.0.as_ptr())
     }
 }
@@ -318,11 +357,11 @@ impl CapabilitySids {
     /// build — both names are well known on every supported Windows, so a
     /// failure is real, and under-granting a requested capability silently is
     /// worse than not spawning.
-    pub(crate) fn build() -> io::Result<Self> {
+    pub(crate) fn build() -> Result<Self, AppContainerError> {
         NETWORK_CAPABILITIES
             .into_iter()
             .map(OwnedCapabilitySid::from_capability_name)
-            .collect::<io::Result<_>>()
+            .collect::<Result<_, AppContainerError>>()
             .map(Self)
     }
 

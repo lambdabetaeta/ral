@@ -84,15 +84,13 @@ fn remedies(e: &ProviderError) -> Vec<Remedy> {
             CutShort::OutputCap { .. } => vec![Remedy::RaiseMaxTokens],
             CutShort::Stalled(_) => vec![],
         },
-        ProviderError::Api {
-            status: Some(401 | 403),
-            ..
-        } => vec![Remedy::SignIn],
+        ProviderError::Api { .. } if matches!(e.status(), Some(401 | 403)) => vec![Remedy::SignIn],
         ProviderError::Cancelled(_)
         | ProviderError::Transient { .. }
         | ProviderError::Refused(_)
         | ProviderError::Api { .. }
-        | ProviderError::Other(_)
+        | ProviderError::Terminal(_)
+        | ProviderError::Credential(_)
         | ProviderError::Unavailable(_) => vec![],
     }
 }
@@ -111,34 +109,26 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
         }
         .into_iter()
         .chain(body_or_cause(
-            r.body.as_deref(),
+            e.body().as_deref(),
             provider::reset::BODY_KEYS,
-            &r.cause,
+            &r.cause.describe(),
         ))
         .collect(),
-        ProviderError::Transient {
-            cause,
-            attempts,
-            body,
-            status,
-        } => std::iter::once(text_field("attempts", attempts.to_string()))
-            .chain(status.map(status_field))
-            .chain(body_or_cause(body.as_deref(), &[], cause))
-            .collect(),
-        ProviderError::Api {
-            status,
-            model,
-            message,
-            body,
-        } => {
-            let mut fs: Vec<Field> = status.map(status_field).into_iter().collect();
+        ProviderError::Transient { cause, attempts } => {
+            std::iter::once(text_field("attempts", attempts.to_string()))
+                .chain(e.status().map(status_field))
+                .chain(body_or_cause(e.body().as_deref(), &[], &cause.describe()))
+                .collect()
+        }
+        ProviderError::Api { model, cause } => {
+            let mut fs: Vec<Field> = e.status().map(status_field).into_iter().collect();
             fs.push(text_field("model", model.clone()));
-            if let Some(u) = provider::extract_url(message) {
-                fs.push(text_field("url", u));
+            if let Some(url) = e.endpoint() {
+                fs.push(text_field("url", url));
             }
-            match body {
-                Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(text_field("message", message.clone())),
+            match e.body() {
+                Some(body) => fs.extend(body_fields(&body, &[])),
+                None => fs.push(text_field("message", cause.describe())),
             }
             fs
         }
@@ -148,7 +138,7 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             sent,
             limit,
             listed,
-            body,
+            ..
         } => {
             let tokens = |n: u64| format!("{n} tokens");
             [
@@ -159,7 +149,8 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
                 listed
                     .filter(|l| Some(*l) != *limit)
                     .map(|n| text_field("listed", tokens(n))),
-                body.as_deref()
+                e.body()
+                    .as_deref()
                     .filter(|_| limit.is_none())
                     .and_then(provider::error_object)
                     .and_then(|o| o.get("message"))
@@ -180,9 +171,9 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             }
             CutShort::Stalled(error) => error_fields(error),
         },
-        ProviderError::Other(cause) | ProviderError::Unavailable(cause) => {
-            vec![text_field("cause", prettify(cause))]
-        }
+        ProviderError::Terminal(cause) => vec![text_field("cause", prettify(&cause.describe()))],
+        ProviderError::Credential(cause) => vec![text_field("cause", cause.describe())],
+        ProviderError::Unavailable(cause) => vec![text_field("cause", cause.describe())],
     }
 }
 
@@ -261,4 +252,45 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     };
     let end = start + stream.byte_offset();
     Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ral_core::fact::{
+        GenaiFailure, GenaiFailureHttpError, ServiceCause, ServiceFailure, ServiceOperation,
+    };
+
+    #[test]
+    fn typed_service_evidence_renders_ordered_fields_and_derived_remedies() {
+        let error = ProviderError::Api {
+            model: "model-a".into(),
+            cause: ServiceFailure {
+                service: "service-a".into(),
+                operation: ServiceOperation::Chat,
+                context: Vec::new(),
+                cause: Box::new(ServiceCause::Genai(GenaiFailure::HttpError(
+                    GenaiFailureHttpError {
+                        status: 401,
+                        canonical_reason: "Unauthorized".into(),
+                        body: r#"{"error":{"type":"auth","code":"expired","message":"sign in"}}"#
+                            .into(),
+                        headers: Vec::new(),
+                    },
+                ))),
+            },
+        };
+        let readout = Readout::fatal(&error);
+        assert_eq!(readout.headline, "api error");
+        assert_eq!(
+            readout
+                .fields
+                .iter()
+                .map(|field| field.label.as_str())
+                .collect::<Vec<_>>(),
+            ["status", "model", "type", "code", "message"]
+        );
+        assert_eq!(readout.remedies, [Remedy::SignIn]);
+        assert!(matches!(&readout.fields[4].datum, Datum::Text(text) if text == "sign in"));
+    }
 }

@@ -46,8 +46,8 @@ fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
         panic!("identity")
     };
     let log = child.log_dir().path().join(RECORD);
-    let cause = Severed::Closed("engine lost during helper work".into());
-    let expected_reason = crate::agent::EngineLost::running(&cause, child.run_dir()).to_string();
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
+    let expected_reason = crate::record::ChildFailure::severed(&cause);
     let (tx, rx) = crate::bus::channel();
     let emit = Emitter::new(tx, parent.id());
     let helper = launch_child(&mut parent, child, Some("work".into()), &emit);
@@ -117,11 +117,11 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         "unwind joined the working helper before returning"
     );
     assert!(
-        matches!(next_input(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. } if id == helper.id() && reason.starts_with(WORKER_PANIC_PREFIX))
+        matches!(next_input(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. } if id == helper.id() && matches!(&reason, crate::record::ChildFailure::Panicked(text) if text.starts_with(WORKER_PANIC_PREFIX)))
     );
     assert!(matches!(parent.mailbox.next(parent.rest()), Next::Gone(id) if id == helper.id()));
     assert!(
-        matches!(helper.status().unwrap().report, Some(ChildStatus::Failed(reason)) if reason.starts_with(WORKER_PANIC_PREFIX))
+        matches!(helper.status().unwrap().report, Some(ChildStatus::Failed(reason)) if matches!(&reason, crate::record::ChildFailure::Panicked(text) if text.starts_with(WORKER_PANIC_PREFIX)))
     );
     assert!(!helper.status().unwrap().owes);
     assert_eq!(
@@ -146,7 +146,13 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         "a departed failure is an actionable desk refusal: {}",
         answer.text
     );
-    assert!(answer.text.contains(WORKER_PANIC_PREFIX), "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("agent 'helper' failed without a reply to read: panicked"),
+        "{}",
+        answer.text
+    );
     assert!(
         read_records(&log)
             .unwrap()
@@ -449,7 +455,7 @@ fn a_poisoned_helper_owner_tears_down_delivers_one_failure_and_lets_the_parent_s
         "the actual owner's teardown ended its engine"
     );
     assert!(
-        matches!(next_input(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. } if id == helper.id() && reason == expected)
+        matches!(next_input(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. } if id == helper.id() && reason == crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(handle.status().err().expect("poisoned status").failure())))
     );
     // Gone may trail the notice; block for it, don't settle.
     assert!(

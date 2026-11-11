@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
 generated_at_date: 2026-11-10
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
@@ -34,7 +34,8 @@ and skips every walk those answers make unnecessary.
   sort by construction. `Weak` records a rank-zero residual for reseeding;
   ranks themselves live in the checker. `Closed` is a scheme writing no variable it
   gives no role, constructed only by settlement, `Binders::close` (a builtin's
-  own binder supply) or checked deserialisation. Equality is structural.
+  own binder supply) or checked deserialisation (`Closed::new`, refusing a scheme that
+  writes a free variable with `DecodeCause::OpenScheme`). Equality is structural.
   There are no partial schemes or cached environment free variables
   ([[invariants/schemes-leave-closed|schemes leave closed]]).
 - `ty/exec_arg.rs`: `RefusedArg`, the shapes `execve(2)` has no argument for, one

@@ -12,22 +12,26 @@ use super::{
 use crate::provider::tools::{COMMAND, RAL_TOOL};
 use crate::record::log::LocusReader;
 use crate::record::{
-    AgentId, GrepAnswer, GrepHit, Locus, RECORD, Record, Recorded, Refusal, Role, Transcript,
+    AgentId, GrepAnswer, GrepHit, Locus, RECORD, Record, Recorded, Role, Transcript,
     TranscriptMessage, TranscriptPart, TranscriptTurn, TurnKind,
 };
 use genai::chat::{Binary, BinarySource, ChatMessage, ContentPart, CustomPart, ToolCall};
+use ral_core::fact::{
+    ContextFailure, ContextFailureCurrentlyWritten, ContextFailureReadBack, RecordReadFailure,
+};
 use ral_core::own::OwnDir;
 use regex::Regex;
 use std::collections::BTreeSet;
-use std::io;
 use std::path::PathBuf;
 
 /// One reader of session `source`'s record log under `sessions`: the model
 /// fold's one open of it.
-fn open_log(sessions: &OwnDir, source: AgentId) -> io::Result<LocusReader> {
-    Ok(LocusReader::new(
-        sessions.dir(&source.to_string())?.open(RECORD)?,
-    ))
+fn open_log(sessions: &OwnDir, source: AgentId) -> Result<LocusReader, RecordReadFailure> {
+    sessions
+        .dir(&source.to_string())
+        .and_then(|dir| dir.open(RECORD))
+        .map(LocusReader::new)
+        .map_err(|error| RecordReadFailure::Io(ral_core::io::failure(&error.into())))
 }
 
 /// Session `source`'s record log, as messages name it.
@@ -35,13 +39,12 @@ fn record_name(sessions: &OwnDir, source: AgentId) -> PathBuf {
     sessions.path().join(source.to_string()).join(RECORD)
 }
 
-fn read_at(reader: &mut LocusReader, locus: &Locus) -> io::Result<Transcript> {
+fn read_at(reader: &mut LocusReader, locus: &Locus) -> Result<Transcript, RecordReadFailure> {
     match reader.record(locus)? {
         Record::Transcript(p) => Ok(p.clone()),
-        Record::Control(_) | Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
-            "a pointer named a non-transcript record: a turn's address no longer \
-             names the records it was measured over",
-        )),
+        Record::Control(_) | Record::Display(_) | Record::Forensic(_) => {
+            Err(RecordReadFailure::NonTranscriptRecord)
+        }
     }
 }
 
@@ -109,12 +112,14 @@ fn material(
     open: &mut Option<(AgentId, LocusReader)>,
     sessions: &OwnDir,
     turn: &Placed,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<Vec<ChatMessage>, ContextFailure> {
     match &turn.source {
         Source::Held(records) => Ok(turn_messages(records)),
         Source::Located(Pointer { source, loci }) => read_pointer(open, sessions, *source, loci)
             .map(|records| turn_messages(&records))
-            .map_err(|error| read_back_refusal(turn.id, &record_name(sessions, *source), &error)),
+            .map_err(|error| {
+                read_back_refusal(turn.id, *source, &record_name(sessions, *source), error)
+            }),
     }
 }
 
@@ -143,7 +148,7 @@ impl TranscriptRead {
     ///
     /// # Errors
     /// Refuses a turn whose file will not read back.
-    pub(crate) fn turns(self) -> Result<Vec<TranscriptTurn>, String> {
+    pub(crate) fn turns(self) -> Result<Vec<TranscriptTurn>, ContextFailure> {
         let Self { turns, sessions } = self;
         let mut open = None;
         turns
@@ -177,7 +182,7 @@ impl TranscriptSearch {
     ///
     /// # Errors
     /// Refuses a file that will not read back, where a narrowing named it.
-    pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, String> {
+    pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, ContextFailure> {
         let Self {
             items,
             unreadable,
@@ -212,7 +217,7 @@ fn read_pointer(
     sessions: &OwnDir,
     source: AgentId,
     loci: &[Locus],
-) -> io::Result<Vec<Transcript>> {
+) -> Result<Vec<Transcript>, RecordReadFailure> {
     if open.as_ref().is_none_or(|(id, _)| *id != source) {
         // Closed before the next is opened.
         drop(open.take());
@@ -227,18 +232,14 @@ fn read_pointer(
 pub(super) fn read_seeds(
     sessions: &OwnDir,
     turns: &[Linked],
-) -> Result<Vec<Vec<Recorded<Transcript>>>, Refusal> {
+) -> Result<Vec<Vec<Recorded<Transcript>>>, ContextFailure> {
     let mut open = None;
     turns
         .iter()
         .filter(|linked| linked.row.location == Location::Resident)
         .map(|Linked { row, at }| {
-            let read = read_pointer(&mut open, sessions, at.source, &at.loci).map_err(|error| {
-                Refusal::Unreadable(io::Error::other(format!(
-                    "turn {} was inherited from {}, which no longer reads back ({error}); was that session's directory moved, copied or edited?",
-                    row.id,
-                    ral_core::path::shown(record_name(sessions, at.source))
-                )))
+            let read = read_pointer(&mut open, sessions, at.source, &at.loci).map_err(|cause| {
+                read_back_refusal(row.id, at.source, &record_name(sessions, at.source), cause)
             })?;
             let mut records: Vec<_> = at
                 .loci
@@ -270,7 +271,10 @@ impl Context {
     /// Refuses a read that names no turn, a turn this lineage never recorded,
     /// the turn being written now, or one whose file will not read back.
     #[cfg(test)]
-    pub(crate) fn read_transcript(&self, turns: &[u64]) -> Result<Vec<TranscriptTurn>, String> {
+    pub(crate) fn read_transcript(
+        &self,
+        turns: &[u64],
+    ) -> Result<Vec<TranscriptTurn>, ContextFailure> {
         self.locate_read(turns)?.turns()
     }
 
@@ -280,7 +284,7 @@ impl Context {
     ///
     /// # Errors
     /// Refuses whatever `Self::read_transcript` refuses at location time.
-    pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, String> {
+    pub(crate) fn locate_read(&self, turns: &[u64]) -> Result<TranscriptRead, ContextFailure> {
         Ok(TranscriptRead {
             turns: self
                 .readable(turns)?
@@ -297,19 +301,18 @@ impl Context {
     /// # Errors
     /// Refuses a read naming no turn, a turn never recorded, and the turn
     /// being written now.
-    fn readable(&self, turns: &[u64]) -> Result<Vec<u64>, String> {
+    fn readable(&self, turns: &[u64]) -> Result<Vec<u64>, ContextFailure> {
         let named: BTreeSet<u64> = turns.iter().copied().collect();
         if named.is_empty() {
-            return Err("`turns` names no turn: `!{range a b}` builds a run of ids".into());
+            return Err(ContextFailure::EmptySelection);
         }
         for &id in &named {
             if self.turn(id).is_none() {
                 return Err(not_recorded_refusal_turn(id, self.reach()));
             }
             if self.unclosed_turn() == Some(id) {
-                return Err(format!(
-                    "turn {id} is being written now: it is the one turn the transcript cannot \
-                     read back yet"
+                return Err(ContextFailure::CurrentlyWritten(
+                    ContextFailureCurrentlyWritten { turn: id.into() },
                 ));
             }
         }
@@ -334,7 +337,7 @@ impl Context {
         &self,
         pattern: &Regex,
         turns: Option<&[u64]>,
-    ) -> Result<GrepAnswer, String> {
+    ) -> Result<GrepAnswer, ContextFailure> {
         self.locate_grep(turns)?.grep(pattern)
     }
 
@@ -347,11 +350,14 @@ impl Context {
     ///
     /// # Errors
     /// Refuses whatever `Self::grep_transcript` refuses at location time.
-    pub(crate) fn locate_grep(&self, turns: Option<&[u64]>) -> Result<TranscriptSearch, String> {
+    pub(crate) fn locate_grep(
+        &self,
+        turns: Option<&[u64]>,
+    ) -> Result<TranscriptSearch, ContextFailure> {
         let (named, unreadable) = match turns {
             None => (None, Unreadable::Skip),
             Some([]) => {
-                return Err("`turns` names no turn: omit it to search the whole transcript".into());
+                return Err(ContextFailure::EmptySelection);
             }
             Some(narrowing) => (
                 Some(
@@ -553,9 +559,16 @@ fn transcript_custom(custom: &CustomPart) -> TranscriptPart {
     TranscriptPart::Custom { provider, model }
 }
 
-fn read_back_refusal(turn: u64, path: &std::path::Path, error: &io::Error) -> String {
-    format!(
-        "turn {turn} could not be read back from {}: {error}",
-        ral_core::path::shown(path)
-    )
+fn read_back_refusal(
+    turn: u64,
+    source: AgentId,
+    path: &std::path::Path,
+    cause: RecordReadFailure,
+) -> ContextFailure {
+    ContextFailure::ReadBack(ContextFailureReadBack {
+        turn: turn.into(),
+        source: source.get().into(),
+        record: ral_core::path::shown(path),
+        cause,
+    })
 }

@@ -28,6 +28,8 @@ ral-core   = { path = "../core", features = ["coreutils"] }
 atomic_refcell = "0.1"
 blake3     = "1"
 genai      = "0.7.3"
+value-ext  = "=0.1.5"
+url        = "=2.5.8"
 reqwest    = { version = "0.13", features = ["json", "form"] }
 rustls     = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 webpki-roots = "1"

@@ -225,7 +225,7 @@ mod linux {
         let (unsealed, said) = invoke(&parcel(&[], false), &[]);
         denied(&proof, &control, &unsealed, "ok\n");
         assert_eq!(unsealed.status, 126, "{unsealed:?}");
-        assert!(says(&said, "not sealed"), "{said:?}");
+        assert!(says(&said, "missing-seals"), "{said:?}");
         assert!(unsealed.stdout.is_empty(), "{unsealed:?}");
 
         let (extra, _) = invoke(&sealed, &["extra"]);
@@ -234,7 +234,7 @@ mod linux {
         assert!(
             extra
                 .stderr
-                .contains("takes the warrant and report descriptors"),
+                .contains("takes warrant and report descriptors"),
             "{extra:?}"
         );
         assert!(extra.stdout.is_empty(), "{extra:?}");

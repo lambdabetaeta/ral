@@ -355,7 +355,7 @@ fn an_owned_stdout_terminal_remains_the_envelopes_console() {
     let bwrap = match envelope() {
         Ok(bwrap) => bwrap,
         Err(why) => {
-            skip(why);
+            skip(why.describe());
             return;
         }
     };
@@ -441,7 +441,8 @@ fn the_by_hand_dev_reaches_no_host_terminal() {
                 cwd: cwd.as_path(),
                 set: vec![("RAL_TEST_PROBE".as_ref(), request.as_ref())],
                 unset: Vec::new(),
-            });
+            })
+            .unwrap();
         launch.output().unwrap().into()
     };
     let control = invoke(&|_| vec!["tty".into()]);
@@ -476,7 +477,7 @@ fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
         let Some(env) = envelope_launches(policy) else {
             continue;
         };
-        let host = env.host;
+        let host = &env.host;
         let (stdout, _) = confined(&env, policy, script);
         if label == "restricted" {
             assert!(
@@ -718,7 +719,7 @@ fn assert_program_releases_its_streams(program: &Admitted, prefix: &[&str]) {
     let bwrap = match envelope() {
         Ok(bwrap) => bwrap,
         Err(why) => {
-            skip(why);
+            skip(why.describe());
             return;
         }
     };
@@ -735,7 +736,7 @@ fn assert_program_releases_its_streams(program: &Admitted, prefix: &[&str]) {
     for open_files in [None, Some(64)] {
         assert_stream_closure(&env, program, prefix, open_files);
         if env.host.private_pids {
-            let mut shared = env;
+            let mut shared = env.clone();
             shared.host.private_pids = false;
             assert_stream_closure(&shared, program, prefix, open_files);
         }
@@ -917,7 +918,7 @@ fn no_host_pid_is_nameable_inside_the_envelope() {
         let Some(env) = envelope_launches(policy) else {
             continue;
         };
-        let host = env.host;
+        let host = &env.host;
         let (stdout, _) = confined(&env, policy, &script);
         if host.private_pids {
             assert!(
@@ -968,7 +969,7 @@ fn proc_self_is_the_payloads_own_on_every_projection() {
         let Some(env) = envelope_launches(policy) else {
             continue;
         };
-        let host = env.host;
+        let host = &env.host;
         let (stdout, _) = confined(&env, policy, script);
         let own: u32 = field(&stdout, "SELF=")
             .and_then(|n| n.parse().ok())

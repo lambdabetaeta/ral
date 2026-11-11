@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-04
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_date: 2026-11-10
 covers_paths: [guest-abi/, ral-guest/, netgate/, vm-manager/, synod-machine-broker/, synod/, vm-image/]
 ---
 
@@ -174,9 +174,14 @@ modules directly. **Only real machines are constructed.**
   log and a line ring. Access granted to boot files is revoked at teardown.
   `AllowOvercommit` backs guest memory lazily, so an idle 6 GiB session need
   not consume 6 GiB of host RAM.
-- `Machine::dial_engine` asks for `guest_abi::ports::FACTORY`.
-  macOS implements the guest dial; the two Windows machine implementations
-  explicitly answer `Unsupported` pending the factory work.
+- `Machine::dial_engine(&self) -> Result<Socket, DialError>` asks for
+  `guest_abi::ports::FACTORY`; `connect_guest(&self, port: u32)` has the same
+  result type. macOS implements the dial; the two Windows machine
+  implementations answer `DialError::Unsupported`.
+- `dial.rs` owns `DialError` and `DialBackend`, independent of ral-core.
+  Failures retain machine/device/completion state, timeout versus disconnected
+  wait, backend and native platform domain/code/detail, or the original
+  `io::Error`. Presentation does not replace this evidence.
 
 ## synod-machine-broker/ — the privileged service
 
@@ -335,7 +340,11 @@ is judged; shared machinery stays with exarch and vm-manager.
   `RootEngine::guest` adopts control at `guest_abi::layout::{WORK, SCRATCH}`;
   `netgate::run` adopts net. `MachineFactory(Mutex<Box<dyn Machine>>)`
   implements exarch's `Factory` through `Machine::dial_engine`; the mutex
-  supplies `Sync`. `exarch::app::SCRATCH_VAR` names the guest scratch variable.
+  supplies `Sync`. `dial_failure` exhaustively projects the VM-owned error to
+  core's portable `EngineFactoryFailure`, retaining native evidence and
+  borrowing I/O causes through `ral_core::io::failure`. The dependency points
+  from synod to both owners, never from vm-manager to ral-core.
+  `exarch::app::SCRATCH_VAR` names the guest scratch variable.
 - `Guest` holds `factory`, `host: Host` and `net`. `Host::found` launches
   the human's first child with `LaunchConfig { returns: false, admission:
   Admission::Gated, … }`. `Guest::root` reads `Host::children()[0]`; the host

@@ -9,12 +9,15 @@
 //! the lexical scope and the handler stack: a hook is never resolved by
 //! `$name` and never consulted at command position.
 
+use crate::fact::{
+    BlockRole, HookArity, HookNotFunction, HookRef, HookRegistrationFailure, HookSignature,
+    PluginHookRef, Reason, StateFailure, ValueShape,
+};
 use crate::io::RunIo;
 use crate::process::RequestedTerminalAccess;
-use crate::shell::runtime::Shell;
 use crate::shell::runtime::Value;
 use crate::shell::runtime::{Binding, FrameHandle};
-use crate::text::plural;
+use crate::shell::runtime::{Shell, ill_typed};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, hash_map::Entry};
@@ -92,12 +95,25 @@ impl HookSig {
             Self::Hook { .. } => 1,
         }
     }
+}
 
-    /// Human-readable label for diagnostics.
-    pub(crate) fn label(&self) -> &str {
-        match self {
-            Self::Block => "block",
-            Self::Hook { kind } => kind.as_str(),
+impl From<&HookName> for HookRef {
+    fn from(name: &HookName) -> Self {
+        match &name.namespace {
+            Namespace::Session => Self::Session(name.name.clone()),
+            Namespace::Plugin(plugin) => Self::Plugin(PluginHookRef {
+                plugin: plugin.clone(),
+                hook: name.name.clone(),
+            }),
+        }
+    }
+}
+
+impl From<&HookSig> for HookSignature {
+    fn from(sig: &HookSig) -> Self {
+        match sig {
+            HookSig::Block => Self::Block,
+            HookSig::Hook { kind } => Self::Hook(kind.clone()),
         }
     }
 }
@@ -185,7 +201,7 @@ impl Hook {
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),
-                    actual: format!("{other}"),
+                    actual: other.shape(),
                 });
             }
         };
@@ -194,7 +210,7 @@ impl Hook {
                 name: name.clone(),
                 expected,
                 actual,
-                sig_label: self.sig.label().into(),
+                signature: (&self.sig).into(),
             });
         }
         Ok(())
@@ -206,17 +222,17 @@ impl Hook {
 pub enum RegisterError {
     Typecheck {
         name: HookName,
-        error: Box<crate::typecheck::TypeError>,
+        errors: Vec<crate::typecheck::TypeError>,
     },
     NotFunction {
         name: HookName,
-        actual: String,
+        actual: ValueShape,
     },
     ArityMismatch {
         name: HookName,
         expected: usize,
         actual: usize,
-        sig_label: String,
+        signature: HookSignature,
     },
     AlreadyRegistered {
         name: HookName,
@@ -225,52 +241,47 @@ pub enum RegisterError {
 }
 
 impl RegisterError {
-    /// The one wording of a refused registration as a shell error.
+    /// Project the registration refusal without rendering it.
     pub fn into_error(self) -> crate::error::Error {
-        crate::error::Error::new(self.to_string())
+        crate::error::Error::new(Reason::from(&self))
+    }
+}
+
+impl From<&RegisterError> for Reason {
+    fn from(error: &RegisterError) -> Self {
+        let failure = match error {
+            RegisterError::Typecheck { name, errors } => {
+                return ill_typed("register", BlockRole::Hook(name.to_string()), errors).reason;
+            }
+            RegisterError::NotFunction { name, actual } => {
+                HookRegistrationFailure::NotFunction(HookNotFunction {
+                    name: name.into(),
+                    actual: *actual,
+                })
+            }
+            RegisterError::ArityMismatch {
+                name,
+                expected,
+                actual,
+                signature,
+            } => HookRegistrationFailure::Arity(HookArity {
+                name: name.into(),
+                expected: (*expected).into(),
+                actual: (*actual).into(),
+                signature: signature.clone(),
+            }),
+            RegisterError::AlreadyRegistered { name } => {
+                HookRegistrationFailure::AlreadyRegistered(name.into())
+            }
+            RegisterError::NoSession => HookRegistrationFailure::NoSession,
+        };
+        Self::State(Box::new(StateFailure::HookRegistration(failure)))
     }
 }
 
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Typecheck { name, error } => {
-                write!(f, "cannot register '{name}' as a hook: {error}")
-            }
-            Self::NotFunction { name, actual, .. } => {
-                write!(
-                    f,
-                    "cannot register '{name}' as a hook: \
-                     expected a Block, Lambda, or builtin, got {actual}"
-                )
-            }
-            Self::ArityMismatch {
-                name,
-                expected,
-                actual,
-                sig_label,
-                ..
-            } => {
-                write!(
-                    f,
-                    "cannot register '{}' as a {}: \
-                     expected {}, got {}",
-                    name,
-                    sig_label,
-                    plural(*expected, "parameter"),
-                    actual
-                )
-            }
-            Self::AlreadyRegistered { name, .. } => {
-                write!(f, "hook '{name}' is already registered")
-            }
-            Self::NoSession => write!(
-                f,
-                "hooks and plugins belong to the session, but this shell runs beside it \
-                 (an aside hook, a spawned worker, a pipeline stage): \
-                 did you mean to register it from the rc or the prompt itself?"
-            ),
-        }
+        f.write_str(&Reason::from(self).describe())
     }
 }
 
@@ -306,9 +317,9 @@ impl Shell {
     ) -> Result<Hook, RegisterError> {
         let scheme = self
             .value_scheme(&value)
-            .map_err(|error| RegisterError::Typecheck {
+            .map_err(|errors| RegisterError::Typecheck {
                 name: name.clone(),
-                error,
+                errors,
             })?;
         let hook = Hook {
             binding: Binding { value, scheme },
@@ -520,5 +531,83 @@ mod tests {
         assert!(!shell.plugin_loaded("p").unwrap());
         assert!(shell.plugin_loaded("q").unwrap());
         assert_eq!(shell.take_plugin("p"), None);
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn registration_projection_keeps_namespace_shape_signature_and_all_refusals() {
+        let plugin = HookName::plugin("editor", "change");
+        let reference = HookRef::Plugin(PluginHookRef {
+            plugin: "editor".into(),
+            hook: "change".into(),
+        });
+        let cases = [
+            (
+                RegisterError::NotFunction {
+                    name: plugin.clone(),
+                    actual: ValueShape::Int,
+                },
+                HookRegistrationFailure::NotFunction(HookNotFunction {
+                    name: reference.clone(),
+                    actual: ValueShape::Int,
+                }),
+            ),
+            (
+                RegisterError::ArityMismatch {
+                    name: plugin.clone(),
+                    expected: 1,
+                    actual: 2,
+                    signature: HookSignature::Hook("chpwd".into()),
+                },
+                HookRegistrationFailure::Arity(HookArity {
+                    name: reference.clone(),
+                    expected: 1usize.into(),
+                    actual: 2usize.into(),
+                    signature: HookSignature::Hook("chpwd".into()),
+                }),
+            ),
+            (
+                RegisterError::AlreadyRegistered { name: plugin },
+                HookRegistrationFailure::AlreadyRegistered(reference),
+            ),
+            (RegisterError::NoSession, HookRegistrationFailure::NoSession),
+        ];
+        for (error, expected) in cases {
+            let error = error.into_error();
+            assert_eq!(
+                error.reason,
+                Reason::State(Box::new(StateFailure::HookRegistration(expected)))
+            );
+            assert_eq!(error.hints(), []);
+            assert_eq!(error.context(), None);
+        }
+        assert_eq!(
+            HookRef::from(&HookName::session("prompt")),
+            HookRef::Session("prompt".into())
+        );
+        assert_eq!(HookSignature::from(&HookSig::Block), HookSignature::Block);
+        assert_eq!(
+            HookSignature::from(&HookSig::Hook {
+                kind: "chpwd".into()
+            }),
+            HookSignature::Hook("chpwd".into())
+        );
+        let shell = crate::test_helper::core_shell();
+        let error = shell
+            .vet_hook(
+                &HookName::session("prompt"),
+                Value::Int(7),
+                HookSig::Block,
+                DefaultPolicy::denied(),
+            )
+            .unwrap_err()
+            .into_error();
+        assert!(
+            matches!(error.reason, Reason::State(ref state) if matches!(**state, StateFailure::HookRegistration(HookRegistrationFailure::NotFunction(HookNotFunction { actual: ValueShape::Int, .. }))))
+        );
     }
 }

@@ -5,11 +5,16 @@
 //! walk over it.  A door that admits never converts: the value is what its
 //! source says, and admission only says whether the program may have it.
 
-use crate::shell::runtime::{Break, Error, Map, Settled, Shell, Value};
+use crate::fact::{
+    AdmissionCause, AdmissionExport, AdmissionExtraField, AdmissionFailure, AdmissionShares,
+    AdmissionUses, Expected, Found, InvalidCause, ValueShape,
+};
+use crate::shell::runtime::invalid;
+use crate::shell::runtime::{Break, Map, Settled, Shell, Value};
 use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::{Closed, Fields, Fixed, Fixings, Id, Kind, Shape, Side, Site, Tail, UnitId};
-use std::fmt::{self, Write as _};
+use std::fmt;
 
 // ── Fixings ─────────────────────────────────────────────────────────────
 
@@ -58,40 +63,11 @@ impl Fixings {
 
 /// Why a value is refused, and where: an RFC 6901 pointer into it, and the use
 /// in the script that imposed what it met.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
-    pointer: String,
+    failure: AdmissionFailure,
     witness: Option<Span>,
-    why: Why,
 }
-
-#[derive(Debug, Clone, PartialEq)]
-enum Why {
-    Uses {
-        found: String,
-        expected: String,
-        hint: Option<&'static str>,
-    },
-    NoField(String),
-    ExtraField {
-        field: String,
-        fields: Vec<String>,
-    },
-    Shares {
-        other: String,
-        other_side: Side,
-        side: Side,
-    },
-    Export {
-        found: String,
-        expected: String,
-    },
-}
-
-const JSON_NUMBERS: &str = "JSON has one number type, and ral reads a whole number as an Int and \
-a number with a fraction as a Float; `float` or `int` at the use accepts the other";
-const NO_JSON_VARIANTS: &str = "a decoder produces no variants: a tag is matched only on a value \
-the program built, or one a host answered";
 
 impl Mismatch {
     /// The use that imposed what the value met, when one is known.
@@ -99,122 +75,29 @@ impl Mismatch {
         self.witness
     }
 
-    /// What to do about it, where there is one thing.
+    /// Portable data, without the source witness.
+    pub fn failure(&self) -> &AdmissionFailure {
+        &self.failure
+    }
+
+    /// Advice is derived from the admitted shapes, never cached.
     pub fn hint(&self) -> Option<&'static str> {
-        match &self.why {
-            Why::Uses { hint, .. } => *hint,
-            _ => None,
-        }
+        self.failure()
+            .advice()
+            .map(crate::fact::AdmissionAdvice::text)
     }
 
-    /// The error `door` raises: the sentence, the line of the use that imposed
-    /// what the value met, and a caret on that use.
-    pub fn refusal(&self, door: &str, shell: &Shell) -> Break {
-        let mut message = format!("{door}: {self}");
-        if let Some(site) = self.witness.and_then(|w| shell.session.sources.site(w)) {
-            let _ = write!(message, ", line {}", site.line);
-        }
-        let mut error = Error::new(message).with_witness(self.witness);
-        if let Some(hint) = self.hint() {
-            error = error.with_hint(hint);
-        }
-        error.into()
-    }
-
-    fn place(&self) -> String {
-        match self.pointer.as_str() {
-            "" => "the value".into(),
-            p => format!("the value at `{p}`"),
-        }
-    }
-}
-
-fn shown(pointer: &str) -> String {
-    match pointer {
-        "" => "the whole value".into(),
-        p => format!("`{p}`"),
+    /// The portable refusal and its report-only use witness.
+    pub fn refusal(&self, door: &str) -> Break {
+        invalid(door, InvalidCause::Admission(self.failure.clone()))
+            .with_witness(self.witness)
+            .into()
     }
 }
 
 impl fmt::Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.why {
-            Why::Uses {
-                found, expected, ..
-            } => write!(
-                f,
-                "{} is {found}, but this script uses it as {expected}",
-                self.place()
-            ),
-            Why::NoField(field) => write!(
-                f,
-                "{} has no field `{field}`, which this script reads",
-                self.place()
-            ),
-            Why::ExtraField { field, fields } => write!(
-                f,
-                "{} has a field `{field}`, but this script uses it as a record with exactly the \
-                 fields {}",
-                self.place(),
-                fields
-                    .iter()
-                    .map(|name| format!("`{name}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Why::Shares {
-                other,
-                other_side,
-                side,
-            } => write!(
-                f,
-                "{} is {other_side} and {} is {side}, and this script compares them",
-                shown(other),
-                shown(&self.pointer)
-            ),
-            Why::Export { found, expected } => write!(
-                f,
-                "{} is a block of type {found}, but this script uses it as {expected}",
-                self.place()
-            ),
-        }
-    }
-}
-
-/// How a value looks to a reader of the sentence.
-fn found(value: &Value) -> String {
-    match value {
-        Value::Unit => "null".into(),
-        Value::Bool(b) => format!("a Bool (`{b}`)"),
-        Value::Int(n) => format!("a whole number (`{n}`)"),
-        Value::Float(x) => format!("a number with a fraction (`{x}`)"),
-        Value::String(s) => format!("text (`'{}'`)", clip(s)),
-        Value::Bytes(_) => "bytes".into(),
-        Value::List(_) => "a list".into(),
-        Value::Map(_) => "a map".into(),
-        Value::Variant { label, .. } => format!("a variant (tag `{label}`)"),
-        Value::Thunk(_) | Value::Native(_) => "a block".into(),
-        Value::Handle(_) => "a handle".into(),
-    }
-}
-
-fn clip(text: &str) -> String {
-    const WIDTH: usize = 24;
-    match text.char_indices().nth(WIDTH) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_owned(),
-    }
-}
-
-/// A kind, in the words of the use that imposed it.
-fn kind_phrase(kind: Kind) -> String {
-    match kind {
-        Kind::NUMBER => "a number".into(),
-        Kind::COMPARABLE => "a number or text".into(),
-        Kind::SCALAR => "a number, text or a Bool".into(),
-        Kind::SIZED => "text, bytes, a list or a map".into(),
-        Kind::DATA => "data, with no block or handle in it".into(),
-        other => format!("a value of kind `{other}`"),
+        f.write_str(&self.failure().describe())
     }
 }
 
@@ -249,7 +132,7 @@ impl Site {
     /// As [`Self::admit`], as [`Mismatch::refusal`] words it.
     pub fn admitted(&self, door: &str, value: Value, shell: &Shell) -> Settled<Value> {
         self.admit(&value, shell.fixings())
-            .map_err(|mismatch| mismatch.refusal(door, shell))?;
+            .map_err(|mismatch| mismatch.refusal(door))?;
         Ok(value)
     }
 
@@ -282,9 +165,11 @@ impl Site {
             }
             if let Some(Err((found, expected))) = exports.fits(name, scheme) {
                 return Err(Mismatch {
-                    pointer: pointer_of(&[Step::Key(name.clone())]),
+                    failure: AdmissionFailure {
+                        pointer: pointer_of(&[Step::Key(name.clone())]),
+                        cause: AdmissionCause::Export(AdmissionExport { found, expected }),
+                    },
                     witness: self.nodes[self.root].witness,
-                    why: Why::Export { found, expected },
                 });
             }
         }
@@ -322,28 +207,23 @@ impl Walk<'_> {
         out
     }
 
-    fn mismatch(&self, witness: Option<Span>, why: Why) -> Mismatch {
+    fn mismatch(&self, witness: Option<Span>, why: AdmissionCause) -> Mismatch {
         Mismatch {
-            pointer: pointer_of(&self.path),
+            failure: AdmissionFailure {
+                pointer: pointer_of(&self.path),
+                cause: why,
+            },
             witness,
-            why,
         }
     }
 
-    fn uses(
-        &self,
-        value: &Value,
-        expected: String,
-        witness: Option<Span>,
-        hint: Option<&'static str>,
-    ) -> Mismatch {
+    fn uses(&self, value: &Value, expected: Expected, witness: Option<Span>) -> Mismatch {
         self.mismatch(
             witness,
-            Why::Uses {
-                found: found(value),
+            AdmissionCause::Uses(AdmissionUses {
+                found: value.found(),
                 expected,
-                hint,
-            },
+            }),
         )
     }
 
@@ -376,14 +256,14 @@ impl Walk<'_> {
                 self.variant(fields, label, payload.as_deref(), at)
             }
             (Shape::Free { var, kind, weak }, _) => self.free(*var, *kind, *weak, value, at),
-            (shape, _) => Err(self.uses(value, expected(shape), at, refusal_hint(shape, value))),
+            (shape, _) => Err(self.uses(value, expected(shape), at)),
         }
     }
 
     fn record(&mut self, fields: &Fields, entries: &Map, at: Option<Span>) -> Result<(), Mismatch> {
         for (name, id) in &fields.labels {
             let Some(item) = entries.get(name) else {
-                return Err(self.mismatch(at, Why::NoField(name.clone())));
+                return Err(self.mismatch(at, AdmissionCause::NoField(name.clone())));
             };
             self.below(Step::Key(name.clone()), |w| w.run(*id, &item, at))?;
         }
@@ -395,10 +275,10 @@ impl Walk<'_> {
                 Tail::Closed => {
                     return Err(self.mismatch(
                         at,
-                        Why::ExtraField {
+                        AdmissionCause::ExtraField(AdmissionExtraField {
                             field: key.to_string(),
                             fields: fields.labels.iter().map(|(name, _)| name.clone()).collect(),
-                        },
+                        }),
                     ));
                 }
                 Tail::Open { deep: true, .. } => {
@@ -428,19 +308,12 @@ impl Walk<'_> {
                 }
                 Tail::Closed => Err(self.mismatch(
                     at,
-                    Why::Uses {
-                        found: format!("a variant (tag `{label}`)"),
-                        expected: format!(
-                            "a variant with one of the tags {}",
-                            fields
-                                .labels
-                                .iter()
-                                .map(|(name, _)| format!("`{name}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                    AdmissionCause::Uses(AdmissionUses {
+                        found: Found::Variant(label.to_owned()),
+                        expected: Expected::Tags(
+                            fields.labels.iter().map(|(name, _)| name.clone()).collect(),
                         ),
-                        hint: None,
-                    },
+                    }),
                 )),
             },
         }
@@ -455,7 +328,7 @@ impl Walk<'_> {
         at: Option<Span>,
     ) -> Result<(), Mismatch> {
         if !value.heads().iter().any(|&head| kind.admits(head)) {
-            return Err(self.uses(value, kind_phrase(kind), at, None));
+            return Err(self.uses(value, Expected::Kind(kind.into()), at));
         }
         if kind.is_deep() {
             self.data(value, at)?;
@@ -470,11 +343,11 @@ impl Walk<'_> {
                 .map_err(|first| {
                     self.mismatch(
                         at,
-                        Why::Shares {
+                        AdmissionCause::Shares(AdmissionShares {
                             other: first.pointer,
-                            other_side: first.side,
-                            side,
-                        },
+                            other_side: first.side.into(),
+                            side: side.into(),
+                        }),
                     )
                 })?;
         }
@@ -485,7 +358,7 @@ impl Walk<'_> {
     fn data(&mut self, value: &Value, at: Option<Span>) -> Result<(), Mismatch> {
         match value {
             Value::Thunk(_) | Value::Native(_) | Value::Handle(_) => {
-                Err(self.uses(value, kind_phrase(Kind::DATA), at, None))
+                Err(self.uses(value, Expected::Kind(Kind::DATA.into()), at))
             }
             Value::List(items) => {
                 for (index, item) in items.iter().enumerate() {
@@ -514,33 +387,27 @@ impl Walk<'_> {
     }
 }
 
-/// The use a position stands for, in words.
-fn expected(shape: &Shape) -> String {
+/// The solved value expectation, without compiler or diagnostic state.
+fn expected(shape: &Shape) -> Expected {
     match shape {
-        Shape::Unit => "`()`".into(),
-        Shape::Bool => "a Bool".into(),
-        Shape::Int => "an Int".into(),
-        Shape::Float => "a Float".into(),
-        Shape::String => "text".into(),
-        Shape::Bytes => "bytes".into(),
-        Shape::List(_) => "a list".into(),
-        Shape::Map(_) => "a map".into(),
-        Shape::Record(_) => "a record".into(),
-        Shape::Variant(_) => "a variant".into(),
-        Shape::Thunk(_) => "a block".into(),
-        Shape::Handle(..) => "a handle".into(),
-        Shape::Free { kind, .. } => kind_phrase(*kind),
+        Shape::Unit => Expected::Shape(ValueShape::Unit),
+        Shape::Bool => Expected::Shape(ValueShape::Bool),
+        Shape::Int => Expected::Shape(ValueShape::Int),
+        Shape::Float => Expected::Shape(ValueShape::Float),
+        Shape::String => Expected::Shape(ValueShape::String),
+        Shape::Bytes => Expected::Shape(ValueShape::Bytes),
+        Shape::List(_) => Expected::Shape(ValueShape::List),
+        Shape::Map(_) => Expected::Shape(ValueShape::Map),
+        Shape::Record(fields) => {
+            Expected::Record(fields.labels.iter().map(|(name, _)| name.clone()).collect())
+        }
+        Shape::Variant(_) => Expected::Shape(ValueShape::Variant),
+        Shape::Thunk(_) => Expected::AnyOf(vec![ValueShape::Block, ValueShape::Function]),
+        Shape::Handle(..) => Expected::Shape(ValueShape::Handle),
+        Shape::Free { kind, .. } => Expected::Kind((*kind).into()),
         Shape::Return(..) | Shape::Fun(..) | Shape::FreeComp { .. } => {
             unreachable!("a value position is never a computation")
         }
-    }
-}
-
-fn refusal_hint(shape: &Shape, value: &Value) -> Option<&'static str> {
-    match (shape, value) {
-        (Shape::Float, Value::Int(_)) | (Shape::Int, Value::Float(_)) => Some(JSON_NUMBERS),
-        (Shape::Variant(_), _) => Some(NO_JSON_VARIANTS),
-        _ => None,
     }
 }
 

@@ -472,7 +472,9 @@ fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
     let out = ral(&["-c", src]);
     assert_ne!(out.status, 0, "an argument policy must not decode");
     assert!(
-        out.stderr.contains("grant exec: unknown key 'git'"),
+        out.stderr.contains(
+            "grant exec: grant: field \"exec\": unknown field \"git\"; offered: allow, deny"
+        ),
         "expected the exec-table diagnostic; got:\n{}",
         out.stderr
     );

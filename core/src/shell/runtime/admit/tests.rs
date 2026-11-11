@@ -53,9 +53,14 @@ fn a_deep_mismatch_names_its_pointer() {
         map(&[("size", Value::Int(1))]),
         map(&[("size", Value::string("12kB"))]),
     ]);
+    let mismatch = ground(&ty).admit(&value, &Fixings::default()).unwrap_err();
+    assert_eq!(mismatch.failure.pointer, "/1/size");
     assert_eq!(
-        refusal(&ground(&ty), &value),
-        "the value at `/1/size` is text (`'12kB'`), but this script uses it as an Int"
+        mismatch.failure.cause,
+        AdmissionCause::Uses(AdmissionUses {
+            found: Value::string("12kB").found(),
+            expected: Expected::Shape(ValueShape::Int),
+        })
     );
 }
 
@@ -102,9 +107,16 @@ fn a_kinded_variable_admits_only_its_heads() {
         )
         .is_ok()
     );
+    let mismatch = s
+        .admit(&Value::list(vec![Value::string("x")]), &Fixings::default())
+        .unwrap_err();
+    assert_eq!(mismatch.failure.pointer, "/0");
     assert_eq!(
-        refusal(&s, &Value::list(vec![Value::string("x")])),
-        "the value at `/0` is text (`'x'`), but this script uses it as a number"
+        mismatch.failure.cause,
+        AdmissionCause::Uses(AdmissionUses {
+            found: Value::string("x").found(),
+            expected: Expected::Kind(Kind::NUMBER.into())
+        })
     );
 }
 
@@ -142,9 +154,15 @@ fn a_comparable_variable_is_fixed_to_numbers_or_to_text() {
         .is_ok()
     );
     let mixed = map(&[("a", Value::Int(1)), ("c", Value::string("x"))]);
+    let mismatch = s.admit(&mixed, &Fixings::default()).unwrap_err();
+    assert_eq!(mismatch.failure.pointer, "/c");
     assert_eq!(
-        refusal(&s, &mixed),
-        "`/a` is a number and `/c` is text, and this script compares them"
+        mismatch.failure.cause,
+        AdmissionCause::Shares(AdmissionShares {
+            other: "/a".into(),
+            other_side: crate::fact::NumberOrText::Number,
+            side: crate::fact::NumberOrText::Text,
+        })
     );
 }
 
@@ -182,16 +200,21 @@ fn a_recursive_type_admits_a_nested_document_and_refuses_a_scalar_leaf() {
     let nested = map(&[("a", map(&[("b", map(&[]))]))]);
     assert!(s.admit(&nested, &Fixings::default()).is_ok());
     let leaf = map(&[("a", map(&[("b", Value::Int(1))]))]);
+    let mismatch = s.admit(&leaf, &Fixings::default()).unwrap_err();
+    assert_eq!(mismatch.failure.pointer, "/a/b");
     assert_eq!(
-        refusal(&s, &leaf),
-        "the value at `/a/b` is a whole number (`1`), but this script uses it as a map"
+        mismatch.failure.cause,
+        AdmissionCause::Uses(AdmissionUses {
+            found: Found::Int(1),
+            expected: Expected::Shape(ValueShape::Map)
+        })
     );
 }
 
 #[test]
 fn a_json_number_keeps_its_kind_at_a_ground_site() {
     let float = refusal(&ground(&Ty::float()), &Value::Int(3));
-    assert!(float.contains("a whole number (`3`)") && float.contains("as a Float"));
+    assert!(float.contains("Int 3") && float.contains("Float"));
     let int = ground(&Ty::int())
         .admit(
             &Value::Float(crate::data::Finite::new(2.5).expect("finite")),
@@ -222,8 +245,20 @@ fn a_variant_site_needs_a_tag_of_its_row() {
         label: "other".into(),
         payload: None,
     };
-    assert!(refusal(&s, &other).contains("one of the tags `none`, `some`"));
-    assert!(refusal(&s, &map(&[])).contains("uses it as a variant"));
+    assert!(
+        matches!(s.admit(&other, &Fixings::default()).unwrap_err().failure.cause, AdmissionCause::Uses(AdmissionUses { expected: Expected::Tags(tags), found: Found::Variant(label) }) if tags == ["none", "some"] && label == "other")
+    );
+    assert_eq!(
+        s.admit(&map(&[]), &Fixings::default())
+            .unwrap_err()
+            .failure
+            .cause,
+        AdmissionCause::Uses(AdmissionUses {
+            found: Found::Map,
+            expected: Expected::Shape(ValueShape::Variant),
+        })
+    );
+    assert!(refusal(&s, &map(&[])).contains("uses it as a tag"));
 }
 
 #[test]
@@ -238,6 +273,19 @@ fn the_witness_is_the_use_that_fixed_the_structure() {
         .admit(&Value::string("x"), &Fixings::default())
         .expect_err("text is not an Int");
     assert_eq!(mismatch.witness(), Some(at));
+    let Break::Error(error) = mismatch.refusal("from-json") else {
+        panic!("admission refusal")
+    };
+    assert_eq!(error.witness(), Some(at));
+    let without_witness = Mismatch {
+        witness: None,
+        ..mismatch
+    };
+    let Break::Error(portable) = without_witness.refusal("from-json") else {
+        panic!("admission refusal")
+    };
+    assert_eq!(error.reason, portable.reason);
+    assert_eq!(portable.witness(), None);
 }
 
 #[test]
@@ -291,5 +339,54 @@ fn a_module_closure_is_held_to_its_scheme() {
         err.to_string()
             .starts_with("the value at `/f` is a block of type")
     );
+    assert!(
+        matches!(&err.failure.cause, AdmissionCause::Export(AdmissionExport { found, expected }) if found != expected)
+    );
     let _ = &mut u;
+}
+
+#[test]
+fn admission_reasons_keep_structured_causes_and_witnesses_outside_records() {
+    use crate::data::datum::Datum as _;
+    use crate::fact::Reason;
+    let ty = Ty::list(closed_record(&[("size", Ty::int())]));
+    let value = Value::list(vec![map(&[("size", Value::string("wrong"))])]);
+    let mismatch = ground(&ty).admit(&value, &Fixings::default()).unwrap_err();
+    let failure = mismatch.failure().clone();
+    assert_eq!(failure.pointer, "/0/size");
+    assert!(matches!(
+        &failure.cause,
+        AdmissionCause::Uses(AdmissionUses {
+            expected: Expected::Shape(ValueShape::Int),
+            found: Found::Text(_)
+        })
+    ));
+    let Break::Error(error) = mismatch.refusal("from-json") else {
+        panic!("refusal")
+    };
+    assert_eq!(error.witness(), mismatch.witness());
+    assert_eq!(error.hints(), []);
+    assert!(
+        matches!(&error.reason, Reason::Invalid(f) if f.cause == InvalidCause::Admission(failure))
+    );
+    assert_eq!(
+        crate::fact::Reason::decode(&error.reason.clone().encode()).unwrap(),
+        error.reason
+    );
+    let missing = ground(&closed_record(&[("a", Ty::int())]))
+        .admit(&map(&[]), &Fixings::default())
+        .unwrap_err();
+    assert_eq!(missing.failure.cause, AdmissionCause::NoField("a".into()));
+    assert_eq!(missing.failure.pointer, "");
+    let extra = ground(&closed_record(&[]))
+        .admit(&map(&[("a", Value::Int(1))]), &Fixings::default())
+        .unwrap_err();
+    assert_eq!(
+        extra.failure.cause,
+        AdmissionCause::ExtraField(AdmissionExtraField {
+            field: "a".into(),
+            fields: vec![]
+        })
+    );
+    assert_eq!(extra.failure.pointer, "");
 }

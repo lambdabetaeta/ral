@@ -447,8 +447,8 @@ their membership, restriction, extension and activation, and the checker.
 
 ## Review history
 
-Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds
-(Claude, Fable, Codex on gpt-6-astra). Findings, in order:
+Drafted against 0c52a8f4; revised at 6bfbb097 after three review rounds.
+Findings, in order:
 
 1. First round: the plan was reshaped to lead into the Belnap plan (this one
    replaces the surface, decoder and checker; that one the algebra).

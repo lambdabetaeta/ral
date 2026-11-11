@@ -106,7 +106,8 @@ fn pipeline_external_stage_rejects_list_arg_with_hint() {
     let o = run("let xs = /bin/echo '[1, 2, 3]' | from-json; /bin/echo hi | /usr/bin/printf $xs");
     assert_ne!(o.status, 0);
     assert!(
-        o.stderr.contains("cannot pass List"),
+        o.stderr
+            .contains("cannot pass a list as argument at index 0 to `/usr/bin/printf`"),
         "stderr: {}",
         o.stderr
     );

@@ -7,6 +7,7 @@ use crate::site::{Silent, site};
 
 #[cfg(windows)]
 pub mod broker;
+mod dial;
 mod error;
 #[cfg(windows)]
 pub mod hcs;
@@ -20,6 +21,7 @@ mod spec;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
+pub use dial::{DialBackend, DialError};
 pub use error::{Act, Error, GuestConsole, HostFile, MachineFiles, Spelling, Wire, Worded};
 pub use machine::{Booted, Hypervisor, Machine, Socket, Wires};
 pub use spec::{BootArtifact, MachineSpec, Resources, SIZE};

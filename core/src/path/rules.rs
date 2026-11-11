@@ -5,7 +5,7 @@
 /// A parameter rather than a `cfg!` read, so both tables are pinned by tests
 /// on every host; the gate is [`Self::HOST`], read by the public entry points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PathRules {
+pub enum PathRules {
     Posix,
     Windows,
 }

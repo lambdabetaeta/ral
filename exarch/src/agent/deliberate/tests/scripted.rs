@@ -236,7 +236,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         Err(Fault::Provider(ProviderError::Truncated { cause })) => match cause.as_ref() {
             CutShort::Stalled(cause) => assert_eq!(
                 cause.summary(),
-                "connection failed: model response body read timed out"
+                "connection failed: service: scripted chat: stream timeout: read"
             ),
             other @ CutShort::OutputCap { .. } => {
                 panic!("a stall must carry its own cut, got {other:?}")
@@ -280,7 +280,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         matches!(
             error.stall_cause(),
             Some(ProviderError::Transient { cause, .. })
-                if cause == "model response body read timed out"
+                if matches!(cause, ral_core::fact::RetryableProviderCause::Service(failure) if failure.cause.as_ref() == &ral_core::fact::ServiceCause::StreamTimeout(ral_core::fact::StreamTimeoutKind::Read))
         ),
         "the stall cause must reach the renderers through stall_cause, \
          got {error:?}",

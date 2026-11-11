@@ -1,7 +1,7 @@
 //! Direct placement and the certificate of a fresh leader in ral's session.
 
 use super::{Launch, Spawned, Unstarted};
-use crate::error::Error;
+
 use crate::process::group::Step;
 use crate::process::{Group, Pgid, Placement, Scope, TerminalHold};
 
@@ -63,8 +63,11 @@ impl Placement {
                     Ok(terminal) => Ok((Group::Owns(leader.pgid()), terminal)),
                     Err((prepared, error)) => Err((
                         Self::Tenant(prepared),
-                        Unstarted::Refused(Error::io(
-                            "could not hand over the terminal to the command's process group",
+                        Unstarted::Refused(super::prepare_io(
+                            crate::fact::PrepareStep::TerminalHandover,
+                            crate::fact::PrepareSubject::Group(
+                                u64::from(child.as_raw().unsigned_abs()).into(),
+                            ),
                             &error,
                         )),
                     )),

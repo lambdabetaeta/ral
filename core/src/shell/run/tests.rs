@@ -901,15 +901,15 @@ fn rendered_fault(shell: &mut Shell, src: &str) -> String {
 fn a_result_that_is_not_data_says_what_it_holds() {
     let mut shell = crate::test_helper::core_shell();
     for (src, says, hint) in [
-        ("spawn { echo hi }", "the result is a handle", "let h ="),
-        ("{ echo hi }", "the result is a block", "!{ … }"),
-        ("{ |x| echo $x }", "the result is a function", "arguments"),
+        ("spawn { echo hi }", "found a handle", "let h ="),
+        ("{ echo hi }", "found a block", "!{ … }"),
+        ("{ |x| echo $x }", "found a function", "arguments"),
         (
             "[n: 1, h: !{spawn { echo hi }}]",
-            "the result holds a handle",
+            "the value contains a handle",
             "let h =",
         ),
-        ("[k: { echo hi }]", "the result holds a block", "!{ … }"),
+        ("[k: { echo hi }]", "the value contains a block", "!{ … }"),
     ] {
         let report = shell
             .run(Run::captured(src, test_origin()))
@@ -1005,13 +1005,15 @@ fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
     );
 }
 
-fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorRecord {
-    use crate::data::datum::Datum as _;
-    let End::Ok(value) = shell.run(Run::captured(source, test_origin())).expect_ran() else {
+fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorFact {
+    let End::Ok(Value::Map(record)) = shell.run(Run::captured(source, test_origin())).expect_ran()
+    else {
         panic!("the handler must return the error record: {source}");
     };
-    crate::fact::ErrorRecord::decode(&crate::data::FOValue::try_from(&value).expect("data"))
-        .expect("error record")
+    record
+        .witness()
+        .expect("a caught record is witnessed")
+        .clone()
 }
 
 #[test]
@@ -1206,7 +1208,7 @@ fn an_unclaimed_hook_failure_uses_its_origin_base() {
     use crate::shell::runtime::{DefaultPolicy, HookName, HookSig};
     let mut runtime = crate::test_helper::core_runtime();
     install_body(&mut runtime, "hook-refusal", |_, _| {
-        Err(Error::new("hook refused").into())
+        Err(Error::new(crate::fact::Reason::raised("hook refused")).into())
     });
     let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
     let name = HookName::session("origin-probe");
@@ -1228,7 +1230,7 @@ fn an_unclaimed_hook_failure_uses_its_origin_base() {
     let End::Err(error) = shell.run(run).expect_ran() else {
         panic!("hook refusal")
     };
-    let record = error.record(&shell);
+    let record = error.fact(&shell);
     assert_eq!(record.frame(), name.fault_label());
     assert_eq!(record.site().script.as_ref(), "<hook-origin>");
     assert_eq!((record.site().line, record.site().col), (1, 1));
@@ -1505,7 +1507,7 @@ fn a_run_ending_in_an_error_under_a_stop_ends_stopped() {
     let mut runtime = crate::test_helper::core_runtime();
     install_halting_act(&mut runtime, "strike-then-fail", |mooring| {
         mooring.home.cancel(CancelCause::Interrupted);
-        crate::shell::runtime::Error::new("x").into()
+        crate::shell::runtime::Error::new(crate::fact::Reason::raised("x")).into()
     });
     let (ending, _) = ran(runtime, Run::captured("strike-then-fail", test_origin()));
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
@@ -1813,4 +1815,44 @@ fn a_hooks_arity_is_its_type() {
             ..
         })
     ));
+}
+
+#[test]
+fn missing_hook_dispatch_retains_its_namespace_as_a_state_fact() {
+    use crate::fact::{HookRef, PluginHookRef, Reason, StateFailure};
+    use crate::shell::runtime::HookName;
+    for (name, expected) in [
+        (
+            HookName::session("absent"),
+            HookRef::Session("absent".into()),
+        ),
+        (
+            HookName::plugin("editor", "change"),
+            HookRef::Plugin(PluginHookRef {
+                plugin: "editor".into(),
+                hook: "change".into(),
+            }),
+        ),
+    ] {
+        let mut shell = crate::test_helper::core_shell();
+        let report = shell.run(Run {
+            program: crate::protocol::Program::Hook {
+                name,
+                args: Vec::new(),
+            },
+            ..Run::captured("", test_origin())
+        });
+        let RunReport::Static {
+            diagnostics: StaticDiagnostics::Host(error),
+        } = report
+        else {
+            panic!("missing hook must refuse before evaluation")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::MissingHook(expected)))
+        );
+        assert_eq!(error.hints(), []);
+        assert_eq!(error.context(), None);
+    }
 }

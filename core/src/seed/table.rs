@@ -9,8 +9,11 @@
 //! [`WireDecoder`], is the sole wire→runtime conversion.
 
 use crate::data::FOValue;
+use crate::data::json::{drop_value, on_json_stack};
+use crate::fact::{InvariantFailure, ProtocolFailure, Reason};
 use crate::ir::{Comp, Name};
-use crate::shell::runtime::{Binding, BuiltinTable, Closure, Env, Error, Leaf, Runtime, Value};
+use crate::shell::runtime::{Binding, BuiltinTable, Closure, Env, Error, Runtime, Value};
+use crate::ty::Closed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -31,7 +34,7 @@ pub(crate) type SerialValue = FOValue<SerialClosure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialThunk {
-    pub comp: Arc<Comp>,
+    pub(super) comp: Arc<Comp>,
     pub env: SerialEnvSnapshot,
 }
 
@@ -55,10 +58,16 @@ pub(crate) struct SerialEnvSnapshot {
 }
 
 /// Wire mirror of a [`Binding`]: the value converted, the scheme as itself.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SerialBinding {
     pub value: SerialValue,
-    pub(crate) scheme: Option<crate::ty::Closed>,
+    pub(super) scheme: Option<Closed>,
+}
+
+impl Drop for SerialBinding {
+    fn drop(&mut self) {
+        drop_value(std::mem::replace(&mut self.value, SerialValue::Unit));
+    }
 }
 
 /// One row per interned environment, in discovery order;
@@ -150,7 +159,9 @@ impl Default for InternCtx {
 /// One wording for the one fault, raised from both the ordering pass and the
 /// rehydration that reads the table it built.
 fn unresolved_scope_ref(id: u32) -> Error {
-    Error::new(format!("seed: scope ref {id} out of range or unresolved"))
+    Error::new(Reason::Protocol(Box::new(
+        ProtocolFailure::UnresolvedScope(u64::from(id).into()),
+    )))
 }
 
 /// One reconstructed environment per scope table row (`None` until built).
@@ -166,6 +177,26 @@ type EnvRows = Vec<Option<Env>>;
 pub(crate) struct WireDecoder {
     rows: EnvRows,
     manifest: BuiltinTable,
+}
+
+impl Drop for WireDecoder {
+    fn drop(&mut self) {
+        for env in self.rows.drain(..).flatten() {
+            env.drop_seed();
+        }
+    }
+}
+
+/// Completed bindings remain owned until their row is ready to transfer.
+#[derive(Default)]
+struct SeedBindings(Vec<(Name, Binding)>);
+
+impl Drop for SeedBindings {
+    fn drop(&mut self) {
+        for (_, Binding { value, .. }) in self.0.drain(..) {
+            value.drop_seed();
+        }
+    }
 }
 
 impl WireDecoder {
@@ -205,20 +236,20 @@ impl WireDecoder {
         };
         let mut built = 0;
         while let Some(id) = ready.pop() {
-            let bindings = scope_table[id]
-                .iter()
-                .map(|(k, b)| {
-                    Ok((
-                        Name::from(k.as_str()),
-                        Binding {
-                            value: b.value.clone().into_runtime(&dec)?,
-                            scheme: b.scheme.clone(),
-                        },
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            let mut env = Env::new();
-            env.extend(bindings.into_iter());
+            let mut bindings = SeedBindings::default();
+            for (name, binding) in &scope_table[id] {
+                bindings.0.push((
+                    Name::from(name.as_str()),
+                    Binding {
+                        value: binding.value.clone().into_runtime(&dec)?,
+                        scheme: binding.scheme.clone(),
+                    },
+                ));
+            }
+            let (env, displaced) = Env::from_seed_bindings(std::mem::take(&mut bindings.0));
+            for Binding { value, .. } in displaced {
+                value.drop_seed();
+            }
             dec.rows[id] = Some(env);
             built += 1;
             for &next in &dependents[id] {
@@ -229,7 +260,9 @@ impl WireDecoder {
             }
         }
         if built < n {
-            return Err(Error::new("seed: cyclic scope dependencies"));
+            return Err(Error::new(Reason::Protocol(Box::new(
+                ProtocolFailure::CyclicScopes,
+            ))));
         }
         Ok(dec)
     }
@@ -239,64 +272,158 @@ impl WireDecoder {
 /// declare whether it carries scope references, or its dependency edges go
 /// silently missing from [`WireDecoder::for_runtime`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
-    value.for_each_ext(&mut |closure| match closure {
-        SerialClosure::Thunk(t) => {
-            out.insert(t.env.bindings);
+    for_each_closure(value, |closure| match closure {
+        SerialClosure::Thunk(thunk) => {
+            out.insert(thunk.env.bindings);
         }
         SerialClosure::Native(_) => {}
     });
 }
 
+fn for_each_closure(value: &SerialValue, mut visit: impl FnMut(&SerialClosure)) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            SerialValue::List { items } => pending.extend(items.iter().rev()),
+            SerialValue::Map { entries } => {
+                pending.extend(entries.iter().rev().map(|(_, value)| value));
+            }
+            SerialValue::Variant { payload, .. } => pending.extend(payload.as_deref()),
+            SerialValue::Ext(closure) => visit(closure),
+            SerialValue::Unit
+            | SerialValue::Bool { .. }
+            | SerialValue::Int { .. }
+            | SerialValue::Float { .. }
+            | SerialValue::String { .. }
+            | SerialValue::Bytes { .. } => {}
+        }
+    }
+}
+
 // ── Value conversions ─────────────────────────────────────────────────────
 
 impl FOValue<SerialClosure> {
-    /// Encode a runtime [`Value`], interning captured closure environments
-    /// through `ctx`.
-    ///
-    /// # Errors
-    /// `value` is or reaches a `Value::Handle`, which has no wire form.
+    /// Encode a value without recursing through captured environments.
     pub(crate) fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
-        Self::walk(value, &mut |leaf| match leaf {
-            Leaf::Thunk(closure) => Ok(Self::Ext(SerialClosure::Thunk(SerialThunk {
+        on_json_stack(|| match value {
+            Value::Unit => Ok(Self::Unit),
+            Value::Bool(value) => Ok(Self::Bool { value: *value }),
+            Value::Int(value) => Ok(Self::Int { value: *value }),
+            Value::Float(value) => Ok(Self::Float { value: *value }),
+            Value::String(value) => Ok(Self::String {
+                value: value.to_string(),
+            }),
+            Value::Bytes(value) => Ok(Self::Bytes {
+                value: value.to_vec(),
+            }),
+            Value::List(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for value in items {
+                    match Self::from_runtime(&value, ctx) {
+                        Ok(value) => values.push(value),
+                        Err(error) => {
+                            values.into_iter().for_each(drop_value);
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(Self::List { items: values })
+            }
+            Value::Map(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for (name, value) in items {
+                    match Self::from_runtime(&value, ctx) {
+                        Ok(value) => values.push((name.to_string(), value)),
+                        Err(error) => {
+                            for (_, value) in values {
+                                drop_value(value);
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(Self::Map { entries: values })
+            }
+            Value::Variant { label, payload } => Ok(Self::Variant {
+                label: label.to_string(),
+                payload: payload
+                    .as_deref()
+                    .map(|value| Self::from_runtime(value, ctx).map(Box::new))
+                    .transpose()?,
+            }),
+            Value::Thunk(closure) => Ok(Self::Ext(SerialClosure::Thunk(SerialThunk {
                 comp: Arc::clone(closure.comp()),
                 env: SerialEnvSnapshot::from_runtime(closure.env(), ctx),
             }))),
-            Leaf::Native(entry) => Ok(Self::Ext(SerialClosure::Native(SerialNative {
+            Value::Native(entry) => Ok(Self::Ext(SerialClosure::Native(SerialNative {
                 name: entry.decl.name.as_ref().to_string(),
             }))),
-            Leaf::Handle => Err(Error::new(
-                "a handle reached the seed wire, though `Shell::bequeath` should have \
-                 replaced it: this is a fault in ral rather than in your program: please \
-                 report the source that produced it",
-            )),
+            Value::Handle(_) => Err(Error::new(Reason::Invariant(Box::new(
+                InvariantFailure::HandleInSeed,
+            )))),
         })
     }
 
-    /// Decode back into a runtime [`Value`], resolving captured environments
-    /// and native names against `dec`.
-    ///
-    /// # Errors
-    /// A nested value fails to decode, a captured environment names a scope id
-    /// out of range or unresolved, or a native's name is unknown to the
-    /// manifest.
-    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
-        self.unwalk(&mut |closure| match closure {
-            SerialClosure::Thunk(thunk) => Ok(Value::Thunk(Closure::captured(
-                thunk.comp,
-                thunk.env.into_runtime(dec)?,
-            ))),
-            SerialClosure::Native(n) => {
-                // The value half only: no `Value::Native` was ever built from
-                // a base frame, so a wire name that reaches one is not a
-                // native we could rebuild.
-                let entry = dec.manifest.value(&n.name).ok_or_else(|| {
-                    Error::new(format!(
-                        "seed: unknown native '{}' in receiving manifest",
-                        n.name
-                    ))
-                })?;
-                Ok(Value::Native(Arc::new(entry)))
+    /// Check all fallible references before building any runtime value.
+    pub(crate) fn validate_runtime(&self, dec: &WireDecoder) -> Result<(), Error> {
+        let mut result = Ok(());
+        for_each_closure(self, |closure| {
+            if result.is_err() {
+                return;
             }
+            result = match closure {
+                SerialClosure::Thunk(thunk) => thunk.env.clone().into_runtime(dec).map(|_| ()),
+                SerialClosure::Native(native) if dec.manifest.value(&native.name).is_none() => {
+                    Err(Error::new(Reason::Protocol(Box::new(
+                        ProtocolFailure::UnknownNative(native.name.clone()),
+                    ))))
+                }
+                SerialClosure::Native(_) => Ok(()),
+            };
+        });
+        result
+    }
+
+    /// Resolve against the receiving runtime, then dispose the wire spine iteratively.
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
+        let result = self.validate_runtime(dec).map(|()| self.hydrate(dec));
+        drop_value(self);
+        result
+    }
+
+    fn hydrate(&self, dec: &WireDecoder) -> Value {
+        on_json_stack(|| match self {
+            Self::Unit => Value::Unit,
+            Self::Bool { value } => Value::Bool(*value),
+            Self::Int { value } => Value::Int(*value),
+            Self::Float { value } => Value::Float(*value),
+            Self::String { value } => Value::string(value.as_str()),
+            Self::Bytes { value } => Value::bytes(value.clone()),
+            Self::List { items } => {
+                Value::list(items.iter().map(|value| value.hydrate(dec)).collect())
+            }
+            Self::Map { entries } => Value::Map(crate::shell::runtime::Map::from_seed_values(
+                entries
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.hydrate(dec))),
+            )),
+            Self::Variant { label, payload } => Value::variant(
+                label.as_str(),
+                payload.as_deref().map(|value| value.hydrate(dec)),
+            ),
+            Self::Ext(SerialClosure::Thunk(thunk)) => {
+                let env = thunk
+                    .env
+                    .clone()
+                    .into_runtime(dec)
+                    .expect("validated scope reference");
+                Value::Thunk(Closure::captured(Arc::clone(&thunk.comp), env))
+            }
+            Self::Ext(SerialClosure::Native(native)) => Value::Native(Arc::new(
+                dec.manifest
+                    .value(&native.name)
+                    .expect("validated native name"),
+            )),
         })
     }
 }
@@ -443,9 +570,8 @@ mod tests {
             env: SerialEnvSnapshot { bindings: 0 },
         }));
 
-        // The same `serde_json` codec `frame::encode` frames with.
-        let json = serde_json::to_vec(&lambda).expect("serialise lambda");
-        let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
+        let json = crate::data::json::to_vec(&lambda).expect("serialise lambda");
+        let back: SerialValue = crate::data::json::from_slice(&json).expect("deserialise lambda");
 
         let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
             panic!("round-trip changed the value variant");
@@ -497,8 +623,8 @@ mod tests {
             comp: Arc::clone(&node),
             env: SerialEnvSnapshot { bindings: 0 },
         }));
-        let json = serde_json::to_vec(&lambda).expect("serialise lambda");
-        let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
+        let json = crate::data::json::to_vec(&lambda).expect("serialise lambda");
+        let back: SerialValue = crate::data::json::from_slice(&json).expect("deserialise lambda");
         let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
             panic!("round-trip changed the value variant");
         };
@@ -531,8 +657,8 @@ mod tests {
         let err = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
             .expect_err("out-of-range ref must fail the build");
         assert_eq!(
-            err.describe(),
-            "seed: scope ref 5 out of range or unresolved"
+            &err.reason,
+            &Reason::Protocol(Box::new(ProtocolFailure::UnresolvedScope(5u64.into())))
         );
     }
 

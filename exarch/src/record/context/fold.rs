@@ -6,10 +6,14 @@ use super::state::{admissible, advance, resting};
 use super::table::{Item, holder};
 use super::transcript::read_seeds;
 use super::{
-    Context, Location, Span, Turn, chat_messages, message_bytes, message_label, message_role,
-    not_recorded_refusal_turn, opening_line,
+    Context, ContextStepFailure, ForeignRecord, Location, Span, Turn, chat_messages, message_bytes,
+    message_label, message_role, not_recorded_refusal_turn, opening_line,
 };
-use crate::record::{Record, Recorded, Refusal, Role, Transcript, TurnKind};
+use crate::record::{Record, Recorded, Role, Transcript, TurnKind};
+use ral_core::fact::{
+    ContextFailure, ContextFailureCurrentlyWritten, ContextFailureStraddledEviction,
+    ContextFailureWithdrawn, ContextOperation, WithdrawalEvidence,
+};
 
 impl Context {
     /// Whether an eviction may take the run `span`: the one place its rules
@@ -18,20 +22,21 @@ impl Context {
     /// # Errors
     /// Refuses an end never recorded or withdrawn, a run holding the turn
     /// being written now, and one that cuts an eviction.
-    pub(crate) fn resolve_cut(&self, span: Span) -> Result<(), String> {
+    pub(crate) fn resolve_cut(&self, span: Span) -> Result<(), ContextFailure> {
         for id in [span.from(), span.to()] {
             let Some(turn) = self.turn(id) else {
                 return Err(not_recorded_refusal_turn(id, self.reach()));
             };
             if turn.is_withdrawn() {
-                return Err(format!(
-                    "turn {id} was rewound or cleared away: it is no longer in your context"
-                ));
+                return Err(ContextFailure::Withdrawn(ContextFailureWithdrawn {
+                    turn: id.into(),
+                    evidence: WithdrawalEvidence::Unavailable,
+                }));
             }
         }
         if let Some(id) = self.unclosed_turn().filter(|&id| span.contains(id)) {
-            return Err(format!(
-                "turn {id} is being written now: an eviction keeps the work in hand"
+            return Err(ContextFailure::CurrentlyWritten(
+                ContextFailureCurrentlyWritten { turn: id.into() },
             ));
         }
         // `to` ends an item exactly when `to + 1` starts one.
@@ -41,11 +46,11 @@ impl Context {
             .or_else(|| self.table.straddling(span.to().saturating_add(1)))
             .map(|eviction| eviction.span)
         {
-            return Err(format!(
-                "{straddled} stand together under one note: name from: {}, to: {} whole, or \
-                 leave it",
-                straddled.from(),
-                straddled.to()
+            return Err(ContextFailure::StraddledEviction(
+                ContextFailureStraddledEviction {
+                    requested: span.into(),
+                    covering: straddled.into(),
+                },
             ));
         }
         Ok(())
@@ -57,32 +62,36 @@ impl Context {
     ///
     /// # Errors
     /// Names the bad anchor, or what the session is waiting for.
-    pub(crate) fn rewindable(&self, anchor: u64) -> Result<(), String> {
+    pub(crate) fn rewindable(&self, anchor: u64) -> Result<(), ContextFailure> {
         let Some(turn) = self.turn(anchor) else {
             return Err(not_recorded_refusal_turn(anchor, self.reach()));
         };
         if turn.is_withdrawn() {
-            let earliest = match self.table.turns().iter().find(|turn| !turn.is_withdrawn()) {
-                Some(first) => format!("the earliest you can rewind to is turn {}", first.id),
-                None => "nothing has been said since the last /clear or /rewind".into(),
-            };
-            return Err(format!(
-                "turn {anchor} was already rewound or cleared away; {earliest}"
-            ));
+            let evidence = self
+                .table
+                .turns()
+                .iter()
+                .find(|turn| !turn.is_withdrawn())
+                .map_or(WithdrawalEvidence::NothingRetained, |first| {
+                    WithdrawalEvidence::EarliestRetained(first.id.into())
+                });
+            return Err(ContextFailure::Withdrawn(ContextFailureWithdrawn {
+                turn: anchor.into(),
+                evidence,
+            }));
         }
+
         if let Some(eviction) = self.table.straddling(anchor) {
             let span = eviction.span;
-            return Err(format!(
-                "turn {anchor} lies under the eviction over {span}: rewind to turn {} or turn {}",
-                span.from(),
-                span.to() + 1
+            return Err(ContextFailure::StraddledEviction(
+                ContextFailureStraddledEviction {
+                    requested: Span::single(anchor).into(),
+                    covering: span.into(),
+                },
             ));
         }
         if !self.is_ready() {
-            return Err(format!(
-                "cannot rewind while the session is {}",
-                self.waiting_for()
-            ));
+            return Err(self.mutation_failure(ContextOperation::Rewind));
         }
         Ok(())
     }
@@ -118,29 +127,41 @@ impl Context {
         Some(candidates[0].span().hull(candidates[through].span()))
     }
 
-    /// The one fold, judging each record before applying it — so a
-    /// hand-edited or foreign file is refused by the same function that folds
-    /// a live one.
-    ///
-    /// Live authorship is typestate-correct, so a refusal on the live path is
-    /// a harness bug and propagates as [`Refusal`] through [`Fold::step`](crate::record::Fold::step).
-    ///
-    /// # Errors
-    /// Returns [`Refusal::Foreign`] for a record no live session could have
-    /// written at this point in the log, and [`Refusal::Unreadable`] for a
-    /// link whose ancestor's file will not read back.
-    pub(crate) fn step_transcript(&mut self, record: Recorded<Transcript>) -> Result<(), Refusal> {
+    /// Replay/opening may read an inherited ancestor, before installing it.
+    pub(crate) fn step_transcript(
+        &mut self,
+        record: Recorded<Transcript>,
+    ) -> Result<(), ContextStepFailure> {
+        self.judge(self.len, record.value())
+            .map_err(ContextStepFailure::Foreign)?;
+        if let Transcript::Inherited { turns, evictions } = record.value() {
+            let seeds =
+                read_seeds(self.table.sessions(), turns).map_err(ContextStepFailure::ReadBack)?;
+            self.table.install(turns, evictions, seeds);
+        }
+        self.apply_transcript(record);
+        Ok(())
+    }
+
+    /// Live authorship cannot read an ancestor or install an inheritance.
+    pub(crate) fn step_live(&mut self, record: Recorded<Transcript>) -> Result<(), ForeignRecord> {
+        if matches!(record.value(), Transcript::Inherited { .. }) {
+            return Err(ForeignRecord {
+                record: Box::new(Record::Transcript(record.into_value())),
+                reason: "a live session cannot inherit another transcript".into(),
+            });
+        }
+        self.judge(self.len, record.value())?;
+        self.apply_transcript(record);
+        Ok(())
+    }
+
+    fn apply_transcript(&mut self, record: Recorded<Transcript>) {
         let index = self.len;
-        self.judge(index, record.value())?;
         let (locus, protocol) = record.into_parts();
         let mut state = advance(&self.state, &protocol);
         match &protocol {
             Transcript::System { text } => self.system = text.as_str().into(),
-            Transcript::Inherited { turns, evictions } => {
-                // Read first: a failure leaves the structure as it was.
-                let seeds = read_seeds(self.table.sessions(), turns)?;
-                self.table.install(turns, evictions, seeds);
-            }
             Transcript::Evicted(eviction) => {
                 self.table.evict(eviction.clone());
                 self.newest_edit = Some(index);
@@ -156,7 +177,8 @@ impl Context {
                 state = resting(self.resident().last().map_or(&[], Turn::records));
                 self.newest_edit = Some(index);
             }
-            Transcript::UserPrompt { .. }
+            Transcript::Inherited { .. }
+            | Transcript::UserPrompt { .. }
             | Transcript::Steering { .. }
             | Transcript::Import { .. }
             | Transcript::AssistantMessage { .. }
@@ -168,13 +190,12 @@ impl Context {
             let bytes = message_bytes(&chat_messages(&protocol));
             self.table.absorb(at, Recorded::new(locus, protocol), bytes);
         }
-        Ok(())
     }
 
     /// What no live session could have written here.
-    fn judge(&self, index: usize, protocol: &Transcript) -> Result<(), Refusal> {
+    fn judge(&self, index: usize, protocol: &Transcript) -> Result<(), ForeignRecord> {
         let n = index + 1;
-        let foreign = |reason: String| Refusal::Foreign {
+        let foreign = |reason: String| ForeignRecord {
             record: Box::new(Record::Transcript(protocol.clone())),
             reason,
         };
@@ -272,8 +293,9 @@ impl Context {
             && let Err(reason) = self.resolve_cut(eviction.span)
         {
             return Err(foreign(format!(
-                "record {n} evicts {}, which no live session could: {reason}; was record.jsonl hand-edited?",
-                eviction.span
+                "record {n} evicts {}, which no live session could: {}; was record.jsonl hand-edited?",
+                eviction.span,
+                reason.describe()
             )));
         }
         if matches!(protocol, Transcript::Steering { .. }) && self.table.turns().is_empty() {

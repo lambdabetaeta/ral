@@ -60,11 +60,17 @@ fn a_founded_agents_prompt_carries_its_own_name_grant_and_scratch() {
     assert!(system.contains("'main'"), "{system}");
     let scratch = agent
         .engine()
-        .read(|t| t.env_var(crate::app::SCRATCH_VAR))
+        .read(
+            ral_core::fact::ProbeSubject::EnvVar(crate::app::SCRATCH_VAR.into()),
+            |t| t.env_var(crate::app::SCRATCH_VAR),
+        )
         .unwrap()
         .expect("an identity engine names its scratch");
     assert!(system.contains(&scratch), "{system}");
-    let grants = agent.engine().read(|t| t.grants()).unwrap();
+    let grants = agent
+        .engine()
+        .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+        .unwrap();
     assert!(system.contains(&prompt::with_grant(GRANT_PLACEHOLDER, &grants)));
 }
 

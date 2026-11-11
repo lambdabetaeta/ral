@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::data::FOValue;
 use crate::error::Error;
+use crate::fact::{
+    InvalidCause, InvalidFailure, PathFailure, ProtocolFailure, ProtocolFailureVersionMismatch,
+    Reason,
+};
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, RootCause, Scope, ScopeNode};
 use crate::protocol::channel::WriteError;
@@ -77,7 +81,7 @@ impl crate::shell::runtime::EventSink for Surface {
     fn emit(&self, ev: &FOValue) {
         if let Err(WriteError::Unencodable(e)) = (self.outlet)(self.id, Event::Surface(ev.clone()))
         {
-            crate::errln!("engine: dropped a surface value: {e}");
+            crate::errln!("engine: dropped a surface value: {}", e.describe());
         }
     }
 }
@@ -89,14 +93,21 @@ fn resolve_installer<'a>(
     installer: &str,
 ) -> Result<&'a EngineInstaller, Error> {
     if proto_version != PROTOCOL_VERSION {
-        return Err(Error::new(format!(
-            "protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
-        )));
+        return Err(Error::new(Reason::Protocol(Box::new(
+            ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
+                front: proto_version,
+                engine: PROTOCOL_VERSION,
+            }),
+        ))));
     }
     installers
         .iter()
         .find(|i| i.tag == installer)
-        .ok_or_else(|| Error::new(format!("unknown builtin installer '{installer}'")))
+        .ok_or_else(|| {
+            Error::new(Reason::Protocol(Box::new(
+                ProtocolFailure::UnknownInstaller(installer.to_owned()),
+            )))
+        })
 }
 
 impl Engine {
@@ -117,8 +128,13 @@ impl Engine {
         let runtime = Arc::new((installer.runtime)(spec)?);
         let shell = match &attach.origin {
             Origin::Root(root) => {
-                let cwd = CwdPath::new(root.cwd.native().to_path_buf())
-                    .map_err(|e| Error::new(e.to_string()))?;
+                let cwd = CwdPath::new(root.cwd.native().to_path_buf()).map_err(|e| {
+                    Error::new(Reason::Invalid(Box::new(InvalidFailure {
+                        operation: "attach".into(),
+                        path: Vec::new(),
+                        cause: InvalidCause::Path(PathFailure::from(&e)),
+                    })))
+                })?;
                 let mut shell = Shell::root(Arc::clone(&runtime), cwd);
                 crate::shell::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
@@ -290,7 +306,7 @@ mod tests {
             ..Capabilities::default()
         })]);
         let received: GrantStack =
-            serde_json::from_str(&serde_json::to_string(&grants).unwrap()).unwrap();
+            crate::data::json::from_slice(&crate::data::json::to_vec(&grants).unwrap()).unwrap();
         assert_eq!(received.held_ids(), [None]);
         let depth = 1 + received.len();
         let engine = Engine::boot(
@@ -325,17 +341,33 @@ mod tests {
         ) {
             Ok(_) => panic!("unknown tag must be refused"),
             Err(msg) => {
-                assert!(msg.describe().contains("unknown builtin installer"));
-                assert!(msg.describe().contains("no-such-installer"));
+                assert_eq!(
+                    msg.reason,
+                    Reason::Protocol(Box::new(ProtocolFailure::UnknownInstaller(
+                        "no-such-installer".into()
+                    ),))
+                );
             }
         }
     }
 
     #[test]
     fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
-        match resolve_installer(&crate::carrier::testkit::BARE, PROTOCOL_VERSION + 1, "bare") {
+        match resolve_installer(
+            &crate::carrier::testkit::BARE,
+            PROTOCOL_VERSION + 1,
+            "no-such-installer",
+        ) {
             Ok(_) => panic!("a mismatched protocol version must be refused"),
-            Err(msg) => assert!(msg.describe().contains("protocol version mismatch")),
+            Err(msg) => assert_eq!(
+                msg.reason,
+                Reason::Protocol(Box::new(ProtocolFailure::VersionMismatch(
+                    ProtocolFailureVersionMismatch {
+                        front: PROTOCOL_VERSION + 1,
+                        engine: PROTOCOL_VERSION,
+                    }
+                ),))
+            ),
         }
     }
 
@@ -369,6 +401,35 @@ mod tests {
         let Err(why) = Engine::boot(&crate::carrier::testkit::BARE, &attach) else {
             panic!("a seal that is not a frame must refuse the attach");
         };
-        assert!(why.describe().contains("sealed bequest"), "{why}");
+        let Origin::Child(seal) = &attach.origin else {
+            unreachable!()
+        };
+        assert_eq!(why.reason, seal.unseal().unwrap_err().reason);
+    }
+}
+
+#[cfg(test)]
+mod typed_boot_tests {
+    use super::*;
+    use crate::carrier::testkit::{BARE, attach};
+
+    #[test]
+    fn relative_root_cwd_keeps_path_rules_and_semantic_attach_operation() {
+        let mut request = attach(&BARE);
+        let relative = std::path::PathBuf::from("relative");
+        let expected = PathFailure::from(&CwdPath::new(relative.clone()).unwrap_err());
+        let Origin::Root(root) = &mut request.origin else {
+            unreachable!()
+        };
+        root.cwd = crate::path::EnginePath::Host(relative);
+        let error = Engine::boot(&BARE, &request).err().expect("relative cwd");
+        assert_eq!(
+            error.reason,
+            Reason::Invalid(Box::new(InvalidFailure {
+                operation: "attach".into(),
+                path: vec![],
+                cause: InvalidCause::Path(expected),
+            }))
+        );
     }
 }

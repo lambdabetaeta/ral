@@ -6,10 +6,17 @@
 
 use super::log::Log;
 use super::{Fold, Record};
+use ral_core::fact::ContextFailure;
 use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::Path;
+
+#[derive(Debug)]
+pub(crate) struct ForeignRecord {
+    pub(crate) record: Box<Record>,
+    pub(crate) reason: String,
+}
 
 /// Why a fold could not finish replaying the log: the file itself would not
 /// read back, or a fold declined a record it does not recognise.
@@ -20,6 +27,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub enum Refusal {
     Unreadable(io::Error),
+    ReadBack(ContextFailure),
     Foreign { record: Box<Record>, reason: String },
 }
 
@@ -27,6 +35,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable(e) => write!(f, "the record log would not read back: {e}"),
+            Self::ReadBack(cause) => f.write_str(&cause.describe()),
             Self::Foreign { reason, .. } => write!(f, "refused a foreign record: {reason}"),
         }
     }

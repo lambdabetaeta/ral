@@ -15,6 +15,9 @@ use ral_core::carrier::Host;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
+use ral_core::fact::{
+    ExarchFailure, HostFailure, ProtocolData, ProtocolFailure, ProtocolFailureDecode, Reason,
+};
 use ral_core::process::Scope;
 use ral_core::shell::runtime::no_desk;
 use std::sync::Arc;
@@ -139,12 +142,20 @@ impl ExarchDesk {
         let answer = self.dispatch(req);
         recorder
             .sync()
-            .map_err(|failure| Error::new(failure.to_string()))?;
+            .map_err(|failure| self::failure(ExarchFailure::Recording(failure.failure())))?;
         answer
     }
 
     fn dispatch(&self, req: &FOValue) -> Result<FOValue, Error> {
-        match Request::decode(req).map_err(Error::new)? {
+        match Request::decode(req).map_err(|cause| {
+            Error::new(Reason::Protocol(Box::new(ProtocolFailure::Decode(
+                ProtocolFailureDecode {
+                    kind: ProtocolData::Request,
+                    operation: "exarch enquiry".into(),
+                    cause,
+                },
+            ))))
+        })? {
             Request::Agents(Agents::List) => {
                 Ok(listing(&self.call.handle, &self.call.fleet).encode())
             }
@@ -167,6 +178,7 @@ impl ExarchDesk {
             Request::Context(Context::Survey) => Ok(Survey::from(self.context_survey()?).encode()),
             Request::Context(Context::Evict(evict)) => self.context_evict(evict),
             Request::Transcript(Transcript::Index) => self.locate_then_read(
+                None,
                 |log| {
                     Ok(Vec::from_iter(
                         log.context()
@@ -178,6 +190,7 @@ impl ExarchDesk {
                 |index| Ok(index.encode()),
             ),
             Request::Transcript(Transcript::Read(read)) => self.locate_then_read(
+                Some("exarch-transcript `read"),
                 |log| log.context().locate_read(&read.turns),
                 |read| {
                     read.turns()
@@ -185,6 +198,7 @@ impl ExarchDesk {
                 },
             ),
             Request::Transcript(Transcript::Grep(grep)) => self.locate_then_read(
+                Some("exarch-transcript `grep"),
                 |log| log.context().locate_grep(grep.turns.only()),
                 |read| {
                     read.grep(&grep.pattern)
@@ -219,6 +233,10 @@ mod agents;
 mod context;
 mod pins;
 mod schedules;
+
+fn failure(cause: ExarchFailure) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Exarch(cause))))
+}
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]

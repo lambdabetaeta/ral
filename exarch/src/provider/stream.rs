@@ -13,6 +13,7 @@ use genai::chat::{
     ChatFrameSink, ChatMessage, ChatStreamEvent, FrameCtx, RawFrameRef, StopReason, StreamEnd,
     ToolCall,
 };
+use ral_core::fact::RecordingFailure;
 use ral_core::process::Scope;
 use ral_core::sync::LockExt;
 use serde::Deserialize;
@@ -88,7 +89,7 @@ impl Pool {
         selected: &Selected,
         request: Request<'_>,
         on_delta: &mut F,
-        before_attempt: &mut dyn FnMut() -> Result<(), String>,
+        before_attempt: &mut dyn FnMut() -> Result<(), RecordingFailure>,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         let model = selected.model.as_str();
@@ -130,7 +131,7 @@ impl Pool {
                             model,
                             wire,
                             Some(&options),
-                        ) => result.map_err(|error| ProviderError::from_genai(&error, model))?,
+                        ) => result.map_err(|error| ProviderError::from_genai(&error, &selected.service, model))?,
                     };
                     loop {
                         let event = tokio::select! {
@@ -141,7 +142,7 @@ impl Pool {
                             event = response.stream.next() => match event {
                                 Some(Ok(event)) => event,
                                 Some(Err(error)) => {
-                                    return Err(ProviderError::from_genai(&error, model));
+                                    return Err(ProviderError::from_genai(&error, &selected.service, model));
                                 }
                                 None => break,
                             }
@@ -166,9 +167,7 @@ impl Pool {
                             ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
                         }
                     }
-                    Err(ProviderError::local_transient(
-                        "stream ended without End event",
-                    ))
+                    Err(ProviderError::stream_ended_without_end(&selected.service, model))
                 }
                 .await;
 
@@ -202,7 +201,7 @@ fn before_request(
     retrying: Option<&ProviderError>,
     lost: Option<Usage>,
     on_delta: &mut impl FnMut(Delta<'_>),
-    before_attempt: &mut dyn FnMut() -> Result<(), String>,
+    before_attempt: &mut dyn FnMut() -> Result<(), RecordingFailure>,
 ) -> Result<(), ProviderError> {
     if let Some(cause) = retrying {
         on_delta(Delta::Retry { cause, lost });
@@ -309,12 +308,16 @@ mod tests {
             Ok(())
         };
         before_request(None, None, &mut delta, &mut certify).unwrap();
-        let error = ProviderError::local_transient("previous attempt");
+        let error = ProviderError::stream_ended_without_end("fixture", "m");
         before_request(Some(&error), None, &mut delta, &mut certify).unwrap();
         assert!(through.get() > first);
         recorder.assert_synced_through(through.get());
-        let failure =
-            before_request(None, None, &mut delta, &mut || Err("disk".into())).unwrap_err();
+        let failure = before_request(None, None, &mut delta, &mut || {
+            Err(RecordingFailure::CellPoisoned(
+                ral_core::fact::RecordingFailureCellPoisoned { agent: 1u64.into() },
+            ))
+        })
+        .unwrap_err();
         assert!(matches!(failure, ProviderError::Unavailable(_)));
         assert!(!failure.retryable());
     }
@@ -498,6 +501,7 @@ mod tests {
     fn stalled_step_out_keeps_streamed_prefix() {
         let cause = ProviderError::from_genai(
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
+            "fixture",
             "test-model",
         );
         let step = stalled_step_out(
@@ -535,6 +539,7 @@ mod tests {
     fn stalled_step_out_keeps_streamed_reasoning_even_without_text() {
         let cause = ProviderError::from_genai(
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
+            "fixture",
             "test-model",
         );
         let step = stalled_step_out(

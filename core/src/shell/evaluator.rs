@@ -9,6 +9,7 @@ pub(crate) mod pattern;
 pub(crate) mod scope;
 pub(crate) mod val;
 
+use crate::fact::{ApplyFailure, CallOrForce, EvalFailure, Reason};
 use crate::ir::{Comp, Pattern, Phrase};
 use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::Spanned;
@@ -158,11 +159,13 @@ pub fn apply(
 ) -> Settled<Value> {
     match val {
         Value::Thunk(_) | Value::Native(_) => machine::apply(val.clone(), args, mooring, shell),
-        _ => Err(
-            Error::new(format!("cannot call {} '{}'", val.type_name(), val))
-                .with_hint("only Blocks, Lambdas, and natives can be called")
-                .into(),
-        ),
+        _ => Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
+            ApplyFailure {
+                operation: CallOrForce::Call,
+                found: val.found(),
+            },
+        ))))
+        .into()),
     }
 }
 
@@ -173,7 +176,7 @@ pub(crate) fn readmit(top: &crate::ir::Toplevel, shell: &Shell) -> Settled<()> {
     for (name, site) in &top.admits {
         if let Some(value) = shell.env.get(name) {
             site.admit(value, shell.fixings())
-                .map_err(|mismatch| mismatch.refusal(&format!("${name}"), shell))?;
+                .map_err(|mismatch| mismatch.refusal(&format!("${name}")))?;
         }
     }
     Ok(())

@@ -15,7 +15,7 @@
 //! the ending; the rest is re-raised as `await` raises it.
 
 use crate::error::Error;
-use crate::fact::Io;
+use crate::fact::{Io, OperationState, Reason, StateFailure};
 use crate::io::{Retained, Streams};
 use crate::shell::runtime::{
     CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value, outcome_value,
@@ -68,7 +68,11 @@ fn cut_note(title: &str, stream: &str, retained: &Retained) -> String {
 
 /// `verb`'s refusal of a handle whose result is gone to another claimer.
 fn already_claimed(verb: &str) -> Error {
-    Error::new(format!("{verb}: this worker's result was already claimed"))
+    Error::new(Reason::State(Box::new(StateFailure::WorkerClaimed(
+        OperationState {
+            operation: verb.into(),
+        },
+    ))))
 }
 
 /// Exact await of a claimed result: replay, then conclude.
@@ -186,7 +190,7 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         Sample::Ready(settle) => {
             let outcome = match settle.end.outcome() {
                 Ok(Ok(v)) => Ok(handle.protect_value(v, shell)?),
-                Ok(Err(e)) => Err(e.record(shell)),
+                Ok(Err(e)) => Err(e.fact(shell)),
                 Err(halt) => return halt.widen().into_settled(),
             };
             let io: Io = settle.written.map(|retained| retained.bytes.into());
@@ -234,7 +238,12 @@ fn handles_of(list: &Value, verb: &str) -> Settled<Vec<HandleInner>> {
         .map(|v| v.expect_handle(verb).cloned())
         .collect::<Result<Vec<_>, _>>()?;
     if handles.is_empty() {
-        return Err(Error::new(format!("{verb}: no handles to wait for")).into());
+        return Err(Error::new(Reason::State(Box::new(StateFailure::EmptyWait(
+            OperationState {
+                operation: verb.into(),
+            },
+        ))))
+        .into());
     }
     Ok(handles)
 }

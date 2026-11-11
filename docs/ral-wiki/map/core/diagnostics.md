@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 248aff5c
-generated_at_date: 2026-11-07
-covers_paths: [core/src/error.rs, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
+covers_paths: [core/src/error.rs, core/src/fact/error.rs, core/src/fact/error/, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
 # Map: core / diagnostics
@@ -28,12 +28,29 @@ and `prov: Option<Prov>`, together with the report of one unwinding: stored
 `rejection`, a `context` prefix and the `Unwound` facts (`abandoned_tail`, a
 saturating `discarded` byte count). Its optional parts are boxed because an
 `Error` rides in every `Settled`, and a compile-time assertion keeps it under
-clippy's `result_large_err` threshold. `Error::new` takes anything that is a
-`Reason`; `with_hint` appends, `with_context` prepends, and `Display` is the
-context chain followed by `Reason::describe`. Rendering is not here: it lives in
-`shell/runtime/error.rs`, below. The wording of an I/O failure is `Error::io`,
-the one phrasing every door shares, which says the same fixed string for
-`NotFound` and `PermissionDenied` on every host.
+clippy's `result_large_err` threshold. `Error::new(reason: Reason) -> Error`
+accepts no implicit string conversion. `with_hint` appends, `with_context`
+prepends, and `Display` is the context chain followed by `Reason::describe`.
+Rendering lives in `shell/runtime/error.rs`, below.
+
+**Operational reasons are facts; `Raised(Claim)` is authored text.**
+`fact/error.rs` declares the shared `Reason`; `fact/error/` owns its closed
+payload families and their `Datum` definitions (`ErrorRecord` alone is
+`Typed`). `Reason::describe`
+and `Reason::advice` read those facts, not rendered messages.
+`Error::io(operation: IoOperation, subject: IoSubject, error: &io::Error)`
+borrows the native error and projects its cause through `io::failure`, retaining
+custom path/owned-I/O facts. Fixed not-found and permission-denied wording is
+derived centrally; opaque OS/library detail remains beneath a typed foreign
+cause, not a general message fallback.
+
+**A block the checker refuses at install is one fact.** A handler, catch-all,
+hook or rc binding that the runtime vets and the checker refuses becomes
+`InvalidCause::IllTyped { role: BlockRole, diagnostics }`
+(`fact/error/invalid.rs`): each `TypeDiagnostic` is the stable code and
+rendered message of one checker error, projected by `TypeError::diagnostic`
+and gathered by `ill_typed` (`shell/runtime/coerce.rs`). The checker's runtime
+entry points return every close error, not the first.
 
 **A failure carries one provenance: the failing frame's name and site.**
 `prov` is `None` until claimed. `Break::locate(name, span, shell)`
@@ -104,14 +121,16 @@ with `reject`. A run that never reached evaluation carries one in
 its `StaticDiagnostics` (`shell/run.rs`) — `Compile(Rejection)`, beside `Host`, a
 spanless pre-run failure (an unknown hook, a non-ground argument) — whose
 `render` is what every host on the wire prints through `Report::Static`
-([[map/core/engine-protocol|engine-protocol]]). `Compile` is not folded into
-`Error`: a loaded file's parse error would then raise status 2, not 1. A file
+([[map/core/engine-protocol|engine-protocol]]). Static rejection keeps its
+own status, separate from a runtime `Reason::Compile`, which exits 1. A file
 loaded at runtime — a `use`d module, the rc, a plugin, a capability profile —
 carries its rejection on the runtime `Error` instead, as `Error::rejection`,
 which `shell::load::check_source` attaches with `with_rejection` at the
 loader's compile door; `CompileError` itself knows no runtime error.
-Its `Reason::Raised` carries the plain compile sentence a `try` handler reads
-with `describe`; a loader's context prefix belongs only to the report.
+Its `Reason::Compile(CompileFailure { source, phase })` keeps a portable
+summary: `CompilePhase::Parse` or `Types(TypeErrorCount { count })`. A `try`
+handler describes that summary; the rich source-labelled rejection, witness
+and loader context belong only to the report.
 `locate` supplies the `use` frame's provenance, so `$err[site]` names the
 `use` that failed, while the rejection draws the loaded source's compile
 failure.
@@ -139,13 +158,18 @@ Rendering tests live inline with each owner: generic renderer tests in
 `render` function** in `shell/runtime/error.rs`. `Error::diagnosis` supplies
 the described reason and report-only facts; `Stop::diagnosis` supplies its
 cause and provenance. `Reason::describe(&self)` is the one wording, reading
-the reason alone; `Error::describe` and `ErrorRecord::describe` delegate.
-A report's notes are the error's stored hints, then `advice`: the one note the
-record determines (signal advice for `signaled`, the session's exit-hints entry
-for `exited`, keyed by program basename and status), recomputed at each render.
-Notes have no precedence; all are shown, composed under SPEC §13.1. Context
-prefixes never change the reason. The renderer then adds the saturating counted
-discard and, when no note is present and the failure is not a spawn refusal, an abandoned-tail note.
+the reason alone; `Error::describe` and `ErrorFact::describe` delegate, and
+the record's `message` is its value.
+`Reason::advice` derives ordered intrinsic notes; runtime `advice` appends the
+session's exit-hints entry for `exited`, keyed by program basename and status.
+A denial's intrinsic remedy precedes stored hints. Other reasons show stored
+hints, then `context_advice` for the report's operation context, then intrinsic
+and exit-table advice. All are shown, composed under SPEC §13.1; stored hints
+retain attachment order. Context prefixes never change the reason. Intrinsic
+advice survives record projection and re-raise by recomputation; report-context
+advice does not survive without that context. The renderer then adds the
+saturating counted discard and, when no note is present and the failure is not
+a spawn refusal, an abandoned-tail note.
 A panic is spanless `run panicked: …`; values, exits and reader-gone stops
 render nothing. `Error::render`, `compact` and `render_spanless` use that same
 renderer; `Error::plain` is its words alone, uncoloured and unlaid (message

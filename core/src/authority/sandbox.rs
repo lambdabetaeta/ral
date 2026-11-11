@@ -56,8 +56,6 @@ pub use reexec::pinned_arg0;
 #[cfg(unix)]
 pub(crate) use carriers::carriers;
 pub(crate) use launch::{Confinement, Image, Ownership, ProgramLaunch, interpreter_of};
-#[cfg(target_os = "macos")]
-pub use macos::ALREADY_PROFILED;
 #[cfg(unix)]
 pub(crate) use warrant::serve_warrant;
 
@@ -97,18 +95,17 @@ pub(crate) use macos::RENDERS_EXEC as EXEC_ENFORCED;
 #[cfg(windows)]
 pub(crate) const EXEC_ENFORCED: bool = false;
 
-#[cfg(any(target_os = "linux", windows))]
-pub(crate) use crate::process::launch::unavailable;
-
 /// Boot-pinned objects the baseline protects against writes under every grant.
-pub(super) fn protected_images() -> Vec<(ObjectId, &'static str)> {
-    let images: [Option<(ObjectId, &'static str)>; _] = [
+pub(super) fn protected_images() -> Vec<(ObjectId, crate::fact::PinnedBinary)> {
+    let images: [Option<(ObjectId, crate::fact::PinnedBinary)>; _] = [
         #[cfg(target_os = "linux")]
         linux::envelope()
             .ok()
-            .map(|e| (e.object_id(), linux::BWRAP)),
+            .map(|e| (e.object_id(), crate::fact::PinnedBinary::Bwrap)),
         #[cfg(unix)]
-        reexec::OWN.get().map(|o| (o.object_id(), "ral")),
+        reexec::OWN
+            .get()
+            .map(|o| (o.object_id(), crate::fact::PinnedBinary::Ral)),
     ];
     images.into_iter().flatten().collect()
 }

@@ -12,7 +12,7 @@
 //! object the grant judged, and paths resolve against the shell's scoped cwd.
 
 use crate::authority::policy::FsOp;
-use crate::fact::{Read, Write};
+use crate::fact::{IoOperation, IoSubject, Read, Write};
 use crate::io::{IoPatch, Sink, Source, SourceReader};
 use crate::ir::{Redirects, StderrTarget, StdinSource, WriteMode};
 use crate::path::{
@@ -204,7 +204,7 @@ fn open_stdin_source(
             } else {
                 shell.locate::<Reading>(&rp)?.read()
             }
-            .map_err(io_error(path))?;
+            .map_err(io_error(IoOperation::Open, path))?;
             shell.observe(mooring, Observed::Read(Read { path: path.clone() }));
             SourceReader::file(file)
         }
@@ -215,7 +215,14 @@ fn open_stdin_source(
                 .strip_prefix("\r\n")
                 .or_else(|| word.strip_prefix('\n'))
                 .unwrap_or(word);
-            SourceReader::from_bytes(body.as_bytes().to_vec()).map_err(io_error("here-string"))?
+            SourceReader::from_bytes(body.as_bytes().to_vec()).map_err(|error| {
+                crate::process::launch::prepare_io(
+                    crate::fact::PrepareStep::Stdio,
+                    crate::fact::PrepareSubject::Stream(crate::fact::StandardStream::Stdin),
+                    &error,
+                )
+                .with_context("preparing a here-string")
+            })?
         }
     };
     Ok(Source::Reader(reader))
@@ -259,7 +266,10 @@ fn open_write_target(
 ) -> Settled<(File, Option<PendingWrite>)> {
     let rp = shell.resolve(path);
     if rp.is_discard() {
-        return Ok((open_discard().map_err(io_error(path))?, None));
+        return Ok((
+            open_discard().map_err(io_error(IoOperation::Open, path))?,
+            None,
+        ));
     }
     let located = shell.locate::<Writing>(&rp)?;
     let streaming = match mode {
@@ -272,19 +282,30 @@ fn open_write_target(
             .then_some(Streaming::Truncate),
     };
     let mut handle = match streaming {
-        Some(access) => {
-            WriteHandle::Stream(located.open_streaming(access).map_err(io_error(path))?)
-        }
-        None => WriteHandle::Atomic(located.stage(Visibility::Public).map_err(io_error(path))?),
+        Some(access) => WriteHandle::Stream(
+            located
+                .open_streaming(access)
+                .map_err(io_error(IoOperation::Open, path))?,
+        ),
+        None => WriteHandle::Atomic(
+            located
+                .stage(Visibility::Public)
+                .map_err(io_error(IoOperation::Stage, path))?,
+        ),
     };
-    let writer = handle.file().try_clone().map_err(io_error(path))?;
+    let writer = handle
+        .file()
+        .try_clone()
+        .map_err(io_error(IoOperation::Duplicate, path))?;
     let before = if heard {
         handle.before_image(shell)
     } else {
         None
     };
     if let (WriteHandle::Stream(streamed), Some(Streaming::Truncate)) = (&handle, streaming) {
-        streamed.truncate().map_err(io_error(path))?;
+        streamed
+            .truncate()
+            .map_err(io_error(IoOperation::Write, path))?;
     }
     let write = PendingWrite {
         path: path.to_owned(),
@@ -340,7 +361,7 @@ impl PendingWrite {
             // A stream's bytes landed as they were written: it cannot abort.
             (WriteHandle::Stream(_), _) => (WriteOutcome::Committed, Ok(())),
         };
-        let published = published.map_err(io_error(&path));
+        let published = published.map_err(io_error(IoOperation::Write, &path));
         // A write that did not land changed nothing, so it has no images.
         let landed = outcome == WriteOutcome::Committed;
         let image = |bytes: Option<Vec<u8>>| bytes.filter(|_| landed).map(Bytes::from);
@@ -442,20 +463,24 @@ impl Shell {
     /// The open, the write, or the publish fails.
     pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> Settled<()> {
         let (mut writer, write) = open_write_target(path, WriteMode::Write, false, self)?;
-        writer.write_all(bytes).map_err(io_error(path))?;
+        writer
+            .write_all(bytes)
+            .map_err(io_error(IoOperation::Write, path))?;
         drop(writer);
         if let Some(PendingWrite {
             handle: WriteHandle::Atomic(staged),
             ..
         }) = write
         {
-            staged.publish().map_err(io_error(path))?;
+            staged
+                .publish()
+                .map_err(io_error(IoOperation::Write, path))?;
         }
         Ok(())
     }
 }
 
 /// An I/O failure on `name`, as an error.
-fn io_error(name: &str) -> impl Fn(io::Error) -> Error + '_ {
-    move |e| Error::io(name, &e)
+fn io_error(operation: IoOperation, name: &str) -> impl Fn(io::Error) -> Error + '_ {
+    move |e| Error::io(operation, IoSubject::Path(name.into()), &e)
 }

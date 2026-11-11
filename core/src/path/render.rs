@@ -119,7 +119,7 @@ pub(crate) fn render_objects<'a>(
             &'a [super::RealPath],
         ),
     >,
-) -> Result<Vec<Object>, String> {
+) -> Result<Vec<Object>, crate::fact::ProjectionFailure> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut objects = BTreeMap::<Rendered, (super::RealPath, [BTreeSet<Rendered>; 2])>::new();
     for (position, surface, passed) in grants {
@@ -159,17 +159,13 @@ pub(crate) fn render_objects<'a>(
 /// An OS rule is a string literal, so a position that is not valid Unicode
 /// would be rendered lossily as a different inode; a grant that cannot be
 /// expressed faithfully is refused, not approximated.
-pub(crate) fn render_real(real: &super::RealPath) -> Result<Vec<Rendered>, String> {
+pub(crate) fn render_real(
+    real: &super::RealPath,
+) -> Result<Vec<Rendered>, crate::fact::ProjectionFailure> {
     super::canon::twins(real.as_path())
         .map(|twin| {
-            // `{twin:?}`, not `.display()`: `Display` would paper over the
-            // fault with the very U+FFFD substitution being refused.
-            #[allow(clippy::unnecessary_debug_formatting)]
             let text = site!(Silent::RuleText, &twin => to_str()).ok_or_else(|| {
-                format!(
-                    "ral: sandbox grant path is not valid UTF-8, refusing to render \
-                     it into a sandbox rule that could name the wrong path: {twin:?}"
-                )
+                crate::fact::ProjectionFailure::UnrenderablePath(super::shown(&twin))
             })?;
             Ok(Rendered(text.to_owned()))
         })
@@ -225,7 +221,7 @@ pub(crate) fn rendered_ancestors<'a>(
 /// As [`render_real`].
 pub(crate) fn render_excluded<'a>(
     denies: impl IntoIterator<Item = &'a super::RealPath>,
-) -> Result<Vec<Rendered>, String> {
+) -> Result<Vec<Rendered>, crate::fact::ProjectionFailure> {
     let mut names = std::collections::BTreeSet::new();
     for real in denies {
         names.extend(render_real(real)?);
@@ -247,7 +243,7 @@ pub(crate) fn render_excluded<'a>(
 pub(crate) fn pinned_dirs<'a>(
     denies: impl IntoIterator<Item = &'a super::RealPath>,
     writes: &[super::RealPath],
-) -> Result<Vec<Rendered>, String> {
+) -> Result<Vec<Rendered>, crate::fact::ProjectionFailure> {
     let pins: std::collections::BTreeSet<_> = denies
         .into_iter()
         .flat_map(|real| {
@@ -306,7 +302,10 @@ mod tests {
         .expect("a position's spelling");
         let err = render_real(&real)
             .expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
-        assert!(err.contains("not valid UTF-8"), "got {err:?}");
+        assert!(matches!(
+            err,
+            crate::fact::ProjectionFailure::UnrenderablePath(_)
+        ));
     }
 
     /// A name the renderer cannot express faithfully must be refused, never
@@ -327,7 +326,10 @@ mod tests {
 
         let err = render_real(&crate::test_helper::real(&target))
             .expect_err("a non-UTF-8 position must fail closed");
-        assert!(err.contains("not valid UTF-8"), "got {err:?}");
+        assert!(matches!(
+            err,
+            crate::fact::ProjectionFailure::UnrenderablePath(_)
+        ));
     }
 
     /// A frozen real path whose name has since become a symlink renders to

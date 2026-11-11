@@ -1,6 +1,6 @@
 # Test: a boundary admits a value against the type the script uses it at
 
-let refusal = { |body| try $body { |e| echo !{describe $e}; return () } }
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
 
 # A match, and a deep mismatch that names its pointer and its line
 let sizes = !{to-string '{"items": [{"size": 1}, {"size": 2}]}' | from-json}

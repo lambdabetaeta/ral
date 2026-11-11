@@ -16,6 +16,7 @@
 use super::flow::Settled;
 use super::value::Value;
 use super::{Error, Mooring, Shell};
+use crate::fact::{InvariantFailure, Reason};
 use crate::ty::Site;
 use crate::typecheck::builtins::{
     BuiltinDiagnostic, BuiltinTypeRule, Convention, Decl, LANGUAGE_CONSTANTS, Manifest,
@@ -153,10 +154,9 @@ impl BuiltinEntry {
             (BuiltinBody::Boundary(f), Some(site)) => f(args, site, mooring, shell),
             // Checking gives every boundary call a frozen site; only a host calling
             // a door outside a checked program reaches this.
-            (BuiltinBody::Boundary(_), None) => Err(Error::new(format!(
-                "{}: reached without a checked site",
-                self.decl.name
-            ))
+            (BuiltinBody::Boundary(_), None) => Err(Error::new(Reason::Invariant(Box::new(
+                InvariantFailure::BoundaryWithoutSite(self.decl.name.to_string()),
+            )))
             .into()),
         }?;
         // The declared scheme, not the body, is authoritative: asserted in
@@ -342,5 +342,20 @@ mod tests {
             ]
         );
         assert!(CORE_BUILTINS.iter().all(|e| !e.decl.is_boundary()));
+    }
+    #[test]
+    fn a_boundary_without_a_site_remains_a_recoverable_invariant() {
+        let mut shell = crate::test_helper::core_shell();
+        let entry = &BOUNDARY_BUILTINS[0];
+        let Err(super::super::Break::Error(error)) = entry.run(&[], &Mooring::adrift(), &mut shell)
+        else {
+            panic!("boundary refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Invariant(Box::new(InvariantFailure::BoundaryWithoutSite(
+                entry.decl.name.to_string()
+            )))
+        );
     }
 }

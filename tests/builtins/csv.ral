@@ -11,24 +11,24 @@ echo $back[1][b]
 to-csv $rows
 
 # A row with more or fewer fields than the header is refused, not cut or padded.
-try { let _short = !{to-string "a,b\n1\n" | from-csv} } { |e| echo !{describe $e} }
-try { let _long = !{to-string "a,b\n1,2,3\n" | from-csv} } { |e| echo !{describe $e} }
+try { let _short = !{to-string "a,b\n1\n" | from-csv} } { |e| echo $e[message] }
+try { let _long = !{to-string "a,b\n1,2,3\n" | from-csv} } { |e| echo $e[message] }
 
 # A blank line is no row at all, so it is not a ragged one.
 echo !{length !{to-string "a,b\n1,2\n\n" | from-csv}}
 
 # A duplicate header column is refused: a map cannot hold two `a`s.
-try { let _dup = !{to-string "a,a\n1,2\n" | from-csv} } { |e| echo !{describe $e} }
+try { let _dup = !{to-string "a,a\n1,2\n" | from-csv} } { |e| echo $e[message] }
 
 # A row whose keys differ from the first's is refused by name, and nothing is
 # written: no `b` dropped, no `''` standing in for an absent key.
-try { to-csv [[:, a: '1'], [:, a: '2', b: '3']] } { |e| echo !{describe $e} }
-try { to-csv [[:, a: '1', b: '2'], [:, b: '3', c: '4']] } { |e| echo !{describe $e} }
-try { to-csv [[:]] } { |e| echo !{describe $e} }
+try { to-csv [[:, a: '1'], [:, a: '2', b: '3']] } { |e| echo $e[message] }
+try { to-csv [[:, a: '1', b: '2'], [:, b: '3', c: '4']] } { |e| echo $e[message] }
+try { to-csv [[:]] } { |e| echo $e[message] }
 
 let encoded = !{to-csv [[a: 1]] | from-string}
 if $[$encoded != "a\n1\n"] { fail 'to-csv must encode a record with a numeric cell' }
 
-try { to-csv [[a: [k: 1]]] } { |e| echo !{describe $e} }
+try { to-csv [[a: [k: 1]]] } { |e| echo $e[message] }
 
 echo 'csv tests done'

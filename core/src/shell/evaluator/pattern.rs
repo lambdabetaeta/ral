@@ -2,6 +2,9 @@
 //! Pure and all-or-nothing: [`destructure`] collects every binding first, so a
 //! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — binds nothing.
 
+use crate::fact::{
+    CountRule, EvalFailure, Expected, KeyOrField, MissingEntry, PatternLength, Reason, ValueShape,
+};
 use crate::ir::{Name, Pattern};
 use crate::shell::runtime::{Binding, Env, Error, Settled, Value};
 
@@ -50,37 +53,18 @@ fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> S
         }
         Pattern::List { elems, rest } => {
             let Value::List(items) = value else {
-                return Err(
-                    Error::new(format!("expected List, got {}", value.type_name()))
-                        .with_hint("right-hand side must be a list")
-                        .into(),
-                );
+                return Err(value
+                    .expected("pattern", Expected::Shape(ValueShape::List))
+                    .into());
             };
             // `Ty::List` carries no length, so a too-short list typechecks;
             // catch it here rather than silently skip element patterns.
             if elems.len() > items.len() {
-                let hint = if rest.is_none() {
-                    "use [..., ...rest] to capture remaining elements"
-                } else {
-                    "the list has too few elements for the named bindings"
-                };
-                return Err(Error::new(format!(
-                    "need {} values, got {}",
-                    elems.len(),
-                    items.len()
-                ))
-                .with_hint(hint)
-                .into());
+                return Err(length_failure(elems.len(), items.len(), rest.is_some()).into());
             }
             // Without a `...rest` tail, a longer list would lose its extras in silence.
             if rest.is_none() && items.len() > elems.len() {
-                return Err(Error::new(format!(
-                    "need {} values, got {}",
-                    elems.len(),
-                    items.len()
-                ))
-                .with_hint("there are more elements; use [..., ...rest] to capture them")
-                .into());
+                return Err(length_failure(elems.len(), items.len(), false).into());
             }
             for (i, pat) in elems.iter().enumerate() {
                 let item = items
@@ -98,25 +82,40 @@ fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> S
         }
         Pattern::Record(entries) => {
             let Value::Map(m) = value else {
-                return Err(
-                    Error::new(format!("expected Map, got {}", value.type_name()))
-                        .with_hint("right-hand side must be a map")
-                        .into(),
-                );
+                return Err(value
+                    .expected("pattern", Expected::Shape(ValueShape::Map))
+                    .into());
             };
             for entry in entries {
                 let key_label = &entry.key;
                 let Some(val) = m.get(key_label) else {
-                    let ks: Vec<&str> = m.keys().collect();
-                    return Err(Error::new(format!("key '{key_label}' not found"))
-                        .with_hint(format!("available: {}", ks.join(", ")))
-                        .into());
+                    return Err(Error::new(Reason::Evaluation(Box::new(
+                        EvalFailure::MissingEntry(MissingEntry {
+                            kind: KeyOrField::Field,
+                            key: key_label.clone(),
+                            available: m.keys().map(str::to_owned).collect(),
+                        }),
+                    )))
+                    .into());
                 };
                 stage(&entry.pattern, &val, staged)?;
             }
             Ok(())
         }
     }
+}
+
+fn length_failure(expected: usize, got: usize, rest: bool) -> Error {
+    Error::new(Reason::Evaluation(Box::new(EvalFailure::PatternLength(
+        PatternLength {
+            expected: if rest {
+                CountRule::AtLeast(expected.into())
+            } else {
+                CountRule::Exactly(expected.into())
+            },
+            got: got.into(),
+        },
+    ))))
 }
 
 #[cfg(test)]
@@ -131,10 +130,13 @@ mod tests {
         }
     }
 
-    fn message(result: Settled<Vec<(Name, Value)>>) -> String {
+    fn failure(result: Settled<Vec<(Name, Value)>>) -> EvalFailure {
         match result {
-            Err(Break::Error(e)) => e.describe().into_owned(),
-            other => panic!("expected length error, got {other:?}"),
+            Err(Break::Error(Error {
+                reason: Reason::Evaluation(e),
+                ..
+            })) => *e,
+            other => panic!("expected pattern failure, got {other:?}"),
         }
     }
 
@@ -143,7 +145,13 @@ mod tests {
     fn rest_pattern_errors_when_list_shorter_than_elems() {
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![Value::string("x")]);
-        assert!(message(destructure(&pat, &value)).contains("need 2 values, got 1"));
+        assert_eq!(
+            failure(destructure(&pat, &value)),
+            EvalFailure::PatternLength(PatternLength {
+                expected: CountRule::AtLeast(2usize.into()),
+                got: 1usize.into()
+            })
+        );
     }
 
     #[test]
@@ -154,7 +162,13 @@ mod tests {
             Value::string("y"),
             Value::string("z"),
         ]);
-        assert!(message(destructure(&pat, &value)).contains("need 2 values, got 3"));
+        assert_eq!(
+            failure(destructure(&pat, &value)),
+            EvalFailure::PatternLength(PatternLength {
+                expected: CountRule::Exactly(2usize.into()),
+                got: 3usize.into()
+            })
+        );
     }
 
     #[test]
@@ -171,6 +185,38 @@ mod tests {
         assert_eq!(
             env.get("rest"),
             Some(&Value::list(vec![Value::string("z")])),
+        );
+    }
+    #[test]
+    fn pattern_shape_and_missing_field_failures_preserve_their_distinctions() {
+        for (pattern, shape) in [
+            (list_pat(&["x"], None), ValueShape::List),
+            (Pattern::Record(vec![]), ValueShape::Map),
+        ] {
+            let Err(Break::Error(error)) = destructure(&pattern, &Value::Unit) else {
+                panic!("invalid pattern input")
+            };
+            assert_eq!(
+                error.reason,
+                Value::Unit
+                    .expected("pattern", Expected::Shape(shape))
+                    .reason
+            );
+        }
+        let pattern = Pattern::Record(vec![crate::ir::FieldPattern {
+            key: "wanted".into(),
+            pattern: Pattern::Wildcard,
+        }]);
+        assert_eq!(
+            failure(destructure(
+                &pattern,
+                &Value::map(vec![("available".into(), Value::Unit)])
+            )),
+            EvalFailure::MissingEntry(MissingEntry {
+                kind: KeyOrField::Field,
+                key: "wanted".into(),
+                available: vec!["available".into()]
+            })
         );
     }
 }

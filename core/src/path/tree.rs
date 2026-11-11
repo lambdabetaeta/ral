@@ -202,28 +202,15 @@ impl WalkEntry {
     ///
     /// # Errors
     /// A name no ral string can hold.
-    pub fn name(&self, base: Option<&CwdPath>) -> Result<String, String> {
+    pub fn name(&self, base: Option<&CwdPath>) -> Result<String, crate::path::NotUtf8> {
         let path = self.shown.as_path();
         let rel = base
             .and_then(|base| site!(Silent::WalkedRelative, path => strip_prefix(base)).ok())
             .unwrap_or(path);
         let rel = site!(Silent::WalkedRelative, rel => strip_prefix(".")).unwrap_or(rel);
-        let text = site!(Silent::Unnameable, rel => to_str());
-        text.map(|_| literal_relative(&shown(rel)))
-            .ok_or_else(|| unnameable(rel))
+        crate::path::utf8(rel)?;
+        Ok(literal_relative(&shown(rel)))
     }
-}
-
-#[allow(
-    clippy::unnecessary_debug_formatting,
-    reason = "Debug escapes the invalid bytes; Display would mangle them"
-)]
-fn unnameable(shown: &Path) -> String {
-    let dir = site!(Silent::Unnameable, shown => ancestors())
-        .find_map(|above| site!(Silent::Unnameable, above => to_str()))
-        .unwrap_or("");
-    let name = site!(Silent::Unnameable, shown => strip_prefix(dir)).unwrap_or(shown);
-    format!("{dir}: {name:?} is not valid UTF-8, so no ral string can hold it; rename it?")
 }
 
 /// A directory entered, and what is left of it to yield.
@@ -511,7 +498,7 @@ impl Entries {
             if self.region.admits(&entry) {
                 let seen = match entry.seen() {
                     Ok(seen) => Ok((seen.stat.clone(), seen.id)),
-                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+                    Err(e) => Err(io::Error::new(e.kind(), crate::io::failure(e))),
                 };
                 items.push(Item {
                     name: entry.name().clone(),

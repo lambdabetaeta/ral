@@ -75,7 +75,7 @@ pub fn resume(sessions: &OwnDir, id: AgentId) -> io::Result<(Context, (Mail, Sch
             "cannot resume {}: the first record is {record:?}; expected a root, SessionStarted {{ parent: None, .. }}; is this a copied child log?",
             ral_core::path::shown(&path)
         )),
-        Refusal::Unreadable(_) => refused(refusal),
+        Refusal::Unreadable(_) | Refusal::ReadBack(_) => refused(refusal),
     })?;
     if let Record::Control(Control::SessionStarted(started)) = head.value()
         && started.parent.is_some()

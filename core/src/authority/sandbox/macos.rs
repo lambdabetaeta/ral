@@ -12,6 +12,10 @@
 
 use super::{ExecProjection, FsProjection, RenderedLists, SandboxProjection};
 use crate::authority::policy::{ExecDeny, Gpu, KernelAllow, Net};
+use crate::fact::{
+    LaunchFailure, OsFailure, ProjectionFailure, SeatbeltFailure, SeatbeltFailureAlreadyConfined,
+    SeatbeltFailureEntry,
+};
 use crate::path::{
     Excluded, LeafMode, LexicalPath, Object, Rendered, join_slash, render_excluded, render_real,
     rendered_ancestors, walk_lenient,
@@ -22,26 +26,10 @@ use std::fmt;
 use std::os::raw::{c_char, c_int};
 use std::sync::OnceLock;
 
-/// Seatbelt profiles do not stack: a process already inside one gets EPERM
-/// entering another, and a launch promising more than that profile is refused.
-pub const ALREADY_PROFILED: &str = "this process is already inside a macOS sandbox profile and macOS \
-     will not let it enter a second, so the launch is refused rather than run under that wider \
-     profile; is ral itself running confined?";
-
 /// Apply `profile` to the current process.  Seatbelt entry cannot be undone.
-pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
-    fn cstr(s: &str, what: &str) -> std::io::Result<CString> {
-        CString::new(s).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{what} contains NUL byte"),
-            )
-        })
-    }
-    let profile_cstr = cstr(profile, "sandbox profile")?;
-    // No SBPL parameters: a lone null terminator.
+pub(super) fn apply_profile(profile: &str) -> Result<(), SeatbeltFailure> {
+    let profile_cstr = CString::new(profile).map_err(|_| SeatbeltFailure::Nul)?;
     let parameter_ptrs: [*const c_char; 1] = [std::ptr::null()];
-
     let mut errorbuf: *mut c_char = std::ptr::null_mut();
     let rc = unsafe {
         sandbox_init_with_parameters(
@@ -52,24 +40,25 @@ pub(super) fn apply_profile(profile: &str) -> std::io::Result<()> {
         )
     };
     if rc != 0 {
-        let already_profiled = std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        let message = if errorbuf.is_null() {
-            "sandbox_init_with_parameters failed".to_string()
+        let error = std::io::Error::last_os_error();
+        let detail = if errorbuf.is_null() {
+            None
         } else {
-            // SAFETY: Seatbelt set `errorbuf` to a NUL-terminated message it
-            // owns, which is freed once, after the copy.
-            unsafe {
+            // SAFETY: Seatbelt owns this diagnostic until freed after the copy.
+            Some(unsafe {
                 let message = CStr::from_ptr(errorbuf).to_string_lossy().into_owned();
                 sandbox_free_error(errorbuf);
                 message
-            }
+            })
         };
-        if already_profiled {
-            return Err(std::io::Error::other(format!(
-                "{ALREADY_PROFILED} ({message})"
-            )));
-        }
-        return Err(std::io::Error::other(message));
+        return Err(if error.raw_os_error() == Some(libc::EPERM) {
+            SeatbeltFailure::AlreadyConfined(SeatbeltFailureAlreadyConfined { detail })
+        } else {
+            SeatbeltFailure::Entry(SeatbeltFailureEntry {
+                cause: OsFailure::from(&error),
+                detail,
+            })
+        });
     }
     Ok(())
 }
@@ -151,13 +140,15 @@ impl fmt::Display for Profile {
     }
 }
 
-pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
+pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, LaunchFailure> {
     let mut profile = Profile {
         net: policy.net,
         gpu: policy.gpu,
         ..Profile::default()
     };
-    let rendered = policy.rendered()?;
+    let rendered = policy
+        .rendered()
+        .map_err(|e| LaunchFailure::Seatbelt(SeatbeltFailure::Profile(e)))?;
     match &rendered.fs {
         FsProjection::Restricted(lists) => emit_fs_restricted(&mut profile, lists),
         FsProjection::Unrestricted => {
@@ -173,11 +164,14 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         emit_gpu_caches(&mut profile.fs_allows, gpu_caches());
     }
 
-    emit_exec_rules(&mut profile, &rendered.exec)?;
+    emit_exec_rules(&mut profile, &rendered.exec)
+        .map_err(|e| LaunchFailure::Seatbelt(SeatbeltFailure::Profile(e)))?;
 
     // Ral's own file, rendered like the rest: execve presents `/tmp/x` as
     // `/private/tmp/x`.  Protected whatever the grant, never admitted by it.
-    let own = render_real(super::reexec::own()?.trace().real())?;
+    let pin = super::reexec::own().map_err(LaunchFailure::Pin)?;
+    let own = render_real(pin.trace().real())
+        .map_err(|e| LaunchFailure::Seatbelt(SeatbeltFailure::Profile(e)))?;
     let pinned = rendered
         .fs
         .lists()
@@ -308,7 +302,7 @@ fn exec_clauses<'a>(
 ///
 /// `Err` when a name's expansion is not valid UTF-8, which [`render_real`]
 /// refuses.
-fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), String> {
+fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), ProjectionFailure> {
     let ExecProjection::Restricted(rules) = exec else {
         profile.exec_rules.push(ANY_EXEC.to_string());
         return Ok(());
@@ -316,7 +310,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
     // An exclusion at each position it holds, its name's and its link's
     // target's, as the fs renderers render one.
     let excluded = |excluded: &Excluded| render_excluded(&excluded.positions());
-    let positives = rules.allows().map(|scope| -> Result<_, String> {
+    let positives = rules.allows().map(|scope| -> Result<_, ProjectionFailure> {
         Ok(match scope {
             KernelAllow::Any => vec![ANY_EXEC.to_string()],
             KernelAllow::Dir(dir) => {
@@ -325,7 +319,7 @@ fn emit_exec_rules(profile: &mut Profile, exec: &ExecProjection) -> Result<(), S
             KernelAllow::File(real) => exec_clauses(true, &render_real(real)?, Filter::Literal),
         })
     });
-    let negatives = rules.denies().map(|scope| -> Result<_, String> {
+    let negatives = rules.denies().map(|scope| -> Result<_, ProjectionFailure> {
         Ok(match scope {
             ExecDeny::Dir(dir) => exec_clauses(false, &excluded(&dir.real)?, Filter::Subpath),
             ExecDeny::File(file) => exec_clauses(false, &excluded(&file.real)?, Filter::Literal),
@@ -639,6 +633,14 @@ mod tests {
         profile
             .find(form)
             .unwrap_or_else(|| panic!("missing {form}:\n{profile}"))
+    }
+
+    #[test]
+    fn seatbelt_profile_nul_is_typed_before_the_os_call() {
+        assert_eq!(
+            super::apply_profile("\0"),
+            Err(crate::fact::SeatbeltFailure::Nul)
+        );
     }
 
     #[test]

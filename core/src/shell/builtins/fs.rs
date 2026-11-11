@@ -9,9 +9,11 @@
 
 use crate::error::Error;
 use crate::fact::{DirEntry, FileInfo};
+use crate::fact::{InvalidCause, IoOperation, IoSubject, PathFailure, PathFailureGlob};
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Shell, Value};
 use std::io;
 use std::path::Path;
@@ -50,12 +52,8 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
 fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Judged<Writing>>> {
     let rp = shell.anchor(&crate::host::temp_dir());
     let dir = shell.locate_dir::<Writing>(&rp)?;
-    crate::path::utf8(dir.real().as_path()).map_err(|e| {
-        Error::new(format!(
-            "{ctx}: the temp directory {e}, so no path made in it can be returned as text; \
-             point TMPDIR (TMP on Windows) at one that is"
-        ))
-    })?;
+    crate::path::utf8(dir.real().as_path())
+        .map_err(|e| invalid(ctx, InvalidCause::Path((&e).into())))?;
     Ok(dir)
 }
 
@@ -65,19 +63,27 @@ fn writable_temp_dir(ctx: &str, shell: &mut Shell) -> Settled<Dir<Judged<Writing
 /// is a different position.
 fn made_in(
     ctx: &str,
+    operation: IoOperation,
     shell: &mut Shell,
     parent: &Dir<Judged<Writing>>,
     make: impl Fn(Located<Judged<Writing>>) -> io::Result<String>,
 ) -> Settled<Value> {
-    let failed = |e: &dyn std::fmt::Display| Error::new(format!("{ctx}: {e}"));
     loop {
-        let name = EntryName::fresh("ral-tmp-").map_err(|e| failed(&e))?;
+        let name = EntryName::fresh("ral-tmp-").map_err(|e| {
+            Error::io(
+                operation,
+                IoSubject::Path(shown(parent.real().as_path())),
+                &e.into(),
+            )
+            .with_context(ctx)
+        })?;
         let target = parent.absent(name);
         let target = shell.judge::<Writing>(target)?;
+        let subject = IoSubject::Path(shown(target.real().as_path()));
         match make(target) {
             Ok(made) => return Ok(Value::string(made)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(failed(&e).into()),
+            Err(e) => return Err(Error::io(operation, subject, &e).with_context(ctx).into()),
         }
     }
 }
@@ -93,32 +99,46 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 }
 
 fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Value> {
-    made_in("temp-dir", shell, parent, |target| {
-        target
-            .create_dir(Visibility::Private)
-            .map(|dir| shown(dir.real().as_path()))
-    })
+    made_in(
+        "temp-dir",
+        IoOperation::CreateDirectory,
+        shell,
+        parent,
+        |target| {
+            target
+                .create_dir(Visibility::Private)
+                .map(|dir| shown(dir.real().as_path()))
+        },
+    )
 }
 
 fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Value> {
-    made_in("temp-file", shell, parent, |target| {
-        let made = shown(target.real().as_path());
-        target.create_file(Visibility::Private)?;
-        Ok(made)
-    })
+    made_in(
+        "temp-file",
+        IoOperation::CreateFile,
+        shell,
+        parent,
+        |target| {
+            let made = shown(target.real().as_path());
+            target.create_file(Visibility::Private)?;
+            Ok(made)
+        },
+    )
 }
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
     let raw = args[0].as_str("glob")?;
-    let glob = Arc::new(
-        shell
-            .context
-            .resolver()
-            .glob(raw)
-            .map_err(|e| Error::new(format!("glob: {e}")))?,
-    );
+    let glob = Arc::new(shell.context.resolver().glob(raw).map_err(|e| {
+        invalid(
+            "glob",
+            InvalidCause::Path(PathFailure::Glob(PathFailureGlob {
+                pattern: raw.into(),
+                cause: e,
+            })),
+        )
+    })?);
     let mut walk = shell.admitted_walk(glob.walk(), "glob", raw);
     let mut hits = Vec::new();
     while let Some(entry) = walk.next()? {
@@ -132,7 +152,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
 
 /// Label an `io::Error` with the operation and the path that provoked it.
 fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Error {
-    Error::io(format!("{ctx}: {}", shown(path)), e)
+    Error::io(IoOperation::List, IoSubject::Path(shown(path)), e).with_context(ctx)
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries
@@ -143,7 +163,14 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let raw = args[0].as_str("file-info")?;
     let rp = shell.resolve(raw);
     let path = rp.as_path().to_path_buf();
-    let missing = || Error::new(format!("file-info: {raw}: no such file or directory"));
+    let missing = || {
+        Error::io(
+            IoOperation::Stat,
+            IoSubject::Path(raw.into()),
+            &io::ErrorKind::NotFound.into(),
+        )
+        .with_context("file-info")
+    };
     let located = shell
         .locate_existing::<Reading>(&rp, LeafMode::NoFollow)?
         .ok_or_else(missing)?;
@@ -161,7 +188,14 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
     let rp = shell.resolve(s);
     let located = shell
         .locate_existing::<Reading>(&rp, LeafMode::Follow)?
-        .ok_or_else(|| Error::new(format!("resolve-path: {s}: no such file or directory")))?;
+        .ok_or_else(|| {
+            Error::io(
+                IoOperation::Stat,
+                IoSubject::Path(s.into()),
+                &io::ErrorKind::NotFound.into(),
+            )
+            .with_context("resolve-path")
+        })?;
     Ok(Value::string(shown(located.real().as_path())))
 }
 
@@ -363,5 +397,43 @@ mod tests {
         assert_eq!(ask(0o000), [true, false, false]);
         assert_eq!(ask(0o400), [true, true, false]);
         assert_eq!(ask(0o200), [true, false, true]);
+    }
+}
+
+#[cfg(test)]
+mod typed_failure_tests {
+    use super::*;
+
+    #[test]
+    fn missing_paths_and_invalid_globs_keep_distinct_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        let path = shown(dir.path().join("missing"));
+        for (result, operation) in [
+            (
+                builtin_file_info(&[Value::string(path.clone())], &mut shell),
+                "file-info",
+            ),
+            (
+                builtin_resolve_path(&[Value::string(path.clone())], &mut shell),
+                "resolve-path",
+            ),
+        ] {
+            let Err(crate::shell::runtime::Break::Error(error)) = result else {
+                panic!("missing path")
+            };
+            assert_eq!(error.context(), Some(operation));
+            assert!(
+                matches!(error.reason, crate::fact::Reason::Io(f) if f.operation == IoOperation::Stat && f.subject == IoSubject::Path(path.clone()) && matches!(f.cause.leaf.as_ref(), crate::fact::IoLeaf::Os(os) if os.kind == crate::fact::IoKind::NotFound))
+            );
+        }
+        let Err(crate::shell::runtime::Break::Error(error)) =
+            builtin_glob(&[Value::string("*/..")], &shell)
+        else {
+            panic!("invalid glob")
+        };
+        assert!(
+            matches!(error.reason, crate::fact::Reason::Invalid(f) if matches!(&f.cause, InvalidCause::Path(PathFailure::Glob(PathFailureGlob { pattern, cause: crate::fact::GlobFailure::ParentAfterWildcard })) if pattern == "*/.."))
+        );
     }
 }

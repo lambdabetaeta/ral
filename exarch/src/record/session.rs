@@ -8,14 +8,21 @@
 //! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! scrollback.
 
-use super::context::{Context, Eviction, ItemKind, Linked, Span, validate_result_ids};
+use super::context::{
+    Context, ContextStepFailure, Eviction, ItemKind, Linked, Span, validate_result_ids,
+};
 use super::{
-    Control, EditAuthority, Fold as _, Folds, Forensic, Mail, Model, NonEmpty, Post, QuiesceReason,
-    RECORD, Record, Recorded, Refusal, Role, Schedules, Selected, Started, ToolResult, Transcript,
-    Unavailable, Voice,
+    Control, EditAuthority, Folds, Forensic, Mail, Model, NonEmpty, Post, QuiesceReason, RECORD,
+    Record, Recorded, Role, Schedules, Selected, Started, ToolResult, Transcript, Unavailable,
+    Voice,
 };
 use crate::record::AgentId;
 use genai::chat::{ChatMessage, ChatRole};
+use ral_core::error::Error;
+use ral_core::fact::{
+    ContextFailure, ContextFailureAssistantRole, ContextOperation, ExarchFailure, HostFailure,
+    IoOperation, IoSubject, ProviderMessageRole, Reason,
+};
 #[cfg(test)]
 use ral_core::own::TestDir;
 use ral_core::own::{Entry, OwnDir};
@@ -114,7 +121,7 @@ pub struct AgentLog {
     _scratch: Option<TestDir>,
     /// The model fold's own structure over `record.jsonl` — the type every
     /// query in this file answers from; advanced inline through
-    /// [`Self::advance`] on every protocol fact this log authors.
+    /// [`Self::record_transcript`] after opening.
     context: Context,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
@@ -126,7 +133,7 @@ pub struct AgentLog {
 #[derive(Debug)]
 pub enum Uncommitted {
     /// Refused as written: nothing was recorded and the session is usable.
-    Refused(String),
+    Refused(ContextFailure),
     /// The writer failed: the session has ended.
     Unavailable(Unavailable),
 }
@@ -134,7 +141,7 @@ pub enum Uncommitted {
 impl fmt::Display for Uncommitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Refused(why) => why.fmt(f),
+            Self::Refused(why) => f.write_str(&why.describe()),
             Self::Unavailable(failure) => failure.fmt(f),
         }
     }
@@ -176,7 +183,7 @@ impl AgentLog {
         sessions_root: &OwnDir,
         id: AgentId,
         opening: Opening<'_>,
-    ) -> io::Result<(Self, Mail, Schedules, Model)> {
+    ) -> Result<(Self, Mail, Schedules, Model), Error> {
         let mut log = Self::open_fresh(sessions_root, id)?;
         let (mail, schedules, model) = log.open(opening)?;
         Ok((log, mail, schedules, model))
@@ -193,8 +200,14 @@ impl AgentLog {
     pub(crate) fn for_test(
         session_id: AgentId,
         model: &str,
-    ) -> io::Result<(Self, Mail, Schedules, Model)> {
-        let scratch = OwnDir::for_test("agent-log")?;
+    ) -> Result<(Self, Mail, Schedules, Model), Error> {
+        let scratch = OwnDir::for_test("agent-log").map_err(|error| {
+            Error::io(
+                IoOperation::CreateDirectory,
+                IoSubject::Unspecified,
+                &error.into(),
+            )
+        })?;
         let selected = Selected::for_test(model);
         let (log, mail, schedules, model) = Self::create(
             &scratch,
@@ -322,21 +335,6 @@ impl AgentLog {
         }
     }
 
-    /// Advance the model fold for one witnessed record — called immediately
-    /// after every [`crate::record::Emitter::emit`] this log makes itself.
-    ///
-    /// # Errors
-    /// A link's ancestor file will not read back.
-    fn advance(&mut self, record: Recorded<Record>) -> io::Result<()> {
-        Context::step(&mut self.context, record).map_err(|refusal| match refusal {
-            Refusal::Unreadable(error) => error,
-            // Live authorship is typestate-correct by construction, so a
-            // foreign record here is a caller bug; skipping it would desync
-            // the memo from record.jsonl with nothing to show for it.
-            Refusal::Foreign { .. } => unreachable!("model fold refused a live record: {refusal}"),
-        })
-    }
-
     /// The record seam this session authors through — a cheap clone whoever
     /// couples a live bus, records a display record, or feeds the chopper
     /// takes for themselves.
@@ -417,12 +415,11 @@ impl AgentLog {
     ///
     /// # Errors
     /// The session is not awaiting an assistant reply.
-    pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
+    pub fn render_messages(&self) -> Result<Vec<ChatMessage>, ContextFailure> {
         if !self.context.is_awaiting_assistant() {
-            return Err(format!(
-                "cannot render request while the session is {}",
-                self.context.waiting_for()
-            ));
+            return Err(self
+                .context
+                .mutation_failure(ContextOperation::RenderRequest));
         }
         Ok(self.context.rendered())
     }
@@ -443,10 +440,9 @@ impl AgentLog {
     /// Refused as not ready (`Refused`), or the writer failed (`Unavailable`).
     pub fn import_note(&mut self, message: ChatMessage) -> Result<(), Uncommitted> {
         if !self.context.is_ready() {
-            return Err(Uncommitted::Refused(format!(
-                "cannot import context while the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context.mutation_failure(ContextOperation::Import),
+            ));
         }
         let turn = self.context.next_id();
         self.record_transcript(Transcript::Import { turn, message })
@@ -468,10 +464,9 @@ impl AgentLog {
         voice: Voice,
     ) -> Result<(), Uncommitted> {
         if !self.context.is_ready() {
-            return Err(Uncommitted::Refused(format!(
-                "cannot accept a new user prompt while the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context.mutation_failure(ContextOperation::AcceptUser),
+            ));
         }
         // A continuation is honoured only while the turn it names is in the
         // context and is the prompt it answers.
@@ -496,15 +491,13 @@ impl AgentLog {
     /// Refused as incomplete or turnless (`Refused`), or the writer failed (`Unavailable`).
     pub fn append_steering(&mut self, text: String, voice: Voice) -> Result<(), Uncommitted> {
         if !self.context.is_awaiting_assistant() {
-            return Err(Uncommitted::Refused(format!(
-                "tool results must be complete before accepting a steering prompt; the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context
+                    .mutation_failure(ContextOperation::AcceptSteering),
+            ));
         }
         if self.context.unclosed_turn().is_none() {
-            return Err(Uncommitted::Refused(
-                "cannot accept a steering prompt: no turn is being written".into(),
-            ));
+            return Err(Uncommitted::Refused(ContextFailure::SteeringWithoutTurn));
         }
         self.record_transcript(Transcript::Steering { text, voice })
             .map_err(Uncommitted::from)
@@ -522,15 +515,21 @@ impl AgentLog {
         stop_reason: Option<String>,
     ) -> Result<(), Uncommitted> {
         if !self.context.is_awaiting_assistant() {
-            return Err(Uncommitted::Refused(format!(
-                "assistant message is not expected while the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context
+                    .mutation_failure(ContextOperation::AppendAssistant),
+            ));
         }
         if message.role != ChatRole::Assistant {
-            return Err(Uncommitted::Refused(format!(
-                "a {} message arrived where the assistant's reply was expected",
-                role_label(&message.role)
+            return Err(Uncommitted::Refused(ContextFailure::AssistantRole(
+                ContextFailureAssistantRole {
+                    found: match message.role {
+                        ChatRole::System => ProviderMessageRole::System,
+                        ChatRole::User => ProviderMessageRole::User,
+                        ChatRole::Assistant => ProviderMessageRole::Assistant,
+                        ChatRole::Tool => ProviderMessageRole::Tool,
+                    },
+                },
             )));
         }
         let turn = self.context.next_id();
@@ -549,10 +548,10 @@ impl AgentLog {
     /// Refused as unexpected or mismatched (`Refused`), or the writer failed (`Unavailable`).
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), Uncommitted> {
         let Some(pending_ids) = self.context.pending_tool_results() else {
-            return Err(Uncommitted::Refused(format!(
-                "tool results are not expected while the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context
+                    .mutation_failure(ContextOperation::AppendToolResults),
+            ));
         };
         validate_result_ids(&pending_ids, &results).map_err(Uncommitted::Refused)?;
         self.record_transcript(Transcript::ToolResults { results })
@@ -617,10 +616,9 @@ impl AgentLog {
     pub(crate) fn prepare_clear(&self) -> Result<(), Uncommitted> {
         self.seam.check_available()?;
         if !self.context.is_ready() {
-            return Err(Uncommitted::Refused(format!(
-                "cannot clear while the session is {}",
-                self.context.waiting_for()
-            )));
+            return Err(Uncommitted::Refused(
+                self.context.mutation_failure(ContextOperation::Clear),
+            ));
         }
         Ok(())
     }
@@ -637,12 +635,37 @@ impl AgentLog {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    fn open_fresh(sessions_root: &OwnDir, session_id: AgentId) -> io::Result<Self> {
+    fn open_fresh(sessions_root: &OwnDir, session_id: AgentId) -> Result<Self, Error> {
         let name = session_id.to_string();
-        sessions_root.remove(&name)?;
-        let dir = sessions_root.make_dir(&name)?;
-        sessions_root.sync()?;
-        let seam = crate::record::Emitter::create(&dir)?;
+        let path = sessions_root.path().join(&name);
+        sessions_root.remove(&name).map_err(|error| {
+            Error::io(
+                IoOperation::Write,
+                IoSubject::Path(ral_core::path::shown(&path)),
+                &error.into(),
+            )
+        })?;
+        let dir = sessions_root.make_dir(&name).map_err(|error| {
+            Error::io(
+                IoOperation::CreateDirectory,
+                IoSubject::Path(ral_core::path::shown(&path)),
+                &error.into(),
+            )
+        })?;
+        sessions_root.sync().map_err(|error| {
+            Error::io(
+                IoOperation::Sync,
+                IoSubject::Path(ral_core::path::shown(sessions_root.path())),
+                &error.into(),
+            )
+        })?;
+        let seam = crate::record::Emitter::create(&dir).map_err(|error| {
+            Error::io(
+                IoOperation::CreateFile,
+                IoSubject::HostFile(ral_core::path::shown(dir.path().join(RECORD))),
+                &error,
+            )
+        })?;
         Ok(Self {
             id: session_id,
             dir,
@@ -667,35 +690,66 @@ impl AgentLog {
             system,
             inherited,
         }: Opening<'_>,
-    ) -> io::Result<(Mail, Schedules, Model)> {
-        let folds = self.seam.begin(Started {
-            session_id: self.id,
-            name: name.to_string(),
-            parent,
-            returns,
-            selected: selected.clone(),
-            log_dir: self.dir.path().to_path_buf(),
-            at_unix_ms: crate::app::now_unix_ms(),
-        })?;
+    ) -> Result<(Mail, Schedules, Model), Error> {
+        let folds = self
+            .seam
+            .begin(Started {
+                session_id: self.id,
+                name: name.to_string(),
+                parent,
+                returns,
+                selected: selected.clone(),
+                log_dir: self.dir.path().to_path_buf(),
+                at_unix_ms: crate::app::now_unix_ms(),
+            })
+            .map_err(|failure| recording_error(&failure))?;
         if let Some(Inherited { turns, evictions }) = inherited {
-            let link = self.seam.emit(Transcript::Inherited { turns, evictions })?;
-            self.advance(link)?;
+            let link = self
+                .emit_transcript(Transcript::Inherited { turns, evictions })
+                .map_err(|failure| recording_error(&failure))?;
+            self.context
+                .step_transcript(link)
+                .map_err(|failure| match failure {
+                    ContextStepFailure::ReadBack(cause) => Error::new(Reason::Host(Box::new(
+                        HostFailure::Exarch(ExarchFailure::Context(cause)),
+                    ))),
+                    ContextStepFailure::Foreign(foreign) => {
+                        unreachable!("model fold refused a live opening: {}", foreign.reason)
+                    }
+                })?;
         }
         self.record_transcript(Transcript::System {
             text: system.to_string(),
-        })?;
+        })
+        .map_err(|failure| recording_error(&failure))?;
         Ok(folds)
     }
 
     /// Emit a protocol fact and advance the fold on its witnessed result.
     ///
     /// # Errors
-    /// The writer failed, or the fold refused a durable record, breaking agreement.
+    /// The writer failed and ended the session.
     fn record_transcript(&mut self, p: Transcript) -> Result<(), Unavailable> {
-        let recorded = self.seam.emit(p)?;
-        self.advance(recorded)
-            .map_err(|error| self.seam.fail(error))
+        let recorded = self.emit_transcript(p)?;
+        self.context.step_live(recorded).unwrap_or_else(|foreign| {
+            unreachable!("model fold refused a live record: {}", foreign.reason)
+        });
+        Ok(())
     }
+
+    fn emit_transcript(&self, p: Transcript) -> Result<Recorded<Transcript>, Unavailable> {
+        let (locus, record) = self.seam.emit(p)?.into_parts();
+        let Record::Transcript(p) = record else {
+            unreachable!("the emitter returns the record it appended")
+        };
+        Ok(Recorded::new(locus, p))
+    }
+}
+
+fn recording_error(failure: &Unavailable) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+        ExarchFailure::Recording(failure.failure()),
+    ))))
 }
 
 /// What a restart tells the log about the inputs it withdrew unread.

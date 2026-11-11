@@ -122,10 +122,13 @@ mod unix {
         assert!(matches!(dir.append("l"), Err(OwnError::Linked(_))));
         assert!(matches!(dir.open_write("l"), Err(OwnError::Linked(_))));
         assert!(matches!(dir.open_update("l"), Err(OwnError::Linked(_))));
-        assert!(matches!(dir.load::<u8>("l"), Err(OwnError::Linked(_))));
+        assert!(matches!(
+            dir.load::<u8>("l"),
+            Err(SerdeFileError::Own(OwnError::Linked(_)))
+        ));
         assert!(matches!(
             dir.store("l", &1u8, Visibility::Public),
-            Err(OwnError::Linked(_))
+            Err(SerdeFileError::Own(OwnError::Linked(_)))
         ));
         assert_eq!(dir.stat("l").map(|s| s.kind), Some(Kind::Symlink));
         assert_eq!(
@@ -272,11 +275,7 @@ mod unix {
         std::fs::rename(root.path(), base.path().join("original")).unwrap();
         base.make_dir("root").unwrap();
         let error = root.within(root.path()).err().unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("directory changed during resolution")
-        );
+        assert!(error.to_string().contains("directory changed"));
 
         let root = base.make_dir("fresh").unwrap();
         let session = root.make_dir("session").unwrap();
@@ -288,11 +287,7 @@ mod unix {
             })));
         });
         let error = root.within(session.path()).err().unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("directory changed during resolution")
-        );
+        assert!(error.to_string().contains("directory changed"));
         assert!(!root.dir("session").unwrap().same_directory(&session));
     }
 
@@ -808,8 +803,13 @@ fn load_reports_what_is_not_the_value_and_none_only_for_nothing() {
     dir.store("text", &"not a number", Visibility::Public)
         .unwrap();
     let wrong = dir.load::<u32>("text").err().unwrap();
-    assert!(matches!(wrong, OwnError::Json { act: Act::Read, .. }));
-    assert_eq!(wrong.kind(), io::ErrorKind::InvalidData);
+    let SerdeFileError::Json { act, at, error } = &wrong else {
+        panic!("a generic serde JSON failure: {wrong}");
+    };
+    assert!(matches!(act, Act::Read));
+    assert_eq!(at, &dir.path().join("text"));
+    assert!(error.is_data());
+    assert_eq!(error.io_error_kind(), None);
     assert!(wrong.to_string().contains("as JSON"), "{wrong}");
 
     dir.make_dir("d").unwrap();
@@ -1005,5 +1005,9 @@ fn an_error_says_what_to_do() {
 
     let as_io = io::Error::from(OwnError::Linked(PathBuf::from("/s/oauth.json")));
     assert_eq!(as_io.kind(), io::ErrorKind::InvalidInput);
-    assert!(String::from(OwnError::Linked(PathBuf::from("/s/oauth.json"))).contains("is a link"));
+    assert!(
+        OwnError::Linked(PathBuf::from("/s/oauth.json"))
+            .to_string()
+            .contains("is a link")
+    );
 }

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: ba8c709eecc33885511e3058f92cbd4a98c1da0b
-verified_at_date: 2026-11-08
+verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+verified_at_date: 2026-11-10
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, BroodGuard, exit_brood]
 ---
 
@@ -299,8 +299,9 @@ v = ⟦V⟧ρ,Σ       h = ⟦W⟧ρ,Σ
   installed, it can catch a failure forcing its body. On a catch, `Try` is
   already popped before reserving the argument and forcing the handler:
   **a handler's own failure is not caught by the same `Try`**.
-- `record(e,σ)` is the public `[reason, frame, site]` value, not discarded
-  bytes or abandoned-tail accounting. `Try` passes a `Lambda` terminal
+- `record(e,σ)` is the public `[frame, message, status, site]` value, a
+  witnessed map from which `raise` recovers the fact, not discarded bytes or
+  abandoned-tail accounting. `Try` passes a `Lambda` terminal
   through unchanged on success, just as it passes `Value`.
 
 **Guard preserves the body's outcome only if cleanup succeeds.** Let

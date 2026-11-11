@@ -2,6 +2,7 @@ use super::eliminate::{await_handle, first_ready};
 use super::*;
 use crate::data::FOValue;
 use crate::fact::{ExitCode as _, FailureCode as _};
+use crate::fact::{InvalidCause, Multiline, OperationState, Reason, StateFailure, WorkerCap};
 use crate::io::{ByteBuffer, CapturedBytes, Streams, new_buffer};
 use crate::process::{CancelCause, DurableRoot, Scope, ScopeNode};
 use crate::shell::runtime::{
@@ -46,10 +47,15 @@ fn status(b: Break) -> u8 {
 /// error, not a stop.
 fn expect_claimed(b: Break, verb: &str) {
     match b {
-        Break::Error(e) => assert_eq!(
-            e.describe(),
-            format!("{verb}: this worker's result was already claimed")
-        ),
+        Break::Error(e) => {
+            assert_eq!(
+                e.reason,
+                Reason::State(Box::new(StateFailure::WorkerClaimed(OperationState {
+                    operation: verb.into()
+                },)))
+            );
+            assert_eq!(e.hints(), []);
+        }
         other @ Break::Escape(_) => panic!("expected the already-claimed error, got {other:?}"),
     }
 }
@@ -429,7 +435,7 @@ fn spawned_worker_never_receives_the_enquiry_desk() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("worker must send its enquire outcome before settling");
     match outcome {
-        Err(Break::Error(e)) => assert_eq!(e.describe(), crate::shell::runtime::NO_DESK),
+        Err(Break::Error(e)) => assert_eq!(e.reason, Reason::State(Box::new(StateFailure::NoDesk))),
         Err(other) => panic!("expected the absence error, got {other:?}"),
         Ok(_) => panic!("a worker must never reach the spawning run's desk"),
     }
@@ -674,13 +680,12 @@ fn cap_refused_spawn_observes_no_birth() {
         .expect("a report carries its outcome");
     let error = expect_map(expect_variant(outcome, "err"));
     assert_eq!(
-        error.get("reason").as_deref(),
-        Some(&Value::variant(
-            "raised",
-            Some(Value::string(
-                "spawn: 0 workers are still executing or stopping; wait for one to end (`workers` lists them), or cancel work you no longer need",
-            )),
-        )),
+        error.witness().map(crate::fact::ErrorFact::reason),
+        Some(&Reason::State(Box::new(StateFailure::WorkerCap(
+            WorkerCap {
+                limit: 0usize.into()
+            }
+        )))),
         "the refused spawn's reason"
     );
     assert_eq!(error.get("frame").as_deref(), Some(&Value::string("spawn")));
@@ -754,13 +759,13 @@ fn a_second_await_finds_the_result_claimed() {
         &mut shell,
         "let h = spawn { echo out; return 4 }\n\
          let v = await $h\necho $v\n\
-         try { let _ = await $h } { |e| echo !{describe $e} }",
+         try { let _ = await $h } { |e| echo $e[message] }",
         None,
     );
     ended.expect("the second await's failure is caught");
     assert_eq!(
         String::from_utf8_lossy(&stdout),
-        "out\n4\nawait: this worker's result was already claimed\n"
+        "out\n4\nawait: worker was already claimed\n"
     );
 }
 
@@ -982,10 +987,11 @@ fn race_fails_when_every_handle_is_claimed_mid_wait() {
 fn race_refuses_an_empty_list() {
     let mut shell = crate::test_helper::core_shell();
     match builtin_race(&[Value::list(vec![])], &Mooring::adrift(), &mut shell) {
-        Err(Break::Error(e)) => assert!(
-            e.describe().contains("race: no handles"),
-            "{}",
-            e.describe()
+        Err(Break::Error(e)) => assert_eq!(
+            e.reason,
+            Reason::State(Box::new(StateFailure::EmptyWait(OperationState {
+                operation: "race".into()
+            }))),
         ),
         other => panic!("an empty race must be refused, got {other:?}"),
     }
@@ -1096,10 +1102,11 @@ fn first_settled_is_cancel_aware() {
 fn first_settled_refuses_an_empty_list() {
     let shell = crate::test_helper::core_shell();
     match builtin_first_settled(&[Value::list(vec![])], &shell) {
-        Err(Break::Error(e)) => assert!(
-            e.describe().contains("first-settled: no handles"),
-            "{}",
-            e.describe()
+        Err(Break::Error(e)) => assert_eq!(
+            e.reason,
+            Reason::State(Box::new(StateFailure::EmptyWait(OperationState {
+                operation: "first-settled".into()
+            }))),
         ),
         other => panic!("an empty first-settled must be refused, got {other:?}"),
     }
@@ -1258,10 +1265,11 @@ fn a_timed_out_workers_done_poll_and_await_records_are_identical() {
     .expect("await record");
     assert_eq!(done, polled);
     assert_eq!(done, awaited);
-    assert_eq!(done.reason(), &crate::fact::Reason::TimedOut);
-    assert_eq!(done.frame(), "timeout-now");
-    assert_eq!(done.site().script.as_ref(), "worker.ral");
-    assert_eq!((done.site().line, done.site().col), (2, 3));
+    assert_eq!(done.message, crate::fact::Reason::TimedOut.describe());
+    assert_eq!(done.status.get(), 124);
+    assert_eq!(done.frame, "timeout-now");
+    assert_eq!(done.site.script.as_ref(), "worker.ral");
+    assert_eq!((done.site.line, done.site.col), (2, 3));
 }
 
 #[test]
@@ -1273,7 +1281,7 @@ fn an_unlocated_worker_error_is_completed_before_any_observer_sees_it() {
         &Mooring::adrift(),
         &mut shell,
         spawned("unlocated"),
-        |_, _| Err(Error::new("unlocated worker refusal").into()),
+        |_, _| Err(Error::new(crate::fact::Reason::raised("unlocated worker refusal")).into()),
     )
     .expect("spawn");
     wait_settled(&handle);
@@ -1284,7 +1292,7 @@ fn an_unlocated_worker_error_is_completed_before_any_observer_sees_it() {
         panic!("worker error")
     };
     assert_eq!(error.prov, Some(base));
-    let expected = error.record(&shell);
+    let expected = error.fact(&shell);
     let (_, observer) =
         shell.register_root(&crate::source::SourceOrigin::named("observer.ral"), "poll");
     let _observed_at = shell.local.audit.enter_site(observer);
@@ -1293,12 +1301,12 @@ fn an_unlocated_worker_error_is_completed_before_any_observer_sees_it() {
     let outcome = expect_map(ready).get("outcome").unwrap().into_owned();
     assert_eq!(
         expect_variant(&outcome, "err"),
-        &Value::from_datum(expected.clone())
+        &Value::failure(expected.clone())
     );
     let Break::Error(awaited) = await_handle(&handle, "await", &mut shell).unwrap_err() else {
         panic!("worker error")
     };
-    assert_eq!(awaited.record(&shell), expected);
+    assert_eq!(awaited.fact(&shell), expected);
 }
 
 /// A deferred-sink double for the agent host: records what it is handed.
@@ -1368,7 +1376,7 @@ fn worker_flushes_done_to_deferred_sink() {
         Some("<block>")
     );
 
-    let err = run(|_, _child| Err(Error::new("boom").into()));
+    let err = run(|_, _child| Err(Error::new(crate::fact::Reason::raised("boom")).into()));
     assert_eq!(done_outcome_label(&err[0]), "err");
 
     let panicked = run(|_, _child| panic!("worker exploded"));
@@ -1388,12 +1396,8 @@ fn watched_lines_surface_one_by_one() {
         label: "job".into(),
     };
     let handle = spawn_child(&m, &mut shell, birth, |_, child| {
-        child
-            .write_stdout(b"one\ntwo")
-            .map_err(|e| Error::new(e.to_string()))?;
-        child
-            .write_stderr(b"bad\r\n")
-            .map_err(|e| Error::new(e.to_string()))?;
+        child.write_stdout(b"one\ntwo")?;
+        child.write_stderr(b"bad\r\n")?;
         Ok(Value::Unit)
     })
     .unwrap();
@@ -1903,12 +1907,17 @@ fn worker_cap_rejects_at_the_entry_and_frees_on_cancel() {
         Err(Break::Error(e)) => e,
         other => panic!("the capped birth must be refused, got {other:?}"),
     };
-    for remedy in ["still executing or stopping", "`workers`", "cancel"] {
-        assert!(
-            err.describe().contains(remedy),
-            "the refusal must name {remedy}: {}",
-            err.describe()
-        );
+    assert_eq!(
+        err.reason,
+        Reason::State(Box::new(StateFailure::WorkerCap(WorkerCap {
+            limit: 2usize.into(),
+        })))
+    );
+    assert!(err.describe().contains('2'));
+    assert!(err.hints().is_empty(), "remedies must not be stored");
+    let advice = err.reason.advice().join("\n");
+    for remedy in ["`workers`", "cancel"] {
+        assert!(advice.contains(remedy), "missing remedy {remedy}: {advice}");
     }
     assert_eq!(
         shell.local.workers.count(),
@@ -2197,7 +2206,7 @@ fn spawn_failing_in(shell: &mut Shell, own: bool) -> Error {
             } else {
                 parent_file
             };
-            let mut error = Error::new("inner boom");
+            let mut error = Error::new(crate::fact::Reason::raised("inner boom"));
             error.prov = Some(Prov::Live {
                 name: "fail".into(),
                 span: Span::new(file, 10, 10),
@@ -2226,7 +2235,7 @@ fn a_worker_publishes_a_failure_in_its_own_file_resolved() {
         error.prov,
         Some(crate::shell::runtime::Prov::Resolved(_))
     ));
-    let site = error.record(&shell).site;
+    let site = error.fact(&shell).site;
     assert_eq!((&*site.script, site.line, site.col), ("mod.ral", 2, 1));
 }
 
@@ -2239,7 +2248,7 @@ fn a_worker_keeps_a_failure_in_the_parents_file_live() {
         error.prov,
         Some(crate::shell::runtime::Prov::Live { .. })
     ));
-    assert_eq!(&*error.record(&shell).site.script, "parent.ral");
+    assert_eq!(&*error.fact(&shell).site.script, "parent.ral");
 }
 
 // ── ownership: the cradle and the brood ──────────────────────────────
@@ -2457,11 +2466,15 @@ fn an_untitled_spawn_is_refused_where_titles_are_required() {
     m.worker_title = TitlePolicy::Required;
     let body = crate::shell::runtime::block_over(&shell.env);
     match spawn_form(None, &body, &m, &mut shell) {
-        Err(Break::Error(e)) => assert!(
-            e.describe().contains("requires a title"),
-            "{}",
-            e.describe()
-        ),
+        Err(Break::Error(e)) => {
+            let Reason::Invalid(failure) = &e.reason else {
+                panic!("title refusal")
+            };
+            assert_eq!(failure.operation, "spawn");
+            assert_eq!(failure.cause, InvalidCause::TitleRequired);
+            assert_eq!(e.hints(), []);
+            assert!(e.reason.advice().join("\n").contains("spawn"));
+        }
         other => panic!("an untitled spawn must be refused, got {other:?}"),
     }
     assert_eq!(shell.local.workers.count(), 0, "refused before any birth");
@@ -2470,19 +2483,28 @@ fn an_untitled_spawn_is_refused_where_titles_are_required() {
 #[test]
 fn a_title_must_be_legible() {
     let mut shell = crate::test_helper::core_shell();
-    for src in ["spawn \"\" { return 1 }", "spawn \"a\nb\" { return 1 }"] {
+    for (src, cause) in [
+        (r#"spawn "" { return 1 }"#, InvalidCause::Empty),
+        (
+            "spawn \"a\nb\" { return 1 }",
+            InvalidCause::Multiline(Multiline {
+                lines: 2usize.into(),
+            }),
+        ),
+    ] {
         let Break::Error(e) = run_captured(&mut shell, src, None)
             .0
             .expect_err("an illegible title must be refused")
         else {
             panic!("an error expected");
         };
-        assert!(
-            e.describe()
-                .contains("spawn: the title must be a non-empty single line"),
-            "{}",
-            e.describe()
-        );
+        let Reason::Invalid(failure) = &e.reason else {
+            panic!("title refusal")
+        };
+        assert_eq!(failure.operation, "spawn");
+        assert_eq!(failure.cause, cause);
+        assert_eq!(e.hints(), []);
+        assert!(e.reason.advice().join("\n").contains("one line"));
     }
     assert_eq!(shell.local.workers.count(), 0);
 }
@@ -3320,17 +3342,11 @@ fn watch_flush_panic_isolation_and_precedence_and_no_duplicate_flush() {
 #[test]
 fn late_enrolment_on_closed_brood_cancels_and_reports_clean_error() {
     // `spawn_child` for both `Birth::Spawn` and `Birth::Watch` against a closed brood.
-    for (birth, expected_msg) in [
-        (
-            spawned("<late-spawn>"),
-            "spawn: the enclosing gather has ended; the new worker was cancelled",
-        ),
-        (
-            Birth::Watch {
-                label: "late-watch".into(),
-            },
-            "watch: the enclosing gather has ended; the new worker was cancelled",
-        ),
+    for birth in [
+        spawned("<late-spawn>"),
+        Birth::Watch {
+            label: "late-watch".into(),
+        },
     ] {
         let mut shell = crate::test_helper::core_shell();
         let owner = BroodGuard::new(BroodOwner::Gather);
@@ -3353,7 +3369,12 @@ fn late_enrolment_on_closed_brood_cancels_and_reports_clean_error() {
         let Break::Error(err) = res.expect_err("closed brood must refuse birth") else {
             panic!("expected Break::Error");
         };
-        assert_eq!(err.describe(), expected_msg);
+        assert_eq!(
+            err.reason,
+            Reason::State(Box::new(StateFailure::GatherClosed))
+        );
+        assert_eq!(err.hints(), []);
+        assert!(err.reason.advice().join("\n").contains("cancelled"));
 
         // While gated, the rejected child is `Stopping` with cancellation
         // signalled and remains in `WorkerRegistry` until its thread ends.
@@ -3403,7 +3424,7 @@ fn exit_brood_and_race_wait_for_already_stopping_children() {
 
         let err = exit_brood(
             &owner,
-            Err(Error::new("gather halted").into()),
+            Err(Error::new(crate::fact::Reason::raised("gather halted")).into()),
             std::time::Duration::from_secs(5),
             &mut shell,
         )
@@ -3647,13 +3668,9 @@ fn par_surfaces_outside_claim_with_par_prefix() {
         _mooring: &Mooring,
         _shell: &mut Shell,
     ) -> Settled<Value> {
-        let [Value::List(list)] = args else {
-            return Err(Error::new("expected handle list").into());
-        };
+        let list = args[0].as_list("first-settled")?;
         let first = list.iter().next().expect("non-empty handle list");
-        let Value::Handle(h) = first.as_ref() else {
-            return Err(Error::new("expected handle").into());
-        };
+        let h = first.expect_handle("first-settled")?;
         h.claim_and_stop();
         Ok(Value::Int(0))
     }
@@ -3684,8 +3701,8 @@ fn par_surfaces_outside_claim_with_par_prefix() {
         panic!("expected Break::Error");
     };
     assert_eq!(
-        err.describe(),
-        "par: this worker's result was already claimed"
+        err.reason,
+        Reason::raised("par: this worker's result was already claimed")
     );
 }
 
@@ -3736,4 +3753,78 @@ fn stopping_worker_is_exempt_from_retention_and_spares_its_ready_child() {
     wait_ended(&inner);
     assert_eq!(shell.local.workers.count(), 0);
     assert_eq!(shell.take_worker_reap_notices().len(), 0);
+}
+
+#[test]
+fn legible_title_shape_uses_the_canonical_found_preview() {
+    let value = Value::Int(7);
+    let Err(Break::Error(error)) = legible_title(&value, "detach") else {
+        panic!("title shape")
+    };
+    let Reason::Invalid(failure) = &error.reason else {
+        panic!("invalid title")
+    };
+    assert_eq!(failure.operation, "detach");
+    assert_eq!(
+        failure.cause,
+        InvalidCause::Shape(crate::fact::ShapeFailure {
+            expected: crate::fact::Expected::Shape(crate::fact::ValueShape::String),
+            found: value.found(),
+        })
+    );
+    assert_eq!(error.hints(), []);
+    assert_eq!(
+        legible_title(&Value::string("  build the docs  "), "spawn").unwrap(),
+        "build the docs"
+    );
+}
+
+#[test]
+fn typed_worker_io_reason_survives_done_poll_and_await_with_report_fields_separate() {
+    use crate::fact::{Done, IoLeaf, IoOperation, IoSubject, StandardStream};
+    let mut shell = crate::test_helper::core_shell();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let mut mooring = Mooring::adrift();
+    mooring.deferred = Some(Arc::new(RecDeferred(batches.clone())));
+    let error = Error::io(
+        IoOperation::Write,
+        IoSubject::Stream(StandardStream::Stdout),
+        &std::io::Error::from(crate::sync::Torn),
+    )
+    .with_context("worker output")
+    .with_hint("check this session's output destination");
+    let reason = error.reason.clone();
+    let handle = spawn_child(&mooring, &mut shell, spawned("torn output"), move |_, _| {
+        Err(error.into())
+    })
+    .unwrap();
+    wait_settled(&handle);
+    let polled = builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).unwrap();
+    let ready = expect_variant(&polled, "ready");
+    let outcome = expect_map(ready).get("outcome").unwrap().into_owned();
+    let record = expect_map(expect_variant(&outcome, "err"))
+        .witness()
+        .expect("a polled failure is witnessed")
+        .clone();
+    assert_eq!(record.reason(), &reason);
+    let done = wait_for_batch(&batches)
+        .into_iter()
+        .flatten()
+        .find_map(|event| crate::shell::runtime::DoneEvent::from_surface(&event))
+        .expect("done");
+    let Done::Err(done_record) = done.outcome else {
+        panic!("typed worker failure")
+    };
+    assert_eq!(done_record, record.record());
+    let Break::Error(awaited) = await_handle(&handle, "await", &mut shell).unwrap_err() else {
+        panic!("worker I/O failure")
+    };
+    assert_eq!(awaited.reason, reason);
+    assert_eq!(awaited.context(), Some("worker output"));
+    assert_eq!(
+        awaited.hints(),
+        &[Box::<str>::from("check this session's output destination")]
+    );
+    assert!(matches!(awaited.reason, Reason::Io(ref io) if *io.cause.leaf == IoLeaf::Torn));
+    assert_eq!(awaited.fact(&shell), record);
 }

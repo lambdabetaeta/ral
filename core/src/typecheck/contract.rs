@@ -29,6 +29,9 @@ pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, GPU, NET, PLACE, SHELL};
 use super::error::{Clash, Reason, Standing, TypeError, TypeErrorKind};
 use super::solve::{Solution, sort_errors};
 use super::unify::Unifier;
+use crate::fact::{
+    GrantFailure, GrantFailureUnknownVocabulary, GrantVocabulary, RefusedGrantKey, UnknownField,
+};
 use crate::ir::{CompKind, Phrase, Val};
 use crate::source::{Span, Spanned};
 pub(crate) use crate::text::code;
@@ -58,17 +61,17 @@ pub enum Holds {
     /// inference has finished, and never constraining.
     Table(&'static Table),
     /// Known, and refused, with advice of its own rather than "unknown key".
-    Refused(&'static str),
+    Refused(RefusedGrantKey),
 }
 
 /// What a written or inferred value is done with, by what its key holds it to.
-pub(super) enum Held<'a> {
+pub(super) enum Held {
     /// Unified with this type, minted fresh.
     Unify(Ty),
     /// Ascribed once inference has finished.
     Nested(&'static Table),
     /// Refused with this advice.
-    Refuse(&'a str),
+    Refuse(&'static str),
     /// Left to the runtime decoder.
     Nothing,
 }
@@ -76,12 +79,12 @@ pub(super) enum Held<'a> {
 impl Holds {
     /// What a value held here is done with.  Exhaustive, so a new way of
     /// holding a value cannot be ignored by the doors that apply it.
-    pub(super) fn held(&self) -> Held<'_> {
+    pub(super) fn held(&self) -> Held {
         match self {
             Self::At(mint) | Self::Required(mint) => Held::Unify(mint()),
             Self::CatchAll => Held::Unify(catch_all_ty()),
             Self::Table(table) => Held::Nested(table),
-            Self::Refused(advice) => Held::Refuse(advice),
+            Self::Refused(cause) => Held::Refuse(cause.advice()),
             Self::Decoded => Held::Nothing,
         }
     }
@@ -93,12 +96,9 @@ impl Holds {
 /// checker admits are one list; the decoder words its refusals from the same
 /// vocabulary.
 pub struct Vocab {
-    /// What a member is called: "place".
-    pub noun: &'static str,
+    pub id: GrantVocabulary,
     /// The row's tags with their payloads, in the order a refusal lists them.
     pub row: fn() -> Vec<(String, Ty)>,
-    /// Advice for a tag refused on purpose.
-    pub misses: fn(&str) -> Option<String>,
     /// Advice for a value that is no tag at all.
     pub untagged: &'static str,
     /// Advice for a tag whose payload is the wrong type.
@@ -111,7 +111,7 @@ pub struct Vocab {
 impl fmt::Debug for Vocab {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Vocab")
-            .field("noun", &self.noun)
+            .field("noun", &self.noun())
             .field("row", &(self.row)())
             .field("untagged", &self.untagged)
             .field("payload", &self.payload)
@@ -122,6 +122,11 @@ impl fmt::Debug for Vocab {
 }
 
 impl Vocab {
+    /// What a member is called: "place".
+    pub fn noun(&self) -> &'static str {
+        self.id.noun()
+    }
+
     /// The closed variant this vocabulary is.
     pub(crate) fn ty(&self) -> Ty {
         Ty::variant(
@@ -144,17 +149,16 @@ impl Vocab {
 
     /// The advice kept for `tag`, a tag refused on purpose.
     pub fn miss(&self, tag: &str) -> Option<String> {
-        (self.misses)(tag)
+        self.id.miss(tag)
     }
 
-    /// The headline for `tag`, which the row lacks, and the advice kept for
-    /// it: one refusal for the checker and the decoder alike.  Advice replaces
-    /// the nearest-tag guess, which would contradict it.
-    pub fn refuse(&self, tag: &str) -> (String, Option<String>) {
-        let advice = self.miss(tag);
-        let headline =
-            super::explain::unknown_tag_message(self.noun, tag, &self.tags(), advice.is_none());
-        (headline, advice)
+    /// The rejected vocabulary member, without diagnostic prose as identity.
+    pub fn refuse(&self, tag: &str) -> GrantFailure {
+        GrantFailure::UnknownVocabulary(GrantFailureUnknownVocabulary {
+            vocabulary: self.id,
+            tag: tag.to_owned(),
+            offered: (self.row)().into_iter().map(|(tag, _)| tag).collect(),
+        })
     }
 }
 
@@ -194,10 +198,12 @@ impl Table {
             .collect()
     }
 
-    /// What a runtime door says about a key this table does not name — the
-    /// one wording all three doors share, each prefixing its own context.
-    pub fn unknown_key(&self, key: &str) -> String {
-        unknown_key_message(self.form, key, &self.offered())
+    /// A key this table does not name, with its declared alternatives.
+    pub fn unknown_key(&self, key: &str) -> UnknownField {
+        UnknownField {
+            field: key.to_owned(),
+            offered: self.offered().into_iter().map(str::to_owned).collect(),
+        }
     }
 
     /// What this table says about `label`, or `None` for a label it does not
@@ -344,11 +350,7 @@ static MANIFEST: Table = Table {
         },
         Key {
             label: "capabilities",
-            holds: Holds::Refused(
-                "manifest 'capabilities:' is not enforced: plugins run with host \
-                 authority. Remove the key; to confine a plugin invocation, wrap it \
-                 in `grant { ... }`.",
-            ),
+            holds: Holds::Refused(RefusedGrantKey::ManifestCapabilitiesUnenforced),
             reason: None,
         },
     ],
@@ -689,7 +691,7 @@ mod tests {
             &super::SHELL,
         ] {
             let debug = format!("{vocab:#?}");
-            assert!(debug.contains(vocab.noun));
+            assert!(debug.contains(vocab.noun()));
             assert!(debug.contains("row:"));
             assert!(!debug.contains("0x"), "{debug}");
             assert!(!debug.contains("misses:"), "{debug}");
@@ -698,6 +700,24 @@ mod tests {
         assert!(nested.contains("place or a selector"));
         assert!(nested.contains("String"));
         assert!(nested.contains("Variant"));
+    }
+
+    #[test]
+    fn runtime_contract_refusals_contain_declared_facts() {
+        let super::GrantFailure::UnknownVocabulary(failure) = super::SHELL.refuse("missing") else {
+            panic!("vocabulary failure")
+        };
+        assert_eq!(failure.vocabulary, super::GrantVocabulary::Shell);
+        assert_eq!(failure.tag, "missing");
+        assert!(failure.offered.contains(&"detach".to_owned()));
+        assert!(matches!(
+            declared(Form::Grant).holds("detach"),
+            Some(Holds::Refused(super::RefusedGrantKey::DetachMovedToShell))
+        ));
+        let unknown = declared(Form::Manifest).unknown_key("missing");
+        assert_eq!(unknown.field, "missing");
+        assert!(unknown.offered.contains(&"name".to_owned()));
+        assert!(!unknown.offered.contains(&"capabilities".to_owned()));
     }
 
     fn contract_errors(form: Form, src: &str) -> Vec<TypeError> {

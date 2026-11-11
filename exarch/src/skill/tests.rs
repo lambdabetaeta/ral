@@ -74,7 +74,7 @@ fn parse_valid_skill() {
 /// Each way a frontmatter can fail, against the one good spelling.
 #[test]
 fn a_frontmatter_must_declare_a_matching_valid_name_and_a_description() {
-    let parse = |raw| skill_from_frontmatter(raw, "my-skill");
+    let parse = |raw| skill_from_frontmatter(raw, "my-skill", &SkillPlace::Builtin);
     assert!(parse("---\nname: my-skill\ndescription: x\n---\n").is_ok());
     for bad in [
         "# no frontmatter at all\n",
@@ -198,7 +198,7 @@ fn discovery_under_a_restricted_stack_finds_only_what_it_may_read() {
 #[test]
 fn builtins_parse_under_their_names() {
     for (name, text) in BUILTIN {
-        let skill = skill_from_frontmatter(text, name).unwrap();
+        let skill = skill_from_frontmatter(text, name, &SkillPlace::Builtin).unwrap();
         assert_ne!(skill.description, "");
         let found = builtin(name).unwrap();
         assert_ne!(read_skill_body(&found).unwrap().trim(), "");
@@ -310,5 +310,125 @@ fn metadata_silently_drops_a_skill_whose_frontmatter_fails() {
         std::iter::once("fine")
             .chain(BUILTIN.map(|(n, _)| n))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn frontmatter_failures_keep_the_skill_place_field_and_actual_yaml_head() {
+    let place = SkillPlace::Disk("/skills/my-skill".into());
+    for (raw, cause) in [
+        ("plain body", FrontmatterFailure::Missing),
+        (
+            "---\n- x\n---\n",
+            FrontmatterFailure::NotMapping(FrontmatterFailureNotMapping {
+                found: PodKind::Array,
+            }),
+        ),
+        (
+            "---\ndescription: x\n---\n",
+            FrontmatterFailure::MissingField(SkillField::Name),
+        ),
+        (
+            "---\nname: my-skill\n---\n",
+            FrontmatterFailure::MissingField(SkillField::Description),
+        ),
+        (
+            "---\nname: 7\ndescription: x\n---\n",
+            FrontmatterFailure::FieldShape(FrontmatterFailureFieldShape {
+                field: SkillField::Name,
+                found: PodKind::Integer,
+            }),
+        ),
+        (
+            "---\nname: my-skill\ndescription: true\n---\n",
+            FrontmatterFailure::FieldShape(FrontmatterFailureFieldShape {
+                field: SkillField::Description,
+                found: PodKind::Boolean,
+            }),
+        ),
+        (
+            "---\nname: My-Skill\ndescription: x\n---\n",
+            FrontmatterFailure::InvalidName(FrontmatterFailureInvalidName {
+                name: "My-Skill".into(),
+            }),
+        ),
+        (
+            "---\nname: other\ndescription: x\n---\n",
+            FrontmatterFailure::DirectoryNameMismatch(FrontmatterFailureDirectoryNameMismatch {
+                declared: "other".into(),
+                directory: "my-skill".into(),
+            }),
+        ),
+    ] {
+        assert_eq!(
+            skill_from_frontmatter(raw, "my-skill", &place).unwrap_err(),
+            SkillFailure::Frontmatter(SkillFailureFrontmatter {
+                name: "my-skill".into(),
+                place: place.clone(),
+                cause
+            })
+        );
+    }
+    for (pod, kind) in [
+        (gray_matter::Pod::Null, PodKind::Null),
+        (gray_matter::Pod::String("x".into()), PodKind::String),
+        (gray_matter::Pod::Integer(1), PodKind::Integer),
+        (gray_matter::Pod::Float(1.0), PodKind::Float),
+        (gray_matter::Pod::Boolean(false), PodKind::Boolean),
+        (gray_matter::Pod::Array(vec![]), PodKind::Array),
+        (
+            gray_matter::Pod::Hash(std::collections::HashMap::default()),
+            PodKind::Hash,
+        ),
+    ] {
+        assert_eq!(pod_kind(&pod), kind);
+    }
+}
+
+#[test]
+fn yaml_parser_detail_is_foreign_and_body_loading_still_needs_no_metadata() {
+    let broken = Found {
+        name: "broken".into(),
+        source: Source::Builtin("---\nname: [unclosed\n---\nbody"),
+    };
+    let error = read_skill_body(&broken).unwrap_err();
+    let Reason::Host(host) = error.reason else {
+        panic!("host failure")
+    };
+    let HostFailure::Exarch(ExarchFailure::Skill(SkillFailure::Yaml(failure))) = *host else {
+        panic!("YAML parser failure")
+    };
+    assert_eq!(failure.name, "broken");
+    assert_eq!(failure.place, SkillPlace::Builtin);
+    assert_ne!(failure.detail, "");
+    for body in ["plain body", "---\nanything: 1\n---\nplain body"] {
+        let found = Found {
+            name: "body-only".into(),
+            source: Source::Builtin(body),
+        };
+        assert_eq!(read_skill_body(&found).unwrap(), "plain body");
+        assert!(parse_skill(&found).is_err());
+    }
+}
+
+#[test]
+fn skill_text_keeps_utf8_offsets_instead_of_a_read_error_sentence() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("SKILL.md"), [b'a', 0xc3]).unwrap();
+    let found = found(root.path());
+    let error = read_skill_body(&found).unwrap_err();
+    let Reason::Invalid(failure) = error.reason else {
+        panic!("invalid UTF-8")
+    };
+    assert_eq!(failure.operation, "skill");
+    assert_eq!(
+        failure.cause,
+        InvalidCause::Codec(CodecFailure::Utf8(CodecFailureUtf8 {
+            subject: Utf8Subject::Path(ral_core::path::shown(root.path().join("SKILL.md"))),
+            cause: Utf8Failure {
+                valid_up_to: 1usize.into(),
+                error_len: None
+            },
+        }))
     );
 }

@@ -241,7 +241,9 @@ fn an_unlistable_directory_ends_the_plan() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     if let Err(why) = refused {
         let at = shown(tree.at("/a/b").as_path());
-        assert!(why.contains(&format!("cannot list '{at}'")), "{why}");
+        assert!(
+            matches!(why, crate::fact::ProjectionFailure::Carve(failure) if failure.path == at)
+        );
     }
 }
 

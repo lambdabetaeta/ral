@@ -473,6 +473,20 @@ impl fmt::Display for FilterError {
     }
 }
 
+impl From<FilterError> for crate::fact::FilterFailure {
+    fn from(e: FilterError) -> Self {
+        match e {
+            FilterError::Arch(e) => Self::Arch(crate::fact::FilterFailureArch {
+                architecture: std::env::consts::ARCH.into(),
+                detail: e.to_string(),
+            }),
+            FilterError::Compile(e) => Self::Compile(crate::fact::FilterFailureCompile {
+                detail: e.to_string(),
+            }),
+        }
+    }
+}
+
 #[cfg(seccomp)]
 impl Cond {
     fn compile(&self) -> Result<Vec<seccompiler::SeccompCondition>, FilterError> {

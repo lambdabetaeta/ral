@@ -328,24 +328,24 @@ the semantics is the residue of their findings.
 
 1. **First review.** An earlier draft (written against 94344cac) was replaced,
    and the decisions of the list above were reached with Alex.
-2. **Second (Claude, Codex).** The account of the write freeze and of ral's
+2. **Second.** The account of the write freeze and of ral's
    exemption was corrected; writing reads were added; `Any` was lowered against
    the envelope's binds; the support set stayed projection data; the
    package-manager catalogue moved to its own plan.
-3. **Third (Claude, Codex, Fable).** No kernel judges an exec of ral for a
+3. **Third.** No kernel judges an exec of ral for a
    bundled tool, so ral's binary became ordinary support; an extension's run
    allowances were kept beside `Any` so that their reads resolve afresh; support
    moved out of restricted exec; scope capacities and the launch-time carrier
    check were dropped; every directory admission was lowered against the binds;
    hard links and the existing fs limits were declared.
-4. **Fourth (Claude, Codex, Fable).** Windows' deny walk defeats any `ral.exe`
+4. **Fourth.** Windows' deny walk defeats any `ral.exe`
    exception and a bundled tool reaches its own image through `/proc/self/exe`,
    so a bundled tool reads ral's binary; the read pairing of run allowances
    moved from the bundle to the stack, for ergonomics; frozen identities stayed
    frozen through rendering; `Any` became an authored-free flag, `every`, with
    no negative form; activation became denotational; support got one cross-axis
    rule; the remaining Linux and Windows limits were declared.
-5. **Fifth (Claude, Codex).** Confirmed on Linux that a re-resolved allowance
+5. **Fifth.** Confirmed on Linux that a re-resolved allowance
    can be repointed by a symlink to read and write outside the grant, so
    allowances are frozen and only exclusions re-resolve; pairing looks down the
    stack, since pairing at the whole stack let a nested grant widen reading; a
@@ -353,14 +353,14 @@ the semantics is the residue of their findings.
    through Windows stamping and its projection cache; ral's binary was given
    support in the guard's judgment; directory lowering was restored for alias
    binds; the self layer was stated as the guardrail it is.
-6. **Sixth (Codex).** Shaped places broke the fs meet and Windows' capability
+6. **Sixth.** Shaped places broke the fs meet and Windows' capability
    names, so places read as prefixes; a surface spelling must never be an
    allowance of its own; Windows must stamp the object it checked, with no
    reparse point on its path; exec exclusions must re-resolve too; synod's grant
    must be frozen once per session, not per run; lowering must cover canonical
    sub-binds; the stack is an ordered elaboration before the meet; hard links
    reach past any path grant.
-7. **Seventh (Claude, Codex).** ral's binary became an ordinary host file,
+7. **Seventh.** ral's binary became an ordinary host file,
    neither support nor excluded; exarch's self layer shrank to its own binary,
    pushed in every session; freezing refuses a real path that is not Unicode;
    names live per run; Windows refuses the universal prefix; deputy findings

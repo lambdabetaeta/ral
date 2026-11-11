@@ -15,10 +15,11 @@ use crate::authority::guard::{Denial, check_exec, check_exec_name};
 use crate::authority::policy::{self, Admitted, Baseline, GrantStack};
 use crate::authority::sandbox::{Confinement, Image, Ownership, ProgramLaunch};
 use crate::error::Error;
-use crate::fact::{Failure, NotRunnable, Reason, Unrunnable};
+use crate::fact::{Failure, NotRunnable, PrepareStep, PrepareSubject, Reason, Unrunnable};
 use crate::io::child::{Connection, Drains};
 use crate::ir::{CommandName, Redirects};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
+use crate::process::launch::nul_free;
 use crate::process::{CancelCause, Group, Placement, Scope, Spawned, Unstarted, WaitOutcome};
 use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell, Value};
 use crate::source::Span;
@@ -87,7 +88,12 @@ pub(crate) enum LookupFailure {
     Refused {
         at: String,
         denial: Box<Denial>,
+        exhaustion: Option<PathExhaustion>,
     },
+}
+
+pub(crate) enum PathExhaustion {
+    NoAllowedDirectory,
 }
 
 /// No program runs under the name. Reported once the run has begun.
@@ -195,6 +201,7 @@ impl Command<Request> {
                     |denial| LookupFailure::Refused {
                         at: shown.clone(),
                         denial,
+                        exhaustion: None,
                     },
                 )
             }
@@ -205,7 +212,7 @@ impl Command<Request> {
                     try_file(file, Origin::Bare, &shown, grants, baseline)
                         .map_or_else(ControlFlow::Continue, ControlFlow::Break)
                 })
-                .map_err(|failures| search_error(failures, &shown))
+                .map_err(search_error)
             }
         };
         Command {
@@ -299,8 +306,13 @@ fn try_file(
         Ok(located) => located,
         Err(error) => {
             if let Ok(trace) = failure_trace(&spelled, &error) {
-                check_exec_name(grants, baseline, shown, &trace)
-                    .map_err(|denial| LookupFailure::Refused { at, denial })?;
+                check_exec_name(grants, baseline, shown, &trace).map_err(|denial| {
+                    LookupFailure::Refused {
+                        at,
+                        denial,
+                        exhaustion: None,
+                    }
+                })?;
             }
             return Err(match error.kind() {
                 ErrorKind::NotFound | ErrorKind::NotADirectory => LookupFailure::ABSENT,
@@ -319,7 +331,11 @@ fn try_file(
             located: Box::new(located),
         },
     )
-    .map_err(|denial| LookupFailure::Refused { at, denial })?;
+    .map_err(|denial| LookupFailure::Refused {
+        at,
+        denial,
+        exhaustion: None,
+    })?;
     // A handle can only be inspected once the grants have accepted it.
     if let policy::Program::File { arg0, located } = admitted.program()
         && !located.is_executable()
@@ -336,19 +352,18 @@ fn try_file(
 /// Pick the error for a failed PATH search: the first one that is not
 /// "absent". If every file was absent or simply not allowed, the refusal
 /// gets a hint that no allowed PATH directory has the program.
-fn search_error(failures: Vec<LookupFailure>, shown: &str) -> LookupFailure {
+fn search_error(failures: Vec<LookupFailure>) -> LookupFailure {
     let nowhere = failures.iter().all(|failure| {
         failure.is_absent()
-            || matches!(failure, LookupFailure::Refused { denial, .. } if denial.missing_allowance)
+            || matches!(failure, LookupFailure::Refused { denial, .. } if denial.missing_allowance())
     });
     match failures.into_iter().find(|failure| !failure.is_absent()) {
         None => LookupFailure::ABSENT,
-        Some(LookupFailure::Refused { at, mut denial }) if nowhere => {
-            denial.error = denial.error.with_hint(format!(
-                "'{shown}' is not in any PATH directory the grant allows"
-            ));
-            LookupFailure::Refused { at, denial }
-        }
+        Some(LookupFailure::Refused { at, denial, .. }) if nowhere => LookupFailure::Refused {
+            at,
+            denial,
+            exhaustion: Some(PathExhaustion::NoAllowedDirectory),
+        },
         Some(failure) => failure,
     }
 }
@@ -374,8 +389,16 @@ impl Command<Lookup> {
         let state = match state {
             Ok(admitted) => Ok(admitted),
             Err(LookupFailure::Missing(missing)) => Err(missing.into_error(&shown)),
-            Err(LookupFailure::Refused { denial, .. }) => {
-                return Err(shell.exec_refused(*denial, mooring));
+            Err(LookupFailure::Refused {
+                denial, exhaustion, ..
+            }) => {
+                let refusal = shell.exec_refused(*denial, mooring);
+                return Err(refusal.map_error(|error| match exhaustion {
+                    Some(PathExhaustion::NoAllowedDirectory) => error.with_hint(format!(
+                        "'{shown}' is not in any PATH directory the grant allows"
+                    )),
+                    None => error,
+                }));
             }
         };
         Ok(Command {
@@ -421,7 +444,7 @@ impl Command<Result<Admitted, Error>> {
                 .context
                 .env_overrides()
                 .for_child(shell.context.cwd(), shell.has_active_capabilities()),
-        );
+        )?;
         #[cfg(unix)]
         launch
             .launch_mut()
@@ -449,15 +472,56 @@ impl Command<Result<Admitted, Error>> {
 /// the type checker does the same, but cannot always know the type.
 fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Error> {
     args.iter()
-        .map(|arg| {
-            if let Some(refused) = arg.heads().first().copied().and_then(RefusedArg::of_head) {
-                return Err(Error::new(RefusedArg::headline(cmd, arg.type_name()))
-                    .with_hint(refused.remedy(cmd)));
+        .enumerate()
+        .map(|(index, arg)| {
+            if arg
+                .heads()
+                .first()
+                .copied()
+                .and_then(RefusedArg::of_head)
+                .is_some()
+            {
+                return Err(Error::new(Reason::Invalid(Box::new(
+                    crate::fact::InvalidFailure {
+                        operation: cmd.into(),
+                        path: vec![crate::fact::DataStep::Index(index.into())],
+                        cause: crate::fact::InvalidCause::Shape(crate::fact::ShapeFailure {
+                            expected: crate::fact::Expected::AnyOf(vec![
+                                crate::fact::ValueShape::Bool,
+                                crate::fact::ValueShape::Int,
+                                crate::fact::ValueShape::Float,
+                                crate::fact::ValueShape::String,
+                                crate::fact::ValueShape::Variant,
+                            ]),
+                            found: match arg {
+                                Value::Unit => crate::fact::Found::Unit,
+                                Value::Thunk(_) => crate::fact::Found::Block,
+                                Value::Native(_) => crate::fact::Found::Function,
+                                Value::Handle(_) => crate::fact::Found::Handle,
+                                Value::List(_) => crate::fact::Found::List,
+                                Value::Map(_) => crate::fact::Found::Map,
+                                Value::Bytes(_) => crate::fact::Found::Bytes,
+                                Value::Bool(_)
+                                | Value::Int(_)
+                                | Value::Float(_)
+                                | Value::String(_)
+                                | Value::Variant { .. } => unreachable!("scalar argv is admitted"),
+                            },
+                        }),
+                    },
+                ))));
             }
-            Ok(match arg {
+            let text = match arg {
                 Value::String(text) => Cow::Borrowed(text.as_ref()),
                 _ => Cow::Owned(arg.to_string()),
-            })
+            };
+            // argv[0] is arg0, so the first argument is argument 1.
+            nul_free(
+                OsStr::new(text.as_ref()),
+                PrepareStep::Argv,
+                PrepareSubject::Argument((index + 1).into()),
+            )?;
+            Ok(text)
         })
         .collect()
 }
@@ -506,8 +570,16 @@ impl Prepared {
             confinement,
             program,
         } = self;
-        let drains = (io.install(launch.launch_mut()).start(scope))
-            .map_err(|e| Break::from(program.io_error("start output drains", &e)))?;
+        let drains = (io.install(launch.launch_mut()).start(scope)).map_err(|e| {
+            Break::from(
+                Error::io(
+                    crate::fact::IoOperation::StartThread,
+                    crate::fact::IoSubject::Thread("output drain".into()),
+                    &e,
+                )
+                .with_context(format!("starting program '{}'", program.shown)),
+            )
+        })?;
         let spawned = match launch.spawn(placement, scope) {
             Ok(spawned) => spawned,
             Err(why) => {
@@ -528,7 +600,11 @@ impl Prepared {
 
     /// The error for streams that could not be connected to this command.
     pub(super) fn connection_error(&self, e: &std::io::Error) -> Error {
-        self.program.io_error("connect standard streams", e)
+        crate::process::launch::prepare_io(
+            crate::fact::PrepareStep::Stdio,
+            crate::fact::PrepareSubject::Program(self.program.shown.clone()),
+            e,
+        )
     }
 }
 
@@ -596,11 +672,6 @@ impl Program {
                 })
                 .into(),
         }
-    }
-
-    /// The I/O failure to `what` for this program.
-    fn io_error(&self, what: &str, e: &std::io::Error) -> Error {
-        Error::io(format!("{}: could not {what}", self.shown), e)
     }
 
     /// Where the program was found, as lookup names it.

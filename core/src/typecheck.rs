@@ -22,9 +22,7 @@ pub use self::contract::{Form, Table};
 pub use self::error::{
     CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind, UnderAppliedBuiltin,
 };
-pub(crate) use self::explain::{
-    NO_STATUS_REGISTER, hyphen_boundary, hyphen_boundary_hint, spread_into_application,
-};
+pub(crate) use self::explain::{hyphen_boundary, hyphen_boundary_hint, spread_into_application};
 pub(crate) use self::unify::Unifier;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -90,20 +88,10 @@ fn seeded_generator(schemes: SessionSchemes) -> Generator {
     Generator::new(solver, env, residuals)
 }
 
-/// The first of a refused unit's errors.
-fn first_error(errors: Vec<TypeError>) -> Box<TypeError> {
-    Box::new(
-        errors
-            .into_iter()
-            .next()
-            .expect("a refused unit has an error"),
-    )
-}
-
 /// Exit the inference region before generalising, and export only after closure.
-fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Box<TypeError>> {
+fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Vec<TypeError>> {
     let scheme = generator.solver.generalise(&Ty::thunk(cty));
-    let solution = generator.solver.close().map_err(first_error)?;
+    let solution = generator.solver.close()?;
     Ok(solution.settle(Arc::new(scheme)))
 }
 
@@ -176,7 +164,7 @@ pub(crate) fn alias_arm_scheme(
     head: &str,
     arm: &Arc<Comp>,
     schemes: SessionSchemes,
-) -> Result<Closed, Box<TypeError>> {
+) -> Result<Closed, Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
     let (cty, _) =
         generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::Named(head), None));
@@ -192,10 +180,10 @@ pub(crate) fn alias_arm_scheme(
 pub(crate) fn catch_all_stands_in(
     arm: &Arc<Comp>,
     schemes: SessionSchemes,
-) -> Result<(), Box<TypeError>> {
+) -> Result<(), Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
     generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::CatchAll, None));
-    generator.solver.close().map(drop).map_err(first_error)
+    generator.solver.close().map(drop)
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`):
@@ -203,7 +191,7 @@ pub(crate) fn catch_all_stands_in(
 pub(crate) fn binding_value_scheme(
     body: &Comp,
     schemes: SessionSchemes,
-) -> Result<Closed, Box<TypeError>> {
+) -> Result<Closed, Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
     let (cty, _) = generator.region(|this| this.scope(|this| this.comp(body)));
     close_thunk_scheme(generator, cty)

@@ -7,8 +7,6 @@
 mod fork_brake;
 
 use super::Launch;
-#[cfg(any(windows, target_os = "macos"))]
-use super::launch::unavailable;
 use crate::error::Error;
 #[cfg(unix)]
 use rustix::process::Resource;
@@ -58,14 +56,6 @@ impl ChildLimit {
 #[cfg(any(windows, target_os = "macos"))]
 pub(super) const ACTIVE_PROCESS_CAP: u32 = 512;
 
-/// Why a child under a grant was not started: `why` its budget could not be set.
-#[cfg(any(windows, target_os = "macos"))]
-pub(super) fn unbudgeted(why: impl std::fmt::Display) -> Error {
-    unavailable(format!(
-        "{why}, so this command would run with no process budget"
-    ))
-}
-
 /// Advice for a grant-confined command that exited with `code`: on macOS,
 /// status 128 may be a fork the process limit refused. Other platforms
 /// impose no such limit at launch, and have nothing to say.
@@ -89,15 +79,34 @@ pub(crate) fn failure_hint(code: i32) -> Option<String> {
 
 #[cfg(unix)]
 impl ChildLimits {
-    /// Apply the session's soft limits in the child, preserving hard limits.
-    /// Only getrlimit/setrlimit: no allocation or locks after fork.
-    pub(super) fn apply(mut self) -> io::Result<()> {
+    pub(super) fn checks(
+        evidence: &mut super::launch::setup::Evidence,
+    ) -> [super::launch::setup::Check; 3] {
+        use crate::fact::{PrepareStep, PrepareSubject, SessionLimit};
+        [
+            SessionLimit::OpenFiles,
+            SessionLimit::CoreBytes,
+            SessionLimit::StackBytes,
+        ]
+        .map(|limit| {
+            evidence.check(super::launch::setup::Context::Prepare(
+                PrepareStep::SessionLimit,
+                PrepareSubject::SessionLimit(limit),
+            ))
+        })
+    }
+
+    /// Only getrlimit/setrlimit; no allocation or locks after fork.
+    pub(super) fn apply_checked(
+        mut self,
+        checks: &[super::launch::setup::Check; 3],
+    ) -> io::Result<()> {
         use rustix::process::{getrlimit, setrlimit};
-        for limit in ChildLimit::ALL {
+        for (limit, check) in ChildLimit::ALL.into_iter().zip(checks) {
             if let Some(value) = *(limit.slot)(&mut self) {
                 let mut current = getrlimit(limit.resource);
                 current.current = Some(value);
-                setrlimit(limit.resource, current)?;
+                check.run(setrlimit(limit.resource, current).map_err(Into::into))?;
             }
         }
         Ok(())
@@ -114,13 +123,30 @@ pub(super) struct GrantLimits {
 
 #[cfg(unix)]
 impl GrantLimits {
-    /// Apply after session limits, so the mandatory ceilings win.
-    /// Only setrlimit: no allocation or locks after fork.
-    #[cfg_attr(not(target_os = "macos"), allow(clippy::unused_self))]
-    pub(super) fn apply(self) -> io::Result<()> {
+    pub(super) fn checks(
+        evidence: &mut super::launch::setup::Evidence,
+    ) -> [super::launch::setup::Check; 2] {
+        use crate::fact::{GrantLimit, PrepareStep, PrepareSubject};
+        [GrantLimit::Processes, GrantLimit::CoreBytes].map(|limit| {
+            evidence.check(super::launch::setup::Context::Prepare(
+                PrepareStep::GrantLimit,
+                PrepareSubject::GrantLimit(limit),
+            ))
+        })
+    }
+
+    /// Mandatory ceilings follow session limits.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unused_self,
+            reason = "only macOS consumes the parent-measured fork budget"
+        )
+    )]
+    pub(super) fn apply_checked(self, checks: &[super::launch::setup::Check; 2]) -> io::Result<()> {
         #[cfg(target_os = "macos")]
-        set_limit(Resource::Nproc, self.forks)?;
-        set_limit(Resource::Core, 0)
+        checks[0].run(set_limit(Resource::Nproc, self.forks))?;
+        checks[1].run(set_limit(Resource::Core, 0))
     }
 }
 
@@ -148,8 +174,11 @@ impl Launch {
     pub(crate) fn limit_resources(&mut self) -> Result<(), Error> {
         self.setup.grant_limits = Some(GrantLimits {
             #[cfg(target_os = "macos")]
-            forks: fork_brake::limit()
-                .map_err(|e| unbudgeted(format_args!("cannot count your processes: {e}")))?,
+            forks: fork_brake::limit().map_err(|e| {
+                super::launch::refused(crate::fact::LaunchFailure::Budget(
+                    crate::fact::BudgetFailure::CountProcesses(e),
+                ))
+            })?,
         });
         Ok(())
     }

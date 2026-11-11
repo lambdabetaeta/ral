@@ -9,6 +9,9 @@
 
 use super::super::local::Local;
 use super::DaclError;
+use crate::fact::{
+    DaclOperation, DaclWin32Cause, OsFailure, SidFailure, SidFailureParse, SidFailureTooLong,
+};
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
@@ -30,7 +33,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 /// The call that writes security to a target, for messages.
-const SET_OP: &str = "SetSecurityInfo";
+const SET_OP: DaclOperation = DaclOperation::SetSecurityInfo;
 
 /// An empty `ACL` header's byte count — the baseline every ACL built here is
 /// sized up from, as the `u32` [`InitializeAcl`] wants.
@@ -133,12 +136,14 @@ const MAX_SID_STRING_LEN: usize = 256;
 impl OwnedSid {
     pub(super) fn parse(s: &str) -> Result<Self, DaclError> {
         if s.is_empty() {
-            return Err(DaclError::InvalidSid("(empty)".to_string()));
+            return Err(DaclError::InvalidSid(SidFailure::Empty));
         }
         if s.len() > MAX_SID_STRING_LEN {
-            return Err(DaclError::InvalidSid(format!(
-                "SID string too long ({} bytes, max {MAX_SID_STRING_LEN})",
-                s.len(),
+            return Err(DaclError::InvalidSid(SidFailure::TooLong(
+                SidFailureTooLong {
+                    bytes: s.len().into(),
+                    limit: MAX_SID_STRING_LEN.into(),
+                },
             )));
         }
         let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
@@ -147,15 +152,15 @@ impl OwnedSid {
         // out-param the callee fills on success.
         let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) };
         if ok == 0 {
-            return Err(DaclError::InvalidSid(format!(
-                "{s}: {}",
-                io::Error::last_os_error()
-            )));
+            return Err(DaclError::InvalidSid(SidFailure::Parse(SidFailureParse {
+                text: s.to_owned(),
+                cause: OsFailure::from(&io::Error::last_os_error()),
+            })));
         }
         // SAFETY: ConvertStringSidToSidW transferred this allocation.
         let sid = Self(unsafe { Local::from_raw(psid) });
         if psid.is_null() || unsafe { IsValidSid(psid) } == 0 {
-            return Err(DaclError::InvalidSid(s.to_string()));
+            return Err(DaclError::InvalidSid(SidFailure::Invalid(s.to_owned())));
         }
         Ok(sid)
     }
@@ -208,7 +213,7 @@ impl Security {
         Self::query(
             path,
             kind,
-            "GetSecurityInfo",
+            DaclOperation::GetSecurityInfo,
             |info, dacl, sacl, sd| unsafe {
                 GetSecurityInfo(
                     handle.as_raw_handle(),
@@ -229,7 +234,7 @@ impl Security {
     fn query(
         path: &Path,
         kind: AclKind,
-        op: &str,
+        op: DaclOperation,
         call: impl FnOnce(u32, *mut *mut ACL, *mut *mut ACL, *mut *mut c_void) -> u32,
     ) -> Result<Self, DaclError> {
         let mut acl = std::ptr::null_mut();
@@ -342,23 +347,26 @@ fn dacl_written(target: Target<'_>, rc: u32) -> Result<(), DaclError> {
         ERROR_SUCCESS => Ok(()),
         ERROR_ACCESS_DENIED => Err(DaclError::WriteDacDenied {
             path: path.to_path_buf(),
-            reason: format!("{op}: {}", io::Error::from_raw_os_error(rc.cast_signed())),
+            operation: op,
+            error: io::Error::from_raw_os_error(rc.cast_signed()),
         }),
         _ => Err(win32_err(path, op, rc)),
     }
 }
 
-pub(super) fn win32_err(path: &Path, op: &str, rc: u32) -> DaclError {
-    DaclError::Win32 {
-        path: path.to_path_buf(),
-        reason: format!("{op}: {}", io::Error::from_raw_os_error(rc.cast_signed())),
-    }
+pub(super) fn win32_err(path: &Path, operation: DaclOperation, rc: u32) -> DaclError {
+    win32_io(
+        path,
+        operation,
+        &io::Error::from_raw_os_error(rc.cast_signed()),
+    )
 }
 
-pub(super) fn win32_err_str(path: &Path, msg: &str) -> DaclError {
+pub(super) fn win32_io(path: &Path, operation: DaclOperation, error: &io::Error) -> DaclError {
     DaclError::Win32 {
         path: path.to_path_buf(),
-        reason: msg.to_string(),
+        operation,
+        cause: DaclWin32Cause::Io(Box::new(crate::io::failure(error))),
     }
 }
 
@@ -393,7 +401,7 @@ pub(super) fn apply_explicit_ace(
     // above, and null there means "no prior DACL", which the callee accepts.
     let rc = unsafe { SetEntriesInAclW(1, &raw const ea, security.acl, &raw mut new_dacl) };
     if rc != ERROR_SUCCESS {
-        return Err(win32_err(path, "SetEntriesInAclW", rc));
+        return Err(win32_err(path, DaclOperation::SetEntriesInAcl, rc));
     }
 
     // SAFETY: SetEntriesInAclW transferred this allocation.
@@ -452,9 +460,10 @@ pub(super) fn apply_mandatory_label_ace(target: Target<'_>) -> Result<(), DaclEr
     // SAFETY: freshly allocated, zeroed, 4-byte-aligned, and at least
     // `acl_size` bytes long.
     if unsafe { InitializeAcl(acl_ptr, acl_size, ACL_REVISION) } == 0 {
-        return Err(win32_err_str(
+        return Err(win32_io(
             path,
-            &format!("InitializeAcl: {}", io::Error::last_os_error()),
+            DaclOperation::InitializeAcl,
+            &io::Error::last_os_error(),
         ));
     }
     // SAFETY: `acl_ptr` was sized above to hold exactly one mandatory-label
@@ -469,9 +478,10 @@ pub(super) fn apply_mandatory_label_ace(target: Target<'_>) -> Result<(), DaclEr
         )
     } == 0
     {
-        return Err(win32_err_str(
+        return Err(win32_io(
             path,
-            &format!("AddMandatoryAce: {}", io::Error::last_os_error()),
+            DaclOperation::AddMandatoryAce,
+            &io::Error::last_os_error(),
         ));
     }
 
@@ -482,7 +492,7 @@ pub(super) fn apply_mandatory_label_ace(target: Target<'_>) -> Result<(), DaclEr
         acl_ptr,
     );
     if rc != ERROR_SUCCESS {
-        return Err(win32_err(path, &format!("{SET_OP}(label)"), rc));
+        return Err(win32_err(path, DaclOperation::SetSecurityInfoLabel, rc));
     }
     Ok(())
 }
@@ -525,7 +535,7 @@ pub(super) fn scan_explicit_aces_for_sid(
         .filter_map(|ace| {
             let ace = match ace {
                 Ok(ace) => ace,
-                Err(e) => return Some(Err(win32_err_str(canonical, &format!("GetAce: {e}")))),
+                Err(e) => return Some(Err(win32_io(canonical, DaclOperation::GetAce, &e))),
             };
             if ace.0.AceFlags & INHERITED_ACE_FLAG != 0 {
                 return None;
@@ -574,7 +584,7 @@ fn compute_appcontainer_effective_access(target: Target<'_>) -> Result<u32, Dacl
     let mut allowed = 0;
     let mut denied = 0;
     for ace in security.aces() {
-        let ace = ace.map_err(|e| win32_err_str(path, &format!("GetAce: {e}")))?;
+        let ace = ace.map_err(|e| win32_io(path, DaclOperation::GetAce, &e))?;
         if ace.0.AceFlags & INHERIT_ONLY_ACE_FLAG != 0 {
             continue;
         }

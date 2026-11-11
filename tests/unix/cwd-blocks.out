@@ -20,6 +20,6 @@ true
 true
 true
 true
-cd: the empty string names no directory; did you mean `cd .`, or `cd ~`?
+cd: a path must not be empty
 true
 cwd blocks done

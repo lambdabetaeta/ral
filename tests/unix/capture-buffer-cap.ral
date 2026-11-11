@@ -9,7 +9,7 @@ let refusal = try {
     let big = yes ral | head -c 20000000
     return "bound"
 } { |e|
-    return !{describe $e}
+    return $e[message]
 }
 echo $refusal
 

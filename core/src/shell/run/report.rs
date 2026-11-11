@@ -6,37 +6,24 @@
 //! status, hint, caret) and only has to print it.
 
 use crate::data::datum::Datum;
-use crate::data::{FOValue, NotData, Opaque};
+use crate::data::{FOValue, NotData};
 use crate::fact::Ending;
+use crate::fact::{InvalidCause, Reason};
 use crate::protocol::{Ran, Report};
 use crate::shell::run::{RunReport, spanless};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{End, Error, Shell};
 use std::convert::identity;
 
-fn not_data(NotData { leaf, nested }: NotData) -> Error {
-    let (verb, hint) = match (leaf, nested) {
-        (Opaque::Handle, false) => (
-            "is",
-            "did you mean to keep it? bind it (`let h = spawn \"title\" { … }`) and \
-             `await $h` when you need its value",
-        ),
-        (Opaque::Block | Opaque::Function, false) => (
-            "is",
-            "did you mean to run it? force it with `!{ … }`, or pass it its arguments",
-        ),
-        (Opaque::Handle, true) => (
-            "holds",
-            "bind the handle with `let h = …`, and return only data",
-        ),
-        (Opaque::Block | Opaque::Function, true) => (
-            "holds",
-            "return only data: force a block with `!{ … }`, or bind it with `let`",
-        ),
-    };
-    Error::new(format!(
-        "the result {verb} {leaf}, and a run can return only data"
-    ))
-    .with_hint(hint)
+fn not_data(error: NotData) -> Error {
+    invalid("run", InvalidCause::NonData(error.into()))
+}
+
+/// A report lost after evaluation may already have started.
+#[cfg(unix)]
+pub(crate) enum ReportFault {
+    WorkerPanicked,
+    Unencodable(crate::fact::FrameEncodeFailure),
 }
 
 impl RunReport {
@@ -72,7 +59,7 @@ impl RunReport {
                     End::Panic(text) => Ending::Panic(text),
                 };
                 let rendered = ending.render(shell.sources(), compact, shell.exit_hints());
-                let ending = ending.map(identity, |error| error.record(shell), |stop| stop.cause);
+                let ending = ending.map(identity, |error| error.fact(shell), |stop| stop.cause);
                 Report::Ran(Ran {
                     ending,
                     rendered,
@@ -90,9 +77,9 @@ impl Report {
     /// that could not be sent), rendered as the same one-liner a run's own
     /// host-level static failure is, so a host never has to know which of the
     /// two it is printing.
-    pub(crate) fn refused(message: String) -> Self {
+    pub(crate) fn refused(reason: Reason) -> Self {
         let (rendered, status) = spanless(
-            &Error::new(message),
+            &Error::new(reason),
             &crate::shell::runtime::ExitHints::default(),
         );
         Self::Static { rendered, status }
@@ -103,12 +90,26 @@ impl Report {
     /// whole, so it is no refusal. Rendered as the same one-liner a refusal is.
     /// Only the wire engine, a unix process, has an outside to fault in.
     #[cfg(unix)]
-    pub(crate) fn faulted(message: String) -> Self {
-        let (rendered, status) = spanless(
-            &Error::new(message),
-            &crate::shell::runtime::ExitHints::default(),
-        );
-        Self::Faulted { rendered, status }
+    pub(crate) fn faulted(fault: ReportFault) -> Self {
+        let message = match fault {
+            ReportFault::WorkerPanicked => "engine: dispatch panicked in the engine worker".into(),
+            ReportFault::Unencodable(cause) => format!(
+                "engine: run report could not be encoded: {}",
+                cause.describe()
+            ),
+        };
+        let rendered = crate::diagnostic::Report {
+            code: Some("R0001"),
+            message,
+            at: None,
+            also: None,
+            hint: None,
+        }
+        .plain();
+        Self::Faulted {
+            rendered,
+            status: std::num::NonZeroU8::MIN,
+        }
     }
 }
 
@@ -146,7 +147,7 @@ mod runtime_error_seam_tests {
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let shell = crate::test_helper::core_shell();
-        let err = Error::new("boom").with_hint("try harder");
+        let err = Error::new(Reason::raised("boom")).with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
         let Report::Ran(Ran {
             rendered,
@@ -272,12 +273,14 @@ mod static_diagnostic_seam_tests {
     /// The `Host` arm is spanless, so it renders as the one-liner.
     #[test]
     fn a_host_fault_renders_without_a_caret() {
-        let (rendered, status) = StaticDiagnostics::Host(crate::shell::runtime::Error::new(
-            "hook 'x' is not registered",
-        ))
-        .render(&crate::shell::runtime::ExitHints::default());
+        let reason = Reason::State(Box::new(crate::fact::StateFailure::MissingHook(
+            crate::fact::HookRef::Session("x".into()),
+        )));
+        let expected = reason.describe().into_owned();
+        let (rendered, status) = StaticDiagnostics::Host(Error::new(reason))
+            .render(&crate::shell::runtime::ExitHints::default());
         assert_eq!(status, NonZeroU8::MIN);
-        assert!(rendered.contains("hook 'x' is not registered"));
+        assert!(rendered.contains(&expected));
         assert!(!rendered.contains('╰'), "no span, no caret: {rendered:?}");
         assert!(rendered.ends_with('\n'));
     }
@@ -287,11 +290,12 @@ mod static_diagnostic_seam_tests {
     #[cfg(unix)]
     #[test]
     fn a_fault_is_a_faulted_one_liner() {
-        let Report::Faulted { rendered, status } = Report::faulted("worker panicked".into()) else {
+        let Report::Faulted { rendered, status } = Report::faulted(ReportFault::WorkerPanicked)
+        else {
             panic!("a fault must be Report::Faulted");
         };
         assert_eq!(status.get(), 1);
-        assert!(rendered.contains("worker panicked") && !rendered.contains('╰'));
+        assert!(rendered.contains("panicked in the engine worker") && !rendered.contains('╰'));
     }
 
     #[test]
@@ -351,5 +355,71 @@ mod static_diagnostic_seam_tests {
             };
             assert!(rendered.is_empty(), "{src}: {rendered:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod typed_report_tests {
+    use super::*;
+    use crate::data::Opaque;
+    use crate::fact::{NonData, OpaqueKind, StateFailure};
+
+    #[test]
+    fn non_data_result_keeps_opaque_leaf_and_nesting_without_stored_advice() {
+        for (leaf, kind) in [
+            (Opaque::Block, OpaqueKind::Block),
+            (Opaque::Function, OpaqueKind::Function),
+            (Opaque::Handle, OpaqueKind::Handle),
+        ] {
+            for nested in [false, true] {
+                let error = not_data(NotData { leaf, nested });
+                let Reason::Invalid(failure) = &error.reason else {
+                    panic!("non-data refusal")
+                };
+                assert_eq!(failure.operation, "run");
+                assert_eq!(
+                    failure.cause,
+                    InvalidCause::NonData(NonData { leaf: kind, nested })
+                );
+                assert_eq!(error.hints(), []);
+                let advice = error.reason.advice().join("\n");
+                assert!(
+                    advice.contains(match (kind, nested) {
+                        (OpaqueKind::Handle, false) => "`await $h`",
+                        (OpaqueKind::Block | OpaqueKind::Function, false) => "force",
+                        (_, true) => "return only data",
+                    }),
+                    "{advice}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refused_accepts_a_typed_reason_before_evaluation() {
+        let Report::Static { rendered, status } =
+            Report::refused(Reason::State(Box::new(StateFailure::NoChildEngines)))
+        else {
+            panic!("refusal must be static")
+        };
+        assert_eq!(status.get(), 1);
+        assert!(rendered.contains(&StateFailure::NoChildEngines.describe()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_encoding_fault_does_not_claim_the_run_was_refused() {
+        let cause =
+            crate::fact::FrameEncodeFailure::TooLarge(crate::fact::FrameEncodeFailureTooLarge {
+                actual: 65536usize.into(),
+                limit: 65535usize.into(),
+            });
+        let Report::Faulted { rendered, status } = Report::faulted(ReportFault::Unencodable(cause))
+        else {
+            panic!("already-started run loses a report, not admission")
+        };
+        assert_eq!(status.get(), 1);
+        assert!(rendered.contains("run report") && rendered.contains("65536"));
+        assert!(!rendered.contains('╰'));
     }
 }

@@ -20,7 +20,7 @@ for $files { |f|
     try {
         ffmpeg -i $f $out 2> /dev/null ? echo "  done: !{basename $out}"
     } { |err|
-        echo "  failed: !{describe $err}"
+        echo "  failed: $err[message]"
     }
 }
 

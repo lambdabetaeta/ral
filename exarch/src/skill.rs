@@ -13,6 +13,14 @@ use ral_core::Shell;
 use ral_core::authority::policy::LocateError;
 use ral_core::authority::policy::{Baseline, GrantStack};
 use ral_core::environ::EnvVars;
+use ral_core::error::Error;
+use ral_core::fact::{
+    CodecFailure, CodecFailureUtf8, Count, ExarchFailure, FrontmatterFailure,
+    FrontmatterFailureDirectoryNameMismatch, FrontmatterFailureFieldShape,
+    FrontmatterFailureInvalidName, FrontmatterFailureNotMapping, HostFailure, InvalidCause,
+    InvalidFailure, PodKind, Reason, SkillFailure, SkillFailureFrontmatter, SkillFailureRead,
+    SkillFailureYaml, SkillField, SkillPlace, Utf8Failure, Utf8Subject,
+};
 use ral_core::path::{
     CwdPath, Dir, Judged, Kind, LeafMode, LexicalPath, Located, Reading, Resolver,
 };
@@ -160,6 +168,13 @@ pub(crate) enum Source {
 }
 
 impl Found {
+    pub(crate) fn failure_place(&self) -> SkillPlace {
+        match &self.source {
+            Source::Disk { dir, .. } => SkillPlace::Disk(ral_core::path::shown(dir)),
+            Source::Builtin(_) => SkillPlace::Builtin,
+        }
+    }
+
     /// Where the skill lives, as a reader is shown it.
     pub(crate) fn place(&self) -> String {
         match &self.source {
@@ -219,59 +234,139 @@ pub(crate) fn discover_metadata(
 /// is valid and matches its directory.  I/O-free by design: callers do their own
 /// read, keeping the startup judge and the surface turn-time one distinct
 /// while sharing this parse.
-fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Result<Skill, String> {
-    let matter = Matter::<YAML>::new();
-    let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter
-        .parse(raw)
-        .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
-    let Some(gray_matter::Pod::Hash(data)) = parsed.data else {
-        return Err("missing YAML frontmatter".into());
+fn skill_from_frontmatter(
+    raw: &str,
+    dir_name: &str,
+    place: &SkillPlace,
+) -> Result<Skill, SkillFailure> {
+    let parsed = parse_frontmatter(raw, dir_name, place)?;
+    let refused = |cause| {
+        SkillFailure::Frontmatter(SkillFailureFrontmatter {
+            name: dir_name.into(),
+            place: place.clone(),
+            cause,
+        })
     };
-    // `Pod`'s `Index` panics on a missing key.
-    let field = |key| {
-        data.get(key)
-            .and_then(|v| v.as_string().ok())
-            .ok_or_else(|| format!("frontmatter must contain a string `{key}`"))
+    let data = match parsed.data {
+        Some(gray_matter::Pod::Hash(data)) => data,
+        None => return Err(refused(FrontmatterFailure::Missing)),
+        Some(other) => {
+            return Err(refused(FrontmatterFailure::NotMapping(
+                FrontmatterFailureNotMapping {
+                    found: pod_kind(&other),
+                },
+            )));
+        }
     };
-    let (name, description) = (field("name")?, field("description")?);
+    let field = |key, field| match data.get(key) {
+        Some(gray_matter::Pod::String(value)) => Ok(value.clone()),
+        Some(other) => Err(refused(FrontmatterFailure::FieldShape(
+            FrontmatterFailureFieldShape {
+                field,
+                found: pod_kind(other),
+            },
+        ))),
+        None => Err(refused(FrontmatterFailure::MissingField(field))),
+    };
+    let (name, description) = (
+        field("name", SkillField::Name)?,
+        field("description", SkillField::Description)?,
+    );
     if !valid_skill_name(&name) {
-        return Err(format!(
-            "invalid skill name {name:?}; use lowercase letters, digits, and hyphens"
-        ));
+        return Err(refused(FrontmatterFailure::InvalidName(
+            FrontmatterFailureInvalidName { name },
+        )));
     }
     if name != dir_name {
-        return Err(format!(
-            "frontmatter name {name:?} must match directory name {dir_name:?}"
-        ));
+        return Err(refused(FrontmatterFailure::DirectoryNameMismatch(
+            FrontmatterFailureDirectoryNameMismatch {
+                declared: name,
+                directory: dir_name.into(),
+            },
+        )));
     }
     Ok(Skill { name, description })
 }
 
+fn pod_kind(value: &gray_matter::Pod) -> PodKind {
+    match value {
+        gray_matter::Pod::Null => PodKind::Null,
+        gray_matter::Pod::String(_) => PodKind::String,
+        gray_matter::Pod::Integer(_) => PodKind::Integer,
+        gray_matter::Pod::Float(_) => PodKind::Float,
+        gray_matter::Pod::Boolean(_) => PodKind::Boolean,
+        gray_matter::Pod::Array(_) => PodKind::Array,
+        gray_matter::Pod::Hash(_) => PodKind::Hash,
+    }
+}
+
+fn parse_frontmatter(
+    raw: &str,
+    name: &str,
+    place: &SkillPlace,
+) -> Result<gray_matter::ParsedEntity<gray_matter::Pod>, SkillFailure> {
+    Matter::<YAML>::new().parse(raw).map_err(|error| {
+        SkillFailure::Yaml(SkillFailureYaml {
+            name: name.into(),
+            place: place.clone(),
+            detail: error.to_string(),
+        })
+    })
+}
+
 /// The whole of a skill's `SKILL.md`, read through the handle that was judged.
-fn read_skill_file(found: &Found) -> Result<String, String> {
-    let held = match &found.source {
-        Source::Disk { file, .. } => file,
+fn read_skill_file(found: &Found) -> Result<String, Error> {
+    let (dir, held) = match &found.source {
+        Source::Disk { dir, file } => (dir, file),
         Source::Builtin(text) => return Ok((*text).to_owned()),
     };
-    let mut raw = String::new();
-    let mut file = held.read().map_err(|e| e.to_string())?;
-    file.read_to_string(&mut raw).map_err(|e| e.to_string())?;
-    Ok(raw)
+    let failure = |error: std::io::Error| {
+        refusal(SkillFailure::Read(SkillFailureRead {
+            name: found.name.clone(),
+            place: found.failure_place(),
+            cause: ral_core::io::failure(&error),
+        }))
+    };
+    let mut raw = Vec::new();
+    let mut file = held.read().map_err(failure)?;
+    file.read_to_end(&mut raw).map_err(failure)?;
+    String::from_utf8(raw).map_err(|error| {
+        let cause = error.utf8_error();
+        Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
+            "skill".into(),
+            InvalidCause::Codec(CodecFailure::Utf8(CodecFailureUtf8 {
+                subject: Utf8Subject::Path(ral_core::path::shown(dir.join("SKILL.md"))),
+                cause: Utf8Failure {
+                    valid_up_to: cause.valid_up_to().into(),
+                    error_len: cause.error_len().map(Count::from),
+                },
+            })),
+        ))))
+    })
+}
+
+pub(crate) fn refusal(cause: SkillFailure) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+        ExarchFailure::Skill(cause),
+    ))))
 }
 
 /// A skill's frontmatter, for the `skill-list` builtin and the boot.
-pub(crate) fn parse_skill(found: &Found) -> Result<Skill, String> {
-    skill_from_frontmatter(&read_skill_file(found)?, &found.name)
+pub(crate) fn parse_skill(found: &Found) -> Result<Skill, Error> {
+    skill_from_frontmatter(
+        &read_skill_file(found)?,
+        &found.name,
+        &found.failure_place(),
+    )
+    .map_err(refusal)
 }
 
 /// The Markdown after the frontmatter, for the `skill` builtin.
-pub(crate) fn read_skill_body(found: &Found) -> Result<String, String> {
+pub(crate) fn read_skill_body(found: &Found) -> Result<String, Error> {
     let raw = read_skill_file(found)?;
-    let matter = Matter::<YAML>::new();
-    let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter
-        .parse(&raw)
-        .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
-    Ok(parsed.content)
+    Ok(parse_frontmatter(&raw, &found.name, &found.failure_place())
+        .map_err(refusal)?
+        .content)
 }
 
 /// The skills of `root`: each entry that is a directory holding a `SKILL.md`,

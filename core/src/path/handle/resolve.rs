@@ -209,7 +209,7 @@ impl<A: Lists> Dir<A> {
         if step.kind != Kind::Symlink {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{} is not a link", shown(name.as_os_str())),
+                crate::fact::PathIoLeaf::NotLink(shown(name.as_os_str())),
             ));
         }
         let target = host::read_link(&link.file)?;
@@ -370,7 +370,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
     fn refused() -> io::Error {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the walk passed an object its vetting refused",
+            crate::fact::PathIoLeaf::VettingRefused,
         )
     }
 
@@ -414,7 +414,7 @@ impl<V: FnMut(&Vetted<'_>) -> bool> Walker<V> {
         if target.as_os_str().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                "a symlink with an empty target names nothing",
+                crate::fact::PathIoLeaf::EmptyLinkTarget,
             ));
         }
         let Spelling { root, names } = split(target)?;

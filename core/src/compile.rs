@@ -2,6 +2,7 @@
 
 use crate::diagnostic::Rejection;
 use crate::elaborator::elaborate;
+use crate::fact::{CompileFailure, CompilePhase, TypeErrorCount};
 use crate::ir::{Name, Toplevel};
 use crate::source::{FileId, Source};
 use crate::syntax::parser::{ParseError, parse_with};
@@ -31,6 +32,19 @@ impl std::fmt::Display for CompileError {
 }
 
 impl CompileError {
+    /// Portable summary for a runtime load; rich source diagnostics stay on the report.
+    pub fn failure(&self, source: impl Into<String>) -> CompileFailure {
+        CompileFailure {
+            source: source.into(),
+            phase: match self {
+                Self::Parse(_) => CompilePhase::Parse,
+                Self::Types(errors) => CompilePhase::Types(TypeErrorCount {
+                    count: errors.len().into(),
+                }),
+            },
+        }
+    }
+
     /// The failure drawable against `source`, with the status a run that
     /// failed so exits on: 2 for a parse failure, 1 for a type failure.
     pub fn reject(self, source: Source) -> Rejection {

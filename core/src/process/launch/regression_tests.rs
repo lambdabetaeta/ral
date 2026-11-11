@@ -2,6 +2,7 @@
 
 use super::{Launch, Unstarted};
 use crate::authority::sandbox::ProgramLaunch;
+use crate::fact::FailureCode as _;
 use crate::process::report::{Report, Witness};
 use crate::process::{CancelCause, DurableRoot, Placement, Scope, ScopeNode};
 use crate::test_helper::terminal::{self, Mode, PrivatePty};
@@ -24,7 +25,7 @@ fn enveloped(
 ) -> ProgramLaunch {
     ProgramLaunch::Enveloped(super::EnvelopedLaunch::synthetic(
         cmd,
-        "/bin/sh",
+        crate::fact::LauncherRole::Bwrap,
         payload.map(|payload| Box::new(move || Ok(Some(payload))) as _),
         report,
     ))
@@ -61,7 +62,8 @@ fn an_envelopes_failed_exec_is_refused_kept_and_detached() {
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let launch = super::EnvelopedLaunch::synthetic(cmd, "missing-test-envelope", None, report);
+        let launch =
+            super::EnvelopedLaunch::synthetic(cmd, crate::fact::LauncherRole::Bwrap, None, report);
         let scope = DurableRoot::default().child();
         let why = if surrender {
             launch.spawn_detached(&scope).err()
@@ -71,11 +73,8 @@ fn an_envelopes_failed_exec_is_refused_kept_and_detached() {
         let Some(Unstarted::Refused(why)) = why else {
             panic!("the envelope's exec failure must be a refusal: {why:?}");
         };
-        assert!(
-            why.describe()
-                .contains("cannot start missing-test-envelope:"),
-            "{why}"
-        );
+        assert!(matches!(&why.reason, crate::fact::Reason::Launch(failure)
+            if matches!(**failure, crate::fact::LaunchFailure::Launcher(crate::fact::LauncherFailure::Exec(_)))));
     }
 }
 
@@ -85,7 +84,10 @@ fn an_envelopes_unstarted_report_preserves_the_programs_errno_kept_and_detached(
     for surrender in [false, true] {
         for errno in [libc::ENOENT, libc::EACCES, libc::ENOEXEC] {
             let (report, witness) = report();
-            witness.unstarted(&io::Error::from_raw_os_error(errno));
+            witness.unstarted(
+                &io::Error::from_raw_os_error(errno),
+                crate::fact::LaunchImageSubject::File("test".into()),
+            );
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.args(["-c", "exit 0"])
                 .stdin(std::process::Stdio::null())
@@ -169,7 +171,9 @@ fn hear_failure(witness: Witness, scope: &ScopeNode, stop: bool) -> Option<Witne
         // Keep the writer open until cancellation is set: EOF is not the cue.
         Some(witness)
     } else {
-        witness.refused("synthetic report refusal");
+        witness.refused(&crate::fact::LaunchFailure::Warrant(
+            crate::fact::WarrantFailure::Magic,
+        ));
         None
     }
 }
@@ -182,7 +186,7 @@ fn assert_failure(why: &Unstarted, stop: bool) {
         );
     } else {
         assert!(
-            matches!(why, Unstarted::Refused(e) if e.describe().contains("synthetic report refusal")),
+            matches!(why, Unstarted::Refused(e) if matches!(&e.reason, crate::fact::Reason::Launch(why) if matches!(**why, crate::fact::LaunchFailure::Warrant(crate::fact::WarrantFailure::Magic)))),
             "{why:?}"
         );
     }
@@ -211,7 +215,9 @@ fn tenant_report_failure(pty: &PrivatePty, enveloped: bool) {
             .local_modes
             .intersects(rustix::termios::LocalModes::ECHO | rustix::termios::LocalModes::ICANON)
     );
-    witness.refused("synthetic report refusal");
+    witness.refused(&crate::fact::LaunchFailure::Warrant(
+        crate::fact::WarrantFailure::Magic,
+    ));
     let why = finish
         .recv_timeout(terminal::WAIT)
         .expect("failed birth must settle");
@@ -242,6 +248,10 @@ impl Drop for Released {
     reason = "the landing returns its request beside the refusal, as every landing does"
 )]
 fn a_failed_birth_releases_its_request_only_after_reaping() {
+    use crate::fact::{
+        LaunchFailure, PrepareCause, PrepareFailure, PrepareStep, PrepareSubject, Reason,
+    };
+
     let (reaped, released) = mpsc::channel();
     let mut launch = Launch::new("/bin/sh");
     launch.args(["-c", "sleep 1000"]);
@@ -255,14 +265,24 @@ fn a_failed_birth_releases_its_request_only_after_reaping() {
             &DurableRoot::default().child(),
             |mut request, child| {
                 request.child = Some(child.as_raw());
-                let refusal = crate::error::Error::new("synthetic landing refusal");
+                let refusal = super::prepare_io(
+                    PrepareStep::TerminalHandover,
+                    PrepareSubject::Group(u64::from(child.as_raw().unsigned_abs()).into()),
+                    &io::Error::from_raw_os_error(libc::EIO),
+                );
                 Err::<((), crate::process::TerminalHold), _>((request, Unstarted::Refused(refusal)))
             },
         )
         .err()
         .expect("a refused landing fails the birth");
     assert!(
-        matches!(&why, Unstarted::Refused(e) if e.describe().contains("synthetic landing refusal")),
+        matches!(&why, Unstarted::Refused(error)
+            if matches!(&error.reason, Reason::Launch(failure)
+                if matches!(failure.as_ref(), LaunchFailure::Prepare(PrepareFailure {
+                    step: PrepareStep::TerminalHandover,
+                    subject: PrepareSubject::Group(_),
+                    cause: PrepareCause::Io(cause),
+                }) if **cause == crate::io::failure(&io::Error::from_raw_os_error(libc::EIO))))),
         "{why:?}"
     );
     assert_eq!(released.try_recv(), Ok(true), "released before the reap");
@@ -420,4 +440,71 @@ fn an_enveloped_detached_refused_or_stopped_report_leaves_its_survivor_alive() {
         "process::launch::regression_tests::an_enveloped_detached_refused_or_stopped_report_leaves_its_survivor_alive",
         || detached_report_failure(true),
     );
+}
+
+#[test]
+fn a_nonexistent_cwd_is_spawn_before_setup_not_stdio_or_program_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut command = std::process::Command::new("/bin/true");
+    command.current_dir(temp.path().join("absent"));
+    let why = kept(
+        ProgramLaunch::Direct(Launch::from_command(command)),
+        Placement::Inherit,
+        &DurableRoot::default().child(),
+    );
+    let Unstarted::Refused(error) = why else {
+        panic!("missing cwd is not a program exec error: {why:?}");
+    };
+    assert_eq!(error.failure_code().get(), 1);
+    assert!(matches!(&error.reason, crate::fact::Reason::Launch(failure)
+        if matches!(&**failure, crate::fact::LaunchFailure::Launcher(
+            crate::fact::LauncherFailure::SpawnBeforeSetup(crate::fact::LauncherFailureSpawnBeforeSetup {
+                subject: crate::fact::LaunchImageSubject::File(image), cause,
+            })
+        ) if image == "/bin/true" && cause.raw == Some(libc::ENOENT))));
+}
+
+#[test]
+fn an_unmarked_non_native_failure_keeps_its_io_cause() {
+    let error = io::Error::from(io::ErrorKind::InvalidInput);
+    let cause = crate::io::failure(&error);
+    let why = super::fork::<()>(
+        std::process::Command::new("/bin/true"),
+        None,
+        super::setup::Evidence::new().unwrap(),
+        |_, _| Err(crate::process::SpawnError::Prepare(error)),
+    )
+    .unwrap_err();
+    let Unstarted::Refused(error) = why else {
+        panic!("request construction is ral's failure");
+    };
+    assert_eq!(error.failure_code().get(), 1);
+    assert!(matches!(&error.reason, crate::fact::Reason::Launch(failure)
+        if matches!(&**failure, crate::fact::LaunchFailure::Launcher(
+            crate::fact::LauncherFailure::NonNativeExecError(crate::fact::LauncherFailureNonNativeExecError {
+                subject: crate::fact::LaunchImageSubject::File(image), cause: actual,
+            })
+        ) if image == "/bin/true" && **actual == cause)));
+}
+
+#[test]
+fn a_detached_setup_failure_retains_the_failed_session_limit() {
+    let mut launch = Launch::new("/bin/true");
+    launch.limit_session(crate::process::ChildLimits {
+        open_files: Some(u64::MAX - 1),
+        ..Default::default()
+    });
+    let why = launch
+        .spawn_detached(&DurableRoot::default().child())
+        .unwrap_err();
+    let Unstarted::Refused(error) = why else {
+        panic!("failed setup must refuse the launch");
+    };
+    assert_eq!(error.failure_code().get(), 1);
+    assert!(matches!(&error.reason, crate::fact::Reason::Launch(failure)
+    if matches!(&**failure, crate::fact::LaunchFailure::Prepare(crate::fact::PrepareFailure {
+        step: crate::fact::PrepareStep::SessionLimit,
+        subject: crate::fact::PrepareSubject::SessionLimit(crate::fact::SessionLimit::OpenFiles),
+        cause: crate::fact::PrepareCause::Io(_),
+    }))));
 }

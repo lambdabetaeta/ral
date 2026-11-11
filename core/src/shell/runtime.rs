@@ -10,7 +10,6 @@ pub(crate) mod signature;
 pub(crate) use signature::{PreludeMap, Signature, lookup};
 
 mod value;
-pub(crate) use value::Leaf;
 pub use value::Value;
 #[cfg(test)]
 pub(crate) use value::{block_over, captured, deep_block_chain};
@@ -80,8 +79,8 @@ pub use walk::AdmittedWalk;
 // `sig` rides along with the coercions: both sit below the builtins and the
 // capability layer, which reach them without importing each other.
 mod coerce;
-pub(crate) use coerce::decode_utf8_strict;
 pub use coerce::settings_map;
+pub(crate) use coerce::{decode_utf8_strict, ill_typed, invalid};
 
 pub use state::modules::Modules;
 
@@ -93,7 +92,7 @@ pub use audit::{
 
 // Here because the session speaks them: the records `fact` declares.
 pub use crate::fact::{
-    Check, CommandOrigin, Decision, Done, ErrorRecord, Observation, Observed, Reason, Resource,
+    Check, CommandOrigin, Decision, Done, ErrorFact, Observation, Observed, Reason, Resource,
     WorkerId, WriteOutcome,
 };
 
@@ -112,6 +111,7 @@ pub(crate) use state::Context;
 pub use state::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, PluginEntry, RegisterError,
 };
+pub(crate) use state::json::RawContext;
 pub use state::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use state::{Image, Terms};
 

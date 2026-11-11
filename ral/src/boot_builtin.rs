@@ -8,6 +8,11 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::environ::EnvVars;
 use ral_core::error::Error;
+use ral_core::fact::InvalidFailure;
+use ral_core::fact::{
+    ArityFailure, BootFailure, BootFailureProfileNotAbsolute, CountRule, HostFailure, InvalidCause,
+    ProtocolData, ProtocolFailure, ProtocolFailureDecode, RalFailure, Reason, StateFailure,
+};
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;
@@ -46,9 +51,11 @@ fn scheme(binders: &mut Binders) -> Ty {
 /// Register the builtin as the `Session "boot"` hook, over a shell whose surface
 /// carries [`BUILTINS`].
 pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
-    let entry = shell
-        .lookup_builtin(NAME)
-        .ok_or_else(|| Error::new(format!("this shell's surface has no {NAME}")))?;
+    let entry = shell.lookup_builtin(NAME).ok_or_else(|| {
+        Error::new(Reason::State(Box::new(StateFailure::MissingBuiltin(
+            NAME.into(),
+        ))))
+    })?;
     shell
         .register_hook(
             hook(),
@@ -137,20 +144,41 @@ impl Boot {
 /// is operator-trusted bootstrap, the user's ceiling is the last word.
 fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     if !shell.unregister_hook(&hook()) {
-        return Err(refuse("the session has already booted"));
+        return Err(
+            Error::new(Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
+                BootFailure::AlreadyBooted,
+            )))))
+            .into(),
+        );
     }
-    let record = args
-        .first()
-        .and_then(|v| FOValue::try_from(v).ok())
-        .ok_or_else(|| refuse("the boot record must be first-order data"))?;
-    let boot = Boot::decode(&record).map_err(|e| refuse(&format!("in the boot record, {e}")))?;
+    let argument = args.first().ok_or_else(|| {
+        invalid(InvalidCause::Arity(ArityFailure {
+            expected: CountRule::Exactly(1_usize.into()),
+            got: args.len().into(),
+        }))
+    })?;
+    let record = FOValue::try_from(argument)
+        .map_err(|cause| invalid(InvalidCause::NonData(cause.into())))?;
+    let boot = Boot::decode(&record).map_err(|cause| {
+        Error::new(Reason::Protocol(Box::new(ProtocolFailure::Decode(
+            ProtocolFailureDecode {
+                kind: ProtocolData::Request,
+                operation: NAME.into(),
+                cause,
+            },
+        ))))
+    })?;
     // The front-end anchored every profile (`Boot::profiles`); a relative
     // one would now read the shell's cwd, which the rc may yet move.
     if let Some(path) = boot.capabilities.iter().find(|p| !is_absolute(p)) {
-        return Err(refuse(&format!(
-            "the --capabilities profile {} is not absolute",
-            shown(path)
-        )));
+        return Err(
+            Error::new(Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
+                BootFailure::ProfileNotAbsolute(BootFailureProfileNotAbsolute {
+                    path: path.clone(),
+                }),
+            )))))
+            .into(),
+        );
     }
     let settings = if boot.no_rc {
         RcSettings::default()
@@ -179,8 +207,11 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     Ok(Value::from(BootAnswer::Settled(settings).encode()))
 }
 
-fn refuse(message: &str) -> Break {
-    Error::new(format!("{NAME}: {message}")).into()
+fn invalid(cause: InvalidCause) -> Error {
+    Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
+        NAME.into(),
+        cause,
+    ))))
 }
 
 /// Decode the boot answer; only the host chooses capability refusals' exit 2.
@@ -246,8 +277,8 @@ mod tests {
             Err(2)
         ));
         let report = Report::Ran(Ran {
-            ending: Ending::Err(ral_core::fact::ErrorRecord::new(
-                ral_core::fact::Reason::Raised("rc failed".into()),
+            ending: Ending::Err(ral_core::fact::ErrorFact::new(
+                ral_core::fact::Reason::raised("rc failed"),
                 "fail".into(),
                 ral_core::source::CallSite {
                     script: "rc.ral".into(),
@@ -300,5 +331,82 @@ mod tests {
         ] {
             assert!(diagnostic.contains(detail), "{diagnostic}");
         }
+    }
+    #[test]
+    fn boot_refusals_keep_arity_nondata_decode_and_lifecycle_distinct() {
+        fn shell() -> Shell {
+            let mut runtime = ral_core::test_helper::core_runtime();
+            runtime.install_builtins(BUILTINS);
+            let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+            register(&mut shell).unwrap();
+            shell
+        }
+        fn refused(args: &[Value]) -> Error {
+            let Err(Break::Error(error)) = boot(args, &Mooring::adrift(), &mut shell()) else {
+                panic!("expected boot refusal")
+            };
+            assert_eq!(error.hints(), []);
+            assert!(error.context().is_none());
+            error
+        }
+        assert_eq!(
+            refused(&[]).reason,
+            invalid(InvalidCause::Arity(ArityFailure {
+                expected: CountRule::Exactly(1_usize.into()),
+                got: 0_usize.into()
+            }))
+            .reason
+        );
+        let block = crate::repl::eval(&mut shell(), "{ return () }");
+        assert_eq!(
+            refused(&[Value::list(vec![block])]).reason,
+            invalid(InvalidCause::NonData(ral_core::fact::NonData {
+                leaf: ral_core::fact::OpaqueKind::Block,
+                nested: true
+            }))
+            .reason
+        );
+        let malformed = FOValue::Int { value: 4 };
+        assert_eq!(
+            refused(&[malformed.clone().into()]).reason,
+            Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
+                kind: ProtocolData::Request,
+                operation: NAME.into(),
+                cause: Boot::decode(&malformed).err().unwrap()
+            })))
+        );
+        let relative = Boot {
+            no_rc: true,
+            recursion_limit: None,
+            capabilities: vec!["relative.ral".into()],
+        };
+        assert_eq!(
+            refused(&[relative.encode().into()]).reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
+                BootFailure::ProfileNotAbsolute(BootFailureProfileNotAbsolute {
+                    path: "relative.ral".into()
+                })
+            ))))
+        );
+        let mut shell = shell();
+        assert!(shell.unregister_hook(&hook()));
+        let Err(Break::Error(error)) = boot(&[], &Mooring::adrift(), &mut shell) else {
+            panic!("expected already-booted refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
+                BootFailure::AlreadyBooted
+            ))))
+        );
+    }
+
+    #[test]
+    fn missing_boot_builtin_is_a_state_fact() {
+        let mut shell = ral_core::test_helper::core_shell();
+        assert_eq!(
+            register(&mut shell).unwrap_err().reason,
+            Reason::State(Box::new(StateFailure::MissingBuiltin(NAME.into())))
+        );
     }
 }

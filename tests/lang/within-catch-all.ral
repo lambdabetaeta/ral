@@ -26,7 +26,7 @@ within [handler: $quiet] { echo installed }
 
 # A catch-all whose body diverges installs
 within [handler: { |n a| fail 'unhandled command' }] {
-    try { zzz } { |e| echo !{describe $e} }
+    try { zzz } { |e| echo $e[message] }
 }
 
 echo 'within catch-all tests done'

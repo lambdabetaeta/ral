@@ -5,7 +5,7 @@
 //! teardown, while EOF initiates it. Dispatch carries one whole run, Event flows
 //! engine to front-end, and Control flows front-end to engine. The carriers
 //! that interpret the algebra are [`crate::carrier`]'s.
-use crate::fact::{ErrorRecord, ExitCode as _};
+use crate::fact::{ErrorFact, ExitCode as _, FrameKind, ProbeFailure, Reason};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU8;
 
@@ -19,13 +19,14 @@ use crate::shell::runtime::CapturePolicy;
 use probe::Probe;
 
 pub mod channel;
+pub(crate) mod json;
 pub mod probe;
 
 /// The engine's contract with the host: frames and command confinement.
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 44;
+pub const PROTOCOL_VERSION: u32 = 45;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -83,19 +84,19 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// The variant's name, for a diagnostic about a frame out of place.
-    pub(crate) fn kind(&self) -> &'static str {
+    /// Portable identity for a frame out of place.
+    pub(crate) fn kind(&self) -> FrameKind {
         match self {
-            Self::Attach(_) => "Attach",
-            Self::Detach => "Detach",
-            Self::Dispatch(..) => "Dispatch",
-            Self::Probe(..) => "Probe",
-            Self::Event(..) => "Event",
-            Self::Session(..) => "Session",
-            Self::Control(..) => "Control",
-            Self::Answer(..) => "Answer",
-            Self::Ping(_) => "Ping",
-            Self::Pong(_) => "Pong",
+            Self::Attach(_) => FrameKind::Attach,
+            Self::Detach => FrameKind::Detach,
+            Self::Dispatch(..) => FrameKind::Dispatch,
+            Self::Probe(..) => FrameKind::Probe,
+            Self::Event(..) => FrameKind::Event,
+            Self::Session(..) => FrameKind::Session,
+            Self::Control(..) => FrameKind::Control,
+            Self::Answer(..) => FrameKind::Answer,
+            Self::Ping(_) => FrameKind::Ping,
+            Self::Pong(_) => FrameKind::Pong,
         }
     }
 }
@@ -324,12 +325,24 @@ pub enum Event {
     /// before this dispatch's Report and answered by a `Frame::Answer`
     /// carrying the same `EnquiryId`.
     Enquiry(EnquiryId, FOValue),
-    /// The answer to a [`Frame::Probe`]: the reading, or the engine's refusal in
-    /// its own words. Its own event, not a run that ended: a probe has no
-    /// ending, status or trail to forge.
-    Reading(Result<FOValue, String>),
+    /// The answer to a [`Frame::Probe`]: the reading, or its typed refusal.
+    /// Its own event, not a run that ended: a probe has no ending, status
+    /// or trail to forge.
+    Reading(Result<FOValue, ProbeFailure>),
     /// The dispatch's sole terminal frame.
     Report(Report),
+}
+
+// Portable probe refusals use the same Datum convention as error records.
+impl Serialize for ProbeFailure {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::data::datum::as_datum::serialize(self, serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ProbeFailure {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::data::datum::as_datum::deserialize(deserializer)
+    }
 }
 
 /// Engine → front-end traffic with no dispatch to ride: the attach verdict,
@@ -347,37 +360,40 @@ pub enum SessionEvent {
     DeferredSurface(Vec<FOValue>),
 }
 
-/// An [`Error`] as it crosses the transport, a desk's refusal or an engine's
-/// refusal to attach: its message line, context included, and its hints,
-/// nothing else.
-///
-/// Both carriers pass every refusal through [`WireError::of`] and back
-/// through [`WireError::to_error`], so a refusal reads the same under
-/// either. The enquiring builtin supplies the engine-side provenance.
+/// A refusal's portable reason and ordered report facts, without host provenance.
+/// Both carriers normalize through this envelope; the enquiring operation
+/// claims its own engine-side provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireError {
-    pub message: String,
+    #[serde(with = "crate::data::datum::as_datum")]
+    pub reason: Reason,
+    pub context: Option<String>,
     pub hints: Vec<String>,
 }
 
 impl WireError {
-    /// What of `error` the transport carries.
     #[must_use]
     pub fn of(error: &Error) -> Self {
         Self {
-            message: error.to_string(),
+            reason: error.reason.clone(),
+            context: error.context().map(str::to_owned),
             hints: error.hints().iter().map(ToString::to_string).collect(),
         }
     }
 
-    /// The error this refusal was, on the far side.
     #[must_use]
     pub fn to_error(&self) -> Error {
-        self.hints
-            .iter()
-            .fold(Error::new(self.message.as_str()), |error, hint| {
-                error.with_hint(hint.as_str())
-            })
+        let error = Error::new(self.reason.clone()).with_hints(self.hints.iter().cloned());
+        match &self.context {
+            Some(context) => error.with_context(context),
+            None => error,
+        }
+    }
+
+    /// The message line for presentation, never failure identity.
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.to_error().to_string()
     }
 }
 
@@ -431,7 +447,7 @@ pub struct Ran {
 }
 
 /// How a run ended, projected onto the wire.
-pub type Ending = crate::fact::Ending<FOValue, ErrorRecord, CancelCause>;
+pub type Ending = crate::fact::Ending<FOValue, ErrorFact, CancelCause>;
 
 impl Report {
     /// The process status a host exits on.
@@ -453,9 +469,9 @@ mod control_wire_tests {
     fn an_end_round_trips_its_cause() {
         for &cause in RootCause::VARIANTS {
             let control = Control::End(cause);
-            let wire = serde_json::to_string(&control).expect("encode");
-            let back: Control = serde_json::from_str(&wire).expect("decode");
-            assert_eq!(back, control, "{wire}");
+            let wire = crate::data::json::to_vec(&control).expect("encode");
+            let back: Control = crate::data::json::from_slice(&wire).expect("decode");
+            assert_eq!(back, control);
         }
     }
 }
@@ -483,9 +499,9 @@ mod ending_wire_round_trip_tests {
     }
 
     fn round_trips(report: &Report) {
-        let encoded = serde_json::to_string(report).expect("Report must encode");
-        let decoded: Report = serde_json::from_str(&encoded).expect("Report must decode");
-        assert_eq!(&decoded, report, "round trip must be lossless: {encoded}");
+        let encoded = crate::data::json::to_vec(report).expect("Report must encode");
+        let decoded: Report = crate::data::json::from_slice(&encoded).expect("Report must decode");
+        assert_eq!(&decoded, report);
     }
 
     #[test]
@@ -494,38 +510,36 @@ mod ending_wire_round_trip_tests {
     }
 
     #[test]
-    fn an_enquiry_refusal_carries_message_and_hints_and_becomes_a_plain_raise() {
-        use crate::fact::FailureCode as _;
+    fn an_enquiry_refusal_preserves_reason_and_ordered_report_facts() {
+        use crate::fact::{ProtocolFailure, ProtocolFailureVersionMismatch};
 
-        let refused = Error::new("the desk refused")
-            .with_context("enquire")
-            .with_hint("try the foreground")
-            .with_hint("or ask again");
-        let refusal = WireError::of(&refused);
-        assert_eq!(
-            serde_json::to_string(&refusal).unwrap(),
-            r#"{"message":"enquire: the desk refused","hints":["try the foreground","or ask again"]}"#
-        );
-        let frame = Frame::Answer(EnquiryId(7), Err(refusal));
-        let encoded = serde_json::to_string(&frame).unwrap();
-        let decoded: Frame = serde_json::from_str(&encoded).unwrap();
+        let refused = Error::new(Reason::Protocol(Box::new(
+            ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
+                front: 44,
+                engine: PROTOCOL_VERSION,
+            }),
+        )))
+        .with_context("enquire")
+        .with_hint("try the foreground")
+        .with_hint("or ask again");
+        let frame = Frame::Answer(EnquiryId(7), Err(WireError::of(&refused)));
+        let encoded = crate::data::json::to_vec(&frame).unwrap();
+        let decoded: Frame = crate::data::json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, frame);
         let Frame::Answer(_, Err(refusal)) = decoded else {
             panic!("the refusal must survive the wire")
         };
         let error = refusal.to_error();
-        assert_eq!(
-            error.reason,
-            Reason::Raised("enquire: the desk refused".into())
-        );
+        assert_eq!(error.reason, refused.reason);
+        assert_eq!(error.context(), refused.context());
         assert_eq!(error.hints(), refused.hints());
-        assert_eq!(error.failure_code(), NonZeroU8::MIN);
+        assert!(error.prov.is_none());
     }
 
     #[test]
     fn err_round_trips() {
-        let record = ErrorRecord::new(
-            Reason::Raised("boom".into()),
+        let record = ErrorFact::new(
+            Reason::raised("boom"),
             "cmd".into(),
             crate::test_helper::site(),
         );

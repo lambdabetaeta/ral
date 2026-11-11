@@ -8,9 +8,14 @@ use exarch::port::{BusReceiver, Port};
 use exarch::provider::Provider;
 use exarch::record::AgentId;
 use ral_core::authority::grant::value::GrantValue;
+use ral_core::fact::{
+    DurationFact, EngineFactoryFailure, EngineFactoryFailureDialTimedOut,
+    EngineFactoryFailureDialWaitDisconnected, EngineFactoryFailurePlatform,
+    EngineFactoryFailureUnsupported, FactoryBackend,
+};
 use ral_core::own::OwnDir;
 use ral_core::path::{GuestPath, shown};
-use vm_manager::{Booted, GuestConsole, Machine};
+use vm_manager::{Booted, DialBackend, DialError, GuestConsole, Machine};
 
 use ral_core::protocol::channel::WireStream;
 use ral_core::sync::LockExt;
@@ -24,12 +29,60 @@ impl MachineFactory {
 }
 
 impl Factory for MachineFactory {
-    fn engine(&self) -> Result<WireStream, String> {
+    fn engine(&self) -> Result<WireStream, EngineFactoryFailure> {
         self.0
             .lock_ignore_poison()
             .dial_engine()
             .map(WireStream::from)
-            .map_err(|e| format!("could not dial the guest's engine factory: {e}"))
+            .map_err(dial_failure)
+    }
+}
+
+fn dial_failure(error: DialError) -> EngineFactoryFailure {
+    match error {
+        DialError::Unsupported(backend) => {
+            EngineFactoryFailure::Unsupported(EngineFactoryFailureUnsupported {
+                backend: factory_backend(backend),
+            })
+        }
+        DialError::MachineThreadStopped => EngineFactoryFailure::MachineThreadStopped,
+        DialError::MissingSocketDevice => EngineFactoryFailure::MissingSocketDevice,
+        DialError::NonVirtioSocketDevice => EngineFactoryFailure::NonVirtioSocketDevice,
+        DialError::CompletionWithoutResult => EngineFactoryFailure::CompletionWithoutResult,
+        DialError::TimedOut { port, within } => {
+            EngineFactoryFailure::DialTimedOut(EngineFactoryFailureDialTimedOut {
+                port,
+                within: DurationFact {
+                    seconds: within.as_secs().into(),
+                    nanos: within.subsec_nanos(),
+                },
+            })
+        }
+        DialError::WaitDisconnected { port } => {
+            EngineFactoryFailure::DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected {
+                port,
+            })
+        }
+        DialError::Platform {
+            backend,
+            domain,
+            code,
+            detail,
+        } => EngineFactoryFailure::Platform(EngineFactoryFailurePlatform {
+            backend: factory_backend(backend),
+            domain,
+            code,
+            detail,
+        }),
+        DialError::Io(error) => EngineFactoryFailure::Io(ral_core::io::failure(&error)),
+    }
+}
+
+fn factory_backend(backend: DialBackend) -> FactoryBackend {
+    match backend {
+        DialBackend::Broker => FactoryBackend::Broker,
+        DialBackend::HyperV => FactoryBackend::HyperV,
+        DialBackend::Virtualization => FactoryBackend::Virtualization,
     }
 }
 
@@ -172,12 +225,12 @@ mod tests {
     }
 
     impl vm_manager::Machine for FakeMachine {
-        fn dial_engine(&self) -> std::io::Result<vm_manager::Socket> {
-            let (guest, host) = local_pair()?;
+        fn dial_engine(&self) -> Result<vm_manager::Socket, DialError> {
+            let (guest, host) = local_pair().map_err(DialError::Io)?;
             self.guest_ends.lock_ignore_poison().push(guest);
             Ok(host)
         }
-        fn connect_guest(&self, _port: u32) -> std::io::Result<vm_manager::Socket> {
+        fn connect_guest(&self, _port: u32) -> Result<vm_manager::Socket, DialError> {
             unimplemented!("not exercised by these tests")
         }
         fn console(&self) -> vm_manager::GuestConsole {
@@ -204,6 +257,108 @@ mod tests {
             Some(factory.clone()),
             Script::new().then(Reply::text("done")),
         )
+    }
+
+    #[test]
+    fn dial_failure_projects_each_unsupported_backend() {
+        for (owner, portable) in [
+            (DialBackend::Broker, FactoryBackend::Broker),
+            (DialBackend::HyperV, FactoryBackend::HyperV),
+            (DialBackend::Virtualization, FactoryBackend::Virtualization),
+        ] {
+            assert_eq!(
+                dial_failure(DialError::Unsupported(owner)),
+                EngineFactoryFailure::Unsupported(EngineFactoryFailureUnsupported {
+                    backend: portable,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn dial_failure_preserves_each_closed_local_condition() {
+        for (owner, portable) in [
+            (
+                DialError::MachineThreadStopped,
+                EngineFactoryFailure::MachineThreadStopped,
+            ),
+            (
+                DialError::MissingSocketDevice,
+                EngineFactoryFailure::MissingSocketDevice,
+            ),
+            (
+                DialError::NonVirtioSocketDevice,
+                EngineFactoryFailure::NonVirtioSocketDevice,
+            ),
+            (
+                DialError::CompletionWithoutResult,
+                EngineFactoryFailure::CompletionWithoutResult,
+            ),
+        ] {
+            assert_eq!(dial_failure(owner), portable);
+        }
+    }
+
+    #[test]
+    fn dial_failure_preserves_timeout_port_and_duration_separately_from_disconnection() {
+        let port = 934;
+        for within in [
+            std::time::Duration::from_secs(5),
+            std::time::Duration::new(u64::MAX, 999_999_999),
+        ] {
+            assert_eq!(
+                dial_failure(DialError::TimedOut { port, within }),
+                EngineFactoryFailure::DialTimedOut(EngineFactoryFailureDialTimedOut {
+                    port,
+                    within: DurationFact {
+                        seconds: within.as_secs().into(),
+                        nanos: within.subsec_nanos(),
+                    },
+                })
+            );
+        }
+        assert_eq!(
+            dial_failure(DialError::WaitDisconnected { port }),
+            EngineFactoryFailure::DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected {
+                port
+            })
+        );
+    }
+
+    #[test]
+    fn dial_failure_preserves_raw_platform_domain_signed_code_and_detail() {
+        for (owner, portable) in [
+            (DialBackend::Broker, FactoryBackend::Broker),
+            (DialBackend::HyperV, FactoryBackend::HyperV),
+            (DialBackend::Virtualization, FactoryBackend::Virtualization),
+        ] {
+            let domain = "VZErrorDomain\0raw";
+            let detail = "original framework diagnostic\nsecond line";
+            assert_eq!(
+                dial_failure(DialError::Platform {
+                    backend: owner,
+                    domain: domain.into(),
+                    code: -17,
+                    detail: detail.into(),
+                }),
+                EngineFactoryFailure::Platform(EngineFactoryFailurePlatform {
+                    backend: portable,
+                    domain: domain.into(),
+                    code: -17,
+                    detail: detail.into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn dial_failure_projects_the_original_native_io_error() {
+        let native = std::io::Error::from_raw_os_error(9);
+        let expected = ral_core::io::failure(&native);
+        assert_eq!(
+            dial_failure(DialError::Io(native)),
+            EngineFactoryFailure::Io(expected)
+        );
     }
 
     #[test]

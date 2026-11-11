@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 3e3fbc84
-verified_at_commit: 248aff5c
-verified_at_date: 2026-11-09
-anchors: [Command, Request, LookupFailure, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Command::from_name, Command::lookup, Command::admit, settle, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_date: 2026-11-10
+anchors: [Command, Request, LookupFailure, ExecRules, ExecAllow, ExecDeny, Withheld, ExecDenial, Evidence, GrantStack, admit, admit_name, Command::from_name, Command::lookup, Command::admit, search_error, Candidate, holds_program, failure_trace, ReadRegion::judge, check_exec, check_exec_name, Admitted, for_kernel, KernelAllow, KernelRules, places, deputy_prefixes]
 ---
 
 # Exec judgment: which program may run
@@ -65,10 +65,13 @@ launch for a direct pipeline stage and `detach`.
   entry ral may not search reads as that refusal, not as absence.
 - **A refused bare name reveals nothing about the candidates' kinds.** The
   hint `'{name}' is not in any PATH directory the grant allows` is
-  added (`settle`) only when every candidate was absent or refused for a
-  missing allowance alone, which places it outside the grant. An exclusion's
+  selected by `search_error` and attached by `Command::admit` only when every
+  candidate was absent or refused for a missing allowance alone, which places it outside the grant. An exclusion's
   refusal carries the exclusion's hint alone: it is no evidence of absence.
-  Only verdicts decide the hint, never a refused candidate's kind.
+  `Denial::missing_allowance` derives this classification from typed causes;
+  only verdicts decide the hint, never a refused candidate's kind. The search
+  retains the selected denial and adds situational advice only after the shell
+  records it, not by storing an error or hints in the denial.
   A refused path head offers itself as text. Refusal messages name the shown
   command, and denial records keep that name and any exclusion, never the
   resolved target: a refusal grants no authority to read a link's target.
@@ -81,7 +84,8 @@ launch for a direct pipeline stage and `detach`.
 - **Arguments play no part.** An allowed target runs with any arguments, a
   denied one with none. `Admitted` holds only the judged program; a refusal is its `ExecDenial` alone, the refused program and its
   handle dropped. The guard words a bundled tool's read refusal by the tool's
-  name. The caller owns argv, and no refusal records it.
+  name through the portable denial's subject. The caller owns argv, and no
+  refusal records it.
 - **A path key** matches the real path by equality, and a directory key by
   containment. Specificity decides nothing: **an exclusion beats every
   allowance**, so an exact file or a deeper directory never reopens an excluded

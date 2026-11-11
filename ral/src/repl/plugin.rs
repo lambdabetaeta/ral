@@ -26,6 +26,12 @@ pub(super) mod manifest;
 pub(super) mod router;
 pub(super) mod rustyline;
 
+use ral_core::error::Error;
+use ral_core::fact::{
+    HostFailure, PluginFailure, PluginFailureAlreadyLoaded, PluginFailureNotLoaded, RalFailure,
+    Reason,
+};
+
 pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 
 use ral_core::HookName;
@@ -33,6 +39,7 @@ use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::errln;
+use ral_core::fact::{DecodeCause, DecodeFailure, Expected, Found, ShapeFailure};
 use ral_core::sync::LockExt as _;
 use ral_core::ty::{Ty, Typed};
 use std::time::Duration;
@@ -49,6 +56,12 @@ use ral_core::text::{byte_to_char, char_to_byte};
 // to the sibling `rustyline` module instead of the crate of the same name.
 use ::rustyline::config::EditMode;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+pub(super) fn refusal(cause: PluginFailure) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Ral(
+        RalFailure::Plugin(cause),
+    ))))
+}
 
 // ── Lock helper ─────────────────────────────────────────────────────────
 
@@ -91,11 +104,14 @@ impl Datum for Keymap {
         .encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         match v.as_str() {
             Some("emacs") => Ok(Self::Emacs),
             Some("vi") => Ok(Self::Vi),
-            _ => Err(format!("expected \"emacs\" or \"vi\", got {}", v.shape())),
+            _ => Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::StringLiterals(vec!["emacs".into(), "vi".into()]),
+                found: Found::of(v),
+            }))),
         }
     }
 }
@@ -467,7 +483,7 @@ impl PluginRuntime {
 
     /// Take what a load builtin says: admit a manifest, re-validated, or let a
     /// plugin go.  The engine's own admission checks do not excuse these.
-    pub(super) fn note(&mut self, note: PluginNote) -> Result<(), String> {
+    pub(super) fn note(&mut self, note: PluginNote) -> Result<(), Error> {
         match note {
             PluginNote::Loaded(manifest) => self.admit(manifest),
             PluginNote::Unloaded(name) => {
@@ -475,7 +491,11 @@ impl PluginRuntime {
                     .plugins
                     .iter()
                     .position(|p| p.name == name)
-                    .ok_or_else(|| format!("plugin '{name}' is not loaded"))?;
+                    .ok_or_else(|| {
+                        refusal(PluginFailure::NotLoaded(PluginFailureNotLoaded {
+                            name: name.clone(),
+                        }))
+                    })?;
                 self.plugins.remove(idx);
                 self.keybindings_changed();
                 Ok(())
@@ -483,11 +503,15 @@ impl PluginRuntime {
         }
     }
 
-    fn admit(&mut self, manifest: Manifest) -> Result<(), String> {
+    fn admit(&mut self, manifest: Manifest) -> Result<(), Error> {
         if self.plugins.iter().any(|p| p.name == manifest.name) {
-            return Err(format!("plugin '{}' is already loaded", manifest.name));
+            return Err(refusal(PluginFailure::AlreadyLoaded(
+                PluginFailureAlreadyLoaded {
+                    name: manifest.name,
+                },
+            )));
         }
-        let plugin = LoadedPlugin::admit(manifest)?;
+        let plugin = LoadedPlugin::admit(manifest).map_err(manifest::keybinding_refusal)?;
         let name = plugin.name.clone();
         self.plugins.push(plugin);
         self.keybindings_changed();

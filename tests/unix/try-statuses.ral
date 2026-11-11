@@ -1,0 +1,25 @@
+# Test: how try reports a command that did not succeed
+
+# The handler's record carries the failure's text and its exit status: the
+# program's own, 127 for a command not found, 128 plus the signal for a kill
+try { sh -c 'exit 3'; fail 'ran' } { |e| echo $e[status] $e[message] }
+try { /nonexistent/ral-no-such-command; fail 'ran' } { |e| echo $e[status] $e[message] }
+try { ral-no-such-command; fail 'ran' } { |e| echo $e[status] $e[message] }
+try { sh -c 'kill -SEGV $$'; fail 'ran' } { |e| echo $e[status] $e[message] }
+
+# A file without the execute bit is not runnable (126), by path or through PATH
+let dir = temp-dir
+to-string '#!/bin/sh' > "$dir/not-executable"
+let unrunnable = { |e|
+    echo $e[status]
+    echo !{re-match 'is a file, not an executable' $e[message]}
+}
+within [dir: $dir] {
+    try { ./not-executable; fail 'ran' } { |e| unrunnable $e }
+}
+within [env: [PATH: "$dir:/bin:/usr/bin"]] {
+    try { not-executable; fail 'ran' } { |e| unrunnable $e }
+}
+rm -rf $dir
+
+echo 'try status tests done'

@@ -2,4 +2,4 @@
 # status: 1
 # at: 5:6
 # contains: use `raise $e` to re-raise
-fail [reason: `raised "boom", frame: "deploy", site: [script: "manual", line: 1, col: 1]]
+fail [frame: "deploy", message: "boom", status: 1, site: [script: "manual", line: 1, col: 1]]

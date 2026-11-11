@@ -15,7 +15,12 @@ fn a_desk_without_a_factory_cannot_make_an_engine() {
             )
             .expect("a bequest seals");
             let made = desk.make_engine(&crate::boot::test_attach().0, seal);
-            assert!(made.is_err());
+            assert_eq!(
+                made.err().expect("the factory is missing").reason,
+                Reason::Invariant(Box::new(
+                    ral_core::fact::InvariantFailure::MissingEngineFactory
+                ))
+            );
         },
     );
 }

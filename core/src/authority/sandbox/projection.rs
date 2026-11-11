@@ -22,6 +22,8 @@ use crate::authority::policy::{
 };
 #[cfg(unix)]
 use crate::authority::policy::{GrantPath, Subject, Withheld};
+#[cfg(unix)]
+use crate::fact::ProjectionFailure;
 use crate::path::RealPath;
 #[cfg(unix)]
 use crate::path::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
@@ -188,7 +190,7 @@ impl SandboxProjection {
     /// A name whose expansion cannot be spelled faithfully, as
     /// [`render_excluded`] refuses it.
     #[cfg(unix)]
-    pub(crate) fn rendered(&self) -> Result<RenderedProjection, String> {
+    pub(crate) fn rendered(&self) -> Result<RenderedProjection, ProjectionFailure> {
         let Self { fs, net, gpu, exec } = self;
         let fs = match fs {
             FsProjection::Unrestricted => FsProjection::Unrestricted,
@@ -320,7 +322,7 @@ impl SandboxProjection {
 
 /// `scopes` as their objects, each frozen allowance by its real path.
 #[cfg(unix)]
-fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, String> {
+fn objects(scopes: &[FsAllow]) -> Result<Vec<Object>, ProjectionFailure> {
     let universal = RealPath::universal();
     let none: &[RealPath] = &[];
     let named = scopes.iter().map(|scope| match scope {

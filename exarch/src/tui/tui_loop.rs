@@ -65,7 +65,7 @@ pub(crate) fn run(
             port,
             crate::app::EXARCH
                 .project(info.cwd.as_path())
-                .map_err(String::from),
+                .map_err(|error| error.to_string()),
             PromptState::new(vi, history),
             banner::session_card(info),
             jobs,

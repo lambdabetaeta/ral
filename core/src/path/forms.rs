@@ -101,6 +101,71 @@ impl std::fmt::Display for NotACwd {
 
 impl std::error::Error for NotACwd {}
 
+impl From<&NotACwd> for crate::fact::PathFailure {
+    fn from(error: &NotACwd) -> Self {
+        Self::NotWorkingDirectory(crate::fact::PathFailureNotWorkingDirectory {
+            path: shown(&error.0),
+            rules: PathRules::HOST,
+        })
+    }
+}
+
+impl From<&NotACwd> for crate::fact::PathDecodeFailure {
+    fn from(error: &NotACwd) -> Self {
+        Self {
+            shown: shown(&error.0),
+            cause: crate::fact::LexicalPathFailure::NotWorkingDirectory(
+                crate::fact::LexicalPathFailureNotWorkingDirectory {
+                    rules: PathRules::HOST,
+                },
+            ),
+        }
+    }
+}
+
+impl crate::data::json::JsonDecode for CwdPath {
+    fn decode_json(
+        value: crate::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        let path: String = crate::data::json::decode_structural(value)?;
+        Self::new(path.into()).map_err(|error| {
+            crate::fact::DecodeFailure::new(crate::fact::DecodeCause::Path((&error).into()))
+        })
+    }
+}
+
+impl crate::data::json::JsonEncode for CwdPath {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        let text = utf8(&self.0).map_err(|_| {
+            crate::fact::JsonEncodeFailure::new(crate::fact::JsonEncodeCause::NonUnicodePath(
+                crate::fact::JsonEncodeCauseNonUnicodePath {
+                    shown: shown(&self.0),
+                },
+            ))
+        })?;
+        Ok(crate::data::json::serialize_structural(text, format))
+    }
+}
+
+impl crate::data::json::JsonDecode for FrozenPath {
+    fn decode_json(
+        value: crate::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        crate::data::json::decode_structural(value)
+    }
+}
+impl crate::data::json::JsonEncode for FrozenPath {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(crate::data::json::serialize_structural(self, format))
+    }
+}
+
 /// A lexically-resolved path: absolute, sigils expanded, anchored against
 /// the logical cwd, its `.`, `..` and any trailing separator kept as
 /// written.  No disk is consulted to make one.
@@ -271,13 +336,8 @@ impl FrozenPath {
     /// # Errors
     /// The refusal to hold `path` as a grant, saying why: it is not valid
     /// Unicode.
-    pub fn freeze(path: &Path) -> Result<Self, String> {
-        utf8(path).map(Self::from_surface).map_err(|_| {
-            format!(
-                "ral cannot hold '{}' as a grant: it is not valid Unicode; grant a path that is",
-                shown(path),
-            )
-        })
+    pub fn freeze(path: &Path) -> Result<Self, super::NotUtf8> {
+        utf8(path).map(Self::from_surface)
     }
 
     /// The filesystem root, as the prefix that covers every path: the
@@ -360,6 +420,27 @@ mod tests {
     use crate::authority::policy::GrantPath;
     #[cfg(unix)]
     use crate::path::{Depth, Excluded, Subject, Walked as _, utf8};
+
+    #[test]
+    fn typed_cwd_json_uses_lexical_validation_and_frozen_json_keeps_its_spelling() {
+        use crate::data::json::{from_slice, to_vec};
+        use crate::fact::{DecodeCause, JsonInputFailure, LexicalPathFailure, PathDecodeFailure};
+        let JsonInputFailure::Decode(error) =
+            from_slice::<super::CwdPath>(br#""relative""#).unwrap_err()
+        else {
+            panic!("syntax")
+        };
+        assert!(matches!(
+            *error.cause,
+            DecodeCause::Path(PathDecodeFailure {
+                cause: LexicalPathFailure::NotWorkingDirectory(_),
+                ..
+            })
+        ));
+        let frozen = from_slice::<super::FrozenPath>(br#""relative/../literal""#).unwrap();
+        assert_eq!(frozen.as_str(), "relative/../literal");
+        assert_eq!(to_vec(&frozen).unwrap(), br#""relative/../literal""#);
+    }
 
     /// An exclusion's walk keeps a name that is not Unicode byte-exact, so it
     /// holds that name and not the U+FFFD sibling, nor what the link reached

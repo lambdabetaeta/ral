@@ -1,0 +1,1027 @@
+//! Portable protocol failure facts.
+
+use super::decode::{DecodeCause, DecodeFailure, JsonEncodeFailure, JsonInputFailure};
+use super::io::IoCause;
+use super::shared::{
+    Count, DataStep, DurationFact, Expected, ShapeFailure, UnknownTag, ValueShape,
+};
+use crate::{label, record, variant};
+use strum::{IntoStaticStr, VariantArray};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum FrameChannel {
+    Wire,
+    Seed,
+}
+label!(FrameChannel);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum FramePart {
+    Length,
+    Body,
+}
+label!(FramePart);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameEncodeFailure {
+    TooLarge(FrameEncodeFailureTooLarge),
+    Json(JsonEncodeFailure),
+}
+variant!(FrameEncodeFailure { TooLarge(FrameEncodeFailureTooLarge): "too-large", Json(JsonEncodeFailure): "json" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameFailure {
+    TooLarge(FrameFailureTooLarge),
+    Partial(FrameFailurePartial),
+    Json(JsonInputFailure),
+    Io(IoCause),
+}
+variant!(FrameFailure { TooLarge(FrameFailureTooLarge): "too-large", Partial(FrameFailurePartial): "partial", Json(JsonInputFailure): "json", Io(IoCause): "io" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProtocolOperation {
+    Attach,
+    Detach,
+    Dispatch,
+    Probe,
+    Surface,
+    Enquiry,
+    Answer,
+    Reading,
+    Report,
+    Session,
+    Control,
+    Ping,
+    Pong,
+    SealSeed,
+    UnsealSeed,
+}
+label!(ProtocolOperation);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProtocolData {
+    Request,
+    Answer,
+    RootConfig,
+}
+label!(ProtocolData);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ForkKind {
+    Park,
+    Seal,
+}
+label!(ForkKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProtocolWork {
+    Dispatch,
+    Probe,
+}
+label!(ProtocolWork);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedFrameFailure {
+    Empty,
+    Trailing(SeedFrameFailureTrailing),
+    Frame(FrameFailure),
+}
+variant!(SeedFrameFailure { Empty: "empty", Trailing(SeedFrameFailureTrailing): "trailing", Frame(FrameFailure): "frame" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolFailure {
+    VersionMismatch(ProtocolFailureVersionMismatch),
+    UnknownInstaller(String),
+    RootMissingScratch,
+    Decode(ProtocolFailureDecode),
+    WrongForkKind(ProtocolFailureWrongForkKind),
+    SeedFrame(SeedFrameFailure),
+    UnresolvedScope(Count),
+    CyclicScopes,
+    UnknownNative(String),
+    Frame(ProtocolFailureFrame),
+    Unencodable(ProtocolFailureUnencodable),
+    ConnectionLostDuringEnquiry,
+    Busy(ProtocolWork),
+}
+variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", WrongForkKind(ProtocolFailureWrongForkKind): "wrong-fork-kind", SeedFrame(SeedFrameFailure): "seed-frame", UnresolvedScope(Count): "unresolved-scope", CyclicScopes: "cyclic-scopes", UnknownNative(String): "unknown-native", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProtocolPeer {
+    Frontend,
+    Engine,
+}
+label!(ProtocolPeer);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProtocolPhase {
+    AwaitAttach,
+    Attached,
+}
+label!(ProtocolPhase);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum FrameKind {
+    Attach,
+    Detach,
+    Dispatch,
+    Probe,
+    Event,
+    Session,
+    Control,
+    Answer,
+    Ping,
+    Pong,
+}
+label!(FrameKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ConnectionOperation {
+    Adopt,
+    Read,
+    Write,
+    SetWriteDeadline,
+}
+label!(ConnectionOperation);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeSubject {
+    BindingCount,
+    LeasedBindingCount,
+    LargestBindingBytes,
+    EnvVar(String),
+    Cwd,
+    Home,
+    BuiltinNames,
+    PathBytes(String),
+    Workers,
+    SessionEnded,
+    CompletionNames,
+    Bindings,
+    PathEntries(String),
+    Grants,
+    WorkerCount,
+    GrantDepth,
+}
+variant!(ProbeSubject { BindingCount: "binding-count", LeasedBindingCount: "leased-binding-count", LargestBindingBytes: "largest-binding-bytes", EnvVar(String): "env-var", Cwd: "cwd", Home: "home", BuiltinNames: "builtin-names", PathBytes(String): "path-bytes", Workers: "workers", SessionEnded: "session-ended", CompletionNames: "completion-names", Bindings: "bindings", PathEntries(String): "path-entries", Grants: "grants", WorkerCount: "worker-count", GrantDepth: "grant-depth" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeFailure {
+    Busy,
+    WorkerPanicked,
+    Unencodable(FrameEncodeFailure),
+}
+variant!(ProbeFailure { Busy: "busy", WorkerPanicked: "worker-panicked", Unencodable(FrameEncodeFailure): "unencodable" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionClosed {
+    Eof(ProtocolPeer),
+    ReaderThreadEnded,
+    TransportDropped,
+    Io(ConnectionClosedIo),
+    Frame(FrameFailure),
+}
+variant!(ConnectionClosed { Eof(ProtocolPeer): "eof", ReaderThreadEnded: "reader-thread-ended", TransportDropped: "transport-dropped", Io(ConnectionClosedIo): "io", Frame(FrameFailure): "frame" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionFault {
+    UnexpectedFrame(ConnectionFaultUnexpectedFrame),
+    ReadingForDispatch,
+    ProbeAnswer(ConnectionFaultProbeAnswer),
+    ProbeRejected(ConnectionFaultProbeRejected),
+    Unencodable(ConnectionFaultUnencodable),
+    WorkersSurvived(Count),
+}
+variant!(ConnectionFault { UnexpectedFrame(ConnectionFaultUnexpectedFrame): "unexpected-frame", ReadingForDispatch: "reading-for-dispatch", ProbeAnswer(ConnectionFaultProbeAnswer): "probe-answer", ProbeRejected(ConnectionFaultProbeRejected): "probe-rejected", Unencodable(ConnectionFaultUnencodable): "unencodable", WorkersSurvived(Count): "workers-survived" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionFailure {
+    Closed(ConnectionClosed),
+    Silent(DurationFact),
+    Faulted(ConnectionFault),
+}
+variant!(ConnectionFailure { Closed(ConnectionClosed): "closed", Silent(DurationFact): "silent", Faulted(ConnectionFault): "faulted" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameEncodeFailureTooLarge {
+    pub actual: Count,
+    pub limit: Count,
+}
+record!(FrameEncodeFailureTooLarge {
+    actual: "actual",
+    limit: "limit"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameFailureTooLarge {
+    pub actual: Count,
+    pub limit: Count,
+}
+record!(FrameFailureTooLarge {
+    actual: "actual",
+    limit: "limit"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameFailurePartial {
+    pub part: FramePart,
+    pub got: Count,
+    pub expected: Count,
+}
+record!(FrameFailurePartial {
+    part: "part",
+    got: "got",
+    expected: "expected"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedFrameFailureTrailing {
+    pub bytes: Count,
+}
+record!(SeedFrameFailureTrailing { bytes: "bytes" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolFailureVersionMismatch {
+    pub front: u32,
+    pub engine: u32,
+}
+record!(ProtocolFailureVersionMismatch {
+    front: "front",
+    engine: "engine"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolFailureDecode {
+    pub kind: ProtocolData,
+    pub operation: String,
+    pub cause: DecodeFailure,
+}
+record!(ProtocolFailureDecode {
+    kind: "kind",
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolFailureWrongForkKind {
+    pub expected: ForkKind,
+    pub actual: ForkKind,
+}
+record!(ProtocolFailureWrongForkKind {
+    expected: "expected",
+    actual: "actual"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolFailureFrame {
+    pub channel: FrameChannel,
+    pub operation: ProtocolOperation,
+    pub cause: FrameFailure,
+}
+record!(ProtocolFailureFrame {
+    channel: "channel",
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolFailureUnencodable {
+    pub operation: ProtocolOperation,
+    pub cause: FrameEncodeFailure,
+}
+record!(ProtocolFailureUnencodable {
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionClosedIo {
+    pub operation: ConnectionOperation,
+    pub cause: IoCause,
+}
+record!(ConnectionClosedIo {
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFaultUnexpectedFrame {
+    pub receiver: ProtocolPeer,
+    pub phase: ProtocolPhase,
+    pub actual: FrameKind,
+}
+record!(ConnectionFaultUnexpectedFrame {
+    receiver: "receiver",
+    phase: "phase",
+    actual: "actual"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFaultProbeAnswer {
+    pub probe: ProbeSubject,
+    pub cause: DecodeFailure,
+}
+record!(ConnectionFaultProbeAnswer {
+    probe: "probe",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFaultProbeRejected {
+    pub probe: ProbeSubject,
+    pub cause: ProbeFailure,
+}
+record!(ConnectionFaultProbeRejected {
+    probe: "probe",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFaultUnencodable {
+    pub operation: ProtocolOperation,
+    pub cause: FrameEncodeFailure,
+}
+record!(ConnectionFaultUnencodable {
+    operation: "operation",
+    cause: "cause"
+});
+
+impl FrameChannel {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl FramePart {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl FrameEncodeFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TooLarge(value) => format!("too large: {}", value.describe()),
+            Self::Json(value) => format!("json: {}", value.describe()),
+        }
+    }
+}
+
+impl FrameFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TooLarge(value) => format!("too large: {}", value.describe()),
+            Self::Partial(value) => format!("partial: {}", value.describe()),
+            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::Io(value) => format!("io: {}", value.describe()),
+        }
+    }
+}
+
+impl ProtocolOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProtocolData {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ForkKind {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProtocolWork {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl SeedFrameFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Empty => "empty".to_owned(),
+            Self::Trailing(value) => format!("trailing: {}", value.describe()),
+            Self::Frame(value) => format!("frame: {}", value.describe()),
+        }
+    }
+}
+
+impl ProtocolFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::VersionMismatch(value) => value.describe(),
+            Self::UnknownInstaller(value) => format!("unknown installer: {value}"),
+            Self::RootMissingScratch => "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach".into(),
+            Self::Decode(value) => value.describe(),
+            Self::WrongForkKind(value) => value.describe(),
+            Self::SeedFrame(value) => format!("seed frame: {}", value.describe()),
+            Self::UnresolvedScope(value) => format!("unresolved scope: {value}"),
+            Self::CyclicScopes => "cyclic scopes".to_owned(),
+            Self::UnknownNative(value) => format!("unknown native: {value}"),
+            Self::Frame(value) => format!("frame: {}", value.describe()),
+            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
+            Self::ConnectionLostDuringEnquiry => "connection lost during enquiry".to_owned(),
+            Self::Busy(value) => format!("busy: {}", value.describe()),
+        }
+    }
+}
+
+impl ProtocolPeer {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProtocolPhase {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl FrameKind {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ConnectionOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProbeSubject {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::BindingCount => "binding count".to_owned(),
+            Self::LeasedBindingCount => "leased binding count".to_owned(),
+            Self::LargestBindingBytes => "largest binding bytes".to_owned(),
+            Self::EnvVar(value) => format!("env var: {value}"),
+            Self::Cwd => "cwd".to_owned(),
+            Self::Home => "home".to_owned(),
+            Self::BuiltinNames => "builtin names".to_owned(),
+            Self::PathBytes(value) => format!("path bytes: {value}"),
+            Self::Workers => "workers".to_owned(),
+            Self::SessionEnded => "session ended".to_owned(),
+            Self::CompletionNames => "completion names".to_owned(),
+            Self::Bindings => "bindings".to_owned(),
+            Self::PathEntries(value) => format!("path entries: {value}"),
+            Self::Grants => "grants".to_owned(),
+            Self::WorkerCount => "worker count".to_owned(),
+            Self::GrantDepth => "grant depth".to_owned(),
+        }
+    }
+}
+
+impl ProbeFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Busy => "busy".to_owned(),
+            Self::WorkerPanicked => "worker panicked".to_owned(),
+            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
+        }
+    }
+}
+
+impl ConnectionClosed {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Eof(value) => format!("end of stream from the {}", value.describe()),
+            Self::ReaderThreadEnded => "reader thread ended".to_owned(),
+            Self::TransportDropped => "transport dropped".to_owned(),
+            Self::Io(value) => format!("io: {}", value.describe()),
+            Self::Frame(value) => format!("frame: {}", value.describe()),
+        }
+    }
+}
+
+impl ConnectionFault {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::UnexpectedFrame(value) => value.describe(),
+            Self::ReadingForDispatch => "reading for dispatch".to_owned(),
+            Self::ProbeAnswer(value) => format!("probe answer: {}", value.describe()),
+            Self::ProbeRejected(value) => format!("probe rejected: {}", value.describe()),
+            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
+            Self::WorkersSurvived(value) => format!("workers survived: {value}"),
+        }
+    }
+}
+
+impl ConnectionFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Closed(value) => format!("closed: {}", value.describe()),
+            Self::Silent(value) => format!("silent: {}.{:09} seconds", value.seconds, value.nanos),
+            Self::Faulted(value) => format!("faulted: {}", value.describe()),
+        }
+    }
+}
+
+impl FrameEncodeFailureTooLarge {
+    pub fn describe(&self) -> String {
+        format!(
+            "encoded frame has {} bytes, exceeding limit {}",
+            self.actual, self.limit
+        )
+    }
+}
+
+impl FrameFailureTooLarge {
+    pub fn describe(&self) -> String {
+        format!(
+            "frame has {} bytes, exceeding limit {}",
+            self.actual, self.limit
+        )
+    }
+}
+
+impl FrameFailurePartial {
+    pub fn describe(&self) -> String {
+        format!(
+            "partial frame {}: got {} bytes, expected {}",
+            self.part.describe(),
+            self.got,
+            self.expected
+        )
+    }
+}
+
+impl SeedFrameFailureTrailing {
+    pub fn describe(&self) -> String {
+        format!("bytes: {}", self.bytes)
+    }
+}
+
+impl ProtocolFailureVersionMismatch {
+    pub fn describe(&self) -> String {
+        format!(
+            "protocol version mismatch: frontend {}, engine {}",
+            self.front, self.engine
+        )
+    }
+}
+
+impl ProtocolFailureDecode {
+    pub fn describe(&self) -> String {
+        match self.kind {
+            ProtocolData::Answer => format!(
+                "{}: the host answered out of shape; {}",
+                self.operation,
+                self.cause.describe()
+            ),
+            ProtocolData::Request | ProtocolData::RootConfig => format!(
+                "{}: malformed {}: {}",
+                self.operation,
+                self.kind.describe(),
+                self.cause.describe()
+            ),
+        }
+    }
+}
+
+impl ProtocolFailureWrongForkKind {
+    pub fn describe(&self) -> String {
+        match (self.expected, self.actual) {
+            (ForkKind::Park, ForkKind::Seal) => {
+                "this host runs its children in its own process, but received a sealed fork".into()
+            }
+            (ForkKind::Seal, ForkKind::Park) => {
+                "this host makes its children over a wire, but received a parked fork".into()
+            }
+            _ => format!(
+                "expected {} fork, got {}",
+                self.expected.describe(),
+                self.actual.describe()
+            ),
+        }
+    }
+}
+
+impl ProtocolFailureFrame {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {} frame failed: {}",
+            self.channel.describe(),
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ProtocolFailureUnencodable {
+    pub fn describe(&self) -> String {
+        format!(
+            "cannot encode {}: {}",
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ConnectionClosedIo {
+    pub fn describe(&self) -> String {
+        format!(
+            "operation: {}, cause: {}",
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ConnectionFaultUnexpectedFrame {
+    pub fn describe(&self) -> String {
+        format!(
+            "the {} received an unexpected {} frame {}",
+            self.receiver.describe(),
+            self.actual.describe(),
+            match self.phase {
+                ProtocolPhase::AwaitAttach => "while awaiting attachment",
+                ProtocolPhase::Attached => "after attachment",
+            }
+        )
+    }
+}
+
+impl ConnectionFaultProbeAnswer {
+    pub fn describe(&self) -> String {
+        format!(
+            "probe: {}, cause: {}",
+            self.probe.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ConnectionFaultProbeRejected {
+    pub fn describe(&self) -> String {
+        format!(
+            "probe: {}, cause: {}",
+            self.probe.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ConnectionFaultUnencodable {
+    pub fn describe(&self) -> String {
+        format!(
+            "operation: {}, cause: {}",
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ProtocolFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Decode(value) => value.advice(),
+            Self::WrongForkKind(value) => value.advice(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ProtocolFailureWrongForkKind {
+    pub fn advice(&self) -> Vec<String> {
+        match (self.expected, self.actual) {
+            (ForkKind::Park, ForkKind::Seal) => vec!["use `parked <nursery id>`; a sealed bequest names a wire this desk does not have".into()],
+            (ForkKind::Seal, ForkKind::Park) => vec!["use `sealed <bytes>`; a parked fork names an in-process nursery this desk does not have".into()],
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ProtocolFailureDecode {
+    pub fn advice(&self) -> Vec<String> {
+        if self.kind != ProtocolData::Request || self.operation != "exarch-agents" {
+            return Vec::new();
+        }
+        let advice = match (self.cause.path.as_slice(), self.cause.cause.as_ref()) {
+            (
+                [DataStep::Payload(start), DataStep::Field(grant)],
+                DecodeCause::UnknownTag(UnknownTag { tag, .. }),
+            ) if start == "start"
+                && grant == "grant"
+                && matches!(tag.as_str(), "dangerous" | "minimal") =>
+            {
+                "`inherit is how you decline to narrow at all; a child cannot widen its parent's grant"
+            }
+            (
+                [DataStep::Payload(start), DataStep::Field(grant)],
+                DecodeCause::MissingPayload(tag),
+            ) if start == "start" && grant == "grant" && tag == "restrict" => {
+                "`restrict must carry a capability record of the same shape grant [...] takes: [exec: …, fs: …, net: …, gpu: …, editor: …, shell: …], every key optional"
+            }
+            (
+                [
+                    DataStep::Payload(start),
+                    DataStep::Field(grant),
+                    DataStep::Payload(restrict),
+                ],
+                DecodeCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Map),
+                    ..
+                }),
+            ) if start == "start" && grant == "grant" && restrict == "restrict" => {
+                "`restrict must carry a capability record of the same shape grant [...] takes: [exec: …, fs: …, net: …, gpu: …, editor: …, shell: …], every key optional"
+            }
+            _ => return Vec::new(),
+        };
+        vec![advice.into()]
+    }
+}
+
+#[cfg(test)]
+mod payload_presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::{Found, Reason};
+    use std::fmt::Write as _;
+
+    fn check(value: &ProtocolFailure, description: &str, advice: &[&str]) {
+        let back = ProtocolFailure::decode(&value.clone().encode()).unwrap();
+        assert_eq!(&back, value);
+        for value in [value, &back] {
+            assert_eq!(value.describe(), description);
+            let reason = Reason::Protocol(Box::new(value.clone()));
+            assert_eq!(reason.advice(), advice);
+            let error = Error::new(reason);
+            assert_eq!(error.hints(), []);
+            let mut expected = description.to_owned();
+            for hint in advice {
+                let _ = write!(expected, "\nhint: {hint}");
+            }
+            assert_eq!(error.plain(), expected);
+        }
+    }
+    fn decode(
+        kind: ProtocolData,
+        operation: &str,
+        path: &[DataStep],
+        cause: &DecodeCause,
+    ) -> ProtocolFailureDecode {
+        ProtocolFailureDecode {
+            kind,
+            operation: operation.into(),
+            cause: DecodeFailure {
+                path: path.to_vec(),
+                cause: Box::new(cause.clone()),
+            },
+        }
+    }
+
+    #[test]
+    fn decode_directions_keep_the_complete_original_decode_description() {
+        let cause = DecodeCause::MissingField("name".into());
+        let path = [
+            DataStep::Payload("start".into()),
+            DataStep::Field("items".into()),
+            DataStep::Index(u64::MAX.into()),
+        ];
+        for (kind, headline) in [
+            (ProtocolData::Request, "op: malformed request: "),
+            (ProtocolData::Answer, "op: the host answered out of shape; "),
+            (ProtocolData::RootConfig, "op: malformed root config: "),
+        ] {
+            let value = decode(kind, "op", &path, &cause);
+            let expected = format!("{headline}{}", value.cause.describe());
+            assert_eq!(value.describe(), expected);
+            check(&ProtocolFailure::Decode(value), &expected, &[]);
+        }
+    }
+
+    #[test]
+    fn spawn_grant_advice_requires_request_operation_path_and_exact_cause() {
+        let path = vec![
+            DataStep::Payload("start".into()),
+            DataStep::Field("grant".into()),
+        ];
+        let restrict_path = vec![
+            DataStep::Payload("start".into()),
+            DataStep::Field("grant".into()),
+            DataStep::Payload("restrict".into()),
+        ];
+        let inherit =
+            "`inherit is how you decline to narrow at all; a child cannot widen its parent's grant";
+        let restrict = "`restrict must carry a capability record of the same shape grant [...] takes: [exec: …, fs: …, net: …, gpu: …, editor: …, shell: …], every key optional";
+        let cases = [
+            (
+                path.clone(),
+                DecodeCause::UnknownTag(UnknownTag {
+                    tag: "dangerous".into(),
+                    offered: vec!["inherit".into(), "restrict".into()],
+                }),
+                inherit,
+            ),
+            (
+                path.clone(),
+                DecodeCause::UnknownTag(UnknownTag {
+                    tag: "minimal".into(),
+                    offered: vec![],
+                }),
+                inherit,
+            ),
+            (
+                path.clone(),
+                DecodeCause::MissingPayload("restrict".into()),
+                restrict,
+            ),
+            (
+                restrict_path.clone(),
+                DecodeCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Map),
+                    found: Found::Unit,
+                }),
+                restrict,
+            ),
+        ];
+        for (positive_path, cause, hint) in &cases {
+            let value = decode(ProtocolData::Request, "exarch-agents", positive_path, cause);
+            check(
+                &ProtocolFailure::Decode(value.clone()),
+                &value.describe(),
+                &[*hint],
+            );
+            for kind in [ProtocolData::Answer, ProtocolData::RootConfig] {
+                let value = decode(kind, "exarch-agents", positive_path, cause);
+                check(
+                    &ProtocolFailure::Decode(value.clone()),
+                    &value.describe(),
+                    &[],
+                );
+            }
+            for operation in ["exarch-agents-other", "exarch-schedules", "other"] {
+                let value = decode(ProtocolData::Request, operation, positive_path, cause);
+                check(
+                    &ProtocolFailure::Decode(value.clone()),
+                    &value.describe(),
+                    &[],
+                );
+            }
+            for negative_path in [
+                vec![],
+                vec![
+                    DataStep::Payload("start".into()),
+                    DataStep::Field("model".into()),
+                ],
+                vec![
+                    DataStep::Payload("other".into()),
+                    DataStep::Field("grant".into()),
+                ],
+                {
+                    let mut p = positive_path.clone();
+                    p.push(DataStep::Field("exec".into()));
+                    p
+                },
+            ] {
+                let value = decode(
+                    ProtocolData::Request,
+                    "exarch-agents",
+                    &negative_path,
+                    cause,
+                );
+                check(
+                    &ProtocolFailure::Decode(value.clone()),
+                    &value.describe(),
+                    &[],
+                );
+            }
+        }
+        for (path, cause) in [
+            (
+                path.clone(),
+                DecodeCause::UnknownTag(UnknownTag {
+                    tag: "other".into(),
+                    offered: vec!["inherit".into()],
+                }),
+            ),
+            (path.clone(), DecodeCause::MissingPayload("other".into())),
+            (
+                path,
+                DecodeCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Map),
+                    found: Found::Unit,
+                }),
+            ),
+            (
+                restrict_path,
+                DecodeCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::List),
+                    found: Found::Unit,
+                }),
+            ),
+        ] {
+            let value = decode(ProtocolData::Request, "exarch-agents", &path, &cause);
+            check(
+                &ProtocolFailure::Decode(value.clone()),
+                &value.describe(),
+                &[],
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_version_fork_pairs_and_scratch_have_single_useful_headlines() {
+        check(
+            &ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
+                front: 43,
+                engine: 44,
+            }),
+            "protocol version mismatch: frontend 43, engine 44",
+            &[],
+        );
+        check(
+            &ProtocolFailure::RootMissingScratch,
+            "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach",
+            &[],
+        );
+        for (expected, actual, description, advice) in [
+            (
+                ForkKind::Park,
+                ForkKind::Seal,
+                "this host runs its children in its own process, but received a sealed fork",
+                vec![
+                    "use `parked <nursery id>`; a sealed bequest names a wire this desk does not have",
+                ],
+            ),
+            (
+                ForkKind::Seal,
+                ForkKind::Park,
+                "this host makes its children over a wire, but received a parked fork",
+                vec![
+                    "use `sealed <bytes>`; a parked fork names an in-process nursery this desk does not have",
+                ],
+            ),
+            (
+                ForkKind::Park,
+                ForkKind::Park,
+                "expected park fork, got park",
+                vec![],
+            ),
+            (
+                ForkKind::Seal,
+                ForkKind::Seal,
+                "expected seal fork, got seal",
+                vec![],
+            ),
+        ] {
+            let value = ProtocolFailureWrongForkKind { expected, actual };
+            assert_eq!(value.describe(), description);
+            assert_eq!(value.advice(), advice);
+            check(&ProtocolFailure::WrongForkKind(value), description, &advice);
+        }
+    }
+
+    #[test]
+    fn eof_and_unexpected_frames_keep_peer_phase_and_actual_kind() {
+        for (peer, name) in [
+            (ProtocolPeer::Engine, "engine"),
+            (ProtocolPeer::Frontend, "frontend"),
+        ] {
+            let closed = ConnectionClosed::Eof(peer);
+            let back = ConnectionClosed::decode(&closed.clone().encode()).unwrap();
+            assert_eq!(closed.describe(), format!("end of stream from the {name}"));
+            assert_eq!(back, closed);
+            for (phase, phrase) in [
+                (ProtocolPhase::AwaitAttach, "while awaiting attachment"),
+                (ProtocolPhase::Attached, "after attachment"),
+            ] {
+                for actual in FrameKind::VARIANTS {
+                    let product = ConnectionFaultUnexpectedFrame {
+                        receiver: peer,
+                        phase,
+                        actual: *actual,
+                    };
+                    let description = format!(
+                        "the {name} received an unexpected {} frame {phrase}",
+                        actual.describe()
+                    );
+                    assert_eq!(product.describe(), description);
+                    let fault = ConnectionFault::UnexpectedFrame(product);
+                    let back = ConnectionFault::decode(&fault.clone().encode()).unwrap();
+                    assert_eq!(back, fault);
+                    assert_eq!(back.describe(), description);
+                }
+            }
+        }
+    }
+}

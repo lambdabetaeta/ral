@@ -94,10 +94,15 @@ fn static_codes(src: &str) -> Vec<String> {
 #[test]
 fn the_exec_boundary_names_the_spread_that_lowers_a_list() {
     match run_capture("let show = { |v| cat $v }; show [a, b]").0 {
-        Err(Break::Error(e)) => assert!(
-            e.hints().first().is_some_and(|h| h.contains("...")),
-            "the refusal should point at `...`"
-        ),
+        Err(Break::Error(e)) => {
+            assert!(e.hints().is_empty(), "intrinsic advice is not cached");
+            let advice = e.reason.advice();
+            assert!(
+                advice.first().is_some_and(|h| h.contains("...")),
+                "the refusal should point at `...`"
+            );
+            assert!(e.plain().contains(&advice[0]));
+        }
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -116,7 +121,12 @@ fn a_polymorphic_argument_is_left_to_the_spawn() {
         "a parameter's shape is not known here, so nothing may be refused"
     );
     match run_capture(call).0 {
-        Err(Break::Error(e)) => assert!(!e.hints().is_empty(), "the refusal carries the idiom"),
+        Err(Break::Error(e)) => {
+            assert!(e.hints().is_empty(), "intrinsic advice is not cached");
+            let advice = e.reason.advice();
+            assert!(!advice.is_empty(), "the refusal carries the idiom");
+            assert!(e.plain().contains(&advice[0]));
+        }
         other => panic!("`vet` must refuse the shape at run time, got {other:?}"),
     }
     // Nor is a spread's elements' shape: an empty spread reaches `execve(2)`
@@ -146,5 +156,75 @@ fn a_grant_refusal_outranks_the_shape_of_an_argument() {
             ),
             other => panic!("{call}: expected a grant refusal, got {other:?}"),
         }
+    }
+}
+
+#[test]
+fn every_refused_argv_shape_derives_its_unchanged_remedy_after_transport() {
+    use ral_core::data::datum::Datum;
+    use ral_core::fact::{
+        DataStep, Expected, Found, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape,
+    };
+    for (found, remedy) in [
+        (
+            Found::Unit,
+            "`()` is nothing, not a word: if the text is meant, write `'()'`",
+        ),
+        (
+            Found::List,
+            "use '...' to spread a list into arguments: tool ...$xs",
+        ),
+        (
+            Found::Map,
+            "a map is fields rather than one word: pass a field, as in `tool $m[name]`, or render the whole of it with `tool !{to-json $m}`",
+        ),
+        (
+            Found::Block,
+            "a block is a computation, not a word: run it and pass what it gives, as in `tool !{!$b}`",
+        ),
+        (
+            Found::Function,
+            "a block is a computation, not a word: run it and pass what it gives, as in `tool !{!$b}`",
+        ),
+        (
+            Found::Handle,
+            "await the concurrent block first (`let r = await $h`), then pass what it returned, as in `tool $r`",
+        ),
+        (
+            Found::Bytes,
+            "pipe binary data via stdin with to-bytes, or decode to string first",
+        ),
+    ] {
+        let description = format!(
+            "cannot pass {} as argument at index 0 to `tool`",
+            found.describe()
+        );
+        let reason = Reason::Invalid(Box::new(InvalidFailure {
+            operation: "tool".into(),
+            path: vec![DataStep::Index(0usize.into())],
+            cause: InvalidCause::Shape(ShapeFailure {
+                expected: Expected::AnyOf(vec![
+                    ValueShape::Bool,
+                    ValueShape::Int,
+                    ValueShape::Float,
+                    ValueShape::String,
+                    ValueShape::Variant,
+                ]),
+                found,
+            }),
+        }));
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(decoded, reason);
+        assert_eq!(decoded.describe(), description);
+        assert_eq!(decoded.advice(), [remedy]);
+        let error = ral_core::Error::new(decoded);
+        assert_eq!(error.hints(), []);
+        let rendered = error.render(
+            &ral_core::source::SourceDb::default(),
+            None,
+            &ral_core::shell::runtime::ExitHints::default(),
+        );
+        assert!(rendered.contains(&description), "{rendered}");
+        assert_eq!(rendered.matches(remedy).count(), 1, "{rendered}");
     }
 }

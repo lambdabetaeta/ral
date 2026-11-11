@@ -33,6 +33,9 @@ use super::{
     SignIn, json_or_error, jwt_payload, revoke_at, submit_refresh, wait,
 };
 use crate::provider::error::body_detail;
+use ral_core::fact::{
+    RefreshFailure, RefreshFailureExpiryOverflow, RefreshFailureInvalidExpiry, RefreshTokenField,
+};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -282,13 +285,19 @@ struct IdClaims {
     email: Option<String>,
 }
 
-fn expires_at(expires_in: Option<u64>, now: u64) -> Result<u64, String> {
+fn expires_at(expires_in: Option<u64>, now: u64) -> Result<u64, RefreshFailure> {
     let seconds = expires_in.unwrap_or(3600);
     if seconds == 0 {
-        return Err(invalid_field("expires_in"));
+        return Err(RefreshFailure::InvalidExpiry(RefreshFailureInvalidExpiry {
+            seconds: seconds.into(),
+        }));
     }
-    now.checked_add(seconds)
-        .ok_or_else(|| invalid_field("expires_in (overflow)"))
+    now.checked_add(seconds).ok_or_else(|| {
+        RefreshFailure::ExpiryOverflow(RefreshFailureExpiryOverflow {
+            now: now.into(),
+            seconds: seconds.into(),
+        })
+    })
 }
 
 fn finalize(raw: RefreshResponse) -> Result<OAuthToken, String> {
@@ -313,7 +322,8 @@ fn finalize(raw: RefreshResponse) -> Result<OAuthToken, String> {
         refresh_token,
         issued: claims.sub,
         email: claims.email,
-        expires_at: expires_at(raw.expires_in, crate::app::now_secs())?,
+        expires_at: expires_at(raw.expires_in, crate::app::now_secs())
+            .map_err(|cause| cause.describe())?,
         grant: Grant::Grok,
     })
 }
@@ -341,14 +351,17 @@ pub(super) async fn refresh_at(
     renewed(previous, submit_refresh(request, previous).await?).map_err(RefreshError::Ambiguous)
 }
 
-fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<RefreshUpdate<()>, String> {
-    required(&raw.access_token, "access_token")?;
+fn renewed(
+    previous: &OAuthToken,
+    raw: RefreshResponse,
+) -> Result<RefreshUpdate<()>, RefreshFailure> {
+    nonempty_token(&raw.access_token, RefreshTokenField::AccessToken)?;
     let refresh_token = raw
         .refresh_token
         .unwrap_or_else(|| previous.refresh_token.clone());
-    required(&refresh_token, "refresh_token")?;
+    nonempty_token(&refresh_token, RefreshTokenField::RefreshToken)?;
     if let Some(id_token) = &raw.id_token {
-        required(id_token, "id_token")?;
+        nonempty_token(id_token, RefreshTokenField::IdToken)?;
     }
     let email = raw
         .id_token
@@ -363,6 +376,14 @@ fn renewed(previous: &OAuthToken, raw: RefreshResponse) -> Result<RefreshUpdate<
         expires_at: expires_at(raw.expires_in, crate::app::now_secs())?,
         metadata: (),
     })
+}
+
+fn nonempty_token(token: &str, field: RefreshTokenField) -> Result<(), RefreshFailure> {
+    if token.is_empty() {
+        Err(RefreshFailure::EmptyToken(field))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) async fn revoke(token: &OAuthToken) -> Result<Revocation, String> {
@@ -645,6 +666,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn renewed_token_and_expiry_refusals_keep_their_exact_fields_and_operands() {
+        let previous = parse_token(token_json()).unwrap();
+        for (field, token_field) in [
+            ("access_token", RefreshTokenField::AccessToken),
+            ("refresh_token", RefreshTokenField::RefreshToken),
+            ("id_token", RefreshTokenField::IdToken),
+        ] {
+            let mut value = json!({"access_token":"new"});
+            value[field] = json!("");
+            assert_eq!(
+                renewed(&previous, refresh_response(value)).unwrap_err(),
+                RefreshFailure::EmptyToken(token_field)
+            );
+            let mut value = json!({"access_token":"new"});
+            value[field] = json!(" ");
+            assert!(
+                renewed(&previous, refresh_response(value)).is_ok(),
+                "Grok does not trim token strings"
+            );
+        }
+        assert_eq!(
+            expires_at(Some(0), 100).unwrap_err(),
+            RefreshFailure::InvalidExpiry(RefreshFailureInvalidExpiry {
+                seconds: 0u64.into()
+            })
+        );
+        assert_eq!(
+            expires_at(Some(u64::MAX), 100).unwrap_err(),
+            RefreshFailure::ExpiryOverflow(RefreshFailureExpiryOverflow {
+                now: 100u64.into(),
+                seconds: u64::MAX.into()
+            })
+        );
+    }
+
     struct Request {
         method: String,
         path: String,
@@ -809,7 +866,8 @@ mod tests {
         let url = format!("{}/oauth2/token", fixture.url);
         assert!(matches!(
             refresh_at(&client, &url, &previous).await,
-            Err(RefreshError::Rejected(reason)) if reason.contains("expired or been revoked")
+            Err(RefreshError::Rejected(RefreshFailure::Service(service)))
+                if matches!(service.cause.as_ref(), ral_core::fact::ServiceCause::RefreshResponse(response) if response.expired_or_revoked())
         ));
         // A success we cannot use may still have rotated the token.
         for _ in 0..2 {
@@ -821,7 +879,7 @@ mod tests {
         // So may a gateway error that follows a committed rotation.
         assert!(matches!(
             refresh_at(&client, &url, &previous).await,
-            Err(RefreshError::Ambiguous(reason)) if reason.contains("503")
+            Err(RefreshError::Ambiguous(RefreshFailure::Service(service))) if service.cause.status() == Some(503)
         ));
     }
 

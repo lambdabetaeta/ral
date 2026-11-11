@@ -61,7 +61,17 @@ fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
 fn a_retry_seals_the_failed_attempts_lanes() {
     let (_dir, emit, rx) = emitter();
     let mut stream = Stream::default();
-    let cause = ProviderError::local_transient("model response body read timed out");
+    let cause = ProviderError::Transient {
+        cause: ral_core::fact::RetryableProviderCause::Service(ral_core::fact::ServiceFailure {
+            service: "fixture".into(),
+            operation: ral_core::fact::ServiceOperation::Chat,
+            context: Vec::new(),
+            cause: Box::new(ral_core::fact::ServiceCause::StreamTimeout(
+                ral_core::fact::StreamTimeoutKind::Read,
+            )),
+        }),
+        attempts: 1,
+    };
     stream.push(&emit, Delta::Think("first try"));
     stream.push(
         &emit,

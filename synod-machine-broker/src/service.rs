@@ -595,12 +595,16 @@ mod tests {
     }
 
     impl Machine for Fake {
-        fn dial_engine(&self) -> io::Result<Socket> {
-            Err(io::ErrorKind::Unsupported.into())
+        fn dial_engine(&self) -> Result<Socket, vm_manager::DialError> {
+            Err(vm_manager::DialError::Unsupported(
+                vm_manager::DialBackend::HyperV,
+            ))
         }
 
-        fn connect_guest(&self, _: u32) -> io::Result<Socket> {
-            Err(io::ErrorKind::Unsupported.into())
+        fn connect_guest(&self, _: u32) -> Result<Socket, vm_manager::DialError> {
+            Err(vm_manager::DialError::Unsupported(
+                vm_manager::DialBackend::HyperV,
+            ))
         }
 
         fn console(&self) -> GuestConsole {

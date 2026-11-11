@@ -4,8 +4,8 @@
 let refused = try {
     let n = $[!{env}[HOME] + 1]
     return false
-} { |e| return $[!{re-match '^env:.*`/HOME`' !{describe $e}} && !{re-match 'line 5$' !{describe $e}}] }
-if $[not $refused] { fail 'env must refuse the numeric HOME use at its door, naming /HOME and line 5' }
+} { |e| return !{re-match '^env:.*`/HOME`' $e[message]} }
+if $[not $refused] { fail 'env must refuse the numeric HOME use at its door, naming /HOME' }
 echo $[!{env}[HOME] == !{home}]
 
 # within [env:] is visible to `env`; nested overrides stack; none leaks

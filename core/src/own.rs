@@ -25,6 +25,11 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::data::json::{self, JsonDecode, JsonEncode};
+use crate::fact::{
+    IoCause, IoContext, IoLeaf, JsonInputFailure, OwnAct, OwnIoContext, OwnJsonCause, OwnLeaf,
+    OwnLeafDangling, OwnLeafJson, OwnLeafOutside,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use strum::IntoStaticStr;
@@ -116,7 +121,7 @@ pub enum OwnError {
     Json {
         act: Act,
         at: PathBuf,
-        error: serde_json::Error,
+        cause: OwnJsonCause,
     },
 }
 
@@ -207,11 +212,12 @@ impl fmt::Display for OwnError {
             Self::Io { act, at, error, .. } => {
                 write!(f, "could not {} {}: {error}", <&str>::from(*act), shown(at))
             }
-            Self::Json { act, at, error } => write!(
+            Self::Json { act, at, cause } => write!(
                 f,
-                "could not {} {} as JSON: {error}",
+                "could not {} {} as JSON: {}",
                 <&str>::from(*act),
-                shown(at)
+                shown(at),
+                cause.describe()
             ),
         }
     }
@@ -221,8 +227,8 @@ impl std::error::Error for OwnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { error, .. } => Some(error),
-            Self::Json { error, .. } => Some(error),
-            Self::NoBase(_)
+            Self::Json { .. }
+            | Self::NoBase(_)
             | Self::NoCwd(_)
             | Self::Linked(_)
             | Self::Dangling { .. }
@@ -238,10 +244,93 @@ impl From<OwnError> for io::Error {
     }
 }
 
-impl From<OwnError> for String {
-    /// The sentence: what `?` makes in a `Result<_, String>`.
-    fn from(e: OwnError) -> Self {
-        e.to_string()
+impl From<Act> for OwnAct {
+    fn from(act: Act) -> Self {
+        match act {
+            Act::Open => Self::Open,
+            Act::Make => Self::Make,
+            Act::Read => Self::Read,
+            Act::Write => Self::Write,
+            Act::Sync => Self::Sync,
+            Act::Rename => Self::Rename,
+            Act::Remove => Self::Remove,
+            Act::List => Self::List,
+        }
+    }
+}
+
+impl From<&OwnError> for IoCause {
+    fn from(error: &OwnError) -> Self {
+        let leaf = match error {
+            OwnError::NoBase(kind) => OwnLeaf::NoBase(*kind),
+            OwnError::NoCwd(path) => OwnLeaf::NoCwd(shown(path)),
+            OwnError::Linked(path) => OwnLeaf::Linked(shown(path)),
+            OwnError::Dangling { at, to } => OwnLeaf::Dangling(OwnLeafDangling {
+                at: shown(at),
+                to: shown(to),
+            }),
+            OwnError::Outside { at, root } => OwnLeaf::Outside(OwnLeafOutside {
+                at: shown(at),
+                root: shown(root),
+            }),
+            OwnError::Io { act, at, to, error } => {
+                return crate::io::failure(error).at(IoContext::Owned(OwnIoContext {
+                    act: (*act).into(),
+                    at: shown(at),
+                    to: to.as_ref().map(shown),
+                }));
+            }
+            OwnError::Json { act, at, cause } => OwnLeaf::Json(OwnLeafJson {
+                act: (*act).into(),
+                at: shown(at),
+                cause: cause.clone(),
+            }),
+        };
+        Self::new(IoLeaf::Owned(leaf))
+    }
+}
+
+/// Erased serde failures are confined to UI/cache files, never runtime causes.
+#[derive(Debug)]
+pub enum SerdeFileError {
+    Own(OwnError),
+    Json {
+        act: Act,
+        at: PathBuf,
+        error: serde_json::Error,
+    },
+}
+
+impl From<OwnError> for SerdeFileError {
+    fn from(error: OwnError) -> Self {
+        Self::Own(error)
+    }
+}
+
+impl fmt::Display for SerdeFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Own(error) => error.fmt(f),
+            Self::Json { act, at, error } => write!(
+                f,
+                "could not {} {} as JSON: {error}",
+                <&str>::from(*act),
+                shown(at)
+            ),
+        }
+    }
+}
+impl std::error::Error for SerdeFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Own(error) => Some(error),
+            Self::Json { error, .. } => Some(error),
+        }
+    }
+}
+impl From<SerdeFileError> for String {
+    fn from(error: SerdeFileError) -> Self {
+        error.to_string()
     }
 }
 
@@ -446,9 +535,7 @@ impl OwnDir {
             return Err(io_at(
                 Act::Open,
                 path,
-                io::Error::other(
-                    "the directory changed during resolution; refused the replacement; retry",
-                ),
+                io::Error::other(crate::fact::PathIoLeaf::DirectoryChanged),
             ));
         }
         Ok(reached)
@@ -490,7 +577,7 @@ impl OwnDir {
                 }),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    let error = io::Error::new(e.kind(), e.to_string());
+                    let error = io::Error::new(e.kind(), crate::io::failure(e));
                     return Err(io_at(Act::List, &self.at(listed.name()), error));
                 }
             }
@@ -510,17 +597,17 @@ impl OwnDir {
     /// file to read as none, writes `.ok().flatten()` and says so.
     ///
     /// # Errors
-    /// [`OwnError::Linked`] for a link; the read's; [`OwnError::Json`] for
+    /// [`OwnError::Linked`] for a link; the read's; [`SerdeFileError::Json`] for
     /// text that is not the value.
-    pub fn load<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, OwnError> {
+    pub fn load<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>, SerdeFileError> {
         let bytes = match self.read(name) {
             Ok(bytes) => bytes,
             Err(e) if e.is_absent() => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|error| OwnError::Json {
+            .map_err(|error| SerdeFileError::Json {
                 act: Act::Read,
                 at: self.path().join(name),
                 error,
@@ -533,16 +620,16 @@ impl OwnDir {
     /// whatever was there.
     ///
     /// # Errors
-    /// [`OwnError::Linked`] for a link; [`OwnError::Json`] for a value with no
+    /// [`OwnError::Linked`] for a link; [`SerdeFileError::Json`] for a value with no
     /// JSON; the write's.
     pub fn store<T: Serialize>(
         &self,
         name: &str,
         value: &T,
         visibility: Visibility,
-    ) -> Result<(), OwnError> {
+    ) -> Result<(), SerdeFileError> {
         let name = self.entry(Act::Write, name)?;
-        let json = serde_json::to_vec_pretty(value).map_err(|error| OwnError::Json {
+        let json = serde_json::to_vec_pretty(value).map_err(|error| SerdeFileError::Json {
             act: Act::Write,
             at: self.at(&name),
             error,
@@ -553,6 +640,53 @@ impl OwnDir {
             .stage(visibility)
             .map_err(failed)?;
         staged.file().write_all(&json).map_err(failed)?;
+        staged.publish().map_err(failed).map_err(Into::into)
+    }
+
+    /// Read an audited JSON schema, preserving syntax and domain causes.
+    ///
+    /// # Errors
+    /// Returns owned-file access failures or typed JSON syntax/domain failures.
+    pub fn load_json<T: JsonDecode>(&self, name: &str) -> Result<Option<T>, OwnError> {
+        let bytes = match self.read(name) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_absent() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| OwnError::Json {
+                act: Act::Read,
+                at: self.path().join(name),
+                cause: match error {
+                    JsonInputFailure::Syntax(cause) => OwnJsonCause::Syntax(cause),
+                    JsonInputFailure::Decode(cause) => OwnJsonCause::Decode(cause),
+                },
+            })
+    }
+
+    /// Encode before staging, then publish under the same durability rules.
+    ///
+    /// # Errors
+    /// Returns JSON encoding refusals or owned-file staging, write and publication failures.
+    pub fn store_json<T: JsonEncode + ?Sized>(
+        &self,
+        name: &str,
+        value: &T,
+        visibility: Visibility,
+    ) -> Result<(), OwnError> {
+        let name = self.entry(Act::Write, name)?;
+        let bytes = json::to_vec_pretty(value).map_err(|cause| OwnError::Json {
+            act: Act::Write,
+            at: self.at(&name),
+            cause: OwnJsonCause::Encode(cause),
+        })?;
+        let failed = |error| self.failed(Act::Write, &name, error);
+        let mut staged = self
+            .unlinked(Act::Write, &name)?
+            .stage(visibility)
+            .map_err(failed)?;
+        staged.file().write_all(&bytes).map_err(failed)?;
         staged.publish().map_err(failed)
     }
 
@@ -974,7 +1108,10 @@ impl UserFile {
             spelled_parent(spelling.as_path()).and_then(LexicalPath::absolute),
             file_name(spelling.as_path()),
         ) else {
-            let error = io::Error::new(io::ErrorKind::InvalidInput, "it names no file");
+            let error = io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::fact::PathIoLeaf::NoFileEntry,
+            );
             return Err(io_at(Act::Open, &self.path, error));
         };
         let name = EntryName::parse(name).map_err(|e| io_at(Act::Open, &self.path, e.into()))?;
@@ -1056,4 +1193,118 @@ pub fn create_named(path: &Path) -> Result<File, OwnError> {
     writing(found)
         .create_new(Access::Write, Visibility::Public)
         .map_err(|e| io_at(Act::Make, path, e))
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod typed_failure_tests {
+    use super::*;
+    use crate::fact::{DecodeCause, DecodeFailure, PathIoLeaf};
+
+    #[test]
+    fn own_projection_retains_every_terminal_variant_and_io_context() {
+        let errors = [
+            OwnError::NoBase(XdgKind::State),
+            OwnError::NoCwd("relative".into()),
+            OwnError::Linked("link".into()),
+            OwnError::Dangling {
+                at: "link".into(),
+                to: "target".into(),
+            },
+            OwnError::Outside {
+                at: "entry".into(),
+                root: "root".into(),
+            },
+            OwnError::Json {
+                act: Act::Read,
+                at: "json".into(),
+                cause: OwnJsonCause::Decode(DecodeFailure::new(DecodeCause::MissingField(
+                    "key".into(),
+                ))),
+            },
+        ];
+        for error in errors {
+            let expected = IoCause::from(&error);
+            assert!(matches!(*expected.leaf, IoLeaf::Owned(_)));
+            assert_eq!(crate::io::failure(&io::Error::from(error)), expected);
+        }
+        let error = OwnError::Io {
+            act: Act::Write,
+            at: "link".into(),
+            to: Some("target".into()),
+            error: io::Error::other(PathIoLeaf::NotHeld),
+        };
+        let cause = IoCause::from(&error);
+        assert_eq!(*cause.leaf, IoLeaf::Path(PathIoLeaf::NotHeld));
+        assert_eq!(
+            cause.context,
+            vec![IoContext::Owned(OwnIoContext {
+                act: OwnAct::Write,
+                at: "link".into(),
+                to: Some("target".into())
+            })]
+        );
+    }
+
+    #[test]
+    fn typed_own_json_is_distinct_from_erased_cache_json() {
+        let dir = OwnDir::for_test("typed-json").unwrap();
+        let value = EnvVars::from_pairs([("A", "value")]).unwrap();
+        dir.store_json("env", &value, Visibility::Secret).unwrap();
+        assert_eq!(dir.load_json::<EnvVars>("env").unwrap(), Some(value));
+        assert_eq!(dir.load_json::<EnvVars>("absent").unwrap(), None);
+        dir.store(
+            "bad-env",
+            &BTreeMap::from([("PWD", "x")]),
+            Visibility::Secret,
+        )
+        .unwrap();
+        assert!(matches!(
+            dir.load_json::<EnvVars>("bad-env"),
+            Err(OwnError::Json {
+                cause: OwnJsonCause::Decode(DecodeFailure {
+                    cause,
+                    ..
+                }),
+                ..
+            }) if matches!(cause.as_ref(), DecodeCause::ReservedEnvironment(_))
+        ));
+        let (name, mut file) = dir
+            .create_fresh("syntax-", ".json", Visibility::Secret)
+            .unwrap();
+        file.write_all(b"{").unwrap();
+        drop(file);
+        assert!(matches!(
+            dir.load_json::<EnvVars>(&name),
+            Err(OwnError::Json {
+                cause: OwnJsonCause::Syntax(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            dir.load::<u32>("bad-env"),
+            Err(SerdeFileError::Json { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_encoding_refusal_does_not_replace_an_owned_file() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = OwnDir::for_test("typed-json-publish").unwrap();
+        dir.store("path", &"original", Visibility::Secret).unwrap();
+        let raw = std::ffi::OsString::from_vec(b"/bad\xff".to_vec());
+        let path = crate::path::EnginePath::Host(raw.into());
+        assert!(matches!(
+            dir.store_json("path", &path, Visibility::Secret),
+            Err(OwnError::Json {
+                cause: OwnJsonCause::Encode(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            dir.load::<String>("path").unwrap().as_deref(),
+            Some("original")
+        );
+    }
 }

@@ -23,3 +23,37 @@ fn stamp_store_roundtrip_and_merge() {
         assert!(!stamp_recorded("ro|\\\\?\\c:\\work\\a"));
     });
 }
+
+#[test]
+fn corrupt_stamp_store_is_unrecorded_and_replaced_on_update() {
+    with_scoped_state_dir(|| {
+        let dir = ledger_dir().unwrap();
+        for bad in [b"{".as_slice(), br#"{"stamps":42}"#] {
+            std::fs::write(dir.path().join(STAMP_STORE_FILE_NAME), bad).unwrap();
+            assert!(!stamp_recorded("fixture"));
+            record_stamp("fixture").unwrap();
+            assert!(stamp_recorded("fixture"));
+        }
+    });
+}
+
+#[test]
+fn stamp_json_preserves_defaults_sets_unknowns_duplicates_and_sequences() {
+    for bytes in [b"{}".as_slice(), br#"{"unknown":true}"#, b"[[]]"] {
+        assert!(
+            json::from_slice::<StampStore>(bytes)
+                .unwrap()
+                .stamps
+                .is_empty()
+        );
+    }
+    let store = json::from_slice::<StampStore>(br#"{"stamps":["a","a","b"]}"#).unwrap();
+    assert_eq!(store.stamps.len(), 2);
+    assert_eq!(
+        json::to_vec_pretty(&store).unwrap(),
+        serde_json::to_vec_pretty(&store).unwrap()
+    );
+    assert!(
+        matches!(json::from_slice::<StampStore>(br#"{"stamps":[],"stamps":[]}"#), Err(crate::fact::JsonInputFailure::Decode(failure)) if *failure.cause == crate::fact::DecodeCause::DuplicateField("stamps".into()))
+    );
+}

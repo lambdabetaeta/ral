@@ -1,6 +1,6 @@
 # Test: dedent, words, nub, re-find-* and string-replace at their edges
 
-let refusal = { |body| try $body { |e| echo !{describe $e}; return () } }
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
 let check = { |name expected actual|
     if $[$expected == $actual] { echo "ok: $name" } else {
         fail "assertion failed: $name"

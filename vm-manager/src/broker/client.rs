@@ -5,6 +5,7 @@ use std::io;
 use std::os::windows::io::{FromRawSocket, OwnedSocket};
 
 use super::wire::{PIPE, Reply, Request, VERSION, frame};
+use crate::dial::{DialBackend, DialError};
 use crate::error::{Error, GuestConsole, Wire};
 use crate::hcs::win::HYPERVISOR;
 use crate::machine::{Booted, Hypervisor, Machine, Socket, Wires};
@@ -109,16 +110,12 @@ pub(crate) struct BrokeredGuest {
 }
 
 impl Machine for BrokeredGuest {
-    fn dial_engine(&self) -> io::Result<Socket> {
+    fn dial_engine(&self) -> Result<Socket, DialError> {
         self.connect_guest(guest_abi::ports::FACTORY)
     }
 
-    fn connect_guest(&self, _port: u32) -> io::Result<Socket> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the machine broker cannot yet dial a port inside its guest; it currently only \
-             transfers connections opened by the guest",
-        ))
+    fn connect_guest(&self, _port: u32) -> Result<Socket, DialError> {
+        Err(DialError::Unsupported(DialBackend::Broker))
     }
 
     /// An unreachable service yields an empty retained console while the caller reports the original failure.

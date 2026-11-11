@@ -174,8 +174,7 @@ fn a_cancelled_workers_await_finds_it_claimed() {
     .expect("await of a cancelled worker hung");
     assert_eq!(out.status, 1, "stderr: {}", out.stderr);
     assert!(
-        out.stderr
-            .contains("await: this worker's result was already claimed"),
+        out.stderr.contains("await: worker was already claimed"),
         "stderr: {}",
         out.stderr
     );

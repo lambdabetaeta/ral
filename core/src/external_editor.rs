@@ -4,6 +4,10 @@
 //! draft file.  Where the draft lives, and under whose authority, is each
 //! host's own.
 
+use crate::fact::{
+    DraftFailure, DraftFailureTooLarge, EditorCommandCause, EditorFailureCommand, EditorVariable,
+    Utf8Failure,
+};
 use std::fmt;
 use std::io::{self, Read};
 use std::string::FromUtf8Error;
@@ -26,13 +30,16 @@ impl EditorCommand {
     /// # Errors
     /// The chosen variable's: a NUL byte, unbalanced quoting, an empty first word.
     pub fn select(visual: Option<&str>, editor: Option<&str>) -> Result<Self, CommandError> {
-        [("VISUAL", visual), ("EDITOR", editor)]
-            .into_iter()
-            .find_map(|(var, spec)| Some((var, spec.filter(|s| !s.trim().is_empty())?)))
-            .map_or_else(
-                || Ok(Self::platform_default()),
-                |(var, spec)| Self::parse(spec).map_err(|fault| CommandError { var, fault }),
-            )
+        [
+            (EditorVariable::Visual, visual),
+            (EditorVariable::Editor, editor),
+        ]
+        .into_iter()
+        .find_map(|(var, spec)| Some((var, spec.filter(|s| !s.trim().is_empty())?)))
+        .map_or_else(
+            || Ok(Self::platform_default()),
+            |(var, spec)| Self::parse(spec).map_err(|fault| CommandError { var, fault }),
+        )
     }
 
     fn platform_default() -> Self {
@@ -42,13 +49,13 @@ impl EditorCommand {
         }
     }
 
-    fn parse(spec: &str) -> Result<Self, Fault> {
+    fn parse(spec: &str) -> Result<Self, EditorCommandCause> {
         // Splitting only drops and regroups characters: this covers every word.
         if spec.contains('\0') {
-            return Err(Fault::Nul);
+            return Err(EditorCommandCause::Nul);
         }
         #[cfg(not(windows))]
-        let words = shlex::split(spec).ok_or(Fault::Unbalanced)?;
+        let words = shlex::split(spec).ok_or(EditorCommandCause::Unbalanced)?;
         #[cfg(windows)]
         let words = windows_words(spec);
         let mut words = words.into_iter();
@@ -57,7 +64,7 @@ impl EditorCommand {
                 program,
                 args: words.collect(),
             }),
-            _ => Err(Fault::NoProgram),
+            _ => Err(EditorCommandCause::NoProgram),
         }
     }
 
@@ -106,30 +113,35 @@ fn windows_words(spec: &str) -> Vec<String> {
 /// Why the variable [`EditorCommand::select`] chose names no runnable command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandError {
-    var: &'static str,
-    fault: Fault,
+    var: EditorVariable,
+    fault: EditorCommandCause,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fault {
-    Nul,
-    #[cfg(not(windows))]
-    Unbalanced,
-    NoProgram,
+impl CommandError {
+    pub fn failure(self) -> EditorFailureCommand {
+        EditorFailureCommand {
+            variable: self.var,
+            cause: self.fault,
+        }
+    }
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let var = self.var;
+        let var = match self.var {
+            EditorVariable::Visual => "VISUAL",
+            EditorVariable::Editor => "EDITOR",
+        };
         match self.fault {
-            Fault::Nul => write!(f, "{var} contains a NUL byte; remove it"),
-            #[cfg(not(windows))]
-            Fault::Unbalanced => write!(
+            EditorCommandCause::Nul => write!(f, "{var} contains a NUL byte; remove it"),
+            EditorCommandCause::Unbalanced => write!(
                 f,
                 "{var} has an unmatched quote or a trailing backslash; \
                  it is split into words as a POSIX shell would, with nothing expanded"
             ),
-            Fault::NoProgram => write!(f, "{var} names no program: its first word is empty"),
+            EditorCommandCause::NoProgram => {
+                write!(f, "{var} names no program: its first word is empty")
+            }
         }
     }
 }
@@ -143,6 +155,24 @@ pub enum DraftError {
     TooLarge,
     Read(io::Error),
     NotUtf8(FromUtf8Error),
+}
+
+impl DraftError {
+    pub fn failure(&self) -> DraftFailure {
+        match self {
+            Self::TooLarge => DraftFailure::TooLarge(DraftFailureTooLarge {
+                limit: MAX_DRAFT_BYTES.into(),
+            }),
+            Self::Read(error) => DraftFailure::Read(crate::io::failure(error)),
+            Self::NotUtf8(error) => {
+                let error = error.utf8_error();
+                DraftFailure::Utf8(Utf8Failure {
+                    valid_up_to: error.valid_up_to().into(),
+                    error_len: error.error_len().map(Into::into),
+                })
+            }
+        }
+    }
 }
 
 impl fmt::Display for DraftError {
@@ -256,7 +286,11 @@ mod tests {
         );
         for unbalanced in ["editor '", "editor \"x", "editor \\"] {
             let error = EditorCommand::select(Some(unbalanced), None).unwrap_err();
-            assert_eq!(error.fault, Fault::Unbalanced, "{unbalanced:?}");
+            assert_eq!(
+                error.fault,
+                EditorCommandCause::Unbalanced,
+                "{unbalanced:?}"
+            );
             assert!(
                 error
                     .to_string()
@@ -289,8 +323,8 @@ mod tests {
             assert_eq!(
                 error,
                 CommandError {
-                    var: "EDITOR",
-                    fault: Fault::NoProgram
+                    var: EditorVariable::Editor,
+                    fault: EditorCommandCause::NoProgram
                 }
             );
             assert_eq!(
@@ -309,7 +343,7 @@ mod tests {
             "editor \\\0",
         ] {
             let error = EditorCommand::select(Some(spec), Some("nano")).unwrap_err();
-            assert_eq!(error.fault, Fault::Nul, "{spec:?}");
+            assert_eq!(error.fault, EditorCommandCause::Nul, "{spec:?}");
             assert_eq!(error.to_string(), "VISUAL contains a NUL byte; remove it");
         }
     }
@@ -337,6 +371,32 @@ mod tests {
         let error = read_draft(&[0xff][..]).unwrap_err();
         assert!(matches!(error, DraftError::NotUtf8(_)));
         assert!(error.to_string().starts_with("the draft is not UTF-8"));
+    }
+
+    #[test]
+    fn command_and_draft_failures_project_without_rendering() {
+        let error = EditorCommand::select(Some("ed\0"), None).unwrap_err();
+        assert_eq!(
+            error.failure(),
+            EditorFailureCommand {
+                variable: EditorVariable::Visual,
+                cause: EditorCommandCause::Nul,
+            }
+        );
+        let error = read_draft(&[b'a', 0xff][..]).unwrap_err();
+        assert_eq!(
+            error.failure(),
+            DraftFailure::Utf8(Utf8Failure {
+                valid_up_to: 1_usize.into(),
+                error_len: Some(1_usize.into()),
+            })
+        );
+        assert_eq!(
+            DraftError::TooLarge.failure(),
+            DraftFailure::TooLarge(DraftFailureTooLarge {
+                limit: MAX_DRAFT_BYTES.into(),
+            })
+        );
     }
 
     #[test]

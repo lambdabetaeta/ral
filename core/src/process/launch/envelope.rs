@@ -66,11 +66,11 @@ pub(crate) struct EnvelopedLaunch {
 }
 
 impl EnvelopedLaunch {
-    /// `program` names the envelope in a failed start.
+    /// `role` identifies the launcher, never the payload.
     pub(crate) fn new(
         cmd: Command,
         stdio: EnvelopeStdio,
-        program: &'static str,
+        role: crate::fact::LauncherRole,
         payload_pgid: Option<PayloadPgid>,
         report: Report,
     ) -> Self {
@@ -80,7 +80,7 @@ impl EnvelopedLaunch {
             error,
             diagnostics,
         } = stdio;
-        let mut enveloped = Self::unslotted(cmd, program, payload_pgid, report, diagnostics);
+        let mut enveloped = Self::unslotted(cmd, role, payload_pgid, report, diagnostics);
         enveloped.launch.setup.streams = Some(EnvelopeStreams {
             payload,
             null,
@@ -93,24 +93,24 @@ impl EnvelopedLaunch {
     #[cfg(test)]
     pub(crate) fn synthetic(
         cmd: Command,
-        program: &'static str,
+        role: crate::fact::LauncherRole,
         payload_pgid: Option<PayloadPgid>,
         report: Report,
     ) -> Self {
         let diagnostics = tempfile::tempfile().expect("empty envelope diagnostics");
-        Self::unslotted(cmd, program, payload_pgid, report, diagnostics)
+        Self::unslotted(cmd, role, payload_pgid, report, diagnostics)
     }
 
     fn unslotted(
         cmd: Command,
-        program: &'static str,
+        role: crate::fact::LauncherRole,
         payload_pgid: Option<PayloadPgid>,
         report: Report,
         diagnostics: std::fs::File,
     ) -> Self {
         let mut launch = Launch::from_command(cmd);
         launch.launcher = Some(Launcher {
-            name: program,
+            role,
             report,
             diagnostics: Some(diagnostics),
         });
@@ -118,6 +118,11 @@ impl EnvelopedLaunch {
             launch,
             payload_pgid,
         }
+    }
+
+    pub(crate) fn with_setup_evidence(mut self, evidence: super::setup::Evidence) -> Self {
+        self.launch = self.launch.with_setup_evidence(evidence);
+        self
     }
 
     pub(crate) fn launch_mut(&mut self) -> &mut Launch {

@@ -110,7 +110,7 @@ mod win_groups {
         }
     }
 
-    fn associate_completion_port(job: HANDLE) -> HANDLE {
+    fn associate_completion_port(job: HANDLE) -> std::io::Result<HANDLE> {
         unsafe {
             let port = CreateIoCompletionPort(
                 windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
@@ -119,7 +119,7 @@ mod win_groups {
                 1,
             );
             if port.is_null() {
-                return std::ptr::null_mut();
+                return Err(std::io::Error::last_os_error());
             }
             let mut assoc: JOBOBJECT_ASSOCIATE_COMPLETION_PORT = std::mem::zeroed();
             assoc.CompletionKey = job.cast();
@@ -131,10 +131,11 @@ mod win_groups {
                 cb::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>(),
             );
             if ok == 0 {
+                let error = std::io::Error::last_os_error();
                 CloseHandle(port);
-                return std::ptr::null_mut();
+                return Err(error);
             }
-            port
+            Ok(port)
         }
     }
 
@@ -158,22 +159,29 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the Join arm holds the registry guard across `DuplicateHandle` on purpose: see the comment there"
     )]
-    pub(super) fn prepare(step: super::Step) -> std::io::Result<PreparedGroup> {
+    pub(super) fn prepare(step: super::Step) -> Result<PreparedGroup, crate::fact::PrepareFailure> {
+        use crate::fact::{
+            PrepareCause, PrepareFailure, PrepareInvalid, PrepareStep, PrepareSubject,
+        };
+        let io = |error: std::io::Error| PrepareFailure {
+            step: PrepareStep::Job,
+            subject: PrepareSubject::Child,
+            cause: PrepareCause::Io(Box::new(crate::io::failure(&error))),
+        };
         match step {
             super::Step::Inherit => Ok(PreparedGroup::None),
             super::Step::NewLeader | super::Step::NewSession => {
                 let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
                 if job.is_null() {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(io(std::io::Error::last_os_error()));
                 }
                 install_kill_on_close(job);
-                let completion_port = associate_completion_port(job);
-                if completion_port.is_null() {
+                let completion_port = associate_completion_port(job).map_err(|error| {
                     unsafe {
                         CloseHandle(job);
                     }
-                    return Err(std::io::Error::last_os_error());
-                }
+                    io(error)
+                })?;
                 Ok(PreparedGroup::NewLeader {
                     job,
                     completion_port,
@@ -185,19 +193,26 @@ mod win_groups {
                 // keeps `release` from closing it before the `DuplicateHandle`.
                 let groups = GROUPS.lock_ignore_poison();
                 let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("pipeline group {leader} is no longer live"),
-                    ));
+                    return Err(PrepareFailure {
+                        step: PrepareStep::Group,
+                        subject: PrepareSubject::Group(u64::from(leader.unsigned_abs()).into()),
+                        cause: PrepareCause::Invalid(PrepareInvalid::GroupNoLongerLive(
+                            u64::from(leader.unsigned_abs()).into(),
+                        )),
+                    });
                 };
                 if state.job.is_null() {
-                    return Err(std::io::Error::other(format!(
-                        "pipeline group {leader} has no Job Object"
-                    )));
+                    return Err(PrepareFailure {
+                        step: PrepareStep::Group,
+                        subject: PrepareSubject::Group(u64::from(leader.unsigned_abs()).into()),
+                        cause: PrepareCause::Invalid(PrepareInvalid::GroupHasNoJob(
+                            u64::from(leader.unsigned_abs()).into(),
+                        )),
+                    });
                 }
                 let job = duplicate_process_handle(state.job);
                 if job.is_null() {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(io(std::io::Error::last_os_error()));
                 }
                 Ok(PreparedGroup::Join { leader: pgid, job })
             }
@@ -467,7 +482,7 @@ mod win_groups {
         clippy::significant_drop_tightening,
         reason = "the guard is held across the read-modify-write on purpose: see the doc"
     )]
-    pub(crate) fn set_active_process_limit(job: HANDLE, limit: u32) -> bool {
+    pub(crate) fn set_active_process_limit(job: HANDLE, limit: u32) -> std::io::Result<()> {
         let _groups = GROUPS.lock_ignore_poison();
         unsafe {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -480,16 +495,21 @@ mod win_groups {
                 &raw mut returned,
             ) == 0
             {
-                return false;
+                return Err(std::io::Error::last_os_error());
             }
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
             info.BasicLimitInformation.ActiveProcessLimit = limit;
-            SetInformationJobObject(
+            let ok = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 (&raw const info).cast(),
                 cb::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(),
-            ) != 0
+            );
+            if ok == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -505,7 +525,7 @@ mod win_groups {
             let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
             assert!(!job.is_null());
             install_kill_on_close(job);
-            assert!(set_active_process_limit(job, 7));
+            set_active_process_limit(job, 7).unwrap();
 
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
             let mut returned: u32 = 0;
@@ -541,7 +561,7 @@ pub(crate) fn release_win_group(leader: i32) {
 pub(crate) fn set_active_process_limit(
     job: windows_sys::Win32::Foundation::HANDLE,
     limit: u32,
-) -> bool {
+) -> std::io::Result<()> {
     win_groups::set_active_process_limit(job, limit)
 }
 
@@ -555,7 +575,9 @@ pub(crate) fn is_known_group(leader: i32) -> bool {
 
 pub(in crate::process) type PreparedGroup = win_groups::PreparedGroup;
 
-pub(in crate::process) fn prepare_group(step: Step) -> std::io::Result<PreparedGroup> {
+pub(in crate::process) fn prepare_group(
+    step: Step,
+) -> Result<PreparedGroup, crate::fact::PrepareFailure> {
     win_groups::prepare(step)
 }
 

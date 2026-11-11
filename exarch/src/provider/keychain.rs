@@ -161,17 +161,23 @@ impl Keychain {
     /// The fallback file's keys, an empty map where there is no file.
     ///
     /// # Errors
-    /// [`OwnError`] where the state directory, or the file in it, cannot be
-    /// read as a key map.  A caller that writes the map back stops here: a
+    /// UI-rendered failure when the state directory or its key map cannot be
+    /// read. A caller that writes the map back stops here: a
     /// file that could not be read is never written over.
-    fn read_fallback(self) -> Result<BTreeMap<String, String>, OwnError> {
-        Ok(self.state()?.load(FALLBACK_FILE)?.unwrap_or_default())
+    fn read_fallback(self) -> Result<BTreeMap<String, String>, String> {
+        Ok(self
+            .state()
+            .map_err(|error| error.to_string())?
+            .load(FALLBACK_FILE)?
+            .unwrap_or_default())
     }
 
     fn write_fallback(self, keys: &BTreeMap<String, String>) -> Result<(), String> {
-        Ok(self
-            .state()?
-            .store(FALLBACK_FILE, keys, Visibility::Secret)?)
+        Ok(self.state().map_err(|error| error.to_string())?.store(
+            FALLBACK_FILE,
+            keys,
+            Visibility::Secret,
+        )?)
     }
 
     /// Where the fallback file lives: this app's state directory.

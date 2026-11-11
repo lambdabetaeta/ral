@@ -12,13 +12,12 @@ use crate::environ::EnvVars;
 /// Anchor a host-held path against the process's working directory, without expanding sigils.
 ///
 /// # Errors
-/// A sentence when the process has no working directory to anchor against.
-pub fn spelled(path: &Path) -> Result<LexicalPath, String> {
+/// The typed path refusal when the process has no working directory.
+pub fn spelled(path: &Path) -> Result<LexicalPath, crate::fact::PathFailure> {
     let cwd = crate::host::cwd().ok_or_else(|| {
-        format!(
-            "Cannot tell which folder the process is running in, so cannot find {}.",
-            super::shown(path)
-        )
+        crate::fact::PathFailure::NoProcessCwd(crate::fact::PathFailureNoProcessCwd {
+            path: super::shown(path),
+        })
     })?;
     Ok(Resolver::at(&EnvVars::new(), &cwd).anchor(path))
 }
@@ -67,7 +66,7 @@ impl<'a> Resolver<'a> {
     /// # Errors
     /// An invalid wildcard, one that matches only hidden names, or `..`
     /// after a wildcard, which no walked entry carries.
-    pub(crate) fn glob(&self, raw: &str) -> Result<super::tree::Glob, String> {
+    pub(crate) fn glob(&self, raw: &str) -> Result<super::tree::Glob, crate::fact::GlobFailure> {
         super::tree::Glob::resolve(raw, self)
     }
 

@@ -1,9 +1,0 @@
-`process [failure: `exited 3, program: sh]
-`process [failure: `not-found, program: /nonexistent/ral-no-such-command]
-`process [failure: `not-found, program: ral-no-such-command]
-`process [failure: `signaled 11, program: sh]
-`not-executable
-true
-`not-executable
-true
-try reason tests done

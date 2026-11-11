@@ -13,6 +13,7 @@ use super::map::Map;
 use crate::data::Bytes;
 use crate::data::Finite;
 use crate::data::Str;
+use crate::fact::{Found, TextPreview, ValueShape};
 use crate::io::terminal::{InteractiveMode, TerminalState};
 use crate::ty::{Head, TAG_PREFIX};
 use std::fmt;
@@ -21,7 +22,8 @@ use std::sync::Arc;
 
 mod compare;
 mod first_order;
-pub(crate) use first_order::Leaf;
+mod seed;
+pub(super) use seed::{drop_seed_env, drop_seed_value};
 
 /// The runtime representation of every ral value.
 ///
@@ -64,6 +66,47 @@ const _: () = assert!(
 );
 
 impl Value {
+    /// Release seed-created data and captures without recursive drop glue.
+    pub(crate) fn drop_seed(self) {
+        drop_seed_value(self);
+    }
+
+    /// An inert head summary; closures are never traversed.
+    pub fn shape(&self) -> ValueShape {
+        match self {
+            Self::Unit => ValueShape::Unit,
+            Self::Bool(_) => ValueShape::Bool,
+            Self::Int(_) => ValueShape::Int,
+            Self::Float(_) => ValueShape::Float,
+            Self::String(_) => ValueShape::String,
+            Self::Bytes(_) => ValueShape::Bytes,
+            Self::List(_) => ValueShape::List,
+            Self::Map(_) => ValueShape::Map,
+            Self::Variant { .. } => ValueShape::Variant,
+            Self::Thunk(c) if c.comp().lam().is_none() => ValueShape::Block,
+            Self::Thunk(_) | Self::Native(_) => ValueShape::Function,
+            Self::Handle(_) => ValueShape::Handle,
+        }
+    }
+
+    /// Bounded evidence for a refusal, independent of runtime resources.
+    pub fn found(&self) -> Found {
+        match self {
+            Self::Unit => Found::Unit,
+            Self::Bool(b) => Found::Bool(*b),
+            Self::Int(n) => Found::Int(*n),
+            Self::Float(f) => Found::Float(*f),
+            Self::String(s) => Found::Text(TextPreview::new(s)),
+            Self::Bytes(_) => Found::Bytes,
+            Self::List(_) => Found::List,
+            Self::Map(_) => Found::Map,
+            Self::Variant { label, .. } => Found::Variant(label.to_string()),
+            Self::Thunk(c) if c.comp().lam().is_none() => Found::Block,
+            Self::Thunk(_) | Self::Native(_) => Found::Function,
+            Self::Handle(_) => Found::Handle,
+        }
+    }
+
     /// `Int` only: the checker keeps `Int` and `Float` apart, and a
     /// numeric-looking string is the `int` builtin's job.
     pub fn as_int(&self) -> Option<i64> {
@@ -151,6 +194,11 @@ impl Value {
     /// total inside, gated at the OS call.
     pub(crate) fn render_argv(args: &[Self]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
+    }
+
+    /// The record a program reads of `fact`; `raise` recovers `fact` from it.
+    pub fn failure(fact: crate::fact::ErrorFact) -> Self {
+        Self::Map(Map::witnessed(fact))
     }
 
     /// On duplicate keys the *last* pair wins; a caller needing first-wins
@@ -588,5 +636,52 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("a deep literal chain must drop without exhausting the stack");
+    }
+    #[test]
+    fn reason_summaries_distinguish_blocks_functions_and_data_heads() {
+        let block = block_over(&Env::new());
+        assert_eq!(
+            (block.shape(), block.found()),
+            (ValueShape::Block, Found::Block)
+        );
+        for (value, shape, found) in [
+            (Value::Unit, ValueShape::Unit, Found::Unit),
+            (Value::Bool(true), ValueShape::Bool, Found::Bool(true)),
+            (Value::Int(i64::MIN), ValueShape::Int, Found::Int(i64::MIN)),
+            (
+                Value::Float(Finite::from(2_i64)),
+                ValueShape::Float,
+                Found::Float(Finite::from(2_i64)),
+            ),
+            (Value::bytes(vec![0xff]), ValueShape::Bytes, Found::Bytes),
+            (Value::list(vec![block]), ValueShape::List, Found::List),
+            (Value::map(vec![]), ValueShape::Map, Found::Map),
+            (
+                Value::variant("label", None),
+                ValueShape::Variant,
+                Found::Variant("label".into()),
+            ),
+        ] {
+            assert_eq!(value.shape(), shape);
+            assert_eq!(value.found(), found);
+        }
+        assert_eq!(
+            Value::string("x".repeat(24)).found(),
+            Found::Text(TextPreview {
+                preview: "x".repeat(24),
+                truncated: false,
+            })
+        );
+    }
+    #[test]
+    fn opaque_previews_never_retain_live_handles_or_closure_captures() {
+        let handle = crate::shell::runtime::idle_handle();
+        assert_eq!(handle.shape(), ValueShape::Handle);
+        assert_eq!(handle.found(), Found::Handle);
+        let mut shell = crate::test_helper::core_shell();
+        let function =
+            crate::shell::evaluator::run_source("{ |x| return $x }", &mut shell).unwrap();
+        assert_eq!(function.shape(), ValueShape::Function);
+        assert_eq!(function.found(), Found::Function);
     }
 }

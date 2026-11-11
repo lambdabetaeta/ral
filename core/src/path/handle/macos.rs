@@ -59,10 +59,7 @@ thread_local! {
 
 /// A walk's refusal of an entry that is no longer the one it opened.
 fn moved(name: &EntryName) -> io::Error {
-    io::Error::other(format!(
-        "{} moved during the walk: it is no longer the entry its directory held when the walk opened it",
-        shown(name.as_os_str())
-    ))
+    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(shown(name.as_os_str())))
 }
 
 /// `/`, held as a search handle.
@@ -155,10 +152,11 @@ pub(super) fn settle(
         return Ok(name.clone());
     }
     let Some(id) = held else {
-        return Err(io::Error::other(format!(
-            "cannot learn the stored name of {}, which the walk states but does not hold: the lookup answered {}, and only a held object's identity can tell which entry is its own",
-            shown(name.as_os_str()),
-            shown(answered)
+        return Err(io::Error::other(crate::fact::PathIoLeaf::StoredNameUnheld(
+            crate::fact::PathIoLeafStoredNameUnheld {
+                requested: shown(name.as_os_str()),
+                answered: shown(answered),
+            },
         )));
     };
     stored_entry(dir, id, name)
@@ -170,13 +168,16 @@ pub(super) fn settle(
 /// and kept where the lookup reaches `id`, then decided by [`pick`].  A
 /// directory that cannot be listed refuses: the name is not guessed.
 fn stored_entry(dir: &File, id: ObjectId, name: &EntryName) -> io::Result<EntryName> {
-    let cannot = |e: io::Error| {
+    let cannot = |error: io::Error| {
         io::Error::new(
-            e.kind(),
-            format!(
-                "cannot learn the stored name of {}: {e}",
-                shown(name.as_os_str())
-            ),
+            error.kind(),
+            crate::io::failure(&error).at(crate::fact::IoContext::Path(
+                crate::fact::PathIoContext::StoredNameRead(
+                    crate::fact::PathIoContextStoredNameRead {
+                        name: shown(name.as_os_str()),
+                    },
+                ),
+            )),
         )
     };
     let key = collision_key(name.as_os_str());
@@ -212,11 +213,14 @@ pub(super) fn pick(entries: &[EntryName], name: &EntryName) -> io::Result<EntryN
     match folded.as_slice() {
         [only] => Ok((*only).clone()),
         [] => Err(moved(name)),
-        several => Err(io::Error::other(format!(
-            "{} is one of {} spellings of one object in this directory, and the walk cannot tell which the directory stores",
-            shown(name.as_os_str()),
-            several.len()
-        ))),
+        several => Err(io::Error::other(
+            crate::fact::PathIoLeaf::StoredNameAmbiguous(
+                crate::fact::PathIoLeafStoredNameAmbiguous {
+                    name: shown(name.as_os_str()),
+                    spellings: several.len().into(),
+                },
+            ),
+        )),
     }
 }
 
@@ -232,7 +236,7 @@ struct Reply<'a> {
 fn short() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "the kernel's attribute answer is shorter than it says",
+        crate::fact::PathIoLeaf::KernelReplyShort(crate::fact::KernelReply::MacosAttributes),
     )
 }
 
@@ -360,7 +364,12 @@ pub(super) fn parse_lookup(buf: &[u8]) -> io::Result<Looked> {
     if common & REQUIRED != REQUIRED {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "this volume does not answer the name, identity, kind and mode of an entry, which a walk needs",
+            crate::fact::PathIoLeaf::VolumeAttributesUnsupported(
+                crate::fact::PathIoLeafVolumeAttributesUnsupported {
+                    required: REQUIRED,
+                    returned: common,
+                },
+            ),
         ));
     }
     let name = reply.name()?;
@@ -524,7 +533,7 @@ pub(super) fn current_path(file: &File) -> io::Result<PathBuf> {
     let end = name.iter().position(|&byte| byte == 0).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "F_GETPATH returned an unterminated path",
+            crate::fact::PathIoLeaf::MissingPathTerminator,
         )
     })?;
     Ok(PathBuf::from(OsString::from_vec(name[..end].to_vec())))

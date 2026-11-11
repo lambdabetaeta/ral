@@ -48,7 +48,9 @@ impl Agent {
                 let done = values.iter().rev().find_map(DoneEvent::from_surface);
                 let announced = done.as_ref().is_none_or(|done| {
                     self.engine()
-                        .read(|transport| transport.workers())
+                        .read(ral_core::fact::ProbeSubject::Workers, |transport| {
+                            transport.workers()
+                        })
                         .is_ok_and(|rows| done.unclaimed_in(&rows))
                 });
                 let values = if announced {

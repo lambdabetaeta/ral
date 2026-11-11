@@ -662,8 +662,6 @@ pub mod scheme {
         thunk(fun(ErrorRecord::ty(), divergent(binders)))
     }
 
-    scheme!(describe: [ErrorRecord::ty()] -> Ty::string());
-
     /// `exit`/`quit` :: ∀ε α. Int → F^ε α — a status, and no return.
     /// The elaborator sugars bare `exit` to `exit 0`.
     pub(crate) fn exit(binders: &mut Binders) -> Ty {
@@ -703,6 +701,15 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn the_error_record_is_the_closed_four_field_record_a_handler_reads() {
+        assert_eq!(
+            ErrorRecord::ty().to_string(),
+            "[frame: String, message: String, site: [col: Integer, line: Integer, \
+             script: String], status: Integer]"
+        );
     }
 
     #[test]

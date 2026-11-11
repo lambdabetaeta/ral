@@ -15,6 +15,12 @@
 //! safe inside editor callbacks, where the evaluator must never run.
 
 use super::manifest::LoadedPlugin;
+use ral_core::fact::{
+    BuiltinKeyAction, KeyModifier, KeyNotationFailure, KeyNotationFailureControlCharacter,
+    KeyNotationFailureDuplicateModifier, KeyNotationFailureShiftedCharacter,
+    KeyNotationFailureTerminalAlias, KeyNotationFailureUnknownKey,
+    KeyNotationFailureUppercaseControl, ReservedKeyAction, TerminalKeyAlias,
+};
 
 /// A frontend-neutral key name: the subset of keys a plugin keybinding may
 /// bind, exactly the notations [`parse_key_notation`] accepts.  Each editor
@@ -71,7 +77,7 @@ pub(in crate::repl) const CTRL_X: KeyChord = KeyChord {
 /// uppercase letter, `ctrl-h`, `ctrl-i`, `ctrl-m` and `ctrl-[` (backspace,
 /// tab, enter, escape), and a control character as the key.  The error names
 /// the offending text, not the notation it came from.
-pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, String> {
+pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, KeyNotationFailure> {
     const MODIFIERS: [&str; 3] = ["ctrl", "alt", "shift"];
     const NAMED: &[(&str, KeyName)] = &[
         ("tab", KeyName::Tab),
@@ -87,14 +93,14 @@ pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, St
         ("backspace", KeyName::Backspace),
     ];
     // A terminal sends the same byte for these `ctrl-` letters as for the named key.
-    const ALIASED: [(char, &str); 4] = [
-        ('h', "backspace"),
-        ('i', "tab"),
-        ('m', "enter"),
-        ('[', "escape"),
+    const ALIASED: [(char, TerminalKeyAlias); 4] = [
+        ('h', TerminalKeyAlias::Backspace),
+        ('i', TerminalKeyAlias::Tab),
+        ('m', TerminalKeyAlias::Enter),
+        ('[', TerminalKeyAlias::Escape),
     ];
     if key.trim().is_empty() {
-        return Err("the key notation is empty; name a key such as 'ctrl-r'".into());
+        return Err(KeyNotationFailure::Empty);
     }
     key.split_whitespace()
         .map(|chord| {
@@ -104,9 +110,11 @@ pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, St
                 (!tail.is_empty()).then_some((i, tail))
             }) {
                 if std::mem::replace(&mut mods[i], true) {
-                    return Err(format!(
-                        "modifier '{}' appears twice in '{chord}'",
-                        MODIFIERS[i]
+                    return Err(KeyNotationFailure::DuplicateModifier(
+                        KeyNotationFailureDuplicateModifier {
+                            chord: chord.into(),
+                            modifier: [KeyModifier::Ctrl, KeyModifier::Alt, KeyModifier::Shift][i],
+                        },
                     ));
                 }
                 rest = tail;
@@ -123,45 +131,43 @@ pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, St
                         (1..=12).contains(&n).then_some(KeyName::F(n))
                     })
                     .ok_or_else(|| {
-                        let names: Vec<_> = NAMED.iter().map(|&(n, _)| n).collect();
-                        format!(
-                            "'{rest}' is not a key: a key is one character, f1 to f12, or one of {}",
-                            names.join(", ")
-                        )
+                        KeyNotationFailure::UnknownKey(KeyNotationFailureUnknownKey {
+                            token: rest.into(),
+                        })
                     })?,
             };
-            let [ctrl_, alt_] =
-                [(ctrl, "ctrl-"), (alt, "alt-")].map(|(on, m)| if on { m } else { "" });
             if let KeyName::Char(c) = name {
                 if c.is_control() {
-                    return Err(format!(
-                        "{c:?} is a control character; name the key that sends it, e.g. 'ctrl-c' or 'escape'"
+                    return Err(KeyNotationFailure::ControlCharacter(
+                        KeyNotationFailureControlCharacter {
+                            character: c.to_string(),
+                        },
                     ));
                 }
                 if shift {
-                    let ask = if c.is_alphabetic() {
-                        let key = if ctrl {
-                            c.to_lowercase().to_string()
-                        } else {
-                            c.to_uppercase().to_string()
-                        };
-                        format!(": did you mean '{ctrl_}{alt_}{key}'?")
-                    } else {
-                        ".".into()
-                    };
-                    return Err(format!(
-                        "'{chord}' shifts a character, and the shifted character is itself the key{ask}"
+                    return Err(KeyNotationFailure::ShiftedCharacter(
+                        KeyNotationFailureShiftedCharacter {
+                            chord: chord.into(),
+                            character: c.to_string(),
+                            control: ctrl,
+                            alt,
+                        },
                     ));
                 }
                 if ctrl && c.is_ascii_uppercase() {
-                    return Err(format!(
-                        "'{chord}' is the same key to a terminal as its lowercase form: did you mean '{}'?",
-                        chord.to_ascii_lowercase()
+                    return Err(KeyNotationFailure::UppercaseControl(
+                        KeyNotationFailureUppercaseControl {
+                            chord: chord.into(),
+                        },
                     ));
                 }
-                if ctrl && let Some(&(_, named)) = ALIASED.iter().find(|&&(a, _)| a == c) {
-                    return Err(format!(
-                        "'{chord}' is {named} to a terminal: did you mean '{alt_}{named}'?"
+                if ctrl && let Some(&(_, alias)) = ALIASED.iter().find(|&&(a, _)| a == c) {
+                    return Err(KeyNotationFailure::TerminalAlias(
+                        KeyNotationFailureTerminalAlias {
+                            chord: chord.into(),
+                            alt,
+                            alias,
+                        },
                     ));
                 }
             }
@@ -179,10 +185,10 @@ pub(in crate::repl) fn parse_key_notation(key: &str) -> Result<Vec<KeyChord>, St
 /// session's escape hatches, and a wedged handler on either would leave no
 /// way to stop it or leave the shell.  The manifest rejects these at load,
 /// guard or not.
-pub(in crate::repl) fn reserved_action(chord: KeyChord) -> Option<&'static str> {
+pub(in crate::repl) fn reserved_action(chord: KeyChord) -> Option<ReservedKeyAction> {
     match (chord.name, chord.ctrl && !(chord.alt || chord.shift)) {
-        (KeyName::Char('c'), true) => Some("interrupt"),
-        (KeyName::Char('d'), true) => Some("end-of-file"),
+        (KeyName::Char('c'), true) => Some(ReservedKeyAction::Interrupt),
+        (KeyName::Char('d'), true) => Some(ReservedKeyAction::EndOfFile),
         _ => None,
     }
 }
@@ -193,18 +199,20 @@ pub(in crate::repl) fn reserved_action(chord: KeyChord) -> Option<&'static str> 
 /// binding there would shadow it on every press and the manifest requires a
 /// guard.  Modified chords and function keys carry none: they hold at most
 /// an underlying editor default, which a plugin may replace outright.
-pub(in crate::repl) fn builtin_action(chord: KeyChord) -> Option<&'static str> {
+pub(in crate::repl) fn builtin_action(chord: KeyChord) -> Option<BuiltinKeyAction> {
     if chord.ctrl || chord.alt || chord.shift {
         return None;
     }
     match chord.name {
-        KeyName::Char(_) => Some("text insertion"),
-        KeyName::Tab => Some("completion"),
-        KeyName::Enter => Some("accept-line"),
-        KeyName::Escape => Some("keymap escape"),
-        KeyName::Up | KeyName::Down => Some("history navigation"),
-        KeyName::Left | KeyName::Right | KeyName::Home | KeyName::End => Some("cursor movement"),
-        KeyName::Backspace | KeyName::Delete => Some("deletion"),
+        KeyName::Char(_) => Some(BuiltinKeyAction::TextInsertion),
+        KeyName::Tab => Some(BuiltinKeyAction::Completion),
+        KeyName::Enter => Some(BuiltinKeyAction::AcceptLine),
+        KeyName::Escape => Some(BuiltinKeyAction::KeymapEscape),
+        KeyName::Up | KeyName::Down => Some(BuiltinKeyAction::HistoryNavigation),
+        KeyName::Left | KeyName::Right | KeyName::Home | KeyName::End => {
+            Some(BuiltinKeyAction::CursorMovement)
+        }
+        KeyName::Backspace | KeyName::Delete => Some(BuiltinKeyAction::Deletion),
         KeyName::F(_) => None,
     }
 }
@@ -396,29 +404,73 @@ mod tests {
     /// Each refusal names the offending text, and says what is wanted.
     #[test]
     fn parse_key_notation_refuses_with_the_offending_text() {
-        for (key, needle) in [
-            ("", "is empty"),
-            ("   ", "is empty"),
-            ("hyper-x", "'hyper-x' is not a key"),
-            ("f13", "'f13' is not a key"),
-            ("ctrl-", "'ctrl-' is not a key"),
-            ("ctrl-x alt-ctrl-alt-y", "modifier 'alt' appears twice"),
-            ("shift-a", "did you mean 'A'?"),
-            ("shift-1", "the shifted character is itself the key."),
-            ("ctrl-C", "did you mean 'ctrl-c'?"),
-            ("ctrl-alt-C", "did you mean 'ctrl-alt-c'?"),
-            ("alt-shift-a", "did you mean 'alt-A'?"),
-            ("ctrl-shift-a", "did you mean 'ctrl-a'?"),
-            ("ctrl-h", "did you mean 'backspace'?"),
-            ("ctrl-i", "did you mean 'tab'?"),
-            ("ctrl-m", "did you mean 'enter'?"),
-            ("ctrl-[", "did you mean 'escape'?"),
-            ("alt-ctrl-h", "did you mean 'alt-backspace'?"),
-            ("\u{3}", "'\\u{3}' is a control character"),
-            ("ctrl-\u{1b}", "'\\u{1b}' is a control character"),
+        for (key, expected) in [
+            ("", KeyNotationFailure::Empty),
+            ("   ", KeyNotationFailure::Empty),
+            (
+                "hyper-x",
+                KeyNotationFailure::UnknownKey(KeyNotationFailureUnknownKey {
+                    token: "hyper-x".into(),
+                }),
+            ),
+            (
+                "f13",
+                KeyNotationFailure::UnknownKey(KeyNotationFailureUnknownKey {
+                    token: "f13".into(),
+                }),
+            ),
+            (
+                "ctrl-",
+                KeyNotationFailure::UnknownKey(KeyNotationFailureUnknownKey {
+                    token: "ctrl-".into(),
+                }),
+            ),
+            (
+                "ctrl-x alt-ctrl-alt-y",
+                KeyNotationFailure::DuplicateModifier(KeyNotationFailureDuplicateModifier {
+                    chord: "alt-ctrl-alt-y".into(),
+                    modifier: KeyModifier::Alt,
+                }),
+            ),
         ] {
-            let err = parse_key_notation(key).expect_err(key);
-            assert!(err.contains(needle), "{key:?}: {err}");
+            assert_eq!(parse_key_notation(key).unwrap_err(), expected, "{key:?}");
+        }
+        for key in ["shift-a", "shift-1", "alt-shift-a", "ctrl-shift-a"] {
+            assert!(
+                matches!(parse_key_notation(key), Err(KeyNotationFailure::ShiftedCharacter(fact)) if fact.chord == key && fact.character == key.chars().last().unwrap().to_string() && fact.control == key.starts_with("ctrl-") && fact.alt == key.starts_with("alt-"))
+            );
+        }
+        for key in ["ctrl-C", "ctrl-alt-C"] {
+            assert_eq!(
+                parse_key_notation(key).unwrap_err(),
+                KeyNotationFailure::UppercaseControl(KeyNotationFailureUppercaseControl {
+                    chord: key.into()
+                })
+            );
+        }
+        for (key, alias, alt) in [
+            ("ctrl-h", TerminalKeyAlias::Backspace, false),
+            ("ctrl-i", TerminalKeyAlias::Tab, false),
+            ("ctrl-m", TerminalKeyAlias::Enter, false),
+            ("ctrl-[", TerminalKeyAlias::Escape, false),
+            ("alt-ctrl-h", TerminalKeyAlias::Backspace, true),
+        ] {
+            assert_eq!(
+                parse_key_notation(key).unwrap_err(),
+                KeyNotationFailure::TerminalAlias(KeyNotationFailureTerminalAlias {
+                    chord: key.into(),
+                    alias,
+                    alt
+                })
+            );
+        }
+        for (key, character) in [("\u{3}", "\u{3}"), ("ctrl-\u{1b}", "\u{1b}")] {
+            assert_eq!(
+                parse_key_notation(key).unwrap_err(),
+                KeyNotationFailure::ControlCharacter(KeyNotationFailureControlCharacter {
+                    character: character.into()
+                })
+            );
         }
     }
 
@@ -430,8 +482,19 @@ mod tests {
             key: "ctrl-C".into(),
             guard: None,
         };
-        let err = spec.bind().expect_err("ctrl-C must not slip past ctrl-c");
-        assert!(err.contains("did you mean 'ctrl-c'?"), "{err}");
+        assert_eq!(
+            spec.bind().unwrap_err(),
+            ral_core::fact::KeybindingFailure::Notation(
+                ral_core::fact::KeybindingFailureNotation {
+                    key: "ctrl-C".into(),
+                    cause: KeyNotationFailure::UppercaseControl(
+                        KeyNotationFailureUppercaseControl {
+                            chord: "ctrl-C".into()
+                        }
+                    ),
+                }
+            )
+        );
     }
 
     /// `guard_allows`: no guard always allows; a guard matches against the
@@ -575,17 +638,38 @@ mod tests {
     #[test]
     fn reserved_and_builtin_tables() {
         let chord = |s| parse_key_notation(s).unwrap()[0];
-        assert_eq!(reserved_action(chord("ctrl-c")), Some("interrupt"));
-        assert_eq!(reserved_action(chord("ctrl-d")), Some("end-of-file"));
+        assert_eq!(
+            reserved_action(chord("ctrl-c")),
+            Some(ReservedKeyAction::Interrupt)
+        );
+        assert_eq!(
+            reserved_action(chord("ctrl-d")),
+            Some(ReservedKeyAction::EndOfFile)
+        );
         assert_eq!(reserved_action(chord("ctrl-t")), None);
         assert_eq!(reserved_action(chord("ctrl-alt-c")), None);
         assert_eq!(reserved_action(chord("tab")), None);
 
-        assert_eq!(builtin_action(chord("tab")), Some("completion"));
-        assert_eq!(builtin_action(chord("enter")), Some("accept-line"));
-        assert_eq!(builtin_action(chord("up")), Some("history navigation"));
-        assert_eq!(builtin_action(chord("t")), Some("text insertion"));
-        assert_eq!(builtin_action(chord("backspace")), Some("deletion"));
+        assert_eq!(
+            builtin_action(chord("tab")),
+            Some(BuiltinKeyAction::Completion)
+        );
+        assert_eq!(
+            builtin_action(chord("enter")),
+            Some(BuiltinKeyAction::AcceptLine)
+        );
+        assert_eq!(
+            builtin_action(chord("up")),
+            Some(BuiltinKeyAction::HistoryNavigation)
+        );
+        assert_eq!(
+            builtin_action(chord("t")),
+            Some(BuiltinKeyAction::TextInsertion)
+        );
+        assert_eq!(
+            builtin_action(chord("backspace")),
+            Some(BuiltinKeyAction::Deletion)
+        );
         assert_eq!(builtin_action(chord("f5")), None);
         assert_eq!(builtin_action(chord("ctrl-t")), None);
         assert_eq!(builtin_action(chord("alt-c")), None);

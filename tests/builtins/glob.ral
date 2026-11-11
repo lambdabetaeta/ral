@@ -57,7 +57,7 @@ within [env: [HOME: $dotdir]] {
 rm -rf $dotdir
 
 # A wildcard component that can match only dotfiles matches nothing: refused
-let refusal = { |body| try $body { |e| echo !{describe $e}; return () } }
+let refusal = { |body| try $body { |e| echo $e[message]; return () } }
 let gdir = temp-dir
 within [dir: $gdir] {
     refusal { glob '.h*'; return () }

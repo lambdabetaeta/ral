@@ -4,7 +4,10 @@
 
 use super::builtin::BuiltinEntry;
 use super::value::Value;
-use super::{Closure, Shell};
+use super::{Break, Closure, Shell, ill_typed};
+use crate::fact::{
+    BlockRole, DataStep, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure,
+};
 use std::borrow::Cow;
 use std::fmt;
 use strum::IntoStaticStr;
@@ -69,14 +72,13 @@ impl HandlerEntry {
         shell: &Shell,
         role: HandlerRole,
     ) -> Settled<Self> {
-        let label = <&str>::from(role);
-        let closure = arm_closure(&thunk, &format!("{label}: `{name}`"), HandlerArity::Unary)?;
+        let closure = arm_closure(&thunk, role, &name)?;
         let scheme = crate::typecheck::alias_arm_scheme(
             &name,
             closure.comp(),
             shell.closure_schemes(closure),
         )
-        .map_err(|error| refused_arm(label, &error, closure.comp().span, shell))?;
+        .map_err(|errors| refused_arm(role, &name, &errors, closure.comp().span, shell))?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {
             entry.scheme = Some(scheme);
@@ -96,37 +98,60 @@ pub(crate) enum HandlerRole {
     /// `within [handlers: …]` — the frame is popped before the run ends.
     #[strum(serialize = "within handlers")]
     Scoped,
+    #[strum(serialize = "within handler")]
+    CatchAll,
 }
 
 impl HandlerRole {
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::Scoped | Self::CatchAll => "within",
+        }
+    }
+
+    fn invalid(self, subject: &str, cause: InvalidCause) -> super::Error {
+        let path = match self {
+            Self::Alias => vec![DataStep::Field(subject.into())],
+            Self::Scoped => vec![
+                DataStep::Field("handlers".into()),
+                DataStep::Field(subject.into()),
+            ],
+            Self::CatchAll => vec![DataStep::Field("handler".into())],
+        };
+        super::Error::new(Reason::Invalid(Box::new(InvalidFailure {
+            operation: self.operation().into(),
+            path,
+            cause,
+        })))
+    }
+
+    fn block(self, subject: &str) -> BlockRole {
+        match self {
+            Self::Alias | Self::Scoped => BlockRole::Handler(subject.into()),
+            Self::CatchAll => BlockRole::CatchAll,
+        }
+    }
+
     fn persists_scheme(self) -> bool {
         matches!(self, Self::Alias)
     }
 }
 
-/// A refused arm, in the checker's own sentence, caret on the arm when it has
-/// a span.
+/// A refused arm, in the checker's own sentences, caret on the arm when it
+/// has a span.
 pub(crate) fn refused_arm(
-    label: &str,
-    error: &crate::typecheck::TypeError,
+    role: HandlerRole,
+    subject: &str,
+    errors: &[crate::typecheck::TypeError],
     span: Option<crate::source::Span>,
     shell: &Shell,
-) -> crate::shell::runtime::Break {
-    let sentence = error.hint().unwrap_or_else(|| error.kind.render_message());
-    crate::shell::runtime::Break::from(crate::shell::runtime::Error::new(format!(
-        "{label}: {sentence}"
-    )))
-    .locate(label, span, shell)
-}
-
-impl HandlerArity {
-    /// The arm a slot of this convention is written as, for a refusal.
-    fn form(self) -> &'static str {
-        match self {
-            Self::CatchAll => "`{ |name args| … }`",
-            Self::Unary => "`{ |args| … }`",
-        }
-    }
+) -> Break {
+    Break::from(ill_typed(role.operation(), role.block(subject), errors)).locate(
+        <&str>::from(role),
+        span,
+        shell,
+    )
 }
 
 /// The closure an arm installs: any block.  Its parameters are its type's
@@ -136,17 +161,20 @@ impl HandlerArity {
 /// `value` is not a block.
 pub(crate) fn arm_closure<'a>(
     value: &'a Value,
-    context: &str,
-    arity: HandlerArity,
+    role: HandlerRole,
+    subject: &str,
 ) -> Settled<&'a Closure> {
     match value {
         Value::Thunk(closure) => Ok(closure),
-        other => Err(super::Error::new(format!(
-            "{context} must be a block, such as {}, got a {}",
-            arity.form(),
-            other.type_name()
-        ))
-        .into()),
+        other => Err(role
+            .invalid(
+                subject,
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Closure,
+                    found: other.found(),
+                }),
+            )
+            .into()),
     }
 }
 
@@ -360,5 +388,61 @@ impl HandlerStack {
             .rposition(|(h, _)| h.0 < handle.0)
             .map_or(0, |i| i + 1);
         self.frames.insert(insert_at, (handle, frame));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fact::IllTyped;
+
+    #[test]
+    fn a_refused_arm_is_one_ill_typed_fact_located_at_its_span() {
+        let mut shell = crate::test_helper::core_shell();
+        let file = shell.install_script_context(
+            &crate::source::SourceOrigin::named("handler.ral"),
+            "handler",
+        );
+        let span = Some(crate::source::Span::new(file, 0, 7));
+        let error = crate::typecheck::TypeError {
+            pos: span,
+            kind: crate::typecheck::TypeErrorKind::RecursiveRow,
+            reason: None,
+            weak: None,
+            unit: None,
+        };
+        let Break::Error(refused) = refused_arm(
+            HandlerRole::Alias,
+            "echo",
+            std::slice::from_ref(&error),
+            span,
+            &shell,
+        ) else {
+            panic!("handler refusal")
+        };
+        let Reason::Invalid(failure) = &refused.reason else {
+            panic!("invalid")
+        };
+        assert_eq!(failure.operation, "alias");
+        assert_eq!(
+            failure.cause,
+            InvalidCause::IllTyped(IllTyped {
+                role: BlockRole::Handler("echo".into()),
+                diagnostics: vec![error.diagnostic()],
+            })
+        );
+        assert_eq!(
+            refused.prov.as_ref().and_then(crate::error::Prov::span),
+            span
+        );
+        assert_eq!(refused.hints(), []);
+    }
+
+    #[test]
+    fn a_handler_closure_expectation_excludes_natives() {
+        let shell = crate::test_helper::core_shell();
+        let native = crate::shell::runtime::lookup("length", &shell.env, &shell.sig).unwrap();
+        assert_eq!(native.shape(), crate::fact::ValueShape::Function);
+        assert!(arm_closure(native, HandlerRole::Alias, "length").is_err());
     }
 }

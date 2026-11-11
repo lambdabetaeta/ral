@@ -38,7 +38,10 @@ mod tests {
     use crate::data::datum::{Datum, tag, untag};
     use crate::data::{Bytes, FOValue};
     use crate::fact::{Act, Check, Decision, Grep, Read, Resource, Worker, Write, WriteOutcome};
-    use crate::fact::{AuditIo, Command, CommandOrigin};
+    use crate::fact::{
+        AuditIo, Command, CommandOrigin, DecodeCause, DecodeFailure, Expected, Found, ShapeFailure,
+        ValueShape,
+    };
     use crate::io::Retained;
     use crate::ir::WriteMode;
     use crate::shell::runtime::{Map, Value, WorkerId};
@@ -163,17 +166,23 @@ mod tests {
             let missing = FOValue::Map {
                 entries: entries.iter().filter(|(k, _)| k != key).cloned().collect(),
             };
-            assert!(Command::decode(&missing).unwrap_err().contains(key));
+            assert_eq!(
+                Command::decode(&missing).unwrap_err(),
+                DecodeFailure::new(DecodeCause::MissingField(key.into()))
+            );
         }
         entries
             .iter_mut()
             .find(|(k, _)| k == "stdout-total")
             .unwrap()
             .1 = FOValue::Unit;
-        assert!(
-            Command::decode(&FOValue::Map { entries })
-                .unwrap_err()
-                .contains("stdout-total")
+        assert_eq!(
+            Command::decode(&FOValue::Map { entries }).unwrap_err(),
+            DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Int),
+                found: Found::Unit,
+            }))
+            .field("stdout-total")
         );
     }
 

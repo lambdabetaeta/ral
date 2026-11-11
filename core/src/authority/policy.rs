@@ -11,6 +11,7 @@
 mod deputy;
 mod exec;
 mod fs;
+pub(crate) mod json;
 mod lattice;
 mod table;
 

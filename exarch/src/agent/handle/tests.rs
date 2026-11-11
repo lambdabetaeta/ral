@@ -144,9 +144,9 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
     assert!(!handle.is_live());
     assert_eq!(
         handle.status().unwrap().report,
-        Some(ChildStatus::Failed(
-            crate::bus::ENDED_BEFORE_REPORTING.into()
-        ))
+        Some(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting
+        )))
     );
     assert!(!handle.status().unwrap().owes);
     assert_eq!(
@@ -156,7 +156,7 @@ fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
     let inputs = parent.mailbox.drain();
     assert!(
         matches!(&inputs[..], [Drained::Input(Input::Child { status: ChildStatus::Failed(reason), .. })]
-        if reason == crate::bus::ENDED_BEFORE_REPORTING)
+        if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
     );
 }
 
@@ -256,7 +256,8 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
         }))
         .is_err()
     );
-    let failure = helper.report(ChildStatus::Stopped).unwrap_err().to_string();
+    let unavailable = helper.report(ChildStatus::Stopped).unwrap_err();
+    let failure = unavailable.to_string();
     assert_eq!(
         failure,
         format!(
@@ -266,7 +267,7 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
     );
     assert!(
         matches!(take(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. }
-        if id == helper.id() && reason == failure)
+        if id == helper.id() && reason == crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(unavailable.failure())))
     );
     assert_eq!(
         parent.mailbox.address().queued_posts(),
@@ -295,7 +296,11 @@ fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
     );
     assert!(nursery.owing());
     handle.end();
-    handle.report(ChildStatus::Failed("ended".into())).unwrap();
+    handle
+        .report(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting,
+        )))
+        .unwrap();
     assert!(!handle.status().unwrap().owes);
     assert_eq!(
         handle.0.address.queued_posts(),
@@ -303,13 +308,15 @@ fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
     );
     assert_eq!(
         handle.status().unwrap().report,
-        Some(ChildStatus::Failed("ended".into()))
+        Some(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting
+        )))
     );
     let records = read_records(&handle.log_dir().path().join(RECORD)).unwrap();
     assert!(matches!(&records[records.len()-2..],
         [Record::Control(Control::Status { status: ChildStatus::Failed(reason) }),
          Record::Control(Control::Withdrawn { posts })]
-        if reason == "ended" && posts.iter().copied().collect::<Vec<_>>() == pending));
+        if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting) && posts.iter().copied().collect::<Vec<_>>() == pending));
     let (_, _, commits) = helper
         .body
         .log
@@ -329,7 +336,7 @@ fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
     );
     assert!(!nursery.owing());
     assert!(matches!(parent.mailbox.drain().as_slice(),
-        [Drained::Input(Input::Child { status: ChildStatus::Failed(reason), .. })] if reason == "ended"));
+        [Drained::Input(Input::Child { status: ChildStatus::Failed(reason), .. })] if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting)));
     parent.mailbox.address().gone(handle.id());
     assert!(!nursery.owing(), "a queued Gone cannot resurrect paid debt");
     assert_eq!(nursery.dismiss_all(), Vec::<String>::new());

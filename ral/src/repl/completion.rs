@@ -23,6 +23,7 @@
 use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, exact_keys, field};
+use ral_core::fact::DecodeFailure;
 use ral_core::path::CwdPath;
 use ral_core::path::complete::{PartialPath, TildeReading, spell_entry};
 use ral_core::protocol::probe::PathEntry;
@@ -61,7 +62,7 @@ impl Datum for Candidate {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         if let Some(s) = v.as_str() {
             return Ok(Self {
                 display: s.into(),

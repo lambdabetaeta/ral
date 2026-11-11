@@ -67,6 +67,12 @@
 //! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
 //! boot, deleting its registered profiles.
 
+use crate::fact::{
+    AccessCheckOperation, DaclFailure, DaclFailureAccessCheck, DaclFailureLedgerParse,
+    DaclFailureMutexTimeout, DaclFailureReachable, DaclFailureRedirected, DaclFailureWin32,
+    DaclFailureWriteDacDenied, DaclOperation, DaclWin32Cause, JsonInputFailure, LedgerIoFailure,
+    OsFailure, OwnJsonCause, RedirectedTargetKind, SidFailure,
+};
 use crate::own::OwnError;
 use crate::path::is_volume_guid;
 use crate::path::shown;
@@ -178,7 +184,8 @@ pub(crate) enum DaclError {
     },
     WriteDacDenied {
         path: PathBuf,
-        reason: String,
+        operation: DaclOperation,
+        error: io::Error,
     },
     /// `at`, inside the exclusion `denied` (or `denied` itself), is one the
     /// launch's token could still open.
@@ -188,16 +195,20 @@ pub(crate) enum DaclError {
     },
     /// The access check standing in for the launch's token could not be run.
     AccessCheck {
-        op: &'static str,
+        op: AccessCheckOperation,
         error: io::Error,
     },
     Win32 {
         path: PathBuf,
-        reason: String,
+        operation: DaclOperation,
+        cause: DaclWin32Cause,
     },
-    LedgerIo(io::Error),
-    LedgerParse(String),
-    InvalidSid(String),
+    LedgerIo(LedgerIoFailure),
+    LedgerParse {
+        path: PathBuf,
+        cause: JsonInputFailure,
+    },
+    InvalidSid(SidFailure),
     MutexTimeout {
         path: PathBuf,
         timeout_ms: u32,
@@ -208,97 +219,105 @@ pub(crate) enum DaclError {
     Cancelled(Cancellation),
 }
 
-impl std::fmt::Display for DaclError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotLocal(p) => write!(
-                f,
-                "'{}' is not on a local fixed volume (a network share, a removable \
-                 drive and an unnamed volume cannot be granted); grant a folder on a local disk",
-                shown(p)
-            ),
-            Self::NotUnicode(p) => write!(
-                f,
-                "'{}' is not valid Unicode, and a Windows grant names its object by text: \
-                 a grant that cannot be expressed faithfully is refused, not approximated",
-                shown(p)
-            ),
-            Self::Redirected {
-                granted,
-                at,
-                target: Some(t),
-            } if is_volume_guid(t) => write!(
-                f,
-                "'{}' was granted by its real path, but '{}' is where a volume is mounted; \
-                 a volume mounted in a folder cannot be granted on Windows (it cannot be \
-                 told from a junction). Would giving the volume a drive letter and \
-                 granting that do?",
-                shown(granted),
-                shown(at)
-            ),
+impl DaclError {
+    pub(super) fn failure(&self) -> Result<DaclFailure, &Cancellation> {
+        Ok(match self {
+            Self::NotLocal(p) => DaclFailure::NotLocal(shown(p)),
+            Self::NotUnicode(p) => DaclFailure::NotUnicode(shown(p)),
             Self::Redirected {
                 granted,
                 at,
                 target,
-            } => {
-                write!(f, "'{}' was granted by its real path, but ", shown(granted))?;
-                match target {
-                    Some(t) => write!(f, "'{}' is now a link to '{}'", shown(at), shown(t))?,
-                    None => write!(f, "'{}' is now a reparse point", shown(at))?,
-                }
-                write!(f, "; {}", crate::authority::remedy::grant_the_new_target())
+            } => DaclFailure::Redirected(DaclFailureRedirected {
+                granted: shown(granted),
+                at: shown(at),
+                target_kind: match target {
+                    Some(t) if is_volume_guid(t) => RedirectedTargetKind::MountedVolume,
+                    Some(_) => RedirectedTargetKind::JunctionOrLink,
+                    None => RedirectedTargetKind::ReparsePoint,
+                },
+            }),
+            Self::WriteDacDenied {
+                path,
+                operation,
+                error,
+            } => DaclFailure::WriteDacDenied(DaclFailureWriteDacDenied {
+                path: shown(path),
+                operation: *operation,
+                cause: OsFailure::from(error),
+            }),
+            Self::Reachable { denied, at } => DaclFailure::Reachable(DaclFailureReachable {
+                denied: shown(denied),
+                at: shown(at),
+            }),
+            Self::AccessCheck { op, error } => DaclFailure::AccessCheck(DaclFailureAccessCheck {
+                operation: *op,
+                cause: OsFailure::from(error),
+            }),
+            Self::Win32 {
+                path,
+                operation,
+                cause,
+            } => DaclFailure::Win32(DaclFailureWin32 {
+                path: (!path.as_os_str().is_empty()).then(|| shown(path)),
+                operation: *operation,
+                cause: cause.clone(),
+            }),
+            Self::LedgerIo(cause) => DaclFailure::LedgerIo(cause.clone()),
+            Self::LedgerParse { path, cause } => DaclFailure::LedgerParse(DaclFailureLedgerParse {
+                path: shown(path),
+                cause: cause.clone(),
+            }),
+            Self::InvalidSid(cause) => DaclFailure::InvalidSid(cause.clone()),
+            Self::MutexTimeout { path, timeout_ms } => {
+                DaclFailure::MutexTimeout(DaclFailureMutexTimeout {
+                    path: shown(path),
+                    timeout_ms: u64::from(*timeout_ms).into(),
+                })
             }
-            Self::WriteDacDenied { path, reason } => {
-                write!(f, "WRITE_DAC denied on {}: {reason}", shown(path))
-            }
-            Self::Reachable { denied, at } => {
-                write!(f, "'{}' is excluded", shown(at))?;
-                if at != denied {
-                    write!(f, " (it lies inside the excluded '{}')", shown(denied))?;
-                }
-                f.write_str(
-                    ", but a sandboxed program could still open it: its own permissions \
-                     admit every Windows sandbox (as `ALL APPLICATION PACKAGES` does) or carry \
-                     a folder this grant allows (as a hard link does), and Windows cannot take \
-                     such access away. Remove that access from it, or drop the exclusion",
-                )
-            }
-            Self::AccessCheck { op, error } => {
-                write!(
-                    f,
-                    "cannot check what the sandbox could open ({op}): {error}"
-                )
-            }
-            Self::Win32 { path, reason } => {
-                write!(f, "Win32 error on {}: {reason}", shown(path))
-            }
-            Self::LedgerIo(e) => write!(f, "DACL ledger I/O error: {e}"),
-            Self::LedgerParse(s) => write!(f, "DACL ledger parse error: {s}"),
-            Self::InvalidSid(s) => write!(f, "invalid SID string: {s}"),
-            Self::MutexTimeout { path, timeout_ms } => write!(
-                f,
-                "timed out acquiring DACL mutex on {} after {timeout_ms} ms",
-                shown(path)
-            ),
-            Self::Cancelled(stop) => write!(f, "{stop}"),
-        }
+            Self::Cancelled(stop) => return Err(stop),
+        })
     }
 }
 
+impl std::fmt::Display for DaclError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.failure() {
+            Ok(cause) => f.write_str(&cause.describe()),
+            Err(stop) => write!(f, "{stop}"),
+        }
+    }
+}
 impl std::error::Error for DaclError {}
 
 impl From<io::Error> for DaclError {
     fn from(e: io::Error) -> Self {
-        Self::LedgerIo(e)
+        Self::LedgerIo(LedgerIoFailure::Io(Box::new(crate::io::failure(&e))))
     }
 }
 
 impl From<OwnError> for DaclError {
-    /// JSON that is not a ledger is a parse error; anything else is the I/O's.
     fn from(e: OwnError) -> Self {
         match e {
-            OwnError::Json { .. } => Self::LedgerParse(e.to_string()),
-            e => Self::LedgerIo(e.into()),
+            OwnError::Json {
+                at,
+                cause: OwnJsonCause::Syntax(cause),
+                ..
+            } => Self::LedgerParse {
+                path: at,
+                cause: JsonInputFailure::Syntax(cause),
+            },
+            OwnError::Json {
+                at,
+                cause: OwnJsonCause::Decode(cause),
+                ..
+            } => Self::LedgerParse {
+                path: at,
+                cause: JsonInputFailure::Decode(cause),
+            },
+            e => Self::LedgerIo(LedgerIoFailure::Io(Box::new(crate::fact::IoCause::from(
+                &e,
+            )))),
         }
     }
 }
@@ -356,10 +375,9 @@ pub(crate) fn ensure_frozen_grant(
     let target = pin.target();
     let canonical = target.path;
     let inheritable = kind.inherits()
-        && target.is_dir().map_err(|e| DaclError::Win32 {
-            path: canonical.to_path_buf(),
-            reason: format!("metadata: {e}"),
-        })?;
+        && target
+            .is_dir()
+            .map_err(|e| acl::win32_io(canonical, DaclOperation::Metadata, &e))?;
     // No ACE alone admits a create: the mandatory-integrity check runs first,
     // and a `Low`-IL child clears it only if the directory's own label is
     // `Low` or below. A read-only grant needs no label — `Low` already reads

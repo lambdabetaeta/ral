@@ -184,8 +184,8 @@ fn closure_only_gate_refusal_exports_no_one_shot_scheme_or_checked_tree() {
         crate::test_helper::core_schemes(),
     )
     .expect_err("the late argv gate must refuse a catch-all");
-    for error in [binding, alias, catch_all] {
-        assert_eq!(error.kind.code(), "T0057");
+    for errors in [binding, alias, catch_all] {
+        assert!(errors.iter().any(|error| error.kind.code() == "T0057"));
     }
     let errors = super::typecheck(
         &[Spanned::synthetic(Phrase::Define {

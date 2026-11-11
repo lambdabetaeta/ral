@@ -6,42 +6,46 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use crate::fact::{EntryNameFailure, LexicalPathFailure, PathIoLeaf};
 use crate::path::lex::{is_absolute, is_unparsed_head};
 use crate::path::site::Silent;
 use crate::path::{PathRules, shown};
 use crate::site::site;
-
-/// Why a name is not an entry name.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rule {
-    Empty,
-    Dots,
-    Separator,
-    Stream,
-}
 
 /// A name refused as an entry name by [`EntryName::parse`].  Shows as the
 /// sentence naming the rule.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NotAnEntryName {
     name: OsString,
-    rule: Rule,
+    rule: EntryNameFailure,
+}
+
+impl NotAnEntryName {
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+}
+
+impl From<&NotAnEntryName> for EntryNameFailure {
+    fn from(error: &NotAnEntryName) -> Self {
+        error.rule
+    }
 }
 
 impl fmt::Display for NotAnEntryName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = shown(&self.name);
         match self.rule {
-            Rule::Empty => f.write_str("an entry name cannot be empty"),
-            Rule::Dots => write!(
+            EntryNameFailure::Empty => f.write_str("an entry name cannot be empty"),
+            EntryNameFailure::Dots => write!(
                 f,
                 "{name} is not an entry name: it is a directory's own or its parent's"
             ),
-            Rule::Separator => write!(
+            EntryNameFailure::Separator => write!(
                 f,
                 "{name} is not an entry name: it holds a path separator, so it names a path"
             ),
-            Rule::Stream => write!(
+            EntryNameFailure::Stream => write!(
                 f,
                 "{name} is not an entry name: it holds `:`, which names a stream of a file, not an entry"
             ),
@@ -78,16 +82,16 @@ impl EntryName {
     pub fn parse(name: &OsStr) -> Result<Self, NotAnEntryName> {
         let bytes = name.as_encoded_bytes();
         let rule = if bytes.is_empty() {
-            Some(Rule::Empty)
+            Some(EntryNameFailure::Empty)
         } else if bytes == b"." || bytes == b".." {
-            Some(Rule::Dots)
+            Some(EntryNameFailure::Dots)
         } else if bytes
             .iter()
             .any(|&b| PathRules::HOST.is_separator(char::from(b)))
         {
-            Some(Rule::Separator)
+            Some(EntryNameFailure::Separator)
         } else {
-            (cfg!(windows) && bytes.contains(&b':')).then_some(Rule::Stream)
+            (cfg!(windows) && bytes.contains(&b':')).then_some(EntryNameFailure::Stream)
         };
         rule.map_or_else(
             || Ok(Self(name.to_owned())),
@@ -137,18 +141,15 @@ impl<'de> Deserialize<'de> for EntryName {
 pub struct RootName(pub(super) PathBuf);
 
 impl RootName {
-    fn parse(raw: &OsStr) -> io::Result<Self> {
+    pub(super) fn parse(raw: &OsStr) -> Result<Self, LexicalPathFailure> {
         let path = lexical(raw);
-        rooted(path)?;
-        match split(path)? {
+        rooted_lexical(path)?;
+        match split_lexical(path).map_err(|error| LexicalPathFailure::EntryName((&error).into()))? {
             Spelling {
                 root: Some(root),
                 names,
             } if names.is_empty() => Ok(root),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is more than a root", shown(path)),
-            )),
+            _ => Err(LexicalPathFailure::MoreThanRoot),
         }
     }
 }
@@ -161,7 +162,7 @@ impl Serialize for RootName {
 
 impl<'de> Deserialize<'de> for RootName {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(&OsString::deserialize(d)?).map_err(D::Error::custom)
+        Self::parse(&OsString::deserialize(d)?).map_err(|cause| D::Error::custom(cause.describe()))
     }
 }
 
@@ -204,6 +205,10 @@ pub(super) struct Spelling {
 
 /// `path` as its root and the names past it, `.` dropped.
 pub(super) fn split(path: &Path) -> io::Result<Spelling> {
+    split_lexical(path).map_err(Into::into)
+}
+
+pub(super) fn split_lexical(path: &Path) -> Result<Spelling, NotAnEntryName> {
     let mut root = PathBuf::new();
     let mut names = VecDeque::new();
     for component in site!(Silent::SpellingSplit, path => components()) {
@@ -232,17 +237,34 @@ pub(super) fn split(path: &Path) -> io::Result<Spelling> {
 /// one whose head `std::path` cannot parse ([`is_unparsed_head`]), which
 /// the walk would descend from the current drive's root.
 pub(super) fn rooted(path: &Path) -> io::Result<()> {
+    rooted_lexical(path).map_err(|cause| lexical_error(path.as_os_str(), &cause))
+}
+
+pub(super) fn rooted_lexical(path: &Path) -> Result<(), LexicalPathFailure> {
     if !is_absolute(path) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "a walk starts from the root, and a relative name has none",
-        ));
+        return Err(LexicalPathFailure::Relative);
     }
     if is_unparsed_head(path) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no well-formed share, drive or namespace opens this path, so there is no root to walk it from",
-        ));
+        return Err(LexicalPathFailure::MalformedRoot);
     }
     Ok(())
+}
+
+pub(super) fn lexical_error(raw: &OsStr, cause: &LexicalPathFailure) -> io::Error {
+    let shown = shown(raw);
+    let leaf = match cause {
+        LexicalPathFailure::Relative => PathIoLeaf::RelativeWalk,
+        LexicalPathFailure::MalformedRoot => PathIoLeaf::MalformedRoot,
+        LexicalPathFailure::MoreThanRoot => PathIoLeaf::MoreThanRoot(shown),
+        LexicalPathFailure::EntryName(cause) => {
+            PathIoLeaf::EntryName(crate::fact::PathIoLeafEntryName {
+                name: shown,
+                cause: *cause,
+            })
+        }
+        LexicalPathFailure::ParentInPosition => PathIoLeaf::ParentInPosition(shown),
+        LexicalPathFailure::NonCanonicalPosition => PathIoLeaf::NonCanonicalPosition(shown),
+        LexicalPathFailure::NotWorkingDirectory(_) => PathIoLeaf::NotDirectory(shown),
+    };
+    io::Error::new(io::ErrorKind::InvalidInput, leaf)
 }

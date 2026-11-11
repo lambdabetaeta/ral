@@ -8,7 +8,12 @@
 // so each diffs against the one it was taken from.
 
 use super::{DaclError, stamp::STAMP_STORE_FILE_NAME};
+use crate::data::json::{self, JsonDecode, JsonEncode, JsonFormat, JsonRef};
+use crate::fact::{
+    DaclOperation, DecodeFailure, JsonEncodeFailure, LedgerIoFailure, LedgerIoFailureRetryExhausted,
+};
 use crate::own::{OwnDir, OwnError};
+use crate::path::RawOsString;
 use crate::path::{Visibility, XdgKind, extension, shown};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -36,6 +41,48 @@ struct Ledger {
     /// `AppContainer` profile names, recorded before the OS-level create so
     /// the orphan sweep deletes a crashed session's profiles.
     profiles: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawLedger {
+    run_id: String,
+    pid: u32,
+    image_name: RawOsString,
+    started_at_filetime: u64,
+    profiles: Vec<String>,
+}
+
+impl JsonDecode for Ledger {
+    fn decode_json(value: JsonRef<'_, '_>) -> Result<Self, DecodeFailure> {
+        let RawLedger {
+            run_id,
+            pid,
+            image_name,
+            started_at_filetime,
+            profiles,
+        } = json::decode_structural(value)?;
+        Ok(Self {
+            run_id,
+            pid,
+            image_name: image_name.validate().map_err(|e| e.field("image_name"))?,
+            started_at_filetime,
+            profiles,
+        })
+    }
+}
+impl JsonEncode for Ledger {
+    fn encode_json(&self, format: JsonFormat) -> Result<Vec<u8>, JsonEncodeFailure> {
+        Ok(json::serialize_structural(
+            &RawLedger {
+                run_id: self.run_id.clone(),
+                pid: self.pid,
+                image_name: RawOsString::from(self.image_name.as_os_str()),
+                started_at_filetime: self.started_at_filetime,
+                profiles: self.profiles.clone(),
+            },
+            format,
+        ))
+    }
 }
 
 /// Aggregated outcome of [`recover_orphaned_state`].
@@ -181,7 +228,7 @@ pub(super) fn ledger_dir() -> Result<OwnDir, DaclError> {
 /// sweep, another session's stamp check — sees either the previous complete
 /// file or this one, never a half-written one.
 fn write_ledger(dir: &OwnDir, name: &str, ledger: &Ledger) -> Result<(), DaclError> {
-    Ok(dir.store(name, ledger, Visibility::Public)?)
+    Ok(dir.store_json(name, ledger, Visibility::Public)?)
 }
 
 fn remove_ledger_best_effort(dir: &OwnDir, name: &str) {
@@ -199,8 +246,9 @@ fn read_ledger(dir: &OwnDir, name: &str) -> Result<Ledger, DaclError> {
     for i in 0..ATTEMPTS {
         match dir.read(name) {
             Ok(bytes) => {
-                return serde_json::from_slice(&bytes).map_err(|e| {
-                    DaclError::LedgerParse(format!("{}: {e}", shown(dir.path().join(name))))
+                return json::from_slice(&bytes).map_err(|cause| DaclError::LedgerParse {
+                    path: dir.path().join(name),
+                    cause,
                 });
             }
             Err(e) => {
@@ -223,8 +271,10 @@ fn read_ledger(dir: &OwnDir, name: &str) -> Result<Ledger, DaclError> {
     }
     Err(last_err.map_or_else(
         || {
-            DaclError::LedgerIo(io::Error::other(
-                "read_ledger: retries exhausted on transient error",
+            DaclError::LedgerIo(LedgerIoFailure::RetryExhausted(
+                LedgerIoFailureRetryExhausted {
+                    attempts: u64::from(ATTEMPTS).into(),
+                },
             ))
         },
         DaclError::from,
@@ -331,13 +381,11 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
         )
     };
     if ok == 0 {
-        return Err(DaclError::Win32 {
-            path: PathBuf::new(),
-            reason: format!(
-                "GetProcessTimes(GetCurrentProcess): {}",
-                io::Error::last_os_error()
-            ),
-        });
+        return Err(super::acl::win32_io(
+            std::path::Path::new(""),
+            DaclOperation::GetProcessTimes,
+            &io::Error::last_os_error(),
+        ));
     }
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }

@@ -20,6 +20,10 @@ use ral_core::data::datum::Datum;
 use ral_core::environ::Reserved;
 use ral_core::errln;
 use ral_core::error::Error;
+use ral_core::fact::{
+    DataStep, DecodeCause, DecodeFailure, Expected, Found, InvalidCause, InvalidFailure, Reason,
+    ShapeFailure, ValueShape,
+};
 use ral_core::own::{OwnDir, UserFile};
 use ral_core::path::{XdgKind, shown};
 use ral_core::record;
@@ -72,10 +76,14 @@ impl Datum for Surface {
             .encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let name = String::decode(v)?;
-        <Self as clap::ValueEnum>::from_str(&name, true)
-            .map_err(|_| format!("expected minimal or readline, got '{name}'"))
+        <Self as clap::ValueEnum>::from_str(&name, true).map_err(|_| {
+            DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::StringLiterals(vec!["minimal".into(), "readline".into()]),
+                found: Found::of(v),
+            }))
+        })
     }
 }
 
@@ -134,6 +142,21 @@ return ()
 /// value refuses the whole rc, and nothing of it was applied.
 fn refuse(reason: impl std::fmt::Display) -> String {
     format!("rc: {reason}. The rc was not applied; the shell started with defaults.")
+}
+
+fn unknown_rc_key(cause: &ral_core::fact::UnknownField) -> String {
+    let near =
+        match ral_core::text::near_names(&cause.field, cause.offered.iter().map(String::as_str), 1)
+            [..]
+        {
+            [near] => format!(" (did you mean '{near}'?)"),
+            _ => String::new(),
+        };
+    format!(
+        "unknown key '{}': `rc` takes {}{near}",
+        cause.field,
+        cause.offered.join(", ")
+    )
 }
 
 /// A fully judged rc: every field already has its final shape and every hook
@@ -248,7 +271,7 @@ impl RcPlan {
                         other.type_name()
                     )));
                 }
-                (k, _) => return Err(refuse(table.unknown_key(k))),
+                (k, _) => return Err(refuse(unknown_rc_key(&table.unknown_key(k)))),
             }
         }
         Ok(plan)
@@ -275,9 +298,7 @@ impl RcPlan {
         }
         // Bindings, functions included, are lexical: applyable at the prompt.
         for (k, v) in &self.bindings {
-            shell
-                .bind_value(k.to_string(), v.into_owned())
-                .map_err(|error| Error::new(format!("rc binding '{k}': {error}")))?;
+            shell.bind_value(k.to_string(), v.into_owned())?;
         }
         for entry in self.aliases {
             shell.commit_alias(entry);
@@ -286,15 +307,7 @@ impl RcPlan {
             shell.set_stack_limit(n);
         }
         for (name, options) in &self.plugins {
-            let loaded = match options.into_owned() {
-                Value::Map(o) => super::plugin::load::load_plugin(name, &o, mooring, shell),
-                other => Err(Error::new(format!(
-                    "the value under a plugin name is its options map; got {}. \
-                     Write `{name}: [:]` if it takes no options.",
-                    other.type_name()
-                ))
-                .into()),
-            };
+            let loaded = load_configured_plugin(name, options.into_owned(), mooring, shell);
             match loaded {
                 Err(Break::Error(e)) => {
                     let what = format!("plugin '{name}'");
@@ -305,6 +318,26 @@ impl RcPlan {
             }
         }
         Ok(self.settings)
+    }
+}
+
+fn load_configured_plugin(
+    name: &str,
+    options: Value,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<()> {
+    match options {
+        Value::Map(options) => super::plugin::load::load_plugin(name, &options, mooring, shell),
+        other => Err(Error::new(Reason::Invalid(Box::new(InvalidFailure {
+            operation: "load-plugin".into(),
+            path: vec![DataStep::Field(name.into())],
+            cause: InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Map),
+                found: other.found(),
+            }),
+        })))
+        .into()),
     }
 }
 
@@ -903,10 +936,41 @@ mod tests {
                 .err()
                 .expect("Unit satisfies no key");
             assert!(
-                !err.contains(&table.unknown_key(key.label)),
+                !err.contains(&unknown_rc_key(&table.unknown_key(key.label))),
                 "key '{}' fell through",
                 key.label
             );
         }
+    }
+    #[test]
+    fn configured_plugin_options_preserve_the_name_as_a_data_path() {
+        let Err(Break::Error(error)) = load_configured_plugin(
+            "zoxide",
+            Value::Int(7),
+            &Mooring::adrift(),
+            &mut prelude_shell(),
+        ) else {
+            panic!("expected options-map refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Invalid(Box::new(InvalidFailure {
+                operation: "load-plugin".into(),
+                path: vec![DataStep::Field("zoxide".into())],
+                cause: InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Map),
+                    found: Found::Int(7)
+                })
+            }))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        assert!(
+            error
+                .reason
+                .advice()
+                .iter()
+                .any(|hint| hint.contains("zoxide: [:]"))
+        );
     }
 }

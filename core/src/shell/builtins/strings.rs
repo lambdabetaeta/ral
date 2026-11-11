@@ -2,19 +2,38 @@
 
 use crate::data::Finite;
 use crate::error::Error;
+use crate::fact::{
+    CodecFailure, CodecFailureMatchCount, Expected, IntOrFloat, InvalidCause, InvalidFailure,
+    LiteralOrRegex, Number, NumberFailure, NumberFault, NumberRange, Reason, ShapeFailure,
+    ValueShape,
+};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Value};
 use std::borrow::Cow;
 
-use super::util::regex_err;
+use super::util::regex_failure;
 use super::util::{lossy_line_list, read_lines};
 
 /// Decode a `Value` as a `usize` index.
-fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
-    match v {
-        Value::Int(n) => usize::try_from(*n)
-            .map_err(|_| Error::new(format!("{ctx}: index must be non-negative, got {n}")).into()),
-        other => Err(Error::new(format!("{ctx}: expected Int, got {}", other.type_name())).into()),
-    }
+pub(super) fn as_index(v: &Value, operation: &str, argument: usize) -> Settled<usize> {
+    let cause = match v {
+        Value::Int(n) => match usize::try_from(*n) {
+            Ok(index) => return Ok(index),
+            Err(_) => InvalidCause::Range(NumberRange {
+                value: Number::Int(*n),
+                minimum: Number::Int(0),
+                maximum: Number::Int(i64::MAX),
+            }),
+        },
+        _ => InvalidCause::Shape(ShapeFailure {
+            expected: Expected::Shape(ValueShape::Int),
+            found: v.found(),
+        }),
+    };
+    Err(Error::new(Reason::Invalid(Box::new(
+        InvalidFailure::new(operation.into(), cause).index(argument.into()),
+    )))
+    .into())
 }
 
 pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
@@ -25,11 +44,17 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
         Value::List(items) => items.len(),
         Value::Map(m) => m.len(),
         _ => {
-            return Err(Error::new(format!(
-                "length: expected String, Bytes, List, or Map, got {}",
-                val.type_name()
-            ))
-            .into());
+            return Err(val
+                .expected(
+                    "length",
+                    Expected::AnyOf(vec![
+                        ValueShape::String,
+                        ValueShape::Bytes,
+                        ValueShape::List,
+                        ValueShape::Map,
+                    ]),
+                )
+                .into());
         }
     };
     #[allow(
@@ -65,8 +90,8 @@ pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
 
 pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
     let s = args[0].as_str("slice")?;
-    let start = as_index(&args[1], "slice start")?;
-    let length = as_index(&args[2], "slice length")?;
+    let start = as_index(&args[1], "slice", 1)?;
+    let length = as_index(&args[2], "slice", 2)?;
     Ok(Value::string(
         s.chars().skip(start).take(length).collect::<String>(),
     ))
@@ -82,13 +107,21 @@ pub(super) fn builtin_posix_split(args: &[Value]) -> Settled<Value> {
     let s = args[0].as_str("posix-split")?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(s)
-        .ok_or_else(|| Error::new("posix-split: malformed input (unterminated quote?)"))?;
+        .ok_or_else(|| invalid("posix-split", InvalidCause::Codec(CodecFailure::PosixSplit)))?;
     Ok(Value::list(parts.into_iter().map(Value::string).collect()))
 }
 
 pub(super) fn builtin_posix_quote(args: &[Value]) -> Settled<Value> {
     let s = args[0].as_str("posix-quote")?;
-    let quoted = shlex::try_quote(s).map_err(|e| Error::new(format!("posix-quote: {e}")))?;
+    let quoted = shlex::try_quote(s).map_err(|error| {
+        invalid(
+            "posix-quote",
+            InvalidCause::Codec(match error {
+                shlex::QuoteError::Nul => CodecFailure::PosixQuoteNul,
+                other => CodecFailure::PosixQuoteUnclassified(other.to_string()),
+            }),
+        )
+    })?;
     Ok(Value::string(quoted))
 }
 
@@ -98,8 +131,13 @@ pub(super) fn builtin_ral_quote(args: &[Value]) -> Settled<Value> {
 }
 
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
-    regex::Regex::new(pattern)
-        .map_err(|e| Error::new(regex_err(ctx, pattern, &e.to_string())).into())
+    regex::Regex::new(pattern).map_err(|e| {
+        invalid(
+            ctx,
+            InvalidCause::Codec(CodecFailure::Regex(regex_failure(pattern, &e))),
+        )
+        .into()
+    })
 }
 
 /// Compile `args[0]`, hand the regex to `f`.
@@ -117,22 +155,15 @@ fn with_regex(
 pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     with_regex("re-replace", args, |re, args| {
         let input = args[2].as_str("re-replace")?;
-        match re.find_iter(input).count() {
-            0 => Err(Error::new(
-                "re-replace: pattern not found in input; is the file already updated, \
-                 or did the pattern get whitespace-mangled?",
-            )
-            .into()),
-            1 => Ok(Value::string(
-                re.replace(input, args[1].as_str("re-replace")?),
-            )),
-            n => Err(Error::new(format!(
-                "re-replace: pattern matches {n} times; must match exactly once; \
-                 widen the pattern with surrounding context to disambiguate, \
-                 or use re-replace-all to replace every match"
-            ))
-            .into()),
+        let matches = re.find_iter(input).count();
+        if matches != 1 {
+            return Err(
+                match_count("re-replace", LiteralOrRegex::Regex, re.as_str(), matches).into(),
+            );
         }
+        Ok(Value::string(
+            re.replace(input, args[1].as_str("re-replace")?),
+        ))
     })
 }
 
@@ -171,21 +202,17 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     let to = args[1].as_str("string-replace")?;
     let input = args[2].as_str("string-replace")?;
     if from.is_empty() {
-        return Err(Error::new("string-replace: 'from' must be non-empty").into());
-    }
-    match occurrence_starts(input, from).len() {
-        0 => Err(Error::new(
-            "string-replace: 'from' not found in input; did the pattern get \
-             whitespace-mangled?",
+        return Err(invalid(
+            "string-replace",
+            InvalidCause::Codec(CodecFailure::EmptyReplacementPattern),
         )
-        .into()),
-        1 => Ok(Value::string(input.replacen(from, to, 1))),
-        n => Err(Error::new(format!(
-            "string-replace: 'from' matches {n} times; must match exactly once; \
-             widen the pattern with surrounding context to disambiguate"
-        ))
-        .into()),
+        .into());
     }
+    let matches = occurrence_starts(input, from).len();
+    if matches != 1 {
+        return Err(match_count("string-replace", LiteralOrRegex::Literal, from, matches).into());
+    }
+    Ok(Value::string(input.replacen(from, to, 1)))
 }
 
 pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
@@ -216,9 +243,7 @@ pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
         let input = args[1].as_str("re-find-match")?;
         match re.find(input) {
             Some(m) => Ok(Value::string(m.as_str())),
-            None => {
-                Err(Error::new(format!("re-find-match: no match for pattern '{}'", args[0])).into())
-            }
+            None => Err(match_count("re-find-match", LiteralOrRegex::Regex, re.as_str(), 0).into()),
         }
     })
 }
@@ -283,52 +308,73 @@ fn dedent(s: &str) -> String {
         .join("\n")
 }
 
+fn match_count(operation: &str, kind: LiteralOrRegex, pattern: &str, matches: usize) -> Error {
+    invalid(
+        operation,
+        InvalidCause::Codec(CodecFailure::MatchCount(CodecFailureMatchCount {
+            kind,
+            pattern: pattern.into(),
+            matches: matches.into(),
+        })),
+    )
+}
+
+fn number_failure(operation: &str, text: &str, target: IntOrFloat, why: NumberFault) -> Error {
+    invalid(
+        operation,
+        InvalidCause::Number(NumberFailure {
+            text: text.into(),
+            target,
+            why,
+        }),
+    )
+}
+
 pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
-    let val = &args[0];
-    match val {
+    match &args[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
-        // An integral magnitude `i64` cannot hold is refused, not silently clamped.
         Value::Float(f) if f.get().fract() == 0.0 => f
             .to_i64()
             .map(Value::Int)
-            .ok_or_else(|| Error::new(format!("int: {f} is outside the integer range")).into()),
-        Value::Float(f) => Err(Error::new(format!("int: {f} is not integral"))
-            .with_hint("convert with floor, ceil or trunc, which return an Int")
-            .into()),
-        Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-            Error::new(format!("int: '{s}' is not a valid integer"))
-                .with_hint("expected a whole-number string, e.g. int '42'")
-                .into()
+            .ok_or_else(|| invalid("int", InvalidCause::IntegerRange(*f)).into()),
+        Value::Float(f) => Err(invalid("int", InvalidCause::NonIntegral(*f)).into()),
+        Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|error| {
+            let why = match error.kind() {
+                std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                    NumberFault::OutOfRange
+                }
+                _ => NumberFault::Syntax,
+            };
+            number_failure("int", s, IntOrFloat::Int, why).into()
         }),
-        other => Err(Error::new(format!(
-            "int: expected String, Int, or integral Float, got {}",
-            other.type_name()
-        ))
-        .with_hint("e.g. int '42'")
-        .into()),
+        other => Err(other
+            .expected(
+                "int",
+                Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
+            )
+            .into()),
     }
 }
 
 pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
-    let val = &args[0];
-    match val {
+    match &args[0] {
         Value::Int(n) => Ok(Value::Float(Finite::from(*n))),
         Value::Float(f) => Ok(Value::Float(*f)),
-        // `f64::from_str` accepts 'NaN' and 'inf', but a Float is finite by
-        // construction, so those spellings are refused alongside garbage.
         Value::String(s) => match s.parse::<f64>().map(Finite::new) {
             Ok(Some(f)) => Ok(Value::Float(f)),
-            Ok(None) => Err(Error::new(format!("float: '{s}' is not a finite number")).into()),
-            Err(_) => Err(Error::new(format!("float: '{s}' is not a valid number"))
-                .with_hint("expected a numeric string, e.g. float '3.14'")
-                .into()),
+            Ok(None) => {
+                Err(number_failure("float", s, IntOrFloat::Float, NumberFault::NonFinite).into())
+            }
+            Err(_) => {
+                Err(number_failure("float", s, IntOrFloat::Float, NumberFault::Syntax).into())
+            }
         },
-        other => Err(Error::new(format!(
-            "float: expected String, Int, or Float, got {}",
-            other.type_name()
-        ))
-        .with_hint("e.g. float '3.14'")
-        .into()),
+        other => Err(other
+            .expected(
+                "float",
+                Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
+            )
+            .into()),
     }
 }
 
@@ -344,38 +390,161 @@ pub(super) fn builtin_to_string(args: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fact::DataStep;
     use crate::shell::runtime::Break;
 
-    fn refusal(result: Settled<Value>) -> String {
-        match result {
-            Err(Break::Error(e)) => e.describe().into_owned(),
-            other => panic!("expected a refusal, got {other:?}"),
+    #[test]
+    fn length_requires_a_sized_runtime_head() {
+        let Err(Break::Error(error)) = builtin_len(&[Value::Unit]) else {
+            panic!("length of an unsized value")
+        };
+        assert_eq!(
+            error.reason,
+            Value::Unit
+                .expected(
+                    "length",
+                    Expected::AnyOf(vec![
+                        ValueShape::String,
+                        ValueShape::Bytes,
+                        ValueShape::List,
+                        ValueShape::Map,
+                    ])
+                )
+                .reason
+        );
+    }
+
+    fn refusal(result: Settled<Value>) -> InvalidFailure {
+        let Err(Break::Error(error)) = result else {
+            panic!("expected refusal")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("invalid input")
+        };
+        *failure
+    }
+
+    #[test]
+    fn slice_keeps_argument_position_separate_from_operation() {
+        let failure = refusal(builtin_slice(&[
+            Value::string("hello"),
+            Value::string("1"),
+            Value::Int(3),
+        ]));
+        assert_eq!(failure.operation, "slice");
+        assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Int),
+                ..
+            })
+        ));
+        let negative = refusal(builtin_slice(&[
+            Value::string("hello"),
+            Value::Int(0),
+            Value::Int(-1),
+        ]));
+        assert_eq!(negative.path, vec![DataStep::Index(2usize.into())]);
+        assert!(matches!(negative.cause, InvalidCause::Range(_)));
+    }
+
+    #[test]
+    fn numeric_conversions_distinguish_syntax_range_fraction_and_nonfinite() {
+        for (text, target, fault) in [
+            ("garbage", IntOrFloat::Int, NumberFault::Syntax),
+            (
+                "9223372036854775808",
+                IntOrFloat::Int,
+                NumberFault::OutOfRange,
+            ),
+            (
+                "-9223372036854775809",
+                IntOrFloat::Int,
+                NumberFault::OutOfRange,
+            ),
+            ("garbage", IntOrFloat::Float, NumberFault::Syntax),
+            ("NaN", IntOrFloat::Float, NumberFault::NonFinite),
+            ("1e999", IntOrFloat::Float, NumberFault::NonFinite),
+        ] {
+            let result = match target {
+                IntOrFloat::Int => builtin_to_int(&[Value::string(text)]),
+                IntOrFloat::Float => builtin_to_float(&[Value::string(text)]),
+            };
+            assert_eq!(
+                refusal(result).cause,
+                InvalidCause::Number(NumberFailure {
+                    text: text.into(),
+                    target,
+                    why: fault
+                })
+            );
+        }
+        let f = Finite::new(3.7).unwrap();
+        assert_eq!(
+            refusal(builtin_to_int(&[Value::Float(f)])).cause,
+            InvalidCause::NonIntegral(f)
+        );
+        let large = Finite::new(f64::MAX).unwrap();
+        assert_eq!(
+            refusal(builtin_to_int(&[Value::Float(large)])).cause,
+            InvalidCause::IntegerRange(large)
+        );
+        for builtin in [builtin_to_int, builtin_to_float] {
+            assert!(matches!(
+                refusal(builtin(&[Value::Bool(true)])).cause,
+                InvalidCause::Shape(_)
+            ));
         }
     }
 
     #[test]
-    fn slice_takes_int_indices_not_numeric_text() {
-        let args = [Value::string("hello"), Value::string("1"), Value::Int(3)];
+    fn codec_refusals_distinguish_quotes_regex_and_literal_matches() {
         assert_eq!(
-            refusal(builtin_slice(&args)),
-            "slice start: expected Int, got String"
+            refusal(builtin_posix_split(&[Value::string("'")])).cause,
+            InvalidCause::Codec(CodecFailure::PosixSplit)
         );
-    }
-
-    #[test]
-    fn int_of_a_fractional_float_says_it_is_not_integral() {
-        let f = Finite::new(3.7).expect("finite");
         assert_eq!(
-            refusal(builtin_to_int(&[Value::Float(f)])),
-            "int: 3.7 is not integral"
+            refusal(builtin_posix_quote(&[Value::string("\0")])).cause,
+            InvalidCause::Codec(CodecFailure::PosixQuoteNul)
         );
-    }
-
-    #[test]
-    fn float_of_a_non_number_lists_every_type_it_takes() {
+        let invalid = builtin_match(&[Value::string("["), Value::string("x")]);
+        assert!(
+            matches!(refusal(invalid).cause, InvalidCause::Codec(CodecFailure::Regex(crate::fact::RegexFailure { pattern, cause: crate::fact::RegexCause::Syntax(_) })) if pattern == "[")
+        );
+        for (from, input, matches) in [("z", "abc", 0usize), ("aa", "aaa", 2usize)] {
+            assert_eq!(
+                refusal(builtin_string_replace(&[
+                    Value::string(from),
+                    Value::string("x"),
+                    Value::string(input)
+                ]))
+                .cause,
+                InvalidCause::Codec(CodecFailure::MatchCount(CodecFailureMatchCount {
+                    kind: LiteralOrRegex::Literal,
+                    pattern: from.into(),
+                    matches: matches.into()
+                }))
+            );
+        }
         assert_eq!(
-            refusal(builtin_to_float(&[Value::Bool(true)])),
-            "float: expected String, Int, or Float, got Bool"
+            refusal(builtin_string_replace(&[
+                Value::string(""),
+                Value::string("x"),
+                Value::string("abc")
+            ]))
+            .cause,
+            InvalidCause::Codec(CodecFailure::EmptyReplacementPattern)
+        );
+        for (input, matches) in [("x", 0usize), ("aa", 2usize)] {
+            assert!(
+                matches!(refusal(builtin_replace(&[Value::string("a"), Value::string("x"), Value::string(input)])).cause,
+                InvalidCause::Codec(CodecFailure::MatchCount(f)) if f.kind == LiteralOrRegex::Regex && f.matches == matches.into())
+            );
+        }
+        assert!(
+            matches!(refusal(builtin_find_match(&[Value::string("a"), Value::string("x")])).cause,
+            InvalidCause::Codec(CodecFailure::MatchCount(f)) if f.matches == 0usize.into())
         );
     }
 }

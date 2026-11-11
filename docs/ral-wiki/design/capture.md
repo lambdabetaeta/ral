@@ -153,7 +153,7 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
   stdout. On error, each capture adds its actual byte count to
   `Unwound.discarded`, summed saturatingly across nesting. One renderer shows
   one counted note, after the hints and advice (`docs/SPEC.md` §13.1) and
-  before any eligible abandoned-tail note. The count is report-only and does not enter `[reason, frame, site]` or
+  before any eligible abandoned-tail note. The count is report-only and does not enter `[frame, message, status, site]` or
   survive `raise` of that record; escapes carry no unwind facts. `audit`
   keeps a command's output
   ([[decisions/261105_the-error-record|the error record]]).

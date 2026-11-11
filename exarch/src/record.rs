@@ -17,6 +17,7 @@
 pub(crate) mod context;
 mod control;
 pub mod fault;
+pub(crate) mod json;
 mod log;
 mod mail;
 mod model;
@@ -61,8 +62,11 @@ pub use crate::app::RECORD;
 use crate::card::{Card, Change};
 use crate::provider::{ProviderError, Tuning, Usage, Via};
 use genai::chat::ChatMessage;
+use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
+use ral_core::fact::HelperFailure;
 use ral_core::own::OwnDir;
+use ral_core::protocol::WireError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Range;
@@ -407,13 +411,43 @@ pub enum Voice {
     Harness,
 }
 
+/// A helper's cause, original refusal, or lifecycle panic evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildFailure {
+    Cause(#[serde(with = "ral_core::data::datum::as_datum")] HelperFailure),
+    Refused(WireError),
+    Panicked(String),
+}
+
+impl ChildFailure {
+    pub(crate) fn severed(cause: &Severed) -> Self {
+        match cause {
+            Severed::Refused(wire) => Self::Refused(wire.clone()),
+            Severed::Closed(_) | Severed::Silent(_) | Severed::Faulted(_) => Self::Cause(
+                HelperFailure::Connection(cause.connection_failure().expect("non-refusal")),
+            ),
+        }
+    }
+}
+
+impl fmt::Display for ChildFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cause(cause) => f.write_str(&cause.describe()),
+            Self::Refused(wire) => f.write_str(&wire.to_error().plain()),
+            Self::Panicked(text) => f.write_str(text),
+        }
+    }
+}
+
 /// How a returning agent answered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildStatus {
     /// The value its parent reads with `` exarch-agents `read ``.
     Replied(FOValue),
-    Failed(String),
+    Failed(ChildFailure),
     Stopped,
 }
 
@@ -436,7 +470,7 @@ impl ChildStatus {
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Settlement {
     Replied,
-    Failed { reason: String },
+    Failed { reason: ChildFailure },
     Stopped,
 }
 

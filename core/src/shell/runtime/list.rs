@@ -46,6 +46,14 @@ impl Drop for Repr {
 }
 
 impl List {
+    /// Consume only seed-built data; its persistent spine has no internal aliases.
+    pub(crate) fn into_seed_values(mut self) -> Option<imbl::Vector<Value>> {
+        match &mut self.0 {
+            Repr::Built(values) => Arc::into_inner(std::mem::take(values)),
+            Repr::Literal(..) => unreachable!("seed hydration creates only built lists"),
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

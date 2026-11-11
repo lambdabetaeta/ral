@@ -77,6 +77,10 @@ const STYLES: &[HighlightStyle] = &[
     },
 ];
 
+pub(super) fn style_names() -> impl Iterator<Item = &'static str> {
+    STYLES.iter().map(|style| style.name)
+}
+
 /// The ANSI escape for a highlight style name, or `None` if the name is not a
 /// known style.  The legal style vocabulary lives in [`STYLES`].
 pub(super) fn style_ansi(style: &str) -> Option<&'static str> {

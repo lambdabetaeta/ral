@@ -9,6 +9,7 @@ use crate::enquiry::check_name;
 use crate::provider::{Bureau, Toolset, roles::Roles};
 use crate::record::AgentId;
 use ral_core::carrier::Severed;
+use ral_core::fact::{AgentFailure, AgentFailureNameTaken, AgentNameFailure};
 use ral_core::own::OwnDir;
 #[cfg(test)]
 use ral_core::own::TestDir;
@@ -66,7 +67,10 @@ impl Launch {
         terms: &Terms,
         name: &str,
     ) -> Result<String, Severed> {
-        let own = crate::prompt::with_grant(&self.system, &engine.read(|t| t.grants())?);
+        let own = crate::prompt::with_grant(
+            &self.system,
+            &engine.read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())?,
+        );
         Ok(if self.tools.is_empty() {
             own
         } else {
@@ -272,7 +276,15 @@ impl Registry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unborn {
     NameTaken(String),
-    NameMalformed(String),
+    NameMalformed(AgentNameFailure),
+}
+impl Unborn {
+    pub(crate) fn failure(self) -> AgentFailure {
+        match self {
+            Self::NameTaken(name) => AgentFailure::NameTaken(AgentFailureNameTaken { name }),
+            Self::NameMalformed(cause) => AgentFailure::NameMalformed(cause),
+        }
+    }
 }
 impl fmt::Display for Unborn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -281,7 +293,7 @@ impl fmt::Display for Unborn {
                 f,
                 "an agent already bears the name '{name}': pick another, or wait for it to end. Names stay reserved through teardown; agents lists yours."
             ),
-            Self::NameMalformed(why) => f.write_str(why),
+            Self::NameMalformed(why) => f.write_str(&why.describe()),
         }
     }
 }

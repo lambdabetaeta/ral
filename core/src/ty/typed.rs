@@ -39,9 +39,13 @@ fn rfold(fields: &[(&str, Ty)], tail: Row, label: fn(String) -> Label) -> Row {
     })
 }
 
-/// A record type over a row of fields ending in `tail`.
+/// A record type over a row of fields ending in `tail`.  The fields are
+/// ordered by label, as the elaborator orders a literal's, so that a type
+/// derived here is the type a literal of the same fields has.
 pub fn record_row(fields: &[(&str, Ty)], tail: Row) -> Ty {
-    Ty::record(rfold(fields, tail, Label::Field))
+    let mut sorted = fields.to_vec();
+    sorted.sort_by_key(|(name, _)| *name);
+    Ty::record(rfold(&sorted, tail, Label::Field))
 }
 
 /// A record type over a closed row: the tail is `Empty`, so no extension.

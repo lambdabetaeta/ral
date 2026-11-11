@@ -14,17 +14,7 @@ let resolved = grant [net: `offline] {
         echo 'resolved from the registry'
         return $remote
     } { |err|
-        let denied = case $err[reason] [
-            `process: { |p| case $p[failure] [
-                `exited: { |n| return !{contains $no-network $n} },
-                `signaled: { |_| return false },
-                `not-found: { |_| return false },
-                `not-runnable: { |_| return false },
-            ] },
-            `timed-out: { |_| return false },
-            `cancelled: { |_| return false },
-            `raised: { |_| return false },
-        ]
+        let denied = contains $no-network $err[status]
         if $denied {
             echo 'network denied — resolved from the vendored lockfile'
             return !{from-csv < $lockfile}

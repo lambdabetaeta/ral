@@ -43,10 +43,22 @@ pub(super) struct StageRoute {
 }
 
 fn open_edge() -> Settled<(ByteOut, ByteIn)> {
-    let (r, w) = crate::process::cloexec_pipe().map_err(|e| Error::io("pipe", &e))?;
+    let (r, w) = crate::process::cloexec_pipe().map_err(|e| {
+        Error::io(
+            crate::fact::IoOperation::CreateFile,
+            crate::fact::IoSubject::Pipe,
+            &e,
+        )
+    })?;
     let held = HeldEdge {
         edge: Edge::new(),
-        reader: Arc::new(r.try_clone().map_err(|e| Error::io("pipe", &e))?),
+        reader: Arc::new(r.try_clone().map_err(|e| {
+            Error::io(
+                crate::fact::IoOperation::Duplicate,
+                crate::fact::IoSubject::Pipe,
+                &e,
+            )
+        })?),
         listening: Cell::default(),
     };
     Ok((ByteOut::Downstream { writer: w, held }, ByteIn::Upstream(r)))

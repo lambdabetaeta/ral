@@ -384,7 +384,7 @@ fn an_empty_commit_is_refused() {
             &read(&path).unwrap().next().unwrap().unwrap_err(),
             &path,
             1,
-            "at least one",
+            "expected at least 1 elements, got 0",
         );
     }
 }
@@ -502,9 +502,12 @@ fn a_reader_reads_each_record_of_each_commit_and_refuses_a_stale_locus() {
         ..commit.records().first.locus().clone()
     };
     let refusal = reader.record(&beyond).unwrap_err();
-    assert!(
-        refusal.to_string().contains("which holds fewer"),
-        "{refusal}"
+    assert_eq!(
+        refusal,
+        RecordReadFailure::MissingLocusRecord(RecordReadFailureMissingLocusRecord {
+            commit: 1u64.into(),
+            index: 3usize.into(),
+        })
     );
     let mut bytes = terminated(commit_line(&[error("prepended")]));
     bytes.extend(std::fs::read(&path).unwrap());
@@ -512,9 +515,11 @@ fn a_reader_reads_each_record_of_each_commit_and_refuses_a_stale_locus() {
     let refusal = LocusReader::new(File::open(&path).unwrap())
         .record(commit.records().rest[0].locus())
         .unwrap_err();
-    assert!(
-        refusal.to_string().contains("did not hash to the locus"),
-        "{refusal}"
+    assert_eq!(
+        refusal,
+        RecordReadFailure::LocusSealMismatch(RecordReadFailureLocusSealMismatch {
+            commit: commit.number().into(),
+        })
     );
 }
 
@@ -525,20 +530,16 @@ fn a_reader_refuses_a_stale_range_before_parsing_its_records() {
     let log = Log::create(&dir).unwrap();
     let commit = log.append(several()).unwrap();
     drop(log);
-    let foreign =
-        RawValue::from_string(r#"{"at_unix_ms":0,"records":[{"alien":1}]}"#.into()).unwrap();
-    let line = serde_json::to_vec(&Line {
-        sum: Sum::of(foreign.get().as_bytes()),
-        commit: &foreign,
-    })
-    .unwrap();
+    let line = raw::sealed_fixture(br#"{"at_unix_ms":0,"records":[{"alien":1}]}"#);
     std::fs::write(&path, terminated(line)).unwrap();
     let refusal = LocusReader::new(File::open(&path).unwrap())
         .record(commit.records().first.locus())
         .unwrap_err();
-    assert!(
-        refusal.to_string().contains("did not hash to the locus"),
-        "{refusal}"
+    assert_eq!(
+        refusal,
+        RecordReadFailure::LocusSealMismatch(RecordReadFailureLocusSealMismatch {
+            commit: commit.number().into(),
+        })
     );
 }
 
@@ -638,4 +639,292 @@ fn a_write_failure_during_sync_prevents_watermark_publication() {
     release.send(()).unwrap();
     assert!(Arc::ptr_eq(&failed.0, &sync.join().unwrap().unwrap_err().0));
     assert_eq!(log.inner.lock_strict().unwrap().synced, 0);
+}
+
+#[test]
+fn recording_failure_projection_keeps_path_stage_and_original_io() {
+    let path = PathBuf::from("sessions/7/record.jsonl");
+    for syncing in [false, true] {
+        let cause = io::Error::from_raw_os_error(13);
+        let expected = ral_core::io::failure(&cause);
+        let unavailable = Unavailable(Arc::new(Failure::Recording {
+            record: Some(path.clone()),
+            cause,
+            syncing,
+        }));
+        assert_eq!(
+            unavailable.failure(),
+            RecordingFailure::Recording(RecordingFailureRecording {
+                record: Some(ral_core::path::shown(&path)),
+                stage: if syncing {
+                    RecordingStage::Sync
+                } else {
+                    RecordingStage::Append
+                },
+                cause: expected,
+            })
+        );
+    }
+    let unavailable = Unavailable::new(None, io::Error::from(io::ErrorKind::StorageFull));
+    assert!(
+        matches!(unavailable.failure(), RecordingFailure::Recording(failure)
+        if failure.record.is_none() && failure.stage == RecordingStage::Append)
+    );
+}
+
+#[test]
+fn a_poisoned_cell_keeps_the_full_agent_id_before_rendering() {
+    let log = Log::none();
+    let agent = super::super::AgentId::new(u64::MAX);
+    let failure = log.cell_poisoned(agent);
+    assert_eq!(
+        failure.failure(),
+        RecordingFailure::CellPoisoned(RecordingFailureCellPoisoned {
+            agent: u64::MAX.into(),
+        })
+    );
+    assert!(Arc::ptr_eq(
+        &failure.0,
+        &log.check_available().unwrap_err().0
+    ));
+}
+
+fn line_fault(bytes: &[u8]) -> Unsealed {
+    match unseal(bytes) {
+        Err(fault) => fault,
+        Ok(line) => records_of(line.body()).unwrap_err(),
+    }
+}
+
+#[test]
+fn log_checksum_uses_original_commit_ranges_not_raw_reencoding() {
+    let body = br#" { "records" : [ {"Forensic":{"error":{"text":"\u0062ravo"}}} ], "at_unix_ms" : 18446744073709551615 } "#;
+    // Surrounding whitespace is outside the JSON value, hence outside its range.
+    let body = &body[1..body.len() - 1];
+    let bytes = raw::sealed_fixture(body);
+    let line = unseal(&bytes).unwrap();
+    assert_eq!(line.body().source(), body);
+    assert_eq!(line.sum, Sum::of(body));
+    let records = records_of(line.body()).unwrap();
+    let raw = crate::record::json::RawBody::from_records(u64::MAX, &records).unwrap();
+    let normalized = raw.encode(ral_core::data::json::JsonFormat::Compact);
+    assert_ne!(normalized, body);
+    assert_ne!(Sum::of(&normalized), line.sum);
+    assert!(
+        matches!(&records.first, Record::Forensic(Forensic::Error { text }) if text == "bravo")
+    );
+}
+
+#[test]
+fn log_unsealed_projection_preserves_syntax_envelope_seal_records_precedence() {
+    use ral_core::fact::{DataStep, DecodeCause, JsonShape};
+
+    let fault = line_fault(br#"{"sum":false,"commit":[}"#);
+    assert!(fault.damaged());
+    assert!(matches!(fault.failure(), RecordLineFailure::JsonSyntax(_)));
+
+    let fault = line_fault(br#"{"sum":"not-a-seal","commit":false,"extra":0}"#);
+    assert!(!fault.damaged());
+    assert!(
+        matches!(fault.failure(), RecordLineFailure::InvalidEnvelope(cause)
+        if matches!(cause.cause.as_ref(), DecodeCause::UnknownField(field) if field.field == "extra"))
+    );
+
+    let fault = line_fault(br#"{"sum":false,"commit":false}"#);
+    assert!(!fault.damaged());
+    assert!(
+        matches!(fault.failure(), RecordLineFailure::InvalidEnvelope(cause)
+        if cause.path == vec![DataStep::Field("sum".into())]
+        && matches!(cause.cause.as_ref(), DecodeCause::JsonShape(shape) if shape.found == JsonShape::Bool))
+    );
+
+    for sealed in ["not-a-seal", "FFFFFFFFFFFFFFFF", "0000000000000000"] {
+        let bytes = format!(r#"{{"sum":"{sealed}","commit":false}}"#);
+        let fault = line_fault(bytes.as_bytes());
+        assert!(fault.damaged());
+        assert_eq!(
+            fault.failure(),
+            RecordLineFailure::SealMismatch(RecordLineFailureSealMismatch {
+                sealed: sealed.into(),
+                actual: Sum::of(b"false").to_string(),
+            })
+        );
+    }
+
+    let fault = line_fault(&raw::sealed_fixture(b"false"));
+    assert!(!fault.damaged());
+    assert!(
+        matches!(fault.failure(), RecordLineFailure::InvalidRecords(cause)
+        if cause.path.is_empty() && matches!(cause.cause.as_ref(), DecodeCause::JsonShape(_)))
+    );
+}
+
+#[test]
+fn log_envelope_fields_keep_object_only_duplicate_missing_and_unknown_facts() {
+    use ral_core::fact::DecodeCause;
+    for (bytes, expected) in [
+        (
+            br#"{"sum":"bad","sum":"bad","commit":0}"#.as_slice(),
+            DecodeCause::DuplicateField("sum".into()),
+        ),
+        (
+            br#"{"sum":"bad","commit":0,"commit":0}"#,
+            DecodeCause::DuplicateField("commit".into()),
+        ),
+        (
+            br#"{"sum":"bad"}"#,
+            DecodeCause::MissingField("commit".into()),
+        ),
+        (br#"{"commit":0}"#, DecodeCause::MissingField("sum".into())),
+    ] {
+        let fault = line_fault(bytes);
+        assert!(!fault.damaged());
+        assert!(
+            matches!(fault.failure(), RecordLineFailure::InvalidEnvelope(cause)
+            if cause.path.is_empty() && *cause.cause == expected)
+        );
+    }
+    assert!(matches!(line_fault(br#"["bad",0]"#), Unsealed::Shape(_)));
+    assert!(matches!(
+        line_fault(br#"{"commit":0,"sum":"bad"}"#),
+        Unsealed::Sum { .. }
+    ));
+}
+
+#[test]
+fn log_sealed_shape_and_domain_failures_keep_exact_record_paths() {
+    use ral_core::fact::{DataStep, DecodeCause, InvertedTurnSpan};
+    let bytes = raw::sealed_fixture(
+        br#"{"at_unix_ms":0,"records":[{"Transcript":{"system":{"text":false}}}]}"#,
+    );
+    let fault = line_fault(&bytes);
+    assert!(
+        matches!(fault.failure(), RecordLineFailure::InvalidRecords(cause)
+        if cause.path == vec![DataStep::Field("records".into()), DataStep::Index(0u64.into()),
+            DataStep::Payload("Transcript".into()), DataStep::Payload("system".into()), DataStep::Field("text".into())]
+        && matches!(cause.cause.as_ref(), DecodeCause::JsonShape(_)))
+    );
+
+    let bytes = raw::sealed_fixture(br#"{"at_unix_ms":0,"records":[{"Transcript":{"evicted":{"span":{"from":9,"to":2},"by":"model"}}}]}"#);
+    let fault = line_fault(&bytes);
+    let RecordLineFailure::InvalidRecords(cause) = fault.failure() else {
+        panic!("record domain failure")
+    };
+    assert_eq!(
+        cause.path,
+        vec![
+            DataStep::Field("records".into()),
+            DataStep::Index(0u64.into()),
+            DataStep::Payload("Transcript".into()),
+            DataStep::Payload("evicted".into()),
+            DataStep::Field("span".into())
+        ]
+    );
+    assert_eq!(
+        cause.cause.as_ref(),
+        &DecodeCause::TurnSpan(InvertedTurnSpan {
+            from: 9u64.into(),
+            to: 2u64.into()
+        })
+    );
+}
+
+#[test]
+fn locus_reader_reports_typed_records_only_after_both_seals_agree() {
+    let dir = temp_dir("reader-typed-records");
+    let path = dir.path().join(RECORD);
+    let bytes = raw::sealed_fixture(br#"{"at_unix_ms":0,"records":[]}"#);
+    let sum = unseal(&bytes).unwrap().sum;
+    let expected = line_fault(&bytes).failure();
+    let bytes = terminated(bytes);
+    let locus = Locus {
+        seq: Seq::new(7, 0),
+        bytes: 0..bytes.len() as u64,
+        sum,
+    };
+    std::fs::write(&path, bytes).unwrap();
+    let mut reader = LocusReader::new(File::open(&path).unwrap());
+    assert_eq!(
+        reader.record(&locus).unwrap_err(),
+        RecordReadFailure::Line(RecordReadFailureLine {
+            commit: 7u64.into(),
+            cause: expected,
+        })
+    );
+    let stale = Locus {
+        sum: Sum::of(b"stale"),
+        ..locus
+    };
+    assert_eq!(
+        reader.record(&stale).unwrap_err(),
+        RecordReadFailure::LocusSealMismatch(RecordReadFailureLocusSealMismatch {
+            commit: 7u64.into(),
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn log_encoding_failure_is_typed_latched_and_never_appended_or_published() {
+    use crate::provider::Selected;
+    use crate::record::{AgentId, Started};
+    use ral_core::fact::{DataStep, IoLeaf, JsonEncodeCause};
+    use std::os::unix::ffi::OsStringExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Sink(Arc<AtomicUsize>);
+    impl Publish for Sink {
+        fn commit(&self, _: Commit) {
+            let _ = self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn synced(&self, _: u64) {}
+        fn transient(&self, _: Transient) {}
+    }
+    let dir = temp_dir("encoding-failure");
+    let path = dir.path().join(RECORD);
+    let log = Log::create(&dir).unwrap();
+    let published = Arc::new(AtomicUsize::new(0));
+    log.attach(Box::new(Sink(Arc::clone(&published))));
+    let first = log.append(NonEmpty::one(error("prefix"))).unwrap();
+    let prefix = std::fs::read(&path).unwrap();
+    let started = Started {
+        session_id: AgentId::new(1),
+        name: "agent".into(),
+        parent: None,
+        returns: false,
+        selected: Selected::for_test("fixture-model"),
+        log_dir: std::ffi::OsString::from_vec(vec![b'/', 0xff]).into(),
+        at_unix_ms: 0,
+    };
+    let failure = log
+        .append(NonEmpty::one(Record::Control(Control::SessionStarted(
+            started,
+        ))))
+        .unwrap_err();
+    let RecordingFailure::Recording(recording) = failure.failure() else {
+        panic!("append failure")
+    };
+    assert_eq!(recording.stage, RecordingStage::Append);
+    let IoLeaf::JsonEncoding(cause) = recording.cause.leaf.as_ref() else {
+        panic!("typed encoding cause")
+    };
+    assert_eq!(
+        cause.path,
+        vec![
+            DataStep::Field("records".into()),
+            DataStep::Index(0u64.into()),
+            DataStep::Payload("Control".into()),
+            DataStep::Payload("session_started".into()),
+            DataStep::Field("log_dir".into())
+        ]
+    );
+    assert!(matches!(cause.cause, JsonEncodeCause::NonUnicodePath(_)));
+    assert_eq!(std::fs::read(&path).unwrap(), prefix);
+    assert_eq!(log.inner.lock_strict().unwrap().commits, first.number());
+    assert_eq!(published.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        &failure.0,
+        &log.append(NonEmpty::one(error("later"))).unwrap_err().0
+    ));
+    assert!(Arc::ptr_eq(&failure.0, &log.sync().unwrap_err().0));
 }

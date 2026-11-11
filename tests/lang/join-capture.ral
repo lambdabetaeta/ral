@@ -32,7 +32,7 @@ let indirect = try $arm { |_| return () } | from-line
 assert_eq 'command arm in hand' indirect $indirect
 
 # An unwritten handler arrow still receives the error; `let` captures the join.
-let h = { |e| echo "handled !{describe $e}" }
+let h = { |e| echo "handled $e[message]" }
 let handled = try { fail 'boom' } { !$h }
 assert_eq 'handler under an unwritten arrow' 'handled boom' $handled
 

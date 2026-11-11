@@ -234,7 +234,9 @@ impl LiveSource {
     ) -> Result<Vec<Listed>, ListFailure> {
         let runtime = blocking_runtime("subscription model-list").map_err(ListFailure::Runtime)?;
         runtime.block_on(async {
-            cell.prepare().await.map_err(ListFailure::Refresh)?;
+            cell.prepare()
+                .await
+                .map_err(|cause| ListFailure::Refresh(cause.describe()))?;
             let token = cell.snapshot();
             match token.login() {
                 Login::Chatgpt => {

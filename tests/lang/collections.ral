@@ -48,8 +48,8 @@ echo !{has [:, a: 1, b: 2] c}
 # computed or one is written out
 let k = 'a'
 let j = 'a'
-try { let _ = [$k: 1, $j: 2]; return () } { |e| echo !{describe $e} }
-try { let _ = [a: 1, $k: 2]; return () } { |e| echo !{describe $e} }
+try { let _ = [$k: 1, $j: 2]; return () } { |e| echo $e[message] }
+try { let _ = [a: 1, $k: 2]; return () } { |e| echo $e[message] }
 
 # An explicit entry replaces a spread's, so that is not a repeat
 let replaced = [...[:, a: 1], $k: 2]

@@ -9,11 +9,19 @@
 //! redefine.
 
 use crate::error::Error;
+use crate::fact::{
+    ArityFailure, CodecFailure, CodecFailureCsvCell, CodecFailureCsvKeys, CodecFailureJsonLine,
+    CodecFailureJsonPointer, CodecFailureNotJson, CodecJsonNumberFailure, CountRule,
+    CsvDeserializeCause, CsvPosition, CsvReadFailure, CsvReadFailureDeserialize,
+    CsvReadFailureUnequalLengths, CsvReadFailureUtf8, Expected, InvalidCause, InvalidFailure,
+    IoOperation, IoSubject, JsonCategory, JsonPointerCause, JsonShape, JsonSyntaxFailure,
+    JsonValueFailure, JsonValueNumberCause, Reason, ShapeFailure, StandardStream, Utf8Failure,
+    Utf8Subject, ValueShape,
+};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token};
-use crate::text::plural;
-use crate::ty::RefusedArg;
 
-use crate::data::{FOValue, Finite, Opaque};
+use crate::data::{FOValue, Finite};
 use crate::ty::Site;
 use std::sync::Arc;
 
@@ -25,12 +33,16 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     let mut bytes = Vec::new();
     super::util::stdin_reader(name, shell)?
         .read_to_end(&mut bytes)
-        .map_err(|e| Error::new(format!("{name}: {e}")))?;
+        .map_err(|e| {
+            Error::io(
+                IoOperation::Read,
+                IoSubject::Stream(StandardStream::Stdin),
+                &e,
+            )
+            .with_context(name)
+        })?;
     Ok(bytes)
 }
-
-const DECODE_VALUE_IN_HAND: &str =
-    "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`";
 
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
@@ -39,10 +51,13 @@ fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
     }
-    Err(Error::new(format!(
-        "{name}: takes no arguments; it reads the byte channel"
-    ))
-    .with_hint(DECODE_VALUE_IN_HAND)
+    Err(invalid(
+        name,
+        InvalidCause::Arity(ArityFailure {
+            expected: CountRule::Exactly(0usize.into()),
+            got: args.len().into(),
+        }),
+    )
     .into())
 }
 
@@ -54,11 +69,7 @@ fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
 /// Channel text for a `from-X` decoder that needs real UTF-8: the same
 /// refusal, and the same way out of it, for every one of them.
 fn input_text(args: &[Value], name: &str, shell: &Shell) -> Settled<String> {
-    decode_utf8_strict(
-        input_bytes(args, name, shell)?,
-        &format!("{name}: input is not valid UTF-8"),
-        "use from-bytes to keep raw bytes",
-    )
+    decode_utf8_strict(input_bytes(args, name, shell)?, name, Utf8Subject::Input)
 }
 
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &Shell) -> Settled<Value> {
@@ -80,17 +91,7 @@ pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value
     lossy_line_list(super::util::stdin_lines("from-lines", shell)?)
 }
 
-/// The one JSON number ral refuses: a `u64` above `i64::MAX`, whose low bits
-/// `f64` would round away.
-struct OutOfRange(serde_json::Number);
-
-impl std::fmt::Display for OutOfRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "integer {} is outside the supported range", self.0)
-    }
-}
-
-fn json_to_fo(j: serde_json::Value) -> Result<FOValue, OutOfRange> {
+fn json_to_fo(j: serde_json::Value) -> Result<FOValue, CodecJsonNumberFailure> {
     Ok(match j {
         serde_json::Value::Null => FOValue::Unit,
         serde_json::Value::Bool(value) => FOValue::Bool { value },
@@ -98,9 +99,23 @@ fn json_to_fo(j: serde_json::Value) -> Result<FOValue, OutOfRange> {
             (Some(value), _) => FOValue::Int { value },
             (None, Some(f)) if n.is_f64() => match Finite::new(f) {
                 Some(value) => FOValue::Float { value },
-                None => return Err(OutOfRange(n)),
+                None => {
+                    return Err(CodecJsonNumberFailure {
+                        text: n.to_string(),
+                        cause: JsonValueNumberCause::NonFinite,
+                    });
+                }
             },
-            _ => return Err(OutOfRange(n)),
+            _ => {
+                return Err(CodecJsonNumberFailure {
+                    text: n.to_string(),
+                    cause: if n.is_f64() {
+                        JsonValueNumberCause::NonFinite
+                    } else {
+                        JsonValueNumberCause::OutOfI64
+                    },
+                });
+            }
         },
         serde_json::Value::String(value) => FOValue::String { value },
         serde_json::Value::Array(arr) => FOValue::List {
@@ -115,7 +130,7 @@ fn json_to_fo(j: serde_json::Value) -> Result<FOValue, OutOfRange> {
     })
 }
 
-fn json_to_value(j: serde_json::Value) -> Result<Value, OutOfRange> {
+fn json_to_value(j: serde_json::Value) -> Result<Value, CodecJsonNumberFailure> {
     json_to_fo(j).map(Value::from)
 }
 
@@ -126,8 +141,9 @@ pub(crate) fn builtin_from_json(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let text = input_text(args, "from-json", shell)?;
-    let json = serde_json::from_str(&text).map_err(|e| Error::new(format!("from-json: {e}")))?;
-    let value = json_to_value(json).map_err(|e| Error::new(format!("from-json: {e}")))?;
+    let json = serde_json::from_str(&text)
+        .map_err(|e| codec("from-json", CodecFailure::JsonSyntax(json_syntax(&e))))?;
+    let value = json_to_value(json).map_err(|e| codec("from-json", CodecFailure::JsonNumber(e)))?;
     site.admitted("from-json", value, shell)
 }
 
@@ -137,50 +153,42 @@ fn step<'a>(
     json: &'a serde_json::Value,
     token: &str,
     at: &str,
-) -> Result<&'a serde_json::Value, String> {
-    let here = if at.is_empty() {
-        "the document".to_owned()
-    } else {
-        format!("`{at}`")
+) -> Result<&'a serde_json::Value, CodecFailureJsonPointer> {
+    let cause = match json {
+        serde_json::Value::Object(members) => {
+            if let Some(value) = members.get(token) {
+                return Ok(value);
+            }
+            JsonPointerCause::MissingMember(members.keys().cloned().collect())
+        }
+        serde_json::Value::Array(items) => {
+            if let Some(value) = token
+                .parse::<usize>()
+                .ok()
+                .filter(|index| index.to_string() == token)
+                .and_then(|index| items.get(index))
+            {
+                return Ok(value);
+            }
+            JsonPointerCause::NoElement(items.len().into())
+        }
+        scalar => JsonPointerCause::Scalar(json_shape(scalar)),
     };
-    match json {
-        serde_json::Value::Object(members) => members.get(token).ok_or_else(|| {
-            let keys: Vec<_> = members.keys().map(|k| format!("`{k}`")).collect();
-            format!(
-                "{here} has no member `{token}`; its keys are {}",
-                if keys.is_empty() {
-                    "none".to_owned()
-                } else {
-                    keys.join(", ")
-                }
-            )
-        }),
-        serde_json::Value::Array(items) => token
-            .parse::<usize>()
-            .ok()
-            .filter(|index| index.to_string() == token)
-            .and_then(|index| items.get(index))
-            .ok_or_else(|| {
-                format!(
-                    "{here} has {} elements, none of them numbered `{token}`",
-                    items.len()
-                )
-            }),
-        scalar => Err(format!(
-            "{here} is {}, which has nothing at `{token}`",
-            json_kind(scalar)
-        )),
-    }
+    Err(CodecFailureJsonPointer {
+        at: at.into(),
+        token: token.into(),
+        cause,
+    })
 }
 
-fn json_kind(json: &serde_json::Value) -> &'static str {
+fn json_shape(json: &serde_json::Value) -> JsonShape {
     match json {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "text",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
+        serde_json::Value::Null => JsonShape::Null,
+        serde_json::Value::Bool(_) => JsonShape::Bool,
+        serde_json::Value::Number(_) => JsonShape::Number,
+        serde_json::Value::String(_) => JsonShape::String,
+        serde_json::Value::Array(_) => JsonShape::Array,
+        serde_json::Value::Object(_) => JsonShape::Object,
     }
 }
 
@@ -197,29 +205,34 @@ pub(crate) fn builtin_from_json_at(
     let tokens: Vec<String> = args[0]
         .as_list(DOOR)?
         .iter()
-        .map(|token| match &*token {
+        .enumerate()
+        .map(|(index, token)| match &*token {
             Value::String(s) => Ok(s.to_string()),
-            other => Err(Error::new(format!(
-                "{DOOR}: a reference token is text, got {}",
-                other.type_name()
-            ))),
+            other => Err(Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(
+                    DOOR.into(),
+                    InvalidCause::Shape(ShapeFailure {
+                        expected: Expected::Shape(ValueShape::String),
+                        found: other.found(),
+                    }),
+                )
+                .index(index.into())
+                .index(0usize.into()),
+            )))),
         })
         .collect::<Result<_, _>>()?;
-    let text = decode_utf8_strict(
-        read_stdin_bytes(DOOR, shell)?,
-        &format!("{DOOR}: input is not valid UTF-8"),
-        "use from-bytes to keep raw bytes",
-    )?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| Error::new(format!("{DOOR}: {e}")))?;
+    let text = decode_utf8_strict(read_stdin_bytes(DOOR, shell)?, DOOR, Utf8Subject::Input)?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| codec(DOOR, CodecFailure::JsonSyntax(json_syntax(&e))))?;
     let mut leaf = &json;
     let mut at = String::new();
     for token in &tokens {
-        leaf = step(leaf, token, &at).map_err(|why| Error::new(format!("{DOOR}: {why}")))?;
+        leaf = step(leaf, token, &at).map_err(|why| codec(DOOR, CodecFailure::JsonPointer(why)))?;
         at.push('/');
         at.push_str(&pointer_token(token));
     }
-    let value = json_to_value(leaf.clone()).map_err(|e| Error::new(format!("{DOOR}: {e}")))?;
+    let value =
+        json_to_value(leaf.clone()).map_err(|e| codec(DOOR, CodecFailure::JsonNumber(e)))?;
     site.admitted(DOOR, value, shell)
 }
 
@@ -241,27 +254,45 @@ pub(crate) fn builtin_from_jsonl(
             continue;
         }
         let n = index + 1;
-        let json = serde_json::from_slice(&line).map_err(|e| {
-            Error::new(format!(
-                "from-jsonl: line {n}, column {}: {}",
-                e.column(),
-                unpositioned(&e)
-            ))
+        let json = serde_json::from_slice(&line).map_err(|error| {
+            codec(
+                "from-jsonl",
+                CodecFailure::JsonLine(CodecFailureJsonLine {
+                    line: n.into(),
+                    cause: JsonValueFailure::Syntax(json_syntax(&error)),
+                }),
+            )
         })?;
-        records.push(
-            json_to_value(json).map_err(|e| Error::new(format!("from-jsonl: line {n}: {e}")))?,
-        );
+        records.push(json_to_value(json).map_err(|error| {
+            codec(
+                "from-jsonl",
+                CodecFailure::JsonLine(CodecFailureJsonLine {
+                    line: n.into(),
+                    cause: JsonValueFailure::Number(error),
+                }),
+            )
+        })?);
     }
     site.admitted("from-jsonl", Value::list(records), shell)
 }
 
-/// serde's message less the position it appends, for a caller stating the
-/// position in its own terms.
-fn unpositioned(e: &serde_json::Error) -> String {
-    let mut message = e.to_string();
-    let at = format!(" at line {} column {}", e.line(), e.column());
-    message.truncate(message.strip_suffix(&at).map_or(message.len(), str::len));
-    message
+fn codec(operation: &str, cause: CodecFailure) -> Error {
+    invalid(operation, InvalidCause::Codec(cause))
+}
+
+fn json_syntax(error: &serde_json::Error) -> JsonSyntaxFailure {
+    JsonSyntaxFailure {
+        class: match error.classify() {
+            serde_json::error::Category::Syntax => JsonCategory::Syntax,
+            serde_json::error::Category::Eof => JsonCategory::Eof,
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                unreachable!("parsing JSON values from bytes performs neither validation nor I/O")
+            }
+        },
+        line: error.line().into(),
+        column: error.column().into(),
+        detail: error.to_string(),
+    }
 }
 
 /// CSV cells stay text; the site checks each row's required shape.
@@ -275,19 +306,20 @@ pub(super) fn builtin_from_csv(
     let mut rdr = csv::Reader::from_reader(bytes.as_slice());
     let headers: Vec<String> = rdr
         .headers()
-        .map_err(|e| csv_refusal(&e))?
+        .map_err(|e| codec("from-csv", CodecFailure::CsvRead(csv_failure(&e))))?
         .iter()
         .map(str::to_owned)
         .collect();
     let mut seen = std::collections::HashSet::with_capacity(headers.len());
     for h in &headers {
         if !seen.insert(h) {
-            return Err(Error::new(format!("from-csv: duplicate header column {h:?}")).into());
+            return Err(codec("from-csv", CodecFailure::CsvDuplicateHeader(h.clone())).into());
         }
     }
     let mut rows = Vec::new();
     for record in rdr.records() {
-        let record = record.map_err(|e| csv_refusal(&e))?;
+        let record =
+            record.map_err(|e| codec("from-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
         // The reader refuses a ragged record, so the zip drops nothing.
         let fields = headers
             .iter()
@@ -298,21 +330,64 @@ pub(super) fn builtin_from_csv(
     site.admitted("from-csv", Value::list(rows), shell)
 }
 
-/// `from-csv`'s refusal, a ragged row named by the line its read began on:
-/// the row's own, unless blank lines precede it.
-fn csv_refusal(e: &csv::Error) -> Error {
-    match e.kind() {
+fn csv_position(position: &csv::Position) -> CsvPosition {
+    CsvPosition {
+        byte: position.byte().into(),
+        line: position.line().into(),
+        record: position.record().into(),
+    }
+}
+
+fn csv_failure(error: &csv::Error) -> CsvReadFailure {
+    match error.kind() {
+        csv::ErrorKind::Io(error) => CsvReadFailure::Io(crate::io::failure(error)),
+        csv::ErrorKind::Utf8 { pos, err } => CsvReadFailure::Utf8(CsvReadFailureUtf8 {
+            position: pos.as_ref().map(csv_position),
+            field: err.field().into(),
+            valid_up_to: err.valid_up_to().into(),
+        }),
         csv::ErrorKind::UnequalLengths {
-            pos: Some(pos),
+            pos,
             expected_len,
             len,
-        } => Error::new(format!(
-            "from-csv: line {} has {}, but the header has {}",
-            pos.line(),
-            plural(*len, "field"),
-            plural(*expected_len, "field")
-        )),
-        _ => Error::new(format!("from-csv: {e}")),
+        } => CsvReadFailure::UnequalLengths(CsvReadFailureUnequalLengths {
+            position: pos.as_ref().map(csv_position),
+            expected: (*expected_len).into(),
+            got: (*len).into(),
+        }),
+        csv::ErrorKind::Seek => CsvReadFailure::Seek,
+        csv::ErrorKind::Serialize(detail) => CsvReadFailure::Serialize(detail.clone()),
+        csv::ErrorKind::Deserialize { pos, err } => {
+            CsvReadFailure::Deserialize(CsvReadFailureDeserialize {
+                position: pos.as_ref().map(csv_position),
+                field: err.field().map(Into::into),
+                cause: csv_deserialize(err.kind()),
+            })
+        }
+        _ => CsvReadFailure::Unclassified(error.to_string()),
+    }
+}
+
+fn csv_deserialize(cause: &csv::DeserializeErrorKind) -> CsvDeserializeCause {
+    use csv::DeserializeErrorKind as C;
+    match cause {
+        C::Message(detail) => CsvDeserializeCause::Message(detail.clone()),
+        C::Unsupported(detail) => CsvDeserializeCause::Unsupported(detail.clone()),
+        C::UnexpectedEndOfRow => CsvDeserializeCause::UnexpectedEndOfRow,
+        C::InvalidUtf8(error) => CsvDeserializeCause::InvalidUtf8(Utf8Failure {
+            valid_up_to: error.valid_up_to().into(),
+            error_len: error.error_len().map(Into::into),
+        }),
+        C::ParseBool(_) => CsvDeserializeCause::ParseBool,
+        C::ParseInt(error) => CsvDeserializeCause::ParseInt(match error.kind() {
+            std::num::IntErrorKind::Empty => crate::fact::IntegerParseCause::Empty,
+            std::num::IntErrorKind::InvalidDigit => crate::fact::IntegerParseCause::InvalidDigit,
+            std::num::IntErrorKind::PosOverflow => crate::fact::IntegerParseCause::PositiveOverflow,
+            std::num::IntErrorKind::NegOverflow => crate::fact::IntegerParseCause::NegativeOverflow,
+            std::num::IntErrorKind::Zero => crate::fact::IntegerParseCause::Zero,
+            _ => crate::fact::IntegerParseCause::Unclassified,
+        }),
+        C::ParseFloat(_) => CsvDeserializeCause::ParseFloat,
     }
 }
 
@@ -323,13 +398,10 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     if let Some(first) = rows.iter().next() {
         let header = first.as_ref().as_map_ref("to-csv")?;
         if header.is_empty() {
-            return Err(Error::new(
-                "to-csv: the row at index 0 has no keys, and CSV cannot write a row of no columns",
-            )
-            .into());
+            return Err(codec("to-csv", CodecFailure::CsvNoColumns).into());
         }
         wtr.write_record(header.keys())
-            .map_err(|e| Error::new(format!("to-csv: {e}")))?;
+            .map_err(|e| codec("to-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
         for (i, row) in rows.iter().enumerate() {
             let map = row.as_ref().as_map_ref("to-csv")?;
             let stray = header
@@ -342,40 +414,46 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
                 } else {
                     (0, i)
                 };
-                return Err(Error::new(format!(
-                        "to-csv: the row at index {has} has the key {key:?}, but the row at index {lacks} does not"
-                    )).with_hint("CSV cannot leave a field out: give every row every key, as `union $blank $row` does where `$blank` maps each column to ''").into());
+                return Err(codec(
+                    "to-csv",
+                    CodecFailure::CsvKeys(CodecFailureCsvKeys {
+                        has_row: has.into(),
+                        lacks_row: lacks.into(),
+                        key: key.into(),
+                    }),
+                )
+                .into());
             }
             let cells = map
                 .iter()
                 .map(|(key, value)| csv_cell(&value, i, key))
                 .collect::<Settled<Vec<_>>>()?;
             wtr.write_record(cells)
-                .map_err(|e| Error::new(format!("to-csv: {e}")))?;
+                .map_err(|e| codec("to-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
         }
     }
-    let bytes = wtr
-        .into_inner()
-        .map_err(|e| Error::new(format!("to-csv: {e}")))?;
+    let bytes = wtr.into_inner().map_err(|e| {
+        codec(
+            "to-csv",
+            CodecFailure::CsvFinalize(crate::io::failure(e.error())),
+        )
+    })?;
     write_encoded(&bytes, shell)
 }
 
 fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
-    let kind = match value {
-        Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
-            return Ok(value.to_string());
-        }
-        Value::Unit => "unit",
-        Value::Bytes(_) => "bytes",
-        Value::List(_) => "a list",
-        Value::Map(_) => "a map",
-        Value::Variant { .. } => "a variant",
-        Value::Thunk(_) | Value::Native(_) => "a block",
-        Value::Handle(_) => "a handle",
-    };
-    Err(Error::new(format!(
-        "to-csv: the cell `{key}` of the row at index {row} is {kind}; a CSV cell is text, a number or a boolean"
-    )).into())
+    if let Some(text) = value.scalar_text() {
+        return Ok(text);
+    }
+    Err(codec(
+        "to-csv",
+        CodecFailure::CsvCell(CodecFailureCsvCell {
+            row: row.into(),
+            key: key.into(),
+            found: value.shape(),
+        }),
+    )
+    .into())
 }
 
 fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<Value> {
@@ -411,10 +489,30 @@ pub(super) fn builtin_echo(
     _mooring: &crate::shell::runtime::Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    if args.iter().any(|arg| matches!(arg, Value::Unit)) {
-        return Err(Error::new("echo: cannot print Unit")
-            .with_hint(RefusedArg::Unit.remedy("echo"))
-            .into());
+    if let Some(index) = args.iter().position(|arg| matches!(arg, Value::Unit)) {
+        return Err(Error::new(Reason::Invalid(Box::new(
+            InvalidFailure::new(
+                "echo".into(),
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::AnyOf(vec![
+                        ValueShape::Bool,
+                        ValueShape::Int,
+                        ValueShape::Float,
+                        ValueShape::String,
+                        ValueShape::Bytes,
+                        ValueShape::List,
+                        ValueShape::Map,
+                        ValueShape::Variant,
+                        ValueShape::Block,
+                        ValueShape::Function,
+                        ValueShape::Handle,
+                    ]),
+                    found: crate::fact::Found::Unit,
+                }),
+            )
+            .index(index.into()),
+        )))
+        .into());
     }
     let mut s = Value::render_argv(args).join(" ");
     s.push('\n');
@@ -430,29 +528,23 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
     write_encoded(text.as_bytes(), shell)
 }
 
-/// What `value_to_json` refuses: a leaf that is not data.
-struct Unrepresentable(Opaque);
-
-impl std::fmt::Display for Unrepresentable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} has no JSON representation", self.0)
-    }
-}
-
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
 /// than erasing it; Bytes become the integer array `ints-to-bytes` accepts
 /// back.
 ///
 /// # Errors
 /// If `v` or anything nested within it is a block, function or handle.
-fn value_to_json(v: &Value) -> Result<serde_json::Value, Unrepresentable> {
+fn value_to_json(v: &Value) -> Result<serde_json::Value, CodecFailureNotJson> {
     FOValue::try_from(v)
         .map(|fo| fo.to_json(|b| b.iter().map(|&byte| serde_json::json!(byte)).collect()))
-        .map_err(|e| Unrepresentable(e.leaf))
+        .map_err(|e| CodecFailureNotJson {
+            leaf: e.leaf.into(),
+            nested: e.nested,
+        })
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let json = value_to_json(&args[0]).map_err(|e| Error::new(format!("to-json: {e}")))?;
+    let json = value_to_json(&args[0]).map_err(|e| codec("to-json", CodecFailure::NotJson(e)))?;
     write_encoded(json.to_string().as_bytes(), shell)
 }
 
@@ -461,10 +553,305 @@ pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Valu
 pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut text = String::new();
     for (i, item) in args[0].as_list("to-jsonl")?.iter().enumerate() {
-        let json = value_to_json(item.as_ref())
-            .map_err(|e| Error::new(format!("to-jsonl: element at index {i}: {e}")))?;
+        let json = value_to_json(item.as_ref()).map_err(|e| {
+            Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(
+                    "to-jsonl".into(),
+                    InvalidCause::Codec(CodecFailure::NotJson(e)),
+                )
+                .index(i.into()),
+            )))
+        })?;
         text.push_str(&json.to_string());
         text.push('\n');
     }
     write_encoded(text.as_bytes(), shell)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::fact::{DataStep, Found};
+    use crate::shell::runtime::{Break, Env, block_over};
+
+    fn input(bytes: &[u8]) -> Shell {
+        let mut shell = crate::test_helper::core_shell();
+        shell.io.stdin =
+            crate::io::Source::Reader(crate::io::SourceReader::from_bytes(bytes.to_vec()).unwrap());
+        shell
+    }
+
+    fn site(ty: &crate::ty::Ty) -> Arc<Site> {
+        Arc::new(Site::snapshot(
+            &crate::typecheck::Unifier::new(),
+            ty,
+            crate::ty::UnitId::fresh(),
+        ))
+    }
+
+    fn failure(result: Settled<Value>) -> InvalidFailure {
+        let Err(Break::Error(error)) = result else {
+            panic!("expected invalid input")
+        };
+        assert_eq!(error.hints(), []);
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("invalid input")
+        };
+        let encoded = failure.clone().encode();
+        let decoded = InvalidFailure::decode(&encoded).unwrap();
+        assert_eq!(decoded, *failure);
+        assert_eq!(decoded.describe(), failure.describe());
+        assert_eq!(decoded.advice(), failure.advice());
+        *failure
+    }
+
+    #[test]
+    fn json_numbers_syntax_and_pointer_failures_keep_their_causes() {
+        let n = json_to_value(serde_json::json!(u64::MAX)).unwrap_err();
+        assert_eq!(
+            n,
+            CodecJsonNumberFailure {
+                text: u64::MAX.to_string(),
+                cause: JsonValueNumberCause::OutOfI64
+            }
+        );
+        let mut shell = input(b"{");
+        assert!(matches!(
+            failure(builtin_from_json(
+                &[],
+                &site(&crate::ty::Ty::unit()),
+                &Mooring::adrift(),
+                &mut shell
+            ))
+            .cause,
+            InvalidCause::Codec(CodecFailure::JsonSyntax(JsonSyntaxFailure {
+                class: JsonCategory::Eof,
+                ..
+            }))
+        ));
+        let doc = serde_json::json!({"a": [1], "b": true});
+        let missing = step(&doc, "z", "").unwrap_err();
+        assert_eq!(missing.at, "");
+        assert_eq!(missing.token, "z");
+        assert_eq!(
+            missing.cause,
+            JsonPointerCause::MissingMember(vec!["a".into(), "b".into()])
+        );
+        for token in ["1", "01", "-1", "-"] {
+            assert_eq!(
+                step(&doc["a"], token, "/a").unwrap_err().cause,
+                JsonPointerCause::NoElement(1usize.into())
+            );
+        }
+        assert_eq!(
+            step(&doc["b"], "a", "/b").unwrap_err().cause,
+            JsonPointerCause::Scalar(JsonShape::Bool)
+        );
+        let mut shell = input(b"{}");
+        let failure = failure(builtin_from_json_at(
+            &[Value::list(vec![Value::Int(2)])],
+            &site(&crate::ty::Ty::unit()),
+            &Mooring::adrift(),
+            &mut shell,
+        ));
+        assert_eq!(
+            failure.path,
+            vec![
+                DataStep::Index(0usize.into()),
+                DataStep::Index(0usize.into())
+            ]
+        );
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                found: Found::Int(2),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn json_lines_keep_real_input_lines_and_encoding_element_positions() {
+        for (bytes, numeric) in [
+            (&b"\n \t\n{\n"[..], false),
+            (&b"\n\n18446744073709551615\n"[..], true),
+        ] {
+            let mut shell = input(bytes);
+            let failure = failure(builtin_from_jsonl(
+                &[],
+                &site(&crate::ty::Ty::list(crate::ty::Ty::unit())),
+                &Mooring::adrift(),
+                &mut shell,
+            ));
+            assert!(failure.describe().starts_with("from-jsonl: input line 3: "));
+            assert_eq!(failure.advice(), [] as [String; 0]);
+            let InvalidCause::Codec(CodecFailure::JsonLine(line)) = failure.cause else {
+                panic!("input line")
+            };
+            assert_eq!(line.line, 3usize.into());
+            assert_eq!(matches!(line.cause, JsonValueFailure::Number(_)), numeric);
+        }
+        let block = block_over(&Env::new());
+        for (value, nested) in [
+            (block.clone(), false),
+            (Value::list(vec![block.clone()]), true),
+        ] {
+            let cause = value_to_json(&value).unwrap_err();
+            assert_eq!(
+                cause,
+                CodecFailureNotJson {
+                    leaf: crate::fact::OpaqueKind::Block,
+                    nested
+                }
+            );
+        }
+        let mut shell = input(b"");
+        let failure = failure(builtin_to_jsonl(
+            &[Value::list(vec![Value::Int(1), block])],
+            &mut shell,
+        ));
+        assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Codec(CodecFailure::NotJson(CodecFailureNotJson {
+                nested: false,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn csv_library_projection_keeps_positions_and_foreign_subcauses() {
+        let mut reader = csv::Reader::from_reader(&b"a,b\n1\n"[..]);
+        reader.headers().unwrap();
+        let error = reader.records().next().unwrap().unwrap_err();
+        let CsvReadFailure::UnequalLengths(width) = csv_failure(&error) else {
+            panic!("unequal widths")
+        };
+        assert_eq!(width.expected, 2usize.into());
+        assert_eq!(width.got, 1usize.into());
+        assert!(width.position.is_some());
+        let mut reader = csv::Reader::from_reader(&b"a\n\xff\n"[..]);
+        reader.headers().unwrap();
+        let error = reader.records().next().unwrap().unwrap_err();
+        assert!(
+            matches!(csv_failure(&error), CsvReadFailure::Utf8(CsvReadFailureUtf8 { field, valid_up_to, position: Some(_) }) if field == 0usize.into() && valid_up_to == 0usize.into())
+        );
+        use csv::DeserializeErrorKind as C;
+        let bad_utf8 = String::from_utf8(vec![0xff]).unwrap_err().utf8_error();
+        for (source, expected) in [
+            (
+                C::Message("library".into()),
+                CsvDeserializeCause::Message("library".into()),
+            ),
+            (
+                C::Unsupported("library".into()),
+                CsvDeserializeCause::Unsupported("library".into()),
+            ),
+            (
+                C::UnexpectedEndOfRow,
+                CsvDeserializeCause::UnexpectedEndOfRow,
+            ),
+            (
+                C::InvalidUtf8(bad_utf8),
+                CsvDeserializeCause::InvalidUtf8(Utf8Failure {
+                    valid_up_to: 0usize.into(),
+                    error_len: Some(1usize.into()),
+                }),
+            ),
+            (
+                C::ParseBool("x".parse::<bool>().unwrap_err()),
+                CsvDeserializeCause::ParseBool,
+            ),
+            (
+                C::ParseInt("999999999999999999999".parse::<i64>().unwrap_err()),
+                CsvDeserializeCause::ParseInt(crate::fact::IntegerParseCause::PositiveOverflow),
+            ),
+            (
+                C::ParseFloat("x".parse::<f64>().unwrap_err()),
+                CsvDeserializeCause::ParseFloat,
+            ),
+        ] {
+            assert_eq!(csv_deserialize(&source), expected);
+        }
+    }
+
+    #[test]
+    fn csv_local_validation_retains_headers_keys_and_cell_heads() {
+        let mut shell = input(b"a,a\n1,2\n");
+        assert!(
+            matches!(failure(builtin_from_csv(&[], &site(&crate::ty::Ty::unit()), &Mooring::adrift(), &mut shell)).cause,
+            InvalidCause::Codec(CodecFailure::CsvDuplicateHeader(header)) if header == "a")
+        );
+        assert_eq!(
+            failure(builtin_to_csv(
+                &[Value::list(vec![Value::map(vec![])])],
+                &mut shell
+            ))
+            .cause,
+            InvalidCause::Codec(CodecFailure::CsvNoColumns)
+        );
+        let rows = Value::list(vec![
+            Value::map(vec![("a".into(), Value::Int(1))]),
+            Value::map(vec![]),
+        ]);
+        assert_eq!(
+            failure(builtin_to_csv(&[rows], &mut shell)).cause,
+            InvalidCause::Codec(CodecFailure::CsvKeys(CodecFailureCsvKeys {
+                has_row: 0usize.into(),
+                lacks_row: 1usize.into(),
+                key: "a".into(),
+            }))
+        );
+        assert_eq!(
+            failure(csv_cell(&Value::Unit, 4, "a").map(Value::string)).cause,
+            InvalidCause::Codec(CodecFailure::CsvCell(CodecFailureCsvCell {
+                row: 4usize.into(),
+                key: "a".into(),
+                found: ValueShape::Unit,
+            }))
+        );
+    }
+
+    #[test]
+    fn decoder_arity_and_echo_refusals_keep_counts_and_indices() {
+        let failure = failure(no_arguments(&[Value::Unit], "from-string").map(|()| Value::Unit));
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Arity(ArityFailure {
+                expected: CountRule::Exactly(0usize.into()),
+                got: 1usize.into()
+            })
+        );
+        assert_eq!(
+            failure.describe(),
+            "from-string: takes no arguments; it reads the byte channel"
+        );
+        assert_eq!(
+            failure.advice(),
+            [
+                "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`"
+            ]
+        );
+        let mut shell = input(b"");
+        let failure = self::failure(builtin_echo(
+            &[Value::string("x"), Value::Unit],
+            &Mooring::adrift(),
+            &mut shell,
+        ));
+        assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
+        assert_eq!(failure.describe(), "echo: element 1: cannot print Unit");
+        assert_eq!(
+            failure.advice(),
+            [crate::ty::RefusedArg::Unit.remedy("echo")]
+        );
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                found: Found::Unit,
+                ..
+            })
+        ));
+    }
 }

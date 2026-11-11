@@ -15,12 +15,18 @@ use std::time::{Duration, Instant};
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Outlet, Rails};
 use crate::error::Error;
+use crate::fact::{
+    ConnectionFault, ConnectionFaultUnexpectedFrame, FrameFailure, ProbeFailure, ProtocolFailure,
+    ProtocolFailureUnencodable, ProtocolOperation, ProtocolPeer, ProtocolPhase, ProtocolWork,
+    Reason,
+};
 use crate::process::{POLL_SLICE, RootCause, Scope, wait_ended};
 use crate::protocol::channel::{HOST_SILENCE_DEADLINE, WireChannel, WriteError, write_or_sever};
 use crate::protocol::probe::Probe;
 use crate::protocol::{
     Attach, DispatchId, EnquiryId, Event, Frame, Origin, Report, Root, Run, SessionEvent, WireError,
 };
+use crate::shell::run::ReportFault;
 use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Fork, Settled};
 use crate::site::{Silent, site};
 use crate::sync::LockExt;
@@ -49,7 +55,7 @@ fn engine_write(
             Err(WriteError::Unencodable(e)),
             Frame::Event(id, ev @ (Event::Report(_) | Event::Reading(_))),
         ) => {
-            let small = fault(matches!(ev, Event::Reading(_)), &e.to_string());
+            let small = fault(matches!(ev, Event::Reading(_)), ReportFault::Unencodable(e));
             write_or_sever(writer, &Frame::Event(*id, small), record)
         }
         (outcome, _) => outcome,
@@ -60,7 +66,11 @@ fn engine_write(
 /// refuses is diagnosed and dropped, and the wire stays alive.
 fn engine_send(writer: &Mutex<WireChannel>, wire_fault: &AtomicBool, frame: &Frame) {
     if let Err(WriteError::Unencodable(e)) = engine_write(writer, wire_fault, frame) {
-        crate::errln!("engine: dropped a {} frame: {e}", frame.kind());
+        crate::errln!(
+            "engine: dropped a {} frame: {}",
+            frame.kind().describe(),
+            e.describe()
+        );
     }
 }
 
@@ -154,10 +164,15 @@ impl EnquiryDesk for WireDesk {
 
         if let Err(e) = (self.outlet)(self.id, Event::Enquiry(eid, req)) {
             self.parks.parked.lock_ignore_poison().remove(&eid);
-            return Err(Error::new(match e {
-                WriteError::Severed => "enquiry lost: the host connection is down".to_string(),
-                WriteError::Unencodable(e) => format!("enquiry: the host could not be asked: {e}"),
-            })
+            return Err(Error::new(Reason::Protocol(Box::new(match e {
+                WriteError::Severed => ProtocolFailure::ConnectionLostDuringEnquiry,
+                WriteError::Unencodable(cause) => {
+                    ProtocolFailure::Unencodable(ProtocolFailureUnencodable {
+                        operation: ProtocolOperation::Enquiry,
+                        cause,
+                    })
+                }
+            })))
             .into());
         }
 
@@ -199,25 +214,26 @@ enum WorkItem {
     Probe(Probe),
 }
 
-const BUSY: &str = "engine busy";
-
-/// The engine's refusal of `why`, in the shape the front-end waits on: a run
-/// ends in a `Report`, a probe in its `Reading`. Nothing ran.
-fn refusal(probing: bool, why: &str) -> Event {
+/// A busy rendezvous admits neither a run nor a probe. Nothing ran.
+fn refusal(probing: bool) -> Event {
     if probing {
-        Event::Reading(Err(why.to_string()))
+        Event::Reading(Err(ProbeFailure::Busy))
     } else {
-        Event::Report(Report::refused(why.to_owned()))
+        Event::Report(Report::refused(Reason::Protocol(Box::new(
+            ProtocolFailure::Busy(ProtocolWork::Dispatch),
+        ))))
     }
 }
 
-/// The engine's fault of `why`, in the shape [`refusal`] takes: the run may
-/// have run, in part or whole, but its report is lost.
-fn fault(probing: bool, why: &str) -> Event {
+/// The run may have started; losing its report is not an admission refusal.
+fn fault(probing: bool, fault: ReportFault) -> Event {
     if probing {
-        Event::Reading(Err(why.to_string()))
+        Event::Reading(Err(match fault {
+            ReportFault::WorkerPanicked => ProbeFailure::WorkerPanicked,
+            ReportFault::Unencodable(cause) => ProbeFailure::Unencodable(cause),
+        }))
     } else {
-        Event::Report(Report::faulted(why.to_owned()))
+        Event::Report(Report::faulted(fault))
     }
 }
 
@@ -347,8 +363,13 @@ fn engine_session(
             }
         }
         Ok(None) => return 0,
-        Ok(Some(_)) => {
-            crate::errln!("engine: expected Attach as the first frame");
+        Ok(Some(frame)) => {
+            let fault = ConnectionFault::UnexpectedFrame(ConnectionFaultUnexpectedFrame {
+                receiver: ProtocolPeer::Engine,
+                phase: ProtocolPhase::AwaitAttach,
+                actual: frame.kind(),
+            });
+            crate::errln!("engine: {}", fault.describe());
             return 1;
         }
         Err(e) => {
@@ -423,9 +444,7 @@ fn engine_session(
                     }
                     WorkItem::Probe(probe) => Event::Reading(Ok(engine.probe(&probe))),
                 }))
-                .unwrap_or_else(|_| {
-                    fault(probing, "engine: dispatch panicked in the engine worker")
-                });
+                .unwrap_or_else(|_| fault(probing, ReportFault::WorkerPanicked));
 
                 // `claim` drops before this, never after: the same thread
                 // writes this answer and any later run's frames, so the wire
@@ -443,7 +462,7 @@ fn engine_session(
     let admit = |id: DispatchId, probing: bool| {
         let claim = Dispatch::claim(&busy, id);
         if claim.is_none() {
-            let _ = outlet(id, refusal(probing, BUSY));
+            let _ = outlet(id, refusal(probing));
         }
         claim
     };
@@ -478,7 +497,7 @@ fn engine_session(
                     }
                     continue;
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(FrameFailure::Io(crate::io::failure(&e)).into()),
             }
         } else {
             reader_ch.read_frame()
@@ -526,11 +545,12 @@ fn engine_session(
             | Frame::Event(..)
             | Frame::Session(..)
             | Frame::Pong(_)) => {
-                crate::errln!(
-                    "engine: the front-end sent a {} frame, which it never sends once attached \
-                     — ending the session",
-                    out_of_protocol.kind()
-                );
+                let fault = ConnectionFault::UnexpectedFrame(ConnectionFaultUnexpectedFrame {
+                    receiver: ProtocolPeer::Engine,
+                    phase: ProtocolPhase::Attached,
+                    actual: out_of_protocol.kind(),
+                });
+                crate::errln!("engine: {} — ending the session", fault.describe());
                 break SessionEnd::Corrupt;
             }
         }
@@ -615,7 +635,7 @@ mod wire_desk_tests {
 
     /// A desk refusal raises its message and hints alike under either transport.
     #[test]
-    fn refused_enquiry_raises_the_front_ends_text() {
+    fn refused_enquiry_preserves_the_front_ends_reason() {
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(desk_over(ours, 1));
 
@@ -635,10 +655,10 @@ mod wire_desk_tests {
             panic!("a refusal is an error, not a stop");
         };
         front_end.join().expect("front-end thread");
-        assert_eq!(err.describe(), crate::shell::runtime::NO_DESK);
+        assert_eq!(err.describe(), no_desk().describe());
         assert_eq!(
             err.reason,
-            crate::fact::Reason::Raised(crate::shell::runtime::NO_DESK.into())
+            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoDesk))
         );
         assert_eq!(err.hints(), no_desk().hints());
     }
@@ -787,6 +807,46 @@ mod engine_session_tests {
         |_, _| Ok(()),
     )];
 
+    #[test]
+    fn every_wire_enquiry_report_claims_engine_provenance_without_reclassifying_the_reason() {
+        use crate::carrier::testkit::{assert_enquiry_report, host_error, reason_families};
+        use crate::carrier::{Host as EnquiryHost, WireTransport, dispatch_to_report};
+        use crate::protocol::channel::Liveness;
+        struct Refuser(Error);
+        impl EnquiryHost for Refuser {
+            fn surface(&self, _: &FOValue) {}
+            fn enquire(&self, _: FOValue) -> Result<FOValue, Error> {
+                Err(self.0.clone())
+            }
+        }
+        static ASK: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
+            "ask",
+            crate::carrier::testkit::enquiring_runtime,
+            |_, _| Ok(()),
+        )];
+        let _g = REQUEST_SERIAL.lock();
+        let _env = env_guard();
+        let (front, back) = crate::process::cloexec_socketpair().unwrap();
+        let worker = std::thread::spawn(move || {
+            engine_session(WireChannel::from_stream(back), &ASK, Patience::default())
+        });
+        let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+        transport.attach(attach("ask"));
+        transport.await_attached().unwrap();
+        for reason in reason_families() {
+            let report = dispatch_to_report(
+                &transport,
+                Run::captured("ask-host", crate::source::SourceOrigin::named("engine.ral")),
+                Arc::new(Refuser(host_error(reason.clone()))),
+                None,
+            )
+            .unwrap();
+            assert_enquiry_report(&report, &reason);
+        }
+        transport.end().unwrap();
+        assert_eq!(worker.join().unwrap(), 0);
+    }
+
     /// `seen` holds the frames read past while awaiting a particular one, so a
     /// later await can still find them.
     struct Host {
@@ -882,7 +942,7 @@ mod engine_session_tests {
             report
         }
 
-        fn reading(&mut self, id: u64) -> Result<FOValue, String> {
+        fn reading(&mut self, id: u64) -> Result<FOValue, ProbeFailure> {
             let frame = self.await_frame(
                 |f| matches!(f, Frame::Event(d, Event::Reading(_)) if *d == DispatchId(id)),
             );
@@ -923,7 +983,7 @@ mod engine_session_tests {
     }
 
     fn is_engine_busy(report: &Report) -> bool {
-        matches!(report, Report::Static { rendered, .. } if rendered.contains("engine busy"))
+        matches!(report, Report::Static { rendered, .. } if rendered.contains(&ProtocolFailure::Busy(ProtocolWork::Dispatch).describe()))
     }
 
     #[test]
@@ -986,7 +1046,7 @@ mod engine_session_tests {
         host.dispatch(1, "/bin/sleep 15");
         assert!(is_engine_busy(&host.run(2, "$[1 + 1]")));
         host.send(&Frame::Probe(DispatchId(3), Probe::Cwd));
-        assert_eq!(host.reading(3), Err(BUSY.to_string()));
+        assert_eq!(host.reading(3), Err(ProbeFailure::Busy));
         assert_eq!(host.hang_up_and_join(), 0, "teardown cancels the sleep");
     }
 
@@ -1096,5 +1156,108 @@ mod engine_session_tests {
             code, 1,
             "a front-end that stopped reading must exit 1, not the clean hang-up's 0"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod typed_fault_tests {
+    use super::*;
+    use crate::fact::{FrameEncodeFailure, FrameEncodeFailureTooLarge};
+
+    fn encoding() -> FrameEncodeFailure {
+        FrameEncodeFailure::TooLarge(FrameEncodeFailureTooLarge {
+            actual: u64::MAX.into(),
+            limit: 256u64.into(),
+        })
+    }
+
+    #[test]
+    fn busy_is_admission_but_panic_and_lost_report_are_after_start_faults() {
+        assert!(
+            matches!(refusal(false), Event::Report(Report::Static { status, .. }) if status.get() == 1)
+        );
+        assert_eq!(refusal(true), Event::Reading(Err(ProbeFailure::Busy)));
+        assert!(matches!(fault(false, ReportFault::WorkerPanicked),
+            Event::Report(Report::Faulted { status, .. }) if status.get() == 1));
+        assert_eq!(
+            fault(true, ReportFault::WorkerPanicked),
+            Event::Reading(Err(ProbeFailure::WorkerPanicked))
+        );
+        let cause = encoding();
+        assert_eq!(
+            fault(true, ReportFault::Unencodable(cause.clone())),
+            Event::Reading(Err(ProbeFailure::Unencodable(cause.clone())))
+        );
+        let Event::Report(Report::Faulted { rendered, status }) =
+            fault(false, ReportFault::Unencodable(cause.clone()))
+        else {
+            panic!("a lost report must not claim nothing ran");
+        };
+        assert_eq!(status.get(), 1);
+        assert!(rendered.contains(&cause.describe()));
+    }
+
+    #[test]
+    fn enquiry_send_failure_distinguishes_lost_connection_from_encoding_refusal() {
+        let expected = [
+            ProtocolFailure::ConnectionLostDuringEnquiry,
+            ProtocolFailure::Unencodable(ProtocolFailureUnencodable {
+                operation: ProtocolOperation::Enquiry,
+                cause: encoding(),
+            }),
+        ];
+        for (unencodable, cause) in [false, true].into_iter().zip(expected) {
+            let desk = WireDesk {
+                id: DispatchId(1),
+                parks: Arc::default(),
+                outlet: Arc::new(move |_, _| {
+                    Err(if unencodable {
+                        WriteError::Unencodable(encoding())
+                    } else {
+                        WriteError::Severed
+                    })
+                }),
+            };
+            let Err(Break::Error(error)) = desk.enquire(
+                FOValue::Unit,
+                &crate::process::DurableRoot::default().child(),
+            ) else {
+                panic!("send failure is not cancellation");
+            };
+            assert_eq!(error.reason, Reason::Protocol(Box::new(cause)));
+            assert!(desk.parks.parked.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_wire_desk_refusal_family_preserves_reason_and_normalizes_host_report_state() {
+        use crate::carrier::testkit::{assert_normalized, host_error, reason_families};
+        for reason in reason_families() {
+            let original = host_error(reason);
+            let wire = WireError::of(&original);
+            // The paired codec is exercised by front/tests; this fixture owns
+            // the park-to-computation normalization and its cancellation order.
+            let parks = Arc::new(Parks::default());
+            let fill = parks.clone();
+            let desk = WireDesk {
+                id: DispatchId(1),
+                parks,
+                outlet: Arc::new(move |_, event| {
+                    let Event::Enquiry(eid, _) = event else {
+                        panic!("enquiry")
+                    };
+                    fill.fill(eid, Err(wire.clone()));
+                    Ok(())
+                }),
+            };
+            let scope = crate::process::DurableRoot::default().child();
+            scope.cancel(crate::process::CancelCause::Cancelled);
+            let Err(Break::Error(error)) = desk.enquire(FOValue::Unit, &scope) else {
+                panic!("a ready refusal outranks a pending cancel");
+            };
+            assert_normalized(&original, &error);
+            assert!(desk.parks.parked.lock().unwrap().is_empty());
+        }
     }
 }

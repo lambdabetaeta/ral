@@ -43,15 +43,29 @@ mod severance_codes {
     fn every_severance_has_its_own_settled_code() {
         let codes = [
             (
-                Severed::Refused(WireError::of(&Error::new("v9"))).code(),
+                Severed::Refused(WireError::of(&Error::new(crate::fact::Reason::Protocol(
+                    Box::new(crate::fact::ProtocolFailure::VersionMismatch(
+                        crate::fact::ProtocolFailureVersionMismatch {
+                            front: 9,
+                            engine: 10,
+                        },
+                    )),
+                ))))
+                .code(),
                 "engine-refused",
             ),
-            (Severed::Closed("eof".into()).code(), "engine-closed"),
+            (
+                Severed::Closed(ConnectionClosed::Eof(crate::fact::ProtocolPeer::Engine)).code(),
+                "engine-closed",
+            ),
             (
                 Severed::Silent(Duration::from_secs(30)).code(),
                 "engine-silent",
             ),
-            (Severed::Faulted("junk".into()).code(), "engine-faulted"),
+            (
+                Severed::Faulted(ConnectionFault::ReadingForDispatch).code(),
+                "engine-faulted",
+            ),
         ];
         for (got, want) in codes {
             assert_eq!(got, want, "a severance code may not be renamed in place");
@@ -60,5 +74,76 @@ mod severance_codes {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), codes.len(), "two severances share a code");
+    }
+}
+
+mod typed_readings {
+    use super::*;
+    use crate::fact::{ConnectionFaultProbeAnswer, DecodeFailure, ProbeSubject};
+
+    struct ReadingTransport {
+        ends: Ends,
+        answer: FOValue,
+    }
+
+    impl ReadingTransport {
+        fn new(answer: FOValue) -> Self {
+            let (_tx, rx) = mpsc::channel();
+            Self {
+                ends: Ends::new(
+                    ControlSender::new(ControlRoute::Wire(Weak::new())),
+                    EventReceiver::new(rx),
+                    Arc::default(),
+                ),
+                answer,
+            }
+        }
+    }
+
+    impl Transport for ReadingTransport {
+        fn ends(&self) -> &Ends {
+            &self.ends
+        }
+        fn dispatch(&self, id: DispatchId, _: Run, _: &Arc<dyn Host>, _: Option<&Scope>) {
+            self.ends
+                .events
+                .stash
+                .lock_ignore_poison()
+                .push_back((id, Event::Reading(Ok(self.answer.clone()))));
+        }
+        fn probe(&self, _: &Probe) -> Result<FOValue, ProbeError> {
+            Ok(self.answer.clone())
+        }
+    }
+
+    #[test]
+    fn malformed_probe_answers_keep_the_actual_subject_and_original_decode_failure() {
+        let value = FOValue::Int { value: -1 };
+        let expected: DecodeFailure = Option::<String>::decode(&value).unwrap_err();
+        let transport = ReadingTransport::new(value);
+        let cause = Severed::Faulted(ConnectionFault::ProbeAnswer(ConnectionFaultProbeAnswer {
+            probe: ProbeSubject::EnvVar("HOME".into()),
+            cause: expected,
+        }));
+        assert_eq!(
+            transport.env_var("HOME"),
+            Err(ProbeError::Severed(cause.clone()))
+        );
+        assert_eq!(transport.severed(), Some(cause));
+    }
+
+    #[test]
+    fn a_reading_for_dispatch_is_a_typed_terminal_fault() {
+        let transport = ReadingTransport::new(FOValue::Unit);
+        let report = dispatch_to_report(
+            &transport,
+            Run::captured("1", crate::source::SourceOrigin::named("<test>")),
+            Arc::new(()),
+            None,
+        );
+        assert_eq!(
+            report,
+            Err(Severed::Faulted(ConnectionFault::ReadingForDispatch))
+        );
     }
 }

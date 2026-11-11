@@ -9,6 +9,7 @@
 )]
 use std::path::{Path, PathBuf};
 
+use crate::dial::{DialBackend, DialError};
 use crate::error::{Act, Error, GuestConsole, HostFile, MachineFiles, Wire};
 use crate::lifecycle::{
     Leaf, Missed, SessionDisk, aside_spelling, await_dials, stop_within, sweep, unix_seconds,
@@ -309,16 +310,12 @@ impl Guest {
 }
 
 impl Machine for Guest {
-    fn dial_engine(&self) -> std::io::Result<Socket> {
+    fn dial_engine(&self) -> Result<Socket, DialError> {
         self.connect_guest(ports::FACTORY)
     }
 
-    fn connect_guest(&self, _port: u32) -> std::io::Result<Socket> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Hyper-V cannot yet dial a port inside its guest; this backend currently only accepts \
-             connections opened by the guest",
-        ))
+    fn connect_guest(&self, _port: u32) -> Result<Socket, DialError> {
+        Err(DialError::Unsupported(DialBackend::HyperV))
     }
 
     fn console(&self) -> GuestConsole {

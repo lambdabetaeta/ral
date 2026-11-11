@@ -237,7 +237,7 @@ fn a_denied_absent_name_is_refused_not_reported_absent() {
     let refused = |deny: &str, body: &str| {
         let body = format!("grant [fs: [read: [`absolute /], deny: [`cwd {deny}]]] {{ {body} }}");
         let message = run_in(&dir, &body).expect_err("a denied name must be refused");
-        let message = format!("{message:?}");
+        let message = message.to_string();
         assert!(
             message.contains("denied by grant"),
             "{body} must be refused by the grant, got: {message}"
@@ -266,7 +266,7 @@ fn a_walk_failing_under_a_denied_tree_is_refused_by_the_grant() {
         let body =
             format!("grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {body} }}");
         let err = run_in(&dir, &body).expect_err("the walk must fail");
-        format!("{err:?}")
+        err.to_string()
     };
     for body in [
         "from-string < denied/sub/f",
@@ -352,10 +352,7 @@ fn a_loop_diagnostic_is_judged_at_the_failed_link() {
                 "grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {op} {path}/child }}"
             );
             let error = run_in(&dir, &body).expect_err("an admitted loop must remain an error");
-            assert!(
-                error.to_string().contains("too many levels"),
-                "{body}: {error}"
-            );
+            assert!(error.to_string().contains("loop: at:"), "{body}: {error}");
         }
     }
     assert_eq!(

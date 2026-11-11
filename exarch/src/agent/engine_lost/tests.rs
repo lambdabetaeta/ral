@@ -6,7 +6,9 @@ use ral_core::carrier::Severed;
 use ral_core::own::{OwnDir, TestDir};
 
 fn closed() -> Severed {
-    Severed::Closed("the engine closed the connection".into())
+    Severed::Closed(ral_core::fact::ConnectionClosed::Eof(
+        ral_core::fact::ProtocolPeer::Engine,
+    ))
 }
 
 /// A run directory of this test's own, deleted with the guard.
@@ -51,7 +53,15 @@ fn the_sentence_carries_a_path_and_nothing_else() {
 /// goes into a window does not.  The split is the whole design.
 #[test]
 fn the_logged_form_keeps_what_the_sentence_drops() {
-    let refused = ral_core::error::Error::new("protocol version 9").with_hint("upgrade the engine");
+    let refused = ral_core::error::Error::new(ral_core::fact::Reason::Protocol(Box::new(
+        ral_core::fact::ProtocolFailure::VersionMismatch(
+            ral_core::fact::ProtocolFailureVersionMismatch {
+                front: 43,
+                engine: 44,
+            },
+        ),
+    )))
+    .with_hint("upgrade the engine");
     let lost = EngineLost::running(
         &Severed::Refused(ral_core::protocol::WireError::of(&refused)),
         &run_dir(),
@@ -59,7 +69,7 @@ fn the_logged_form_keeps_what_the_sentence_drops() {
     let logged = lost.logged();
     assert!(logged.starts_with(&lost.to_string()), "{logged}");
     assert!(
-        logged.contains("protocol version 9"),
+        logged.contains(refused.describe().as_ref()),
         "the engine's own refusal is worth keeping somewhere: {logged}"
     );
     assert!(logged.contains("hint: upgrade the engine"), "{logged}");

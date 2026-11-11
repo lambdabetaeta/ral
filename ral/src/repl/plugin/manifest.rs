@@ -9,6 +9,13 @@ use super::HookHealth;
 use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserved_action};
 use ral_core::data::FOValue;
 use ral_core::error::Error;
+use ral_core::fact::{
+    DataStep, Expected, GrantFailure, GrantFailureRefusedKey, GrantForm, HostFailure, InvalidCause,
+    InvalidFailure, KeybindingFailure, KeybindingFailureGuardRegex, KeybindingFailureNotation,
+    KeybindingFailureReservedAction, KeybindingFailureSequencePrefix,
+    KeybindingFailureUnguardedBuiltinShadow, PluginFailure, PluginFailureUnknownHookEvent,
+    RalFailure, Reason, ShapeFailure, ValueShape,
+};
 use ral_core::shell::runtime::settings_map;
 use ral_core::{Map, Value, label, record};
 use std::collections::HashMap;
@@ -71,33 +78,50 @@ pub(crate) struct KeyBinding {
 impl KeySpec {
     /// The one validation both ends run: the door to refuse early, the host
     /// because its router is what the binding must fit.
-    pub(crate) fn bind(&self) -> Result<KeyBinding, String> {
+    pub(crate) fn bind(&self) -> Result<KeyBinding, KeybindingFailure> {
         let key = &self.key;
-        let chords = parse_key_notation(key).map_err(|why| format!("keybinding '{key}': {why}"))?;
+        let chords = parse_key_notation(key).map_err(|cause| {
+            KeybindingFailure::Notation(KeybindingFailureNotation {
+                key: key.clone(),
+                cause,
+            })
+        })?;
         if let Some(action) = chords.iter().copied().find_map(reserved_action) {
-            return Err(format!(
-                "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
+            return Err(KeybindingFailure::ReservedAction(
+                KeybindingFailureReservedAction {
+                    key: key.clone(),
+                    action,
+                },
             ));
         }
         if chords.len() > 1 && chords[0] != CTRL_X {
-            return Err(format!(
-                "keybinding '{key}': a key sequence begins with ctrl-x, the prefix the line \
-                 editor leaves free for sequences"
+            return Err(KeybindingFailure::SequencePrefix(
+                KeybindingFailureSequencePrefix { key: key.clone() },
             ));
         }
         let guard = self
             .guard
             .as_deref()
-            .map(regex::Regex::new)
-            .transpose()
-            .map_err(|e| format!("keybinding '{key}': invalid guard regex: {e}"))?;
+            .map(|pattern| {
+                regex::Regex::new(pattern).map_err(|error| {
+                    KeybindingFailure::GuardRegex(KeybindingFailureGuardRegex {
+                        key: key.clone(),
+                        pattern: pattern.into(),
+                        cause: ral_core::shell::builtins::util::regex_failure(pattern, &error)
+                            .cause,
+                    })
+                })
+            })
+            .transpose()?;
         if guard.is_none()
             && let [chord] = chords.as_slice()
             && let Some(action) = builtin_action(*chord)
         {
-            return Err(format!(
-                "unguarded keybinding '{key}' would shadow the built-in {action} on every \
-                 press; add a 'guard:' regex so unmatched presses fall through"
+            return Err(KeybindingFailure::UnguardedBuiltinShadow(
+                KeybindingFailureUnguardedBuiltinShadow {
+                    key: key.clone(),
+                    action,
+                },
             ));
         }
         Ok(KeyBinding {
@@ -130,7 +154,7 @@ pub(crate) struct LoadedPlugin {
 
 impl LoadedPlugin {
     /// The host's record of `manifest`, its keybindings re-validated.
-    pub(crate) fn admit(manifest: Manifest) -> Result<Self, String> {
+    pub(crate) fn admit(manifest: Manifest) -> Result<Self, KeybindingFailure> {
         Ok(Self {
             keybindings: manifest
                 .keybindings
@@ -156,64 +180,102 @@ pub(super) struct ManifestHandlers {
 
 /// Parse a plugin manifest value into its first-order part plus the handler
 /// values the engine registers.
+pub(super) fn keybinding_refusal(cause: KeybindingFailure) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Ral(
+        RalFailure::Keybinding(cause),
+    ))))
+}
+
+fn invalid_at(path: Vec<DataStep>, cause: InvalidCause) -> Error {
+    Error::new(Reason::Invalid(Box::new(InvalidFailure {
+        operation: "plugin manifest".into(),
+        path,
+        cause,
+    })))
+}
+
+fn expected_at(path: Vec<DataStep>, value: &Value, expected: Expected) -> Error {
+    invalid_at(
+        path,
+        InvalidCause::Shape(ShapeFailure {
+            expected,
+            found: value.found(),
+        }),
+    )
+}
+
 pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> {
     let Some(map) = settings_map(val) else {
-        return Err(Error::new(format!(
-            "plugin manifest: expected a record, got {}",
-            val.type_name()
-        )));
+        return Err(expected_at(vec![], val, Expected::Shape(ValueShape::Map)));
     };
-    // The keyset is `Form::Manifest`'s declared table, the same one the
-    // checker holds a manifest's returned row to.  A manifest arriving from a
-    // factory has no row to check, so this door meets it here — and a key
-    // with a refusal of its own says that rather than "unknown key".
     let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
     for key in map.keys() {
         match table.holds(key) {
-            Some(ral_core::typecheck::contract::Holds::Refused(advice)) => {
-                return Err(Error::new(*advice));
+            Some(ral_core::typecheck::contract::Holds::Refused(cause)) => {
+                return Err(invalid_at(
+                    vec![],
+                    InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                        form: GrantForm::Manifest,
+                        key: key.into(),
+                        cause: *cause,
+                    })),
+                ));
             }
             Some(_) => {}
-            None => return Err(Error::new(format!("manifest: {}", table.unknown_key(key)))),
+            None => {
+                return Err(invalid_at(
+                    vec![],
+                    InvalidCause::UnknownField(table.unknown_key(key)),
+                ));
+            }
         }
     }
     let name = match map.get("name").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         Some(other) => {
-            return Err(Error::new(format!(
-                "manifest 'name': expected String, got {}",
-                other.type_name()
-            )));
+            return Err(expected_at(
+                vec![DataStep::Field("name".into())],
+                other,
+                Expected::Shape(ValueShape::String),
+            ));
         }
-        None => return Err(Error::new("manifest missing required 'name' field")),
+        None => {
+            return Err(invalid_at(
+                vec![],
+                InvalidCause::MissingField("name".into()),
+            ));
+        }
     };
     let aliases = match map.get("aliases").as_deref() {
         Some(Value::Map(m)) => parse_aliases(m)?,
         Some(other) => {
-            return Err(Error::new(format!(
-                "manifest 'aliases': expected Map, got {}",
-                other.type_name()
-            )));
+            return Err(expected_at(
+                vec![DataStep::Field("aliases".into())],
+                other,
+                Expected::Shape(ValueShape::Map),
+            ));
         }
         None => Vec::new(),
     };
     let hooks = match map.get("hooks").as_deref() {
         Some(Value::Map(m)) => parse_hooks(m)?,
         Some(other) => {
-            return Err(Error::new(format!(
-                "manifest 'hooks': expected Map, got {}",
-                other.type_name()
-            )));
+            return Err(expected_at(
+                vec![DataStep::Field("hooks".into())],
+                other,
+                Expected::Shape(ValueShape::Map),
+            ));
         }
         None => Vec::new(),
     };
     let (keybindings, keybinding_handlers) = match map.get("keybindings").as_deref() {
         Some(Value::List(l)) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
         Some(other) => {
-            return Err(Error::new(format!(
-                "manifest 'keybindings': expected List, got {}",
-                other.type_name()
-            )));
+            return Err(expected_at(
+                vec![DataStep::Field("keybindings".into())],
+                other,
+                Expected::Shape(ValueShape::List),
+            ));
         }
         None => (Vec::new(), Vec::new()),
     };
@@ -231,30 +293,38 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
 }
 
 fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
-    let mut out = Vec::new();
-    for (name, value) in entries {
-        let Some(&event) = HookEvent::VARIANTS
-            .iter()
-            .find(|&&e| <&str>::from(e) == name)
-        else {
-            return Err(Error::new(format!(
-                "unknown hook event '{name}'. Valid events: {}",
-                HookEvent::VARIANTS
-                    .iter()
-                    .map(<&str>::from)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        };
-        if !matches!(value.as_ref(), Value::Thunk(_)) {
-            return Err(Error::new(format!(
-                "hook '{name}': expected a block, got {}",
-                value.type_name()
-            )));
-        }
-        out.push((event, value.into_owned()));
-    }
-    Ok(out)
+    entries
+        .iter()
+        .map(|(name, value)| {
+            let event = HookEvent::VARIANTS
+                .iter()
+                .copied()
+                .find(|&e| <&str>::from(e) == name)
+                .ok_or_else(|| {
+                    super::refusal(PluginFailure::UnknownHookEvent(
+                        PluginFailureUnknownHookEvent {
+                            event: name.into(),
+                            offered: HookEvent::VARIANTS
+                                .iter()
+                                .copied()
+                                .map(|e| <&str>::from(e).into())
+                                .collect(),
+                        },
+                    ))
+                })?;
+            if !matches!(value.as_ref(), Value::Thunk(_)) {
+                return Err(expected_at(
+                    vec![
+                        DataStep::Field("hooks".into()),
+                        DataStep::Field(name.into()),
+                    ],
+                    &value,
+                    Expected::Closure,
+                ));
+            }
+            Ok((event, value.into_owned()))
+        })
+        .collect()
 }
 
 type KeybindingHandlers = Vec<(String, Value)>;
@@ -265,45 +335,61 @@ where
 {
     let mut out = Vec::new();
     let mut handlers = Vec::new();
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        let path = || {
+            vec![
+                DataStep::Field("keybindings".into()),
+                DataStep::Index(index.into()),
+            ]
+        };
+        let field_path = |field: &str| {
+            let mut path = path();
+            path.push(DataStep::Field(field.into()));
+            path
+        };
         let Value::Map(map) = entry else {
-            return Err(Error::new(format!(
-                "keybinding entry: expected Map, got {}",
-                entry.type_name()
-            )));
+            return Err(expected_at(
+                path(),
+                &entry,
+                Expected::Shape(ValueShape::Map),
+            ));
         };
         let key = match map.get("key").as_deref() {
             Some(Value::String(s)) => s.to_string(),
             Some(other) => {
-                return Err(Error::new(format!(
-                    "keybinding 'key': expected String, got {}",
-                    other.type_name()
-                )));
+                return Err(expected_at(
+                    field_path("key"),
+                    other,
+                    Expected::Shape(ValueShape::String),
+                ));
             }
-            None => return Err(Error::new("keybinding entry missing 'key' field")),
+            None => return Err(invalid_at(path(), InvalidCause::MissingField("key".into()))),
         };
         let handler = match map.get("handler").as_deref() {
             Some(h @ Value::Thunk(_)) => h.clone(),
             Some(other) => {
-                return Err(Error::new(format!(
-                    "keybinding '{key}': handler: expected a block, got {}",
-                    other.type_name()
-                )));
+                return Err(expected_at(field_path("handler"), other, Expected::Closure));
             }
-            None => return Err(Error::new("keybinding entry missing 'handler' field")),
+            None => {
+                return Err(invalid_at(
+                    path(),
+                    InvalidCause::MissingField("handler".into()),
+                ));
+            }
         };
         let guard = match map.get("guard").as_deref() {
             Some(Value::String(g)) => Some(g.to_string()),
             Some(other) => {
-                return Err(Error::new(format!(
-                    "keybinding '{key}': guard: expected String, got {}",
-                    other.type_name()
-                )));
+                return Err(expected_at(
+                    field_path("guard"),
+                    other,
+                    Expected::Shape(ValueShape::String),
+                ));
             }
             None => None,
         };
         let spec = KeySpec { key, guard };
-        spec.bind().map_err(Error::new)?;
+        spec.bind().map_err(keybinding_refusal)?;
         handlers.push((spec.key.clone(), handler));
         out.push(spec);
     }
@@ -311,23 +397,49 @@ where
 }
 
 fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
-    let mut out = Vec::with_capacity(entries.len());
-    for (name, value) in entries {
-        if !matches!(value.as_ref(), Value::Thunk(_)) {
-            return Err(Error::new(format!(
-                "alias '{name}': expected a block, got {}",
-                value.type_name()
-            )));
-        }
-        out.push((name.to_string(), value.into_owned()));
-    }
-    Ok(out)
+    entries
+        .iter()
+        .map(|(name, value)| {
+            if !matches!(value.as_ref(), Value::Thunk(_)) {
+                return Err(expected_at(
+                    vec![
+                        DataStep::Field("aliases".into()),
+                        DataStep::Field(name.into()),
+                    ],
+                    &value,
+                    Expected::Closure,
+                ));
+            }
+            Ok((name.to_string(), value.into_owned()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ral_core::shell::runtime::Closure;
+
+    fn invalid_reason(error: &Error) -> &InvalidFailure {
+        let Reason::Invalid(failure) = &error.reason else {
+            panic!("expected invalid manifest, got {:?}", error.reason)
+        };
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        failure
+    }
+
+    fn keybinding_reason(error: &Error) -> &KeybindingFailure {
+        let Reason::Host(host) = &error.reason else {
+            panic!("expected host refusal")
+        };
+        let HostFailure::Ral(RalFailure::Keybinding(cause)) = host.as_ref() else {
+            panic!("expected keybinding refusal")
+        };
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        cause
+    }
 
     /// A `capabilities:` key is rejected with an error that names the key and
     /// points at `grant` (the authority rationale lives on the struct doc).
@@ -337,12 +449,26 @@ mod tests {
             ("name".into(), Value::string("p")),
             ("capabilities".into(), Value::map(vec![])),
         ]);
-        let err = parse(&manifest).expect_err("a manifest with capabilities: must be rejected");
-        assert!(
-            err.describe().contains("capabilities") && err.describe().contains("grant"),
-            "error should name the key and point at grant, got: {}",
-            err.describe()
+        let err = parse(&manifest).unwrap_err();
+        assert_eq!(
+            invalid_reason(&err).cause,
+            InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                form: GrantForm::Manifest,
+                key: "capabilities".into(),
+                cause: ral_core::fact::RefusedGrantKey::ManifestCapabilitiesUnenforced,
+            }))
         );
+        assert_eq!(
+            invalid_reason(&err).path,
+            Vec::<ral_core::fact::DataStep>::new()
+        );
+        assert!(
+            err.reason
+                .advice()
+                .iter()
+                .any(|hint| hint.contains("grant"))
+        );
+        assert!(err.describe().contains("capabilities"));
     }
 
     /// A key the table does not name is refused with the table's own list —
@@ -354,12 +480,17 @@ mod tests {
             ("name".into(), Value::string("p")),
             ("hookz".into(), Value::map(vec![])),
         ]);
-        let err = parse(&manifest).expect_err("an unknown key must be rejected");
-        assert!(
-            err.describe().contains("'hookz'") && err.describe().contains("name, aliases, hooks"),
-            "error should name the key and the list, got: {}",
-            err.describe()
+        let err = parse(&manifest).unwrap_err();
+        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
+        assert_eq!(
+            invalid_reason(&err).cause,
+            InvalidCause::UnknownField(table.unknown_key("hookz"))
         );
+        assert_eq!(
+            invalid_reason(&err).path,
+            Vec::<ral_core::fact::DataStep>::new()
+        );
+        assert!(err.describe().contains("hookz"));
     }
 
     /// Every key `Form::Manifest`'s table declares reaches its own handling
@@ -387,7 +518,14 @@ mod tests {
             match &key.holds {
                 Holds::Refused(advice) => {
                     let err = result.expect_err("refused key must error");
-                    assert_eq!(err.describe().as_ref(), *advice);
+                    assert_eq!(
+                        invalid_reason(&err).cause,
+                        InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                            form: GrantForm::Manifest,
+                            key: key.label.into(),
+                            cause: *advice
+                        }))
+                    );
                 }
                 _ => {
                     result.unwrap_or_else(|err| {
@@ -444,24 +582,29 @@ mod tests {
     /// stringifies or silently degrades to an empty collection.
     #[test]
     fn wrong_typed_fields_are_load_errors() {
-        for (field, value, expected) in [
-            ("name", Value::Int(42), "String"),
-            ("aliases", Value::Int(7), "Map"),
-            ("hooks", Value::Int(7), "Map"),
-            ("keybindings", Value::Int(7), "List"),
+        for (field, expected) in [
+            ("name", ValueShape::String),
+            ("aliases", ValueShape::Map),
+            ("hooks", ValueShape::Map),
+            ("keybindings", ValueShape::List),
         ] {
             let manifest = Value::map(vec![
                 ("name".into(), Value::string("p")),
-                (field.into(), value),
+                (field.into(), Value::Int(42)),
             ]);
-            let err = parse(&manifest).expect_err("wrong type must be rejected");
-            assert!(
-                err.describe().contains(field)
-                    && err.describe().contains(expected)
-                    && err.describe().contains("Int"),
-                "error should name the field and both types, got: {}",
-                err.describe()
+            let err = parse(&manifest).unwrap_err();
+            assert_eq!(
+                invalid_reason(&err).path,
+                vec![DataStep::Field(field.into())]
             );
+            assert_eq!(
+                invalid_reason(&err).cause,
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(expected),
+                    found: ral_core::fact::Found::Int(42)
+                })
+            );
+            assert!(err.describe().contains(field));
         }
     }
 
@@ -480,11 +623,14 @@ mod tests {
     /// `()` is a manifest with nothing set, so it lacks `name`.
     #[test]
     fn unit_manifest_lacks_a_name() {
-        let err = parse(&Value::Unit).expect_err("a manifest needs a name");
-        assert!(
-            err.describe().contains("missing required 'name'"),
-            "{}",
-            err.describe()
+        let err = parse(&Value::Unit).unwrap_err();
+        assert_eq!(
+            invalid_reason(&err).cause,
+            InvalidCause::MissingField("name".into())
+        );
+        assert_eq!(
+            invalid_reason(&err).path,
+            Vec::<ral_core::fact::DataStep>::new()
         );
     }
 
@@ -496,12 +642,21 @@ mod tests {
             ("key".into(), Value::string("ctrl-t")),
             ("handler".into(), Value::Int(3)),
         ]);
-        let err = parse_keybindings(std::iter::once(entry))
-            .expect_err("non-block handler must be rejected");
-        assert!(
-            err.describe().contains("ctrl-t") && err.describe().contains("block"),
-            "error should name the key and expected type, got: {}",
-            err.describe()
+        let err = parse_keybindings(std::iter::once(entry)).unwrap_err();
+        assert_eq!(
+            invalid_reason(&err).path,
+            vec![
+                DataStep::Field("keybindings".into()),
+                DataStep::Index(0_usize.into()),
+                DataStep::Field("handler".into())
+            ]
+        );
+        assert_eq!(
+            invalid_reason(&err).cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Closure,
+                found: ral_core::fact::Found::Int(3)
+            })
         );
     }
 
@@ -546,20 +701,28 @@ mod tests {
     /// rejected — tab/completion is one instance of the general rule.
     #[test]
     fn unguarded_builtin_chord_is_load_error() {
+        use ral_core::fact::BuiltinKeyAction;
         for (key, action) in [
-            ("tab", "completion"),
-            ("enter", "accept-line"),
-            ("up", "history navigation"),
-            ("t", "text insertion"),
+            ("tab", BuiltinKeyAction::Completion),
+            ("enter", BuiltinKeyAction::AcceptLine),
+            ("up", BuiltinKeyAction::HistoryNavigation),
+            ("t", BuiltinKeyAction::TextInsertion),
         ] {
-            let err = parse_keybindings(std::iter::once(keybinding_entry(key, None)))
-                .expect_err("unguarded builtin chord must be rejected");
+            let err = parse_keybindings(std::iter::once(keybinding_entry(key, None))).unwrap_err();
+            assert_eq!(
+                keybinding_reason(&err),
+                &KeybindingFailure::UnguardedBuiltinShadow(
+                    KeybindingFailureUnguardedBuiltinShadow {
+                        key: key.into(),
+                        action
+                    }
+                )
+            );
             assert!(
-                err.describe().contains(key)
-                    && err.describe().contains(action)
-                    && err.describe().contains("guard"),
-                "error should name the key, the action, and the fix, got: {}",
-                err.describe()
+                err.reason
+                    .advice()
+                    .iter()
+                    .any(|hint| hint.contains("guard"))
             );
         }
     }
@@ -591,29 +754,43 @@ mod tests {
     /// An unparseable key notation is a load error, not a sync-time skip.
     #[test]
     fn unrecognised_key_notation_is_load_error() {
-        let err = parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None)))
-            .expect_err("bad notation must be rejected");
-        assert!(
-            err.describe().contains("keybinding 'hyper-x'") && err.describe().contains("not a key"),
-            "error should name the notation and the fault, got: {}",
-            err.describe()
+        let err =
+            parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None))).unwrap_err();
+        assert_eq!(
+            keybinding_reason(&err),
+            &KeybindingFailure::Notation(KeybindingFailureNotation {
+                key: "hyper-x".into(),
+                cause: ral_core::fact::KeyNotationFailure::UnknownKey(
+                    ral_core::fact::KeyNotationFailureUnknownKey {
+                        token: "hyper-x".into()
+                    }
+                )
+            })
         );
+        assert!(err.describe().contains("hyper-x"));
     }
 
     /// A key sequence begins with plain ctrl-x, the prefix the editor leaves
     /// free; anything else is refused, guard or not.
     #[test]
     fn key_sequences_begin_with_ctrl_x() {
-        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-x ctrl-e", None)))
-            .expect("a ctrl-x sequence binds unguarded");
+        let (out, _) =
+            parse_keybindings(std::iter::once(keybinding_entry("ctrl-x ctrl-e", None))).unwrap();
         assert_eq!(out.len(), 1);
         for key in ["escape escape", "alt-x y", "ctrl-alt-x y"] {
-            let err = parse_keybindings(std::iter::once(keybinding_entry(key, Some("x"))))
-                .expect_err("a sequence off ctrl-x must be rejected");
+            let err =
+                parse_keybindings(std::iter::once(keybinding_entry(key, Some("x")))).unwrap_err();
+            assert_eq!(
+                keybinding_reason(&err),
+                &KeybindingFailure::SequencePrefix(KeybindingFailureSequencePrefix {
+                    key: key.into()
+                })
+            );
             assert!(
-                err.describe().contains(key) && err.describe().contains("begins with ctrl-x"),
-                "error should name the key and the rule, got: {}",
-                err.describe()
+                err.reason
+                    .advice()
+                    .iter()
+                    .any(|hint| hint.contains("ctrl-x"))
             );
         }
     }
@@ -622,11 +799,13 @@ mod tests {
     /// itself the key.
     #[test]
     fn shift_with_a_character_is_load_error() {
-        let err = parse_keybindings(std::iter::once(keybinding_entry("shift-a", Some("x"))))
-            .expect_err("shift-a must be rejected");
-        assert!(err.describe().contains("'A'"), "got: {}", err.describe());
-        parse_keybindings(std::iter::once(keybinding_entry("shift-f5", None)))
-            .expect("shift-f5 binds unguarded");
+        let err =
+            parse_keybindings(std::iter::once(keybinding_entry("shift-a", Some("x")))).unwrap_err();
+        assert!(
+            matches!(keybinding_reason(&err), KeybindingFailure::Notation(KeybindingFailureNotation { cause: ral_core::fact::KeyNotationFailure::ShiftedCharacter(fact), .. }) if fact.character == "a" && !fact.control && !fact.alt)
+        );
+        assert!(err.reason.advice().iter().any(|hint| hint.contains("'A'")));
+        parse_keybindings(std::iter::once(keybinding_entry("shift-f5", None))).unwrap();
     }
 
     /// Reserved means exactly ctrl-c / ctrl-d: another modifier frees the chord.

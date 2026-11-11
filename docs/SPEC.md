@@ -1,5 +1,5 @@
-<!-- verified_at_commit: f1b0a4a4 -->
-<!-- generated_at_commit: f1b0a4a4 -->
+<!-- verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a -->
+<!-- generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1877,8 +1877,8 @@ Windows has no POSIX foreground-terminal handoff. Pipeline members share the con
 
 ral separates successful values from failure. A computation may successfully
 return any value, including `false`, `()`, an empty collection, or an empty
-string. Failure is a separate control outcome carrying a reason and
-provenance. This distinction is fundamental: `if` examines a `Bool`, while `?`
+string. Failure is a separate control outcome carrying a cause and
+provenance, which a program reads as an error record (§8.6). This distinction is fundamental: `if` examines a `Bool`, while `?`
 and `try` examine whether a computation succeeded.
 
 Commands and control forms are checked before execution. Branches must agree
@@ -1999,7 +1999,7 @@ Control escapes are not alternatives. In particular, `exit` and internal
 tail-call control pass through a fallback chain rather than selecting its
 next arm. Cancellation is checked between arms.
 
-### 8.5. Raising failure: `fail`, `raise`, and `describe`
+### 8.5. Raising failure: `fail` and `raise`
 
 `fail` takes one `String` and raises an ordinary, recoverable failure:
 
@@ -2007,39 +2007,38 @@ next arm. Cancellation is checked between arms.
 fail 'bad command line'
 ```
 
-Its reason is `` `raised 'bad command line' ``. In visible user code its
+Its message is that text and its status is 1. In visible user code its
 failing frame is `fail`, located at that call. It does not choose an exit
 code: an unhandled raised failure exits 1. To choose a process code, handle
 the failure at top level and use `exit n`.
 
-`raise` takes the closed error record (§8.6) and re-raises it unchanged:
+`raise` takes the closed error record (§8.6) and raises it as a failure:
 
 ```ral
 try { risky-work } { |e| raise $e }
 ```
 
-`raise` trusts the record, including hand-built provenance and reasons. A
-well-typed record claiming an external
-`` `process [program: p, failure: `exited 3] `` is reported as that claim and exits 3 if unhandled. It refuses a
-failure of `` `exited 0 `` (use `return` for success) and `` `signaled n ``
-outside `1..=127`. Records decoded from data must also match the closed type;
+A record `try` handed over re-raises exactly: the failure keeps the cause it
+had, so its advice and its status are the original's. A record that is changed
+(`[...$e, status: 2]`), built by hand, or read back from data is the program's
+own claim instead. `raise` takes it as given, including its `frame` and `site`:
+a claimed `[frame: f, message: m, status: 3, site: s]` is reported as that claim
+and exits 3 if unhandled. It refuses a `status` of 0 (use `return` for success)
+and one above 255. Records decoded from data must also match the closed type;
 extra fields are not accepted.
 
-`describe $e` returns the one human-readable description determined by the
-record's `reason` alone. Only `` `raised text `` stores a message as data;
-all other descriptions are derived. The signatures are:
+The signatures are:
 
 ```text
-fail     : ∀ε α. String → F^ε α
-raise    : ∀ε α. ErrorRecord → F^ε α
-describe : ErrorRecord → Returns String
+fail  : ∀ε α. String → F^ε α
+raise : ∀ε α. ErrorRecord → F^ε α
 ```
 
-A re-raise preserves the record. The record's advice is recomputed from it
-when the error is next rendered (§13.1), including the session's exit-hints
-lookup. Its resolved site renders as `script:line:col`, without a caret.
-Stored hints, context prefixes and unwind facts are report-only and do not
-survive a handler's re-raise. `await` propagates the live error instead,
+A re-raise of a caught record preserves its cause. Its advice is recomputed
+from it when the error is next rendered (§13.1), including the session's
+exit-hints lookup. Its resolved site renders as `script:line:col`, without a
+caret. Stored hints, context prefixes and unwind facts are report-only and do
+not survive a handler's re-raise. `await` propagates the live error instead,
 since no handler has intervened.
 
 An external command that exits unsuccessfully and a runtime operation that
@@ -2055,7 +2054,7 @@ handler:
 let value = try {
   return !{read-config}
 } { |error|
-  warn !{describe $error}
+  warn $error[message]
   return default-config
 }
 ```
@@ -2065,61 +2064,58 @@ receives this record:
 
 ```ral
 [
-  reason: Reason,
   frame: String,
+  message: String,
+  status: Int,
   site: [script: String, line: Int, col: Int],
 ]
 ```
 
-where
+`message` is the failure's one human-readable description and `status` its
+process exit code, from 1 to 255. Both derive from the failure's typed cause,
+which the runtime keeps for the wire, logs and hosts and a program never reads.
+Only `fail`'s text, or a claim a program raised, is authored; every other
+message is derived from typed subjects and causes, with opaque foreign detail
+only at foreign boundaries. Panic remains an ending, not a recoverable
+failure.
 
-```text
-Reason  = `process [program: String, failure: Failure]
-        | `cancelled | `timed-out | `raised String
-Failure = `exited Int | `signaled Int | `not-found
-        | `not-runnable [found: String, why: Unrunnable]
-Unrunnable = `permission-denied | `directory | `not-executable
-           | `missing-interpreter <`some String | `none> | `io String
-```
+`status` derives from the cause. For `fail` it is 1, and for a raised claim the
+claimed status. For an external command:
 
-`reason` says why the failure happened. Its process exit code is derived,
-not stored in the record:
+| The command | `status` |
+|---|---:|
+| exited with nonzero `n` | `n` clamped into `1..=255` |
+| died of signal `s`, not by a cancellation (§8.10) | 128 + `s`, clamped into `1..=255` |
+| does not exist | 127 |
+| could not be started: not executable, a directory, permission denied, or a file whose `#!` interpreter or loader does not exist | 126 |
 
-| `reason` | Meaning | Exit code |
-|---|---|---:|
-| `` `process [program, failure] `` | an external command failed; `program` is its head as dispatched (bare name, or path as typed) | by `failure`, below |
-| `` `cancelled `` | a worker a cancel inside the session stopped, observed by `await` or `poll` | 143 |
-| `` `timed-out `` | a worker reached by a timeout on an enclosing scope, observed likewise | 124 |
-| `` `raised text `` | `fail`, or a runtime operation that could not complete | 1 |
+For every other cause:
 
-A `process` reason takes its code from `failure`:
+| Cause | `status` |
+|---|---:|
+| a worker a cancel inside the session stopped, observed by `await` or `poll` | 143 |
+| a worker reached by a timeout on an enclosing scope, observed likewise | 124 |
+| a refused capability, an I/O or evaluation failure, an invalid input, unavailable state, a source that failed to load, a launch, protocol or host failure, a violated runtime invariant | 1 |
 
-| `failure` | Meaning | Exit code |
-|---|---|---:|
-| `` `exited n `` | the command exited with nonzero `n` | `n` clamped into `1..=255` |
-| `` `signaled s `` | the command died of signal `s`, not by a cancellation (§8.10) | 128 + `s`, clamped into `1..=255` |
-| `` `not-found `` | no command of that name exists | 127 |
-| `` `not-runnable [found, why] `` | the command could not be started; `found` is the path found, or the typed name; `` `missing-interpreter `` is a file that exists whose `#!` interpreter (`` `some ``, when it names one) or loader does not | 126 |
+This table is the shell tradition's code vocabulary; it may be revisited.
 
 A command confined by a grant reports these exactly as an unconfined one does:
-one that cannot start is `` `not-found `` or `` `not-runnable ``, never an
-exit status, and its own end is its own, `` `signaled `` or `` `exited ``. A
-failure of the confinement itself, before the command could start, is
-`` `raised ``, naming what failed.
+one that cannot start is not-found (127) or not-runnable (126), never an exit
+status, and its own end is its own, a signal or an exit. A failure of the
+confinement itself, before the command could start, has status 1 and a message
+naming the failed step and its cause.
 
-Recovery branches on `reason`, not on a status number:
+Recovery reads `status` or `message`, never a parsed diagnostic:
 
 ```ral
-case $e[reason] [
-  `process:   { |p| ... $p[failure] ... },
-  `timed-out: { |_| ... },
-  `cancelled: { |_| ... },
-  `raised:    { |text| ... },
-]
+try { grep -q ERROR log.txt; echo found } { |e|
+  if $[$e[status] == 1] { echo missing } else { raise $e }
+}
 ```
 
-`program` is the subject of every process description (`grep: exited with
-status 1`, `foo: command not found`); it is not a provenance coordinate.
+The command name in a process failure's message is its head as dispatched
+(`grep: exited with status 1`, `foo: command not found`); it is not a
+provenance coordinate.
 
 `frame` is provenance only: the name of the failing frame, not necessarily a
 command. An evaluator refusal names its operation (`index`, for example), and a
@@ -2139,7 +2135,7 @@ must return text too.
 `try` is control flow, not output capture, and it observes nothing: it reads no
 audit trail, retains no bytes, and costs no more than its own frame. Bytes
 written to standard output or standard error continue through the surrounding
-byte pipes. `describe $error` is the failure's description, not captured
+byte pipes. `$error[message]` is the failure's description, not captured
 stderr. Use `audit` when command bytes and the full trail are required — its `` `err `` outcome carries this same record (§13.3).
 
 A handler that succeeds recovers the failure and leaves status 0. `exit`,
@@ -2215,8 +2211,8 @@ against an unrelated caller.
 
 When a failure has actionable context, ral may add hints beneath the primary
 message; §13.1 says which, and in what order. These diagnostics are
-presentation: recovery uses the reason and the failing frame's name and site
-described above, never by parsing the rendered text.
+presentation: recovery uses the record's `status` and the failing frame's name
+and site described above, never by parsing the rendered text.
 
 ### 8.10. Cancellation and signals
 
@@ -2226,7 +2222,7 @@ collection loops and tail-call steps, and while launching or waiting for
 pipelines and external commands. A cancelled external process is terminated
 and reaped before control returns.
 
-A stop is an escape, not a failure: it carries a cause, no `reason`, and no
+A stop is an escape, not a failure: it carries a cause, no error record, and no
 `try` catches it; the run it reaches ends stopped, with the cause's status.
 Two boundaries within a program own stops: a worker's boundary owns
 `cancelled` and `timed out` struck anywhere inside the session — on its own
@@ -2450,7 +2446,7 @@ Every value in `handlers` must be a function of one parameter, such as `{ |args|
 
 The singular `handler` field is a catch-all and must be a function of two parameters, such as `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
-The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed. A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
+The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed, where the refusal is one failure naming the block's role and every checker diagnostic with its code (``the `git` handler does not typecheck: T0057 …``). A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
 
 `detach` never consults handlers: its command is always a program (§11.5). To stub `detach`, stand in for `detach` itself.
 
@@ -2565,9 +2561,9 @@ The live shell is read by six nullary builtins:
 Each is a computation: a `let` of one binds what it returns, and `!{…}` splices it. Each is also an ordinary native: a lexical binding of the same name shadows it, and `^env` runs the program of that name.
 
 The recorded command status is not among them: there is no status register a
-program can read. `try` hands over the failure's reason and provenance where
-a program decides what to do about it. The process exit code is derived from
-the reason, not stored beside it.
+program can read. `try` hands over the failure's message, status and provenance
+where a program decides what to do about it. The process exit code is the
+failure's status, derived from its cause and not stored beside it.
 
 `env` combines the host process environment with any active ral overrides. An inner override wins:
 
@@ -2629,7 +2625,7 @@ use: circular dependency: a.ral -> b.ral -> a.ral
 
 The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
 
-`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their reason and provenance; diagnostics are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the compile failure reads its plain description with `describe`, and its `site` is the `use`.
+`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their cause and provenance; diagnostics are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the compile failure reads its plain description with `describe`, and its `site` is the `use`.
 
 ### 10.5. Persistent sessions
 
@@ -2851,7 +2847,7 @@ been claimed is checked at run time; its type does not record it.
    stdout, then the bytes it wrote to its stderr to the awaiter's current
    stderr;
 3. ends as the block ended: it returns the block's value, raises its failure
-   as it stands (reason, provenance and report decoration included), re-raises its `exit`
+   as it stands (cause, provenance and report decoration included), re-raises its `exit`
    or its stop, and resumes its panic.
 
 The sinks are the awaiter's at the `await`: inside a capture,
@@ -2861,7 +2857,7 @@ failure is the awaiting run's, so `try` recovers it:
 
 ```ral
 try { await $build } { |error|
-    echo "build failed: !{describe $error}"
+    echo "build failed: $error[message]"
 }
 ```
 
@@ -2923,7 +2919,7 @@ result under one lock and returns one of four variants:
 `consumed [elapsed: Float]
 ```
 
-`ErrorRecord` is exactly `[reason, frame, site]` (§8.6). The worker completes
+`ErrorRecord` is exactly `[frame, message, status, site]` (§8.6). The worker completes
 its provenance before publication, so this record agrees with `done` and
 `try` around `await`, regardless of the observer's source context.
 
@@ -3034,9 +3030,9 @@ Cancellation returns `()`. Since `cancel` claims the handle, a later `await` or
 
 A worker stopped by anything but its own `cancel` ends as its own `` `ready ``
 failure: cancelling a worker cancels every worker it started (§11.1), each of
-which ends with `cancelled`, reason `` `cancelled ``, status 143, and
+which ends with `cancelled`, status 143, and
 a worker reached by a timeout on an enclosing scope ends with
-`timed out`, reason `` `timed-out ``, status 124. An `await` that claims
+`timed out`, status 124. An `await` that claims
 such a worker raises that ending as the awaiting run's own failure, which `try`
 can recover (§8.6), and `poll` reports it as that error record in `` `ready ``.
 A cancelled worker's halt claims the workers it started (§11.3), so an `await`
@@ -3778,19 +3774,25 @@ pipeline edge is never an implicit diagnostic or audit channel.
 
 ### 13.1. Runtime errors
 
-A runtime error carries a reason and provenance. It aborts the current
-computation until a construct such as `try` handles it. Its closed data
-projection is exactly `[reason: Reason, frame: String, site: CallSite]` (§8.6),
-with no stored status, derived message or output bytes.
+A runtime error carries a typed cause and provenance. It aborts the current
+computation until a construct such as `try` handles it. A program reads it as
+the closed record `[frame: String, message: String, status: Int, site:
+[script: String, line: Int, col: Int]]` (§8.6), whose `message` and `status` are
+derived from the cause and never stored beside it, and which carries no output
+bytes. The cause is not language data: it stays typed through `try`, `poll`,
+`audit`, hosts and the wire, and re-raising a caught record restores it
+exactly (§8.5); none is reconstructed from diagnostic text. A runtime load's `compile` summary is intrinsic, while
+its source-labelled compiler rejection remains report-only. A source rejected
+before evaluation is a static diagnostic, not a runtime failure.
 
-`fail` creates a fresh raised failure; `raise` re-raises a record; `describe`
-returns its description (§8.5):
+`fail` creates a fresh raised failure; `raise` re-raises a record; `$error[message]`
+is its description (§8.5):
 
 ```ral
 try {
     refresh-index
 } { |error|
-    warn !{describe $error}
+    warn $error[message]
     raise $error
 }
 ```
@@ -3802,21 +3804,25 @@ outcome carry the same record as `try`.
 
 Hints, context prefixes, compile rejections and unwind facts stay on the live
 error, outside its record. A *hint* is advice a site attaches to the error as
-it unwinds; the error keeps its hints in attachment order. The record's
-*advice* is the one note its reason determines: signal advice for a
-`` `signaled `` process failure, the session's exit-hints entry for an
-`` `exited `` one, and none for any other reason. Advice is recomputed at each
-render and is never stored.
+it unwinds; the error keeps its hints in attachment order. The failure's
+*intrinsic advice* is the ordered advice its typed cause determines, including
+signal advice and remedies for operational refusals. A process that `exited`
+also receives the session's matching exit-hints entry. Advice is recomputed
+at each render and is never stored in the record. Some host operations add
+situational advice from the cause and report-only context; that advice does
+not survive a handler's re-raise without that context.
 
-**Hint composition.** The renderer shows every stored hint, in attachment
-order, and then the record's advice. None displaces another, and nothing
-parses the text of any. The compact form (§13.2) composes them identically.
+**Hint composition.** A refused capability's intrinsic advice precedes its stored
+hints. Other causes show stored hints, then any report-context advice, then
+intrinsic advice and the exit-hints entry. Stored hints retain attachment
+order. None displaces another; hint text never determines failure identity or
+control flow. The compact form (§13.2) composes them identically.
 After them come one counted discard note, then an abandoned-tail note. Failed captures add their discarded byte counts,
 saturating at `u32::MAX`; written sequences and binds record whether later
 steps were abandoned. The abandoned-tail note is omitted for spawn failures
 and whenever any hint or advice is shown. Escapes carry no unwind facts.
-Re-raising a record drops these report-only facts; the advice is recomputed
-from the record.
+Re-raising a caught record drops these report-only facts; the advice is
+recomputed from its cause.
 
 Errors raised by the evaluator use the same path as explicit failures. For
 example, a map is indexed by a key computed at runtime, so a key the map does
@@ -3898,7 +3904,7 @@ let report = audit {
 
 case $report[outcome] [
     `ok:  { |value| return $value },
-    `err: { |error| echo !{describe $error} },
+    `err: { |error| echo $error[message] },
 ]
 ```
 
@@ -3913,7 +3919,7 @@ The report is not itself an observation. It has two fields:
 
 ```text
 [
-    outcome: <`ok A | `err [reason: Reason, frame: String,
+    outcome: <`ok A | `err [frame: String, message: String, status: Int,
                             site: [script: String, line: Int, col: Int]]>,
     trail:   [Observation],
 ]
@@ -3921,10 +3927,9 @@ The report is not itself an observation. It has two fields:
 
 `outcome` is the `` `ok ``/`` `err `` half of the body's ending.
 `` `ok `` carries the body's value.
-`` `err `` carries exactly the error record `try` hands its handler, `reason`
-included (§8.6), so
+`` `err `` carries exactly the error record `try` hands its handler (§8.6), so
 one outcome vocabulary serves `try`, `poll` (§11.2), and `audit`: a reader who
-can read one can read all three. `describe` derives its text from the record;
+can read one can read all three. Its `message` is the failure's description;
 hints and advice are for a person and never enter that data (§13.1).
 
 `audit` therefore handles an ordinary runtime error as data: evaluating the
@@ -4224,8 +4229,7 @@ try {
     parse-config 'broken input'
     fail 'parse unexpectedly succeeded'
 } { |error|
-    let expected = `raised 'invalid configuration'
-    assert-equal 'parse reason' $expected $error[reason]
+    assert-equal 'parse message' 'invalid configuration' $error[message]
 }
 ```
 
@@ -4253,7 +4257,7 @@ cover the common assertions without a `case`. Transparent language forms do not
 supply nesting assertions; their nested calls appear directly in the trail that
 owns them. Tests that compare output bytes should inspect a `` `command ``'s
 `stdout` or `stderr`; tests that compare ral's explanation should inspect its
-`error`, or apply `describe` to the report's `` `err `` payload.
+`error`, or read `message` from the report's `` `err `` payload.
 
 For executable-level checks:
 
@@ -4557,7 +4561,7 @@ encodes it, one per line.
 
 ### 14.6. Failure, session control, and concurrency
 
-The core session family includes `fail`, `raise`, `describe`, `exit` and `quit`, `cd`, `alias` and
+The core session family includes `fail`, `raise`, `exit` and `quit`, `cd`, `alias` and
 `unalias`, `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
 `reset`, `help`, and `explain`. All of them are builtins except `echo`, which is a base
 handler: it takes an argument list, writes each argument's text conversion
@@ -4569,8 +4573,8 @@ separated by single spaces, and ends with one newline.
 fail 'unavailable'
 ```
 
-`raise $err` re-raises the closed `[reason, frame, site]` record supplied by
-`try`, unchanged. `describe $err` returns its derived description (§8.5–§8.6).
+`raise $err` re-raises the closed `[frame, message, status, site]` record
+supplied by `try` (§8.5). `$err[message]` is its derived description (§8.6).
 `exit` and `quit` leave the current program rather than producing a
 recoverable failure.
 
@@ -5165,7 +5169,7 @@ At runtime:
 - a normal completion exits 0;
 - `exit N` returns `N`;
 - a runtime error prints a source-labelled diagnostic and exits with the code
-  derived from its reason (§8.6);
+  that is the status of its record (§8.6);
 - a stop returns its cause's status (§8.10), with no diagnostic for a closed stdout;
 - a panic of ral itself prints its message and returns 101.
 
@@ -5173,7 +5177,7 @@ A returning script waits for its still-unclaimed loose workers and writes their
 bytes; a halting script takes them down. Loose workers' endings never change
 the status (§11.1).
 
-An external's raw status stays in its reason until the failure code is
+An external's raw status stays in its typed cause until the failure code is
 computed, where it is clamped into `1..=255`. `exit` refuses arguments outside
 `0..=255`; `fail` takes text and yields code 1. A negative
 Windows `NTSTATUS` therefore cannot turn a failed external into success.
@@ -6172,9 +6176,9 @@ tag.
 ### 17.7. Scope signatures and stand-in arms
 
 Let `Error` be the closed error record
-`` {reason:Reason, frame:String, site:S} ``, where
-`` S = {script:String, line:Int, col:Int} `` and `Reason` is defined in §8.6 — the one
-vocabulary `try`, `poll`, and `audit` all report failure in. The scope forms
+`` {frame:String, message:String, status:Int, site:S} ``, where
+`` S = {script:String, line:Int, col:Int} `` — the one
+vocabulary `try`, `poll`, and `audit` all report failure in (§8.6). The scope forms
 take their bodies as thunks and are typed by them:
 
 ```text
@@ -6378,10 +6382,10 @@ is open, and no allowed check ever; entering a capability layer may also record
 a flagged confused-deputy prefix. With no trail open, capability checks add no
 observations.
 
-`fail m` requires a `String` and raises `` `raised m `` at the innermost
-visible operation frame, including its own. `raise e` requires the closed
-error record and raises it unchanged. `describe e` returns the text derived
-from its reason alone. `exit n` raises an exit escape and is not
+`fail m` requires a `String` and raises a failure of message `m` and status 1
+at the innermost visible operation frame, including its own. `raise e` requires
+the closed error record: a caught record re-raises its exact cause; any other
+is the program's claim, raised as given (§8.5). `exit n` raises an exit escape and is not
 caught by `?` or `try`.
 
 Cancellation is polled at evaluator and process boundaries. A poll of a

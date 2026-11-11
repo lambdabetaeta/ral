@@ -52,7 +52,9 @@ fn arrival_records_display_facts() {
             .admit(Input::Child {
                 id: helper.id(),
                 name: "helper".into(),
-                status: ChildStatus::Failed("boom".into()),
+                status: ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                    ral_core::fact::HelperFailure::NoReply
+                )),
                 elapsed: Duration::from_millis(1500),
             })
             .is_none()
@@ -71,7 +73,9 @@ fn arrival_records_display_facts() {
             .admit(Input::Child {
                 id: helper.id(),
                 name: "helper".into(),
-                status: ChildStatus::Failed("boom".into()),
+                status: ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                    ral_core::fact::HelperFailure::NoReply
+                )),
                 elapsed: Duration::from_millis(1500),
             })
             .is_some()
@@ -90,7 +94,7 @@ fn arrival_records_display_facts() {
     assert_eq!(
         outcome,
         crate::record::Settlement::Failed {
-            reason: "boom".into()
+            reason: crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::NoReply)
         }
     );
     assert_eq!(elapsed_ms, 1500);
@@ -184,7 +188,10 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (run_id, stop_id, ready_id) = loop {
-        let rows = session.engine().read(|t| t.workers()).unwrap();
+        let rows = session
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Workers, |t| t.workers())
+            .unwrap();
         let run = rows
             .iter()
             .find(|r| r.title == "running" && matches!(r.state, WorkerState::Running))
@@ -268,7 +275,7 @@ fn stopping_suppresses_wakeup_while_ready_and_running_deliver() {
 fn severed_worker_probe_declines_after_replaying_cards() {
     let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
-    let cause = Severed::Closed("engine gone".into());
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
     session.engine().transport().sever(cause.clone());
 
     let item = Input::Surface {

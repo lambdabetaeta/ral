@@ -516,17 +516,17 @@ stops the current computation unless something handles it.
     let config = try {
         return !{curl -fsS $primary | from-json}
     } { |error|
-        echo "primary failed: !{describe $error}"
+        echo "primary failed: $error[message]"
         return !{curl -fsS $fallback | from-json}
     }
 
 Keep the handler on the same line as the body's closing brace: `} {`.
-The handler receives exactly `[reason, cmd, site]`. `reason` is a variant:
-`` `exited n `` for an external exit, `` `raised text `` for a raised failure,
-and so on (SPEC §8.6). `cmd` names the failing frame: a command, an operation
-such as `index`, or `fail` itself. `site` is always
-`[script: String, line: Int, col: Int]`. `describe $error` derives the
-failure's text; it is not the command's stderr.
+The handler receives exactly `[frame, message, status, site]` (SPEC §8.6).
+`frame` names the failing frame: a command, an operation such as `index`, or
+`fail` itself. `message` is the failure's text; it is not the command's stderr.
+`status` is its exit status, from 1 to 255: the command's own `n`, `128+n` for
+signal `n`, 127 for a missing command, and 1 for `fail`. `site` is always
+`[script: String, line: Int, col: Int]`.
 
 Raise from text; re-raise a caught record unchanged:
 
@@ -534,9 +534,10 @@ Raise from text; re-raise a caught record unchanged:
     try { risky-work } { |error| raise $error }
 
 An unhandled `fail` exits 1. To choose a code, use `exit n` at top level.
-`raise` trusts a hand-built record, including its reason and site, but refuses
-`` `exited 0 `` and signals outside `1..=127`. Re-raising preserves reason
-hints, not situational advice or unwind notes from the first report.
+`raise` takes a hand-built record as given, including its frame and site, but
+refuses a `status` of 0 (use `return`) or above 255. Re-raising a caught record
+preserves its cause and the hints it determines, not situational advice or
+unwind notes from the first report.
 
 `guard` always runs cleanup, then lets the original failure continue — and a
 cleanup that fails in turn pre-empts it, since a cleanup that could not fail
@@ -568,7 +569,7 @@ The prelude contains common policies:
 
     case $report[outcome] [
         `ok:  { |value| return $value },
-        `err: { |error| echo !{describe $error} },
+        `err: { |error| echo $error[message] },
     ]
 
 `trail` is the flat list of what happened during the body, each entry an

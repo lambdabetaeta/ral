@@ -32,7 +32,7 @@ pub(crate) use mailbox::{
 };
 #[cfg(test)]
 pub(crate) use post::Source;
-pub(crate) use post::{AgentMessage, ENDED_BEFORE_REPORTING, notice, surface_notice};
+pub(crate) use post::{AgentMessage, notice, surface_notice};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 #[cfg(test)]
 pub(crate) use sink::drain_records;

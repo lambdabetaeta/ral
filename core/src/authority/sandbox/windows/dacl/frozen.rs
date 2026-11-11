@@ -47,7 +47,13 @@ impl FrozenPin {
             Ok(Some(held)) => held,
             Ok(None) => return Ok(None),
             Err(e) if is_loop(&e) => return Err(redirected(real)),
-            Err(e) => return Err(unheld(real.as_path(), &e)),
+            Err(e) => {
+                return Err(unheld(
+                    real.as_path(),
+                    crate::fact::DaclOperation::OpenFrozenPath,
+                    &e,
+                ));
+            }
         };
         Self::held(&held, kind).map(Some)
     }
@@ -58,7 +64,13 @@ impl FrozenPin {
         let name = utf8(real.as_path())
             .map_err(|_| DaclError::NotUnicode(real.as_path().to_path_buf()))?
             .to_owned();
-        if !held.is_local().map_err(|e| unheld(real.as_path(), &e))? {
+        if !held.is_local().map_err(|e| {
+            unheld(
+                real.as_path(),
+                crate::fact::DaclOperation::ProbeLocalVolume,
+                &e,
+            )
+        })? {
             return Err(DaclError::NotLocal(real.as_path().to_path_buf()));
         }
         // The most stamping rights `kind` can use that the object grants: a
@@ -77,7 +89,13 @@ impl FrozenPin {
                 reopened => Some(reopened),
             })
             .unwrap_or_else(|| reopen(bare))
-            .map_err(|e| unheld(real.as_path(), &e))?;
+            .map_err(|e| {
+                unheld(
+                    real.as_path(),
+                    crate::fact::DaclOperation::ReopenFrozenPath,
+                    &e,
+                )
+            })?;
         Ok(Self {
             real: real.clone(),
             name,
@@ -120,8 +138,8 @@ fn redirected(real: &RealPath) -> DaclError {
     }
 }
 
-fn unheld(at: &Path, e: &io::Error) -> DaclError {
-    super::acl::win32_err_str(at, &format!("cannot hold it open to check it: {e}"))
+fn unheld(at: &Path, op: crate::fact::DaclOperation, e: &io::Error) -> DaclError {
+    super::acl::win32_io(at, op, e)
 }
 
 /// Check every frozen allowance of one kind, before the session's memo sees

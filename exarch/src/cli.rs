@@ -12,6 +12,10 @@ use std::{sync::LazyLock, time::Duration};
 static HELPER_IDLE_DEFAULT: LazyLock<String> =
     LazyLock::new(|| crate::schedule::fmt_duration(crate::agent::fleet::HELPER_IDLE));
 
+fn parse_helper_idle(text: &str) -> Result<Duration, String> {
+    crate::schedule::parse_duration(text).map_err(|failure| failure.describe())
+}
+
 /// All flags are long-form only: short letters would collide, and there are
 /// few enough to spell out.
 #[derive(Parser, Debug)]
@@ -205,7 +209,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "DURATION",
-        value_parser = crate::schedule::parse_duration,
+        value_parser = parse_helper_idle,
         default_value = HELPER_IDLE_DEFAULT.as_str()
     )]
     pub helper_idle: Duration,
@@ -310,10 +314,10 @@ pub fn load_seed(
 ) -> Result<Option<String>, String> {
     let seed = match (prompt, file) {
         (Some(p), _) => Some(p),
-        (None, Some(path)) => Some(site!(
-            Silent::CliArgument,
-            ral_core::own::read_named(&path)
-        )?),
+        (None, Some(path)) => Some(
+            site!(Silent::CliArgument, ral_core::own::read_named(&path))
+                .map_err(|error| error.to_string())?,
+        ),
         (None, None) => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))

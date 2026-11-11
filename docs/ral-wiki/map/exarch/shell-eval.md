@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-06
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -28,10 +28,10 @@ a cancelled exchange starts no effect. Cancellation threads flip scope flags
 and never write to a transport ([[internals/cancellation|cancellation]]). Formatting is `Agent::ral`'s,
 through `report::tool_result`, which also reports whether the run failed.
 `tool_result` takes the whole `Ran`; `render` reads `ending`, `rendered` and
-`single_command` from it. The ending is `Ending<FOValue, ErrorRecord,
+`single_command` from it. The ending is `Ending<FOValue, ErrorFact,
 CancelCause>`: `Ok`, `Err`, `Exited`,
-`Stopped`, `Panic`. `Err` carries exactly `[reason, frame, site]`, with total
-provenance, no stored status or derived message. `ToolResult.exit` is `u8`,
+`Stopped`, `Panic`. `Err` carries exactly the `ErrorFact` `{frame, reason,
+site}`, with total provenance and the typed reason. `ToolResult.exit` is `u8`,
 read from `ending.code()`; failures delegate to the one table on `Reason`.
 Hosts keep `rendered` verbatim, adding an exit tip only for
 `Err(record)` whose reason is a process failure `Exited`, a timeout tip only for `Stopped(TimedOut)`, and
@@ -267,7 +267,7 @@ never by the decoder or by the seam that records it (`surface::record`):
   bound handle and registry inspect it:
   ``errand #7 (building) finished after 3 mins 12 secs (failed): build failed. `await` on its bound handle replays its output and returns its value; `workers` lists every worker.``
   `Surface::Done` and `Display::Done` keep core `Done`, worded through
-  `Done::parts`/`said`, with failure text derived by `ErrorRecord::describe`.
+  `Done::parts`/`said`, with failure text the record's `message`.
   A worker completes provenance before publishing, so its `done`, `poll`
   and `await` records agree. At admission, `Agent::admit` probes once and admits
   the done card and wake only for a present unclaimed (`Running | Ready`)

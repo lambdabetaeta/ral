@@ -139,7 +139,7 @@ it once.
 refused desk verb also draws an error chrome row. It does not. Every
 `Kind::Error` emit site in exarch was enumerated, and none lies on the
 agent-cancel / message / schedule / unschedule / reply refusal path. A refusal
-*raises*; the raise leaves through `ExarchDesk::handle` as an `Error`, crossing as a `WireError` (message and hints),
+*raises*; the raise leaves through `ExarchDesk::handle` as an `Error`, crossing as a `WireError` (typed reason, report context and ordered hints),
 fails the builtin body, aborts the ral program, and is written by
 `End::render` as an ariadne report into the **captured stderr**, which
 `digest::render` folds into the model-facing `STDERR:` / `EXIT: 1` sections. That

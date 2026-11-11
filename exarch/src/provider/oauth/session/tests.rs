@@ -140,7 +140,7 @@ async fn fixture() -> (TestDir, CredentialHandle) {
     .unwrap()
 }
 
-async fn prepare(handle: &CredentialHandle, url: String) -> Result<(), String> {
+async fn prepare(handle: &CredentialHandle, url: String) -> Result<(), CredentialFailure> {
     handle
         .prepare_until(
             Instant::now() + Duration::from_secs(5),
@@ -293,7 +293,10 @@ async fn failed_persistence_keeps_the_successor_and_retries_only_its_write() {
     state.remove(TOKEN_FILE).unwrap();
     state.make_dir(TOKEN_FILE).unwrap();
     request.reply.send(FRESH).unwrap();
-    assert!(refreshing.await.unwrap().is_err());
+    let error = refreshing.await.unwrap().unwrap_err();
+    assert!(
+        matches!(error.cause, CredentialCause::Store(ref store) if store.operation == CredentialStoreOperation::PersistFreshRotation)
+    );
     assert_eq!(handle.snapshot().refresh_token, "r1");
     std::fs::remove_dir(state.path().join(TOKEN_FILE)).unwrap();
     write_all_at(&state, None, &[token()]).unwrap();
@@ -303,7 +306,7 @@ async fn failed_persistence_keeps_the_successor_and_retries_only_its_write() {
 }
 
 /// A failed exchange, then a retry that reaches the issuer and rotates.
-async fn retry_after(failure: RefreshError) -> String {
+async fn retry_after(failure: RefreshError) -> CredentialFailure {
     let (state, handle) = fixture().await;
     let error = handle
         .prepare_until(Instant::now() + Duration::from_secs(5), async move |_| {
@@ -329,14 +332,38 @@ async fn retry_after(failure: RefreshError) -> String {
 
 #[tokio::test]
 async fn a_refresh_that_was_never_submitted_leaves_the_account_usable() {
-    let error = retry_after(RefreshError::NotSubmitted("connection refused".into())).await;
-    assert!(error.contains("connection refused") && error.contains("retrying is safe"));
+    let request_error = reqwest::Client::new()
+        .post(":invalid-url")
+        .build()
+        .unwrap_err();
+    let cause = crate::provider::service_from_reqwest(
+        &request_error,
+        "xai-grok",
+        ral_core::fact::ServiceOperation::RefreshRequest,
+    );
+    let error = retry_after(RefreshError::NotSubmitted(RefreshFailure::Service(cause))).await;
+    assert!(
+        matches!(error.cause, CredentialCause::Refresh(ref failure) if failure.outcome == RefreshOutcome::NotSubmitted)
+    );
 }
 
 #[tokio::test]
 async fn a_refresh_the_issuer_rejected_leaves_the_account_usable() {
-    let error = retry_after(RefreshError::Rejected("issuer said no".into())).await;
-    assert!(error.contains("issuer said no"));
+    let response = oauth::refresh_failure(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":"invalid_grant"}"#,
+        &token(),
+    );
+    let cause = ral_core::fact::ServiceFailure {
+        service: "xai-grok".into(),
+        operation: ral_core::fact::ServiceOperation::RefreshResponse,
+        context: Vec::new(),
+        cause: Box::new(ral_core::fact::ServiceCause::RefreshResponse(response)),
+    };
+    let error = retry_after(RefreshError::Rejected(RefreshFailure::Service(cause))).await;
+    assert!(
+        matches!(error.cause, CredentialCause::Refresh(ref failure) if failure.outcome == RefreshOutcome::Rejected)
+    );
 }
 
 #[tokio::test]
@@ -351,7 +378,9 @@ async fn an_ambiguous_exchange_is_not_replayed() {
     // The issuer hangs up on a request it has fully received.
     drop(issuer.request().await.reply);
     let error = refreshing.await.unwrap().unwrap_err();
-    assert!(error.contains("may have rotated"), "{error}");
+    assert!(
+        matches!(error.cause, CredentialCause::Refresh(ref failure) if failure.outcome == RefreshOutcome::Ambiguous)
+    );
     assert_eq!(
         credential(&handle),
         CredentialState::Live(Live::Uncertain(token()))
@@ -404,7 +433,13 @@ async fn a_held_file_lock_obeys_the_operation_deadline_without_submitting_http()
             async |_| -> Result<OAuthToken, RefreshError> { panic!("issuer called while locked") },
         )
         .await;
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(CredentialFailure {
+            cause: CredentialCause::LeaseTimedOut,
+            ..
+        })
+    ));
     drop(file);
     let mut issuer = Issuer::new().await;
     let retry = tokio::spawn({
@@ -670,4 +705,116 @@ async fn two_processes_share_one_rotation_and_preserve_sibling_accounts_and_host
             .unwrap(),
         &sibling
     );
+}
+
+#[tokio::test]
+async fn owner_panic_retains_uncertainty_but_not_panic_text() {
+    let (_state, handle) = fixture().await;
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> { panic!("secret panic payload") },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.cause, CredentialCause::OwnerPanicked);
+    assert_eq!(error.account, account_id(&token()).as_str());
+    assert_eq!(error.service, CredentialService::Grok);
+    assert_eq!(
+        credential(&handle),
+        CredentialState::Live(Live::Uncertain(token()))
+    );
+    assert!(!error.describe().contains("secret panic payload"));
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> {
+                panic!("uncertain credentials must not be replayed")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.cause, CredentialCause::UnresolvedRotation);
+}
+
+#[tokio::test]
+async fn a_closed_completion_is_an_owner_stoppage() {
+    let (_state, handle) = fixture().await;
+    let (publish, result) = watch::channel(None);
+    handle.0.state.lock_ignore_poison().pending = Some(result);
+    drop(publish);
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> {
+                panic!("closed completion must not submit")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.cause, CredentialCause::OwnerStopped);
+}
+
+#[tokio::test]
+async fn unreadable_store_and_removed_account_have_distinct_preparation_causes() {
+    let (state, handle) = fixture().await;
+    std::fs::write(state.path().join(TOKEN_FILE), b"{").unwrap();
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> {
+                panic!("unreadable store must not submit")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.cause, CredentialCause::Store(ref store) if store.operation == CredentialStoreOperation::Read)
+    );
+    write_all_at(&state, None, &[]).unwrap();
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> {
+                panic!("removed account must not submit")
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.cause, CredentialCause::Removed);
+}
+
+#[tokio::test]
+async fn opening_the_lease_preserves_its_owned_file_cause() {
+    let (state, handle) = fixture().await;
+    state.remove("oauth.lock").unwrap();
+    state.make_dir("oauth.lock").unwrap();
+    let error = handle
+        .prepare_until(
+            Instant::now() + DEADLINE,
+            async |_| -> Result<OAuthToken, RefreshError> { panic!("no lease must not submit") },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.cause, CredentialCause::Store(ref store) if store.operation == CredentialStoreOperation::OpenLease)
+    );
+}
+
+#[test]
+fn persistence_failure_stages_preserve_the_same_owned_cause_without_merging_the_state_fact() {
+    let error = ral_core::own::OwnError::Linked(std::path::PathBuf::from("oauth.json"));
+    let io = ral_core::fact::IoCause::from(&error);
+    for operation in [
+        CredentialStoreOperation::PersistSuccessor,
+        CredentialStoreOperation::PersistFreshRotation,
+    ] {
+        assert_eq!(
+            store_cause(operation, io.clone()),
+            CredentialCause::Store(CredentialCauseStore {
+                operation,
+                cause: io.clone()
+            })
+        );
+    }
 }

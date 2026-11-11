@@ -456,7 +456,7 @@ impl GrantLayer {
 /// at every boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GrantStack(Vec<GrantLayer>);
+pub struct GrantStack(pub(super) Vec<GrantLayer>);
 
 impl GrantStack {
     /// Where every shell starts; `grant { ... }` blocks and the session-wide

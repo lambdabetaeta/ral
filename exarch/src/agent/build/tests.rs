@@ -101,7 +101,14 @@ fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
 
 #[test]
 fn fork_inherits_host_builtins() {
-    let names = |session: &Agent| session.engine().read(|t| t.builtin_names()).unwrap();
+    let names = |session: &Agent| {
+        session
+            .engine()
+            .read(ral_core::fact::ProbeSubject::BuiltinNames, |t| {
+                t.builtin_names()
+            })
+            .unwrap()
+    };
     let session = Agent::for_test("system").unwrap();
     assert!(names(&session).iter().any(|n| n == "view-text"));
     let child = names(&session.fork().expect("fork child"));
@@ -198,8 +205,14 @@ fn mnemon_root_imports_context_withholds_reply_and_resumes() {
     );
     assert!(child.handle.parent().is_none());
     assert_eq!(
-        child.engine().read(|t| t.grants()).unwrap(),
-        parent.engine().read(|t| t.grants()).unwrap()
+        child
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+            .unwrap(),
+        parent
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+            .unwrap()
     );
     assert_eq!(child.handle.0.fuel, parent.handle.0.fuel);
     let sessions = parent.fleet.launch.sessions_root.clone();
@@ -247,15 +260,16 @@ fn a_reborn_engine_carries_the_life() {
     };
     session.clear().unwrap();
     assert!(session.handle().is_live());
-    outgoing.sever(Severed::Closed("the outgoing engine".into()));
+    outgoing.sever(Severed::Closed(
+        ral_core::fact::ConnectionClosed::TransportDropped,
+    ));
     assert!(
         session.handle().is_live(),
         "the outgoing engine no longer holds the life"
     );
-    session
-        .engine()
-        .transport()
-        .sever(Severed::Closed("the reborn engine".into()));
+    session.engine().transport().sever(Severed::Closed(
+        ral_core::fact::ConnectionClosed::TransportDropped,
+    ));
     assert!(!session.handle().is_live());
 }
 
@@ -358,7 +372,10 @@ fn a_root_runs_under_its_launch_grants() {
         assert_eq!(
             session
                 .engine()
-                .read(|t| t.path_entries(tmp.path()))
+                .read(
+                    ral_core::fact::ProbeSubject::PathEntries(ral_core::path::shown(tmp.path())),
+                    |t| t.path_entries(tmp.path())
+                )
                 .unwrap(),
             [] as [ral_core::protocol::probe::PathEntry; 0]
         );
@@ -439,7 +456,10 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
     })
     .unwrap();
     assert_eq!(
-        parent.engine().read(|t| t.grants()).unwrap(),
+        parent
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+            .unwrap(),
         Grants::of(&grants)
     );
     let c = format!(
@@ -457,7 +477,10 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         ..Capabilities::default()
     }));
     assert_eq!(
-        child.engine().read(|t| t.grants()).unwrap(),
+        child
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+            .unwrap(),
         Grants::of(&grants)
     );
     let (emit, _rx) = crate::bus::dummy_emitter();
@@ -478,7 +501,10 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         ..Capabilities::default()
     }));
     assert_eq!(
-        grandchild.engine().read(|t| t.grants()).unwrap(),
+        grandchild
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Grants, |t| t.grants())
+            .unwrap(),
         Grants::of(&grants)
     );
 }
@@ -499,4 +525,82 @@ fn unwind_ends_non_owing_agents_with_schedules() {
     }));
     assert!(unwind.is_err());
     assert!(!handle.is_live());
+}
+
+#[test]
+fn failed_inherited_opening_never_assembles_or_binds_a_child() {
+    use crate::record::Record;
+    use ral_core::carrier::Transport as _;
+    use ral_core::fact::{ContextFailure, ExarchFailure, HostFailure, Reason, RecordReadFailure};
+
+    let mut parent = trunk(false);
+    parent
+        .body
+        .log
+        .append_user("ancestor".into(), None, Voice::Human)
+        .unwrap();
+    parent
+        .body
+        .log
+        .append_assistant(ChatMessage::assistant("answer"), vec![], None)
+        .unwrap();
+    let inherited = parent.body.log.inherited_context();
+    let source = parent.log_dir().path().join(RECORD);
+    let moved = parent.log_dir().path().join("ancestor-unavailable");
+    fs::rename(&source, &moved).unwrap();
+    let fleet = &parent.fleet;
+    let name = fleet.registry.name("unopened").unwrap();
+    let engine = fleet.launch.engine().unwrap();
+    let crate::agent::engine::EngineKind::Identity(transport) = engine.kind() else {
+        panic!("the fixture uses an identity engine")
+    };
+    assert!(transport.unbind().is_none());
+    let error = Agent::born(
+        fleet,
+        Parent::Agent(&parent.handle, parent.mailbox.home().child()),
+        name,
+        engine,
+        parent.body.client.clone(),
+        Some(inherited),
+    )
+    .err()
+    .expect("the inherited ancestor cannot be opened");
+    fs::rename(&moved, &source).unwrap();
+
+    assert!(matches!(&error.reason, Reason::Host(host)
+        if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
+            if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
+                && failure.record == ral_core::path::shown(&source)
+                && matches!(failure.cause, RecordReadFailure::Io(_)))));
+    assert!(error.context().unwrap().contains("unopened"));
+    assert_eq!(error.hints(), []);
+    assert!(
+        transport.unbind().is_none(),
+        "assembly never binds the failed child's engine"
+    );
+    assert!(fleet.registry.resolve("unopened").is_none());
+    assert!(
+        fleet.registry.name("unopened").is_ok(),
+        "failed construction releases its reservation"
+    );
+    assert!(parent.body.nursery.named("unopened").is_none());
+    let orphan = AgentLog::session_ids(&fleet.launch.sessions_root)
+        .unwrap()
+        .into_iter()
+        .find(|id| *id != parent.id())
+        .unwrap();
+    let prefix = crate::record::read_records(
+        &fleet
+            .launch
+            .sessions_root
+            .path()
+            .join(orphan.to_string())
+            .join(RECORD),
+    )
+    .unwrap();
+    assert!(matches!(prefix.as_slice(), [
+        Record::Control(crate::record::Control::SessionStarted(started)),
+        Record::Transcript(crate::record::Transcript::Inherited { .. }),
+    ] if started.name == "unopened"));
+    transport.end().unwrap();
 }

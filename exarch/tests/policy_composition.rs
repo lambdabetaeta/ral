@@ -479,7 +479,7 @@ fn an_unknown_base_names_every_base_that_exists() {
             .unwrap_err()
             .to_string(),
         format!(
-            "unknown base 'resonable'; expected one of: {}",
+            "exarch: policy: unknown base 'resonable'; expected one of: {}",
             Base::VARIANTS
                 .iter()
                 .map(Base::to_string)
@@ -513,7 +513,7 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
     assert_eq!(
         err.to_string(),
         format!(
-            "--restrict: capability file: {}: no such file or directory",
+            "--restrict: capability file: could not open {:?}: no such file or directory",
             ral_core::path::shown(dir.path().join("no-such-file.ral"))
         )
     );

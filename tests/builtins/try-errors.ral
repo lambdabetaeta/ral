@@ -1,37 +1,37 @@
 # Test: §10.1 try / handler dispatch
 #
 # `try body handler` runs body and returns its value; on failure it
-# calls handler with an ErrorRecord [reason, frame, site] and
-# returns the handler's value instead.
+# calls handler with an error record [frame, message, status, site]
+# and returns the handler's value instead.
 
 # Success: the body's value comes back and the handler is not called.
 echo !{try { return 0 } { |_| return -1 }}
 
-# Command failure: the reason flows into the handler.  `cat`'s complaint lands in
+# Command failure: its message and status flow into the handler.  `cat`'s complaint lands in
 # a file, so the failure is `cat`'s own.
 let d = temp-dir
-echo !{try { cat /nonexistent 2> "$d/err"; return `raised unreached } { |e| return $e[reason] }}
+echo !{try { cat /nonexistent 2> "$d/err"; return unreached } { |e| return "$e[status] $e[message]" }}
 rm -rf $d
 
-# Explicit fail: the reason carries the text.
-echo !{try { fail 'explicit failure' } { |e| return $e[reason] }}
+# Explicit fail: the message carries the text, and the status is 1.
+echo !{try { fail 'explicit failure' } { |e| return "$e[status] $e[message]" }}
 
-# A custom message is data in raised, and describe supplies its text.
+# A custom message is the record's message.
 try { fail 'custom failure' } { |e|
-    echo $e[reason]
-    echo !{describe $e}
+    echo $e[message]
+    echo $e[status]
 }
 
 # raise inside a handler preserves the entire record.
 let original = try { fail 'boom' } { |e| return $e }
 try { raise $original } { |e|
     echo $[$e == $original]
-    echo !{describe $e}
+    echo $e[message]
 }
 
 # `try` with side-effecting handler.
 try { fail 'side-effecting handler test' } { |err|
-    echo "caught !{describe $err}"
+    echo "caught $err[message]"
 }
 
 # Nested try.
@@ -45,15 +45,15 @@ try {
     retry 3 { echo 'trying...'; fail 'retry test' }
 } { |_err| echo 'retry exhausted' }
 
-# The record carries why the body failed, its operation, and a total site.
-try { fail 'x' } { |e| echo $e[reason] $e[frame] }
+# The record carries the failure's message and status, its operation, and a total site.
+try { fail 'x' } { |e| echo $e[message] $e[status] $e[frame] }
 try { fail 'x' } { |e|
     echo $[$e[site][line] > 0]
 }
 
 # guard: the body's error propagates, not the cleanup's.
 try { guard { fail 'original failure' } { echo cleanup } } { |e|
-    echo !{describe $e}
+    echo $e[message]
 }
 
 echo 'try error tests done'

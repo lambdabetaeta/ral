@@ -11,10 +11,16 @@
 
 use ral_core::data::datum::Datum as _;
 use ral_core::error::Error;
+use ral_core::fact::{
+    EscapedLoad, InvalidCause, InvalidFailure, IoOperation, IoSubject, PathFailure, PluginFailure,
+    PluginFailureAliasInstallationEscaped, PluginFailureAlreadyLoaded,
+    PluginFailureFactoryReturnedBlock, PluginFailureNotFound, PluginFailureNotLoaded,
+    PluginFailureOptionsWithoutFactory, Reason, StateFailure,
+};
 use ral_core::path::{Judged, Located, Reading};
 use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, FrameHandle, HookName, HookSig, Map, Mooring,
-    PluginEntry, Settled,
+    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Map,
+    Mooring, PluginEntry, Settled,
 };
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::typecheck::builtins::scheme;
@@ -59,11 +65,21 @@ pub(crate) static BUILTINS: &[BuiltinEntry] = &BUILTINS_ARR;
 /// The plugin's source, read through the judged handle, which ends here:
 /// nothing of the load after the read holds the file or its directory.
 fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String)> {
-    let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(e.to_string()))?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(|e| {
+        Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
+            "load-plugin".into(),
+            InvalidCause::Path(PathFailure::from(&e)),
+        ))))
+    })?;
     let read = located.read().and_then(std::io::read_to_string);
     drop(located);
-    let source = read.map_err(|e| Error::io(ral_core::path::shown(file.path()), &e))?;
+    let source = read.map_err(|e| {
+        Error::io(
+            IoOperation::Read,
+            IoSubject::Path(ral_core::path::shown(file.path())),
+            &e,
+        )
+    })?;
     Ok((file, ral_core::source::normalize_source_text(source)))
 }
 
@@ -92,8 +108,8 @@ pub(crate) fn load_plugin(
             )),
         )
     })?;
-    let module = instantiate(value, options, mooring, shell)?;
-    check_is_manifest(&module)?;
+    let module = instantiate(name_or_path, value, options, mooring, shell)?;
+    check_is_manifest(name_or_path, &module)?;
 
     let (manifest, handlers) = manifest::parse(&module)?;
     let mut entry = PluginEntry {
@@ -104,7 +120,12 @@ pub(crate) fn load_plugin(
         .plugin_loaded(&entry.name)
         .map_err(RegisterError::into_error)?
     {
-        return Err(Error::new("already loaded").into());
+        return Err(
+            super::refusal(PluginFailure::AlreadyLoaded(PluginFailureAlreadyLoaded {
+                name: entry.name.clone(),
+            }))
+            .into(),
+        );
     }
     check_no_binding_conflicts(&handlers.aliases, shell)?;
 
@@ -161,7 +182,7 @@ fn register_plugin_hooks(
                 HookSig::Hook { kind: kind.into() },
                 policy,
             )
-            .map_err(|e| Error::new(format!("hook '{name}': {e}")))?;
+            .map_err(|e| e.into_error().with_context(format!("hook '{name}'")))?;
     }
     for (idx, (key, handler)) in handlers.keybindings.iter().enumerate() {
         shell
@@ -173,7 +194,7 @@ fn register_plugin_hooks(
                 },
                 DefaultPolicy::leased(),
             )
-            .map_err(|e| Error::new(format!("keybinding '{key}': {e}")))?;
+            .map_err(|e| e.into_error().with_context(format!("keybinding '{key}'")))?;
     }
     Ok(())
 }
@@ -186,7 +207,12 @@ pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) ->
         .plugin_loaded(name)
         .map_err(RegisterError::into_error)?
     {
-        return Err(Error::new("not loaded").into());
+        return Err(
+            super::refusal(PluginFailure::NotLoaded(PluginFailureNotLoaded {
+                name: name.into(),
+            }))
+            .into(),
+        );
     }
     shell.enquire(
         mooring,
@@ -205,9 +231,9 @@ pub(crate) fn unload_plugin(name: &str, mooring: &Mooring, shell: &mut Shell) ->
 /// name is not a conflict — the alias installs, live only under `^name`.
 fn check_no_binding_conflicts(bindings: &[(String, Value)], shell: &Shell) -> Result<(), Error> {
     match bindings.iter().find(|(name, _)| shell.has_alias(name)) {
-        Some((name, _)) => Err(Error::new(format!(
-            "alias '{name}' conflicts with an existing alias"
-        ))),
+        Some((name, _)) => Err(Error::new(Reason::State(Box::new(
+            StateFailure::AliasConflict(name.clone()),
+        )))),
         None => Ok(()),
     }
 }
@@ -223,7 +249,17 @@ fn install_bindings(
                 .install_alias(name.clone(), value.clone())
                 .map_err(|e| match e {
                     Break::Error(err) => err.with_context(format!("alias '{name}'")),
-                    Break::Escape(_) => Error::new(format!("alias '{name}' installation escaped")),
+                    Break::Escape(escape) => {
+                        super::refusal(PluginFailure::AliasInstallationEscaped(
+                            PluginFailureAliasInstallationEscaped {
+                                alias: name.clone(),
+                                cause: match escape {
+                                    Escape::Exit(code) => EscapedLoad::Exit(code),
+                                    Escape::Stopped(stop) => EscapedLoad::Stopped(stop.cause),
+                                },
+                            },
+                        ))
+                    }
                 })?,
         );
     }
@@ -233,7 +269,13 @@ fn install_bindings(
 /// Apply the options map to a factory, nested under the load's own mooring,
 /// to yield its manifest.  If the plugin is already a manifest map, a
 /// non-empty options map is a load-time error; an empty one is fine.
-fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn instantiate(
+    plugin: &str,
+    val: Value,
+    options: &Map,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     match val {
         Value::Thunk(_) => ral_core::shell::evaluator::apply(
             &val,
@@ -241,10 +283,11 @@ fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) 
             mooring,
             shell,
         ),
-        _ if !options.is_empty() => Err(Error::new(
-            "it takes no configuration; \
-             its entry in the rc's plugins map wants the empty options map `[:]`",
-        )
+        _ if !options.is_empty() => Err(super::refusal(PluginFailure::OptionsWithoutFactory(
+            PluginFailureOptionsWithoutFactory {
+                plugin: plugin.into(),
+            },
+        ))
         .into()),
         val => Ok(val),
     }
@@ -252,12 +295,13 @@ fn instantiate(val: Value, options: &Map, mooring: &Mooring, shell: &mut Shell) 
 
 /// Error if `val` is still a block after instantiation: a factory that made
 /// one, which only a return of unknown type can slip past the checker with.
-fn check_is_manifest(val: &Value) -> Result<(), Error> {
+fn check_is_manifest(plugin: &str, val: &Value) -> Result<(), Error> {
     match val {
-        Value::Thunk(_) => Err(Error::new(
-            "it returned a Block as its manifest; \
-             expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])",
-        )),
+        Value::Thunk(_) => Err(super::refusal(PluginFailure::FactoryReturnedBlock(
+            PluginFailureFactoryReturnedBlock {
+                plugin: plugin.into(),
+            },
+        ))),
         _ => Ok(()),
     }
 }
@@ -290,9 +334,12 @@ fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located
         .map(|cand| shell.anchor(&cand))
         .chain(written)
         .collect();
-    shell
-        .locate_first(candidates)?
-        .ok_or_else(|| Error::new("not found; is it in <config>/ral/plugins or RAL_PATH?").into())
+    shell.locate_first(candidates)?.ok_or_else(|| {
+        super::refusal(PluginFailure::NotFound(PluginFailureNotFound {
+            requested: name_or_path.into(),
+        }))
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -337,18 +384,32 @@ mod tests {
     /// naming the hook and the arity mismatch.
     #[test]
     fn two_parameter_lifecycle_handler_is_rejected() {
+        use ral_core::fact::{
+            HookArity, HookRef, HookRegistrationFailure, HookSignature, PluginHookRef,
+        };
         let mut shell = ral_core::test_helper::core_shell();
         let h = crate::repl::eval(&mut shell, "{ |_src _status| return () }");
         let err =
             register_plugin_hooks("p", &hooks_only(vec![(HookEvent::PostExec, h)]), &mut shell)
-                .expect_err("a two-parameter lifecycle handler must be rejected");
-        assert!(
-            err.describe().contains("post-exec")
-                && err.describe().contains("1 parameter")
-                && err.describe().contains("got 2"),
-            "error should name the hook and the arity mismatch, got: {}",
-            err.describe()
+                .unwrap_err();
+        assert_eq!(
+            err.reason,
+            Reason::State(Box::new(StateFailure::HookRegistration(
+                HookRegistrationFailure::Arity(HookArity {
+                    name: HookRef::Plugin(PluginHookRef {
+                        plugin: "p".into(),
+                        hook: "post-exec".into()
+                    }),
+                    expected: 1_usize.into(),
+                    actual: 2_usize.into(),
+                    signature: HookSignature::Hook("post-exec".into()),
+                })
+            )))
         );
+        assert_eq!(err.context(), Some("hook 'post-exec'"));
+        assert_eq!(err.hints(), []);
+        assert!(err.describe().contains("post-exec"));
+        assert!(err.plain().contains("1 parameter"));
     }
 
     /// The candidate search takes the first candidate the grant lets be read:
@@ -438,6 +499,142 @@ mod tests {
             })
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn plugin_factory_refusals_and_alias_conflicts_keep_their_subjects() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let options = Map::from_iter([("key".into(), Value::Int(1))]);
+        let Err(Break::Error(error)) =
+            instantiate("p", Value::Unit, &options, &Mooring::adrift(), &mut shell)
+        else {
+            panic!("expected non-factory refusal")
+        };
+        assert_eq!(
+            error.reason,
+            super::super::refusal(PluginFailure::OptionsWithoutFactory(
+                PluginFailureOptionsWithoutFactory { plugin: "p".into() }
+            ))
+            .reason
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        assert!(
+            error
+                .reason
+                .advice()
+                .iter()
+                .any(|hint| hint.contains("[:]"))
+        );
+        let block = crate::repl::eval(&mut shell, "{ return () }");
+        let error = check_is_manifest("p", &block).unwrap_err();
+        assert_eq!(
+            error.reason,
+            super::super::refusal(PluginFailure::FactoryReturnedBlock(
+                PluginFailureFactoryReturnedBlock { plugin: "p".into() }
+            ))
+            .reason
+        );
+        assert!(
+            error
+                .reason
+                .advice()
+                .iter()
+                .any(|hint| hint.contains("name:"))
+        );
+        let block = crate::repl::eval(&mut shell, "{ |_args| return () }");
+        shell.install_alias("ll".into(), block.clone()).unwrap();
+        let error = check_no_binding_conflicts(&[("ll".into(), block)], &shell).unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::AliasConflict("ll".into())))
+        );
+    }
+
+    #[test]
+    fn rejected_plugin_source_keeps_a_summary_and_the_rich_rejection() {
+        use ral_core::fact::{CompileFailure, CompilePhase};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.ral");
+        std::fs::write(&path, "let [").unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        let Err(Break::Error(error)) = load_plugin(
+            &ral_core::path::shown(&path),
+            &Map::new(),
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("expected compile rejection")
+        };
+        let Reason::Compile(summary) = &error.reason else {
+            panic!("expected compile summary")
+        };
+        assert_eq!(
+            summary.as_ref(),
+            &CompileFailure {
+                source: ral_core::path::shown(std::fs::canonicalize(&path).unwrap()),
+                phase: CompilePhase::Parse
+            }
+        );
+        assert!(error.rejection().is_some());
+        assert!(!error.describe().contains("L0002"));
+        assert!(
+            error
+                .render(shell.sources(), None, shell.exit_hints())
+                .contains("L0002")
+        );
+    }
+
+    #[test]
+    fn a_host_refusal_rolls_back_hooks_and_aliases_without_reclassifying() {
+        struct Refuse(ral_core::error::Error);
+        impl ral_core::shell::runtime::EnquiryDesk for Refuse {
+            fn enquire(
+                &self,
+                _: ral_core::data::FOValue,
+                _: &ral_core::process::Scope,
+            ) -> Settled<ral_core::data::FOValue> {
+                Err(self.0.clone().into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin.ral");
+        std::fs::write(
+            &path,
+            "return [name: p, hooks: [post-exec: { |_ev| return () }], aliases: [xx: { |_args| echo hi }]]",
+        )
+        .unwrap();
+        let original =
+            super::super::refusal(PluginFailure::AlreadyLoaded(PluginFailureAlreadyLoaded {
+                name: "p".into(),
+            }))
+            .with_context("host registry")
+            .with_hints(["first", "second"]);
+        let mut runtime = ral_core::test_helper::core_runtime();
+        runtime.install_builtins(BUILTINS);
+        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+        let run = ral_core::shell::run::RunRequest {
+            desk: Some(std::sync::Arc::new(Refuse(original.clone()))),
+            ..ral_core::shell::run::RunRequest::from(crate::repl::exec::line_run(&format!(
+                "load-plugin '{}'",
+                ral_core::path::shown(&path)
+            )))
+        };
+        let ral_core::shell::run::RunReport::Ran { ending, .. } = shell.run(run) else {
+            panic!("load must run")
+        };
+        let Err(Break::Error(error)) = ending.into_settled() else {
+            panic!("host must refuse")
+        };
+        assert_eq!(error.reason, original.reason);
+        assert_eq!(error.hints(), original.hints());
+        assert_eq!(
+            error.context(),
+            Some(format!("plugin '{}': host registry", ral_core::path::shown(&path)).as_str())
+        );
+        assert!(error.rejection().is_none());
+        assert!(!shell.plugin_loaded("p").unwrap());
+        assert!(!shell.has_alias("xx"));
+        assert!(!shell.has_hook(&HookName::plugin("p", "post-exec")));
     }
 }
 

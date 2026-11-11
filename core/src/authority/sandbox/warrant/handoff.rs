@@ -4,6 +4,23 @@
 //! re-exec's sweep of everything else it inherited.
 
 use crate::Role;
+#[cfg(any(target_os = "linux", test))]
+use crate::fact::Count;
+use crate::fact::{
+    DescriptorSweepFailure, DescriptorSweepFailureSetReportCloexec, HandoffField, LaunchFailure,
+    OsFailure, ParcelCause, ParcelFailure, ParcelRole, ParcelStep, WarrantFailure,
+    WarrantFailureSlot, WarrantFailureSlotCount,
+};
+#[cfg(target_os = "macos")]
+use crate::fact::{
+    DescriptorSweepFailureBufferTooLarge, DescriptorSweepFailureCloseDescriptor,
+    DescriptorSweepFailurePartialDescriptorRecord, ParcelCauseSocketTooSmall,
+};
+#[cfg(target_os = "linux")]
+use crate::fact::{
+    DescriptorSweepFailureCloseRange, KernelFeatureFailure, StandardStream, UnavailableFailure,
+    WarrantFailureStreamInstall,
+};
 use crate::path::shown;
 #[cfg(target_os = "linux")]
 use crate::site::{Silent, site};
@@ -31,16 +48,18 @@ impl Slot {
 
     /// The slot `field` spells as [`fmt::Display`] does: plain digits, from
     /// [`Self::FIRST`] up.
-    pub(in crate::authority::sandbox) fn parse(field: &str) -> Result<Self, String> {
+    pub(in crate::authority::sandbox) fn parse(
+        field: &str,
+        kind: HandoffField,
+    ) -> Result<Self, WarrantFailure> {
         (field.parse::<c_int>().ok())
             .filter(|&at| at >= Self::FIRST && at.to_string() == field)
             .map(Self)
             .ok_or_else(|| {
-                format!(
-                    "{field:?} names no handoff descriptor, which is a number from {} up \
-                     in plain digits",
-                    Self::FIRST
-                )
+                WarrantFailure::Slot(WarrantFailureSlot {
+                    field: kind,
+                    spelling: field.to_owned(),
+                })
             })
     }
 
@@ -89,25 +108,29 @@ impl Slots {
 
     /// Direct trampolines (macOS and the Linux confinement harness) inherit
     /// stdio; an envelope names three extra slots.
-    pub(super) fn parse(args: &[OsString]) -> Result<Self, String> {
-        let slot = |arg: &OsString| Slot::parse(&shown(arg));
+    pub(super) fn parse(args: &[OsString]) -> Result<Self, WarrantFailure> {
+        let slot = |arg: &OsString, kind| Slot::parse(&shown(arg), kind);
         #[cfg(target_os = "linux")]
         let (args, streams) = match args {
             [_, _, input, output, error] => (
                 &args[..2],
-                Some([slot(input)?, slot(output)?, slot(error)?]),
+                Some([
+                    slot(input, HandoffField::Stream(StandardStream::Stdin))?,
+                    slot(output, HandoffField::Stream(StandardStream::Stdout))?,
+                    slot(error, HandoffField::Stream(StandardStream::Stderr))?,
+                ]),
             ),
             args => (args, None),
         };
         let [warrant, report] = args else {
-            return Err(format!(
-                "{} takes the warrant and report descriptors, plus three stream descriptors \
-                 under a Linux envelope; it is how ral starts its own confined children, \
-                 never a command to run by hand",
-                Role::Warrant.flag()
-            ));
+            return Err(WarrantFailure::SlotCount(WarrantFailureSlotCount {
+                actual: args.len().into(),
+            }));
         };
-        let (warrant, report) = (slot(warrant)?, slot(report)?);
+        let (warrant, report) = (
+            slot(warrant, HandoffField::Warrant)?,
+            slot(report, HandoffField::Report)?,
+        );
         let all = [warrant, report];
         #[cfg(target_os = "linux")]
         let all = all
@@ -116,9 +139,7 @@ impl Slots {
             .collect::<Vec<_>>();
         for (index, at) in all.iter().enumerate() {
             if all[..index].contains(at) {
-                return Err(format!(
-                    "two handoff owners name fd {at}; one would be closed twice"
-                ));
+                return Err(WarrantFailure::DuplicateSlot(at.fd()));
             }
         }
         Ok(Self {
@@ -131,17 +152,22 @@ impl Slots {
 
     /// Install only in the trampoline branch, before the inherited-fd sweep.
     #[cfg(target_os = "linux")]
-    pub(super) fn install_streams(self) -> Result<(), String> {
+    pub(super) fn install_streams(self) -> Result<(), WarrantFailure> {
         let Some(streams) = self.streams else {
             return Ok(());
         };
         for (target, source) in [0, 1, 2].into_iter().zip(streams) {
             // SAFETY: distinct high handoff slots, never the destinations.
             if unsafe { libc::dup2(source.fd(), target) } < 0 {
-                return Err(format!(
-                    "cannot install payload stream {target} from fd {source}: {}",
-                    io::Error::last_os_error()
-                ));
+                return Err(WarrantFailure::StreamInstall(WarrantFailureStreamInstall {
+                    stream: match target {
+                        0 => StandardStream::Stdin,
+                        1 => StandardStream::Stdout,
+                        _ => StandardStream::Stderr,
+                    },
+                    source: source.fd(),
+                    cause: OsFailure::from(&io::Error::last_os_error()),
+                }));
             }
         }
         Ok(())
@@ -160,73 +186,103 @@ const SEALS: rustix::fs::SealFlags = rustix::fs::SealFlags::SHRINK
 /// until sealed, so the bytes are read back and checked once nothing can
 /// change them; the memfd is left at offset 0, where bwrap reads.
 #[cfg(target_os = "linux")]
-pub(in crate::authority::sandbox) fn parcel(name: &str, bytes: &[u8]) -> io::Result<OwnedFd> {
+pub(in crate::authority::sandbox) fn parcel(
+    name: &str,
+    bytes: &[u8],
+    role: ParcelRole,
+) -> Result<OwnedFd, ParcelFailure> {
     use rustix::fs::{MemfdFlags, fcntl_add_seals, memfd_create};
     use std::io::{Read, Seek};
-    let mut file = std::fs::File::from(memfd_create(
-        name,
-        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-    )?);
-    file.write_all(bytes)?;
-    fcntl_add_seals(&file, SEALS)?;
-    file.rewind()?;
+    let failed = |step, e: io::Error| parcel_io(role.clone(), step, &e);
+    let mut file = std::fs::File::from(
+        memfd_create(name, MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)
+            .map_err(|e| failed(ParcelStep::Create, e.into()))?,
+    );
+    file.write_all(bytes)
+        .map_err(|e| failed(ParcelStep::Write, e))?;
+    fcntl_add_seals(&file, SEALS).map_err(|e| failed(ParcelStep::Seal, e.into()))?;
+    file.rewind().map_err(|e| failed(ParcelStep::Rewind, e))?;
     let mut sealed = Vec::with_capacity(bytes.len());
     (&file)
         .take(bytes.len() as u64 + 1)
-        .read_to_end(&mut sealed)?;
+        .read_to_end(&mut sealed)
+        .map_err(|e| failed(ParcelStep::ReadBack, e))?;
     if sealed != bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the parcel changed before it was sealed: did another process open ral's \
-             descriptors through /proc?",
-        ));
+        return Err(ParcelFailure {
+            role,
+            step: ParcelStep::ReadBack,
+            cause: ParcelCause::ChangedBytes,
+        });
     }
-    file.rewind()?;
+    file.rewind().map_err(|e| failed(ParcelStep::Rewind, e))?;
     Ok(file.into())
 }
 
-/// macOS, which has no `/proc`: the read end of a socketpair whose write end
-/// is filled and closed here, before any child exists.  Whole or not at all —
-/// a socket too small for `bytes` is an error, never a partial parcel.
+/// macOS parcels are filled and closed before any child exists.
 #[cfg(target_os = "macos")]
-pub(in crate::authority::sandbox) fn parcel(_name: &str, bytes: &[u8]) -> io::Result<OwnedFd> {
+pub(in crate::authority::sandbox) fn parcel(
+    _name: &str,
+    bytes: &[u8],
+    role: ParcelRole,
+) -> Result<OwnedFd, ParcelFailure> {
     use rustix::net::sockopt::{set_socket_recv_buffer_size, set_socket_send_buffer_size};
     const SLACK: usize = 64 << 10;
-    let (reader, mut writer) = crate::process::cloexec_socketpair()?;
-    let unfit = |e: io::Error| {
-        io::Error::new(
-            e.kind(),
-            format!("a {}-byte parcel does not fit a socket: {e}", bytes.len()),
-        )
+    let (reader, mut writer) = crate::process::cloexec_socketpair()
+        .map_err(|e| parcel_io(role.clone(), ParcelStep::Create, &e))?;
+    let unfit = |step, e: io::Error| ParcelFailure {
+        role: role.clone(),
+        step,
+        cause: ParcelCause::SocketTooSmall(ParcelCauseSocketTooSmall {
+            bytes: bytes.len().into(),
+            cause: Box::new(crate::io::failure(&e)),
+        }),
     };
     let room = bytes.len() + SLACK;
-    set_socket_send_buffer_size(&writer, room).map_err(|e| unfit(e.into()))?;
-    set_socket_recv_buffer_size(&reader, room).map_err(|e| unfit(e.into()))?;
-    writer.set_nonblocking(true)?;
-    writer.write_all(bytes).map_err(unfit)?;
+    set_socket_send_buffer_size(&writer, room)
+        .map_err(|e| unfit(ParcelStep::SetSendBuffer, e.into()))?;
+    set_socket_recv_buffer_size(&reader, room)
+        .map_err(|e| unfit(ParcelStep::SetReceiveBuffer, e.into()))?;
+    writer
+        .set_nonblocking(true)
+        .map_err(|e| parcel_io(role.clone(), ParcelStep::SetNonblocking, &e))?;
+    writer
+        .write_all(bytes)
+        .map_err(|e| unfit(ParcelStep::Write, e))?;
     Ok(reader.into())
 }
 
-/// The child's half of [`parcel`]'s promise, checked before a byte is read.
+pub(in crate::authority::sandbox) fn parcel_io(
+    role: ParcelRole,
+    step: ParcelStep,
+    e: &io::Error,
+) -> ParcelFailure {
+    ParcelFailure {
+        role,
+        step,
+        cause: ParcelCause::Io(Box::new(crate::io::failure(e))),
+    }
+}
+
+/// Check the channel before reading any bytes.
 #[cfg(target_os = "linux")]
-pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), String> {
+pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), WarrantFailure> {
     let seals = rustix::fs::fcntl_get_seals(fd)
-        .map_err(|e| format!("the warrant is not a sealed memfd: {e}"))?;
+        .map_err(|e| WarrantFailure::SealProbe(OsFailure::from(&io::Error::from(e))))?;
     if !seals.contains(SEALS) {
-        return Err("the warrant's memfd is not sealed against writes; refusing it".to_string());
+        return Err(WarrantFailure::MissingSeals);
     }
     rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
         .map(drop)
-        .map_err(|e| format!("cannot rewind the warrant: {e}"))
+        .map_err(|e| WarrantFailure::Rewind(OsFailure::from(&io::Error::from(e))))
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), String> {
+pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), WarrantFailure> {
     use std::os::fd::AsFd;
     match crate::process::report::is_socket(fd.as_fd()) {
         Ok(true) => Ok(()),
-        Ok(false) => Err("the warrant is not a socket; refusing it".to_string()),
-        Err(e) => Err(format!("cannot stat the warrant: {e}")),
+        Ok(false) => Err(WarrantFailure::NotSocket),
+        Err(e) => Err(WarrantFailure::SocketStat(OsFailure::from(&e))),
     }
 }
 
@@ -237,8 +293,8 @@ pub(super) fn unwritable(fd: &OwnedFd) -> Result<(), String> {
 /// hook's — can be displaced.
 #[derive(Default)]
 pub(in crate::authority::sandbox) struct Handoff {
-    lent: Vec<OwnedFd>,
-    kept: Vec<Slot>,
+    lent: Vec<(OwnedFd, ParcelRole)>,
+    kept: Vec<(Slot, ParcelRole)>,
 }
 
 impl Handoff {
@@ -249,9 +305,10 @@ impl Handoff {
     pub(in crate::authority::sandbox) fn lend(
         &mut self,
         fd: BorrowedFd<'_>,
-    ) -> Result<Slot, String> {
-        let (copy, at) = lift(fd)?;
-        self.lent.push(copy);
+        role: ParcelRole,
+    ) -> Result<Slot, ParcelFailure> {
+        let (copy, at) = lift(fd).map_err(|e| parcel_io(role.clone(), ParcelStep::Lend, &e))?;
+        self.lent.push((copy, role));
         Ok(at)
     }
 
@@ -264,9 +321,10 @@ impl Handoff {
     pub(in crate::authority::sandbox) fn keep(
         &mut self,
         fd: BorrowedFd<'_>,
-    ) -> Result<(OwnedFd, Slot), String> {
-        let (copy, at) = lift(fd)?;
-        self.kept.push(at);
+        role: ParcelRole,
+    ) -> Result<(OwnedFd, Slot), ParcelFailure> {
+        let (copy, at) = lift(fd).map_err(|e| parcel_io(role.clone(), ParcelStep::Keep, &e))?;
+        self.kept.push((at, role));
         Ok((copy, at))
     }
 
@@ -277,24 +335,41 @@ impl Handoff {
     #[cfg(target_os = "linux")]
     pub(in crate::authority::sandbox) fn streams(
         &mut self,
-    ) -> Result<(crate::process::launch::EnvelopeStdio, [Slot; 3]), String> {
+    ) -> Result<(crate::process::launch::EnvelopeStdio, [Slot; 3]), ParcelFailure> {
         use std::os::fd::AsFd;
         let null = crate::path::open_discard()
-            .map_err(|e| format!("sandbox: cannot open envelope null streams: {e}"))?;
-        let (input, input_at) = self.keep(null.as_fd())?;
-        let (output, output_at) = self.keep(null.as_fd())?;
-        let (error, error_at) = self.keep(null.as_fd())?;
+            .map_err(|e| parcel_io(ParcelRole::EnvelopeNullStreams, ParcelStep::Create, &e))?;
+        let (input, input_at) = self.keep(
+            null.as_fd(),
+            ParcelRole::PayloadStream(StandardStream::Stdin),
+        )?;
+        let (output, output_at) = self.keep(
+            null.as_fd(),
+            ParcelRole::PayloadStream(StandardStream::Stdout),
+        )?;
+        let (error, error_at) = self.keep(
+            null.as_fd(),
+            ParcelRole::PayloadStream(StandardStream::Stderr),
+        )?;
         // Unlike a pipe, this remains writable after a detached launch's
         // parent is gone. It carries only envelope startup diagnostics;
         // the bounded read in file_said does not bound the file's storage.
         let diagnostics = std::fs::File::from(
             rustix::fs::memfd_create("ral-envelope-stderr", rustix::fs::MemfdFlags::CLOEXEC)
-                .map_err(|e| format!("sandbox: cannot open envelope diagnostics: {e}"))?,
+                .map_err(|e| {
+                    parcel_io(
+                        ParcelRole::EnvelopeDiagnostics,
+                        ParcelStep::Create,
+                        &e.into(),
+                    )
+                })?,
         );
         // Replacement endpoints stay CLOEXEC: only their dup2 copies at 0–2
         // belong to bwrap. Lift them away from closed inherited stdio too.
-        let (null, _) = lift(null.as_fd())?;
-        let (writer, _) = lift(diagnostics.as_fd())?;
+        let (null, _) = lift(null.as_fd())
+            .map_err(|e| parcel_io(ParcelRole::EnvelopeNullStreams, ParcelStep::Lift, &e))?;
+        let (writer, _) = lift(diagnostics.as_fd())
+            .map_err(|e| parcel_io(ParcelRole::EnvelopeDiagnostics, ParcelStep::Lift, &e))?;
         Ok((
             crate::process::launch::EnvelopeStdio {
                 payload: [input, output, error],
@@ -307,17 +382,36 @@ impl Handoff {
     }
 
     /// Hand `cmd`'s child every slot, through one `pre_exec`.
-    pub(in crate::authority::sandbox) fn install(self, cmd: &mut Command) {
+    pub(in crate::authority::sandbox) fn install(
+        self,
+        cmd: &mut Command,
+        evidence: &mut crate::process::launch::setup::Evidence,
+    ) {
+        use crate::process::launch::setup::Context;
         let Self { lent, kept } = self;
+        let lent: Vec<_> = lent
+            .into_iter()
+            .map(|(fd, role)| {
+                let check = evidence.check(Context::Parcel(role, ParcelStep::Lend));
+                (fd, check)
+            })
+            .collect();
+        let kept: Vec<_> = kept
+            .into_iter()
+            .map(|(at, role)| {
+                let check = evidence.check(Context::Parcel(role, ParcelStep::Keep));
+                (at, check)
+            })
+            .collect();
         // SAFETY: post-fork, `fcntl` alone, which is async-signal-safe, on
         // numbers open here at the fork: the lent copies, which the hook
         // owns, and the kept ones, which their owners hold past the spawn.
         unsafe {
             cmd.pre_exec(move || {
-                let lent = lent.iter().map(AsRawFd::as_raw_fd);
-                for at in lent.chain(kept.iter().map(|at| at.0)) {
+                let lent = lent.iter().map(|(fd, check)| (fd.as_raw_fd(), check));
+                for (at, check) in lent.chain(kept.iter().map(|(at, check)| (at.0, check))) {
                     if libc::fcntl(at, libc::F_SETFD, 0) < 0 {
-                        return Err(io::Error::last_os_error());
+                        return check.run(Err(io::Error::last_os_error()));
                     }
                 }
                 Ok(())
@@ -328,14 +422,8 @@ impl Handoff {
 
 /// A close-on-exec copy of `fd` at the lowest free number from
 /// [`Slot::FIRST`] up, and that number.
-fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
-    let copy = rustix::io::fcntl_dupfd_cloexec(fd, Slot::FIRST).map_err(|e| {
-        format!(
-            "sandbox: cannot copy a descriptor to {} or above for the confined child: \
-             {e}; is the open-file limit below that? Check it with `sh -c 'ulimit -n'`, and raise it for the session with the rc's `limits: [open-files: N]`",
-            Slot::FIRST
-        )
-    })?;
+fn lift(fd: BorrowedFd<'_>) -> io::Result<(OwnedFd, Slot)> {
+    let copy = rustix::io::fcntl_dupfd_cloexec(fd, Slot::FIRST)?;
     let at = Slot(copy.as_raw_fd());
     Ok((copy, at))
 }
@@ -348,7 +436,7 @@ fn lift(fd: BorrowedFd<'_>) -> Result<(OwnedFd, Slot), String> {
 /// of the `--info-fd` writer, and with it the parent's spawn, for its whole
 /// life.
 #[cfg(target_os = "linux")]
-pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
+pub(super) fn close_inherited(keep: Slot) -> Result<(), LaunchFailure> {
     let at = libc::c_uint::try_from(keep.fd()).expect("a slot is positive");
     close_range(3, at - 1)?;
     close_range(at + 1, libc::c_uint::MAX)?;
@@ -356,7 +444,7 @@ pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), String> {
+fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), LaunchFailure> {
     // SAFETY: the warrant role owns no descriptors in the range here.
     let swept = unsafe {
         site!(
@@ -369,24 +457,30 @@ fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), String> {
     }
     let e = io::Error::last_os_error();
     Err(if e.raw_os_error() == Some(libc::ENOSYS) {
-        "this kernel has no close_range(2) (Linux 5.9); the handoff cannot be swept, so the \
-         program would inherit it; refusing to run"
-            .to_string()
+        LaunchFailure::Unavailable(UnavailableFailure::Kernel(
+            KernelFeatureFailure::CloseRangeAbsent,
+        ))
     } else {
-        format!(
-            "cannot close inherited descriptors above stderr with close_range(2): {e}; refusing to run"
-        )
+        sweep(DescriptorSweepFailure::CloseRange(
+            DescriptorSweepFailureCloseRange {
+                first: Count::from_u64(u64::from(first)),
+                last: Count::from_u64(u64::from(last)),
+                cause: OsFailure::from(&e),
+            },
+        ))
     })
 }
 
 /// The report's slot, closed by the program's `execve`.
-fn cloexec(keep: Slot) -> Result<(), String> {
+fn cloexec(keep: Slot) -> Result<(), LaunchFailure> {
     // SAFETY: `F_SETFD` only sets the slot's close-on-exec flag.
     if unsafe { libc::fcntl(keep.fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(format!(
-            "cannot set the report socket at fd {keep} close-on-exec: {}; refusing to run",
-            io::Error::last_os_error()
-        ));
+        return Err(sweep(DescriptorSweepFailure::SetReportCloexec(
+            DescriptorSweepFailureSetReportCloexec {
+                fd: keep.fd(),
+                cause: OsFailure::from(&io::Error::last_os_error()),
+            },
+        )));
     }
     Ok(())
 }
@@ -394,7 +488,7 @@ fn cloexec(keep: Slot) -> Result<(), String> {
 /// Close every descriptor above stderr but `keep`, which stays close-on-exec;
 /// the warrant role must open nothing before this.
 #[cfg(target_os = "macos")]
-pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
+pub(super) fn close_inherited(keep: Slot) -> Result<(), LaunchFailure> {
     let mut entries = vec![
         libc::proc_fdinfo {
             proc_fd: 0,
@@ -403,8 +497,13 @@ pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
         64
     ];
     let count = loop {
-        let size = c_int::try_from(std::mem::size_of_val(entries.as_slice()))
-            .map_err(|e| format!("cannot size the proc_pidinfo(PROC_PIDLISTFDS) buffer: {e}"))?;
+        let size = c_int::try_from(std::mem::size_of_val(entries.as_slice())).map_err(|_| {
+            sweep(DescriptorSweepFailure::BufferTooLarge(
+                DescriptorSweepFailureBufferTooLarge {
+                    bytes: std::mem::size_of_val(entries.as_slice()).into(),
+                },
+            ))
+        })?;
         // SAFETY: entries is writable for size bytes; this only lists our descriptors.
         let listed = unsafe {
             libc::proc_pidinfo(
@@ -416,17 +515,19 @@ pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
             )
         };
         if listed <= 0 {
-            return Err(format!(
-                "proc_pidinfo(PROC_PIDLISTFDS): {}; refusing to run",
-                io::Error::last_os_error()
-            ));
+            return Err(sweep(DescriptorSweepFailure::ListDescriptors(
+                OsFailure::from(&io::Error::last_os_error()),
+            )));
         }
         let listed = usize::try_from(listed).expect("a positive descriptor-list size fits usize");
         let width = std::mem::size_of::<libc::proc_fdinfo>();
         if !listed.is_multiple_of(width) {
-            return Err(format!(
-                "proc_pidinfo(PROC_PIDLISTFDS) returned a partial descriptor record ({listed} bytes); refusing to run"
-            ));
+            return Err(sweep(DescriptorSweepFailure::PartialDescriptorRecord(
+                DescriptorSweepFailurePartialDescriptorRecord {
+                    bytes: listed.into(),
+                    width: width.into(),
+                },
+            )));
         }
         if listed < std::mem::size_of_val(entries.as_slice()) {
             break listed / width;
@@ -447,14 +548,20 @@ pub(super) fn close_inherited(keep: Slot) -> Result<(), String> {
         if unsafe { libc::close(entry.proc_fd) } < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::EBADF) {
-                return Err(format!(
-                    "close({}): {error}; refusing to run",
-                    entry.proc_fd
-                ));
+                return Err(sweep(DescriptorSweepFailure::CloseDescriptor(
+                    DescriptorSweepFailureCloseDescriptor {
+                        fd: entry.proc_fd,
+                        cause: OsFailure::from(&error),
+                    },
+                )));
             }
         }
     }
     cloexec(keep)
+}
+
+fn sweep(cause: DescriptorSweepFailure) -> LaunchFailure {
+    LaunchFailure::Warrant(WarrantFailure::DescriptorSweep(cause))
 }
 
 #[cfg(test)]
@@ -463,15 +570,83 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    #[test]
+    fn failed_handoff_hooks_reconstruct_lend_and_keep_in_the_parent() {
+        use std::os::fd::AsFd;
+        for keep in [false, true] {
+            let source = crate::path::open_discard().unwrap();
+            let mut handoff = Handoff::default();
+            let (held, at, step) = if keep {
+                let (fd, at) = handoff.keep(source.as_fd(), ParcelRole::Warrant).unwrap();
+                (Some(fd), at, ParcelStep::Keep)
+            } else {
+                (
+                    None,
+                    handoff.lend(source.as_fd(), ParcelRole::Warrant).unwrap(),
+                    ParcelStep::Lend,
+                )
+            };
+            let mut command = Command::new("/bin/true");
+            // SAFETY: close only the child's handed-down copy before the handoff hook.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::close(at.fd());
+                    Ok(())
+                });
+            }
+            let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+            handoff.install(&mut command, &mut evidence);
+            let launch =
+                crate::process::Launch::from_command(command).with_setup_evidence(evidence);
+            let why = launch
+                .spawn(
+                    crate::process::Placement::Inherit,
+                    &crate::process::DurableRoot::default().child(),
+                )
+                .err()
+                .expect("F_SETFD on the closed descriptor fails");
+            drop(held);
+            let crate::process::Unstarted::Refused(error) = why else {
+                panic!("handoff failure is ral's refusal");
+            };
+            assert_eq!(
+                error.reason,
+                crate::fact::Reason::Launch(Box::new(LaunchFailure::Parcel(ParcelFailure {
+                    role: ParcelRole::Warrant,
+                    step,
+                    cause: ParcelCause::Io(Box::new(crate::io::failure(
+                        &io::Error::from_raw_os_error(libc::EBADF)
+                    ))),
+                })))
+            );
+            assert!(error.describe().contains("cannot prepare a descriptor"));
+            assert!(!error.describe().contains("copy"));
+        }
+    }
+
     /// One descriptor cannot be both the warrant and the report: each is
     /// taken as an owner of its slot, so both would close it.
     #[test]
     fn a_warrant_and_a_report_cannot_share_a_slot() {
         let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
         let err = Slots::parse(&args(&["101", "101"])).expect_err("one slot twice");
-        assert!(err.contains("fd 101"), "{err}");
+        assert_eq!(err, WarrantFailure::DuplicateSlot(101));
         let both = Slots::parse(&args(&["101", "102"])).expect("two slots");
         assert_eq!(both.argv()[1..], ["101", "102"]);
+    }
+
+    #[test]
+    fn handoff_validation_retains_the_refused_field_and_count() {
+        assert_eq!(
+            Slot::parse("97", HandoffField::Report),
+            Err(WarrantFailure::Slot(WarrantFailureSlot {
+                field: HandoffField::Report,
+                spelling: "97".into(),
+            }))
+        );
+        assert!(
+            matches!(Slots::parse(&[]), Err(WarrantFailure::SlotCount(WarrantFailureSlotCount { actual })) if actual == Count::from_u64(0))
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -498,7 +673,8 @@ mod tests {
         let mut handoff = Handoff::default();
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
         let mut cmd = Command::new("/bin/sh");
-        handoff.install(&mut cmd);
+        let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+        handoff.install(&mut cmd, &mut evidence);
         // SAFETY: close is async-signal-safe, and affects only this child.
         unsafe {
             cmd.pre_exec(|| {
@@ -510,10 +686,11 @@ mod tests {
         let launch = EnvelopedLaunch::new(
             cmd,
             stdio,
-            "/bin/sh",
+            crate::fact::LauncherRole::Bwrap,
             None,
             Report::new(reader, writer.into()),
-        );
+        )
+        .with_setup_evidence(evidence);
         let result = launch.spawn(
             Placement::Inherit,
             &crate::process::DurableRoot::default().child(),
@@ -521,7 +698,15 @@ mod tests {
         let Err(Unstarted::Refused(why)) = result else {
             panic!("a closed stream must refuse preparation");
         };
-        assert!(why.describe().contains("could not prepare"), "{why}");
+        assert!(matches!(&why.reason, crate::fact::Reason::Launch(failure)
+        if matches!(**failure, LaunchFailure::Prepare(crate::fact::PrepareFailure {
+            step: crate::fact::PrepareStep::CapturePayloadStreams, ..
+        }))));
+        assert!(
+            why.describe()
+                .contains("preserve the payload's standard streams"),
+            "{why}"
+        );
         assert!(why.describe().contains("os error 9"), "{why}");
     }
 
@@ -541,7 +726,8 @@ mod tests {
              printf OUT > /proc/self/fd/{output}; printf ERR > /proc/self/fd/{error}"
             ),
         ]);
-        handoff.install(&mut cmd);
+        let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+        handoff.install(&mut cmd, &mut evidence);
         let (reader, writer) = crate::process::cloexec_socketpair().expect("report socket");
         let witness = Witness::new(writer.try_clone().expect("clone report writer").into())
             .expect("a report is a socket");
@@ -549,10 +735,11 @@ mod tests {
         let mut launch = EnvelopedLaunch::new(
             cmd,
             stdio,
-            "/bin/sh",
+            crate::fact::LauncherRole::Bwrap,
             None,
             Report::new(reader, writer.into()),
-        );
+        )
+        .with_setup_evidence(evidence);
         launch.launch_mut().stdin(StdioSpec::Null);
         // Installation must merge and fill the high slots before lowering
         // the descriptor limit.
@@ -580,14 +767,21 @@ mod tests {
         let (stdio, _) = handoff.streams().expect("reserve stream slots");
         let (reader, writer) = crate::process::cloexec_socketpair().expect("report socket");
         let (kept, _) = handoff
-            .keep(writer.as_fd())
+            .keep(writer.as_fd(), ParcelRole::ReportSocket)
             .expect("keep report until fork");
         drop(writer);
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "printf ENVELOPE-REFUSED >&2; exit 1"]);
-        handoff.install(&mut cmd);
-        let mut launch =
-            EnvelopedLaunch::new(cmd, stdio, "/bin/sh", None, Report::new(reader, kept));
+        let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+        handoff.install(&mut cmd, &mut evidence);
+        let mut launch = EnvelopedLaunch::new(
+            cmd,
+            stdio,
+            crate::fact::LauncherRole::Bwrap,
+            None,
+            Report::new(reader, kept),
+        )
+        .with_setup_evidence(evidence);
         launch
             .launch_mut()
             .stdin(StdioSpec::Null)
@@ -626,10 +820,13 @@ mod tests {
         filler.write_all(b"lent").expect("fill the pipe");
         drop(filler);
         let mut handoff = Handoff::default();
-        let at = handoff.lend(lent.as_fd()).expect("lends");
+        let at = handoff
+            .lend(lent.as_fd(), ParcelRole::Warrant)
+            .expect("lends");
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", &format!("cat /dev/fd/{at}")]);
-        handoff.install(&mut cmd);
+        let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+        handoff.install(&mut cmd, &mut evidence);
         let (mut receipt, handshake) = crate::process::cloexec_pipe().expect("a pipe");
         let fd = handshake.as_raw_fd();
         // SAFETY: post-fork, `write` alone, as `detach`'s hook does.
@@ -659,9 +856,12 @@ mod tests {
         let held = below_first_held();
         let stderr = io::stderr();
         let mut handoff = Handoff::default();
-        handoff.lend(stderr.as_fd()).expect("lends");
+        handoff
+            .lend(stderr.as_fd(), ParcelRole::EnvelopeDiagnostics)
+            .expect("lends");
         let mut cmd = Command::new("/ral/no/such/program");
-        handoff.install(&mut cmd);
+        let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+        handoff.install(&mut cmd, &mut evidence);
         let spawned = crate::process::spawn(&mut cmd).map(|mut child| child.wait());
         drop(held);
         let err = spawned.expect_err("a program that cannot run must not spawn");

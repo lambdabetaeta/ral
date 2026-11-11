@@ -8,10 +8,16 @@ use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ral_core::error::Error;
-use ral_core::fact::{Grep, Read};
+use ral_core::fact::{
+    CodecFailure, CodecFailureUtf8, Count, EditFailure, EditFailureDuplicateTargetLine,
+    EditFailureHashAbsent, EditFailureHashAmbiguous, EditFailureMultipleLiteralMatches,
+    EditFailureNoLiteralMatch, ExarchFailure, Expected, Grep, HalfOpenRange, HostFailure,
+    InvalidCause, InvalidFailure, IoOperation, IoSubject, LiteralMiss, Number, NumberRange, Read,
+    Reason, RegexCause, RegexFailure, SkillFailure, SkillFailureInvalidName, SkillFailureMissing,
+    Utf8Failure, Utf8Subject, ValueShape,
+};
 use ral_core::path::tree::Walk;
 use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
-use ral_core::shell::builtins::util::regex_err;
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Observed, Settled};
 use ral_core::text::rank;
 use ral_core::ty::{Binders, Ty, closed_record};
@@ -22,6 +28,16 @@ use std::collections::HashMap;
 use std::io::Read as _;
 
 pub(crate) mod harness;
+
+fn invalid(failure: InvalidFailure) -> Error {
+    Error::new(Reason::Invalid(Box::new(failure)))
+}
+
+fn edit_error(cause: EditFailure) -> Error {
+    Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+        ExarchFailure::Edit(cause),
+    ))))
+}
 
 /// The boot-recipe tag a `Frame::Attach` names to select [`host_surface`] as the
 /// wire engine child's builtin surface; matched against the installer table in
@@ -206,10 +222,28 @@ fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
             let bound = n as usize;
             Ok(bound)
         }
-        _ => Err(Error::new(format!(
-            "{tool}: {which} must be an Int >= 1, got {}",
-            arg.type_name()
-        ))
+        Some(n) => Err(invalid(
+            InvalidFailure::new(
+                tool.into(),
+                InvalidCause::Range(NumberRange {
+                    value: Number::Int(n),
+                    minimum: Number::Int(1),
+                    maximum: Number::Int(i64::MAX),
+                }),
+            )
+            .field(which.into()),
+        )
+        .into()),
+        None => Err(invalid(
+            InvalidFailure::new(
+                tool.into(),
+                InvalidCause::Shape(ral_core::fact::ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Int),
+                    found: arg.found(),
+                }),
+            )
+            .field(which.into()),
+        )
         .into()),
     }
 }
@@ -227,9 +261,14 @@ fn view_range(
     let start = view_bound(&args[1], "start", tool)?;
     let end = view_bound(&args[2], "end", tool)?;
     if end <= start {
-        return Err(Error::new(format!(
-            "{tool}: end must be greater than start (the range [start, end) is half-open), got start={start}, end={end}"
-        )).into());
+        return Err(invalid(InvalidFailure::new(
+            tool.into(),
+            InvalidCause::HalfOpenRange(HalfOpenRange {
+                start: start.into(),
+                end: end.into(),
+            }),
+        ))
+        .into());
     }
 
     let (_, body) = read_text_file(shell, path, tool)?;
@@ -435,7 +474,15 @@ fn search_tree(
     let matcher = RegexMatcherBuilder::new()
         .crlf(true)
         .build(pattern)
-        .map_err(|e| Error::new(regex_err(name, pattern, &e.to_string())))?;
+        .map_err(|error| {
+            invalid(InvalidFailure::new(
+                name.into(),
+                InvalidCause::Codec(CodecFailure::Regex(RegexFailure {
+                    pattern: pattern.into(),
+                    cause: RegexCause::GrepCompiler(error.to_string()),
+                })),
+            ))
+        })?;
     let root = walk_root(shell, name, path)?;
     let tree = if hidden {
         Walk::all(&root).filter_entry(|p| file_name(p.as_path()) != Some(".git".as_ref()))
@@ -569,21 +616,9 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool) {
 /// entirely, and speaks it as one whole-file diff card ([`surface_edit`]).
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = args[0].as_str("edit-hash")?;
-    let edits = match &args[1] {
-        Value::List(items) => items,
-        other => {
-            return Err(Error::new(format!(
-                "edit-hash: expected a List of [hash: …, line: …] records, got {}",
-                other.type_name()
-            ))
-            .into());
-        }
-    };
+    let edits = args[1].as_list("edit-hash")?;
     if edits.is_empty() {
-        return Err(Error::new(
-            "edit-hash: no edits given; pass a list of [hash: …, line: …] records.",
-        )
-        .into());
+        return Err(edit_error(EditFailure::NoEdits).into());
     }
 
     let (eol, body) = read_text_file(shell, path, "edit-hash")?;
@@ -594,49 +629,60 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     // Resolved against the original snapshot, so a stale or now-ambiguous hash
     // fails here, before anything is written.
     let mut resolved = Vec::with_capacity(edits.len());
-    for e in edits {
+    for (index, e) in edits.iter().enumerate() {
         let e = e.into_owned();
+        let at_edit =
+            |cause| invalid(InvalidFailure::new("edit-hash".into(), cause).index(index.into()));
         let m = match e {
             Value::Map(m) => m,
             other => {
-                return Err(Error::new(format!(
-                    "edit-hash: each edit must be a [hash: …, line: …] record, got {}",
-                    other.type_name()
-                ))
+                return Err(at_edit(InvalidCause::Shape(ral_core::fact::ShapeFailure {
+                    expected: Expected::Record(vec!["hash".into(), "line".into()]),
+                    found: other.found(),
+                }))
                 .into());
             }
         };
-        let want = match m.get("hash").map(std::borrow::Cow::into_owned) {
-            Some(v) => v.as_str("edit-hash")?.to_string(),
-            None => {
-                return Err(Error::new(
-                    "edit-hash: each edit needs a `hash` field; the witness from view-hash/view-hash-around.",
-                ).into());
+        let text = |field: &str| {
+            let value = m
+                .get(field)
+                .ok_or_else(|| at_edit(InvalidCause::MissingField(field.into())))?;
+            match &*value {
+                Value::String(text) => Ok(text.as_str().to_owned()),
+                other => Err(invalid(
+                    InvalidFailure::new(
+                        "edit-hash".into(),
+                        InvalidCause::Shape(ral_core::fact::ShapeFailure {
+                            expected: Expected::Shape(ValueShape::String),
+                            found: other.found(),
+                        }),
+                    )
+                    .field(field.into())
+                    .index(index.into()),
+                )),
             }
         };
-        let new = match m.get("line").map(std::borrow::Cow::into_owned) {
-            Some(v) => v.as_str("edit-hash")?.to_string(),
-            None => {
-                return Err(Error::new(
-                    "edit-hash: each edit needs a `line` field; the replacement text.",
-                )
-                .into());
-            }
-        };
+        let want = text("hash")?;
+        let new = text("line")?;
         let idxs: Vec<usize> = (0..n).filter(|&i| hashes[i] == want).collect();
         match idxs.len() {
             0 => {
-                return Err(Error::new(format!(
-                    "edit-hash: no line in {path} hashes to {want}; did the file change? Re-read with view-hash/view-hash-around before editing."
-                )).into());
+                return Err(edit_error(EditFailure::HashAbsent(EditFailureHashAbsent {
+                    path: path.into(),
+                    hash: want,
+                }))
+                .into());
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
             _ => {
-                let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
-                let r#where = at.join(", ");
-                return Err(Error::new(format!(
-                    "edit-hash: hash {want} matches lines {where} in {path}; re-read; the witness has gone stale."
-                )).into());
+                return Err(
+                    edit_error(EditFailure::HashAmbiguous(EditFailureHashAmbiguous {
+                        path: path.into(),
+                        hash: want,
+                        lines: idxs.iter().map(|i| Count::from(i + 1)).collect(),
+                    }))
+                    .into(),
+                );
             }
         }
     }
@@ -644,9 +690,11 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     for w in 0..resolved.len() {
         for v in (w + 1)..resolved.len() {
             if resolved[w].at == resolved[v].at {
-                return Err(Error::new(format!(
-                    "edit-hash: two edits name line {} in {path}.",
-                    resolved[w].at + 1
+                return Err(edit_error(EditFailure::DuplicateTargetLine(
+                    EditFailureDuplicateTargetLine {
+                        path: path.into(),
+                        line: (resolved[w].at + 1).into(),
+                    },
                 ))
                 .into());
             }
@@ -698,23 +746,25 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, String)> {
     let rp = shell.resolve(path);
     let located = shell.locate::<Reading>(&rp)?;
-    let mut file = located.read().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::new(format!(
-                "{tool}: {path} does not exist; {tool} never creates a file; \
-                 `to-string BODY > path` writes a new one."
-            ))
-        } else {
-            Error::io(format!("{tool}: cannot read {path}"), &e)
-        }
+    let mut file = located.read().map_err(|error| {
+        Error::io(IoOperation::Open, IoSubject::Path(path.into()), &error).with_context(tool)
     })?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| Error::io(format!("{tool}: cannot read {path}"), &e))?;
+    file.read_to_end(&mut bytes).map_err(|error| {
+        Error::io(IoOperation::Read, IoSubject::Path(path.into()), &error).with_context(tool)
+    })?;
     let eol = Eol::of(&bytes);
-    let body = String::from_utf8(bytes).map_err(|_| {
-        Error::new(format!(
-            "{tool}: '{path}' is not valid UTF-8; these tools read and edit text only."
+    let body = String::from_utf8(bytes).map_err(|error| {
+        let cause = error.utf8_error();
+        invalid(InvalidFailure::new(
+            tool.into(),
+            InvalidCause::Codec(CodecFailure::Utf8(CodecFailureUtf8 {
+                subject: Utf8Subject::Path(path.into()),
+                cause: Utf8Failure {
+                    valid_up_to: cause.valid_up_to().into(),
+                    error_len: cause.error_len().map(Count::from),
+                },
+            })),
         ))
     })?;
     Ok((eol, eol.decode(body)))
@@ -729,7 +779,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     let from = args[1].as_str("edit-replace")?;
     let to = args[2].as_str("edit-replace")?;
     if from.is_empty() {
-        return Err(Error::new("edit-replace: FROM must be non-empty.").into());
+        return Err(edit_error(EditFailure::EmptyFrom).into());
     }
     let (eol, body) = read_text_file(shell, path, "edit-replace")?;
     let starts = ral_core::shell::builtins::strings::occurrence_starts(&body, from);
@@ -765,43 +815,30 @@ fn line_of(body: &str, at: usize) -> usize {
 /// lines, which is where the model has to widen.
 fn no_unique_match(body: &str, from: &str, path: &str, starts: &[usize]) -> Error {
     if starts.len() > 1 {
-        // Ascending offsets, so several matches on one line collapse next to
-        // each other: name the line once rather than once per match.
-        let mut lines: Vec<String> = Vec::new();
-        for &at in starts {
-            let line = line_of(body, at).to_string();
-            if lines.last() != Some(&line) {
-                lines.push(line);
-            }
-        }
-        return Error::new(format!(
-            "edit-replace: FROM matches {} times in {path}, on {}: {}; must match exactly \
-             once. Widen FROM with a neighbouring line to make it unique, or change every \
-             occurrence by composing string-replace / re-replace-all over from-string and \
-             to-string.",
-            starts.len(),
-            ral_core::text::plural(lines.len(), "line"),
-            lines.join(", ")
+        let mut lines: Vec<Count> = starts
+            .iter()
+            .map(|&at| Count::from(line_of(body, at)))
+            .collect();
+        lines.dedup();
+        return edit_error(EditFailure::MultipleLiteralMatches(
+            EditFailureMultipleLiteralMatches {
+                path: path.into(),
+                matches: starts.len().into(),
+                lines,
+            },
         ));
     }
-    if has_suspicious_escapes(from) {
-        return Error::new(format!(
-            "edit-replace: FROM was not found in {path}, and FROM carries a literal backslash \
-             escape: ral strings are verbatim, so \\n is a backslash and an n. Write real \
-             newlines inside a raw #'…'# string."
-        ));
-    }
-    if let Some(line) = unindented_match(body, from) {
-        return Error::new(format!(
-            "edit-replace: FROM was not found in {path}, but line {line} matches it apart from \
-             leading whitespace: copy the exact text, indentation included, from \
-             view-text-around."
-        ));
-    }
-    Error::new(format!(
-        "edit-replace: FROM was not found in {path}; is the file already what you intended? \
-         Re-read it with view-text-around before editing."
-    ))
+    let evidence = if has_suspicious_escapes(from) {
+        LiteralMiss::Escapes
+    } else if let Some(line) = unindented_match(body, from) {
+        LiteralMiss::Indentation(line.into())
+    } else {
+        LiteralMiss::Absent
+    };
+    edit_error(EditFailure::NoLiteralMatch(EditFailureNoLiteralMatch {
+        path: path.into(),
+        evidence,
+    }))
 }
 
 /// The 1-based line equal to `from`'s first non-empty line once both are trimmed,
@@ -829,15 +866,30 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
             depth
         }
         Value::Int(n) => {
-            return Err(
-                Error::new(format!("explore-dir: depth must be non-negative, got {n}")).into(),
-            );
+            return Err(invalid(
+                InvalidFailure::new(
+                    "explore-dir".into(),
+                    InvalidCause::Range(NumberRange {
+                        value: Number::Int(*n),
+                        minimum: Number::Int(0),
+                        maximum: Number::Int(i64::MAX),
+                    }),
+                )
+                .field("depth".into()),
+            )
+            .into());
         }
         other => {
-            return Err(Error::new(format!(
-                "explore-dir: expected a non-negative Int for depth, got {}",
-                other.type_name()
-            ))
+            return Err(invalid(
+                InvalidFailure::new(
+                    "explore-dir".into(),
+                    InvalidCause::Shape(ral_core::fact::ShapeFailure {
+                        expected: Expected::Shape(ValueShape::Int),
+                        found: other.found(),
+                    }),
+                )
+                .field("depth".into()),
+            )
             .into());
         }
     };
@@ -887,9 +939,13 @@ fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<LexicalPath> {
         .locate_existing::<Reading>(&root, LeafMode::Follow)?
         .is_none()
     {
-        return Err(Error::new(format!(
-            "{who}: {path} does not exist; the path is a file or directory, relative to the cwd or absolute."
-        )).into());
+        return Err(Error::io(
+            IoOperation::Walk,
+            IoSubject::Path(path.into()),
+            &std::io::ErrorKind::NotFound.into(),
+        )
+        .with_context(who)
+        .into());
     }
     Ok(root)
 }
@@ -978,9 +1034,12 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     let name = args[0].as_str("skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(name) {
-        return Err(Error::new(format!(
-            "skill: '{name}' is not a skill name; names are lowercase letters, digits and single hyphens"
-        )).into());
+        return Err(
+            skill::refusal(SkillFailure::InvalidName(SkillFailureInvalidName {
+                name: name.into(),
+            }))
+            .into(),
+        );
     }
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
@@ -1001,16 +1060,12 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             })
         });
     let found = on_disk.or_else(|| skill::builtin(name)).ok_or_else(|| {
-        Error::new(format!(
-            "skill: no skill named '{name}'; did you mean one that `skill-list` shows?"
-        ))
+        skill::refusal(SkillFailure::Missing(SkillFailureMissing {
+            name: name.into(),
+        }))
     })?;
     let place = found.place();
-    let body = skill::read_skill_body(&found).map_err(|why| {
-        Error::new(format!(
-            "skill: could not load '{name}' from {place}: {why}"
-        ))
-    })?;
+    let body = skill::read_skill_body(&found)?;
     // Only once the body is in hand, so the card never claims a load that did
     // not happen.
     mooring.surface(&Value::map(vec![
@@ -1040,9 +1095,10 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
         match skill::parse_skill(&found) {
             Ok(s) => entries.push(format!("{}: {}", s.name, s.description)),
             Err(why) => errors.push(format!(
-                "⚠ skipped {} in {}: {why}",
+                "⚠ skipped {} in {}: {}",
                 found.name,
-                found.place()
+                found.place(),
+                why.describe()
             )),
         }
     }

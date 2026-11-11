@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-generated_at_date: 2026-11-07
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
 ---
 
@@ -66,7 +66,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 44): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 45): checked at `Attach`; a mismatch refuses.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -107,19 +107,21 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
 - `Event` — engine→front-end, inside a dispatch's window: `Surface`,
   `Enquiry`, `Reading`, `Report`. Every surfaced value is a tagged variant; an
   audit observation rides as `` `observed <record> `` (`Observation::to_surface`).
-  `Reading(Result<FOValue, String>)` answers a `Frame::Probe` under its
+  `Reading(Result<FOValue, ProbeFailure>)` answers a `Frame::Probe` under its
   `DispatchId`: the probe's own event, not a run that ended.
 - `SessionEvent` — engine→front-end with no dispatch to ride: `Attached` /
   `Refused(WireError)` (the attach verdict) and `DeferredSurface(Vec<FOValue>)`
   (a worker's batch, and a watched worker's lines).
-- `WireError { message, hints }` — the one wire form of an `Error`: a refused
-  enquiry's `Frame::Answer`, `SessionEvent::Refused` and `Severed::Refused`.
-  `WireError::of(&Error)` takes the message line, context included, and the
-  stored hints, nothing else; `to_error` folds them back through `with_hint`
-  as a plain `Reason::Raised`, so the far side reads status 1 and the record's
-  advice (signal, exit-hint) is not carried. Both carriers pass every refusal through the pair, so a
-  refusal reads the same under either and its hints survive the crossing.
-  The record (`ErrorRecord`, `$err`) is untouched: hints stay report facts.
+- `WireError { reason: Reason, context: Option<String>, hints: Vec<String> }`
+  — a refusal envelope for `Frame::Answer`, `SessionEvent::Refused` and
+  `Severed::Refused`. `of(&Error)` borrows the live error and clones only these
+  portable facts; `to_error(&self) -> Error` restores them without changing the
+  reason or hint order. `message(&self) -> String` derives presentation only.
+  Both carriers normalize through this pair. Intrinsic advice and code are
+  derived from the preserved reason; provenance, witnesses, compiler rejections
+  and unwind facts do not cross. The enquiring operation claims its own site.
+  `ErrorFact` is the separate `{frame, reason, site}` failure, not this
+  report envelope.
 - `Control` — `Strike(DispatchId, CancelCause)` and `End(RootCause)`, the
   closed `Cancelled | Terminated | Aborted`; applied by `Scopes::apply` under
   both carriers. Even a terminal dispatch-local cause never ends the engine.
@@ -127,20 +129,22 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `Ran(Ran { ending, rendered, single_command, captured, trail })` after it;
   `Faulted { rendered, status }` only when the report was lost (engine-worker
   panic or report plumbing/fuse failure), so what ran is unknown.
-- `Ending = fact::Ending<FOValue, ErrorRecord, CancelCause>` has five cases:
-  `Ok(value)`, `Err(record)`, `Exited(u8)`, `Stopped(cause)`, `Panic(text)`.
-  A non-data result becomes `Err`, status 1, with its record and hint.
-  The `ErrorRecord` is the record `try` hands its handler; serde goes through
-  its first-order encoding, and exarch reads its `reason()` for the
-  command-exit tip. `Report::Ran(Ran)` holds the ending with its rendering,
-  captured streams and trail.
-- The error record is exactly `[reason, frame, site]`, with a total site and
-  no stored status or derived message. `Report::code() -> u8` reads the
-  `NonZeroU8` host status for `Static`/`Faulted` and delegates to the ending
+- `Ending = fact::Ending<FOValue, ErrorFact, CancelCause>` has five cases:
+  `Ok(value)`, `Err(fact)`, `Exited(u8)`, `Stopped(cause)`, `Panic(text)`.
+  A non-data result becomes a typed `Invalid` error, status 1, with its fact
+  and reason-derived advice.
+  The `ErrorFact` is the failure behind the record `try` hands its handler
+  (`ErrorFact::record`); serde goes through its first-order encoding, typed
+  reason included, and exarch reads its `reason()` for the command-exit tip.
+  `Report::Ran(Ran)` holds the ending with its rendering, captured streams and
+  trail.
+- The wire failure is exactly `{frame, reason, site}`, with a total site; the
+  `message` and `status` a program reads are derived from the reason, not
+  stored. `Report::code() -> u8` reads the `NonZeroU8` host status for `Static`/`Faulted` and delegates to the ending
   for `Ran`, whose errors project through the one `Reason` code table.
-  Desk refusals become plain raised errors. Hosts exit through
+  Desk refusals retain their typed causes. Hosts exit through
   `std::process::ExitCode::from(u8)`. The versioned wire carries the new
-  record unchanged, without backwards compatibility
+  fact unchanged, without backwards compatibility
   ([[decisions/261105_the-error-record|the error record]]).
 - Serde externally tags the ending in kebab-case: `{"exited":3}`,
   `{"stopped":"timed-out"}`, `{"panic":"…"}`. `Ok` carries an `FOValue`
@@ -158,9 +162,9 @@ maps an error to its record and a `Stop` to its cause.
 A caught run panic is `Ran` with `Panic`, status 101, after checkpoint restore,
 with no capture or trail. Static diagnostics render against their own source
 ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
-`Report::refused`, `Report::faulted` and a host-level static diagnostic share
-one `spanless` helper over the same `Diagnosis` renderer: the former means nothing ran, the latter
-means the report is unavailable, not that evaluation returned a panic ending.
+`Report::refused` renders a typed `Reason` spanlessly: nothing ran.
+`Report::faulted` renders `ReportFault` directly: the report is unavailable,
+not a recoverable error or an evaluation that returned a panic ending.
 
 ## `core/src/protocol/probe.rs`
 

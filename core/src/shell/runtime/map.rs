@@ -16,6 +16,9 @@
 use super::env::Env;
 use super::list::inspect;
 use super::value::Value;
+use crate::data::FOValue;
+use crate::data::datum::Datum as _;
+use crate::fact::ErrorFact;
 use crate::ir::{FieldsNode, Val};
 use imbl::shared_ptr::DefaultSharedPtr;
 use std::borrow::Cow;
@@ -30,6 +33,9 @@ pub struct Map(Repr);
 enum Repr {
     Built(Arc<imbl::OrdMap<String, Value>>),
     Literal(Arc<FieldsNode>, Env),
+    /// `fact.record()`, built, and the fact it projects: what `raise` reads
+    /// back.  Indistinguishable from `Built` to everything else.
+    Witnessed(Arc<imbl::OrdMap<String, Value>>, Arc<ErrorFact>),
 }
 
 impl Default for Repr {
@@ -49,6 +55,27 @@ impl Drop for Repr {
 }
 
 impl Map {
+    /// Hydrate every pair in order, safely releasing an earlier duplicate.
+    pub(crate) fn from_seed_values(values: impl IntoIterator<Item = (String, Value)>) -> Self {
+        let mut map = imbl::OrdMap::new();
+        for (name, value) in values {
+            if let Some(replaced) = map.insert(name, value) {
+                super::value::drop_seed_value(replaced);
+            }
+        }
+        Self(Repr::Built(Arc::new(map)))
+    }
+
+    /// Consume only seed-built data; its persistent spine has no internal aliases.
+    pub(crate) fn into_seed_values(mut self) -> Option<imbl::OrdMap<String, Value>> {
+        match &mut self.0 {
+            Repr::Built(values) => Arc::into_inner(std::mem::take(values)),
+            Repr::Literal(..) | Repr::Witnessed(..) => {
+                unreachable!("seed hydration creates only built maps")
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -70,7 +97,27 @@ impl Map {
     pub(crate) fn literal_parts(&self) -> Option<(&Arc<FieldsNode>, &Env)> {
         match &self.0 {
             Repr::Literal(node, env) => Some((node, env)),
-            Repr::Built(_) => None,
+            Repr::Built(_) | Repr::Witnessed(..) => None,
+        }
+    }
+
+    /// The record a program reads of `fact`, witnessed by it.
+    pub(crate) fn witnessed(fact: ErrorFact) -> Self {
+        let FOValue::Map { entries } = fact.record().encode() else {
+            unreachable!("a record encodes as a map")
+        };
+        let map: imbl::OrdMap<String, Value> = entries
+            .into_iter()
+            .map(|(k, v)| (k, Value::from(v)))
+            .collect();
+        Self(Repr::Witnessed(Arc::new(map), Arc::new(fact)))
+    }
+
+    /// The failure this map is the unchanged record of, if any.
+    pub(crate) fn witness(&self) -> Option<&ErrorFact> {
+        match &self.0 {
+            Repr::Witnessed(_, fact) => Some(fact),
+            Repr::Built(_) | Repr::Literal(..) => None,
         }
     }
 
@@ -83,7 +130,7 @@ impl Map {
     /// otherwise.
     fn materialized(&self) -> Cow<'_, imbl::OrdMap<String, Value>> {
         match &self.0 {
-            Repr::Built(m) => Cow::Borrowed(m),
+            Repr::Built(m) | Repr::Witnessed(m, _) => Cow::Borrowed(m),
             Repr::Literal(node, env) => Cow::Owned(
                 node.shape()
                     .iter()
@@ -95,8 +142,9 @@ impl Map {
 
     /// Materializes a literal once (O(text)), then hands out the unique
     /// `Arc`'s contents to mutate — copy-on-write, as `imbl` already is.
+    /// A changed record no longer projects its fact, so the witness goes.
     fn built_mut(&mut self) -> &mut imbl::OrdMap<String, Value> {
-        if matches!(self.0, Repr::Literal(..)) {
+        if !matches!(self.0, Repr::Built(_)) {
             self.0 = Repr::Built(Arc::new(self.materialized().into_owned()));
         }
         let Repr::Built(m) = &mut self.0 else {
@@ -107,7 +155,7 @@ impl Map {
 
     pub fn len(&self) -> usize {
         match &self.0 {
-            Repr::Built(m) => m.len(),
+            Repr::Built(m) | Repr::Witnessed(m, _) => m.len(),
             Repr::Literal(node, _) => node.shape().len(),
         }
     }
@@ -118,7 +166,7 @@ impl Map {
 
     pub fn get(&self, key: &str) -> Option<Cow<'_, Value>> {
         match &self.0 {
-            Repr::Built(m) => m.get(key).map(Cow::Borrowed),
+            Repr::Built(m) | Repr::Witnessed(m, _) => m.get(key).map(Cow::Borrowed),
             Repr::Literal(node, env) => {
                 let entries = node.shape();
                 let i = entries.partition_point(|(k, _)| k.as_ref() < key);
@@ -132,7 +180,7 @@ impl Map {
 
     pub(crate) fn contains_key(&self, key: &str) -> bool {
         match &self.0 {
-            Repr::Built(m) => m.contains_key(key),
+            Repr::Built(m) | Repr::Witnessed(m, _) => m.contains_key(key),
             Repr::Literal(node, _) => node
                 .shape()
                 .binary_search_by(|(k, _)| k.as_ref().cmp(key))
@@ -146,7 +194,7 @@ impl Map {
 
     pub fn iter(&self) -> Iter<'_> {
         match &self.0 {
-            Repr::Built(m) => Iter(IterRepr::Built(m.iter())),
+            Repr::Built(m) | Repr::Witnessed(m, _) => Iter(IterRepr::Built(m.iter())),
             Repr::Literal(node, env) => Iter(IterRepr::Literal(node.shape().iter(), env)),
         }
     }
@@ -230,7 +278,8 @@ impl<'a> IntoIterator for &'a Map {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::Spanned;
+    use crate::fact::Reason;
+    use crate::source::{CallSite, Spanned};
 
     /// Keys given out of order.
     const CASES: &[&[(&str, i64)]] = &[
@@ -311,5 +360,78 @@ mod tests {
     fn a_literal_lookup_takes_the_first_of_an_equal_run() {
         let map = literal(&[("a", 1), ("a", 2), ("b", 3)]);
         assert_eq!(map.get("a").as_deref(), Some(&Value::Int(1)));
+    }
+
+    fn fact() -> ErrorFact {
+        let site = CallSite {
+            script: "t.ral".into(),
+            line: 3,
+            col: 5,
+        };
+        ErrorFact::new(Reason::TimedOut, "sleep".into(), site)
+    }
+
+    /// The map a program would build by hand from `fact`'s record.
+    fn record_built(fact: &ErrorFact) -> Map {
+        let FOValue::Map { entries } = fact.record().encode() else {
+            unreachable!("a record encodes as a map")
+        };
+        entries
+            .into_iter()
+            .map(|(k, v)| (k, Value::from(v)))
+            .collect()
+    }
+
+    #[test]
+    fn a_witnessed_map_reads_as_the_built_record() {
+        let fact = fact();
+        let (witnessed, blt) = (Map::witnessed(fact.clone()), record_built(&fact));
+        assert_eq!(witnessed.len(), blt.len());
+        assert_eq!(witnessed.is_empty(), blt.is_empty());
+        assert_eq!(pairs(&witnessed), pairs(&blt));
+        for probe in ["frame", "message", "status", "site", "reason"] {
+            assert_eq!(witnessed.get(probe), blt.get(probe), "get {probe:?}");
+            assert_eq!(
+                witnessed.contains_key(probe),
+                blt.contains_key(probe),
+                "has {probe:?}"
+            );
+        }
+        assert_eq!(witnessed, blt);
+        assert_eq!(blt, witnessed);
+        assert_eq!(
+            FOValue::try_from(&Value::Map(witnessed)).expect("data"),
+            fact.record().encode()
+        );
+    }
+
+    #[test]
+    fn a_witnessed_map_names_its_fact() {
+        let fact = fact();
+        assert_eq!(Map::witnessed(fact.clone()).witness(), Some(&fact));
+        assert_eq!(
+            Value::failure(fact.clone()),
+            Value::Map(Map::witnessed(fact))
+        );
+    }
+
+    #[test]
+    fn inserting_into_a_witnessed_map_drops_the_witness_and_keeps_the_entries() {
+        let fact = fact();
+        let mut map = Map::witnessed(fact.clone());
+        map.insert("extra".into(), Value::Int(1));
+        assert_eq!(map.witness(), None);
+        let mut expected = record_built(&fact);
+        expected.insert("extra".into(), Value::Int(1));
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn literal_and_built_maps_have_no_witness() {
+        for case in CASES {
+            assert_eq!(literal(case).witness(), None);
+            assert_eq!(built(case).witness(), None);
+        }
+        assert_eq!(record_built(&fact()).witness(), None);
     }
 }

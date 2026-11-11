@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f048608d
-generated_at_date: 2026-11-09
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -36,8 +36,9 @@ fact data are reached through their owning modules.
   alias, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
   every install boundary refuses a value that is no block (`arm_closure`) or
   whose type takes other parameters (`alias_arm_scheme`, `catch_all_stands_in`,
-  inferred over the closure's own capture by `Shell::closure_schemes`) — the
-  calling convention is never inferred from the runtime shape
+  inferred over the closure's own capture by `Shell::closure_schemes`), which
+  it refuses as one `InvalidCause::IllTyped` fact (role and every checker
+  diagnostic) — the calling convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 - `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
   shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
@@ -407,9 +408,10 @@ Methods on `Shell` live by concern, one submodule each:
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
 - `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
-  `GrantStack` to `authority::guard`, whose `Denial { check, error: Error }`
-  already carries the runtime `Error`, and records it through `Shell::refused` (an exec refusal, with its
-  mooring, through `Shell::exec_refused`); also owns the judged path
+  `GrantStack` to `authority::guard`, whose `Denial` carries only portable
+  request/cause facts. `Shell::refused` records its derived check and constructs
+  `Reason::Denied` (an exec refusal, with its mooring, through
+  `Shell::exec_refused`); also owns the judged path
   doors, sandbox projection and grant-layer scope guards;
 - `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and

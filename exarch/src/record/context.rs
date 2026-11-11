@@ -33,10 +33,12 @@ mod transcript;
 pub use resume::resume;
 pub use span::Span;
 
+use super::replay::ForeignRecord;
 use super::{
     AgentId, EditAuthority, Fold, Locus, Record, Recorded, Refusal, Role, Transcript, TurnKind,
 };
 use genai::chat::{ChatMessage, ChatRole, ContentPart, ToolResponse};
+use ral_core::fact::ContextFailure;
 use ral_core::own::OwnDir;
 use render::eviction_label;
 use serde::{Deserialize, Serialize};
@@ -45,12 +47,31 @@ pub(super) use state::validate_result_ids;
 use std::sync::Arc;
 use table::{Item, Table};
 
+#[derive(Debug)]
+pub(crate) enum ContextStepFailure {
+    Foreign(ForeignRecord),
+    ReadBack(ContextFailure),
+}
+
+impl From<ContextStepFailure> for Refusal {
+    fn from(failure: ContextStepFailure) -> Self {
+        match failure {
+            ContextStepFailure::Foreign(ForeignRecord { record, reason }) => {
+                Self::Foreign { record, reason }
+            }
+            ContextStepFailure::ReadBack(cause) => Self::ReadBack(cause),
+        }
+    }
+}
+
 impl Fold for Context {
     type Memo = Self;
 
     fn step(memo: &mut Self, record: Recorded<Record>) -> Result<(), Refusal> {
         match record.into_parts() {
-            (locus, Record::Transcript(p)) => memo.step_transcript(Recorded::new(locus, p)),
+            (locus, Record::Transcript(p)) => memo
+                .step_transcript(Recorded::new(locus, p))
+                .map_err(Refusal::from),
             (_, Record::Control(_) | Record::Display(_) | Record::Forensic(_)) => Ok(()),
         }
     }
@@ -501,11 +522,11 @@ fn message_role(message: &ChatMessage) -> Role {
     }
 }
 
-fn not_recorded_refusal_turn(turn: u64, reach: Option<u64>) -> String {
-    match reach {
-        Some(reach) => format!("turn {turn} is not recorded: the latest is {reach}"),
-        None => format!("turn {turn} is not recorded: nothing has been recorded yet"),
-    }
+fn not_recorded_refusal_turn(turn: u64, reach: Option<u64>) -> ral_core::fact::ContextFailure {
+    ral_core::fact::ContextFailure::TurnNotRecorded(ral_core::fact::ContextFailureTurnNotRecorded {
+        turn: turn.into(),
+        reach: reach.map(Into::into),
+    })
 }
 
 fn chat_messages(protocol: &Transcript) -> Vec<ChatMessage> {

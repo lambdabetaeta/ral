@@ -23,7 +23,7 @@ pub(crate) fn wallet() -> Result<Wallet, OwnError> {
 
 /// Called before threads: preparing credentials scrubs the launch environment.
 pub(crate) fn prepare() -> Result<CredentialStore, String> {
-    wallet()?.prepare()
+    wallet().map_err(|error| error.to_string())?.prepare()
 }
 
 pub(crate) fn list(store: &Mutex<CredentialStore>) -> AccountList {

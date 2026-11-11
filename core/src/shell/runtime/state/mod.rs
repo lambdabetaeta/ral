@@ -22,6 +22,7 @@ pub(crate) mod cwd;
 pub(crate) mod hooks;
 mod host;
 mod inherit;
+pub(crate) mod json;
 pub(crate) mod modules;
 pub(crate) mod notice;
 mod scope;
@@ -41,6 +42,7 @@ use super::mooring::{Mooring, no_desk};
 use crate::authority::policy::GrantStack;
 use crate::environ::EnvVars;
 use crate::error::{Error, FrameName, Prov};
+use crate::fact::{IoOperation, IoSubject, StandardStream};
 use crate::io::{Io, WriteFault};
 use crate::path::CwdPath;
 use crate::process::{CancelCause, DurableRoot, Scope};
@@ -316,7 +318,12 @@ impl Shell {
     /// # Errors
     /// See [`Self::write_sink`].
     pub(crate) fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stdout, &self.scope, bytes, "stdout")
+        Self::write_sink(
+            &mut self.io.stdout,
+            &self.scope,
+            bytes,
+            StandardStream::Stdout,
+        )
     }
 
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
@@ -325,7 +332,12 @@ impl Shell {
     /// # Errors
     /// See [`Self::write_sink`].
     pub fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
-        Self::write_sink(&mut self.io.stderr, &self.scope, bytes, "stderr")
+        Self::write_sink(
+            &mut self.io.stderr,
+            &self.scope,
+            bytes,
+            StandardStream::Stderr,
+        )
     }
 
     /// The one place a reader leaving becomes the stop it is.  A broken pipe
@@ -335,7 +347,7 @@ impl Shell {
         sink: &mut crate::io::Sink,
         scope: &Scope,
         bytes: &[u8],
-        what: &str,
+        stream: StandardStream,
     ) -> Settled<()> {
         match sink.write_under(scope, bytes) {
             Ok(()) => Ok(()),
@@ -343,7 +355,7 @@ impl Shell {
             Err(WriteFault::BrokenPipe) if sink.is_stderr() => Ok(()),
             Err(WriteFault::BrokenPipe) => Err(Break::stopped(CancelCause::ReaderGone, None)),
             Err(WriteFault::Io(e)) => {
-                Err(Error::new(format!("could not write to {what}: {e}")).into())
+                Err(Error::io(IoOperation::Write, IoSubject::Stream(stream), &e).into())
             }
         }
     }
@@ -351,11 +363,11 @@ impl Shell {
     /// The closed session scheme for a value binding — `None` for anything
     /// but a block. Shared by [`Self::bind_value`] and
     /// [`Self::register_hook`], which differ only in what they do with it.
-    /// Refused blocks return their diagnostic without exporting a scheme.
+    /// A refused block returns every diagnostic and exports no scheme.
     pub(crate) fn value_scheme(
         &self,
         value: &crate::shell::runtime::Value,
-    ) -> Result<Option<crate::ty::Closed>, Box<crate::typecheck::TypeError>> {
+    ) -> Result<Option<crate::ty::Closed>, Vec<crate::typecheck::TypeError>> {
         let crate::shell::runtime::Value::Thunk(closure) = value else {
             return Ok(None);
         };

@@ -63,8 +63,8 @@ echo "x=$recovered"
 
 # A producer failing before any bytes wins over the tail
 let boom = { fail 'producer failed' }
-try { let result = !{!$boom | from-json}; echo $result } { |e| echo !{describe $e} }
-try { echo not-json | from-json; return () } { |e| echo !{describe $e} }
+try { let result = !{!$boom | from-json}; echo $result } { |e| echo $e[message] }
+try { echo not-json | from-json; return () } { |e| echo $e[message] }
 
 # A list-producing lazy chain of 2000 links crosses the final stage
 let chain = { |xs| if !{is-empty $xs} { return `done } else {

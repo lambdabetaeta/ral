@@ -17,8 +17,10 @@ act are one shape apiece rather than seven private ones.
 **The report has two fields, and neither is a second copy of something else.**
 `outcome` is `` `ok `` of the body's value or `` `err `` of *exactly* the error
 record `try` hands its handler — so `try`, `poll`, and `audit` report failure
-in one vocabulary: exactly `[reason, frame, site]`, with a total site and no
-stored status or derived message. A reader that can read one can read all three. `trail`
+in one vocabulary: exactly `[frame, message, status, site]`, with a total
+site. `message` and `status` are derived from the typed reason, never stored
+beside it; diagnostic text is not the failure value. A reader that can read
+one can read all three. `trail`
 is the list of observations. Nothing else: no status field duplicating the
 process exit status the host already owns and `audit` never changes, and no
 hint or advice in the error record, because both are for a person and a
@@ -178,8 +180,10 @@ What builds up the trail is itself scoped:
   anyone is collecting. Observations read the same total register; with no
   listeners, a `CommandRecord` begins silent, before observation work
   ([[decisions/261105_the-error-record|the error record]]);
-- a `grant` has no say. Whenever a trail is open, a capability *denial* is
-  recorded as a `` `check `` observation and an allowed check never is: the
+- a `grant` has no say. Whenever a trail is open, an fs or exec capability
+  *denial* is
+  projected from the selected typed `Denial` and recorded once as a `` `check ``
+  observation; an allowed check never is: the
   denial is a fact about authority nothing else in the trail attests, while
   everything an allowed check would attest is already attested by the command,
   read, or write it let through. There is no flag to set and none to clear, so

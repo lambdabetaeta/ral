@@ -18,7 +18,7 @@ enum Guest {
     /// A guest whose engine died at birth: a connection, and nobody on it.
     Closes,
     /// No engine could be made.
-    Refuses(String),
+    Refuses(ral_core::fact::EngineFactoryFailure),
 }
 
 /// A fake [`crate::agent::Factory`] that plays the guest daemon, so the desk
@@ -52,13 +52,15 @@ impl FakeFactory {
 }
 
 impl crate::agent::Factory for FakeFactory {
-    fn engine(&self) -> Result<ral_core::protocol::channel::WireStream, String> {
+    fn engine(
+        &self,
+    ) -> Result<ral_core::protocol::channel::WireStream, ral_core::fact::EngineFactoryFailure> {
         *self.calls.lock().unwrap() += 1;
         if let Guest::Refuses(reason) = &self.guest {
             return Err(reason.clone());
         }
-        let (host, guest) =
-            UnixStream::pair().map_err(|e| format!("socketpair for the fake factory: {e}"))?;
+        let (host, guest) = UnixStream::pair()
+            .map_err(|e| ral_core::fact::EngineFactoryFailure::Io(ral_core::io::failure(&e)))?;
         if matches!(self.guest, Guest::Spawns) {
             self.children.lock().unwrap().push(spawn_engine_on(&guest));
         }
@@ -107,9 +109,8 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
             .ask(wire_start_req("unattached", parent_seal()))
             .expect_err("an engine that never attached must be refused");
         assert!(
-            err.describe().contains("could not be started"),
-            "got: {}",
-            err.describe()
+            matches!(&err.reason, Reason::Host(host) if matches!(&**host,
+            HostFailure::Exarch(ExarchFailure::Engine(ral_core::fact::EngineFailure { step: ral_core::fact::EngineStep::Attach, cause: ral_core::fact::EngineCause::Connection(_) }))))
         );
         assert_eq!(
             summary(&desk.call.handle, &desk.call.fleet).live,
@@ -123,16 +124,25 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
 /// the factory's reason.
 #[test]
 fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
-    let factory = FakeFactory::new(Guest::Refuses("connection reset by peer".to_string()));
+    let factory = FakeFactory::new(Guest::Refuses(ral_core::fact::EngineFactoryFailure::Io(
+        ral_core::io::failure(&std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    )));
     with_wire_desk(factory, |desk, _fleet, _agent| {
         let err = desk
             .ask(wire_start_req("never-made", parent_seal()))
             .expect_err("a refused factory must be refused");
-        assert!(
-            err.describe().contains("could not make a helper engine")
-                && err.describe().contains("connection reset by peer"),
-            "must name the factory's refusal and its reason, got: {}",
-            err.describe()
+        assert_eq!(
+            err.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Engine(
+                ral_core::fact::EngineFailure {
+                    step: ral_core::fact::EngineStep::Factory,
+                    cause: ral_core::fact::EngineCause::Factory(
+                        ral_core::fact::EngineFactoryFailure::Io(ral_core::io::failure(
+                            &std::io::Error::from(std::io::ErrorKind::ConnectionReset)
+                        ))
+                    ),
+                }
+            ))))
         );
     });
 }
@@ -146,8 +156,17 @@ fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
         let err = desk
             .ask(super::start_req(NurseryId(0), "go", "in-process"))
             .expect_err("a wire desk has no nursery to adopt a parked fork from");
+        assert_eq!(
+            err.reason,
+            Reason::Protocol(Box::new(ral_core::fact::ProtocolFailure::WrongForkKind(
+                ral_core::fact::ProtocolFailureWrongForkKind {
+                    expected: ral_core::fact::ForkKind::Seal,
+                    actual: ral_core::fact::ForkKind::Park
+                }
+            )))
+        );
         assert!(
-            err.describe().contains("`sealed <bytes>`"),
+            err.plain().contains("`sealed <bytes>`"),
             "must name the tag this host does take, got: {}",
             err.describe()
         );
@@ -174,7 +193,10 @@ fn a_sealed_bequest_reaches_the_child_engine() {
             .expect("a sealed bequest makes a child engine");
         assert_eq!(
             child
-                .read(|t| t.env_var("PARENT_MARK"))
+                .read(
+                    ral_core::fact::ProbeSubject::EnvVar("PARENT_MARK".into()),
+                    |t| t.env_var("PARENT_MARK")
+                )
                 .expect("the child engine answers a probe"),
             Some("1".to_string()),
             "the parent's env var reached the child through the sealed bequest"

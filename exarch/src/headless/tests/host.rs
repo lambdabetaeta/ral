@@ -92,7 +92,9 @@ fn headless_no_reply_runs_through_the_host_feed_in_both_formats() {
         );
         assert_eq!(
             root_handle.status().expect("the cell is available").report,
-            Some(ChildStatus::Failed("ended without calling `reply`".into()))
+            Some(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                ral_core::fact::HelperFailure::NoReply
+            )))
         );
         assert_eq!(host.end(), [] as [String; 0]);
     }
@@ -176,16 +178,24 @@ fn verdict_after_fault(
 #[test]
 fn a_report_takes_precedence_over_a_fault_and_a_fault_over_the_missing_reply() {
     let fault = Some("earlier channel fault");
-    let refused = Script::new().then(Reply::error(crate::provider::ProviderError::Other(
-        "request refused".into(),
-    )));
+    let refused = Script::new().then(Reply::error(crate::provider::ProviderError::Api {
+        model: "test-model".into(),
+        cause: crate::agent::testkit::service_response(400, "request refused"),
+    }));
     assert_eq!(
         verdict_after_fault(frontend_root(reply_script("42"), true), fault, |_| {}),
         Ok(())
     );
     assert_eq!(
         verdict_after_fault(frontend_root(refused, true), fault, |_| {}),
-        Err("request refused".to_string())
+        Err(ral_core::fact::HelperFailure::Provider(
+            crate::provider::ProviderError::Api {
+                model: "test-model".into(),
+                cause: crate::agent::testkit::service_response(400, "request refused")
+            }
+            .failure()
+        )
+        .describe())
     );
     assert_eq!(
         verdict_after_fault(blocking_root(), fault, |handle| {
@@ -289,9 +299,10 @@ fn converse_carries_context_from_one_job_into_the_next() {
 fn ordinary_failed_conversation_remains_usable_for_the_next_job() {
     let host = frontend_host(
         Script::new()
-            .then(Reply::error(crate::provider::ProviderError::Other(
-                "request refused".into(),
-            )))
+            .then(Reply::error(crate::provider::ProviderError::Api {
+                model: "test-model".into(),
+                cause: crate::agent::testkit::service_response(400, "request refused"),
+            }))
             .then(Reply::text("next job succeeds")),
         false,
     );
@@ -365,7 +376,7 @@ fn a_helper_without_a_reply_reports_failure_before_the_parent_settles() {
         has_fact(signal, root_id, |record| {
             matches!(record, Record::Display(Display::SubagentDone {
                 name, outcome: Settlement::Failed { reason }, ..
-            }) if name == "flaky" && reason == "ended without calling `reply`")
+            }) if name == "flaky" && reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::NoReply))
         })
     }));
     assert!(

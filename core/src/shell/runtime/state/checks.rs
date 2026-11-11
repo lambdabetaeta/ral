@@ -6,6 +6,7 @@
 use crate::authority::guard::{Denial, check_device_name, check_flag, fs_denial};
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
+use crate::fact::{IoOperation, IoSubject, Reason};
 use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
 use crate::path::{Kind, is_loop};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
@@ -19,21 +20,25 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check(&self, flag: Flag, who: &str) -> Settled<()> {
-        Ok(check_flag(&self.context.grants, flag, who)?)
+        check_flag(&self.context.grants, flag, who)
+            .map_err(|denial| Error::new(Reason::Denied(Box::new(denial))).into())
     }
 
     /// Record `check` and mint the `Break` that refuses.  Its callers hold no
     /// `Mooring`, so the denial reaches the trail alone.
-    fn refused(&mut self, Denial { check, error, .. }: Denial) -> Break {
-        self.record_check(None, check);
-        error.into()
+    fn refused(&mut self, denial: Denial) -> Break {
+        if let Some(check) = denial.audit_check() {
+            self.record_check(None, check);
+        }
+        Error::new(Reason::Denied(Box::new(denial))).into()
     }
 
     /// Record an exec `denial` against `mooring` and mint the `Break` that refuses.
     pub(crate) fn exec_refused(&mut self, denial: Denial, mooring: &Mooring) -> Break {
-        let Denial { check, error, .. } = denial;
-        self.record_check(Some(mooring), check);
-        error.into()
+        if let Some(check) = denial.audit_check() {
+            self.record_check(Some(mooring), check);
+        }
+        Error::new(Reason::Denied(Box::new(denial))).into()
     }
 
     /// The baseline every fs judgment of this shell reads: its runtime's.
@@ -80,7 +85,7 @@ impl Shell {
     }
 
     fn walk_failure(path: &LexicalPath, e: &io::Error) -> Break {
-        Error::io(path.shown(), e).into()
+        Error::io(IoOperation::Walk, IoSubject::Path(path.shown()), e).into()
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and
@@ -95,7 +100,7 @@ impl Shell {
     /// I/O error, phrased with the name as written; or the refusal of a
     /// reserved device name.
     pub fn locate<O: Op>(&mut self, path: &LexicalPath) -> Settled<Located<Judged<O>>> {
-        check_device_name(path)?;
+        check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let verdict = (self.context.grants).locate::<O, Located>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
     }
@@ -105,7 +110,7 @@ impl Shell {
     /// # Errors
     /// As [`locate`](Self::locate).
     pub fn locate_dir<O: Op>(&mut self, path: &LexicalPath) -> Settled<Dir<Judged<O>>> {
-        check_device_name(path)?;
+        check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let verdict = (self.context.grants).locate::<O, Dir>(self.baseline(), path);
         self.raised::<O, _>(path, verdict)
     }
@@ -128,7 +133,7 @@ impl Shell {
         path: &LexicalPath,
         leaf: LeafMode,
     ) -> Settled<Option<Located<Judged<O>>>> {
-        check_device_name(path)?;
+        check_device_name(path).map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
         let located = match walk(path, leaf) {
             Ok(located) => located,
             Err(e) => {
@@ -161,7 +166,8 @@ impl Shell {
     ) -> Settled<Option<Located<Judged<O>>>> {
         let mut first = None;
         for cand in candidates {
-            check_device_name(&cand)?;
+            check_device_name(&cand)
+                .map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
             let located = match walk(&cand, LeafMode::Follow) {
                 Ok(located) => located,
                 Err(e) => {
@@ -286,7 +292,10 @@ mod tests {
         });
         let mut shell = crate::test_helper::core_shell();
         shell.with_layer(restricted, |shell| {
-            let Break::Error(fs) = shell.locate::<Reading>(&path).err().expect("reading is denied")
+            let Break::Error(fs) = shell
+                .locate::<Reading>(&path)
+                .err()
+                .expect("reading is denied")
             else {
                 panic!("a grant refusal is an error, never an escape");
             };
@@ -297,15 +306,49 @@ mod tests {
                     crate::path::shown(&file)
                 )
             );
-            assert_eq!(fs.hints().first().map(|h| &**h), Some("add it to the grant's fs `read` or `write` list"));
+            assert_eq!(
+                fs.reason.advice().first().map(String::as_str),
+                Some("add it to the grant's fs `read` or `write` list")
+            );
+            assert_eq!(
+                fs.reason,
+                Reason::Denied(Box::new(Denial::fs_withheld(
+                    crate::path::shown(&file),
+                    crate::fact::ReadOrWrite::Read,
+                    crate::fact::Withholding::MissingAllowance(crate::fact::SingleOrNested::Single),
+                )))
+            );
+            assert_eq!(fs.context(), None);
+            assert_eq!(fs.hints(), []);
             assert_eq!(fs.failure_code().get(), 1);
 
-            let Break::Error(flag) = shell.check(Flag::Shell(ShellVerb::Detach), "detach").unwrap_err()
+            let Break::Error(flag) = shell
+                .check(Flag::Shell(ShellVerb::Detach), "detach")
+                .unwrap_err()
             else {
                 panic!("a grant refusal is an error, never an escape");
             };
-            assert_eq!(flag.describe(), "detach: an active grant withholds it, so nothing here may outlive this session. Would `spawn` do, since it ends when the session does?");
+            assert_eq!(
+                flag.describe(),
+                "detach: an active grant withholds it, so nothing here may outlive this session"
+            );
+            assert_eq!(
+                flag.reason.advice(),
+                ["Would `spawn` do, since it ends when the session does?"]
+            );
+            assert_eq!(flag.context(), None);
             assert_eq!(flag.hints(), []);
+            assert!(
+                flag.plain()
+                    .contains("hint: Would `spawn` do, since it ends when the session does?")
+            );
+            assert_eq!(
+                flag.reason,
+                Reason::Denied(Box::new(Denial::flag(
+                    "detach".into(),
+                    crate::fact::FlagId::Shell(crate::fact::ShellFlag::Detach),
+                )))
+            );
             assert_eq!(flag.failure_code().get(), 1);
         });
     }

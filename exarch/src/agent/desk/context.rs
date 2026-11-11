@@ -2,10 +2,11 @@
 
 use crate::enquiry::{Evict, Note, Survey};
 use crate::record::context::ContextSurvey;
-use crate::record::{AgentLog, EditAuthority};
+use crate::record::{AgentLog, EditAuthority, Uncommitted};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
+use ral_core::fact::{ContextFailure, ExarchFailure};
 use ral_core::shell::runtime::no_desk;
 
 use super::{DeskAct, ExarchDesk};
@@ -19,14 +20,21 @@ impl ExarchDesk {
     /// Locate against the loan, then release it before reading files.
     pub(super) fn locate_then_read<P>(
         &self,
-        locate: impl FnOnce(&mut AgentLog) -> Result<P, String>,
-        read: impl FnOnce(P) -> Result<FOValue, String>,
+        context: Option<&str>,
+        locate: impl FnOnce(&mut AgentLog) -> Result<P, ContextFailure>,
+        read: impl FnOnce(P) -> Result<FOValue, ContextFailure>,
     ) -> Result<FOValue, Error> {
         let located = {
             let mut body = self.loan.get().ok_or_else(no_desk)?;
             locate(&mut body.log)
         };
-        located.and_then(read).map_err(Error::new)
+        located.and_then(read).map_err(|cause| {
+            let error = super::failure(ExarchFailure::Context(cause));
+            match context {
+                Some(context) => error.with_context(context),
+                None => error,
+            }
+        })
     }
 
     pub(super) fn context_evict(
@@ -41,7 +49,13 @@ impl ExarchDesk {
         let evicted = body
             .log
             .evict(span, Some(note), EditAuthority::Model)
-            .map_err(|why| why.to_string());
+            .map_err(|why| match why {
+                Uncommitted::Refused(cause) => super::failure(ExarchFailure::Context(cause))
+                    .with_context("exarch-context `evict"),
+                Uncommitted::Unavailable(why) => {
+                    super::failure(ExarchFailure::Recording(why.failure()))
+                }
+            });
         self.call.commit_act(
             &body,
             DeskAct::ContextEvict,
@@ -58,13 +72,11 @@ impl ExarchDesk {
                     survey.total_bytes
                 )
             }
-            Err(error) => error.clone(),
+            Err(error) => error.plain(),
         };
         body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult { text });
-        survey
-            .map(|survey| Survey::from(survey).encode())
-            .map_err(Error::new)
+        survey.map(|survey| Survey::from(survey).encode())
     }
 }

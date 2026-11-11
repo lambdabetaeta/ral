@@ -1,5 +1,6 @@
 //! Pure collection assembly.
 
+use crate::fact::{EvalFailure, Expected, Reason, ValueShape};
 use crate::ir::{MapEntryV, Name, Val, ValListElem};
 use crate::shell::runtime::{Break, Env, Error, List, Map, Settled, Signature, Value};
 use crate::source::Spanned;
@@ -82,11 +83,7 @@ pub(super) fn eval_map(
                     .map_err(|error| Break::from(error).locate("map", key.span, shell))?;
                 let Value::String(label) = formed else {
                     return Err(Break::from(
-                        Error::new(format!(
-                            "map key must be a String, got {} '{formed}'",
-                            formed.type_name()
-                        ))
-                        .with_hint("use str to convert"),
+                        formed.expected("map", Expected::Shape(ValueShape::String)),
                     )
                     .locate("map", key.span, shell));
                 };
@@ -115,15 +112,33 @@ pub(super) fn eval_map(
 fn form_map(value: &Spanned<Val>, env: &Env, sig: &Signature) -> Result<Map, Error> {
     match form(&value.item, env, sig)? {
         Value::Map(map) => Ok(map),
-        value => Err(
-            Error::new(format!("spread requires a Map, got {}", value.type_name()))
-                .with_hint("spread (...) in a map expands key-value pairs"),
-        ),
+        value => Err(value.expected("spread", Expected::Shape(ValueShape::Map))),
     }
 }
 
 fn duplicate_key(key: &str) -> Error {
-    Error::new(format!(
-        "map literal: key '{key}' given twice; which did you mean?"
-    ))
+    Error::new(Reason::Evaluation(Box::new(EvalFailure::DuplicateMapKey(
+        key.into(),
+    ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_map_keys_and_spread_shapes_are_not_user_raises() {
+        assert_eq!(
+            duplicate_key("a").reason,
+            Reason::Evaluation(Box::new(EvalFailure::DuplicateMapKey("a".into())))
+        );
+        let shell = crate::test_helper::core_shell();
+        let value = Spanned::synthetic(Val::Int(1));
+        assert!(matches!(
+            form_map(&value, &Env::new(), &shell.sig)
+                .unwrap_err()
+                .reason,
+            Reason::Invalid(_)
+        ));
+    }
 }

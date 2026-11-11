@@ -1,22 +1,23 @@
 //! Minting the record `try` hands its handler.
 
 use crate::error::Error;
-use crate::fact::{ErrorRecord, tag};
+use crate::fact::{ErrorFact, tag};
 use crate::shell::runtime::{Shell, Value};
 
 /// `` `ok v | `err record ``: how `poll`'s settled arm and the report
 /// envelope read a body's end.
-pub fn outcome_value(outcome: Result<Value, ErrorRecord>) -> Value {
+pub fn outcome_value(outcome: Result<Value, ErrorFact>) -> Value {
     match outcome {
         Ok(v) => Value::variant(tag::OK, Some(v)),
-        Err(record) => Value::variant(tag::ERR, Some(Value::from_datum(record))),
+        Err(fact) => Value::variant(tag::ERR, Some(Value::failure(fact))),
     }
 }
 
 impl Error {
-    pub fn record(&self, shell: &Shell) -> ErrorRecord {
+    /// This failure, its provenance resolved against `shell`.
+    pub fn fact(&self, shell: &Shell) -> ErrorFact {
         let prov = self.prov_or(shell.local.audit.call_site());
-        ErrorRecord::new(
+        ErrorFact::new(
             self.reason.clone(),
             prov.name().into(),
             prov.site(&shell.session.sources),
@@ -42,24 +43,24 @@ mod tests {
 
     #[test]
     fn reason_is_the_failure_codes_only_source() {
-        let rec = ErrorRecord::new(
+        let rec = ErrorFact::new(
             Reason::process("sh", Failure::Exited(3)),
             "sh".into(),
             site(),
         );
         assert_eq!(rec.failure_code().get(), 3);
-        let cause = ErrorRecord::new(Reason::TimedOut, "sh".into(), site());
+        let cause = ErrorFact::new(Reason::TimedOut, "sh".into(), site());
         assert_eq!(cause.failure_code().get(), 124);
     }
 
     #[test]
     fn a_wire_record_with_an_unknown_reason_is_refused() {
-        let mut wire = ErrorRecord::new(Reason::Raised("x".into()), "sh".into(), site()).encode();
+        let mut wire = ErrorFact::new(Reason::raised("x"), "sh".into(), site()).encode();
         let FOValue::Map { entries } = &mut wire else {
             unreachable!()
         };
         let reason = entries.iter_mut().find(|(k, _)| k == "reason").unwrap();
         reason.1 = tag("teleported", None);
-        assert!(ErrorRecord::decode(&wire).is_err());
+        assert!(ErrorFact::decode(&wire).is_err());
     }
 }

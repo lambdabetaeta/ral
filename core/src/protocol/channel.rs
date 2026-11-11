@@ -9,6 +9,8 @@
 //! a stream for an address — the one question that would expose the pretence.
 
 use super::Frame;
+use crate::fact::FrameEncodeFailure;
+use crate::io::frame::FrameReadError;
 use crate::sync::LockExt as _;
 use std::io;
 use std::sync::Mutex;
@@ -80,7 +82,7 @@ impl WireChannel {
     /// # Errors
     /// Returns the read or decode error.  `Ok(None)` is a clean EOF: the peer
     /// closed between frames.
-    pub(crate) fn read_frame(&mut self) -> io::Result<Option<Frame>> {
+    pub(crate) fn read_frame(&mut self) -> Result<Option<Frame>, FrameReadError> {
         crate::io::frame::read_frame(&mut self.stream)
     }
 
@@ -89,8 +91,9 @@ impl WireChannel {
     /// # Errors
     /// Returns the encode or write error.
     #[cfg(any(test, feature = "test-util"))]
-    pub(crate) fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
-        self.put(&crate::io::frame::encode(frame)?)
+    pub(crate) fn write_frame(&mut self, frame: &Frame) -> Result<(), FrameWriteError> {
+        let encoded = crate::io::frame::encode(frame).map_err(FrameWriteError::Unencodable)?;
+        self.put(&encoded).map_err(FrameWriteError::Io)
     }
 
     /// Write one already-encoded frame.
@@ -170,10 +173,31 @@ impl WireChannel {
 #[derive(Debug)]
 pub(crate) enum WriteError {
     /// The frame cannot be encoded: the writer's fault, the wire untouched.
-    Unencodable(io::Error),
+    Unencodable(FrameEncodeFailure),
     /// The write failed; the failure was recorded and the channel shut down.
     Severed,
 }
+
+/// Test-access writes keep encoding separate from stream I/O.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug)]
+pub enum FrameWriteError {
+    Unencodable(FrameEncodeFailure),
+    Io(io::Error),
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl std::fmt::Display for FrameWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unencodable(cause) => f.write_str(&cause.describe()),
+            Self::Io(cause) => std::fmt::Display::fmt(cause, f),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl std::error::Error for FrameWriteError {}
 
 /// The one write under the severance law: write `frame`, and if the
 /// write fails, record it through `record` and shut the channel down before
@@ -272,6 +296,7 @@ impl Default for Liveness {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use crate::protocol::{Control, DispatchId};
@@ -286,6 +311,82 @@ mod tests {
         a.write_frame(&frame).unwrap();
         let got = b.read_frame().unwrap().unwrap();
         assert_eq!(got, frame);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unencodable_paths_neither_take_the_writer_lock_nor_sever_the_channel() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (a, mut b) = WireChannel::pair().unwrap();
+        let writer = Mutex::new(a);
+        let locked = writer.lock().unwrap();
+        let recorded = AtomicBool::new(false);
+        let frame = Frame::Probe(
+            DispatchId(1),
+            crate::protocol::probe::Probe::PathBytes(
+                std::ffi::OsString::from_vec(vec![b'/', 255]).into(),
+            ),
+        );
+        let error = write_or_sever(&writer, &frame, |_| {
+            recorded.store(true, Ordering::SeqCst);
+        });
+        assert!(matches!(
+            error,
+            Err(WriteError::Unencodable(FrameEncodeFailure::Json(_)))
+        ));
+        assert!(!recorded.load(Ordering::SeqCst));
+        drop(locked);
+        write_or_sever(&writer, &Frame::Ping(7), |_| panic!("healthy stream")).unwrap();
+        assert_eq!(b.read_frame().unwrap(), Some(Frame::Ping(7)));
+    }
+
+    #[test]
+    fn failed_io_records_once_and_shuts_down_before_returning() {
+        let (a, _peer) = WireChannel::pair().unwrap();
+        a.stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let writer = Mutex::new(a);
+        let recorded = std::sync::atomic::AtomicUsize::new(0);
+        let error = write_or_sever(&writer, &Frame::Ping(7), |_| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(matches!(error, Err(WriteError::Severed)));
+        assert_eq!(recorded.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            writer
+                .lock()
+                .unwrap()
+                .put(&crate::io::frame::encode(&Frame::Ping(8)).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn channel_reads_keep_structural_and_partial_frame_causes_typed() {
+        use crate::fact::{FrameFailure, FramePart, JsonInputFailure};
+        use std::io::Write as _;
+        let (mut a, mut b) = WireChannel::pair().unwrap();
+        let body = br#"{"Attach":{}}"#;
+        let length = u32::try_from(body.len()).expect("fixture frame length fits u32");
+        a.stream.write_all(&length.to_le_bytes()).unwrap();
+        a.stream.write_all(body).unwrap();
+        let error = b.read_frame().unwrap_err();
+        assert!(matches!(
+            error.cause,
+            FrameFailure::Json(JsonInputFailure::Decode(_))
+        ));
+        assert!(error.dump.is_some());
+        a.stream.write_all(&[1, 0]).unwrap();
+        a.shutdown();
+        let error = b.read_frame().unwrap_err();
+        assert!(matches!(
+            error.cause,
+            FrameFailure::Partial(crate::fact::FrameFailurePartial {
+                part: FramePart::Length,
+                ..
+            })
+        ));
+        assert!(error.dump.is_none());
     }
 
     #[test]

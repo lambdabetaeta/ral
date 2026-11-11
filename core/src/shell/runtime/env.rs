@@ -28,12 +28,31 @@ type LargeMap =
 /// map.  8 beat 16 and 32 on B6 and tied on B1 and B2.
 const SMALL: usize = 8;
 
-/// ρ's two representations, chosen by size and invisible to `Env`'s users.
+/// ρ's representations, chosen by size and invisible to `Env`'s users.
 #[derive(Debug, Clone)]
 enum Entries {
     /// Sorted by name, distinct, one allocation.
     Small(Arc<[(Name, Binding)]>),
-    Large(Arc<LargeMap>),
+    Sized(Arc<SizedEntries>),
+}
+
+#[derive(Debug, Clone)]
+enum SizedEntries {
+    /// Same ordering as Small, but sized so seed rollback can take ownership.
+    SeedSmall(Vec<(Name, Binding)>),
+    Large(LargeMap),
+}
+
+impl Entries {
+    fn parts(&self) -> Either<&[(Name, Binding)], &LargeMap> {
+        match self {
+            Self::Small(entries) => Either::Left(entries),
+            Self::Sized(entries) => match entries.as_ref() {
+                SizedEntries::SeedSmall(entries) => Either::Left(entries),
+                SizedEntries::Large(entries) => Either::Right(entries),
+            },
+        }
+    }
 }
 
 /// One static empty `Small`, so a value capturing nothing allocates nothing.
@@ -46,7 +65,7 @@ fn small_or_large(entries: Vec<(Name, Binding)>) -> Entries {
     if entries.is_empty() {
         Entries::Small(Arc::clone(&EMPTY))
     } else if entries.len() > SMALL {
-        Entries::Large(Arc::new(entries.into_iter().collect()))
+        Entries::Sized(Arc::new(SizedEntries::Large(entries.into_iter().collect())))
     } else {
         Entries::Small(entries.into())
     }
@@ -69,10 +88,56 @@ impl Env {
         Self(Entries::Small(Arc::clone(&EMPTY)))
     }
 
+    /// Match ordinary row normalization, retaining displaced owners for seed cleanup.
+    pub(crate) fn from_seed_bindings(bindings: Vec<(Name, Binding)>) -> (Self, Vec<Binding>) {
+        let mut entries: Vec<(Name, Binding)> = Vec::with_capacity(bindings.len());
+        let mut displaced = Vec::new();
+        for (name, binding) in bindings {
+            match entries.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
+                Ok(index) => {
+                    let (_, previous) = std::mem::replace(&mut entries[index], (name, binding));
+                    displaced.push(previous);
+                }
+                Err(index) => entries.insert(index, (name, binding)),
+            }
+        }
+        let env = if entries.is_empty() {
+            Self::new()
+        } else if entries.len() <= SMALL {
+            Self(Entries::Sized(Arc::new(SizedEntries::SeedSmall(entries))))
+        } else {
+            Self(Entries::Sized(Arc::new(SizedEntries::Large(
+                entries.into_iter().collect(),
+            ))))
+        };
+        (env, displaced)
+    }
+
+    /// Only seed-created rows and their unmodified aliases are dismantled here.
+    pub(crate) fn into_seed_bindings(self) -> Result<Vec<Binding>, Self> {
+        match self.0 {
+            Entries::Sized(entries) => Ok(match Arc::into_inner(entries) {
+                Some(SizedEntries::SeedSmall(entries)) => {
+                    entries.into_iter().map(|(_, binding)| binding).collect()
+                }
+                Some(SizedEntries::Large(entries)) => {
+                    entries.into_iter().map(|(_, binding)| binding).collect()
+                }
+                None => Vec::new(),
+            }),
+            Entries::Small(entries) if entries.is_empty() => Ok(Vec::new()),
+            Entries::Small(entries) => Err(Self(Entries::Small(entries))),
+        }
+    }
+
+    pub(crate) fn drop_seed(self) {
+        super::value::drop_seed_env(self);
+    }
+
     pub(crate) fn len(&self) -> usize {
-        match &self.0 {
-            Entries::Small(a) => a.len(),
-            Entries::Large(m) => m.len(),
+        match self.0.parts() {
+            Either::Left(entries) => entries.len(),
+            Either::Right(entries) => entries.len(),
         }
     }
 
@@ -87,12 +152,12 @@ impl Env {
 
     /// The whole [`Binding`] for `name`, ρ alone.
     pub(crate) fn binding(&self, name: &str) -> Option<&Binding> {
-        match &self.0 {
-            Entries::Small(a) => a
+        match self.0.parts() {
+            Either::Left(entries) => entries
                 .binary_search_by(|(n, _)| n.as_ref().cmp(name))
                 .ok()
-                .map(|i| &a[i].1),
-            Entries::Large(m) => m.get(name),
+                .map(|i| &entries[i].1),
+            Either::Right(entries) => entries.get(name),
         }
     }
 
@@ -103,7 +168,7 @@ impl Env {
     /// point, writing a `TrustedLen` iterator in place with no intermediate
     /// `Vec`.
     pub(crate) fn bind(&mut self, name: Name, binding: Binding) {
-        if let Entries::Small(a) = &self.0 {
+        if let Either::Left(a) = self.0.parts() {
             let (i, j) = match a.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
                 Ok(i) => (i, i + 1),
                 Err(i) => (i, i),
@@ -131,8 +196,8 @@ impl Env {
         if entries.len() == 0 {
             return;
         }
-        match &mut self.0 {
-            Entries::Small(a) => {
+        match self.0.parts() {
+            Either::Left(a) => {
                 let mut merged: Vec<(Name, Binding)> = Vec::with_capacity(a.len() + entries.len());
                 merged.extend(a.iter().cloned());
                 for (name, binding) in entries {
@@ -143,8 +208,13 @@ impl Env {
                 }
                 self.0 = small_or_large(merged);
             }
-            Entries::Large(m) => {
-                let m = Arc::make_mut(m);
+            Either::Right(_) => {
+                let Entries::Sized(sized) = &mut self.0 else {
+                    unreachable!("large entries are sized")
+                };
+                let SizedEntries::Large(m) = Arc::make_mut(sized) else {
+                    unreachable!("large entries")
+                };
                 for (name, binding) in entries {
                     m.insert(name, binding);
                 }
@@ -154,16 +224,21 @@ impl Env {
 
     /// Remove `name` from ρ, returning its value.
     pub(crate) fn unset(&mut self, name: &str) -> Option<Value> {
-        match &mut self.0 {
-            Entries::Small(a) => {
+        match self.0.parts() {
+            Either::Left(a) => {
                 let i = a.binary_search_by(|(n, _)| n.as_ref().cmp(name)).ok()?;
-                let mut kept: Vec<(Name, Binding)> = a.iter().cloned().collect();
+                let mut kept: Vec<(Name, Binding)> = a.to_vec();
                 let (_, binding) = kept.remove(i);
                 self.0 = small_or_large(kept);
                 Some(binding.value)
             }
-            Entries::Large(m) => {
-                let map = Arc::make_mut(m);
+            Either::Right(_) => {
+                let Entries::Sized(sized) = &mut self.0 else {
+                    unreachable!("large entries are sized")
+                };
+                let SizedEntries::Large(map) = Arc::make_mut(sized) else {
+                    unreachable!("large entries")
+                };
                 let binding = map.remove(name)?;
                 Some(binding.value)
             }
@@ -192,9 +267,11 @@ impl Env {
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Name, &Binding)> {
-        match &self.0 {
-            Entries::Small(a) => Either::Left(a.iter().map(|(name, binding)| (name, binding))),
-            Entries::Large(m) => Either::Right(m.iter()),
+        match self.0.parts() {
+            Either::Left(entries) => {
+                Either::Left(entries.iter().map(|(name, binding)| (name, binding)))
+            }
+            Either::Right(entries) => Either::Right(entries.iter()),
         }
     }
 
@@ -204,7 +281,7 @@ impl Env {
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Entries::Small(a), Entries::Small(b)) => Arc::ptr_eq(a, b),
-            (Entries::Large(a), Entries::Large(b)) => Arc::ptr_eq(a, b),
+            (Entries::Sized(a), Entries::Sized(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -334,6 +411,83 @@ mod tests {
     use super::*;
     use crate::shell::runtime::signature::Signature;
 
+    #[test]
+    fn seed_rows_preserve_iteration_wire_order_and_identity() {
+        for count in [0, 1, SMALL, SMALL + 1] {
+            for duplicate in [false, true] {
+                let mut pairs: Vec<(Name, Binding)> = (0..count)
+                    .rev()
+                    .map(|index| (format!("key{index:02}").into(), binding(Value::Int(1))))
+                    .collect();
+                if duplicate && count > 0 {
+                    pairs.push(("key00".into(), binding(Value::Int(2))));
+                }
+                let mut ordinary = Env::new();
+                ordinary.extend(pairs.clone().into_iter());
+                let (seed, displaced) = Env::from_seed_bindings(pairs);
+                assert_eq!(displaced.len(), usize::from(duplicate && count > 0));
+                let wire = |env: &Env| {
+                    let mut shell = crate::test_helper::core_shell();
+                    shell.env = env.clone();
+                    let seed = crate::seed::EngineSeed::encode(
+                        &shell.bequeath(crate::shell::grant::SpawnGrant::Inherit),
+                    )
+                    .unwrap();
+                    let bytes = crate::data::json::to_vec(&seed).unwrap();
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["scope_table"]
+                        .clone()
+                };
+                assert_eq!(wire(&ordinary), wire(&seed));
+                assert_eq!(
+                    ordinary.names().collect::<Vec<_>>(),
+                    seed.names().collect::<Vec<_>>()
+                );
+                let clone = seed.clone();
+                assert!(seed.ptr_eq(&clone));
+                let names: Vec<&str> = seed.names().map(AsRef::as_ref).collect();
+                let occ = crate::ir::test_occ(&names);
+                let restricted = seed.restrict(&occ);
+                assert!(seed.ptr_eq(&restricted));
+                restricted.drop_seed();
+                seed.drop_seed();
+                clone.drop_seed();
+            }
+        }
+    }
+
+    #[test]
+    fn seed_small_mutations_follow_ordinary_small_paths() {
+        let (seed, displaced) = Env::from_seed_bindings(vec![
+            ("a".into(), binding(Value::Int(1))),
+            ("b".into(), binding(Value::Int(2))),
+        ]);
+        assert!(displaced.is_empty());
+        let mut mutated = seed.clone();
+        mutated.bind("a".into(), binding(Value::Int(3)));
+        assert!(matches!(mutated.0, Entries::Small(_)));
+        assert_eq!(seed.get("a"), Some(&Value::Int(1)));
+        assert_eq!(mutated.get("a"), Some(&Value::Int(3)));
+        let mut extended = seed.clone();
+        extended.extend(std::iter::once(("c".into(), binding(Value::Int(4)))));
+        assert!(matches!(extended.0, Entries::Small(_)));
+        let mut removed = seed.clone();
+        assert_eq!(removed.unset("a"), Some(Value::Int(1)));
+        assert!(matches!(removed.0, Entries::Small(_)));
+        let restricted = seed.restrict(&crate::ir::test_occ(&["a"]));
+        assert!(matches!(restricted.0, Entries::Small(_)));
+        seed.drop_seed();
+    }
+
+    #[test]
+    fn seed_extraction_returns_ordinary_nonempty_small_ownership() {
+        let mut ordinary = Env::new();
+        ordinary.bind("kept".into(), binding(Value::Int(1)));
+        let original = ordinary.clone();
+        let returned = ordinary.into_seed_bindings().unwrap_err();
+        assert!(original.ptr_eq(&returned));
+        assert_eq!(returned.get("kept"), Some(&Value::Int(1)));
+    }
+
     fn binding(value: Value) -> Binding {
         Binding {
             value,
@@ -411,7 +565,8 @@ mod tests {
         large.bind("a".into(), binding(Value::Int(9)));
 
         assert!(matches!(small.0, Entries::Small(_)));
-        assert!(matches!(large.0, Entries::Large(_)));
+        assert!(matches!(&large.0, Entries::Sized(entries)
+            if matches!(entries.as_ref(), SizedEntries::Large(_))));
         assert_eq!(small.get("a"), Some(&Value::Int(9)));
         assert_eq!(large.get("a"), Some(&Value::Int(9)));
         assert_eq!(small.get("b"), large.get("b"));

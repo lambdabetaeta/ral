@@ -39,10 +39,16 @@ use shown::Layer;
 pub(crate) use shown::{Binds, Shown};
 
 use super::launch::Ownership;
+use super::launch::refused;
 use super::reexec::Pinned;
 use super::warrant::{Handoff, Slot, Slots, nul_terminated, parcel};
-use super::{FsProjection, RenderedProjection, unavailable};
+use super::{FsProjection, RenderedProjection};
 use crate::error::Error;
+use crate::fact::{
+    BinaryRole, DecodeFailure, FilterFailure, LaunchFailure, ParcelRole, ParcelStep,
+    PayloadGroupFailure, ProjectionFailure, ProjectionFailureHiddenWorkingDirectory,
+    ProjectionFailureProcExcluded, UnavailableFailure, UnavailableFailureBwrapProbe, WarrantField,
+};
 use crate::path::{CwdPath, LexicalPath, RealPath};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -75,12 +81,10 @@ pub(super) fn pin_envelope() {
 }
 
 /// The pinned envelope, or why this host has none.
-pub(super) fn envelope() -> Result<&'static Pinned, &'static str> {
-    ENVELOPE.get().ok_or(
-        "bwrap not found on PATH at startup: a grant confines every external command \
-         under bubblewrap, so while one is active nothing can start without it. Is it \
-         installed on this host, and on the PATH ral was started with?",
-    )
+pub(super) fn envelope() -> Result<&'static Pinned, UnavailableFailure> {
+    ENVELOPE
+        .get()
+        .ok_or(UnavailableFailure::MissingBootPin(BinaryRole::Bwrap))
 }
 
 /// bwrap's options as they are built: [`Command`]'s two appenders, and
@@ -104,7 +108,7 @@ impl Options {
 
 /// One launch's envelope: the pinned bwrap, the pinned trampoline it runs,
 /// and what this host lets it build.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Envelope<'a> {
     pub(crate) bwrap: &'a Pinned,
     pub(crate) trampoline: &'a Pinned,
@@ -150,54 +154,73 @@ pub(crate) fn bwrap_command(
         Command,
         Option<InfoFd>,
         crate::process::launch::EnvelopeStdio,
+        crate::process::launch::setup::Evidence,
     ),
     Error,
 > {
-    if let Builds::Nothing(why) = env.host.builds {
-        return Err(unavailable(format!(
-            "bwrap at {} cannot build an envelope on this host: {why}",
-            crate::path::shown(env.bwrap.arg0())
+    if let Builds::Nothing(why) = &env.host.builds {
+        return Err(refused(LaunchFailure::Unavailable(
+            UnavailableFailure::BwrapProbe(UnavailableFailureBwrapProbe {
+                binary: crate::path::shown(env.bwrap.arg0()),
+                cause: why.clone(),
+            }),
         )));
     }
-    let (stdio, streams) = handoff.streams().map_err(Error::new)?;
+    let (stdio, streams) = handoff
+        .streams()
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
     slots.streams = Some(streams);
-    let binds = Binds::open(env, shown, &mut handoff).map_err(Error::new)?;
+    let binds = Binds::open(env, shown, &mut handoff).map_err(refused)?;
     let (info, address) = (ownership == Ownership::Kept)
         .then(|| InfoFd::open(&mut handoff))
         .transpose()
-        .map_err(Error::new)?
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?
         .unzip();
-    let mut lend_parcel = |name: &str, bytes: &[u8]| {
-        let parcel =
-            parcel(name, bytes).map_err(|e| format!("sandbox: cannot parcel {name}: {e}"))?;
-        handoff.lend(parcel.as_fd())
+    let mut lend_parcel = |name: &str, bytes: &[u8], role: ParcelRole| {
+        let parcel = parcel(name, bytes, role.clone())?;
+        handoff.lend(parcel.as_fd(), role)
     };
-    let seccomp = (seccomp_programs().map_err(Error::new)?.into_iter())
-        .map(|program| lend_parcel("ral-seccomp", &program))
+    let seccomp = seccomp_programs()
+        .map_err(|e| refused(LaunchFailure::Filter(e)))?
+        .into_iter()
+        .map(|program| lend_parcel("ral-seccomp", &program, ParcelRole::Seccomp))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(Error::new)?;
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
     let options = bwrap_argv(
         policy,
         chdir,
         address,
-        env.host,
+        &env.host,
         &binds,
         &GpuNodes::discover(),
         &seccomp,
     )
-    .map_err(Error::new)?;
-    let args = lend_parcel(
-        "ral-bwrap-args",
-        &nul_terminated(options.iter().map(|arg| arg.as_bytes())).map_err(Error::new)?,
+    .map_err(|e| refused(LaunchFailure::Projection(e)))?;
+    let bytes = nul_terminated(
+        options
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| (WarrantField::BwrapOption(i.into()), arg.as_bytes())),
     )
-    .map_err(Error::new)?;
-    let trampoline = handoff.lend(env.trampoline.fd()).map_err(Error::new)?;
+    .map_err(|e| refused(LaunchFailure::Warrant(e)))?;
+    let args = lend_parcel("ral-bwrap-args", &bytes, ParcelRole::BwrapArgs)
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
+    let trampoline = handoff
+        .lend(env.trampoline.fd(), ParcelRole::Trampoline)
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
     let mut c = env.bwrap.command();
     c.args(["--args", &args.to_string(), "--"])
         .arg(crate::path::proc_fd_path(trampoline.fd()))
         .args(slots.argv());
-    handoff.install(&mut c);
-    Ok((c, info, stdio))
+    let mut evidence = crate::process::launch::setup::Evidence::new().map_err(|e| {
+        crate::process::launch::prepare_io(
+            crate::fact::PrepareStep::ReadinessMark,
+            crate::fact::PrepareSubject::Child,
+            &e,
+        )
+    })?;
+    handoff.install(&mut c, &mut evidence);
+    Ok((c, info, stdio, evidence))
 }
 
 /// The bwrap options that confine a payload under `policy`: `binds` by
@@ -234,11 +257,11 @@ pub(crate) fn bwrap_argv(
     policy: &RenderedProjection,
     chdir: Option<&CwdPath>,
     address: Option<Slot>,
-    host: HostEnvelope,
+    host: &HostEnvelope,
     binds: &Binds,
     gpu: &GpuNodes,
     seccomp: &[Slot],
-) -> Result<Vec<OsString>, String> {
+) -> Result<Vec<OsString>, ProjectionFailure> {
     let mut c = Options::default();
     c.arg("--new-session");
     c.args(["--unshare-ipc", "--unshare-uts"]);
@@ -307,20 +330,19 @@ pub(crate) fn bwrap_argv(
             if let Some((dir, at)) = &cwd
                 && deny.name.holds_position(at)
             {
-                return Err(format!(
-                    "sandbox: the working directory {} is excluded by {}, and no confined \
-                     command can start inside an exclusion; run it from another directory \
-                     (`cd` or `within [dir: …]`)",
-                    crate::path::shown(dir.as_path()),
-                    deny.name.as_str()
+                return Err(ProjectionFailure::HiddenWorkingDirectory(
+                    ProjectionFailureHiddenWorkingDirectory {
+                        cwd: crate::path::shown(dir.as_path()),
+                        exclusion: deny.name.as_str().to_owned(),
+                    },
                 ));
             }
             for name in binds.names(&deny.name) {
                 if name.holds_spelled("/proc") {
-                    return Err(format!(
-                        "sandbox: the grant denies {}, which hides /proc, and the envelope \
-                         needs /proc to start its program; did you mean a path inside it?",
-                        name.as_str()
+                    return Err(ProjectionFailure::ProcExcluded(
+                        ProjectionFailureProcExcluded {
+                            exclusion: name.as_str().to_owned(),
+                        },
                     ));
                 }
                 deny.mask.render(&mut c, name.as_str());
@@ -338,13 +360,13 @@ pub(crate) fn bwrap_argv(
 /// applies every installed filter and keeps the most severe result, so which
 /// program lands on which slot carries no meaning.  None off the two arches
 /// the deny-set is compiled for.
-pub(crate) fn seccomp_programs() -> Result<Vec<Vec<u8>>, String> {
+pub(crate) fn seccomp_programs() -> Result<Vec<Vec<u8>>, FilterFailure> {
     #[cfg(seccomp)]
     {
         seccomp::Filter::ENVELOPE
             .programs()
             .map(|programs| programs.iter().map(serialise).collect())
-            .map_err(|e| format!("sandbox: {e}"))
+            .map_err(FilterFailure::from)
     }
     #[cfg(not(seccomp))]
     {
@@ -371,7 +393,7 @@ fn serialise(prog: seccompiler::BpfProgramRef<'_>) -> Vec<u8> {
 /// By hand there is no devpts: the payload keeps the terminals it inherits
 /// and allocates none, as any view of the host's shared devpts leaks host
 /// terminals.  An absent node is dropped: binding one costs the launch.
-fn render_dev(c: &mut Options, host: HostEnvelope) {
+fn render_dev(c: &mut Options, host: &HostEnvelope) {
     if host.virtual_dev {
         c.args(["--dev", "/dev"]);
         return;
@@ -414,11 +436,12 @@ impl InfoFd {
     /// A socketpair whose writer crosses twice: bwrap's copy, at the slot
     /// returned for its `--info-fd`, and the payload's, which bwrap leaves it
     /// until its sweep.
-    fn open(handoff: &mut Handoff) -> Result<(Self, Slot), String> {
-        let (reader, writer) = crate::process::cloexec_socketpair()
-            .map_err(|e| format!("sandbox: cannot open bwrap's --info-fd: {e}"))?;
-        let (bwraps, at) = handoff.keep(writer.as_fd())?;
-        let (payloads, _) = handoff.keep(writer.as_fd())?;
+    fn open(handoff: &mut Handoff) -> Result<(Self, Slot), crate::fact::ParcelFailure> {
+        let (reader, writer) = crate::process::cloexec_socketpair().map_err(|e| {
+            super::warrant::parcel_io(ParcelRole::InfoSocket, ParcelStep::Create, &e)
+        })?;
+        let (bwraps, at) = handoff.keep(writer.as_fd(), ParcelRole::InfoSocket)?;
+        let (payloads, _) = handoff.keep(writer.as_fd(), ParcelRole::InfoSocket)?;
         Ok((
             Self {
                 reader,
@@ -433,12 +456,7 @@ impl InfoFd {
     /// waits for the payload's sweep of its copy of the writer, by which the
     /// group exists, or for every holder's death. Empty means bwrap died first;
     /// an unreadable or malformed record refuses the spawn.
-    pub(super) fn payload_pgid(self) -> Result<Option<crate::process::Pgid>, String> {
-        #[derive(serde::Deserialize)]
-        struct Info {
-            #[serde(rename = "child-pid")]
-            child_pid: i32,
-        }
+    pub(super) fn payload_pgid(self) -> Result<Option<crate::process::Pgid>, PayloadGroupFailure> {
         let Self {
             mut reader,
             writers,
@@ -447,20 +465,27 @@ impl InfoFd {
         let mut record = Vec::new();
         reader
             .read_to_end(&mut record)
-            .map_err(|e| format!("sandbox: cannot read bwrap's --info-fd record: {e}"))?;
+            .map_err(|e| PayloadGroupFailure::Read(Box::new(crate::io::failure(&e))))?;
         if record.is_empty() {
             return Ok(None);
         }
-        let info: Info = serde_json::from_slice(&record)
-            .map_err(|e| format!("sandbox: malformed bwrap --info-fd record: {e}"))?;
+        let info: Info =
+            crate::data::json::from_slice(&record).map_err(PayloadGroupFailure::Json)?;
         crate::process::Pgid::from_raw(info.child_pid)
             .map(Some)
-            .ok_or_else(|| {
-                format!(
-                    "sandbox: invalid bwrap --info-fd child-pid: {}",
-                    info.child_pid
-                )
-            })
+            .ok_or(PayloadGroupFailure::InvalidPid(info.child_pid))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Info {
+    #[serde(rename = "child-pid")]
+    child_pid: i32,
+}
+
+impl crate::data::json::JsonDecode for Info {
+    fn decode_json(value: crate::data::json::JsonRef<'_, '_>) -> Result<Self, DecodeFailure> {
+        crate::data::json::decode_structural(value)
     }
 }
 

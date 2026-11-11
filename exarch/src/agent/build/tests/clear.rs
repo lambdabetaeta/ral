@@ -17,7 +17,11 @@ static INSTALLERS: [EngineInstaller; 1] = [EngineInstaller {
     runtime: |spec| {
         BOOTS.set(BOOTS.get() + 1);
         if REFUSE_BOOT.replace(false) {
-            return Err(ral_core::error::Error::new("test boot refusal"));
+            return Err(ral_core::error::Error::new(ral_core::fact::Reason::State(
+                Box::new(ral_core::fact::StateFailure::MissingAmbient(
+                    ral_core::fact::AmbientSetting::Home,
+                )),
+            )));
         }
         let mut runtime = crate::boot::engine_runtime(spec)?;
         runtime.install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -217,7 +221,9 @@ impl Seeded {
         assert!(
             agent
                 .engine()
-                .read(|transport| transport.bindings())
+                .read(ral_core::fact::ProbeSubject::Bindings, |transport| {
+                    transport.bindings()
+                })
                 .unwrap()
                 .iter()
                 .any(|binding| binding.name == "keep" && binding.preview == "1")
@@ -506,7 +512,14 @@ fn clear_cancels_workers_and_records_the_outgoing_engines_failure_once() {
     agent.clear().unwrap();
     assert_eq!(outgoing.session_ended().unwrap(), Some(143));
     assert!(entries[0].handle.home.is_cancelled());
-    assert_eq!(probe_count(&agent, ral_core::test_access::worker_count), 0);
+    assert_eq!(
+        probe_count(
+            &agent,
+            ral_core::fact::ProbeSubject::WorkerCount,
+            ral_core::test_access::worker_count
+        ),
+        0
+    );
     let failures = agent.teardown().failures;
     assert_eq!(failures.len(), 1);
     assert!(failures[0].contains("ended without certified engine teardown"));

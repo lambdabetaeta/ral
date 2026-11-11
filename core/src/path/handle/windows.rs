@@ -76,10 +76,7 @@ const SEPARATOR: u16 = 0x5c;
 /// A walk's refusal of an entry that is no longer one of the directory it
 /// was opened in.
 fn moved(name: &EntryName) -> io::Error {
-    io::Error::other(format!(
-        "{} moved during the walk: it is no longer an entry of the directory the walk held when it opened it",
-        shown(name.as_os_str())
-    ))
+    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(shown(name.as_os_str())))
 }
 
 /// A zeroed buffer aligned for any struct the kernel fills in it, read back
@@ -107,7 +104,7 @@ impl Buf {
 fn short() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        "the answer is shorter than its class says",
+        crate::fact::PathIoLeaf::KernelReplyShort(crate::fact::KernelReply::WindowsInformation),
     )
 }
 
@@ -309,7 +306,7 @@ fn open_entry(dir: &File, name: &OsStr, sharing: Sharing) -> io::Result<File> {
                 if kind_of(basic.FileAttributes, tag) == Kind::Dir {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        format!("{} cannot be traversed", shown(name)),
+                        crate::fact::PathIoLeaf::Untraversable(shown(name)),
                     ));
                 }
                 Ok(file)
@@ -397,8 +394,12 @@ pub(super) fn normalized(f: &File) -> io::Result<Vec<u16>> {
         }
         return Err(io::Error::new(
             error.kind(),
-            format!(
-                "cannot learn the stored name of an entry, which ral needs: FileNormalizedNameInfo is Windows 10 1709 or later ({error})"
+            crate::fact::PathIoLeaf::RequiredInformationClass(
+                crate::fact::PathIoLeafRequiredInformationClass {
+                    operation: crate::fact::WindowsPathOperation::StoredName,
+                    class: crate::fact::WindowsInformationClass::FileNormalizedNameInfo,
+                    cause: (&error).into(),
+                },
             ),
         ));
     }
@@ -590,7 +591,7 @@ pub(super) fn decode(buf: &[u8]) -> io::Result<PathBuf> {
         tag => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("reparse tag {tag:#x} names no path, so it is no link"),
+                crate::fact::PathIoLeaf::UnsupportedReparseTag(tag),
             ));
         }
     };
@@ -672,7 +673,9 @@ pub(super) fn validate_scoped_parents<'a>(
             .map_err(|error| {
                 io::Error::new(
                     error.kind(),
-                    format!("unsafe scoped temporary inheritance chain: {error}"),
+                    crate::io::failure(&error).at(crate::fact::IoContext::Path(
+                        crate::fact::PathIoContext::UnsafeScopedInheritance,
+                    )),
                 )
             })
     };
@@ -690,7 +693,9 @@ pub(super) fn validate_scoped_parents<'a>(
     }
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "cannot prove the scoped temporary parent's ACL inheritance safe: no protected boundary within 256 held ancestors; choose a private temporary directory with a protected DACL",
+        crate::fact::PathIoLeaf::NoProtectedBoundary(crate::fact::PathIoLeafNoProtectedBoundary {
+            limit: 256_usize.into(),
+        }),
     ))
 }
 
@@ -706,7 +711,7 @@ fn scoped_security(dir: &File) -> io::Result<File> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "a scoped directory must be a directory without a reparse point",
+            crate::fact::PathIoLeaf::ScopedDirectoryReparse,
         ));
     }
     reopen_shared(dir, windows_sys::Win32::Storage::FileSystem::READ_CONTROL)
@@ -897,12 +902,20 @@ pub(super) fn mkdir(dir: &File, name: &EntryName, visibility: Visibility) -> io:
 
 /// `error`, with what `class` needs said where the volume or the OS refuses it
 /// as an invalid parameter, which is how a class they lack answers.
-fn class_refused(error: io::Error, what: &str, class: &str) -> io::Error {
+fn class_refused(
+    error: io::Error,
+    operation: crate::fact::WindowsPathOperation,
+    class: crate::fact::WindowsInformationClass,
+) -> io::Error {
     if error.raw_os_error() == i32::try_from(ERROR_INVALID_PARAMETER).ok() {
         io::Error::new(
             error.kind(),
-            format!(
-                "{what} needs {class}, which Windows 10 1809 and NTFS or ReFS answer ({error})"
+            crate::fact::PathIoLeaf::RequiredInformationClass(
+                crate::fact::PathIoLeafRequiredInformationClass {
+                    operation,
+                    class,
+                    cause: (&error).into(),
+                },
             ),
         )
     } else {
@@ -917,8 +930,8 @@ fn class_refused(error: io::Error, what: &str, class: &str) -> io::Error {
 /// converts relative names to absolute paths without clearing `RootDirectory`,
 /// which the native call refuses; call it directly to keep the name relative.
 /// `handle` needs `DELETE` access.  A volume or host that refuses the class
-/// fails with that error, said as `what` needs it; no rename by name follows.
-fn rename_by_handle(handle: &File, dir: &File, to: &EntryName, what: &str) -> io::Result<()> {
+/// fails with that typed class requirement; no rename by name follows.
+fn rename_by_handle(handle: &File, dir: &File, to: &EntryName) -> io::Result<()> {
     let name: Vec<u16> = to.as_os_str().encode_wide().collect();
     let name_bytes = name.len() * size_of::<u16>();
     let mut buf = Buf::new(size_of::<FILE_RENAME_INFORMATION>() + name_bytes);
@@ -953,8 +966,8 @@ fn rename_by_handle(handle: &File, dir: &File, to: &EntryName, what: &str) -> io
         let code = unsafe { RtlNtStatusToDosError(status) };
         return Err(class_refused(
             io::Error::from_raw_os_error(code.cast_signed()),
-            what,
-            "FileRenameInformationEx",
+            crate::fact::WindowsPathOperation::Rename,
+            crate::fact::WindowsInformationClass::FileRenameInformationEx,
         ));
     }
     Ok(())
@@ -968,13 +981,13 @@ pub(super) fn rename_over(
     _from: &EntryName,
     to: &EntryName,
 ) -> io::Result<()> {
-    rename_by_handle(sibling, dir, to, "the atomic write")
+    rename_by_handle(sibling, dir, to)
 }
 
 /// The handle the walk holds on the entry, which Windows acts through.  A
 /// Windows leaf that is present is always held.
 fn held(leaf: Option<&File>) -> io::Result<&File> {
-    leaf.ok_or_else(|| io::Error::other("the walk holds no handle on the entry"))
+    leaf.ok_or_else(|| io::Error::other(crate::fact::PathIoLeaf::NotHeld))
 }
 
 /// Rename the entry the walk holds by `leaf` to `to` in `dir`, over whatever
@@ -988,7 +1001,7 @@ pub(super) fn rename(
     to: &EntryName,
 ) -> io::Result<()> {
     let renamed = reopen_shared(held(leaf)?, DELETE)?;
-    rename_by_handle(&renamed, dir, to, "the rename")
+    rename_by_handle(&renamed, dir, to)
 }
 
 /// Remove the entry the walk holds by `leaf`, by its handle: reopened with
@@ -1021,8 +1034,8 @@ pub(super) fn remove(
     if ok == 0 {
         return Err(class_refused(
             io::Error::last_os_error(),
-            "the removal",
-            "FileDispositionInfoEx",
+            crate::fact::WindowsPathOperation::Remove,
+            crate::fact::WindowsInformationClass::FileDispositionInformationEx,
         ));
     }
     Ok(())
@@ -1365,7 +1378,7 @@ pub(super) mod owner_only {
         if !matches {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "a scoped directory must be owned by the current process user and have exactly ral's protected, owner-only inheritable DACL",
+                crate::fact::PathIoLeaf::OwnerOnlyDaclMismatch,
             ));
         }
         Ok(())
@@ -1388,7 +1401,7 @@ pub(super) mod owner_only {
         let refused = || {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "a scoped temporary parent must be owned by the current user, SYSTEM or Administrators, and must not let other users delete children or change its ownership or DACL; choose a private temporary directory",
+                crate::fact::PathIoLeaf::UnsafeAncestorDacl,
             )
         };
         let mut protected = false;

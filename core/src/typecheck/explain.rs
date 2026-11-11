@@ -8,12 +8,13 @@ use super::error::{
 };
 use super::unify::WeakSource;
 use crate::diagnostic::{self, Report};
+use crate::fact::ErrorRecord;
 use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
 use crate::text::{indefinite, plural};
 use crate::ty::{
     CompTy, CompTyNode, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, TyNode,
-    fmt_comp_ty_ctx, fmt_ty_ctx,
+    Typed as _, fmt_comp_ty_ctx, fmt_ty_ctx,
 };
 
 impl TypeErrorKind {
@@ -1210,11 +1211,11 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
                 .to_string(),
         );
     }
-    let is_error_record = |t: &Ty| matches!(t.node(), TyNode::Record(row) if row_has_reason(row));
-    if is_error_record(expected) || is_error_record(actual) {
+    let error_record = ErrorRecord::ty();
+    if *expected == error_record || *actual == error_record {
         return Some(
             "`fail` takes a String; use `raise $e` to re-raise an error record, \
-             or `describe $e` for its text"
+             or `$e[message]` for its text"
                 .to_string(),
         );
     }
@@ -1291,14 +1292,6 @@ fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
     )
 }
 
-/// Whether a row carries `reason`. An error carries the row as it stood
-/// when the constraint failed, and nothing re-applies it here, so a `Var` tail
-/// reads as absent.  That only ever withholds a hint, never asserts one.
-fn row_has_reason(row: &Row) -> bool {
-    row.fields()
-        .any(|(label, _)| *label == Label::Field("reason".into()))
-}
-
 /// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
 /// takes one argument type, so the hint must hold for each of them.
 fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
@@ -1312,10 +1305,10 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
     })
 }
 
-/// Why `$STATUS` names nothing; the runtime's undefined-variable error says
-/// the same.
-pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
-    error record: catch it with `try` and read `$e[reason]` from the handler's argument";
+/// Why `$STATUS` names nothing.
+const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
+    error record: catch it with `try` and read `$e[status]` and `$e[message]` from \
+    the handler's argument";
 
 /// The message and hint refusing `...` in a value's application, which the
 /// elaborator raises for a head it knows to be a value: the checker's words.
@@ -1420,27 +1413,6 @@ fn coded(known: &[String]) -> String {
     known.iter().map(|k| code(k)).collect::<Vec<_>>().join(", ")
 }
 
-/// The headline for a tag a vocabulary's closed row lacks, in its words: the
-/// one sentence the checker and the grant decoder both say.  `known` are the
-/// row's tags as written, `` `cwd ``; `suggest` offers the nearest of them.
-pub(crate) fn unknown_tag_message(
-    noun: &str,
-    tag: &str,
-    known: &[String],
-    suggest: bool,
-) -> String {
-    let noun = indefinite(noun);
-    let near = match near_tags(tag, known)[..] {
-        [near] if suggest => format!(" (did you mean {}?)", code(near)),
-        _ => String::new(),
-    };
-    format!(
-        "{} is not {noun}; {noun} is one of {}{near}",
-        code(&format!("{TAG_PREFIX}{tag}")),
-        coded(known)
-    )
-}
-
 impl TypeError {
     fn is_redirect_shape(&self) -> bool {
         matches!(
@@ -1465,13 +1437,13 @@ impl TypeError {
                     ..
                 },
                 Some(Reason::Vocabulary(vocab)),
-            ) => Some(vocab.refuse(tag).0),
+            ) => Some(vocab.refuse(tag).describe()),
             (TypeErrorKind::TyMismatch { expected, actual }, Some(Reason::Vocabulary(vocab)))
                 if untagged_mismatch(expected, actual) =>
             {
                 let wanted = match expected.node() {
-                    TyNode::List(_) => format!("a list of {}s", vocab.noun),
-                    _ => indefinite(vocab.noun),
+                    TyNode::List(_) => format!("a list of {}s", vocab.noun()),
+                    _ => indefinite(vocab.noun()),
                 };
                 Some(format!("expected {wanted}, got {}", describe(actual)))
             }
@@ -1499,7 +1471,7 @@ impl TypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::{CompTy, Typed as _};
+    use crate::ty::CompTy;
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch { expected, actual }
@@ -1661,7 +1633,7 @@ mod tests {
                 "a block value",
             ),
             (
-                crate::fact::ErrorRecord::ty(),
+                ErrorRecord::ty(),
                 Ty::string(),
                 "use `raise $e` to re-raise an error record",
             ),
@@ -1719,7 +1691,7 @@ mod tests {
     #[test]
     fn command_value_grade_hints_take_priority_over_payload_shapes() {
         for value in [
-            crate::fact::ErrorRecord::ty(),
+            ErrorRecord::ty(),
             Ty::variant(Row::empty()),
             Ty::thunk(CompTy::pure(Ty::unit())),
             Ty::bytes(),

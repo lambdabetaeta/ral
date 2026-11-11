@@ -81,7 +81,9 @@ impl Agent {
     fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.engine().read(|t| t.workers())?;
+        let entries = self
+            .engine()
+            .read(ral_core::fact::ProbeSubject::Workers, |t| t.workers())?;
         let mut running = 0u64;
         let mut settled = 0u64;
         let mut nearest_expiry: Option<u64> = None;
@@ -151,14 +153,20 @@ impl Agent {
 
         rows.push(ProbeRow::new(
             "bindings.count",
-            self.engine().read(|t| t.binding_count())?,
+            self.engine()
+                .read(ral_core::fact::ProbeSubject::BindingCount, |t| {
+                    t.binding_count()
+                })?,
             None,
             Policy::Reap,
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            self.engine().read(|t| t.leased_binding_count())?,
+            self.engine()
+                .read(ral_core::fact::ProbeSubject::LeasedBindingCount, |t| {
+                    t.leased_binding_count()
+                })?,
             None,
             Policy::Reap,
             Some(format!(
@@ -168,7 +176,10 @@ impl Agent {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            self.engine().read(|t| t.largest_binding_bytes())?,
+            self.engine()
+                .read(ral_core::fact::ProbeSubject::LargestBindingBytes, |t| {
+                    t.largest_binding_bytes()
+                })?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             Policy::Warn,
             Some("shallow estimate; a closure's captures are never chased".to_string()),

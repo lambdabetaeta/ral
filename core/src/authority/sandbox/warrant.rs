@@ -21,13 +21,17 @@
 mod handoff;
 mod trampoline;
 
-pub(super) use handoff::{Handoff, Slot, Slots, parcel};
+pub(super) use handoff::{Handoff, Slot, Slots, parcel, parcel_io};
 pub(crate) use trampoline::serve_warrant;
 
 use super::launch::Image;
 #[cfg(target_os = "linux")]
 use super::linux::landlock::Landlocked;
-use crate::Role;
+use crate::fact::{
+    Count, HandoffField, LaunchFailure, ParcelRole, WarrantFailure, WarrantFailureArgumentCount,
+    WarrantFailureInvalidProgram, WarrantFailureMissingDescriptor, WarrantFailureSize,
+    WarrantFailureUtf8, WarrantField,
+};
 use crate::path::{RealPath, shown};
 use handoff::{close_inherited, unwritable};
 use std::borrow::Cow;
@@ -65,14 +69,13 @@ impl Confinement {
         clippy::unnecessary_wraps,
         reason = "Linux's spelling can be malformed, and the decoder reads both alike"
     )]
-    fn parse(field: &str) -> Result<Self, String> {
+    fn parse(field: &str) -> Result<Self, WarrantFailure> {
         Ok(Self(field.to_owned()))
     }
 
-    fn enter(&self, keep: Slot) -> Result<(), String> {
+    fn enter(&self, keep: Slot) -> Result<(), LaunchFailure> {
         close_inherited(keep)?;
-        super::macos::apply_profile(&self.0)
-            .map_err(|e| format!("cannot enter the Seatbelt sandbox: {e}"))
+        super::macos::apply_profile(&self.0).map_err(LaunchFailure::Seatbelt)
     }
 }
 
@@ -88,7 +91,7 @@ impl Confinement {
         }
     }
 
-    fn parse(field: &str) -> Result<Self, String> {
+    fn parse(field: &str) -> Result<Self, WarrantFailure> {
         if field == "unconfined" {
             return Ok(Self(None));
         }
@@ -97,20 +100,20 @@ impl Confinement {
             "landlock" => false,
             "landlock+refer" => true,
             _ => {
-                return Err(format!(
-                    "the warrant's confinement {field:?} is not unconfined, landlock@<fd> \
-                     or landlock+refer@<fd>"
-                ));
+                return Err(WarrantFailure::Confinement(field.to_owned()));
             }
         };
         Ok(Self(Some(Landlocked {
             refer_root,
-            at: Slot::parse(at)?,
+            at: Slot::parse(at, HandoffField::Ruleset)?,
         })))
     }
 
-    fn enter(&self, keep: Slot) -> Result<(), String> {
-        self.0.as_ref().map_or(Ok(()), Landlocked::enter)?;
+    fn enter(&self, keep: Slot) -> Result<(), LaunchFailure> {
+        self.0
+            .as_ref()
+            .map_or(Ok(()), Landlocked::enter)
+            .map_err(LaunchFailure::Ruleset)?;
         close_inherited(keep)
     }
 }
@@ -148,12 +151,16 @@ impl<'a> Warrant<'a> {
     }
 
     /// This warrant, parcelled for a [`Handoff`].
-    pub(super) fn parcel(&self) -> Result<OwnedFd, String> {
-        parcel("ral-warrant", &self.encode()?)
-            .map_err(|e| format!("sandbox: cannot parcel the warrant: {e}"))
+    pub(super) fn parcel(&self) -> Result<OwnedFd, LaunchFailure> {
+        parcel(
+            "ral-warrant",
+            &self.encode().map_err(LaunchFailure::Warrant)?,
+            ParcelRole::Warrant,
+        )
+        .map_err(LaunchFailure::Parcel)
     }
 
-    fn encode(&self) -> Result<Vec<u8>, String> {
+    fn encode(&self) -> Result<Vec<u8>, WarrantFailure> {
         let (kind, program, arg0): (&[u8], &[u8], Option<&[u8]>) = match &*self.image {
             Image::File { real, arg0 } => (
                 b"file",
@@ -164,16 +171,29 @@ impl<'a> Warrant<'a> {
         };
         let confinement = self.confinement.spell();
         let argc = self.args.len().to_string();
-        let head = [MAGIC, confinement.as_bytes(), kind, program]
-            .into_iter()
-            .chain(arg0)
-            .chain([argc.as_bytes()]);
-        let bytes = nul_terminated(head.chain(self.args.iter().map(|a| a.as_bytes())))?;
+        let head = [
+            (WarrantField::Confinement, confinement.as_bytes()),
+            (WarrantField::ImageKind, kind),
+            (WarrantField::Program, program),
+        ]
+        .into_iter()
+        .chain(arg0.map(|arg| (WarrantField::Argv0, arg)))
+        .chain([(WarrantField::ArgumentCount, argc.as_bytes())]);
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(0);
+        bytes.extend(nul_terminated(
+            head.chain(
+                self.args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (WarrantField::Argument(i.into()), a.as_bytes())),
+            ),
+        )?);
         if bytes.len() > CAP {
-            return Err(format!(
-                "the warrant is {} bytes, over its {CAP}-byte cap: is the command line that long?",
-                bytes.len()
-            ));
+            return Err(WarrantFailure::Size(WarrantFailureSize {
+                actual: bytes.len().into(),
+                limit: CAP.into(),
+            }));
         }
         Ok(bytes)
     }
@@ -183,14 +203,14 @@ impl Warrant<'static> {
     /// The warrant the launch left at `slots.warrant`, its confinement
     /// entered and every inherited descriptor but the report swept: the
     /// program, and nothing before it.
-    pub(super) fn confine(slots: Slots) -> Result<Confined, String> {
+    pub(super) fn confine(slots: Slots) -> Result<Confined, LaunchFailure> {
         let Self {
             confinement,
             image,
             args,
-        } = Self::receive(slots.warrant)?;
+        } = Self::receive(slots.warrant).map_err(LaunchFailure::Warrant)?;
         #[cfg(target_os = "linux")]
-        slots.install_streams()?;
+        slots.install_streams().map_err(LaunchFailure::Warrant)?;
         confinement.enter(slots.report)?;
         Ok(Confined {
             image: image.into_owned(),
@@ -199,79 +219,76 @@ impl Warrant<'static> {
     }
 
     /// The warrant the launch left at `at`, which this takes and closes.
-    fn receive(at: Slot) -> Result<Self, String> {
+    fn receive(at: Slot) -> Result<Self, WarrantFailure> {
         let fd = at.take().ok_or_else(|| {
-            format!(
-                "no warrant at fd {at}: `{}` is how ral starts its own confined children, \
-                 never a command to run by hand",
-                Role::Warrant.flag()
-            )
+            WarrantFailure::MissingDescriptor(WarrantFailureMissingDescriptor {
+                field: HandoffField::Warrant,
+                fd: at.fd(),
+            })
         })?;
         Self::unparcel(fd)
     }
 
-    /// The warrant behind `fd`, once its channel proves unwritable.
-    fn unparcel(fd: OwnedFd) -> Result<Self, String> {
+    fn unparcel(fd: OwnedFd) -> Result<Self, WarrantFailure> {
         unwritable(&fd)?;
         let mut bytes = Vec::new();
         std::fs::File::from(fd)
             .take((CAP + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|e| format!("cannot read the warrant: {e}"))?;
+            .map_err(|e| WarrantFailure::Read(Box::new(crate::io::failure(&e))))?;
         Self::decode(&bytes)
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
+    fn decode(bytes: &[u8]) -> Result<Self, WarrantFailure> {
         let body = bytes
             .strip_suffix(b"\0")
-            .ok_or("the warrant does not end in NUL: it was cut short")?;
+            .ok_or(WarrantFailure::MissingTerminator)?;
         let mut fields = body.split(|&b| b == 0);
         if fields.next() != Some(MAGIC) {
-            return Err(format!("not a {} warrant", String::from_utf8_lossy(MAGIC)));
+            return Err(WarrantFailure::Magic);
         }
-        let mut next = |what: &str| {
-            fields
-                .next()
-                .ok_or_else(|| format!("the warrant ends before its {what}"))
-        };
-        let confinement = Confinement::parse(text(next("confinement")?)?)?;
-        let kind = next("kind")?;
-        let program = OsStr::from_bytes(next("program")?);
+        let mut next = |field| fields.next().ok_or(WarrantFailure::MissingField(field));
+        let confinement = Confinement::parse(text(
+            next(WarrantField::Confinement)?,
+            WarrantField::Confinement,
+        )?)?;
+        let kind = next(WarrantField::ImageKind)?;
+        let program = OsStr::from_bytes(next(WarrantField::Program)?);
         let image = match kind {
             b"file" => Image::File {
                 real: RealPath::off_the_wire(program).map_err(|e| {
-                    format!(
-                        "the warrant's file program {} is not a real path, which is absolute \
-                         and names no link, `.` or `..`: {e}; refusing PATH lookup",
-                        shown(program)
-                    )
+                    WarrantFailure::InvalidProgram(WarrantFailureInvalidProgram {
+                        shown: shown(program),
+                        cause: Box::new(crate::io::failure(&e)),
+                    })
                 })?,
-                arg0: OsStr::from_bytes(next("argv[0]")?).into(),
+                arg0: OsStr::from_bytes(next(WarrantField::Argv0)?).into(),
             },
-            b"tool" => Image::Tool(crate::uutils::bundled_name(program).ok_or_else(|| {
-                format!(
-                    "the warrant names an unknown bundled tool, {:?}",
-                    shown(program)
-                )
-            })?),
+            b"tool" => Image::Tool(
+                crate::uutils::bundled_name(program)
+                    .ok_or_else(|| WarrantFailure::UnknownBundledTool(shown(program)))?,
+            ),
             other => {
-                return Err(format!(
-                    "the warrant names an unknown kind of program, {:?}",
-                    String::from_utf8_lossy(other)
+                return Err(WarrantFailure::UnknownImageKind(
+                    String::from_utf8_lossy(other).into_owned(),
                 ));
             }
         };
-        let argc: usize = text(next("argument count")?)?
+        let count = text(
+            next(WarrantField::ArgumentCount)?,
+            WarrantField::ArgumentCount,
+        )?;
+        let argc: usize = count
             .parse()
-            .map_err(|e| format!("the warrant's argument count: {e}"))?;
+            .map_err(|_| WarrantFailure::ArgumentCountSyntax(count.to_owned()))?;
         let args: Vec<_> = fields
             .map(|arg| Cow::Owned(OsStr::from_bytes(arg).to_owned()))
             .collect();
         if args.len() != argc {
-            return Err(format!(
-                "the warrant counts {argc} arguments but carries {}",
-                args.len()
-            ));
+            return Err(WarrantFailure::ArgumentCount(WarrantFailureArgumentCount {
+                declared: argc.into(),
+                actual: args.len().into(),
+            }));
         }
         let warrant = Self {
             confinement,
@@ -279,28 +296,30 @@ impl Warrant<'static> {
             args,
         };
         if warrant.encode()? != bytes {
-            return Err("the warrant is not in canonical form".to_string());
+            return Err(WarrantFailure::Noncanonical);
         }
         Ok(warrant)
     }
 }
 
-fn text(field: &[u8]) -> Result<&str, String> {
-    std::str::from_utf8(field).map_err(|e| format!("a warrant field is not UTF-8: {e}"))
+fn text(bytes: &[u8], field: WarrantField) -> Result<&str, WarrantFailure> {
+    std::str::from_utf8(bytes).map_err(|e| {
+        WarrantFailure::Utf8(WarrantFailureUtf8 {
+            field,
+            valid_up_to: e.valid_up_to().into(),
+            error_len: e.error_len().map(Count::from),
+        })
+    })
 }
 
-/// `fields`, each NUL-terminated: the warrant's framing, and bwrap's
-/// `--args`.  A field holding a NUL is refused, never truncated.
+/// Fields keep their subjects when a NUL would terminate them early.
 pub(super) fn nul_terminated<'a>(
-    fields: impl IntoIterator<Item = &'a [u8]>,
-) -> Result<Vec<u8>, String> {
+    fields: impl IntoIterator<Item = (WarrantField, &'a [u8])>,
+) -> Result<Vec<u8>, WarrantFailure> {
     let mut out = Vec::new();
-    for field in fields {
+    for (subject, field) in fields {
         if field.contains(&0) {
-            return Err(format!(
-                "{:?} holds a NUL byte, which would end it early",
-                String::from_utf8_lossy(field)
-            ));
+            return Err(WarrantFailure::Nul(subject));
         }
         out.extend_from_slice(field);
         out.push(0);
@@ -342,7 +361,13 @@ mod tests {
     }
 
     fn framed(fields: &[&[u8]]) -> Vec<u8> {
-        nul_terminated(fields.iter().copied()).expect("no field holds a NUL")
+        nul_terminated(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (WarrantField::Argument(i.into()), *f)),
+        )
+        .expect("no field holds a NUL")
     }
 
     #[test]
@@ -481,6 +506,47 @@ mod tests {
         assert!(file(b"/bin/sh", b"sh", &[b"a\0b"]).encode().is_err());
         assert!(file(b"/bin/\0sh", b"sh", &[]).encode().is_err());
         assert!(file(b"/bin/sh", b"s\0h", &[]).encode().is_err());
+    }
+
+    #[test]
+    fn warrant_validation_keeps_field_subjects_and_canonical_counts() {
+        let conf = confinement().spell().into_owned();
+        let bytes = framed(&[
+            MAGIC,
+            conf.as_bytes(),
+            b"file",
+            b"/bin/sh",
+            b"sh",
+            b"+1",
+            b"x",
+        ]);
+        assert_eq!(Warrant::decode(&bytes), Err(WarrantFailure::Noncanonical));
+        let bytes = framed(&[MAGIC, conf.as_bytes(), b"file", b"/bin/sh", b"sh", b"x"]);
+        assert_eq!(
+            Warrant::decode(&bytes),
+            Err(WarrantFailure::ArgumentCountSyntax("x".into()))
+        );
+        let bytes = framed(&[MAGIC, b"\xff"]);
+        assert!(matches!(
+            Warrant::decode(&bytes),
+            Err(WarrantFailure::Utf8(WarrantFailureUtf8 {
+                field: WarrantField::Confinement,
+                ..
+            }))
+        ));
+        let missing = framed(&[MAGIC]);
+        assert_eq!(
+            Warrant::decode(&missing),
+            Err(WarrantFailure::MissingField(WarrantField::Confinement))
+        );
+        assert_eq!(
+            file(b"/bin/sh", b"sh", &[b"a\0b"]).encode(),
+            Err(WarrantFailure::Nul(WarrantField::Argument(0_usize.into())))
+        );
+        assert_eq!(
+            file(b"/bin/sh", b"s\0h", &[]).encode(),
+            Err(WarrantFailure::Nul(WarrantField::Argv0))
+        );
     }
 
     #[test]

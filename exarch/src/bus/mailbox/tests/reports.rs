@@ -37,7 +37,9 @@ fn human_prompts_repeatedly_create_debt_only_for_returning_agents() {
 fn a_helpers_task_report_is_published_and_taken_up_in_the_parents_job() {
     for status in [
         ChildStatus::Replied(FOValue::Unit),
-        ChildStatus::Failed("failed".into()),
+        ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::NoReply,
+        )),
         ChildStatus::Stopped,
     ] {
         let parent = mailbox(Admission::Free);
@@ -167,7 +169,12 @@ fn queued_parent_messages_keep_owing_through_multiple_reports() {
     publish(&address, ChildStatus::Stopped);
     assert!(address.status().unwrap().owes);
     let (_input, _exchange) = take(&helper);
-    publish(&address, ChildStatus::Failed("done".into()));
+    publish(
+        &address,
+        ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::NoReply,
+        )),
+    );
     assert!(!address.status().unwrap().owes);
     assert_eq!(depth(&parent, Source::Agent), 3);
 }
@@ -225,14 +232,18 @@ fn an_ended_helper_can_still_publish_the_failure_it_owes() {
     address.end(CancelCause::Cancelled);
     publish(
         &address,
-        ChildStatus::Failed("ended before reporting".into()),
+        ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting,
+        )),
     );
     assert!(
-        matches!(take(&parent).0, Input::Child { status: ChildStatus::Failed(reason), .. } if reason == "ended before reporting")
+        matches!(take(&parent).0, Input::Child { status: ChildStatus::Failed(reason), .. } if reason == crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
     );
     assert_eq!(
         address.status().unwrap().report,
-        Some(ChildStatus::Failed("ended before reporting".into()))
+        Some(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting
+        )))
     );
 }
 

@@ -1,6 +1,8 @@
 //! The live shell's boundary over the directory-tree walk.
 
-use super::{Break, Error, Settled, Shell};
+use super::invalid;
+use super::{Break, Settled, Shell};
+use crate::fact::InvalidCause;
 use crate::path::CwdPath;
 use crate::path::tree::{Entries, Found, Walk, WalkEntry};
 
@@ -56,7 +58,7 @@ impl AdmittedWalk {
     pub fn name(&self, entry: &WalkEntry) -> Settled<String> {
         Ok(entry
             .name(self.base.as_ref())
-            .map_err(|e| Error::new(format!("{}: {e}", self.who)))?)
+            .map_err(|e| invalid(self.who, InvalidCause::Path((&e).into())))?)
     }
 }
 
@@ -168,9 +170,9 @@ mod tests {
         else {
             panic!("an unnameable entry is an error, not a stop");
         };
-        assert!(error.describe().starts_with("glob: "), "{error:?}");
-        assert!(error.describe().contains("bad-\\xFF"), "{error:?}");
-        assert!(error.describe().contains("not valid UTF-8"), "{error:?}");
-        assert!(error.describe().ends_with("rename it?"), "{error:?}");
+        assert!(
+            matches!(error.reason, crate::fact::Reason::Invalid(f) if f.operation == "glob" && matches!(&f.cause,
+            InvalidCause::Path(crate::fact::PathFailure::NotUnicode(crate::fact::PathFailureNotUnicode { shown })) if shown.ends_with("bad-\u{FFFD}")))
+        );
     }
 }

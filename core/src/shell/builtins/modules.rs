@@ -8,9 +8,11 @@
 //! terminating.
 
 use crate::error::Error;
+use crate::fact::{InvalidCause, IoOperation, IoSubject};
 use crate::path::{Judged, LexicalPath, Located, Reading};
 use crate::shell::evaluator::Mode;
 use crate::shell::load::{ModuleLoad, check_source, module_phrases};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 use crate::source::{SourceFile, SourceOrigin};
 use crate::ty::Site;
@@ -21,10 +23,13 @@ use std::sync::Arc;
 fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
     let read = located.read();
     drop(located);
-    let mut file = read.map_err(|e| Error::io(shown, &e).with_context("use"))?;
+    let mut file = read.map_err(|e| {
+        Error::io(IoOperation::Open, IoSubject::Path(shown.into()), &e).with_context("use")
+    })?;
     let mut source = String::new();
-    std::io::Read::read_to_string(&mut file, &mut source)
-        .map_err(|e| Error::io(shown, &e).with_context("use"))?;
+    std::io::Read::read_to_string(&mut file, &mut source).map_err(|e| {
+        Error::io(IoOperation::Read, IoSubject::Path(shown.into()), &e).with_context("use")
+    })?;
     Ok(crate::source::normalize_source_text(source))
 }
 
@@ -62,7 +67,7 @@ pub(crate) fn builtin_use(
     };
 
     let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(e.to_string()).with_context("use"))?;
+        .map_err(|e| invalid("use", InvalidCause::Path((&e).into())))?;
     let source = read_and_normalize(located, &crate::path::shown(file.path()))?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
@@ -86,7 +91,7 @@ pub(crate) fn builtin_use(
         .collect();
     let record = Value::map(bindings);
     site.admit_module(&record, &top.exported_schemes(), shell.fixings())
-        .map_err(|mismatch| mismatch.refusal("use", shell))?;
+        .map_err(|mismatch| mismatch.refusal("use"))?;
     Ok(record)
 }
 
@@ -123,7 +128,31 @@ fn resolve_in_current_script(path: &str, shell: &Shell) -> Settled<crate::path::
     match origin.and_then(SourceOrigin::file) {
         Some(script) => resolver
             .resolve_in_script(path, script)
-            .map_err(|e| Error::new(e.to_string()).with_context("use").into()),
+            .map_err(|e| invalid("use", InvalidCause::Path((&e).into())).into()),
         None => Ok(resolver.resolve(path)),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use crate::fact::Reason;
+
+    #[test]
+    fn use_read_failures_keep_path_operation_and_loader_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.ral");
+        std::fs::write(&path, [0xff]).unwrap();
+        let mut shell = crate::test_helper::core_shell();
+        let located = shell.locate::<Reading>(&shell.anchor(&path)).unwrap();
+        let shown = crate::path::shown(&path);
+        let Err(Break::Error(error)) = read_and_normalize(located, &shown) else {
+            panic!("non-UTF-8 source")
+        };
+        assert_eq!(error.context(), Some("use"));
+        assert!(
+            matches!(error.reason, Reason::Io(f) if f.operation == IoOperation::Read && f.subject == IoSubject::Path(shown))
+        );
     }
 }

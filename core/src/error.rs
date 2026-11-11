@@ -2,7 +2,7 @@
 //! unwinding.  Rendering lives in `shell::runtime::error`.
 
 use crate::diagnostic::Rejection;
-use crate::fact::{FailureCode, Reason};
+use crate::fact::{FailureCode, IoFailure, IoOperation, IoSubject, Reason};
 use crate::source::{CallSite, SourceDb, Span};
 use std::borrow::Cow;
 use std::fmt;
@@ -136,9 +136,42 @@ impl FailureCode for Error {
 }
 
 impl Error {
-    pub fn new(reason: impl Into<Reason>) -> Self {
+    /// Construct a failure from portable facts, never implicit prose.
+    ///
+    /// ```
+    /// use ral_core::error::Error;
+    /// use ral_core::fact::{Reason, StateFailure};
+    ///
+    /// let error = Error::new(Reason::State(Box::new(StateFailure::NoDesk)));
+    /// assert!(matches!(error.reason, Reason::State(cause) if *cause == StateFailure::NoDesk));
+    /// ```
+    ///
+    /// Neither borrowed nor owned strings are reasons:
+    ///
+    /// ```compile_fail,E0308
+    /// use ral_core::error::Error;
+    ///
+    /// let _ = Error::new("not a typed reason");
+    /// ```
+    ///
+    /// ```compile_fail,E0308
+    /// use ral_core::error::Error;
+    ///
+    /// let _ = Error::new(String::from("not a typed reason"));
+    /// ```
+    ///
+    /// Strings cannot implicitly convert to a reason either:
+    ///
+    /// ```compile_fail,E0277
+    /// use ral_core::error::Error;
+    /// use ral_core::fact::Reason;
+    ///
+    /// let reason: Reason = "not a typed reason".into();
+    /// let _ = Error::new(reason);
+    /// ```
+    pub fn new(reason: Reason) -> Self {
         Self {
-            reason: reason.into(),
+            reason,
             prov: None,
             hints: Box::default(),
             witness: None,
@@ -148,20 +181,13 @@ impl Error {
         }
     }
 
-    /// An I/O failure on `what`, in the one phrasing every door shares.
-    ///
-    /// The OS's errors and ral's own say the fixed string for `NotFound` and
-    /// `PermissionDenied`, the same on every host; the exception is the
-    /// directory's refusal of a staged write (`path::directory_refused`),
-    /// whose words say whose refusal it is.
-    pub fn io(what: impl fmt::Display, e: &io::Error) -> Self {
-        use io::ErrorKind::{NotFound, PermissionDenied};
-        Self::new(match e.kind() {
-            NotFound => format!("{what}: no such file or directory"),
-            PermissionDenied if crate::path::directory_refused(e) => format!("{what}: {e}"),
-            PermissionDenied => format!("{what}: permission denied"),
-            _ => format!("{what}: {e}"),
-        })
+    /// Project I/O at its source boundary, preserving custom path/owned causes.
+    pub fn io(operation: IoOperation, subject: IoSubject, error: &io::Error) -> Self {
+        Self::new(Reason::Io(Box::new(IoFailure {
+            operation,
+            subject,
+            cause: crate::io::failure(error),
+        })))
     }
 
     /// The failure's own provenance, else the register's frame.
@@ -257,7 +283,9 @@ mod tests {
     use std::io::ErrorKind;
 
     fn said(e: &io::Error) -> String {
-        Error::io("f", e).describe().into_owned()
+        Error::io(IoOperation::Read, IoSubject::Path("f".into()), e)
+            .describe()
+            .into_owned()
     }
 
     /// `NotFound` and `PermissionDenied` say the fixed string, whoever made
@@ -266,22 +294,25 @@ mod tests {
     fn io_says_the_fixed_string_for_not_found_and_permission_denied() {
         let os_not_found = io::Error::from_raw_os_error(2);
         assert_eq!(os_not_found.kind(), ErrorKind::NotFound);
-        assert_eq!(said(&os_not_found), "f: no such file or directory");
+        assert_eq!(
+            said(&os_not_found),
+            "could not read \"f\": no such file or directory"
+        );
         assert_eq!(
             said(&ErrorKind::PermissionDenied.into()),
-            "f: permission denied"
+            "could not read \"f\": permission denied"
         );
         assert_eq!(
             said(&ErrorKind::NotFound.into()),
-            "f: no such file or directory"
+            "could not read \"f\": no such file or directory"
         );
         assert_eq!(
             said(&io::Error::new(ErrorKind::PermissionDenied, "other words")),
-            "f: permission denied"
+            "could not read \"f\": permission denied"
         );
         assert_eq!(
             said(&io::Error::new(ErrorKind::NotFound, "other words")),
-            "f: no such file or directory"
+            "could not read \"f\": no such file or directory"
         );
     }
 
@@ -290,20 +321,22 @@ mod tests {
     fn io_says_the_directorys_refusal_in_its_own_words() {
         assert_eq!(
             said(&crate::path::directory_refusal_for_test()),
-            "f: its directory is not writable"
+            "could not read \"f\": its directory is not writable"
         );
     }
 
     #[test]
     fn hints_accumulate_in_attachment_order() {
-        let e = Error::new("boom").with_hint("first").with_hint("second");
+        let e = Error::new(Reason::raised("boom"))
+            .with_hint("first")
+            .with_hint("second");
         assert_eq!(e.hints().len(), 2);
         assert_eq!((&*e.hints()[0], &*e.hints()[1]), ("first", "second"));
     }
 
     #[test]
     fn display_is_the_context_chain_then_the_words() {
-        let e = Error::new("boom")
+        let e = Error::new(Reason::raised("boom"))
             .with_context("inner")
             .with_context("outer");
         assert_eq!(e.to_string(), "outer: inner: boom");

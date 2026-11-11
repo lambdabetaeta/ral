@@ -134,14 +134,17 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
         "the other link's name is not adopted"
     );
     let err = host::settle(&held.file, &name("c"), Some(wanted), OsStr::new("b")).unwrap_err();
-    assert!(err.to_string().contains("moved during the walk"), "{err}");
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
     let stated = host::settle(&held.file, &name("a"), None, OsStr::new("a")).unwrap();
     assert_eq!(stated.as_os_str(), "a", "a stated answer spelled as asked");
     let err = host::settle(&held.file, &name("a"), None, OsStr::new("b")).unwrap_err();
-    assert!(
-        err.to_string().contains("states but does not hold"),
-        "{err}"
-    );
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::StoredNameUnheld(_))
+    ));
 
     if root_user() {
         return;
@@ -157,10 +160,12 @@ fn the_stored_name_rule_takes_a_spelling_and_lists_for_another_links_name() {
     );
     let err = blind.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-    assert!(
-        err.to_string().contains("cannot learn the stored name"),
-        "{err}"
-    );
+    assert!(matches!(
+        crate::io::failure(&err).context.as_slice(),
+        [crate::fact::IoContext::Path(
+            crate::fact::PathIoContext::StoredNameRead(_)
+        )]
+    ));
 }
 
 /// A walk of `walked` records `walked` whichever name the vnode carries, so a
@@ -224,7 +229,10 @@ fn an_ambiguous_fold_refuses() {
         OsStr::new("\u{e1}"),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("spellings of one object"), "{err}");
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::StoredNameAmbiguous(_))
+    ));
 }
 
 #[test]
@@ -234,9 +242,14 @@ fn pick_takes_the_byte_equal_name_then_the_unique_fold() {
     assert_eq!(picked(&["a", "A"], "A").unwrap(), name("A"));
     assert_eq!(picked(&["Desktop"], "desktop").unwrap(), name("Desktop"));
     let err = picked(&["\u{e1}", "\u{c1}"], "a\u{301}").unwrap_err();
-    assert!(err.to_string().contains("2 spellings"), "{err}");
+    assert!(
+        matches!(*crate::io::failure(&err).leaf, crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::StoredNameAmbiguous(cause)) if cause.spellings.to_u64() == 2)
+    );
     let err = picked(&["b"], "a").unwrap_err();
-    assert!(err.to_string().contains("moved during the walk"), "{err}");
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
 }
 
 /// What the kernel packs for one entry: its length, the returned set, the
@@ -338,10 +351,10 @@ fn an_object_replaced_between_lookup_and_open_is_refused() {
             std::fs::write(&x, b"another").unwrap();
         }
     }));
-    assert!(
-        replaced.to_string().contains("moved during the walk"),
-        "{replaced}"
-    );
+    assert!(matches!(
+        *crate::io::failure(&replaced).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
 
     let renamed = stepped(Box::new({
         let (x, y) = (at("a/x"), at("a/y"));
@@ -364,7 +377,10 @@ fn an_object_replaced_between_lookup_and_open_is_refused() {
             mkfifo(&x);
         }
     }));
-    assert!(fifo.to_string().contains("moved during the walk"), "{fifo}");
+    assert!(matches!(
+        *crate::io::failure(&fifo).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
 }
 
 /// `freadlink` reads a link's target through the `O_SYMLINK` descriptor that
@@ -478,10 +494,10 @@ fn a_stated_object_in_another_spelling_is_refused() {
     let Err(err) = located_with(&dir.join("PIPE"), LeafMode::Follow) else {
         panic!("a stated FIFO was named by an identity nothing holds");
     };
-    assert!(
-        err.to_string().contains("states but does not hold"),
-        "{err}"
-    );
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::StoredNameUnheld(_))
+    ));
     let loc = located_with(&dir.join("Pipe"), LeafMode::Follow).unwrap();
     assert_eq!(loc.real().as_path(), dir.join("Pipe"));
 }
@@ -610,10 +626,10 @@ fn a_stream_to_a_fifo_is_opened_by_name_and_must_find_a_fifo() {
     let Err(refused) = loc.open_streaming(Streaming::Append) else {
         panic!("a regular file is no FIFO");
     };
-    assert!(
-        refused.to_string().contains("moved during the walk"),
-        "{refused}"
-    );
+    assert!(matches!(
+        *crate::io::failure(&refused).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
     assert_eq!(read_all(&dir.join("pipe2")), "kept");
 }
 
@@ -636,8 +652,8 @@ fn a_stream_to_a_fifo_swapped_for_another_is_refused() {
     let Err(refused) = loc.open_streaming(Streaming::Append) else {
         panic!("another FIFO is not the one the walk stated");
     };
-    assert!(
-        refused.to_string().contains("moved during the walk"),
-        "{refused}"
-    );
+    assert!(matches!(
+        *crate::io::failure(&refused).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
 }

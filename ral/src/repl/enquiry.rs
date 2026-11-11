@@ -10,6 +10,9 @@
 use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, tag, untag};
+use ral_core::fact::{
+    DecodeCause, DecodeFailure, Expected, Found, ShapeFailure, UnexpectedPayload, UnknownTag,
+};
 use ral_core::record;
 
 use super::plugin::Keymap;
@@ -104,7 +107,7 @@ impl Datum for Data {
         self.0
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         Ok(Self(v.clone()))
     }
 }
@@ -172,30 +175,48 @@ impl Datum for EditorOp {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         use ral_core::data::datum::{exact_keys, field};
-        Ok(match untag(v) {
-            Some(("get", None)) => Self::Get,
-            Some(("set", Some(p))) => {
-                exact_keys(p, &["text", "cursor"])?;
-                Self::Set {
-                    text: field(p, "text")?,
-                    cursor: field(p, "cursor")?,
-                }
+        const TAGS: &[&str] = &[
+            "get",
+            "set",
+            "set-lbuffer",
+            "insert",
+            "push",
+            "accept",
+            "ghost",
+            "highlight",
+            "history",
+            "state-get",
+            "state-set",
+        ];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "get" => bare(label, payload).map(|()| Self::Get),
+            "set" => {
+                let p = carried(label, payload)?;
+                (|| {
+                    exact_keys(p, &["text", "cursor"])?;
+                    Ok(Self::Set {
+                        text: field(p, "text")?,
+                        cursor: field(p, "cursor")?,
+                    })
+                })()
+                .map_err(|why: DecodeFailure| why.payload(label))
             }
-            Some(("set-lbuffer", Some(p))) => Self::SetLbuffer(Datum::decode(p)?),
-            Some(("insert", Some(p))) => Self::Insert(Datum::decode(p)?),
-            Some(("push", None)) => Self::Push,
-            Some(("accept", None)) => Self::Accept,
-            Some(("ghost", Some(p))) => Self::Ghost(Datum::decode(p)?),
-            Some(("highlight", Some(p))) => Self::Highlight(Datum::decode(p)?),
-            Some(("history", None)) => Self::History,
-            Some(("state-get", None)) => Self::StateGet,
-            Some(("state-set", payload)) => {
-                Self::StateSet(Data(payload.cloned().unwrap_or(FOValue::Unit)))
-            }
-            _ => return Err(format!("no `{EDITOR} request is shaped like {}", v.shape())),
-        })
+            "set-lbuffer" => datum(label, payload).map(Self::SetLbuffer),
+            "insert" => datum(label, payload).map(Self::Insert),
+            "push" => bare(label, payload).map(|()| Self::Push),
+            "accept" => bare(label, payload).map(|()| Self::Accept),
+            "ghost" => datum(label, payload).map(Self::Ghost),
+            "highlight" => datum(label, payload).map(Self::Highlight),
+            "history" => bare(label, payload).map(|()| Self::History),
+            "state-get" => bare(label, payload).map(|()| Self::StateGet),
+            "state-set" => Ok(Self::StateSet(Data(
+                payload.cloned().unwrap_or(FOValue::Unit),
+            ))),
+            _ => Err(unknown(label, TAGS)),
+        }
     }
 }
 
@@ -213,28 +234,67 @@ impl Datum for Enquiry {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some((EDITOR, Some(op))) => EditorOp::decode(op).map(Self::Editor),
-            Some((PLUGIN, Some(note))) => match untag(note) {
-                Some(("loaded", Some(m))) => {
-                    Manifest::decode(m).map(|m| Self::Plugin(PluginNote::Loaded(m)))
-                }
-                Some(("unloaded", Some(n))) => {
-                    String::decode(n).map(|n| Self::Plugin(PluginNote::Unloaded(n)))
-                }
-                _ => Err(format!(
-                    "no `{PLUGIN} request is shaped like {}: expected `loaded or `unloaded",
-                    note.shape()
-                )),
-            },
-            Some((CLIPBOARD, Some(req))) => ClipboardReq::decode(req).map(Self::Clipboard),
-            Some((class, _)) => Err(format!(
-                "the REPL answers no `{class} enquiries: only `{EDITOR}, `{PLUGIN} and `{CLIPBOARD}"
-            )),
-            None => Err(format!("an enquiry must be a variant, got {}", v.shape())),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &[EDITOR, PLUGIN, CLIPBOARD];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            EDITOR => datum(label, payload).map(Self::Editor),
+            PLUGIN => {
+                let note = carried(label, payload)?;
+                (|| {
+                    const NOTES: &[&str] = &["loaded", "unloaded"];
+                    let (label, payload) = tagged(note, NOTES)?;
+                    match label {
+                        "loaded" => datum(label, payload).map(PluginNote::Loaded),
+                        "unloaded" => datum(label, payload).map(PluginNote::Unloaded),
+                        _ => Err(unknown(label, NOTES)),
+                    }
+                })()
+                .map(Self::Plugin)
+                .map_err(|why| why.payload(label))
+            }
+            CLIPBOARD => datum(label, payload).map(Self::Clipboard),
+            _ => Err(unknown(label, TAGS)),
         }
     }
+}
+
+fn tagged<'a>(
+    v: &'a FOValue,
+    tags: &[&str],
+) -> Result<(&'a str, Option<&'a FOValue>), DecodeFailure> {
+    untag(v).ok_or_else(|| {
+        DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+            expected: Expected::Tags(tags.iter().map(|tag| (*tag).into()).collect()),
+            found: Found::of(v),
+        }))
+    })
+}
+
+fn unknown(tag: &str, tags: &[&str]) -> DecodeFailure {
+    DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+        tag: tag.into(),
+        offered: tags.iter().map(|tag| (*tag).into()).collect(),
+    }))
+}
+
+fn bare(tag: &str, payload: Option<&FOValue>) -> Result<(), DecodeFailure> {
+    payload.map_or(Ok(()), |p| {
+        Err(DecodeFailure::new(DecodeCause::UnexpectedPayload(
+            UnexpectedPayload {
+                tag: tag.into(),
+                found: Found::of(p),
+            },
+        )))
+    })
+}
+
+fn carried<'a>(tag: &str, payload: Option<&'a FOValue>) -> Result<&'a FOValue, DecodeFailure> {
+    payload.ok_or_else(|| DecodeFailure::new(DecodeCause::MissingPayload(tag.into())))
+}
+
+fn datum<T: Datum>(tag: &str, payload: Option<&FOValue>) -> Result<T, DecodeFailure> {
+    T::decode(carried(tag, payload)?).map_err(|why| why.payload(tag))
 }
 
 #[cfg(test)]
@@ -292,6 +352,12 @@ mod tests {
     #[test]
     fn an_unknown_class_is_named() {
         let why = Enquiry::decode(&tag("exarch-agents", None)).expect_err("unknown class");
-        assert!(why.contains("`exarch-agents"), "{why}");
+        assert_eq!(
+            why,
+            DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                tag: "exarch-agents".into(),
+                offered: vec![EDITOR.into(), PLUGIN.into(), CLIPBOARD.into()],
+            }))
+        );
     }
 }

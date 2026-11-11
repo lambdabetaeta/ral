@@ -58,3 +58,18 @@ fn non_bmp_survives_adjacent_to_escaped_quote() {
         format!("\"{}\" \"{expected_payload}\"", program.to_str().unwrap())
     );
 }
+
+#[test]
+fn a_nul_argument_preserves_its_argv_position() {
+    let error =
+        make_command_line(OsStr::new("tool"), &["okay".into(), "bad\0arg".into()]).unwrap_err();
+    assert_eq!(error.step, crate::fact::PrepareStep::Argv);
+    assert_eq!(
+        error.subject,
+        crate::fact::PrepareSubject::Argument(2usize.into())
+    );
+    assert_eq!(
+        error.cause,
+        crate::fact::PrepareCause::Invalid(crate::fact::PrepareInvalid::Nul)
+    );
+}

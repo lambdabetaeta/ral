@@ -111,7 +111,9 @@ fn live(agent: Agent, emit: Emitter) -> Teardown {
                 terminal.recorder.emit_or_end(Forensic::Error {
                     text: failure.clone(),
                 });
-                let _reported = terminal.handle.report(ChildStatus::Failed(failure.clone()));
+                let _reported = terminal.handle.report(ChildStatus::Failed(
+                    crate::record::ChildFailure::Panicked(failure.clone()),
+                ));
                 Teardown {
                     failures: vec![failure],
                 }

@@ -23,6 +23,8 @@ use ral_core::authority::grant::value::GrantValue;
 use ral_core::authority::policy::GrantStack;
 use ral_core::carrier::{Severed, WireTransport};
 use ral_core::engine::EngineInstaller;
+use ral_core::error::Error;
+use ral_core::fact::EngineStep;
 use ral_core::own::OwnDir;
 use ral_core::path::{CwdPath, EnginePath, GuestPath};
 use ral_core::process::ScopeNode;
@@ -205,9 +207,18 @@ impl Fleet {
                 Engine::wire(*transport, attach).map_err(lost)?
             }
         };
-        let index = BuiltinIndex::resolve(engine.read(|t| t.builtin_names()).map_err(lost)?);
+        let index = BuiltinIndex::resolve(
+            engine
+                .read(ral_core::fact::ProbeSubject::BuiltinNames, |t| {
+                    t.builtin_names()
+                })
+                .map_err(lost)?,
+        );
         let scratch = engine
-            .read(|t| t.env_var(SCRATCH_VAR))
+            .read(
+                ral_core::fact::ProbeSubject::EnvVar(SCRATCH_VAR.into()),
+                |t| t.env_var(SCRATCH_VAR),
+            )
             .map_err(lost)?
             .ok_or_else(|| io::Error::other(format!("the engine names no ${SCRATCH_VAR}")))?;
         let fleet = Self::new(Launch {
@@ -310,7 +321,7 @@ impl Agent {
         engine: Engine,
         provider: Arc<Provider>,
         inherited: Option<Inherited>,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, Error> {
         let id = fresh_id();
         let terms = parent.terms(&fleet.launch, &fleet.registry);
         let parent = terms.parent.as_ref().map(AgentHandle::id);
@@ -335,16 +346,13 @@ impl Agent {
                         inherited,
                     },
                 )
-                .map(|log| (log, ()))
                 .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!("could not open the session log of agent '{log_name}': {error}"),
-                    )
+                    error.with_context(format!(
+                        "could not open the session log of agent '{log_name}'"
+                    ))
                 })
             },
         )
-        .map(|(agent, ())| agent)
     }
     /// Reopen the human's children not closed with `/close`, with fresh engines.
     ///
@@ -409,25 +417,28 @@ impl Agent {
     ) -> io::Result<(Self, Resumed)> {
         let terms = Parent::Human.terms(&fleet.launch, &fleet.registry);
         let returns = terms.returns;
-        let (mut agent, resumed) = Self::hatch(
-            fleet,
-            terms,
+        let launch = &fleet.launch;
+        let system = launch
+            .prompt_for(&engine, &terms, name.name())
+            .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
+        let (log, mail, schedules, model) = AgentLog::reopen(
+            &launch.sessions_root,
+            id,
+            provider.selected(),
+            returns,
+            &system,
+            crate::app::now_unix_ms(),
+        )?;
+        let resumed = log.resumed_summary();
+        let mut agent = Self::assemble(
             name,
             engine,
+            log,
+            (mail, schedules, model),
+            terms,
             provider,
-            |sessions, selected, system| {
-                let (log, mail, schedules, model) = AgentLog::reopen(
-                    sessions,
-                    id,
-                    selected,
-                    returns,
-                    system,
-                    crate::app::now_unix_ms(),
-                )?;
-                let resumed = log.resumed_summary();
-                Ok(((log, mail, schedules, model), resumed))
-            },
-        )?;
+            fleet.clone(),
+        );
         if let Err(error) = agent
             .body
             .log
@@ -440,25 +451,21 @@ impl Agent {
         }
         Ok((agent, resumed))
     }
-    fn hatch<T>(
+    fn hatch(
         fleet: &Arc<Fleet>,
         terms: Terms,
         name: Name,
         engine: Engine,
         provider: Arc<Provider>,
-        open: impl FnOnce(
-            &OwnDir,
-            &Selected,
-            &str,
-        ) -> io::Result<((AgentLog, Mail, Schedules, Model), T)>,
-    ) -> io::Result<(Self, T)> {
+        open: impl FnOnce(&OwnDir, &Selected, &str) -> Result<(AgentLog, Mail, Schedules, Model), Error>,
+    ) -> Result<Self, Error> {
         let launch = &fleet.launch;
         let system = launch
             .prompt_for(&engine, &terms, name.name())
-            .map_err(|lost| io::Error::other(EngineLost::starting(&lost, launch.run_dir())))?;
-        let ((log, mail, schedules, model), opened) =
+            .map_err(|lost| crate::agent::engine::failure(EngineStep::Starting, &lost))?;
+        let (log, mail, schedules, model) =
             open(&launch.sessions_root, provider.selected(), &system)?;
-        let agent = Self::assemble(
+        Ok(Self::assemble(
             name,
             engine,
             log,
@@ -466,8 +473,7 @@ impl Agent {
             terms,
             provider,
             fleet.clone(),
-        );
-        Ok((agent, opened))
+        ))
     }
     pub(crate) fn clear(&mut self) -> Result<(), String> {
         self.body
@@ -554,7 +560,7 @@ impl Agent {
             .registry
             .name(FIRST_NAME)
             .map_err(|why| io::Error::other(why.to_string()))?;
-        Self::born(&fleet, Parent::Human, name, engine, provider, None)
+        Self::born(&fleet, Parent::Human, name, engine, provider, None).map_err(io::Error::other)
     }
     /// # Errors
     /// Refuses chat, wire engines, missing sessions, or failed construction.
@@ -626,7 +632,7 @@ impl Agent {
             .registry
             .name(FIRST_NAME)
             .map_err(|why| io::Error::other(why.to_string()))?;
-        Self::born(&fleet, Parent::Human, name, engine, provider, None)
+        Self::born(&fleet, Parent::Human, name, engine, provider, None).map_err(io::Error::other)
     }
 }
 #[cfg(test)]

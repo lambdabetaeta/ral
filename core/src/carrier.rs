@@ -17,6 +17,10 @@ use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::engine::Scopes;
 use crate::error::Error;
+use crate::fact::{
+    ConnectionClosed, ConnectionClosedIo, ConnectionFailure, ConnectionFault,
+    ConnectionFaultProbeAnswer, ConnectionOperation, DurationFact, ProbeFailure,
+};
 use crate::process::{
     Ambient, CancelCause, Fatal, POLL_SLICE, RootCause, Scope, ScopeNode, interrupt_epoch,
 };
@@ -27,6 +31,7 @@ use crate::shell::runtime::{DeferredSink, no_desk};
 use crate::sync::LockExt as _;
 
 mod identity;
+pub mod json;
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 pub(crate) mod testkit;
@@ -51,16 +56,31 @@ pub enum Severed {
     /// mismatch, an unknown installer, a seed it could not apply.
     Refused(WireError),
     /// The stream closed or a frame failed to cross.
-    Closed(String),
+    Closed(#[serde(with = "crate::data::datum::as_datum")] ConnectionClosed),
     /// Nothing arrived for the liveness deadline — a virtual socket whose far
     /// end died without an EOF.
     Silent(Duration),
     /// The engine answered outside the protocol — a refused boundary-time
     /// probe, say — so nothing it says can be trusted further.
-    Faulted(String),
+    Faulted(#[serde(with = "crate::data::datum::as_datum")] ConnectionFault),
 }
 
 impl Severed {
+    /// Portable non-refusal evidence. An attach refusal keeps its original
+    /// reason through `WireError::to_error`, outside the connection facts.
+    #[must_use]
+    pub fn connection_failure(&self) -> Option<ConnectionFailure> {
+        match self {
+            Self::Refused(_) => None,
+            Self::Closed(cause) => Some(ConnectionFailure::Closed(cause.clone())),
+            Self::Silent(duration) => Some(ConnectionFailure::Silent(DurationFact {
+                seconds: duration.as_secs().into(),
+                nanos: duration.subsec_nanos(),
+            })),
+            Self::Faulted(cause) => Some(ConnectionFailure::Faulted(cause.clone())),
+        }
+    }
+
     /// A short, stable name for *why* the engine went, meant to be shown to a
     /// person and quoted back — in a bug report, in a support mail, in a
     /// search of this tree.  The variant's own [`Display`](std::fmt::Display)
@@ -90,13 +110,19 @@ impl std::fmt::Display for Severed {
                 "the engine refused to attach: {}",
                 why.to_error().plain()
             ),
-            Self::Closed(msg) => write!(f, "the connection to the engine closed: {msg}"),
+            Self::Closed(cause) => write!(
+                f,
+                "the connection to the engine closed: {}",
+                cause.describe()
+            ),
             Self::Silent(d) => write!(
                 f,
                 "the engine fell silent for {}s and was declared dead",
                 d.as_secs()
             ),
-            Self::Faulted(msg) => write!(f, "the engine broke the protocol: {msg}"),
+            Self::Faulted(cause) => {
+                write!(f, "the engine broke the protocol: {}", cause.describe())
+            }
         }
     }
 }
@@ -107,7 +133,7 @@ pub enum ProbeError {
     /// The probe was refused: by the engine, its rendezvous held by an
     /// in-flight run or its reading panicked, or before it was sent, by the
     /// frame fuse.
-    Rejected(String),
+    Rejected(ProbeFailure),
     /// No answer will ever come.
     Severed(Severed),
 }
@@ -374,9 +400,12 @@ pub(crate) fn read<T: Datum>(
     probe: &Probe,
 ) -> Result<T, ProbeError> {
     let answer = t.probe(probe)?;
-    T::decode(&answer).map_err(|why| {
-        ProbeError::Severed(t.sever(Severed::Faulted(format!(
-            "the {probe:?} probe answered outside its shape: {why}"
+    T::decode(&answer).map_err(|cause| {
+        ProbeError::Severed(t.sever(Severed::Faulted(ConnectionFault::ProbeAnswer(
+            ConnectionFaultProbeAnswer {
+                probe: probe.subject(),
+                cause,
+            },
         ))))
     })
 }
@@ -495,9 +524,9 @@ pub fn dispatch_to_report(
                 transport.answer(eid, answer);
                 None
             }
-            Ok((_, Event::Reading(_))) => Some(Err(transport.sever(Severed::Faulted(
-                "it answered a dispatch with a probe's reading".into(),
-            )))),
+            Ok((_, Event::Reading(_))) => Some(Err(
+                transport.sever(Severed::Faulted(ConnectionFault::ReadingForDispatch))
+            )),
             Ok((_, Event::Report(report))) => Some(Ok(report)),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -539,7 +568,11 @@ impl Line {
     /// `Closed` cause.
     fn write(&self, frame: &Frame) -> Result<(), WriteError> {
         write_or_sever(&self.channel, frame, |e| {
-            self.severance.latch(Severed::Closed(e.to_string()));
+            self.severance
+                .latch(Severed::Closed(ConnectionClosed::Io(ConnectionClosedIo {
+                    operation: ConnectionOperation::Write,
+                    cause: crate::io::failure(e),
+                })));
         })
     }
 
@@ -649,7 +682,7 @@ impl ControlSender {
                 if let Some(line) = line.upgrade()
                     && let Err(WriteError::Unencodable(e)) = line.write(&Frame::Control(control))
                 {
-                    unreachable!("a control frame is a few bytes: {e}");
+                    unreachable!("a control frame is a few bytes: {}", e.describe());
                 }
             }
         }

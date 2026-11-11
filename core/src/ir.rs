@@ -541,9 +541,107 @@ impl<P: Phase> Comp<P> {
     }
 }
 
+impl<P: Phase> Comp<P> {
+    /// The first native computation in this tree: the one thing a wire cannot
+    /// carry, since a native's code is built at force and never serialised.
+    pub(crate) fn first_native(&self) -> Option<&NativeEntry> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
+            CompKind::Native { entry, .. } => Some(entry),
+            CompKind::Lam { body, .. }
+            | CompKind::Capture(body)
+            | CompKind::Protect { body, .. } => body.first_native(),
+            CompKind::Bind { comp, rest, .. }
+            | CompKind::Seq {
+                first: comp, rest, ..
+            } => comp.first_native().or_else(|| rest.first_native()),
+            CompKind::App { head, args, .. } => head
+                .first_native()
+                .or_else(|| first_native_in(args.iter().map(|arg| &arg.item))),
+            CompKind::BindingCall {
+                args, redirects, ..
+            } => first_native_in(args.iter().map(|arg| &arg.item).chain(redirects.operands())),
+            CompKind::Exec(exec) => first_native_in(
+                exec.argv
+                    .iter()
+                    .map(|elem| &elem.slot().item)
+                    .chain(exec.redirects.operands()),
+            ),
+            CompKind::Pipeline { stages } => stages.iter().find_map(|stage| stage.first_native()),
+            CompKind::Prim(prim) => first_native_in(prim.operands()),
+            CompKind::Force(value) | CompKind::Return(value) => value.first_native(),
+            CompKind::Rec { group, .. } => group
+                .shape()
+                .iter()
+                .find_map(|(_, member)| member.first_native()),
+            CompKind::If { cond, then, else_ } => {
+                first_native_in([&cond.item, &then.item, &else_.item])
+            }
+            CompKind::Case { scrutinee, arms } => first_native_in(
+                std::iter::once(&scrutinee.item).chain(arms.iter().map(|arm| &arm.body.item)),
+            ),
+            CompKind::Try { body, handler } => first_native_in([body, handler]),
+            CompKind::Guard { body, cleanup } => first_native_in([body, cleanup]),
+            CompKind::Within {
+                opts,
+                handlers,
+                body,
+            } => first_native_in(
+                opts.shape()
+                    .iter()
+                    .map(|(_, value)| &value.item)
+                    .chain(handlers.iter().flatten().map(|arm| &arm.value.item))
+                    .chain(std::iter::once(body)),
+            ),
+            CompKind::Grant { caps, body } => first_native_in(
+                caps.shape()
+                    .iter()
+                    .map(|(_, value)| &value.item)
+                    .chain(std::iter::once(body)),
+            ),
+            CompKind::Spawn { title, body } => first_native_in(
+                title
+                    .iter()
+                    .map(|title| &title.item)
+                    .chain(std::iter::once(body)),
+            ),
+            CompKind::Audit { body } | CompKind::Gather { body } => body.first_native(),
+            CompKind::Redirect { body, redirects } => body
+                .first_native()
+                .or_else(|| first_native_in(redirects.operands())),
+            CompKind::Tilde(_) => None,
+        })
+    }
+}
+
+impl<P: Phase> Val<P> {
+    fn first_native(&self) -> Option<&NativeEntry> {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
+            Self::Unit
+            | Self::String(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::Bool(_)
+            | Self::Variable(_) => None,
+            Self::Thunk(node) => node.shape().first_native(),
+            Self::List(node) => first_native_in(node.shape().iter().map(|elem| &elem.item)),
+            Self::Record(node) | Self::Map(node) => {
+                first_native_in(node.shape().iter().map(|(_, value)| &value.item))
+            }
+            Self::Variant { payload, .. } => payload.first_native(),
+            Self::Protected { value, .. } => value.first_native(),
+        })
+    }
+}
+
+fn first_native_in<'a, P: Phase + 'a>(
+    values: impl IntoIterator<Item = &'a Val<P>>,
+) -> Option<&'a NativeEntry> {
+    values.into_iter().find_map(Val::first_native)
+}
+
 impl<P: Phase> Mentions for Comp<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        match &self.item {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
             CompKind::Lam { param: _, body }
             | CompKind::Capture(body)
             | CompKind::Protect { body, .. } => body.mentions(out),
@@ -646,13 +744,13 @@ impl<P: Phase> Mentions for Comp<P> {
                 body.mentions(out);
                 redirects.mentions(out);
             }
-        }
+        });
     }
 }
 
 impl<P: Phase> Mentions for Val<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
-        match self {
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
             Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
             Self::Variable(name) => out.push(name),
             Self::Protected { value, .. } => value.mentions(out),
@@ -660,7 +758,7 @@ impl<P: Phase> Mentions for Val<P> {
             Self::List(node) => out.extend(node.occ().names()),
             Self::Record(node) | Self::Map(node) => out.extend(node.occ().names()),
             Self::Variant { payload, .. } => payload.mentions(out),
-        }
+        });
     }
 }
 

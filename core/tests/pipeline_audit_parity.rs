@@ -193,7 +193,7 @@ fn a_direct_stage_refused_by_vetting_leaves_one_command_record() {
         command
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("cannot pass List")),
+            .is_some_and(|e| e.contains("cannot pass a list")),
         "{command:?}"
     );
 }

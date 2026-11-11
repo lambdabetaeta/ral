@@ -278,8 +278,8 @@ fn a_module_raising_use_prefixed_text_still_gets_loader_context_once() {
             panic!("expected a module error");
         };
         assert_eq!(error.context(), Some("use"));
-        assert_eq!(error.reason, Reason::Raised("use: user text".into()));
-        let record = error.record(&shell);
+        assert_eq!(error.reason, Reason::raised("use: user text"));
+        let record = error.fact(&shell);
         assert_eq!(record.reason(), &error.reason);
         assert_eq!(record.frame(), "fail");
         assert_eq!(record.site().script.as_ref(), shown(&inner));

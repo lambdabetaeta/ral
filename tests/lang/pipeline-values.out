@@ -17,6 +17,6 @@ hi
 true
 x=caught
 producer failed
-from-json: expected ident at line 1 column 2
+from-json: JSON syntax error at line 1, column 2: expected ident at line 1 column 2
 deep stream done
 pipeline value tests done

@@ -114,7 +114,7 @@ fn resource_rows_survey_the_agents_accumulators() {
     while !{
         let ws = session
             .engine()
-            .read(|t| t.workers())
+            .read(ral_core::fact::ProbeSubject::Workers, |t| t.workers())
             .expect("an identity engine never severs");
         ws.iter().any(|w| matches!(w.state, WorkerState::Running))
             && ws.iter().any(|w| matches!(w.state, WorkerState::Stopping))

@@ -126,3 +126,56 @@ mod tests {
         assert!(!GuestPath::from_static("work").is_absolute());
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum RawEnginePath {
+    Host(String),
+    Guest(GuestPath),
+}
+
+impl RawEnginePath {
+    pub(crate) fn validate(self) -> EnginePath {
+        match self {
+            Self::Host(path) => EnginePath::Host(path.into()),
+            Self::Guest(path) => EnginePath::Guest(path),
+        }
+    }
+
+    pub(crate) fn from_path(value: &EnginePath) -> Result<Self, crate::fact::JsonEncodeFailure> {
+        match value {
+            EnginePath::Host(path) => super::utf8(path)
+                .map(|path| Self::Host(path.into()))
+                .map_err(|_| {
+                    crate::fact::JsonEncodeFailure::new(
+                        crate::fact::JsonEncodeCause::NonUnicodePath(
+                            crate::fact::JsonEncodeCauseNonUnicodePath {
+                                shown: super::shown(path),
+                            },
+                        ),
+                    )
+                    .payload("Host")
+                }),
+            EnginePath::Guest(path) => Ok(Self::Guest(path.clone())),
+        }
+    }
+}
+
+impl crate::data::json::JsonDecode for EnginePath {
+    fn decode_json(
+        value: crate::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        let raw: RawEnginePath = crate::data::json::decode_structural(value)?;
+        Ok(raw.validate())
+    }
+}
+impl crate::data::json::JsonEncode for EnginePath {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(crate::data::json::serialize_structural(
+            &RawEnginePath::from_path(self)?,
+            format,
+        ))
+    }
+}

@@ -15,15 +15,20 @@
 
 use crate::data::datum::Datum;
 use crate::data::{Bytes, FOValue};
+use crate::fact::{
+    DecodeFailure, ProtocolFailure, ProtocolFailureUnencodable, ProtocolOperation, Reason,
+    SeedFrameFailure, SeedFrameFailureTrailing,
+};
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::{
     Bequest, Context, Error, FrameKind, HandlerEntry, HandlerFrame, Image, Runtime, Terms,
 };
 use crate::source::SourceDb;
-use crate::ty::Fixings;
+use crate::ty::{Closed, Fixings};
 use serde::{Deserialize, Serialize};
 use table::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
 
+pub(crate) mod json;
 mod table;
 
 /// Wire mirror of a user-installed [`HandlerFrame`].
@@ -31,59 +36,98 @@ mod table;
 /// Hydration does not re-check arity: a per-name entry is unary by
 /// construction ([`HandlerEntry::ral_per_name`]) and the sender vetted the
 /// thunk at install.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WireHandlerFrame {
-    entries: Vec<(String, SerialValue, Option<crate::ty::Closed>)>,
+#[derive(Debug, Clone)]
+pub(crate) struct WireHandlerFrame {
+    entries: Vec<(String, SerialValue, Option<Closed>)>,
     catch_all: Option<SerialValue>,
     kind: FrameKind,
 }
 
+/// Runtime handler prefixes stay guarded through captured-environment resolution.
+#[derive(Default)]
+struct SeedHandlers(Vec<HandlerFrame>);
+
+impl SeedHandlers {
+    fn into_frames(mut self) -> Vec<HandlerFrame> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for SeedHandlers {
+    fn drop(&mut self) {
+        for frame in self.0.drain(..) {
+            for entry in frame.entries {
+                entry.thunk.drop_seed();
+            }
+            if let Some(value) = frame.catch_all {
+                value.drop_seed();
+            }
+        }
+    }
+}
+
 impl WireHandlerFrame {
     fn from_runtime(frame: &HandlerFrame, ctx: &mut InternCtx) -> Result<Self, Error> {
-        let entries = frame
-            .entries
-            .iter()
-            .map(|entry| {
-                Ok((
-                    entry.name.as_ref().to_string(),
-                    SerialValue::from_runtime(&entry.thunk, ctx)?,
-                    entry.scheme.clone(),
-                ))
-            })
-            .collect::<Result<_, Error>>()?;
-        Ok(Self {
-            entries,
-            catch_all: frame
-                .catch_all
-                .as_ref()
-                .map(|value| SerialValue::from_runtime(value, ctx))
-                .transpose()?,
+        let mut wire = Self {
+            entries: Vec::with_capacity(frame.entries.len()),
+            catch_all: None,
             kind: frame.kind,
-        })
+        };
+        for entry in &frame.entries {
+            wire.entries.push((
+                entry.name.as_ref().to_string(),
+                SerialValue::from_runtime(&entry.thunk, ctx)?,
+                entry.scheme.clone(),
+            ));
+        }
+        wire.catch_all = frame
+            .catch_all
+            .as_ref()
+            .map(|value| SerialValue::from_runtime(value, ctx))
+            .transpose()?;
+        Ok(wire)
     }
 
-    fn into_runtime(self, dec: &WireDecoder) -> Result<HandlerFrame, Error> {
-        let entries = self
-            .entries
-            .into_iter()
-            .map(|(name, value, scheme)| {
-                value.into_runtime(dec).map(|v| {
-                    let mut entry = HandlerEntry::ral_per_name(name, v);
-                    entry.scheme = scheme;
-                    entry
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(HandlerFrame {
-            entries,
-            catch_all: self.catch_all.map(|v| v.into_runtime(dec)).transpose()?,
+    fn into_runtime(mut self, dec: &WireDecoder) -> Result<HandlerFrame, Error> {
+        for (_, value, _) in &self.entries {
+            value.validate_runtime(dec)?;
+        }
+        if let Some(value) = &self.catch_all {
+            value.validate_runtime(dec)?;
+        }
+        let mut frames = SeedHandlers(vec![HandlerFrame {
+            entries: Vec::with_capacity(self.entries.len()),
+            catch_all: None,
             kind: self.kind,
-        })
+        }]);
+        let frame = &mut frames.0[0];
+        for (name, value, scheme) in std::mem::take(&mut self.entries) {
+            let mut entry = HandlerEntry::ral_per_name(name, value.into_runtime(dec)?);
+            entry.scheme = scheme;
+            frame.entries.push(entry);
+        }
+        frame.catch_all = self
+            .catch_all
+            .take()
+            .map(|value| value.into_runtime(dec))
+            .transpose()?;
+        Ok(frames.0.pop().expect("one guarded frame"))
+    }
+}
+
+impl Drop for WireHandlerFrame {
+    fn drop(&mut self) {
+        for (_, value, _) in std::mem::take(&mut self.entries) {
+            crate::data::json::drop_value(value);
+        }
+        if let Some(value) = self.catch_all.take() {
+            crate::data::json::drop_value(value);
+        }
     }
 }
 
 /// A bequest in wire form.  A codec and nothing else.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub(crate) struct EngineSeed {
     scope_table: ScopeTable,
     env: SerialEnvSnapshot,
@@ -96,6 +140,15 @@ pub(crate) struct EngineSeed {
     grant: SpawnGrant,
 }
 
+impl Drop for EngineSeed {
+    fn drop(&mut self) {
+        if let SpawnGrant::Restrict(value) = std::mem::replace(&mut self.grant, SpawnGrant::Inherit)
+        {
+            crate::data::json::drop_value(value);
+        }
+    }
+}
+
 /// A bequest in bytes: what the wire seat's enquiry names and a child's
 /// `Attach` carries. The host relays it and never reads it (the opacity
 /// law, `decisions/261013_the-seed-rides-the-protocol-sealed`).
@@ -105,28 +158,55 @@ pub struct Sealed(Bytes);
 /// Encode and frame `bequest` into bytes.
 ///
 /// # Errors
-/// Returns a sentence naming why the bequest could not be sealed.
-pub fn seal(bequest: &Bequest) -> Result<Sealed, String> {
-    let sealed = |e: &dyn std::fmt::Display| format!("seed: could not seal the bequest: {e}");
-    let seed = EngineSeed::encode(bequest).map_err(|e| sealed(&e))?;
-    let frame = crate::io::frame::encode(&seed).map_err(|e| sealed(&e))?;
+/// Preserves an interning failure; framing failures are typed at this boundary.
+///
+/// # Panics
+/// Only if writing the encoded frame to an in-memory vector fails.
+pub fn seal(bequest: &Bequest) -> Result<Sealed, Error> {
+    let seed = EngineSeed::encode(bequest)?;
+    let frame = crate::io::frame::encode(&seed).map_err(|cause| {
+        Error::new(Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
+            ProtocolFailureUnencodable {
+                operation: ProtocolOperation::SealSeed,
+                cause,
+            },
+        ))))
+    })?;
     let mut bytes = Vec::new();
-    crate::io::frame::put(&mut bytes, &frame).map_err(|e| sealed(&e))?;
+    crate::io::frame::put(&mut bytes, &frame)
+        .expect("writing a seed frame to an in-memory vector cannot fail");
     Ok(Sealed(bytes.into()))
 }
 
 impl Sealed {
-    /// The frame back out. Refuses, naming the fault, on bytes that are not
-    /// one `EngineSeed` frame.
+    /// Exactly one seed frame, with framing evidence kept separate from hydration.
     pub(crate) fn unseal(&self) -> Result<EngineSeed, Error> {
         let mut rest: &[u8] = &self.0;
-        match crate::io::frame::read_frame(&mut rest) {
-            Err(e) => Err(Error::new(format!(
-                "seed: the sealed bequest is not a seed frame: {e}"
-            ))),
-            Ok(Some(seed)) if rest.is_empty() => Ok(seed),
-            Ok(_) => Err(Error::new("seed: the sealed bequest is not one frame")),
-        }
+        let failure = match crate::io::frame::read_frame(&mut rest) {
+            Err(error) => {
+                let failure = Error::new(Reason::Protocol(Box::new(ProtocolFailure::SeedFrame(
+                    SeedFrameFailure::Frame(error.cause),
+                ))));
+                return Err(match error.dump {
+                    None => failure,
+                    Some(crate::io::frame::FrameDump::Written(path)) => failure.with_hint(format!(
+                        "raw frame written to {}",
+                        crate::path::shown(&path)
+                    )),
+                    Some(crate::io::frame::FrameDump::Failed(error)) => {
+                        failure.with_hint(format!("raw frame not kept: {error}"))
+                    }
+                });
+            }
+            Ok(Some(seed)) if rest.is_empty() => return Ok(seed),
+            Ok(Some(_)) => SeedFrameFailure::Trailing(SeedFrameFailureTrailing {
+                bytes: rest.len().into(),
+            }),
+            Ok(None) => SeedFrameFailure::Empty,
+        };
+        Err(Error::new(Reason::Protocol(Box::new(
+            ProtocolFailure::SeedFrame(failure),
+        ))))
     }
 }
 
@@ -135,7 +215,7 @@ impl Datum for Sealed {
         self.0.encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         Bytes::decode(v).map(Self)
     }
 }
@@ -159,12 +239,14 @@ impl EngineSeed {
         } = &bequest.image;
         let mut ctx = InternCtx::new();
         let env = SerialEnvSnapshot::from_runtime(env, &mut ctx);
-        let context = context.clone().try_map_handlers(|frames| {
-            frames
-                .iter()
-                .map(|frame| WireHandlerFrame::from_runtime(frame, &mut ctx))
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+        let context = context
+            .with_handlers(&context.handlers)
+            .try_map_handlers(|frames| {
+                frames
+                    .iter()
+                    .map(|frame| WireHandlerFrame::from_runtime(frame, &mut ctx))
+                    .collect::<Result<Vec<_>, _>>()
+            })?;
         Ok(Self {
             scope_table: ctx.finish()?,
             env,
@@ -180,32 +262,35 @@ impl EngineSeed {
     ///
     /// # Errors
     /// The decode failure, under the part of the seed it was in.
-    pub(crate) fn decode(self, runtime: &Runtime) -> Result<Bequest, Error> {
+    pub(crate) fn decode(mut self, runtime: &Runtime) -> Result<Bequest, Error> {
         let dec =
             WireDecoder::for_runtime(runtime, &self.scope_table).map_err(failed("scope table"))?;
         let mut context = self
             .context
+            .with_handlers(&self.context.handlers)
             .try_map_handlers(|frames| {
-                frames
-                    .into_iter()
-                    .map(|frame| frame.into_runtime(&dec))
-                    .collect::<Result<Vec<_>, _>>()
+                let mut handlers = SeedHandlers::default();
+                for frame in frames.iter().cloned() {
+                    handlers.0.push(frame.into_runtime(&dec)?);
+                }
+                Ok(handlers)
             })
             .map_err(failed("context"))?;
         context.grants.rehold();
         let env = self
             .env
+            .clone()
             .into_runtime(&dec)
             .map_err(failed("captured environment"))?;
         Ok(Bequest {
             image: Image {
                 env,
-                context,
-                sources: self.sources,
-                terms: self.terms,
-                fixings: self.fixings,
+                context: context.map_handlers(SeedHandlers::into_frames),
+                sources: std::mem::take(&mut self.sources),
+                terms: self.terms.clone(),
+                fixings: self.fixings.snapshot(),
             },
-            grant: self.grant,
+            grant: std::mem::replace(&mut self.grant, SpawnGrant::Inherit),
         })
     }
 }
@@ -639,7 +724,13 @@ mod tests {
         let marked = seed
             .scope_table
             .iter()
-            .filter(|row| serde_json::to_string(row).expect("encode").contains(MARKER))
+            .filter(|row| {
+                let table: ScopeTable = vec![(*row).clone()];
+                crate::data::json::to_vec(&table)
+                    .expect("encode")
+                    .windows(MARKER.len())
+                    .any(|window| window == MARKER.as_bytes())
+            })
             .count();
         assert_eq!(marked, 2, "`big` is written once per row that holds it");
         assert_eq!(
@@ -662,6 +753,10 @@ mod tests {
         let err = Sealed(Bytes::from(&b"not a frame"[..]))
             .unseal()
             .expect_err("garbage");
-        assert!(err.describe().contains("sealed bequest"), "{err}");
+        assert!(matches!(
+            &err.reason,
+            Reason::Protocol(failure)
+                if matches!(failure.as_ref(), ProtocolFailure::SeedFrame(_))
+        ));
     }
 }

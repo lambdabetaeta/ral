@@ -19,31 +19,73 @@ pub use record::outcome_value;
 const ABANDONED_TAIL_HINT: &str = "later steps in this block did not run; wrap a step in \
                                    `attempt` if its failure should not stop the rest";
 
-/// The one hint the record determines: signal advice for `signaled`, the
-/// session's exit-hints entry for `exited`.  Recomputed at each render.
-fn advice<'a>(reason: &'a Reason, exit_hints: &ExitHints) -> Option<Cow<'a, str>> {
-    let Reason::Process(process) = reason else {
-        return None;
-    };
-    match process.failure {
-        #[cfg(unix)]
-        Failure::Signaled(libc::SIGKILL) => Some(
-            "the process was killed with SIGKILL; the kernel or another process may have terminated it".into(),
-        ),
-        #[cfg(unix)]
-        Failure::Signaled(libc::SIGSEGV) => {
-            Some("the process crashed with a segmentation fault".into())
-        }
-        Failure::Signaled(n) => Some(
-            format!(
-                "the process terminated from {}",
-                crate::process::Signal::new(n)
-            )
-            .into(),
-        ),
-        Failure::Exited(n) => exit_hints.lookup(&process.program, n).map(Cow::Owned),
-        Failure::NotFound | Failure::NotRunnable(_) => None,
+/// Intrinsic advice precedes the session's optional exit-table entry.
+fn advice(reason: &Reason, exit_hints: &ExitHints) -> Vec<String> {
+    let mut hints = reason.advice();
+    if let Reason::Process(process) = reason
+        && let Failure::Exited(code) = process.failure
+        && let Some(hint) = exit_hints.lookup(&process.program, code)
+    {
+        hints.push(hint);
     }
+    hints
+}
+
+fn context_advice(reason: &Reason, context: Option<&str>) -> Vec<String> {
+    use crate::fact::{
+        ContextFailure, ExarchFailure, HostFailure, IoKind, IoLeaf, IoOperation, IoSubject,
+    };
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    let advice = match reason {
+        Reason::Host(host) => match (host.as_ref(), context) {
+            (
+                HostFailure::Exarch(ExarchFailure::Context(ContextFailure::EmptySelection)),
+                "exarch-transcript `read",
+            ) => "`!{range a b}` builds a run of ids",
+            (
+                HostFailure::Exarch(ExarchFailure::Context(ContextFailure::EmptySelection)),
+                "exarch-transcript `grep",
+            ) => "omit turns to search the whole transcript",
+            (
+                HostFailure::Exarch(ExarchFailure::Context(ContextFailure::CurrentlyWritten(_))),
+                "exarch-transcript `read" | "exarch-transcript `grep",
+            ) => "it is the one turn the transcript cannot read back yet",
+            (
+                HostFailure::Exarch(ExarchFailure::Context(ContextFailure::CurrentlyWritten(_))),
+                "exarch-context `evict",
+            ) => "an eviction keeps the work in hand",
+            _ => return Vec::new(),
+        }
+        .to_owned(),
+        Reason::Io(io) => {
+            let IoSubject::Path(path) = &io.subject else {
+                return Vec::new();
+            };
+            if !io.cause.context.is_empty()
+                || !matches!(io.cause.leaf.as_ref(), IoLeaf::Os(os) if os.kind == IoKind::NotFound)
+            {
+                return Vec::new();
+            }
+            match (io.operation, context) {
+                (IoOperation::Open, "view-text" | "view-hash" | "edit-hash" | "edit-replace") => {
+                    format!(
+                        "{path} does not exist; {context} never creates a file; `to-string BODY > path` writes a new one"
+                    )
+                }
+                (
+                    IoOperation::Walk,
+                    "grep-files" | "grep-hidden" | "explore-dir" | "find-files",
+                ) => format!(
+                    "{path} does not exist; the path is a file or directory, relative to the cwd or absolute"
+                ),
+                _ => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+    vec![advice]
 }
 
 impl Error {
@@ -69,8 +111,8 @@ impl Error {
 
     pub fn compact(&self, exit_hints: &ExitHints) -> String {
         let diagnosis = self.diagnosis(exit_hints);
-        let (message, hint) = diagnosis.compose();
-        diagnosis.compact(&message, hint.as_deref())
+        let (message, notes) = diagnosis.compose(None);
+        diagnosis.compact(&message, &notes)
     }
 
     /// The report's words, uncoloured and unlaid: the message line under its
@@ -78,8 +120,8 @@ impl Error {
     /// word, where no session renders.
     #[must_use]
     pub fn plain(&self) -> String {
-        let (mut out, hint) = self.diagnosis(&ExitHints::default()).compose();
-        if let Some(hint) = hint {
+        let (mut out, notes) = self.diagnosis(&ExitHints::default()).compose(None);
+        for hint in notes {
             out.push('\n');
             let _ = write!(out, "hint: {hint}");
         }
@@ -101,12 +143,20 @@ impl Error {
     }
 
     fn diagnosis(&self, exit_hints: &ExitHints) -> Diagnosis<'_> {
-        let hints = self
-            .hints()
-            .iter()
-            .map(|hint| Cow::Borrowed(&**hint))
-            .chain(advice(&self.reason, exit_hints))
-            .collect();
+        let contextual = self.hints().iter().map(|hint| Cow::Borrowed(&**hint));
+        let intrinsic = advice(&self.reason, exit_hints).into_iter().map(Cow::Owned);
+        let hints = if matches!(self.reason, Reason::Denied(_)) {
+            intrinsic.chain(contextual).collect()
+        } else {
+            contextual
+                .chain(
+                    context_advice(&self.reason, self.context())
+                        .into_iter()
+                        .map(Cow::Owned),
+                )
+                .chain(intrinsic)
+                .collect()
+        };
         Diagnosis {
             message: self.describe(),
             at: self.prov.as_ref(),
@@ -186,23 +236,27 @@ impl<V> Ending<V, Error, Stop> {
 }
 
 fn render(d: &Diagnosis<'_>, db: &SourceDb, compact_root: Option<FileId>) -> String {
-    let (message, hint) = d.compose();
+    let (message, notes) = d.compose(Some(db));
     let stays_in = |root| match d.at {
         Some(Prov::Live { span, .. }) => span.file == root,
         Some(Prov::Resolved(_)) | None => true,
     };
     if d.rejection.is_some() || compact_root.is_some_and(stays_in) {
-        d.compact(&message, hint.as_deref())
+        d.compact(&message, &notes)
     } else {
-        d.draw(db, &message, hint.as_deref())
+        d.draw(db, &message, &notes)
     }
 }
 
 impl Diagnosis<'_> {
     /// The words of a diagnosis before layout: the message under its context
     /// and resolved site, and the notes under it.
-    fn compose(&self) -> (String, Option<String>) {
-        let message = under_context(self.context, &self.message);
+    fn compose(&self, db: Option<&SourceDb>) -> (String, Vec<String>) {
+        let intrinsic = match self.witness.and_then(|witness| db?.site(witness)) {
+            Some(site) => Cow::Owned(format!("{}, line {}", self.message, site.line)),
+            None => self.message.clone(),
+        };
+        let message = under_context(self.context, &intrinsic);
         let message = match self.at {
             Some(Prov::Resolved(pair)) => format!(
                 "{}:{}:{}: {message}",
@@ -224,10 +278,10 @@ impl Diagnosis<'_> {
         if self.unwound.abandoned_tail && !self.spawn && self.hints.is_empty() {
             notes.push(ABANDONED_TAIL_HINT.into());
         }
-        (message, (!notes.is_empty()).then(|| notes.join("\n\n")))
+        (message, notes)
     }
 
-    fn draw(&self, db: &SourceDb, message: &str, hint: Option<&str>) -> String {
+    fn draw(&self, db: &SourceDb, message: &str, notes: &[String]) -> String {
         let label = |span, text: &str| Label {
             span: Some(span),
             text: text.into(),
@@ -241,7 +295,7 @@ impl Diagnosis<'_> {
             message: message.to_owned(),
             at,
             also,
-            hint: hint.map(Into::into),
+            hint: (!notes.is_empty()).then(|| notes.join("\n\n")),
         };
         if let Some((sp, src)) = resolved {
             report(
@@ -257,14 +311,14 @@ impl Diagnosis<'_> {
     }
 
     /// One line and its hint; a rejection is already a report of its own.
-    fn compact(&self, message: &str, hint: Option<&str>) -> String {
+    fn compact(&self, message: &str, notes: &[String]) -> String {
         let (red, cyan, reset) = palette();
         if let Some(rejection) = self.rejection {
             let mut out = match self.context {
                 Some(context) => format!("{context}: {}", rejection.render()),
                 None => rejection.render(),
             };
-            if let Some(hint) = hint {
+            for hint in notes {
                 let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
             }
             return out;
@@ -274,7 +328,7 @@ impl Diagnosis<'_> {
             let _ = write!(out, " (exit status {code})");
         }
         out.push('\n');
-        if let Some(hint) = hint {
+        for hint in notes {
             let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
         }
         out
@@ -356,7 +410,7 @@ mod tests {
             incomplete: false,
         };
         let compile = CompileError::Parse(parse);
-        let err = Error::new(compile.to_string())
+        let err = Error::new(Reason::Compile(Box::new(compile.failure("plugin.ral"))))
             .with_rejection(compile.reject(Source::from_text(file_origin("plugin.ral"), "let [x")))
             .discarded(412)
             .abandoning_tail()
@@ -364,7 +418,7 @@ mod tests {
         let (db, root) = db_with("main.ral", "load-plugin plugin");
         let out = err.render(&db, Some(root), &ExitHints::default());
         assert!(out.contains("P0001") && out.contains("plugin.ral"), "{out}");
-        assert_eq!(err.describe(), "parse error: expected ]");
+        assert_eq!(err.describe(), "loaded source \"plugin.ral\" did not parse");
         assert_eq!(err.failure_code(), NonZeroU8::MIN);
         assert_eq!(err.rejection().unwrap().status.get(), 2);
         let discard = out.find("412 bytes written").expect("discard note");
@@ -391,7 +445,7 @@ mod tests {
         witness: Option<Span>,
         hint: Option<&str>,
     ) -> String {
-        let mut err = Error::new("boom").with_witness(witness);
+        let mut err = Error::new(Reason::raised("boom")).with_witness(witness);
         err.prov = span
             .filter(|sp| db.get(sp.file).is_some())
             .map(|span| Prov::Live {
@@ -479,11 +533,11 @@ mod tests {
     #[test]
     fn unwind_facts_render_once_in_fixed_order_without_changing_the_record() {
         let shell = crate::test_helper::core_shell();
-        let error = Error::new("boom")
+        let error = Error::new(Reason::raised("boom"))
             .discarded(200)
             .discarded(212)
             .abandoning_tail();
-        let record = error.record(&shell);
+        let record = error.fact(&shell);
         let rendered = error.render(shell.sources(), None, shell.exit_hints());
         let discard = rendered
             .find("412 bytes written")
@@ -502,7 +556,7 @@ mod tests {
             rendered.find("specific advice").unwrap() < rendered.find("412 bytes written").unwrap()
         );
         assert!(!rendered.contains("later steps"), "{rendered}");
-        assert_eq!(decorated.record(&shell), record);
+        assert_eq!(decorated.fact(&shell), record);
         assert_eq!(decorated.discarded(u32::MAX).unwound().discarded, u32::MAX);
     }
 
@@ -511,9 +565,55 @@ mod tests {
     fn a_signal_carries_its_advice() {
         let reason = Reason::process("sh", Failure::Signaled(libc::SIGSEGV));
         assert_eq!(
-            advice(&reason, &ExitHints::default()).as_deref(),
-            Some("the process crashed with a segmentation fault")
+            advice(&reason, &ExitHints::default()),
+            ["the process crashed with a segmentation fault"]
         );
+    }
+
+    #[test]
+    fn ordered_notes_stay_separate_until_layout() {
+        let diagnosis = Diagnosis {
+            message: "failure".into(),
+            at: None,
+            witness: None,
+            rejection: None,
+            hints: vec![
+                "site one".into(),
+                "site two".into(),
+                "intrinsic one".into(),
+                "intrinsic two".into(),
+            ],
+            shown: None,
+            context: None,
+            unwound: Unwound {
+                abandoned_tail: false,
+                discarded: 3,
+            },
+            spawn: false,
+        };
+        let (_, notes) = diagnosis.compose(None);
+        assert_eq!(
+            &notes[..4],
+            ["site one", "site two", "intrinsic one", "intrinsic two"]
+        );
+        assert!(notes[4].starts_with("3 bytes written"));
+        let rendered = crate::io::ansi::strip(&diagnosis.compact("failure", &notes));
+        assert_eq!(rendered.matches("hint:").count(), 5);
+    }
+
+    #[test]
+    fn portable_advice_is_rendered_not_stored() {
+        let error = Error::new(Reason::Evaluation(Box::new(
+            crate::fact::EvalFailure::MissingBinding("STATUS".into()),
+        )))
+        .with_hint("contextual advice");
+        assert_eq!(error.hints().len(), 1);
+        let output = error.plain();
+        assert!(
+            output.find("contextual advice").unwrap()
+                < output.find("there is no status register").unwrap()
+        );
+        assert_eq!(error.hints().len(), 1);
     }
 
     #[test]
@@ -529,5 +629,360 @@ mod tests {
         };
         assert!(at("the site's hint") < at("a second site"), "{out}");
         assert!(at("a second site") < at("the table's entry"), "{out}");
+    }
+    #[test]
+    fn witness_line_is_resolved_only_for_source_aware_reports_before_context() {
+        use crate::data::datum::Datum as _;
+        use crate::fact::{
+            AdmissionCause, AdmissionFailure, AdmissionUses, Expected, Found, InvalidCause,
+            InvalidFailure, ValueShape,
+        };
+        let (db, file) = db_with("admission.ral", "bind\nuse\n");
+        let reason = Reason::Invalid(Box::new(InvalidFailure::new(
+            "ask".into(),
+            InvalidCause::Admission(AdmissionFailure {
+                pointer: String::new(),
+                cause: AdmissionCause::Uses(AdmissionUses {
+                    found: Found::Map,
+                    expected: Expected::Shape(ValueShape::Variant),
+                }),
+            }),
+        )));
+        let intrinsic = reason.describe().into_owned();
+        let mut error = Error::new(reason.clone())
+            .with_witness(Some(Span::new(file, 5, 8)))
+            .with_context("context");
+        error.prov = Some(Prov::Live {
+            name: "ask".into(),
+            span: Span::new(file, 0, 4),
+        });
+        for compact in [None, Some(file)] {
+            let rendered =
+                crate::io::ansi::strip(&error.render(&db, compact, &ExitHints::default()));
+            assert!(
+                rendered.contains(&format!("context: {intrinsic}, line 2")),
+                "{rendered}"
+            );
+            assert_eq!(rendered.matches(", line 2").count(), 1, "{rendered}");
+            assert!(!rendered.contains(", line 1"), "{rendered}");
+            assert_eq!(
+                rendered.contains("the use this script makes of it"),
+                compact.is_none(),
+                "{rendered}"
+            );
+            let end = End::Err(error.clone());
+            assert_eq!(
+                end.render(&db, compact, &ExitHints::default()),
+                error.render(&db, compact, &ExitHints::default())
+            );
+        }
+        assert_eq!(reason.describe(), intrinsic);
+        assert_eq!(error.describe(), intrinsic);
+        assert!(!error.plain().contains(", line "));
+        assert!(!error.compact(&ExitHints::default()).contains(", line "));
+        assert!(
+            !error
+                .render_spanless(&ExitHints::default())
+                .contains(", line ")
+        );
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(decoded, reason);
+        assert_eq!(decoded.describe(), intrinsic);
+        error.prov = Some(Prov::Resolved(Box::new((
+            "ask".into(),
+            db.site(Span::new(file, 0, 4)).unwrap(),
+        ))));
+        let resolved =
+            crate::io::ansi::strip(&error.render(&db, Some(file), &ExitHints::default()));
+        assert!(
+            resolved.contains(&format!("admission.ral:1:1: context: {intrinsic}, line 2")),
+            "{resolved}"
+        );
+        let record = error.fact(&crate::test_helper::core_shell());
+        let decoded = crate::fact::ErrorFact::decode(&record.clone().encode()).unwrap();
+        assert_eq!(decoded, record);
+        assert_eq!(record.describe(), intrinsic);
+    }
+
+    #[test]
+    fn witness_line_never_falls_back_to_the_primary_site_or_another_database() {
+        let (mut db, file) = db_with("primary.ral", "first\nsecond\n");
+        let witness_file = db.register(Source::from_text(
+            file_origin("witness.ral"),
+            "first\nsecond\nthird\n",
+        ));
+        let mut error =
+            Error::new(Reason::raised("boom")).with_witness(Some(Span::new(witness_file, 13, 18)));
+        error.prov = Some(Prov::Live {
+            name: "fail".into(),
+            span: Span::new(file, 6, 12),
+        });
+        let rendered = crate::io::ansi::strip(&error.render(&db, None, &ExitHints::default()));
+        assert!(rendered.contains("boom, line 3"), "{rendered}");
+        assert!(
+            !rendered.contains("the use this script makes of it"),
+            "{rendered}"
+        );
+        assert!(
+            !error
+                .render(&SourceDb::default(), None, &ExitHints::default())
+                .contains(", line ")
+        );
+        let absent = error.with_witness(Some(Span::new(FileId::DUMMY, 0, 1)));
+        for compact in [None, Some(file)] {
+            assert!(
+                !absent
+                    .render(&db, compact, &ExitHints::default())
+                    .contains(", line ")
+            );
+        }
+        assert!(
+            !absent
+                .render(&SourceDb::default(), None, &ExitHints::default())
+                .contains(", line ")
+        );
+    }
+
+    #[test]
+    fn general_advice_follows_context_but_denial_advice_still_precedes_it() {
+        use crate::fact::{Denial, EvalFailure, SingleOrNested, Withholding};
+        let error = Error::new(Reason::Evaluation(Box::new(EvalFailure::MissingBinding(
+            "x-y".into(),
+        ))))
+        .with_hint("a hyphen boundary specific to this scope");
+        assert_eq!(error.hints().len(), 1);
+        let rendered = error.plain();
+        assert!(
+            rendered.find("a hyphen boundary").unwrap() < rendered.find("check spelling").unwrap()
+        );
+        let reason = Reason::Denied(Box::new(Denial::exec_run(
+            "git".into(),
+            Withholding::MissingAllowance(SingleOrNested::Nested),
+        )));
+        let intrinsic = reason.advice()[0].clone();
+        let error = Error::new(reason).with_hint("this invocation's search context");
+        let rendered = error.plain();
+        assert!(
+            rendered.find(&intrinsic).unwrap()
+                < rendered.find("this invocation's search context").unwrap()
+        );
+        assert_eq!(error.hints().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod report_context_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::fact::{
+        AgentFailure, AgentFailureReplyFailed, ContextFailure, ContextFailureCurrentlyWritten,
+        Denial, ExarchFailure, HelperFailure, HostFailure, IoCause, IoContext, IoFailure, IoKind,
+        IoLeaf, IoOperation, IoSubject, OsFailure, PathIoContext, SingleOrNested, Withholding,
+    };
+
+    fn context_reason(cause: ContextFailure) -> Reason {
+        Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Context(cause))))
+    }
+    fn check(reason: &Reason, context: Option<&str>, expected: &[&str]) {
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(&decoded, reason);
+        for reason in [reason, &decoded] {
+            let description = reason.describe().into_owned();
+            let mut error = Error::new(reason.clone());
+            if let Some(context) = context {
+                error = error.with_context(context);
+            }
+            assert_eq!(error.describe(), description);
+            assert_eq!(error.hints(), []);
+            assert_eq!(context_advice(&error.reason, error.context()), expected);
+            let error = error.with_hint("stored-first");
+            let rendered = error.plain();
+            let hints: Vec<_> = rendered
+                .lines()
+                .filter_map(|line| line.strip_prefix("hint: "))
+                .collect();
+            let intrinsic = reason.advice();
+            let mut wanted = vec!["stored-first"];
+            wanted.extend_from_slice(expected);
+            wanted.extend(intrinsic.iter().map(String::as_str));
+            assert_eq!(hints, wanted);
+            assert_eq!(
+                error
+                    .hints()
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<&str>>(),
+                ["stored-first"]
+            );
+            let _ = error.render(&SourceDb::default(), None, &ExitHints::default());
+        }
+    }
+
+    #[test]
+    fn direct_context_guidance_requires_exact_operation_and_cause() {
+        let current = ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten {
+            turn: u64::MAX.into(),
+        });
+        for (cause, operation, hint) in [
+            (
+                ContextFailure::EmptySelection,
+                "exarch-transcript `read",
+                "`!{range a b}` builds a run of ids",
+            ),
+            (
+                ContextFailure::EmptySelection,
+                "exarch-transcript `grep",
+                "omit turns to search the whole transcript",
+            ),
+            (
+                current.clone(),
+                "exarch-transcript `read",
+                "it is the one turn the transcript cannot read back yet",
+            ),
+            (
+                current.clone(),
+                "exarch-transcript `grep",
+                "it is the one turn the transcript cannot read back yet",
+            ),
+            (
+                current,
+                "exarch-context `evict",
+                "an eviction keeps the work in hand",
+            ),
+        ] {
+            let reason = context_reason(cause.clone());
+            check(&reason, Some(operation), &[hint]);
+            for context in [
+                None,
+                Some("unrelated"),
+                Some(&format!("{operation}: extra")),
+                Some(&format!("{operation}`")),
+                Some(&format!("prefix: {operation}")),
+            ] {
+                check(&reason, context, &[]);
+            }
+            let nested = Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+                    name: "a".into(),
+                    cause: HelperFailure::Context(cause),
+                }),
+            ))));
+            check(&nested, Some(operation), &[]);
+            check(
+                &context_reason(ContextFailure::SteeringWithoutTurn),
+                Some(operation),
+                &[],
+            );
+        }
+        check(
+            &context_reason(ContextFailure::EmptySelection),
+            Some("exarch-context `evict"),
+            &[],
+        );
+    }
+
+    #[test]
+    fn contextual_missing_paths_never_replace_generic_io_or_infer_from_near_matches() {
+        for (operation, tools) in [
+            (
+                IoOperation::Open,
+                ["view-text", "view-hash", "edit-hash", "edit-replace"],
+            ),
+            (
+                IoOperation::Walk,
+                ["grep-files", "grep-hidden", "explore-dir", "find-files"],
+            ),
+        ] {
+            let io = IoFailure {
+                operation,
+                subject: IoSubject::Path("nope".into()),
+                cause: IoCause::new(IoLeaf::Os(OsFailure {
+                    kind: IoKind::NotFound,
+                    raw: None,
+                    detail: None,
+                })),
+            };
+            let reason = Reason::Io(Box::new(io.clone()));
+            assert_eq!(
+                reason.describe(),
+                format!(
+                    "could not {} \"nope\": no such file or directory",
+                    operation.describe()
+                )
+            );
+            for tool in tools {
+                let hint = if operation == IoOperation::Open {
+                    format!(
+                        "nope does not exist; {tool} never creates a file; `to-string BODY > path` writes a new one"
+                    )
+                } else {
+                    "nope does not exist; the path is a file or directory, relative to the cwd or absolute".into()
+                };
+                check(&reason, Some(tool), &[&hint]);
+                for context in [
+                    None,
+                    Some("other"),
+                    Some(&format!("{tool}: extra")),
+                    Some(&format!("prefix: {tool}")),
+                ] {
+                    check(&reason, context, &[]);
+                }
+                for changed in [
+                    IoFailure {
+                        operation: IoOperation::Read,
+                        ..io.clone()
+                    },
+                    IoFailure {
+                        subject: IoSubject::HostFile("nope".into()),
+                        ..io.clone()
+                    },
+                    IoFailure {
+                        cause: IoCause::new(IoLeaf::Os(OsFailure {
+                            kind: IoKind::PermissionDenied,
+                            raw: None,
+                            detail: None,
+                        })),
+                        ..io.clone()
+                    },
+                    IoFailure {
+                        cause: IoCause {
+                            context: vec![IoContext::Path(PathIoContext::UnsafeScopedInheritance)],
+                            leaf: io.cause.leaf.clone(),
+                        },
+                        ..io.clone()
+                    },
+                ] {
+                    check(&Reason::Io(Box::new(changed)), Some(tool), &[]);
+                }
+            }
+            for wrong in if operation == IoOperation::Open {
+                ["grep-files", "find-files"]
+            } else {
+                ["view-text", "edit-hash"]
+            } {
+                check(&reason, Some(wrong), &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn denial_keeps_intrinsic_before_stored_and_never_gets_missing_file_guidance() {
+        let reason = Reason::Denied(Box::new(Denial::exec_run(
+            "nope".into(),
+            Withholding::MissingAllowance(SingleOrNested::Nested),
+        )));
+        let intrinsic = reason.advice();
+        let error = Error::new(reason)
+            .with_context("view-text")
+            .with_hint("stored-last");
+        assert_eq!(
+            context_advice(&error.reason, error.context()),
+            Vec::<String>::new()
+        );
+        let plain = error.plain();
+        for hint in intrinsic {
+            assert!(plain.find(&hint).unwrap() < plain.find("stored-last").unwrap());
+        }
+        assert!(!plain.contains("never creates a file"));
     }
 }

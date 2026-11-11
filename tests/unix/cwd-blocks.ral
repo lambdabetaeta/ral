@@ -36,7 +36,7 @@ cwd-is "$root/outer"
 # Entering `within [dir:]` needs no chdir authority; a `cd` inside it does
 echo $[!{grant [shell: []] { within [dir: "$root/inner"] { cwd } }} == !{resolve-path "$root/inner"}]
 try { grant [shell: []] { within [dir: "$root/inner"] { cd sub } } } { |e|
-    echo !{describe $e}
+    echo $e[message]
 }
 
 # ...and the scoped directory may be one an fs grant confines to
@@ -60,7 +60,7 @@ $chdir-fn "$root/outer"
 cwd-is "$root/outer"
 
 # The empty path names no directory, and nothing moves
-try { let empty = ''; cd $empty } { |e| echo !{describe $e} }
+try { let empty = ''; cd $empty } { |e| echo $e[message] }
 cwd-is "$root/outer"
 
 cd /

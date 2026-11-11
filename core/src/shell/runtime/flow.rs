@@ -291,7 +291,7 @@ impl End {
     pub(crate) fn done(&self, shell: &Shell) -> Done {
         match self {
             Self::Ok(_) => Done::Ok(()),
-            Self::Err(error) => Done::Err(error.record(shell)),
+            Self::Err(error) => Done::Err(error.fact(shell).record()),
             Self::Exited(code) => Done::Exited(*code),
             Self::Stopped(stop) => Done::Stopped(stop.cause),
             Self::Panic(text) => Done::Panic(text.clone()),
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn map_error_rewrites_an_error_and_spares_an_escape() {
         let tagged = |b: Break| b.map_error(|e| e.with_context("ctx"));
-        let Break::Error(e) = tagged(Error::new("x").into()) else {
+        let Break::Error(e) = tagged(Error::new(Reason::raised("x")).into()) else {
             panic!("an error stays an error");
         };
         assert_eq!(e.context(), Some("ctx"));
@@ -354,7 +354,7 @@ mod tests {
     fn every_end_has_its_code() {
         let error = |reason: Reason| End::Err(Error::new(reason));
         assert_eq!(End::Ok(Value::Unit).code(), 0);
-        assert_eq!(error(Reason::Raised("x".into())).code(), 1);
+        assert_eq!(error(Reason::raised("x")).code(), 1);
         assert_eq!(
             error(Reason::process("tool", crate::fact::Failure::Exited(3))).code(),
             3
@@ -428,12 +428,12 @@ mod tests {
         ));
         let calm = DurableRoot::default().child();
         assert!(matches!(
-            final_poll(Err(Error::new("x").into()), &calm),
+            final_poll(Err(Error::new(Reason::raised("x")).into()), &calm),
             Err(Break::Error(e)) if e.failure_code() == nz(1)
         ));
         let cut = node_under(C::ReaderGone);
         assert!(matches!(
-            final_poll(Err(Error::new("x").into()), &cut),
+            final_poll(Err(Error::new(Reason::raised("x")).into()), &cut),
             Err(Break::Error(e)) if e.failure_code() == nz(1)
         ));
     }
@@ -458,7 +458,7 @@ mod tests {
         ));
         let calm = DurableRoot::default().child();
         assert!(matches!(
-            shell.base(&calm, |_| Err(Error::new("x").into())),
+            shell.base(&calm, |_| Err(Error::new(Reason::raised("x")).into())),
             End::Err(Error { prov: Some(_), .. })
         ));
         assert!(matches!(
@@ -483,7 +483,7 @@ mod tests {
             span: Span::new(file, 2, 3),
         };
 
-        let mut raised = Error::new("x");
+        let mut raised = Error::new(Reason::raised("x"));
         raised.prov = Some(live(inherited));
         let kept = End::Err(raised).leaving(&child);
         assert!(matches!(

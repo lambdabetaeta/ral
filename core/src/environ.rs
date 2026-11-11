@@ -442,3 +442,79 @@ mod tests {
         assert_eq!(empty.iter().count(), 0);
     }
 }
+
+impl From<Reserved> for crate::fact::ReservedVar {
+    fn from(value: Reserved) -> Self {
+        match value {
+            Reserved::Pwd => Self::Pwd,
+            Reserved::Oldpwd => Self::Oldpwd,
+        }
+    }
+}
+
+impl EnvVars {
+    pub(crate) fn from_json_map(
+        map: imbl::HashMap<String, String>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        if let Some((name, reserved)) = map
+            .keys()
+            .find_map(|key| Reserved::of(key).map(|reserved| (key.clone(), reserved)))
+        {
+            return Err(crate::fact::DecodeFailure::new(
+                crate::fact::DecodeCause::ReservedEnvironment(
+                    crate::fact::ReservedEnvironmentFailure {
+                        name,
+                        reserved: reserved.into(),
+                    },
+                ),
+            ));
+        }
+        Ok(Self(map))
+    }
+}
+
+impl crate::data::json::JsonDecode for EnvVars {
+    fn decode_json(
+        value: crate::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        Self::from_json_map(crate::data::json::decode_structural(value)?)
+    }
+}
+
+impl crate::data::json::JsonEncode for EnvVars {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(crate::data::json::serialize_structural(&self.0, format))
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+    use crate::data::json::{from_slice, to_vec};
+    use crate::fact::{DecodeCause, JsonInputFailure};
+
+    #[test]
+    fn typed_env_json_validates_after_map_replacement() {
+        let env = from_slice::<EnvVars>(br#"{"A":"first","A":"last","EMPTY":""}"#).unwrap();
+        assert_eq!(env.get("A").map(String::as_str), Some("last"));
+        assert_eq!(from_slice::<EnvVars>(&to_vec(&env).unwrap()).unwrap(), env);
+        for key in ["PWD", "OLDPWD"] {
+            let bytes = format!(r#"{{"{key}":"x"}}"#);
+            let JsonInputFailure::Decode(error) =
+                from_slice::<EnvVars>(bytes.as_bytes()).unwrap_err()
+            else {
+                panic!("syntax")
+            };
+            assert!(
+                matches!(*error.cause, DecodeCause::ReservedEnvironment(cause) if cause.name == key)
+            );
+        }
+        assert_eq!(
+            from_slice::<EnvVars>(br#"{"pwd":"x"}"#).is_err(),
+            cfg!(windows)
+        );
+    }
+}

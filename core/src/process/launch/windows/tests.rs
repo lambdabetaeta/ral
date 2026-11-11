@@ -60,3 +60,29 @@ fn only_create_process_s_failure_is_the_program_s() {
         Err(Unstarted::Program(_))
     ));
 }
+
+#[test]
+fn environment_nul_facts_name_the_key_not_the_secret_value() {
+    for (key, value, subject) in [
+        (
+            "BAD\0KEY",
+            "value",
+            PrepareSubject::EnvironmentKey("BAD\0KEY".into()),
+        ),
+        (
+            "RAL_NUL_TEST",
+            "secret\0value",
+            PrepareSubject::EnvironmentValue("RAL_NUL_TEST".into()),
+        ),
+    ] {
+        let edits = [(
+            super::super::env_key(OsStr::new(key)),
+            EnvEdit::Set(value.into()),
+        )]
+        .into();
+        let error = environment_block(&edits).unwrap_err();
+        assert_eq!(error.step, PrepareStep::Environment);
+        assert_eq!(error.subject, subject);
+        assert_eq!(error.cause, PrepareCause::Invalid(PrepareInvalid::Nul));
+    }
+}

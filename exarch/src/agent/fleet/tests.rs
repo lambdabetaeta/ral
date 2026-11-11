@@ -55,3 +55,24 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
     drop(helper);
     assert!(parent.fleet.registry.name("short-lived").is_ok());
 }
+
+#[test]
+fn unborn_projects_the_rejected_name_without_rendering_it() {
+    use ral_core::fact::{AgentFailure, AgentFailureNameTaken, AgentNameFailure};
+    let fleet = Fleet::for_test();
+    let malformed = fleet.registry.name("not a name").err().unwrap();
+    assert_eq!(
+        malformed.failure(),
+        AgentFailure::NameMalformed(AgentNameFailure {
+            name: "not a name".into()
+        })
+    );
+    let _reserved = fleet.registry.name("reserved").unwrap();
+    let taken = fleet.registry.name("reserved").err().unwrap();
+    assert_eq!(
+        taken.failure(),
+        AgentFailure::NameTaken(AgentFailureNameTaken {
+            name: "reserved".into()
+        })
+    );
+}

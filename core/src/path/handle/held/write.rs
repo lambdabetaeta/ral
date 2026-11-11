@@ -213,7 +213,7 @@ impl Located<Judged<Writing>> {
             Data::Held(..) | Data::Special => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "a special file is streamed, not replaced",
+                    crate::fact::PathIoLeaf::SpecialFileNotReplaceable,
                 ));
             }
             Data::Absent => {}

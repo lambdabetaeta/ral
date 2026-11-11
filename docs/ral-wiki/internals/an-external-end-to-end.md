@@ -1,8 +1,8 @@
 ---
-generated_at_commit: 40af72fb
-verified_at_commit: 40af72fb
-verified_at_date: 2026-11-09
-anchors: [StartFailure, StartFailure::settle, Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, Placement::land, Placement::command, TerminalAccess::reach, TerminalHold, PreparedTerminalLoan::lend, Unlanded, Drains::join_under, SpawnError, spawn_with_pgid_after, attributed, fork, Launcher, Launch::born, Leader, EnvelopedLaunch, ProgramLaunch, unprepared, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_date: 2026-11-10
+anchors: [StartFailure, StartFailure::settle, Command::prepare, Prepared::start, Prepared::run, Prepared::detach, Started::register, Started::collect, ChildSetup::install, Program::unstarted, ending, exit_error, Started, denial_pids, payload_pids, Unstarted, Spawned, Group, Placement, Placement::land, Placement::command, TerminalAccess::reach, TerminalHold, PreparedTerminalLoan::lend, Unlanded, Drains::join_under, SpawnError, spawn_with_pgid_after, attributed, fork, Launcher, Launch::born, Leader, EnvelopedLaunch, ProgramLaunch, prepare_io, vanished, Confined, Testimony, Witness, Record, Program::exec_error, offer_path_as_text, interpreter_of, interpreter_hint, supervise, into_watch]
 ---
 
 # An external, end to end
@@ -60,15 +60,17 @@ Which of the three cases a failure is, and so whom it blames, is
 
 - **`Program` is read as the program's.** `Program::exec_error` turns it into the same
   process failure the probe reports, with the interpreter hint where it
-  applies. `Refused` keeps its own wording (`unprepared`: "ral could not
-  prepare the command's process"; "cannot start <launcher>").
+  applies. `Refused` preserves a typed launch cause: the failed preparation
+  step, launcher or confinement operation, with I/O evidence where applicable.
+  Its description is derived without blaming the program.
 - **The mark decides it**: a spawn error that the child's last pre-exec step
   did not precede is ral's
   ([[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]). `SpawnError` is
-  `Prepare` or `Exec`, and `fork` reads it: a `Prepare` failure is always
-  ral's own (`unprepared`), whatever stands in the program's place. `Exec`
-  is `Program`, unless the launch holds a `Launcher` to run in the program's
-  place: then it is that launcher's, and `Refused`. Only the fork is read so.
+  `Prepare`, `Setup` or `Exec`, and `fork` reads it: `Setup` retains its typed
+  launch failure; `Prepare` uses recorded setup evidence when available,
+  otherwise a typed launcher failure. Both are ral's own, whatever stands in
+  the program's place. `Exec` is `Program`, unless the launch holds a
+  `Launcher`: then it is that launcher's, and `Refused`. Only the fork is read so.
   A payload report's `Program(errno)` is heard afterwards and is never
   rewritten as a launcher refusal.
 - **A discarded child is killed and reaped** (`Unlanded`). A refusal after the
@@ -110,8 +112,8 @@ the one a `PATH` search built.
   from its real path, is `not-found`.
 - **Only a permission refusal is `permission-denied`.** `EACCES` at the spawn,
   or a walk, a path head's or a `PATH` candidate's, that fails by a refusal.
-  Any other walk error reads as itself, `io` with the OS's words; absence and
-  a non-directory component are `not-found`.
+  Any other walk error retains its typed `IoCause`, including foreign OS
+  detail where needed; absence and a non-directory component are `not-found`.
 - **A confined `EACCES` or `ENOENT` whose interpreter the launch's own
   projection hides is `permission-denied` plus the interpreter hint**, on both
   platforms: Seatbelt refuses the exec (`EACCES`), bwrap hides the interpreter

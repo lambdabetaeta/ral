@@ -159,6 +159,22 @@ mod tests {
             .expect("build retry test runtime")
     }
 
+    fn header_timeout() -> ProviderError {
+        use ral_core::fact::{
+            RetryableProviderCause, ServiceCause, ServiceFailure, ServiceOperation,
+            StreamTimeoutKind,
+        };
+        ProviderError::Transient {
+            cause: RetryableProviderCause::Service(ServiceFailure {
+                service: "fixture".into(),
+                operation: ServiceOperation::Chat,
+                context: Vec::new(),
+                cause: Box::new(ServiceCause::StreamTimeout(StreamTimeoutKind::Headers)),
+            }),
+            attempts: 1,
+        }
+    }
+
     #[test]
     fn a_timeout_before_any_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
@@ -167,12 +183,7 @@ mod tests {
             &DurableRoot::default().child(),
             async |_attempt| {
                 calls.set(calls.get() + 1);
-                Attempt::Failed(ProviderError::Transient {
-                    cause: "model response headers timed out".into(),
-                    attempts: 1,
-                    body: None,
-                    status: None,
-                })
+                Attempt::Failed(header_timeout())
             },
         ));
         assert_eq!(calls.get(), MAX_ATTEMPTS);
@@ -225,16 +236,19 @@ mod tests {
             CancelSite::BeforeRequest,
             &DurableRoot::default().child(),
             async |replaced: Option<&ProviderError>| {
-                seen.borrow_mut().push(replaced.map(ProviderError::summary));
-                Attempt::Failed(ProviderError::local_transient(format!(
-                    "failure {}",
-                    seen.borrow().len()
-                )))
+                seen.borrow_mut().push(replaced.map(ProviderError::failure));
+                Attempt::Failed(ProviderError::stream_ended_without_end(
+                    "fixture",
+                    &seen.borrow().len().to_string(),
+                ))
             },
         ));
         let seen = seen.into_inner();
         assert_eq!(seen[0], None);
-        assert_eq!(seen[1], Some("connection failed: failure 1".to_string()));
+        assert_eq!(
+            seen[1],
+            Some(ProviderError::stream_ended_without_end("fixture", "1").failure())
+        );
         assert_eq!(seen.len(), MAX_ATTEMPTS as usize);
     }
 
@@ -249,12 +263,7 @@ mod tests {
             });
             let out: Result<(), ProviderError> =
                 retry_with_backoff(CancelSite::Backoff, &cancel, async |_| {
-                    Attempt::Failed(ProviderError::Transient {
-                        cause: "retry me".into(),
-                        attempts: 1,
-                        body: None,
-                        status: None,
-                    })
+                    Attempt::Failed(ProviderError::stream_ended_without_end("fixture", "m"))
                 })
                 .await;
             assert!(matches!(

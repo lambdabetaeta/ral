@@ -260,16 +260,16 @@ A failed call ends a `ral` script unless its failure is caught. Definitions that
 
 Choose how to handle a failure: `try` runs a recovery handler, `audit` records the outcome and command output for inspection, and `attempt` deliberately ignores the failure. This also applies to tools whose exit codes carry data, such as `grep`, `diff`, and `test`; distinguish expected nonzero exits from actual errors.
 
-`try`'s handler receives exactly `[reason, frame, site]`, the same record an `audit` report's `` `err `` outcome carries. `frame` names where the failure is reported (a command, `index`, `fail`, your function, etc.); `site` is always `[script: String, line: Int, col: Int]`. Call `explain try` for details:
+`try`'s handler receives exactly `[frame: String, message: String, status: Int, site: [script: String, line: Int, col: Int]]`, the same record an `audit` report's `` `err `` outcome carries. `frame` names where the failure is reported (a command, `index`, `fail`, your function, etc.) and `message` is the failure's text. Call `explain try` for details:
 
     let log =
       try { sort in.txt 2>&1 | from-string } { |err|
-        "sort failed: !{describe $err}"
+        "sort failed: $err[message]"
       }
 
-`$err[reason]` is a variant saying why it failed: `` `process [program: String, failure: …] `` for a program that did not succeed (`failure` is `` `exited n ``, `` `signaled n ``, `` `not-found `` or `` `not-runnable […] ``), else `` `timed-out ``, `` `cancelled `` or `` `raised text ``. Compare it or branch on its tag, as the `audit` example below does.
+`$err[status]` is the failure's exit status, from 1 to 255: a program's own `n`, `128+n` when signal `n` killed it, 127 when the command was not found, 126 when it is not runnable, 124 for a timeout, 143 for a cancellation, and 1 for anything else, including `fail`. Compare it, as the `audit` example below does.
 
-The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `describe $err` derives the failure's text from its reason; to see the failing command's output, wrap the call in `audit`.
+The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is the failure's text; to see the failing command's output, wrap the call in `audit`.
 
 Prelude functions cover common cases:
 
@@ -279,7 +279,7 @@ Prelude functions cover common cases:
 
 `guard BODY CLEANUP` runs the cleanup block whether the body succeeds or fails, then hands back the body's own result — so a failure keeps propagating. A cleanup that fails or exits pre-empts that result and becomes the outcome; write `guard BODY { attempt { … } }` if the cleanup's own failure should be ignored.
 
-Raise a fresh error with `fail #'failure caused by x'#` (reason `` `raised text ``, exit code 1). Re-raise a caught record unchanged with `raise $e`; use top-level `exit n` to choose a process code. `raise` trusts the record, including its provenance, but refuses a failure of `` `exited 0 `` and signals outside `1..=127`. Reason hints are recomputed; situational advice and unwind notes are not in the record.
+Raise a fresh error with `fail #'failure caused by x'#` (status 1). Re-raise a caught record unchanged with `raise $e`; use top-level `exit n` to choose a process code. `raise` also takes a hand-built record with exactly the fields `frame`, `message`, `status` and `site`, and raises it as given, provenance included, so `raise [...$e, status: 2]` fails with status 2; it refuses a status of 0, which is success (use `return`), and a status above 255. Situational advice and unwind notes are not in the record.
 
 
 ## Audit
@@ -292,7 +292,7 @@ Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `comma
     case $r[outcome] [
       `ok:  { |_| bytes-to-string !{commands $r}[0][stdout] },
       `err: { |e|
-        if $[$e[reason] == `process [program: grep, failure: `exited 1]] { #'no matches'# } else { raise $e }
+        if $[$e[frame] == grep && $e[status] == 1] { #'no matches'# } else { raise $e }
       }
     ]
 
@@ -328,7 +328,7 @@ You need not wait for it: end the turn when nothing else remains, and if its res
 `await $h` behaves exactly as if the block had run on that line: whatever it printed appears on your stdout and stderr, its value is returned, and a failure in it fails your script there, so `try` around `await` is how you recover. A handle's result is claimed once: you may await it turns later, but a second `await` of it, or one after `cancel` or `race` claimed it, fails. An `exit` inside the block exits the turn that awaits it.
 
     let out = await $h          # a command's output, as `let out = !{ … }` would bind it
-    try { await $h } { |e| echo "failed: !{describe $e}" }    # or this instead, to recover
+    try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
 
 Retain the handle returned by `spawn` (or `watch`) whenever you will need its result or individual cancellation; a worker ID in `workers` or a completion notice is for observation only and cannot recover a handle.
 

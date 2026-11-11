@@ -17,12 +17,14 @@
 //! `argv[0]`; bwrap execs the trampoline as `/proc/self/fd/<slot>`.
 
 use crate::Role;
+use crate::fact::PinCause;
+#[cfg(unix)]
+use crate::fact::{BinaryRole, PinFailure};
 #[cfg(unix)]
 use crate::path::ObjectId;
 use crate::path::{LeafMode, LexicalPath, Located, Trace, walk};
 #[cfg(unix)]
 use crate::site::{Silent, site};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -132,35 +134,26 @@ impl Pinned {
     /// so `authority::sandbox::launch` calls this before each, to catch an executable
     /// swapped on disk since it was pinned.  Linux execs the pin itself.
     #[cfg(target_os = "macos")]
-    pub(super) fn verify(&self) -> Result<(), String> {
-        let arg0 = self.arg0();
-        let reached = reach(arg0).map_err(|e| {
-            format!(
-                "sandbox eval: verify self: cannot reach {}: {e}",
-                crate::path::shown(arg0)
-            )
-        })?;
+    pub(super) fn verify(&self) -> Result<(), PinFailure> {
+        let failure = |cause| PinFailure {
+            role: BinaryRole::Ral,
+            spelling: Some(crate::path::shown(self.arg0())),
+            cause,
+        };
+        let reached = reach(self.arg0()).map_err(failure)?;
         if reached.trace().leaf_id() == Some(self.object_id()) {
             Ok(())
         } else {
-            Err(format!(
-                "ral binary at {} changed since startup; \
-                     restart to pick up the new build",
-                crate::path::shown(arg0)
-            ))
+            Err(failure(PinCause::ChangedIdentity))
         }
     }
 }
 
 /// Where the absolute name `arg0` leads now.
-fn reach(arg0: &Path) -> io::Result<Located> {
-    let at = LexicalPath::absolute(arg0).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "a pin is taken from an absolute path, and this name is relative",
-        )
-    })?;
+fn reach(arg0: &Path) -> Result<Located, PinCause> {
+    let at = LexicalPath::absolute(arg0).ok_or(PinCause::RelativePath)?;
     walk(&at, LeafMode::Follow)
+        .map_err(|e| PinCause::VerificationWalk(Box::new(crate::io::failure(&e))))
 }
 
 pub(super) static OWN: OnceLock<Pinned> = OnceLock::new();
@@ -180,12 +173,11 @@ pub fn pinned_arg0() -> Option<&'static Path> {
 /// ral's own pin, which a sandboxed launch cannot go without: unpinned, ral
 /// cannot vouch that the copy it re-execs is itself.
 #[cfg(unix)]
-pub(super) fn own() -> Result<&'static Pinned, String> {
-    OWN.get().ok_or_else(|| {
-        "sandbox: ral could not pin its own program at startup (is its executable \
-         missing or unreadable?), so it cannot vouch that the sandboxed copy is \
-         itself; refusing to launch it"
-            .to_string()
+pub(super) fn own() -> Result<&'static Pinned, PinFailure> {
+    OWN.get().ok_or(PinFailure {
+        role: BinaryRole::Ral,
+        spelling: None,
+        cause: PinCause::Unavailable,
     })
 }
 
@@ -235,3 +227,17 @@ pub(super) fn pin_self() {
 #[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod pin_cause_tests {
+    use super::*;
+
+    #[test]
+    fn relative_pin_names_are_typed_before_any_walk() {
+        assert!(matches!(
+            reach(Path::new("ral")),
+            Err(PinCause::RelativePath)
+        ));
+    }
+}

@@ -158,8 +158,8 @@ fn anchor_death(_: crate::process::WaitOutcome) -> Event {
 }
 
 #[allow(clippy::needless_pass_by_value, reason = "named for `map_err`")]
-fn anchor_error(e: std::io::Error) -> Error {
-    Error::io("pipeline anchor", &e)
+fn anchor_error(operation: crate::fact::IoOperation, e: std::io::Error) -> Error {
+    Error::io(operation, crate::fact::IoSubject::PipelineAnchor, &e)
 }
 
 /// `Child::drop` neither kills nor reaps, so a child not handed on goes here.
@@ -179,14 +179,16 @@ impl AnchorProcess {
     fn spawn(tx: Sender<Event>) -> Settled<Self> {
         #[cfg(windows)]
         let _ = tx;
-        let (reader, release) = crate::process::cloexec_pipe().map_err(anchor_error)?;
+        let (reader, release) = crate::process::cloexec_pipe()
+            .map_err(|e| anchor_error(crate::fact::IoOperation::CreateFile, e))?;
         let mut cmd = crate::authority::sandbox::reexec::launch(crate::Role::PipelineAnchor)
-            .map_err(anchor_error)?;
+            .map_err(|e| anchor_error(crate::fact::IoOperation::ReadLink, e))?;
         cmd.stdin(crate::process::StdioSpec::from_owned(reader));
         cmd.stderr(crate::process::StdioSpec::Null);
         #[cfg(unix)]
         let mut report = {
-            let (report, writer) = crate::process::cloexec_pipe().map_err(anchor_error)?;
+            let (report, writer) = crate::process::cloexec_pipe()
+                .map_err(|e| anchor_error(crate::fact::IoOperation::CreateFile, e))?;
             cmd.stdout(crate::process::StdioSpec::from_owned(writer));
             report
         };
@@ -198,29 +200,42 @@ impl AnchorProcess {
         let Spawned { child, group, .. } =
             cmd.spawn_leader(&unstoppable)
                 .map_err(|unstarted| match unstarted {
-                    Unstarted::Program(e) => Break::from(anchor_error(e)),
+                    Unstarted::Program(e) => Break::from(crate::process::launch::prepare_io(
+                        crate::fact::PrepareStep::Application,
+                        crate::fact::PrepareSubject::Program("pipeline anchor".into()),
+                        &e,
+                    )),
                     Unstarted::Refused(refusal) => Break::from(refusal),
                     Unstarted::Stopped(stop) => Break::from(stop),
                 })?;
         #[cfg(unix)]
         let (child, reporter) = {
-            use std::io::{ErrorKind, Read};
+            use std::io::Read;
 
             let mut child = child;
             let mut ready = [0u8; 1];
-            let readiness = report.read_exact(&mut ready).and_then(|()| {
-                if ready == [0] {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        ErrorKind::InvalidData,
-                        "expected the anchor's readiness byte",
-                    ))
-                }
-            });
-            if let Err(e) = readiness {
+            let readiness = report
+                .read_exact(&mut ready)
+                .map_err(|e| {
+                    crate::fact::AnchorReadinessFailure::Read(Box::new(crate::io::failure(&e)))
+                })
+                .and_then(|()| {
+                    if ready == [0] {
+                        Ok(())
+                    } else {
+                        Err(crate::fact::AnchorReadinessFailure::UnexpectedByte(
+                            ready[0],
+                        ))
+                    }
+                });
+            if let Err(cause) = readiness {
                 discard(&mut child);
-                return Err(Error::io("pipeline anchor did not become ready", &e).into());
+                return Err(
+                    crate::process::launch::refused(crate::fact::LaunchFailure::Launcher(
+                        crate::fact::LauncherFailure::AnchorReadiness(cause),
+                    ))
+                    .into(),
+                );
             }
             let report_tx = tx.clone();
             let reporter = std::thread::Builder::new()
@@ -228,7 +243,11 @@ impl AnchorProcess {
                 .spawn(move || read_anchor_reports(report, &report_tx))
                 .map_err(|e| {
                     discard(&mut child);
-                    anchor_error(e)
+                    Error::io(
+                        crate::fact::IoOperation::StartThread,
+                        crate::fact::IoSubject::Thread("ral pipeline anchor report reader".into()),
+                        &e,
+                    )
                 })?;
             (child.into_watch(tx, anchor_death), reporter)
         };

@@ -5,6 +5,11 @@
 
 use crate::data::Finite;
 use crate::error::Error;
+use crate::fact::{
+    ArithmeticFailure, EvalFailure, Expected, InvalidCause, InvalidFailure, Number, NumberRange,
+    Reason, RoundUnrepresentable, ShapeFailure, ValueShape,
+};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Value};
 
 /// The largest `places` for which `10^places` is still finite in `f64`.
@@ -13,11 +18,9 @@ const MAX_PLACES: i64 = 308;
 fn float(name: &str, val: &Value) -> Settled<Finite> {
     match val {
         Value::Float(f) => Ok(*f),
-        other => Err(
-            Error::new(format!("{name}: expected Float, got {}", other.type_name()))
-                .with_hint("e.g. round 3.7 0")
-                .into(),
-        ),
+        other => Err(other
+            .expected(name, Expected::Shape(ValueShape::Float))
+            .into()),
     }
 }
 
@@ -26,7 +29,7 @@ fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
     Finite::new(op(x.get()))
         .and_then(Finite::to_i64)
         .map(Value::Int)
-        .ok_or_else(|| Error::new(format!("{name}: {x} is outside the integer range")).into())
+        .ok_or_else(|| invalid(name, InvalidCause::IntegerRange(x)).into())
 }
 
 pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
@@ -34,19 +37,31 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
     let places = match &args[1] {
         Value::Int(n) => *n,
         other => {
-            return Err(Error::new(format!(
-                "round: places must be an Int, got {}",
-                other.type_name()
-            ))
-            .with_hint("e.g. round 3.14159 2")
+            return Err(Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(
+                    "round".into(),
+                    InvalidCause::Shape(ShapeFailure {
+                        expected: Expected::Shape(ValueShape::Int),
+                        found: other.found(),
+                    }),
+                )
+                .index(1usize.into()),
+            )))
             .into());
         }
     };
     if !(0..=MAX_PLACES).contains(&places) {
-        return Err(Error::new(format!(
-            "round: places must be between 0 and {MAX_PLACES}, got {places}"
-        ))
-        .with_hint("0 rounds to a whole number, 2 to hundredths")
+        return Err(Error::new(Reason::Invalid(Box::new(
+            InvalidFailure::new(
+                "round".into(),
+                InvalidCause::Range(NumberRange {
+                    value: Number::Int(places),
+                    minimum: Number::Int(0),
+                    maximum: Number::Int(MAX_PLACES),
+                }),
+            )
+            .index(1usize.into()),
+        )))
         .into());
     }
     #[allow(
@@ -57,9 +72,9 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
     Finite::new((x.get() * factor).round() / factor)
         .map(Value::Float)
         .ok_or_else(|| {
-            Error::new(format!(
-                "round: rounding {x} to {places} places is not representable as a Float"
-            ))
+            Error::new(Reason::Evaluation(Box::new(EvalFailure::Arithmetic(
+                ArithmeticFailure::RoundUnrepresentable(RoundUnrepresentable { value: x, places }),
+            ))))
             .into()
         })
 }

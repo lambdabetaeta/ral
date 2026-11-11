@@ -13,6 +13,11 @@ use crate::carrier::{
 };
 use crate::data::FOValue;
 use crate::error::Error;
+use crate::fact::{
+    ConnectionClosed, ConnectionClosedIo, ConnectionFault, ConnectionFaultUnencodable,
+    ConnectionFaultUnexpectedFrame, ConnectionOperation, ProbeFailure, ProtocolFailure,
+    ProtocolFailureUnencodable, ProtocolOperation, ProtocolPeer, ProtocolPhase, Reason,
+};
 use crate::process::{Fatal, Scope};
 use crate::protocol::channel::{Liveness, WireChannel, WireStream, WriteError, ticks};
 use crate::protocol::probe::Probe;
@@ -92,7 +97,7 @@ fn spawn_wire_reader(
         impl Drop for SeverOnExit<'_> {
             fn drop(&mut self) {
                 self.severance
-                    .latch(Severed::Closed("the reader thread ended".into()));
+                    .latch(Severed::Closed(ConnectionClosed::ReaderThreadEnded));
                 self.session.1.notify_all();
             }
         }
@@ -136,20 +141,42 @@ fn spawn_wire_reader(
                         }
                         Frame::Pong(_) => {}
                         other => {
-                            severance.latch(Severed::Faulted(format!(
-                                "it sent a {} frame, which only a front-end sends",
-                                other.kind()
+                            let state = *session.0.lock_ignore_poison();
+                            let phase = match state {
+                                SessionState::Opening => ProtocolPhase::AwaitAttach,
+                                SessionState::Attached | SessionState::Ended => {
+                                    ProtocolPhase::Attached
+                                }
+                            };
+                            severance.latch(Severed::Faulted(ConnectionFault::UnexpectedFrame(
+                                ConnectionFaultUnexpectedFrame {
+                                    receiver: ProtocolPeer::Frontend,
+                                    phase,
+                                    actual: other.kind(),
+                                },
                             )));
                             break;
                         }
                     }
                 }
                 Ok(None) => {
-                    severance.latch(Severed::Closed("the engine closed the connection".into()));
+                    severance.latch(Severed::Closed(ConnectionClosed::Eof(ProtocolPeer::Engine)));
                     break;
                 }
-                Err(e) => {
-                    severance.latch(Severed::Closed(e.to_string()));
+                Err(error) => {
+                    severance.latch(Severed::Closed(ConnectionClosed::Frame(error.cause)));
+                    match error.dump {
+                        Some(crate::io::FrameDump::Written(path)) => {
+                            crate::errln!(
+                                "engine: raw frame written to {}",
+                                crate::path::shown(&path)
+                            );
+                        }
+                        Some(crate::io::FrameDump::Failed(error)) => {
+                            crate::errln!("engine: raw frame not kept: {error}");
+                        }
+                        None => {}
+                    }
                     break;
                 }
             }
@@ -190,7 +217,9 @@ fn spawn_heartbeat(line: Weak<Line>, unanswered: Arc<AtomicU32>, liveness: Liven
             seq += 1;
             match line.write(&Frame::Ping(seq)) {
                 Err(WriteError::Severed) => break,
-                Err(WriteError::Unencodable(e)) => unreachable!("a ping is a few bytes: {e}"),
+                Err(WriteError::Unencodable(e)) => {
+                    unreachable!("a ping is a few bytes: {}", e.describe())
+                }
                 Ok(()) => {}
             }
             unanswered.fetch_add(1, Ordering::Relaxed);
@@ -236,7 +265,10 @@ impl WireTransport {
         // Darwin refuses options on a socket whose peer is already gone:
         // the death Linux learns at the first read, learnt here.
         if let Err(e) = deadline {
-            line.sever(Severed::Closed(e.to_string()));
+            line.sever(Severed::Closed(ConnectionClosed::Io(ConnectionClosedIo {
+                operation: ConnectionOperation::SetWriteDeadline,
+                cause: crate::io::failure(&e),
+            })));
         }
         let reader = spawn_wire_reader(
             reader_ch,
@@ -264,9 +296,14 @@ impl WireTransport {
     pub fn attach(&self, attach: Attach) {
         // No session yet to refuse into: the refusal is the attach's verdict.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Attach(attach)) {
-            self.sever(Severed::Refused(WireError::of(&Error::new(format!(
-                "the attach could not be sent: {e}"
-            )))));
+            self.sever(Severed::Refused(WireError::of(&Error::new(
+                Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
+                    ProtocolFailureUnencodable {
+                        operation: ProtocolOperation::Attach,
+                        cause: e,
+                    },
+                ))),
+            ))));
             return;
         }
         let pending = self.pending_heartbeat.lock_ignore_poison().take();
@@ -310,7 +347,12 @@ impl WireTransport {
             return Err(cause);
         }
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Detach) {
-            return Err(self.sever(Severed::Faulted(format!("detach: {e}"))));
+            return Err(self.sever(Severed::Faulted(ConnectionFault::Unencodable(
+                ConnectionFaultUnencodable {
+                    operation: ProtocolOperation::Detach,
+                    cause: e,
+                },
+            ))));
         }
         self.await_state(SessionState::Ended)
     }
@@ -358,9 +400,8 @@ impl WireTransport {
 impl Drop for WireTransport {
     /// The session's end: the engine reads EOF.
     fn drop(&mut self) {
-        self.line.sever(Severed::Closed(
-            "the front-end dropped the transport".into(),
-        ));
+        self.line
+            .sever(Severed::Closed(ConnectionClosed::TransportDropped));
     }
 }
 
@@ -374,7 +415,12 @@ impl Transport for WireTransport {
         // crossing a wire is a frame on `events()`, answered by whoever drains
         // it — `dispatch_to_report`.
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Dispatch(id, Box::new(run))) {
-            let report = Report::refused(format!("dispatch: the run could not be sent: {e}"));
+            let report = Report::refused(Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
+                ProtocolFailureUnencodable {
+                    operation: ProtocolOperation::Dispatch,
+                    cause: e,
+                },
+            ))));
             self.ends
                 .events
                 .stash
@@ -387,9 +433,7 @@ impl Transport for WireTransport {
         forbid_reentry(self);
         let id = mint_dispatch_id();
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Probe(id, probe.clone())) {
-            return Err(ProbeError::Rejected(format!(
-                "probe: the probe could not be sent: {e}"
-            )));
+            return Err(ProbeError::Rejected(ProbeFailure::Unencodable(e)));
         }
         // Foreign events read past on the way to this probe's own reading are
         // held here rather than restashed mid-loop: `recv`'s stash-first law
@@ -426,7 +470,12 @@ impl Transport for WireTransport {
     fn answer(&self, eid: EnquiryId, answer: Result<FOValue, Error>) {
         let answer = answer.map_err(|e| WireError::of(&e));
         if let Err(WriteError::Unencodable(e)) = self.write(&Frame::Answer(eid, answer)) {
-            let refusal = Error::new(format!("answer: the host could not reply: {e}"));
+            let refusal = Error::new(Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
+                ProtocolFailureUnencodable {
+                    operation: ProtocolOperation::Answer,
+                    cause: e,
+                },
+            ))));
             let _ = self.write(&Frame::Answer(eid, Err(WireError::of(&refusal))));
         }
     }

@@ -6,13 +6,33 @@
 use super::Value;
 use crate::data::datum::Datum;
 use crate::data::{FOValue, NoExt, NotData, Opaque};
-use crate::shell::runtime::{BuiltinEntry, Closure};
+use crate::fact::{NonData, OpaqueKind};
+use crate::shell::runtime::Closure;
 use std::convert::Infallible;
+
+impl From<Opaque> for OpaqueKind {
+    fn from(leaf: Opaque) -> Self {
+        match leaf {
+            Opaque::Block => Self::Block,
+            Opaque::Function => Self::Function,
+            Opaque::Handle => Self::Handle,
+        }
+    }
+}
+
+impl From<NotData> for NonData {
+    fn from(error: NotData) -> Self {
+        Self {
+            leaf: error.leaf.into(),
+            nested: error.nested,
+        }
+    }
+}
 
 /// A `Value` that is not data.
 pub(crate) enum Leaf<'a> {
     Thunk(&'a Closure),
-    Native(&'a BuiltinEntry),
+    Native,
     Handle,
 }
 
@@ -20,7 +40,7 @@ impl Leaf<'_> {
     pub(crate) fn kind(&self) -> Opaque {
         match self {
             Self::Thunk(c) if c.comp().lam().is_none() => Opaque::Block,
-            Self::Thunk(_) | Self::Native(_) => Opaque::Function,
+            Self::Thunk(_) | Self::Native => Opaque::Function,
             Self::Handle => Opaque::Handle,
         }
     }
@@ -30,7 +50,7 @@ impl Value {
     fn leaf(&self) -> Option<Leaf<'_>> {
         match self {
             Self::Thunk(c) => Some(Leaf::Thunk(c)),
-            Self::Native(entry) => Some(Leaf::Native(entry)),
+            Self::Native(_) => Some(Leaf::Native),
             Self::Handle(_) => Some(Leaf::Handle),
             _ => None,
         }
@@ -78,7 +98,7 @@ impl<X> FOValue<X> {
                     .transpose()?,
             },
             Value::Thunk(c) => leaf(Leaf::Thunk(c))?,
-            Value::Native(entry) => leaf(Leaf::Native(entry))?,
+            Value::Native(_) => leaf(Leaf::Native)?,
             Value::Handle(_) => leaf(Leaf::Handle)?,
         })
     }
@@ -109,22 +129,6 @@ impl<X> FOValue<X> {
             }
             Self::Ext(x) => ext(x)?,
         })
-    }
-
-    /// Visit every extension, through data alone.
-    pub(crate) fn for_each_ext(&self, f: &mut impl FnMut(&X)) {
-        match self {
-            Self::Ext(x) => f(x),
-            Self::List { items } => items.iter().for_each(|v| v.for_each_ext(f)),
-            Self::Map { entries } => entries.iter().for_each(|(_, v)| v.for_each_ext(f)),
-            Self::Variant { payload, .. } => payload.iter().for_each(|p| p.for_each_ext(f)),
-            Self::Unit
-            | Self::Bool { .. }
-            | Self::Int { .. }
-            | Self::Float { .. }
-            | Self::String { .. }
-            | Self::Bytes { .. } => {}
-        }
     }
 }
 

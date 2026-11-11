@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
 generated_at_date: 2026-11-10
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -30,7 +30,9 @@ reads back checked CBPV IR.** The algorithm is
 - `alias_arm_scheme`, `catch_all_stands_in`, `binding_value_scheme` enter a
   region before checking the body and close before export. `close_thunk_scheme`
   generalises after region exit, then settles only a successful unit. The
-  catch-all stores no scheme.
+  catch-all stores no scheme. Each returns every error from close
+  (`Vec<TypeError>`); the runtime reports a refusal as one `IllTyped` fact
+  through `TypeError::diagnostic` ([[map/core/diagnostics|diagnostics]]).
 
 ## Constraint generation
 

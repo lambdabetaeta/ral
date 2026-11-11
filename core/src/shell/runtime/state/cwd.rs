@@ -7,9 +7,10 @@
 //! as `Command::current_dir` and exports it as `PWD`.
 
 use super::Shell;
+use crate::fact::{InvalidCause, IoOperation, IoSubject};
 use crate::path::{CwdPath, walk_dir};
 use crate::shell::runtime::Error;
-use std::io::ErrorKind;
+use crate::shell::runtime::invalid;
 use std::path::PathBuf;
 
 impl Shell {
@@ -48,14 +49,10 @@ impl Shell {
     /// working directory ([`CwdPath`]).
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
         let resolved = self.resolve(target).folded();
-        let dir = walk_dir(&resolved).map_err(|e| match e.kind() {
-            ErrorKind::NotADirectory => {
-                Error::new(format!("{}: not a directory", resolved.shown()))
-            }
-            _ => Error::io(resolved.shown(), &e),
-        })?;
+        let dir = walk_dir(&resolved)
+            .map_err(|e| Error::io(IoOperation::Chdir, IoSubject::Path(resolved.shown()), &e))?;
         let cwd = CwdPath::new(dir.real().as_path().to_path_buf())
-            .map_err(|e| Error::new(e.to_string()))?;
+            .map_err(|e| invalid("cd", InvalidCause::Path((&e).into())))?;
         self.context.cwd = cwd;
         Ok(())
     }
@@ -71,5 +68,37 @@ impl Shell {
     /// see [`crate::path::Resolver::anchor`].
     pub fn anchor(&self, path: &std::path::Path) -> crate::path::LexicalPath {
         self.context.resolver().anchor(path)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod tests {
+    use super::*;
+    use crate::fact::{IoKind, IoLeaf, Reason};
+
+    #[test]
+    fn apply_chdir_keeps_the_requested_path_and_does_not_move_on_failure() {
+        let mut shell = crate::test_helper::core_shell();
+        let before = shell.cwd();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        for path in [file, tmp.path().join("absent")] {
+            let target = path.to_str().unwrap();
+            let error = shell.apply_chdir(target).unwrap_err();
+            let Reason::Io(failure) = &error.reason else {
+                panic!("I/O refusal")
+            };
+            assert_eq!(failure.operation, IoOperation::Chdir);
+            assert_eq!(
+                failure.subject,
+                IoSubject::Path(shell.resolve(target).folded().shown())
+            );
+            assert!(
+                matches!(failure.cause.leaf.as_ref(), IoLeaf::Os(os) if matches!(os.kind, IoKind::NotADirectory | IoKind::NotFound))
+            );
+            assert_eq!(shell.cwd(), before);
+        }
     }
 }

@@ -10,6 +10,14 @@
 
 use crate::environ::ChildEnv;
 use crate::error::Error;
+use crate::fact::{
+    LaunchFailure, LauncherFailure, PayloadGroupFailure, PrepareCause, PrepareFailure, PrepareStep,
+    PrepareSubject, Reason,
+};
+#[cfg(unix)]
+use crate::fact::{LauncherRole, OsFailure};
+#[cfg(unix)]
+pub(crate) mod setup;
 #[cfg(unix)]
 use crate::process::site::Surface;
 #[cfg(unix)]
@@ -36,13 +44,14 @@ pub(crate) struct Launch {
     /// Owned until a spawn hands it on.
     jail: Option<crate::process::jail::JailCgroup>,
     launcher: Option<Launcher>,
+    evidence: Option<setup::Evidence>,
 }
 
-/// What a confined launch execs in the program's place: blamed by `name`
+/// What a confined launch execs in the program's place: blamed by `role`
 /// when it cannot start, and believed through its trampoline's report.
 #[cfg(unix)]
 struct Launcher {
-    name: &'static str,
+    role: LauncherRole,
     report: crate::process::report::Report,
     /// An envelope's own stderr, which is not the payload's.
     #[cfg(target_os = "linux")]
@@ -59,7 +68,7 @@ impl Launcher {
         piped: impl FnOnce() -> Option<String>,
     ) -> Result<crate::process::report::Testimony, Unstarted> {
         let Self {
-            name,
+            role,
             report,
             #[cfg(target_os = "linux")]
             diagnostics,
@@ -68,9 +77,9 @@ impl Launcher {
         testimony.first(scope, || {
             #[cfg(target_os = "linux")]
             if let Some(file) = &diagnostics {
-                return vanished(name, envelope::file_said(file));
+                return vanished(role, envelope::file_said(file));
             }
-            vanished(name, piped())
+            vanished(role, piped())
         })?;
         Ok(testimony)
     }
@@ -79,7 +88,8 @@ impl Launcher {
 /// Asked once after the fork for an envelope's payload group, answering only
 /// once that group exists or the envelope is gone: `Ok(None)` is an envelope
 /// that died before reporting.
-type PayloadPgid = Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, String> + Send>;
+type PayloadPgid =
+    Box<dyn FnOnce() -> Result<Option<crate::process::Pgid>, PayloadGroupFailure> + Send>;
 
 /// The child's steps between fork and exec, prepared in the parent. The
 /// order they are configured in is irrelevant: [`ChildSetup::install`] fixes
@@ -102,7 +112,7 @@ impl ChildSetup {
     /// command's descriptor handoff runs first; the spawn appends placement,
     /// signal reset and the final exec-readiness mark. The hook owns every
     /// descriptor it uses, so they live until the command is dropped.
-    fn install(self, cmd: &mut std::process::Command) {
+    fn install(self, cmd: &mut std::process::Command, evidence: &mut setup::Evidence) {
         use std::os::unix::process::CommandExt;
         let Self {
             stderr_to_stdout,
@@ -113,6 +123,19 @@ impl ChildSetup {
             #[cfg(seccomp)]
             guest_jail,
         } = self;
+        let merge = evidence.check(setup::Context::Prepare(
+            PrepareStep::MergeStderr,
+            PrepareSubject::Stream(crate::fact::StandardStream::Stderr),
+        ));
+        #[cfg(target_os = "linux")]
+        let capture = evidence.check(setup::Context::Prepare(
+            PrepareStep::CapturePayloadStreams,
+            PrepareSubject::Child,
+        ));
+        let session = crate::process::ChildLimits::checks(evidence);
+        let grant = crate::process::limits::GrantLimits::checks(evidence);
+        #[cfg(seccomp)]
+        let jail_checks = guest_jail.as_ref().map(|jail| jail.checks(evidence));
         // SAFETY: all resources were prepared in the parent. The hook runs
         // only in the forked child, before exec, as `capture` requires; it
         // makes only async-signal-safe syscalls and neither allocates nor
@@ -121,19 +144,19 @@ impl ChildSetup {
         unsafe {
             cmd.pre_exec(move || {
                 if stderr_to_stdout && libc::dup2(1, 2) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                    return merge.run(Err(std::io::Error::last_os_error()));
                 }
                 #[cfg(target_os = "linux")]
                 if let Some(streams) = &streams {
-                    streams.capture()?;
+                    capture.run(streams.capture())?;
                 }
-                session_limits.apply()?;
+                session_limits.apply_checked(&session)?;
                 if let Some(limits) = grant_limits {
-                    limits.apply()?;
+                    limits.apply_checked(&grant)?;
                 }
                 #[cfg(seccomp)]
-                if let Some(jail) = &guest_jail {
-                    jail.enter()?;
+                if let Some((jail, checks)) = guest_jail.as_ref().zip(jail_checks.as_ref()) {
+                    jail.enter_checked(checks)?;
                 }
                 Ok(())
             });
@@ -318,16 +341,27 @@ impl Launch {
     /// Apply `env`: its cwd, then its sets, then its unsets. The one way to
     /// give a launch a directory or environment, so none bypasses
     /// [`EnvVars::for_child`](crate::environ::EnvVars::for_child).
-    pub(crate) fn situate(&mut self, env: ChildEnv<'_>) -> &mut Self {
+    pub(crate) fn situate(&mut self, env: ChildEnv<'_>) -> Result<&mut Self, Error> {
         let ChildEnv { cwd, set, unset } = env;
         self.current_dir(cwd);
         for (key, value) in set {
+            let name = || crate::path::shown(key);
+            nul_free(
+                key,
+                PrepareStep::Environment,
+                PrepareSubject::EnvironmentKey(name()),
+            )?;
+            nul_free(
+                value,
+                PrepareStep::Environment,
+                PrepareSubject::EnvironmentValue(name()),
+            )?;
             self.env(key, value);
         }
         for key in unset {
             self.env_remove(key);
         }
-        self
+        Ok(self)
     }
 }
 
@@ -349,7 +383,13 @@ impl Launch {
             setup: ChildSetup::default(),
             jail: None,
             launcher: None,
+            evidence: None,
         }
+    }
+
+    pub(crate) fn with_setup_evidence(mut self, evidence: setup::Evidence) -> Self {
+        self.evidence = Some(evidence);
+        self
     }
 
     /// Adopt the trampoline's command and its report together.
@@ -360,7 +400,7 @@ impl Launch {
     ) -> Self {
         Self {
             launcher: Some(Launcher {
-                name: "ral's sandbox trampoline",
+                role: LauncherRole::RalTrampoline,
                 report,
                 #[cfg(target_os = "linux")]
                 diagnostics: None,
@@ -454,7 +494,16 @@ impl Launch {
             jail,
             ..
         } = self;
-        setup.install(&mut cmd);
+        let mut evidence = setup::Evidence::new().expect("test setup evidence");
+        setup.install(&mut cmd, &mut evidence);
+        use std::os::unix::process::CommandExt;
+        // SAFETY: retain the reader through earlier hooks, without child-side work.
+        unsafe {
+            cmd.pre_exec(move || {
+                let _ = &evidence;
+                Ok(())
+            });
+        }
         (cmd, jail)
     }
 
@@ -471,10 +520,14 @@ impl Launch {
             setup,
             jail,
             launcher,
+            evidence,
         } = self;
-        setup.install(&mut cmd);
-        let child = fork(cmd, launcher.as_ref(), |cmd| {
-            crate::process::spawn_with_pgid(cmd, step)
+        let mut evidence = evidence
+            .map_or_else(setup::Evidence::new, Ok)
+            .map_err(|e| prepare_io(PrepareStep::ReadinessMark, PrepareSubject::Child, &e))?;
+        setup.install(&mut cmd, &mut evidence);
+        let child = fork(cmd, launcher.as_ref(), evidence, |cmd, evidence| {
+            crate::process::group::spawn_with_evidence(cmd, step, evidence)
         })?;
         let hear = move |child: &mut crate::process::ChildHandle| {
             let Some(launcher) = launcher else {
@@ -515,16 +568,21 @@ impl Launch {
             setup,
             jail,
             launcher,
+            evidence,
         } = self;
         assert!(
             jail.is_none(),
             "a detached launch must not own a kept jail cgroup: its drop would kill the survivor"
         );
-        setup.install(&mut cmd);
+        let mut evidence = evidence
+            .map_or_else(setup::Evidence::new, Ok)
+            .map_err(|e| prepare_io(PrepareStep::DetachedHandshake, PrepareSubject::Child, &e))?;
+        setup.install(&mut cmd, &mut evidence);
         let survivor = fork(
             cmd,
             launcher.as_ref(),
-            crate::process::group::spawn_detached,
+            evidence,
+            crate::process::group::spawn_detached_with_evidence,
         )?;
         if let Some(launcher) = launcher {
             launcher.heard(scope, || None)?;
@@ -582,52 +640,92 @@ fn output(spawned: Spawned<crate::process::Group>) -> std::process::Output {
 
 /// Fork, then release the parent's child-only descriptors before anything
 /// is heard. A failed `execve` is the program's own, unless `launcher` was
-/// to run in its place: then it is the launcher's, and a refusal.
+/// to run in its place: then it is the launcher's, and a refusal. Ral's own
+/// callers refuse NULs earlier ([`nul_free`]); `Prepare` is the backstop for
+/// the rest.
 #[cfg(unix)]
 fn fork<T>(
     mut cmd: std::process::Command,
     launcher: Option<&Launcher>,
-    spawn: impl FnOnce(&mut std::process::Command) -> Result<T, crate::process::SpawnError>,
+    evidence: setup::Evidence,
+    spawn: impl FnOnce(
+        &mut std::process::Command,
+        &mut setup::Evidence,
+    ) -> Result<T, crate::process::SpawnError>,
 ) -> Result<T, Unstarted> {
-    use crate::process::SpawnError::{Exec, Prepare};
-    let forked = spawn(&mut cmd);
+    use crate::process::SpawnError::{Exec, Prepare, Setup};
+    let mut evidence = evidence;
+    let forked = spawn(&mut cmd, &mut evidence);
+    let subject = crate::fact::LaunchImageSubject::File(crate::path::shown(cmd.get_program()));
     drop(cmd);
     forked.map_err(|error| match (error, launcher) {
-        (Prepare(error), _) => unprepared(error),
+        (Prepare(error), _) => {
+            Unstarted::Refused(refused(evidence.reported_failure().unwrap_or_else(|| {
+                LaunchFailure::Launcher(match error.raw_os_error() {
+                    Some(_) => LauncherFailure::SpawnBeforeSetup(
+                        crate::fact::LauncherFailureSpawnBeforeSetup {
+                            subject,
+                            cause: OsFailure::from(&error),
+                        },
+                    ),
+                    None => LauncherFailure::NonNativeExecError(
+                        crate::fact::LauncherFailureNonNativeExecError {
+                            subject,
+                            cause: Box::new(crate::io::failure(&error)),
+                        },
+                    ),
+                })
+            })))
+        }
+        (Setup(failure), _) => Unstarted::Refused(refused(failure)),
         (Exec(error), None) => Unstarted::Program(error),
-        (Exec(error), Some(launcher)) => Unstarted::Refused(unavailable(format!(
-            "cannot start {}: {error}; the command never ran",
-            launcher.name
+        (Exec(error), Some(launcher)) => Unstarted::Refused(refused(LaunchFailure::Launcher(
+            LauncherFailure::Exec(crate::fact::LauncherFailureExec {
+                launcher: launcher.role,
+                cause: OsFailure::from(&error),
+            }),
         ))),
     })
 }
 
-/// `launcher`, ended before its trampoline spoke; `said`, what it left on a
-/// stderr ral reads.
 #[cfg(unix)]
-fn vanished(launcher: &str, said: Option<String>) -> Error {
-    unavailable(match said {
-        Some(said) => format!("{launcher} ended before the program started: {said}"),
-        None => format!(
-            "{launcher} ended before the program started; what it said, if anything, went \
-             to the command's stderr"
-        ),
-    })
-}
-
-/// This host cannot establish the confinement or budget the active grant
-/// asks for: an axis no backend here enforces, an envelope binary that was
-/// not there to pin at boot, an envelope or trampoline that failed.  Nothing
-/// ran, so it is never phrased as the command's fault.
-pub(crate) fn unavailable(why: impl std::fmt::Display) -> Error {
-    Error::new(format!("sandbox confinement unavailable: {why}"))
-}
-
-/// One of ral's own steps before the program could start failed.
-fn unprepared(why: impl std::fmt::Display) -> Unstarted {
-    Unstarted::Refused(Error::new(format!(
-        "ral could not prepare the command's process: {why}; the command never ran"
+fn vanished(launcher: LauncherRole, stderr: Option<String>) -> Error {
+    refused(LaunchFailure::Launcher(LauncherFailure::DiedBeforeReport(
+        crate::fact::LauncherFailureDiedBeforeReport { launcher, stderr },
     )))
+}
+
+/// Refuse `text` if it holds a NUL: no process byte string can.
+pub(crate) fn nul_free(
+    text: &OsStr,
+    step: PrepareStep,
+    subject: PrepareSubject,
+) -> Result<(), Error> {
+    if text.as_encoded_bytes().contains(&0) {
+        Err(refused(LaunchFailure::Prepare(PrepareFailure {
+            step,
+            subject,
+            cause: PrepareCause::Invalid(crate::fact::PrepareInvalid::Nul),
+        })))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn refused(failure: LaunchFailure) -> Error {
+    Error::new(Reason::Launch(Box::new(failure)))
+}
+
+pub(crate) fn prepare_io(
+    step: PrepareStep,
+    subject: PrepareSubject,
+    error: &std::io::Error,
+) -> Error {
+    refused(LaunchFailure::Prepare(PrepareFailure {
+        step,
+        subject,
+        cause: PrepareCause::Io(Box::new(crate::io::failure(error))),
+    }))
 }
 
 /// A child created and not yet landed. Unless it lands, its drop kills every
@@ -644,7 +742,9 @@ struct Unlanded<'a> {
 impl Unlanded<'_> {
     /// Ask an envelope for its payload's group, and hold the answer.
     fn name(&mut self, payload: Option<PayloadPgid>) -> Result<(), Unstarted> {
-        self.payload = payload.map_or(Ok(None), |ask| ask()).map_err(unavailable)?;
+        self.payload = payload
+            .map_or(Ok(None), |ask| ask())
+            .map_err(|e| refused(LaunchFailure::Launcher(LauncherFailure::PayloadGroup(e))))?;
         Ok(())
     }
 
@@ -735,10 +835,63 @@ mod regression_tests;
 #[cfg(all(test, unix))]
 mod tests {
     use super::{Launch, Unstarted};
+    use crate::environ::ChildEnv;
+    use crate::fact::FailureCode as _;
+    use crate::fact::{
+        LaunchFailure, PrepareCause, PrepareFailure, PrepareStep, PrepareSubject, Reason,
+    };
     use crate::process::{CancelCause, DurableRoot, Membership, Pgid, Placement, Scope, ScopeNode};
 
     fn unstopped() -> ScopeNode {
         DurableRoot::default().child()
+    }
+
+    /// `situate` refuses the pair with a NUL fact about `subject`.
+    fn situate_refuses(key: &str, value: &str, subject: &PrepareSubject) {
+        let cwd = crate::test_helper::process_cwd();
+        let error = Launch::new("/bin/true")
+            .situate(ChildEnv {
+                cwd: cwd.as_path(),
+                set: vec![(key.as_ref(), value.as_ref())],
+                unset: Vec::new(),
+            })
+            .map(drop)
+            .unwrap_err();
+        let Reason::Launch(failure) = &error.reason else {
+            panic!("a NUL is a launch refusal");
+        };
+        assert!(matches!(&**failure, LaunchFailure::Prepare(PrepareFailure {
+            step: PrepareStep::Environment, subject: found, cause: PrepareCause::Invalid(crate::fact::PrepareInvalid::Nul),
+        }) if found == subject));
+        assert_eq!(error.failure_code().get(), 1);
+    }
+
+    #[test]
+    fn situate_refuses_a_nul_value() {
+        situate_refuses("K", "a\0b", &PrepareSubject::EnvironmentValue("K".into()));
+    }
+
+    #[test]
+    fn situate_refuses_a_nul_key() {
+        let subject = PrepareSubject::EnvironmentKey(crate::path::shown("K\0"));
+        situate_refuses("K\0", "v", &subject);
+    }
+
+    #[test]
+    fn a_failed_session_limit_reports_its_exact_subject() {
+        let mut launch = Launch::new("/bin/true");
+        launch.limit_session(crate::process::ChildLimits {
+            open_files: Some(u64::MAX - 1),
+            ..Default::default()
+        });
+        let Err(Unstarted::Refused(error)) = launch.spawn(Placement::Inherit, &unstopped()) else {
+            panic!("a soft limit above the hard limit must fail");
+        };
+        assert!(matches!(&error.reason, crate::fact::Reason::Launch(failure)
+        if matches!(**failure, crate::fact::LaunchFailure::Prepare(crate::fact::PrepareFailure {
+            step: crate::fact::PrepareStep::SessionLimit,
+            subject: crate::fact::PrepareSubject::SessionLimit(crate::fact::SessionLimit::OpenFiles), ..
+        }))));
     }
 
     /// A group nobody leads: no pid reaches `i32::MAX`.
@@ -809,7 +962,14 @@ mod tests {
         else {
             panic!("a group nobody leads cannot be joined");
         };
-        assert!(why.describe().contains("could not prepare"), "{why}");
+        assert!(matches!(&why.reason, crate::fact::Reason::Launch(failure)
+        if matches!(**failure, crate::fact::LaunchFailure::Prepare(crate::fact::PrepareFailure {
+            step: crate::fact::PrepareStep::Group, ..
+        }))));
+        assert!(
+            why.describe().contains("place the child in process group"),
+            "{why}"
+        );
 
         let missing =
             Launch::new("ral-no-such-program-exists").spawn(Placement::Inherit, &unstopped());
@@ -836,7 +996,14 @@ mod tests {
         let Err(Unstarted::Refused(why)) = confined("/bin/sh").spawn(nobody(), &unstopped()) else {
             panic!("a group nobody leads cannot be joined, confined or not");
         };
-        assert!(why.describe().contains("could not prepare"), "{why}");
+        assert!(matches!(&why.reason, crate::fact::Reason::Launch(failure)
+        if matches!(**failure, crate::fact::LaunchFailure::Prepare(crate::fact::PrepareFailure {
+            step: crate::fact::PrepareStep::Group, ..
+        }))));
+        assert!(
+            why.describe().contains("place the child in process group"),
+            "{why}"
+        );
 
         let missing =
             confined("ral-no-such-program-exists").spawn(Placement::Inherit, &unstopped());
@@ -846,12 +1013,8 @@ mod tests {
                 missing.err()
             );
         };
-        assert!(
-            why.describe().starts_with(
-                "sandbox confinement unavailable: cannot start ral's sandbox trampoline"
-            ),
-            "{why}"
-        );
+        assert!(matches!(&why.reason, crate::fact::Reason::Launch(failure)
+            if matches!(**failure, crate::fact::LaunchFailure::Launcher(crate::fact::LauncherFailure::Exec(_)))));
     }
 
     /// A synthetic envelope report isolates placement from backend support;
@@ -870,7 +1033,7 @@ mod tests {
             launch.args(["-c", "exit 0"]);
             let launch = super::EnvelopedLaunch::synthetic(
                 launch.cmd,
-                "/bin/sh",
+                crate::fact::LauncherRole::Bwrap,
                 None,
                 crate::process::report::Report::new(reader, writer.into()),
             );
@@ -1060,27 +1223,35 @@ fn env_key(key: &OsStr) -> EnvKey {
 #[cfg(windows)]
 mod windows_args {
     use std::ffi::OsStr;
-    use std::io;
     use std::os::windows::ffi::OsStrExt;
 
     pub(super) fn make_command_line(
         program: &OsStr,
         args: &[std::ffi::OsString],
-    ) -> io::Result<Vec<u16>> {
-        ensure_no_nuls(program)?;
+    ) -> Result<Vec<u16>, crate::fact::PrepareFailure> {
+        use crate::fact::{PrepareCause, PrepareFailure, PrepareStep, PrepareSubject};
+        ensure_no_nuls(program).map_err(|cause| PrepareFailure {
+            step: PrepareStep::Argv,
+            subject: PrepareSubject::Argument(0usize.into()),
+            cause: PrepareCause::Invalid(cause),
+        })?;
         let mut cmd = Vec::new();
         cmd.push(u16::from(b'"'));
         cmd.extend(program.encode_wide());
         cmd.push(u16::from(b'"'));
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
             cmd.push(u16::from(b' '));
-            append_arg(&mut cmd, arg)?;
+            append_arg(&mut cmd, arg).map_err(|cause| PrepareFailure {
+                step: PrepareStep::Argv,
+                subject: PrepareSubject::Argument((index + 1).into()),
+                cause: PrepareCause::Invalid(cause),
+            })?;
         }
         cmd.push(0);
         Ok(cmd)
     }
 
-    fn append_arg(cmd: &mut Vec<u16>, arg: &OsStr) -> io::Result<()> {
+    fn append_arg(cmd: &mut Vec<u16>, arg: &OsStr) -> Result<(), crate::fact::PrepareInvalid> {
         ensure_no_nuls(arg)?;
         let units: Vec<u16> = arg.encode_wide().collect();
         let quote = units.is_empty()
@@ -1109,12 +1280,9 @@ mod windows_args {
         Ok(())
     }
 
-    pub(super) fn ensure_no_nuls(s: &OsStr) -> io::Result<()> {
+    pub(super) fn ensure_no_nuls(s: &OsStr) -> Result<(), crate::fact::PrepareInvalid> {
         if s.encode_wide().any(|c| c == 0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Windows process argument contains a NUL byte",
-            ));
+            return Err(crate::fact::PrepareInvalid::Nul);
         }
         Ok(())
     }
@@ -1131,9 +1299,15 @@ mod windows_args {
 #[cfg(windows)]
 mod windows {
     use super::{
-        EnvEdit, Launch, SecurityCapabilitiesAttr, StdioSpec, Unstarted, unprepared, windows_args,
+        EnvEdit, Launch, SecurityCapabilitiesAttr, StdioSpec, Unstarted, prepare_io, refused,
+        windows_args,
     };
     use crate::error::Error;
+    use crate::fact::{
+        BudgetFailure, BudgetFailureSetBudget, BudgetSetFailure, BudgetSubject, LaunchFailure,
+        OsFailure, PrepareCause, PrepareFailure, PrepareInvalid, PrepareStep, PrepareSubject,
+        StandardStream,
+    };
     use crate::process::ChildHandle;
     use crate::process::group::Step;
     use crate::process::outcome::KILL_EXIT_CODE;
@@ -1169,7 +1343,7 @@ mod windows {
     ) -> Result<ChildHandle, Unstarted> {
         reject_batch(&launch.program)?;
         let prepared = crate::process::group::prepare_group(step)
-            .map_err(|e| Error::new(format!("cannot prepare the child's Job Object: {e}")))?;
+            .map_err(|e| refused(LaunchFailure::Prepare(e)))?;
         match launched(launch, step, &prepared, caps) {
             Ok(child) => {
                 crate::process::group::register_prepared_group(prepared, &child);
@@ -1195,15 +1369,14 @@ mod windows {
             .then(own_job)
             .transpose()?;
         let job = grouped.or_else(|| own.as_ref().map(|job| job.as_raw_handle() as HANDLE));
-        if let (true, Some(job)) = (launch.process_cap, job)
-            && !crate::process::group::set_active_process_limit(
+        if let (true, Some(job)) = (launch.process_cap, job) {
+            crate::process::group::set_active_process_limit(
                 job,
                 crate::process::limits::ACTIVE_PROCESS_CAP,
             )
-        {
-            return Err(
-                crate::process::limits::unbudgeted("cannot cap the child's Job Object").into(),
-            );
+            .map_err(|error| {
+                budget_error(BudgetSetFailure::SetJobLimit(OsFailure::from(&error)))
+            })?;
         }
         let created = spawn_inner(launch, step, job.is_some(), caps)?;
         if let Some(job) = job {
@@ -1214,10 +1387,29 @@ mod windows {
         Ok(created.into_child())
     }
 
+    fn budget_error(cause: BudgetSetFailure) -> Error {
+        refused(LaunchFailure::Budget(BudgetFailure::SetBudget(
+            BudgetFailureSetBudget {
+                subject: BudgetSubject::ChildJob,
+                limit: u64::from(crate::process::limits::ACTIVE_PROCESS_CAP).into(),
+                cause,
+            },
+        )))
+    }
+
+    fn invalid(step: PrepareStep, subject: PrepareSubject, cause: PrepareInvalid) -> Error {
+        refused(LaunchFailure::Prepare(PrepareFailure {
+            step,
+            subject,
+            cause: PrepareCause::Invalid(cause),
+        }))
+    }
+
     fn own_job() -> Result<OwnedHandle, Unstarted> {
         let job = unsafe { CreateJobObjectW(null(), null()) };
         if job.is_null() {
-            return Err(crate::process::limits::unbudgeted(io::Error::last_os_error()).into());
+            let error = io::Error::last_os_error();
+            return Err(budget_error(BudgetSetFailure::CreateJob(OsFailure::from(&error))).into());
         }
         // SAFETY: a fresh owning handle.
         Ok(unsafe { OwnedHandle::from_raw_handle(job) })
@@ -1239,7 +1431,7 @@ mod windows {
         /// Put the suspended child in `job`, then let it run; killed if
         /// either fails.
         fn enter(&self, job: HANDLE) -> Result<(), Unstarted> {
-            let refused = |what: &str| {
+            let fail = |step| {
                 let error = io::Error::last_os_error();
                 unsafe {
                     windows_sys::Win32::System::Threading::TerminateProcess(
@@ -1247,16 +1439,13 @@ mod windows {
                         1,
                     );
                 }
-                Unstarted::Refused(Error::new(format!("{what}: {error}")))
+                Unstarted::Refused(prepare_io(step, PrepareSubject::Child, &error))
             };
             if unsafe { AssignProcessToJobObject(job, self.process.as_raw_handle()) } == 0 {
-                return Err(refused(
-                    "could not place the child in its Job Object before start; is ral already \
-                     running in a restrictive Windows Job Object?",
-                ));
+                return Err(fail(PrepareStep::AssignJob));
             }
             if unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX {
-                return Err(refused("could not resume the child once in its Job Object"));
+                return Err(fail(PrepareStep::ResumeThread));
             }
             Ok(())
         }
@@ -1283,12 +1472,24 @@ mod windows {
             std::mem::replace(&mut launch.stdin, StdioSpec::Null),
             Stream::Stdin,
         )
-        .map_err(unprepared)?;
+        .map_err(|e| {
+            prepare_io(
+                PrepareStep::Stdio,
+                PrepareSubject::Stream(StandardStream::Stdin),
+                &e,
+            )
+        })?;
         let stdout = ChildStdio::lower(
             std::mem::replace(&mut launch.stdout, StdioSpec::Null),
             Stream::Stdout,
         )
-        .map_err(unprepared)?;
+        .map_err(|e| {
+            prepare_io(
+                PrepareStep::Stdio,
+                PrepareSubject::Stream(StandardStream::Stdout),
+                &e,
+            )
+        })?;
         let stderr_spec = std::mem::replace(&mut launch.stderr, StdioSpec::Null);
         let stderr = if launch.stderr_to_stdout {
             drop(stderr_spec);
@@ -1303,7 +1504,13 @@ mod windows {
                 _owned_child: None,
             }
         } else {
-            ChildStdio::lower(stderr_spec, Stream::Stderr).map_err(unprepared)?
+            ChildStdio::lower(stderr_spec, Stream::Stderr).map_err(|e| {
+                prepare_io(
+                    PrepareStep::Stdio,
+                    PrepareSubject::Stream(StandardStream::Stderr),
+                    &e,
+                )
+            })?
         };
 
         let mut inherited = vec![stdin.child, stdout.child, stderr.child];
@@ -1315,15 +1522,30 @@ mod windows {
             launch.arg0.as_ref().unwrap_or(&launch.program),
             &launch.args,
         )
-        .map_err(unprepared)?;
-        let application = wide_null(&launch.program).map_err(unprepared)?;
+        .map_err(|e| refused(LaunchFailure::Prepare(e)))?;
+        let application = wide_null(&launch.program).map_err(|e| {
+            invalid(
+                PrepareStep::Application,
+                PrepareSubject::Program(crate::path::shown(&launch.program)),
+                e,
+            )
+        })?;
         let cwd = launch
             .cwd
             .as_ref()
             .map(|p| wide_null(p.as_os_str()))
             .transpose()
-            .map_err(unprepared)?;
-        let mut env = environment_block(&launch.env).map_err(unprepared)?;
+            .map_err(|e| {
+                invalid(
+                    PrepareStep::WorkingDirectory,
+                    PrepareSubject::Path(crate::path::shown(
+                        launch.cwd.as_ref().expect("cwd validation requires cwd"),
+                    )),
+                    e,
+                )
+            })?;
+        let mut env =
+            environment_block(&launch.env).map_err(|e| refused(LaunchFailure::Prepare(e)))?;
 
         let attr_count: u32 = if caps.is_some() { 2 } else { 1 };
         let mut capabilities = caps.map_or_else(Vec::new, |caps| {
@@ -1341,12 +1563,15 @@ mod windows {
                     .expect("a projection declares a handful of capability SIDs, not four billion"),
                 Reserved: 0,
             });
-        let mut attrs = AttributeList::new(attr_count).map_err(unprepared)?;
-        attrs.update_handle_list(&inherited).map_err(unprepared)?;
+        let mut attrs = AttributeList::new(attr_count)
+            .map_err(|e| prepare_io(PrepareStep::AttributeList, PrepareSubject::Child, &e))?;
+        attrs
+            .update_handle_list(&inherited)
+            .map_err(|e| prepare_io(PrepareStep::HandleList, PrepareSubject::Child, &e))?;
         if let Some(value) = security_caps_value.as_ref() {
-            attrs
-                .update_security_capabilities(value)
-                .map_err(unprepared)?;
+            attrs.update_security_capabilities(value).map_err(|e| {
+                prepare_io(PrepareStep::SecurityCapabilities, PrepareSubject::Child, &e)
+            })?;
         }
 
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
@@ -1367,7 +1592,8 @@ mod windows {
         }
 
         let guard = crate::process::spawn_lock::lock_inheritance();
-        let inheritable = InheritableHandles::set(&inherited).map_err(unprepared)?;
+        let inheritable = InheritableHandles::set(&inherited)
+            .map_err(|e| prepare_io(PrepareStep::HandleInheritance, PrepareSubject::Child, &e))?;
         #[cfg(test)]
         crate::process::spawn_lock::test_phase::pause();
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -1412,16 +1638,9 @@ mod windows {
     /// encoding (the CVE-2024-24576 class).  A `cmd /c` wrapper only moves it.
     fn reject_batch(program: &OsStr) -> Result<(), Error> {
         if crate::path::is_batch_image(program) {
-            return Err(Error::new(format!(
-                "refusing to launch '{}': .bat/.cmd images are not supported on the \
-                     raw Windows launch path. ral will not synthesize a `cmd /c` wrapper \
-                     to run it, because batch-file argument quoting has no safe general \
-                     encoding (the CVE-2024-24576 class of bug): a crafted argument could \
-                     inject additional commands through cmd.exe's own escaping rules. Invoke \
-                     the batch file through cmd.exe yourself if you accept that risk, or run \
-                     the underlying program directly.",
-                crate::path::shown(program)
-            )));
+            return Err(refused(LaunchFailure::BatchImage(crate::path::shown(
+                program,
+            ))));
         }
         Ok(())
     }
@@ -1601,9 +1820,7 @@ mod windows {
                 )
             };
             if ok == 0 {
-                return Err(io::Error::other(
-                    "could not launch child with an explicit handle list",
-                ));
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         }
@@ -1624,9 +1841,7 @@ mod windows {
                 )
             };
             if ok == 0 {
-                return Err(io::Error::other(
-                    "could not launch sandboxed child with AppContainer security capabilities",
-                ));
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         }
@@ -1672,14 +1887,14 @@ mod windows {
         }
     }
 
-    fn wide_null(s: &OsStr) -> io::Result<Vec<u16>> {
+    fn wide_null(s: &OsStr) -> Result<Vec<u16>, PrepareInvalid> {
         windows_args::ensure_no_nuls(s)?;
         Ok(s.encode_wide().chain([0]).collect())
     }
 
     fn environment_block(
         edits: &std::collections::BTreeMap<super::EnvKey, EnvEdit>,
-    ) -> io::Result<Vec<u16>> {
+    ) -> Result<Vec<u16>, PrepareFailure> {
         let mut env = std::collections::BTreeMap::<super::EnvKey, OsString>::new();
         for (k, v) in crate::host::vars_os() {
             env.insert(super::env_key(&k), v);
@@ -1696,8 +1911,18 @@ mod windows {
         }
         let mut block = Vec::new();
         for (k, v) in env {
-            windows_args::ensure_no_nuls(&k.original)?;
-            windows_args::ensure_no_nuls(&v)?;
+            windows_args::ensure_no_nuls(&k.original).map_err(|cause| PrepareFailure {
+                step: PrepareStep::Environment,
+                subject: PrepareSubject::EnvironmentKey(k.original.to_string_lossy().into_owned()),
+                cause: PrepareCause::Invalid(cause),
+            })?;
+            windows_args::ensure_no_nuls(&v).map_err(|cause| PrepareFailure {
+                step: PrepareStep::Environment,
+                subject: PrepareSubject::EnvironmentValue(
+                    k.original.to_string_lossy().into_owned(),
+                ),
+                cause: PrepareCause::Invalid(cause),
+            })?;
             block.extend(k.original.encode_wide());
             block.push(u16::from(b'='));
             block.extend(v.encode_wide());

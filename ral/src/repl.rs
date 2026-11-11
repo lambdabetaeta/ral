@@ -135,9 +135,9 @@ pub(crate) fn engine_at(
         runtime: test_runtime,
         root: dressed_root,
         narrow: |_, _| {
-            Err(ral_core::error::Error::new(
-                "a test engine makes no child sessions",
-            ))
+            Err(ral_core::error::Error::new(ral_core::fact::Reason::State(
+                Box::new(ral_core::fact::StateFailure::NoChildEngines),
+            )))
         },
     }];
     RUNTIME.set(Some(runtime));

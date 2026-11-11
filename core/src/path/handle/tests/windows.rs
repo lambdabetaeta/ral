@@ -608,7 +608,10 @@ fn a_component_renamed_is_adopted_and_one_moved_is_refused() {
     let err = host::stored_name(&parent.node.held.info, &name("new"), file, volume)
         .map(|_| ())
         .unwrap_err();
-    assert!(err.to_string().contains("moved during the walk"), "{err}");
+    assert!(matches!(
+        *crate::io::failure(&err).leaf,
+        crate::fact::IoLeaf::Path(crate::fact::PathIoLeaf::EntryMoved(_))
+    ));
 }
 
 /// The commit renames the staged sibling by its handle with the held

@@ -186,9 +186,9 @@ fn write_sliced(
             #[cfg(windows)]
             Err(e) if super::aborted(&e) => {
                 scope.poll()?;
-                return Err(WriteFault::Io(io::Error::other(
-                    "the write was aborted by a teardown; how much of its chunk landed is unknown",
-                )));
+                return Err(WriteFault::Io(io::Error::other(crate::fact::IoCause::new(
+                    crate::fact::IoLeaf::WriteAbortedUnknownPrefix((&e).into()),
+                ))));
             }
             Err(e) => return Err(e.into()),
         }

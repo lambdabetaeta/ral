@@ -3,7 +3,7 @@
 
 use super::join;
 use crate::error::Error;
-use crate::fact::{Reason, Worker};
+use crate::fact::{Reason, StateFailure, Worker, WorkerCap};
 use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
@@ -36,15 +36,17 @@ pub(super) fn spawn_child<F>(
 where
     F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
 {
-    let verb = match birth {
-        Birth::Spawn { .. } => "spawn",
-        Birth::Watch { .. } => "watch",
-    };
     let reservation = shell
         .local
         .workers
         .reserve(mooring.worker_cap)
-        .map_err(|err| Error::new(format!("{verb}: {err}")))?;
+        .map_err(|err| {
+            Error::new(Reason::State(Box::new(StateFailure::WorkerCap(
+                WorkerCap {
+                    limit: err.0.into(),
+                },
+            ))))
+        })?;
 
     let Cradle { under, brood } = &shell.local.cradle;
     let node = under.child();
@@ -145,9 +147,7 @@ where
     );
     match gather {
         Some(brood) => brood.enrol(handle.clone()).map_err(|EnrolClosed| {
-            Error::new(format!(
-                "{verb}: the enclosing gather has ended; the new worker was cancelled"
-            ))
+            Error::new(Reason::State(Box::new(StateFailure::GatherClosed)))
         })?,
         // After the reservation, never before: a cap-refused spawn observes no
         // birth, so no phantom worker reaches an orphan join.

@@ -4,8 +4,9 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
+use crate::fact::BlockRole;
 use crate::shell::runtime::{
-    Binding, Closure, Env, FrameHandle, HandlerEntry, HandlerRole, Settled, Value,
+    Binding, Closure, Env, FrameHandle, HandlerEntry, HandlerRole, Settled, Value, ill_typed,
 };
 
 impl Shell {
@@ -56,12 +57,10 @@ impl Shell {
     /// # Errors
     /// A block fails type checking, including obligations checked at closure.
     /// Nothing is installed on refusal.
-    pub fn bind_value(
-        &mut self,
-        name: String,
-        value: Value,
-    ) -> Result<(), Box<crate::typecheck::TypeError>> {
-        let scheme = self.value_scheme(&value)?;
+    pub fn bind_value(&mut self, name: String, value: Value) -> Result<(), crate::error::Error> {
+        let scheme = self
+            .value_scheme(&value)
+            .map_err(|errors| ill_typed("bindings", BlockRole::Binding(name.clone()), &errors))?;
         self.env.bind(name.into(), Binding { value, scheme });
         Ok(())
     }

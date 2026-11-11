@@ -4,6 +4,11 @@
 //! whatever arrived ill-shaped; every protocol payload is typed through it.
 
 use crate::data::{FOValue, Finite};
+use crate::fact::{
+    Count, CountRule, DecodeCause, DecodeFailure, DecodeIntegerRange, DecodeIntegerTarget,
+    DecodeLength, Expected, Found, ShapeFailure, UnexpectedPayload, UnknownField, UnknownTag,
+    ValueShape,
+};
 use std::collections::BTreeMap;
 use std::num::NonZeroU8;
 use std::sync::Arc;
@@ -15,12 +20,22 @@ pub trait Datum: Sized {
     fn encode(self) -> FOValue;
 
     /// # Errors
-    /// A sentence naming the shape expected and the one that arrived.
-    fn decode(v: &FOValue) -> Result<Self, String>;
+    /// The rejected shape, value or domain constraint, with its data path.
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure>;
 }
 
-fn expected(what: &str, v: &FOValue) -> String {
-    format!("expected {what}, got {}", v.shape())
+fn expected(shape: ValueShape, v: &FOValue) -> DecodeFailure {
+    DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+        expected: Expected::Shape(shape),
+        found: Found::of(v),
+    }))
+}
+
+fn integer_range(value: i64, target: DecodeIntegerTarget) -> DecodeFailure {
+    DecodeFailure::new(DecodeCause::IntegerRange(DecodeIntegerRange {
+        value,
+        target,
+    }))
 }
 
 /// A tagged value; `Unit` is represented by an absent payload.
@@ -48,40 +63,46 @@ pub fn untag(v: &FOValue) -> Option<(&str, Option<&FOValue>)> {
 ///
 /// # Errors
 /// The field's absence, or its own decode error under its name.
-pub fn field<T: Datum>(v: &FOValue, key: &str) -> Result<T, String> {
-    let f = v
-        .field(key)
-        .ok_or_else(|| format!("no `{key} field in {}", v.shape()))?;
-    T::decode(f).map_err(|why| format!("`{key}: {why}"))
+pub fn field<T: Datum>(v: &FOValue, key: &str) -> Result<T, DecodeFailure> {
+    let FOValue::Map { entries } = v else {
+        return Err(expected(ValueShape::Map, v));
+    };
+    let mut values = entries.iter().filter(|(name, _)| name == key);
+    let (_, value) = values
+        .next()
+        .ok_or_else(|| DecodeFailure::new(DecodeCause::MissingField(key.into())))?;
+    if values.next().is_some() {
+        return Err(DecodeFailure::new(DecodeCause::DuplicateField(key.into())));
+    }
+    T::decode(value).map_err(|why| why.field(key))
 }
 
 /// Refuse a record whose keys are not exactly `keys`, each once.
 ///
 /// # Errors
 /// The first duplicate or unknown key, or a value that is not a record.
-pub fn exact_keys(v: &FOValue, keys: &[&str]) -> Result<(), String> {
+pub fn exact_keys(v: &FOValue, keys: &[&str]) -> Result<(), DecodeFailure> {
     let FOValue::Map { entries } = v else {
-        return Err(expected("a record", v));
+        return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+            expected: Expected::Record(keys.iter().map(|key| (*key).into()).collect()),
+            found: Found::of(v),
+        })));
     };
     let mut seen = std::collections::HashSet::new();
     for (k, _) in entries {
         if !keys.contains(&k.as_str()) {
-            return Err(unknown_key(k, keys));
+            return Err(DecodeFailure::new(DecodeCause::UnknownField(
+                UnknownField {
+                    field: k.clone(),
+                    offered: keys.iter().map(|key| (*key).into()).collect(),
+                },
+            )));
         }
         if !seen.insert(k.as_str()) {
-            return Err(format!("field `{k}` given twice: which one did you mean?"));
+            return Err(DecodeFailure::new(DecodeCause::DuplicateField(k.clone())));
         }
     }
     Ok(())
-}
-
-/// Name the key the writer most likely meant, else list them all.
-fn unknown_key(k: &str, keys: &[&str]) -> String {
-    if let Some(key) = crate::text::near_names(k, keys.iter().copied(), 1).first() {
-        return format!("unknown field `{k}`: did you mean `{key}`?");
-    }
-    let known: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
-    format!("unknown field `{k}`: expected {}", known.join(", "))
 }
 
 /// A [`Datum`] for a struct that is a record, one `field: "key"` per field.
@@ -113,7 +134,7 @@ macro_rules! record {
                 $crate::data::FOValue::Map { entries }
             }
 
-            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, $crate::fact::DecodeFailure> {
                 use $crate::data::datum::field;
                 $crate::data::datum::exact_keys(v, &[$($key),*])?;
                 Ok(Self { $($field: field(v, $key)?),* })
@@ -149,7 +170,7 @@ macro_rules! label {
                 $crate::data::datum::tag(<&str>::from(self), None)
             }
 
-            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, $crate::fact::DecodeFailure> {
                 let all = <$ty as $crate::data::datum::strum::VariantArray>::VARIANTS;
                 $crate::data::datum::labelled(v, all, |x| <&str>::from(*x))
             }
@@ -169,7 +190,12 @@ macro_rules! variant {
     (@dec $label:literal, $arm:path, $p:ident) => {
         match $p {
             None => Ok($arm),
-            Some(x) => Err(format!("`{} takes no payload, got {}", $label, x.shape())),
+            Some(x) => Err($crate::fact::DecodeFailure::new(
+                $crate::fact::DecodeCause::UnexpectedPayload($crate::fact::UnexpectedPayload {
+                    tag: $label.into(),
+                    found: $crate::fact::Found::of(x),
+                }),
+            )),
         }
     };
     (@dec $label:literal, $arm:path, $p:ident, $t:ty) => {
@@ -177,7 +203,7 @@ macro_rules! variant {
             $p.unwrap_or(&$crate::data::FOValue::Unit),
         )
         .map($arm)
-        .map_err(|why| format!("`{}: {why}", $label))
+        .map_err(|why| why.payload($label))
     };
     (typed $ty:ty { $($arm:ident $(($payload:ty))?: $label:literal),* $(,)? }) => {
         $crate::variant!($ty { $($arm $(($payload))?: $label),* });
@@ -203,16 +229,23 @@ macro_rules! variant {
                 }
             }
 
-            fn decode(v: &$crate::data::FOValue) -> Result<Self, String> {
+            fn decode(v: &$crate::data::FOValue) -> Result<Self, $crate::fact::DecodeFailure> {
                 match $crate::data::datum::untag(v) {
                     $(Some(($label, payload)) => {
                         $crate::variant!(@dec $label, Self::$arm, payload $(, $payload)?)
                     })*
-                    Some((other, _)) => Err(format!(
-                        "unknown tag `{other}: expected {}",
-                        [$(concat!("`", $label)),*].join(", ")
+                    Some((other, _)) => Err($crate::fact::DecodeFailure::new(
+                        $crate::fact::DecodeCause::UnknownTag($crate::fact::UnknownTag {
+                            tag: other.into(),
+                            offered: vec![$($label.into()),*],
+                        }),
                     )),
-                    None => Err(format!("expected a tag, got {}", v.shape())),
+                    None => Err($crate::fact::DecodeFailure::new(
+                        $crate::fact::DecodeCause::Shape($crate::fact::ShapeFailure {
+                            expected: $crate::fact::Expected::Tags(vec![$($label.into()),*]),
+                            found: $crate::fact::Found::of(v),
+                        }),
+                    )),
                 }
             }
         }
@@ -222,20 +255,38 @@ macro_rules! variant {
 /// The variant of `all` whose label `v` is, for [`label!`].
 ///
 /// # Errors
-/// A sentence naming the labels expected and the shape that arrived.
+/// An unknown tag, an unexpected payload, or a value that is not a tag.
 pub fn labelled<T: Copy>(
     v: &FOValue,
     all: &[T],
     label: impl Fn(&T) -> &'static str,
-) -> Result<T, String> {
-    match untag(v) {
-        Some((l, None)) => all.iter().find(|x| label(x) == l).copied(),
-        _ => None,
+) -> Result<T, DecodeFailure> {
+    let offered = || all.iter().map(|x| label(x).to_string()).collect();
+    let Some((tag, payload)) = untag(v) else {
+        return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+            expected: Expected::Tags(offered()),
+            found: Found::of(v),
+        })));
+    };
+    let value = all
+        .iter()
+        .find(|x| label(x) == tag)
+        .copied()
+        .ok_or_else(|| {
+            DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                tag: tag.into(),
+                offered: offered(),
+            }))
+        })?;
+    if let Some(payload) = payload {
+        return Err(DecodeFailure::new(DecodeCause::UnexpectedPayload(
+            UnexpectedPayload {
+                tag: tag.into(),
+                found: Found::of(payload),
+            },
+        )));
     }
-    .ok_or_else(|| {
-        let known: Vec<_> = all.iter().map(|x| format!("`{}", label(x))).collect();
-        format!("expected one of {}, got {}", known.join(", "), v.shape())
-    })
+    Ok(value)
 }
 
 impl Datum for () {
@@ -243,10 +294,10 @@ impl Datum for () {
         FOValue::Unit
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         match v {
             FOValue::Unit => Ok(()),
-            _ => Err(expected("()", v)),
+            _ => Err(expected(ValueShape::Unit, v)),
         }
     }
 }
@@ -256,9 +307,9 @@ impl Datum for u8 {
         FOValue::Int { value: self.into() }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        let n = v.as_int().ok_or_else(|| expected("an Int", v))?;
-        Self::try_from(n).map_err(|_| format!("{n} is not a byte (0..=255)"))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
+        Self::try_from(n).map_err(|_| integer_range(n, DecodeIntegerTarget::Byte))
     }
 }
 
@@ -269,12 +320,12 @@ impl Datum for NonZeroU8 {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        let n = v.as_int().ok_or_else(|| expected("an Int", v))?;
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
         u8::try_from(n)
             .ok()
             .and_then(Self::new)
-            .ok_or_else(|| format!("{n} is not a failure status (1..=255)"))
+            .ok_or_else(|| integer_range(n, DecodeIntegerTarget::FailureStatus))
     }
 }
 
@@ -283,7 +334,7 @@ impl Datum for FOValue {
         self
     }
 
-    fn decode(v: &Self) -> Result<Self, String> {
+    fn decode(v: &Self) -> Result<Self, DecodeFailure> {
         Ok(v.clone())
     }
 }
@@ -311,10 +362,10 @@ impl Datum for String {
         FOValue::String { value: self }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         v.as_str()
             .map(str::to_string)
-            .ok_or_else(|| expected("a Str", v))
+            .ok_or_else(|| expected(ValueShape::String, v))
     }
 }
 
@@ -323,8 +374,8 @@ impl Datum for bool {
         FOValue::Bool { value: self }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_bool().ok_or_else(|| expected("a Bool", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        v.as_bool().ok_or_else(|| expected(ValueShape::Bool, v))
     }
 }
 
@@ -333,14 +384,13 @@ impl Datum for i32 {
         FOValue::Int { value: self.into() }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_int()
-            .and_then(|n| Self::try_from(n).ok())
-            .ok_or_else(|| expected("an exit status", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
+        Self::try_from(n).map_err(|_| integer_range(n, DecodeIntegerTarget::I32))
     }
 }
 
-/// Saturating at `i64::MAX`: a count that large is already a lie.
+/// Legacy integer encoding saturates at `i64::MAX`; new failure counts use `Count`.
 impl Datum for u64 {
     fn encode(self) -> FOValue {
         FOValue::Int {
@@ -348,10 +398,9 @@ impl Datum for u64 {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_int()
-            .and_then(|n| Self::try_from(n).ok())
-            .ok_or_else(|| expected("a non-negative Int", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
+        Self::try_from(n).map_err(|_| integer_range(n, DecodeIntegerTarget::U64))
     }
 }
 
@@ -360,8 +409,9 @@ impl Datum for usize {
         u64::try_from(self).unwrap_or(u64::MAX).encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        Self::try_from(u64::decode(v)?).map_err(|_| expected("an Int this host can index", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
+        Self::try_from(n).map_err(|_| integer_range(n, DecodeIntegerTarget::Usize))
     }
 }
 
@@ -373,11 +423,26 @@ impl<T: Datum> Datum for Option<T> {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         match untag(v) {
             Some(("none", None)) => Ok(None),
-            Some(("some", payload)) => T::decode(payload.unwrap_or(&FOValue::Unit)).map(Some),
-            _ => Err(expected("`none or `some", v)),
+            Some(("none", Some(payload))) => Err(DecodeFailure::new(
+                DecodeCause::UnexpectedPayload(UnexpectedPayload {
+                    tag: "none".into(),
+                    found: Found::of(payload),
+                }),
+            )),
+            Some(("some", payload)) => T::decode(payload.unwrap_or(&FOValue::Unit))
+                .map(Some)
+                .map_err(|why| why.payload("some")),
+            Some((tag, _)) => Err(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                tag: tag.into(),
+                offered: vec!["none".into(), "some".into()],
+            }))),
+            None => Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Tags(vec!["none".into(), "some".into()]),
+                found: Found::of(v),
+            }))),
         }
     }
 }
@@ -387,7 +452,7 @@ impl<T: Datum> Datum for Box<T> {
         (*self).encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         T::decode(v).map(Self::new)
     }
 }
@@ -397,8 +462,8 @@ impl Datum for i64 {
         FOValue::Int { value: self }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_int().ok_or_else(|| expected("an Int", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        v.as_int().ok_or_else(|| expected(ValueShape::Int, v))
     }
 }
 
@@ -407,10 +472,10 @@ impl Datum for Finite {
         FOValue::Float { value: self }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         match v {
             FOValue::Float { value } => Ok(*value),
-            _ => Err(expected("a Float", v)),
+            _ => Err(expected(ValueShape::Float, v)),
         }
     }
 }
@@ -420,10 +485,9 @@ impl Datum for u32 {
         FOValue::Int { value: self.into() }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_int()
-            .and_then(|n| Self::try_from(n).ok())
-            .ok_or_else(|| expected("a non-negative Int below 2^32", v))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let n = i64::decode(v)?;
+        Self::try_from(n).map_err(|_| integer_range(n, DecodeIntegerTarget::U32))
     }
 }
 
@@ -434,10 +498,10 @@ impl Datum for Arc<str> {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         v.as_str()
             .map(Self::from)
-            .ok_or_else(|| expected("a Str", v))
+            .ok_or_else(|| expected(ValueShape::String, v))
     }
 }
 
@@ -449,18 +513,13 @@ impl<T: Datum> Datum for BTreeMap<String, T> {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let FOValue::Map { entries } = v else {
-            return Err(expected("a record", v));
+            return Err(expected(ValueShape::Map, v));
         };
         entries
             .iter()
-            .map(|(k, x)| {
-                Ok((
-                    k.clone(),
-                    T::decode(x).map_err(|why| format!("`{k}: {why}"))?,
-                ))
-            })
+            .map(|(k, x)| Ok((k.clone(), T::decode(x).map_err(|why| why.field(k))?)))
             .collect()
     }
 }
@@ -472,12 +531,12 @@ impl<T: Datum> Datum for Vec<T> {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         v.as_list()
-            .ok_or_else(|| expected("a list", v))?
+            .ok_or_else(|| expected(ValueShape::List, v))?
             .iter()
             .enumerate()
-            .map(|(i, x)| T::decode(x).map_err(|why| format!("element {i}: {why}")))
+            .map(|(i, x)| T::decode(x).map_err(|why| why.index(Count::from(i))))
             .collect()
     }
 }
@@ -490,10 +549,17 @@ impl<A: Datum, B: Datum> Datum for (A, B) {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match v.as_list() {
-            Some([a, b]) => Ok((A::decode(a)?, B::decode(b)?)),
-            _ => Err(expected("a list of 2 elements", v)),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let items = v.as_list().ok_or_else(|| expected(ValueShape::List, v))?;
+        match items {
+            [a, b] => Ok((
+                A::decode(a).map_err(|why| why.index(Count::from_u64(0)))?,
+                B::decode(b).map_err(|why| why.index(Count::from_u64(1)))?,
+            )),
+            _ => Err(DecodeFailure::new(DecodeCause::Length(DecodeLength {
+                expected: CountRule::Exactly(Count::from_u64(2)),
+                got: Count::from(items.len()),
+            }))),
         }
     }
 }
@@ -529,12 +595,34 @@ mod tests {
             Carried(()): "carried",
             Number(i64): "number",
         });
-        assert_eq!(
-            Carrier::decode(&tag("carried", None)),
-            Ok(Carrier::Carried(()))
-        );
+        for payload in [None, Some(Box::new(FOValue::Unit))] {
+            assert_eq!(
+                Carrier::decode(&FOValue::Variant {
+                    label: "carried".into(),
+                    payload: payload.clone()
+                }),
+                Ok(Carrier::Carried(()))
+            );
+            assert_eq!(
+                Option::<()>::decode(&FOValue::Variant {
+                    label: "some".into(),
+                    payload
+                }),
+                Ok(Some(()))
+            );
+        }
         let why = Carrier::decode(&tag("number", None)).unwrap_err();
-        assert!(why.starts_with("`number:"), "{why}");
+        assert_eq!(
+            why.path,
+            vec![crate::fact::DataStep::Payload("number".into())]
+        );
+        assert!(matches!(
+            *why.cause,
+            DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Int),
+                found: Found::Unit,
+            })
+        ));
         assert_eq!(Option::<()>::decode(&tag("some", None)), Ok(Some(())));
         assert!(Option::<i64>::decode(&tag("some", None)).is_err());
     }
@@ -554,10 +642,182 @@ mod tests {
         for n in [-1_i64, 256] {
             assert_eq!(
                 u8::decode(&n.encode()),
-                Err(format!("{n} is not a byte (0..=255)"))
+                Err(integer_range(n, DecodeIntegerTarget::Byte))
             );
         }
         assert!(u8::decode(&FOValue::Unit).is_err());
         assert_eq!(u8::ty(), Ty::int());
+    }
+
+    #[test]
+    fn records_lists_and_payloads_keep_outermost_first_paths() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Envelope {
+            values: Vec<Option<(i64, bool)>>,
+        }
+        record!(Envelope { values: "values" });
+        let value = FOValue::Map {
+            entries: vec![(
+                "values".into(),
+                FOValue::List {
+                    items: vec![tag(
+                        "some",
+                        Some(FOValue::List {
+                            items: vec![1_i64.encode(), "bad".to_string().encode()],
+                        }),
+                    )],
+                },
+            )],
+        };
+        let failure = Envelope::decode(&value).unwrap_err();
+        assert_eq!(
+            failure.path,
+            vec![
+                crate::fact::DataStep::Field("values".into()),
+                crate::fact::DataStep::Index(Count::from_u64(0)),
+                crate::fact::DataStep::Payload("some".into()),
+                crate::fact::DataStep::Index(Count::from_u64(1)),
+            ]
+        );
+        assert_eq!(
+            *failure.cause,
+            DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Bool),
+                found: Found::Text(crate::fact::TextPreview::new("bad")),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_duplicate_and_unknown_fields_stay_at_the_record() {
+        #[derive(Debug)]
+        struct Record {
+            value: bool,
+        }
+        record!(Record { value: "value" });
+        let cases = [
+            (vec![], DecodeCause::MissingField("value".into())),
+            (
+                vec![
+                    ("value".into(), true.encode()),
+                    ("value".into(), false.encode()),
+                ],
+                DecodeCause::DuplicateField("value".into()),
+            ),
+            (
+                vec![("other".into(), true.encode())],
+                DecodeCause::UnknownField(UnknownField {
+                    field: "other".into(),
+                    offered: vec!["value".into()],
+                }),
+            ),
+        ];
+        for (entries, cause) in cases {
+            assert_eq!(
+                Record::decode(&FOValue::Map { entries }).unwrap_err(),
+                DecodeFailure::new(cause)
+            );
+        }
+        let duplicate = FOValue::Map {
+            entries: vec![
+                ("value".into(), true.encode()),
+                ("value".into(), false.encode()),
+            ],
+        };
+        assert_eq!(
+            field::<bool>(&duplicate, "value"),
+            Err(DecodeFailure::new(DecodeCause::DuplicateField(
+                "value".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn labels_distinguish_shape_unknown_tag_and_excess_payload() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::VariantArray)]
+        #[strum(serialize_all = "kebab-case")]
+        enum Label {
+            Known,
+        }
+        label!(typed Label);
+        assert!(matches!(
+            *Label::decode(&true.encode()).unwrap_err().cause,
+            DecodeCause::Shape(_)
+        ));
+        assert_eq!(
+            Label::decode(&tag("other", None)),
+            Err(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                tag: "other".into(),
+                offered: vec!["known".into()],
+            })))
+        );
+        assert_eq!(
+            Label::decode(&tag("known", Some(true.encode()))),
+            Err(DecodeFailure::new(DecodeCause::UnexpectedPayload(
+                UnexpectedPayload {
+                    tag: "known".into(),
+                    found: Found::Bool(true),
+                }
+            )))
+        );
+        assert_eq!(
+            Label::decode(&FOValue::Variant {
+                label: "known".into(),
+                payload: Some(Box::new(FOValue::Unit))
+            }),
+            Ok(Label::Known)
+        );
+        let _ = Label::ty();
+    }
+
+    #[test]
+    fn tuple_cardinality_and_integer_ranges_retain_the_operands() {
+        assert_eq!(
+            <(i64, bool)>::decode(&FOValue::List { items: vec![] }),
+            Err(DecodeFailure::new(DecodeCause::Length(DecodeLength {
+                expected: CountRule::Exactly(Count::from_u64(2)),
+                got: Count::from_u64(0),
+            })))
+        );
+        assert_eq!(
+            i32::decode(&i64::MAX.encode()),
+            Err(integer_range(i64::MAX, DecodeIntegerTarget::I32))
+        );
+        assert_eq!(
+            u32::decode(&(-1_i64).encode()),
+            Err(integer_range(-1, DecodeIntegerTarget::U32))
+        );
+        assert_eq!(
+            u64::decode(&(-1_i64).encode()),
+            Err(integer_range(-1, DecodeIntegerTarget::U64))
+        );
+        assert_eq!(
+            usize::decode(&(-1_i64).encode()),
+            Err(integer_range(-1, DecodeIntegerTarget::Usize))
+        );
+        assert_eq!(
+            NonZeroU8::decode(&0_i64.encode()),
+            Err(integer_range(0, DecodeIntegerTarget::FailureStatus))
+        );
+        assert!(matches!(
+            *u32::decode(&true.encode()).unwrap_err().cause,
+            DecodeCause::Shape(_)
+        ));
+    }
+
+    #[test]
+    fn string_keyed_maps_keep_the_key_path_and_replacement_policy() {
+        let value = FOValue::Map {
+            entries: vec![
+                ("key".into(), 1_i64.encode()),
+                ("key".into(), 2_i64.encode()),
+            ],
+        };
+        assert_eq!(BTreeMap::<String, i64>::decode(&value).unwrap()["key"], 2);
+        let failure = BTreeMap::<String, bool>::decode(&value).unwrap_err();
+        assert_eq!(
+            failure.path,
+            vec![crate::fact::DataStep::Field("key".into())]
+        );
     }
 }

@@ -194,7 +194,7 @@ fn failed_status_sync_uses_precommit_debt_and_sends_only_one_failed_fallback() {
     );
     assert_eq!(parent.address().queued_posts().len(), 1);
     assert!(
-        matches!(take(&parent).0, Input::Child { status: ChildStatus::Failed(reason), .. } if reason.contains("status sync failed"))
+        matches!(take(&parent).0, Input::Child { status: ChildStatus::Failed(reason), .. } if matches!(reason, crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(ral_core::fact::RecordingFailure::Recording(ref failure))) if failure.stage == ral_core::fact::RecordingStage::Sync))
     );
 }
 

@@ -1,8 +1,9 @@
 //! Message payloads, commands and model notices.
 
 use crate::card::elapsed_phrase;
-use crate::record::{AgentId, Memory, Settlement};
+use crate::record::{AgentId, ChildFailure, Memory, Settlement};
 use ral_core::data::FOValue;
+use ral_core::fact::{HelperFailure, ProviderStop};
 use std::{fmt, time::Duration};
 
 /// Monotonic and never reused, including across `/clear`.
@@ -63,25 +64,21 @@ impl fmt::Display for Rewrite {
         }
     }
 }
-/// A working child's life ended with no report.
-pub(crate) const ENDED_BEFORE_REPORTING: &str = "ended before reporting";
-/// A working child, or a headless root, was cancelled.
-pub(crate) const CANCELLED: &str = "cancelled";
-
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
     Replied,
-    Stopped(String),
+    Stopped(ProviderStop),
     Cancelled,
-    Failed(String),
+    Failed(ChildFailure),
 }
 impl AgentOutcome {
     /// Why a child still working ends with this outcome.
-    pub(crate) fn reason(self) -> String {
+    pub(crate) fn reason(self) -> ChildFailure {
         match self {
-            Self::Replied => ENDED_BEFORE_REPORTING.into(),
-            Self::Cancelled => CANCELLED.into(),
-            Self::Stopped(reason) | Self::Failed(reason) => reason,
+            Self::Replied => ChildFailure::Cause(HelperFailure::EndedBeforeReporting),
+            Self::Cancelled => ChildFailure::Cause(HelperFailure::Cancelled),
+            Self::Stopped(reason) => ChildFailure::Cause(HelperFailure::ProviderStopped(reason)),
+            Self::Failed(reason) => reason,
         }
     }
 }
@@ -188,7 +185,7 @@ mod tests {
             notice(
                 "helper",
                 &Settlement::Failed {
-                    reason: "boom".into(),
+                    reason: ChildFailure::Panicked("boom".into()),
                 },
                 took,
             ),
@@ -198,16 +195,19 @@ mod tests {
 
     #[test]
     fn a_completion_notice_names_the_worker_to_await() {
-        use ral_core::shell::runtime::{Done, DoneEvent, ErrorRecord, Reason, WorkerId};
+        use ral_core::shell::runtime::{Done, DoneEvent, ErrorFact, Reason, WorkerId};
         let done = DoneEvent {
             id: WorkerId(7),
             title: "building".into(),
             elapsed_ms: 192_000,
-            outcome: Done::Err(ErrorRecord::new(
-                Reason::Raised("build failed".into()),
-                "run".into(),
-                ral_core::test_helper::site(),
-            )),
+            outcome: Done::Err(
+                ErrorFact::new(
+                    Reason::raised("build failed"),
+                    "run".into(),
+                    ral_core::test_helper::site(),
+                )
+                .record(),
+            ),
         };
         assert_eq!(
             surface_notice(&[done.to_surface()]),
@@ -216,5 +216,29 @@ mod tests {
              its output and returns its result. `workers` shows current status; an ID \
              cannot recover a handle."
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn outstanding_reply_debt_keeps_provider_stop_and_owner_failure_categories() {
+        let stop = ProviderStop::ContentFilter("provider-filter-code".into());
+        assert_eq!(
+            AgentOutcome::Stopped(stop.clone()).reason(),
+            ChildFailure::Cause(HelperFailure::ProviderStopped(stop))
+        );
+        assert_eq!(
+            AgentOutcome::Cancelled.reason(),
+            ChildFailure::Cause(HelperFailure::Cancelled)
+        );
+        assert_eq!(
+            AgentOutcome::Replied.reason(),
+            ChildFailure::Cause(HelperFailure::EndedBeforeReporting)
+        );
+        let panic = ChildFailure::Panicked("lifecycle evidence".into());
+        assert_eq!(AgentOutcome::Failed(panic.clone()).reason(), panic);
     }
 }

@@ -449,21 +449,36 @@ fn an_engine_severance_draws_a_system_note_with_its_code_and_cause() {
     for (cause, text) in [
         (
             Severed::Refused(ral_core::protocol::WireError::of(
-                &ral_core::error::Error::new("version mismatch"),
+                &ral_core::error::Error::new(ral_core::fact::Reason::Protocol(Box::new(
+                    ral_core::fact::ProtocolFailure::VersionMismatch(
+                        ral_core::fact::ProtocolFailureVersionMismatch {
+                            front: 43,
+                            engine: 44,
+                        },
+                    ),
+                ))),
             )),
-            "the ral engine was lost (engine-refused): the engine refused to attach: version mismatch",
+            "the ral engine was lost (engine-refused): the engine refused to attach: protocol version mismatch: frontend 43, engine 44",
         ),
         (
-            Severed::Closed("unexpected EOF".into()),
-            "the ral engine was lost (engine-closed): the connection to the engine closed: unexpected EOF",
+            Severed::Closed(ral_core::fact::ConnectionClosed::Eof(
+                ral_core::fact::ProtocolPeer::Engine,
+            )),
+            "the ral engine was lost (engine-closed): the connection to the engine closed: end of stream from the engine",
         ),
         (
             Severed::Silent(Duration::from_secs(3)),
             "the ral engine was lost (engine-silent): the engine fell silent for 3s and was declared dead",
         ),
         (
-            Severed::Faulted("invalid frame".into()),
-            "the ral engine was lost (engine-faulted): the engine broke the protocol: invalid frame",
+            Severed::Faulted(ral_core::fact::ConnectionFault::UnexpectedFrame(
+                ral_core::fact::ConnectionFaultUnexpectedFrame {
+                    receiver: ral_core::fact::ProtocolPeer::Frontend,
+                    phase: ral_core::fact::ProtocolPhase::Attached,
+                    actual: ral_core::fact::FrameKind::Attach,
+                },
+            )),
+            "the ral engine was lost (engine-faulted): the engine broke the protocol: the frontend received an unexpected attach frame after attachment",
         ),
     ] {
         let mut memo = Blocks::default();

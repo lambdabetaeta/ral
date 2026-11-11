@@ -210,7 +210,10 @@ pub fn wire_from_stream(stream: impl Into<WireStream>) -> WireChannel {
 ///
 /// # Errors
 /// The write's own failure.
-pub fn wire_write_frame(channel: &mut WireChannel, frame: &Frame) -> std::io::Result<()> {
+pub fn wire_write_frame(
+    channel: &mut WireChannel,
+    frame: &Frame,
+) -> Result<(), crate::protocol::channel::FrameWriteError> {
     channel.write_frame(frame)
 }
 
@@ -218,7 +221,9 @@ pub fn wire_write_frame(channel: &mut WireChannel, frame: &Frame) -> std::io::Re
 ///
 /// # Errors
 /// The read's own failure.
-pub fn wire_read_frame(channel: &mut WireChannel) -> std::io::Result<Option<Frame>> {
+pub fn wire_read_frame(
+    channel: &mut WireChannel,
+) -> Result<Option<Frame>, crate::io::FrameReadError> {
     channel.read_frame()
 }
 

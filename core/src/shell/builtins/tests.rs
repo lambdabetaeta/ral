@@ -222,3 +222,110 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
         }
     }
 }
+
+#[test]
+fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
+    use crate::fact::{ArithmeticFailure, EvalFailure, InvalidCause, Reason};
+    let invalid = |result: crate::shell::runtime::Settled<Value>, operation: &str| {
+        let Err(Break::Error(error)) = result else {
+            panic!("expected refusal for {operation}")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("invalid input for {operation}")
+        };
+        assert_eq!(failure.operation, operation);
+        *failure
+    };
+    let mut shell = fresh_shell();
+    for (builtin, name) in [
+        (
+            super::math::builtin_floor as fn(&[Value]) -> crate::shell::runtime::Settled<Value>,
+            "floor",
+        ),
+        (super::math::builtin_ceil, "ceil"),
+        (super::math::builtin_trunc, "trunc"),
+    ] {
+        assert!(matches!(
+            invalid(builtin(&[Value::Int(1)]), name).cause,
+            InvalidCause::Shape(_)
+        ));
+        let value = crate::data::Finite::new(f64::MAX).unwrap();
+        assert_eq!(
+            invalid(builtin(&[Value::Float(value)]), name).cause,
+            InvalidCause::IntegerRange(value)
+        );
+    }
+    for args in [
+        [
+            Value::Float(crate::data::Finite::from(1_i64)),
+            Value::string("2"),
+        ],
+        [
+            Value::Float(crate::data::Finite::from(1_i64)),
+            Value::Int(309),
+        ],
+    ] {
+        let failure = invalid(super::math::builtin_round(&args), "round");
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Shape(_) | InvalidCause::Range(_)
+        ));
+    }
+    assert!(
+        matches!(super::math::builtin_round(&[Value::Float(crate::data::Finite::new(f64::MAX).unwrap()), Value::Int(308)]),
+        Err(Break::Error(crate::Error { reason: Reason::Evaluation(f), .. })) if matches!(*f, EvalFailure::Arithmetic(ArithmeticFailure::RoundUnrepresentable(_))))
+    );
+    assert!(matches!(
+        invalid(
+            super::collections::builtin_nth(&[Value::Int(-1), Value::list(vec![])]),
+            "nth"
+        )
+        .cause,
+        InvalidCause::Range(_)
+    ));
+    assert!(matches!(
+        invalid(
+            super::collections::builtin_range(
+                &[Value::Int(i64::MIN), Value::Int(i64::MAX)],
+                &shell
+            ),
+            "range"
+        )
+        .cause,
+        InvalidCause::AddressableRange(_)
+    ));
+    for args in [
+        vec![],
+        vec![Value::Int(1), Value::Unit],
+        vec![Value::string("f"), Value::Unit],
+    ] {
+        let _ = invalid(super::shell::builtin_alias(&args, &mut shell), "alias");
+    }
+    for args in [vec![], vec![Value::Int(1)]] {
+        let _ = invalid(super::shell::builtin_unalias(&args, &mut shell), "unalias");
+    }
+    assert!(
+        matches!(super::shell::builtin_unalias(&[Value::string("not-installed")], &mut shell),
+        Err(Break::Error(crate::Error { reason: Reason::State(f), .. })) if *f == crate::fact::StateFailure::AliasMissing("not-installed".into()))
+    );
+    for arg in [Value::string(""), Value::Int(1)] {
+        let _ = invalid(super::shell::builtin_chdir(&[arg], &mut shell), "cd");
+    }
+}
+
+#[test]
+fn byte_list_validation_keeps_the_element_path() {
+    use crate::fact::{DataStep, InvalidCause, Reason};
+    for (item, range) in [(Value::Int(256), true), (Value::string("1"), false)] {
+        let Err(Break::Error(error)) =
+            super::util::as_byte_list(&Value::list(vec![Value::Int(0), item]), "ints-to-bytes")
+        else {
+            panic!("invalid byte")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("invalid input")
+        };
+        assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
+        assert_eq!(matches!(failure.cause, InvalidCause::Range(_)), range);
+    }
+}

@@ -2,6 +2,7 @@
 use super::{Grant, LoginPhase, OAuthToken, RefreshError, RefreshUpdate, SignIn, submit_refresh};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ral_core::fact::{RefreshFailure, RefreshTokenField};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -328,6 +329,14 @@ struct RefreshResponse {
     refresh_token: Option<String>,
     id_token: Option<String>,
 }
+impl ral_core::data::json::JsonDecode for RefreshResponse {
+    fn decode_json(
+        value: ral_core::data::json::JsonRef<'_, '_>,
+    ) -> Result<Self, ral_core::fact::DecodeFailure> {
+        ral_core::data::json::decode_structural(value)
+    }
+}
+
 fn refresh_request(
     client: &reqwest::Client,
     issuer: &str,
@@ -354,17 +363,19 @@ pub(super) async fn refresh(
 fn refresh_success(
     current: &OAuthToken,
     response: RefreshResponse,
-) -> Result<RefreshUpdate<RefreshedClaims>, String> {
+) -> Result<RefreshUpdate<RefreshedClaims>, RefreshFailure> {
     let access = response
         .access_token
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "token refresh did not return an access token".to_owned())?;
+        .ok_or(RefreshFailure::MissingToken(RefreshTokenField::AccessToken))?;
+    if access.trim().is_empty() {
+        return Err(RefreshFailure::EmptyToken(RefreshTokenField::AccessToken));
+    }
     if response
         .refresh_token
         .as_deref()
-        .is_some_and(|s| s.trim().is_empty())
+        .is_some_and(|token| token.trim().is_empty())
     {
-        return Err("token refresh returned an empty refresh token".into());
+        return Err(RefreshFailure::EmptyToken(RefreshTokenField::RefreshToken));
     }
     Ok(renewed(
         current,
@@ -694,6 +705,38 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn refresh_payload_and_token_validation_are_separate_typed_failures() {
+        let current = finalize(raw("subject", "backend")).unwrap();
+        for (json, expected) in [
+            (
+                r"{}",
+                RefreshFailure::MissingToken(RefreshTokenField::AccessToken),
+            ),
+            (
+                r#"{"access_token":"  "}"#,
+                RefreshFailure::EmptyToken(RefreshTokenField::AccessToken),
+            ),
+            (
+                r#"{"access_token":"new","refresh_token":" "}"#,
+                RefreshFailure::EmptyToken(RefreshTokenField::RefreshToken),
+            ),
+        ] {
+            let response =
+                ral_core::data::json::from_slice::<RefreshResponse>(json.as_bytes()).unwrap();
+            assert_eq!(refresh_success(&current, response).unwrap_err(), expected);
+        }
+        assert!(matches!(
+            ral_core::data::json::from_slice::<RefreshResponse>(br#"{"access_token":true}"#),
+            Err(ral_core::fact::JsonInputFailure::Decode(_))
+        ));
+        let response = ral_core::data::json::from_slice::<RefreshResponse>(br#"{"access_token":"new","refresh_token":null,"id_token":"invalid-jwt","ignored":true}"#).unwrap();
+        assert_eq!(
+            refresh_success(&current, response).unwrap().refresh_token,
+            current.refresh_token
+        );
+    }
+
     #[test]
     fn empty_credentials_never_enter_the_live_token() {
         for empty in ["", "  "] {

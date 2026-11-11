@@ -612,7 +612,7 @@ fn decode_rejects_directory_as_exec_file() {
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
-    assert!(err.hints()[0].contains("`` `dir `absolute '/etc' ``"));
+    assert!(err.reason.advice()[0].contains("`` `dir `absolute '/etc' ``"));
 }
 
 /// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
@@ -672,9 +672,12 @@ fn decode_rejects_relative_absolute_place() {
         "should name the entry: {err}"
     );
     assert!(
-        err.hints().iter().any(|h| h.contains("`` `cwd proj ``")),
+        err.reason
+            .advice()
+            .iter()
+            .any(|h| h.contains("`` `cwd proj ``")),
         "should hint the cwd place: {:?}",
-        err.hints()
+        err.reason.advice()
     );
 }
 
@@ -734,7 +737,7 @@ fn decode_rejects_non_tag_verb() {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("expected a verb"),
+            err.contains("expected one of the tags"),
             "should say what a verb is: {err}"
         );
     }

@@ -5,12 +5,13 @@
 //! An answer outside its probe's shape is the engine breaking the protocol,
 //! and severs the carrier that heard it ([`crate::carrier`]).
 
+use crate::fact::{DecodeCause, DecodeFailure, JsonInputFailure};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::authority::grant::value::LayerValue;
 use crate::authority::policy::{GrantLayer, GrantStack};
-use crate::data::datum::{Datum, tag, untag};
+use crate::data::datum::{Datum, tag};
 use crate::data::{Bytes, FOValue, Finite};
 use crate::shell::runtime::{Done, Owner, Sample, Value};
 use crate::ty::{Ty, Typed, closed_record};
@@ -47,6 +48,125 @@ pub enum Probe {
     /// what a test reads to see a frame leak.
     #[cfg(feature = "test-util")]
     GrantDepth,
+}
+
+/// Paths are JSON strings; decoding never inspects the filesystem.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum RawProbe {
+    BindingCount,
+    LeasedBindingCount,
+    LargestBindingBytes,
+    EnvVar(String),
+    Cwd,
+    Home,
+    BuiltinNames,
+    PathBytes(String),
+    Workers,
+    SessionEnded,
+    CompletionNames,
+    Bindings,
+    PathEntries(String),
+    Grants,
+    #[cfg(feature = "test-util")]
+    WorkerCount,
+    #[cfg(feature = "test-util")]
+    GrantDepth,
+}
+
+impl RawProbe {
+    pub(crate) fn validate(self) -> Probe {
+        match self {
+            Self::BindingCount => Probe::BindingCount,
+            Self::LeasedBindingCount => Probe::LeasedBindingCount,
+            Self::LargestBindingBytes => Probe::LargestBindingBytes,
+            Self::EnvVar(value) => Probe::EnvVar(value),
+            Self::Cwd => Probe::Cwd,
+            Self::Home => Probe::Home,
+            Self::BuiltinNames => Probe::BuiltinNames,
+            Self::PathBytes(value) => Probe::PathBytes(value.into()),
+            Self::Workers => Probe::Workers,
+            Self::SessionEnded => Probe::SessionEnded,
+            Self::CompletionNames => Probe::CompletionNames,
+            Self::Bindings => Probe::Bindings,
+            Self::PathEntries(value) => Probe::PathEntries(value.into()),
+            Self::Grants => Probe::Grants,
+            #[cfg(feature = "test-util")]
+            Self::WorkerCount => Probe::WorkerCount,
+            #[cfg(feature = "test-util")]
+            Self::GrantDepth => Probe::GrantDepth,
+        }
+    }
+
+    pub(crate) fn from_value(value: &Probe) -> Result<Self, crate::fact::JsonEncodeFailure> {
+        Ok(match value {
+            Probe::BindingCount => Self::BindingCount,
+            Probe::LeasedBindingCount => Self::LeasedBindingCount,
+            Probe::LargestBindingBytes => Self::LargestBindingBytes,
+            Probe::EnvVar(value) => Self::EnvVar(value.clone()),
+            Probe::Cwd => Self::Cwd,
+            Probe::Home => Self::Home,
+            Probe::BuiltinNames => Self::BuiltinNames,
+            Probe::PathBytes(value) => {
+                Self::PathBytes(super::json::path_text(value).map_err(|e| e.payload("PathBytes"))?)
+            }
+            Probe::Workers => Self::Workers,
+            Probe::SessionEnded => Self::SessionEnded,
+            Probe::CompletionNames => Self::CompletionNames,
+            Probe::Bindings => Self::Bindings,
+            Probe::PathEntries(value) => Self::PathEntries(
+                super::json::path_text(value).map_err(|e| e.payload("PathEntries"))?,
+            ),
+            Probe::Grants => Self::Grants,
+            #[cfg(feature = "test-util")]
+            Probe::WorkerCount => Self::WorkerCount,
+            #[cfg(feature = "test-util")]
+            Probe::GrantDepth => Self::GrantDepth,
+        })
+    }
+}
+
+impl Probe {
+    /// Portable observation identity, available independently of producer gates.
+    pub fn subject(&self) -> crate::fact::ProbeSubject {
+        use crate::fact::ProbeSubject;
+        match self {
+            Self::BindingCount => ProbeSubject::BindingCount,
+            Self::LeasedBindingCount => ProbeSubject::LeasedBindingCount,
+            Self::LargestBindingBytes => ProbeSubject::LargestBindingBytes,
+            Self::EnvVar(value) => ProbeSubject::EnvVar(value.clone()),
+            Self::Cwd => ProbeSubject::Cwd,
+            Self::Home => ProbeSubject::Home,
+            Self::BuiltinNames => ProbeSubject::BuiltinNames,
+            Self::PathBytes(value) => ProbeSubject::PathBytes(crate::path::shown(value)),
+            Self::Workers => ProbeSubject::Workers,
+            Self::SessionEnded => ProbeSubject::SessionEnded,
+            Self::CompletionNames => ProbeSubject::CompletionNames,
+            Self::Bindings => ProbeSubject::Bindings,
+            Self::PathEntries(value) => ProbeSubject::PathEntries(crate::path::shown(value)),
+            Self::Grants => ProbeSubject::Grants,
+            #[cfg(feature = "test-util")]
+            Self::WorkerCount => ProbeSubject::WorkerCount,
+            #[cfg(feature = "test-util")]
+            Self::GrantDepth => ProbeSubject::GrantDepth,
+        }
+    }
+}
+
+impl crate::data::json::JsonDecode for Probe {
+    fn decode_json(value: crate::data::json::JsonRef<'_, '_>) -> Result<Self, DecodeFailure> {
+        Ok(crate::data::json::decode_structural::<RawProbe>(value)?.validate())
+    }
+}
+impl crate::data::json::JsonEncode for Probe {
+    fn encode_json(
+        &self,
+        format: crate::data::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(crate::data::json::serialize_structural(
+            &RawProbe::from_value(self)?,
+            format,
+        ))
+    }
 }
 
 /// Where a listed worker is in its lifecycle: a consumed worker has left the
@@ -166,17 +286,22 @@ impl Datum for Sample<()> {
         tag(label, None)
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("running", None)) => Ok(Self::Running(())),
-            Some(("stopping", None)) => Ok(Self::Stopping),
-            Some(("ready", None)) => Ok(Self::Ready(())),
-            Some(("consumed", None)) => Ok(Self::Consumed),
-            _ => Err(format!(
-                "expected `running, `stopping, `ready or `consumed, got {}",
-                v.shape()
-            )),
-        }
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        crate::data::datum::labelled(
+            v,
+            &[
+                Self::Running(()),
+                Self::Stopping,
+                Self::Ready(()),
+                Self::Consumed,
+            ],
+            |state| match state {
+                Self::Running(()) => "running",
+                Self::Stopping => "stopping",
+                Self::Ready(()) => "ready",
+                Self::Consumed => "consumed",
+            },
+        )
     }
 }
 
@@ -184,12 +309,15 @@ impl Datum for Sample<()> {
 /// `Root.grants` and a sealed seed ride.
 impl Datum for GrantStack {
     fn encode(self) -> FOValue {
-        Bytes::from(serde_json::to_vec(&self).expect("a grant stack is plain data")).encode()
+        Bytes::from(crate::data::json::to_vec(&self).expect("grant paths use lossless OS strings"))
+            .encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        serde_json::from_slice(&Bytes::decode(v)?)
-            .map_err(|e| format!("expected an encoded grant stack: {e}"))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        crate::data::json::from_slice(&Bytes::decode(v)?).map_err(|why| match why {
+            JsonInputFailure::Syntax(cause) => DecodeFailure::new(DecodeCause::JsonSyntax(cause)),
+            JsonInputFailure::Decode(cause) => cause,
+        })
     }
 }
 
@@ -263,9 +391,9 @@ mod tests {
             Probe::PathBytes(PathBuf::from("a/b")),
         ] {
             let frame = Frame::Probe(DispatchId(1), probe);
-            let json = serde_json::to_string(&frame).expect("a frame encodes");
+            let json = crate::data::json::to_vec(&frame).expect("a frame encodes");
             assert_eq!(
-                serde_json::from_str::<Frame>(&json).expect("it decodes"),
+                crate::data::json::from_slice::<Frame>(&json).expect("it decodes"),
                 frame
             );
         }
@@ -278,7 +406,10 @@ mod tests {
             entries: vec![("id".into(), FOValue::Int { value: 1 })],
         })
         .expect_err("a row with only an id");
-        assert!(why.contains("`title"), "{why}");
+        assert_eq!(
+            why,
+            DecodeFailure::new(DecodeCause::MissingField("title".into()))
+        );
     }
 
     /// A grant stack crosses a probe layer for layer, exec rules and all.

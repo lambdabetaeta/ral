@@ -11,8 +11,10 @@ use std::path::Path;
 
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::{Fragment, GrantLayer};
+use crate::fact::{InvalidCause, IoOperation, IoSubject};
 use crate::path::Reading;
 use crate::shell::grant::decode_capability_map;
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::source::{SourceFile, SourceOrigin};
 
@@ -60,10 +62,18 @@ pub fn load_capabilities_from_path(
     let rp = shell.anchor(path);
     let located = (shell.locate::<Reading>(&rp))
         .map_err(|b| b.map_error(|e| e.with_context("capability file")))?;
-    let file = SourceFile::new(located.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(e.to_string()).with_context("capability file"))?;
-    let source = (located.read().and_then(std::io::read_to_string))
-        .map_err(|e| Error::io(rp.shown(), &e).with_context("capability file"))?;
+    let file = SourceFile::new(located.real().as_path().to_path_buf()).map_err(|e| {
+        invalid("load-capabilities", InvalidCause::Path((&e).into()))
+            .with_context("capability file")
+    })?;
+    let reader = located.read().map_err(|e| {
+        Error::io(IoOperation::Open, IoSubject::Path(rp.shown()), &e)
+            .with_context("capability file")
+    })?;
+    let source = std::io::read_to_string(reader).map_err(|e| {
+        Error::io(IoOperation::Read, IoSubject::Path(rp.shown()), &e)
+            .with_context("capability file")
+    })?;
     let source = crate::source::normalize_source_text(source);
     load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)
 }
@@ -250,14 +260,19 @@ mod tests {
         );
     }
 
-    fn load_err_message(source: &str, label: &str) -> String {
+    fn load_compile_report(source: &str, label: &str) -> String {
         let mut shell = shell();
         let origin = SourceOrigin::named(label);
         let err =
             load_capabilities_from_str(&Mooring::adrift(), &mut shell, source, &origin, &ctx())
                 .unwrap_err();
         match err {
-            Break::Error(e) => e.describe().into_owned(),
+            Break::Error(e) => {
+                assert!(matches!(e.reason, crate::fact::Reason::Compile(_)));
+                e.rejection()
+                    .expect("rich compile report is separate from reason")
+                    .render()
+            }
             other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
         }
     }
@@ -266,7 +281,7 @@ mod tests {
     /// the form itself is, so the typo never reaches the walker.
     #[test]
     fn unknown_top_level_key_is_refused_before_the_file_runs() {
-        let msg = load_err_message("return [fss: [read: [`absolute /tmp]]]", "<test:typo>");
+        let msg = load_compile_report("return [fss: [read: [`absolute /tmp]]]", "<test:typo>");
         assert!(msg.contains("'fss'"), "{msg}");
     }
 
@@ -274,7 +289,7 @@ mod tests {
     /// table's labels, so it is written as a record.
     #[test]
     fn a_mapped_profile_is_refused_before_the_file_runs() {
-        let msg = load_err_message(
+        let msg = load_compile_report(
             "return [:, fss: [read: [`absolute /tmp]]]",
             "<test:typo-map>",
         );

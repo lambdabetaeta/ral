@@ -37,9 +37,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::authority::policy::FsAllow;
+use crate::authority::sandbox::SandboxProjection;
 use crate::authority::sandbox::carve;
-use crate::authority::sandbox::{SandboxProjection, unavailable};
+use crate::authority::sandbox::launch::refused;
 use crate::error::Error;
+use crate::fact::{
+    LaunchFailure, PrepareFailure, PrepareStep, PrepareSubject, UnavailableFailure,
+    UnsupportedConfinement, UnsupportedConfinementWindowsAllowanceExclusion,
+    UnsupportedConfinementWindowsEveryPath,
+};
 use crate::path::{Installing, Located, RealPath, Walked, shown};
 use crate::process::Unstarted;
 use crate::process::cancel::Scope;
@@ -47,7 +53,7 @@ use crate::process::launch::SecurityCapabilitiesAttr;
 use crate::sync::LockExt as _;
 
 use super::appcontainer::{
-    AppContainerProfile, CapabilitySids, OwnedCapabilitySid, OwnedContainerSid,
+    AppContainerError, AppContainerProfile, CapabilitySids, OwnedCapabilitySid, OwnedContainerSid,
 };
 use super::dacl::{self, DaclError, DaclManager, FrozenPin, GrantKind};
 
@@ -110,7 +116,7 @@ impl SessionSandbox {
         let name = profile_name(index);
         self.dacl.record_profile(&name)?;
         let profile = AppContainerProfile::create_or_reuse(&name)
-            .map_err(|e| Error::io("sandbox: create AppContainer profile", &e))?;
+            .map_err(|e| refused(LaunchFailure::Prepare(e)))?;
         Ok(vacant.insert(profile).sid())
     }
 }
@@ -122,8 +128,13 @@ fn ensure_network_caps(
     slot: &mut Option<Arc<CapabilitySids>>,
 ) -> Result<Arc<CapabilitySids>, Error> {
     if slot.is_none() {
-        let caps = CapabilitySids::build()
-            .map_err(|e| Error::io("sandbox: derive network capability SIDs", &e))?;
+        let caps = CapabilitySids::build().map_err(|e| {
+            prepare(
+                PrepareStep::NetworkCapabilitySids,
+                PrepareSubject::Child,
+                &e,
+            )
+        })?;
         *slot = Some(Arc::new(caps));
     }
     Ok(Arc::clone(slot.as_ref().expect("network caps built above")))
@@ -213,8 +224,10 @@ pub(crate) fn confine(
         .map(|&p| p.clone())
         .collect();
     let exclusions: Vec<_> = lists.deny.iter().map(|d| &d.grant().real).collect();
-    let readwrite = carve::carve(&readwrite, &exclusions).map_err(Error::new)?;
-    let mut readonly = carve::carve(&readonly, &exclusions).map_err(Error::new)?;
+    let readwrite =
+        carve::carve(&readwrite, &exclusions).map_err(|e| refused(LaunchFailure::Projection(e)))?;
+    let mut readonly =
+        carve::carve(&readonly, &exclusions).map_err(|e| refused(LaunchFailure::Projection(e)))?;
     readonly.whole.retain(|p| !readwrite.whole.contains(p));
     readonly.held.retain(|entry| {
         !readwrite.whole.contains(entry.real())
@@ -366,11 +379,20 @@ fn ensure_grant(
 ) -> Result<String, Unstarted> {
     let name = dacl::fs_capability_name(pin.name(), kind);
     if !fs_cap_sids.contains_key(&name) {
-        let sid = OwnedCapabilitySid::from_capability_name(&name)
-            .map_err(|e| Error::io("sandbox: derive fs capability SID", &e))?;
-        let sid_string = sid
-            .sid_string()
-            .map_err(|e| Error::io("sandbox: fs capability SID string", &e))?;
+        let sid = OwnedCapabilitySid::from_capability_name(&name).map_err(|e| {
+            prepare(
+                PrepareStep::FilesystemCapabilitySid,
+                PrepareSubject::Capability(name.clone()),
+                &e,
+            )
+        })?;
+        let sid_string = sid.sid_string().map_err(|e| {
+            prepare(
+                PrepareStep::SidString,
+                PrepareSubject::Capability(name.clone()),
+                &e,
+            )
+        })?;
         dacl::ensure_frozen_grant(pin, &sid_string, kind, cancel)?;
         fs_cap_sids.insert(name.clone(), Arc::new(sid));
     }
@@ -387,16 +409,11 @@ fn ensure_grant(
 fn positions(region: &[FsAllow], excluding: bool) -> Result<Vec<&RealPath>, Error> {
     let positions: Option<Vec<_>> = region.iter().map(FsAllow::real).collect();
     positions.ok_or_else(|| {
-        let allows = if excluding {
-            "every path except some exclusions"
-        } else {
-            "every path"
-        };
-        unavailable(format!(
-            "this grant allows {allows}, which Windows cannot enforce: a sandboxed program \
-             reaches only folders stamped for it, and ral will not stamp every drive; grant \
-             the folders the program needs instead"
-        ))
+        refused(LaunchFailure::Unavailable(UnavailableFailure::Unsupported(
+            UnsupportedConfinement::WindowsEveryPath(UnsupportedConfinementWindowsEveryPath {
+                excluding,
+            }),
+        )))
     })
 }
 
@@ -415,12 +432,15 @@ fn refuse_deny_meeting_grant(granted: &[&RealPath], denied: &[RealPath]) -> Resu
         for g in granted {
             if d.contains_folded(g) || g.contains_folded(d) {
                 let (d, g) = (shown(d.as_path()), shown(g.as_path()));
-                return Err(unavailable(format!(
-                    "this command is allowed '{g}' and '{d}' is excluded, which Windows \
-                     cannot enforce together: a sandbox can be kept out of what lies beneath \
-                     an allowance, but not out of the allowance itself or what holds it. \
-                     Allow paths outside '{d}', run a program outside it, or drop the \
-                     exclusion"
+                return Err(refused(LaunchFailure::Unavailable(
+                    UnavailableFailure::Unsupported(
+                        UnsupportedConfinement::WindowsAllowanceExclusion(
+                            UnsupportedConfinementWindowsAllowanceExclusion {
+                                granted: g,
+                                denied: d,
+                            },
+                        ),
+                    ),
                 )));
             }
         }
@@ -505,15 +525,19 @@ pub(crate) fn teardown() {
 /// cannot establish.
 impl From<DaclError> for Unstarted {
     fn from(e: DaclError) -> Self {
-        match e {
-            DaclError::Cancelled(stop) => Self::Stopped(stop),
-            e @ (DaclError::Redirected { .. } | DaclError::NotUnicode(_)) => {
-                Self::Refused(Error::new(e.to_string()))
-            }
-            e @ DaclError::Reachable { .. } => Self::Refused(unavailable(e)),
-            e => Self::Refused(Error::new(format!("sandbox: fs grant failed: {e}"))),
+        match e.failure() {
+            Ok(cause) => Self::Refused(refused(LaunchFailure::Dacl(cause))),
+            Err(stop) => Self::Stopped(stop.clone()),
         }
     }
+}
+
+fn prepare(step: PrepareStep, subject: PrepareSubject, e: &AppContainerError) -> Error {
+    refused(LaunchFailure::Prepare(PrepareFailure {
+        step,
+        subject,
+        cause: e.cause(),
+    }))
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use super::{
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::error::Error;
+use crate::fact::{ConnectionFault, Reason, StateFailure};
 use crate::process::Scope;
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
@@ -84,11 +85,9 @@ impl IdentityTransport {
     /// No bequest parked under `id`, or whatever narrowing its grant refuses.
     pub fn adopt_parked(&self, id: NurseryId) -> Result<Self, Error> {
         let bequest = self.nursery.adopt(id).ok_or_else(|| {
-            Error::new(format!(
-                "no forked session is parked under nursery id {}: was it adopted already, or \
-                 has the run that forked it ended?",
-                id.0
-            ))
+            Error::new(Reason::State(Box::new(StateFailure::NurseryMissing(
+                id.0.into(),
+            ))))
         })?;
         let shell = Shell::child_of(Arc::clone(&self.runtime), bequest, self.installer.narrow)?;
         Ok(Self::over(Engine::new(shell, self.installer)))
@@ -110,9 +109,7 @@ impl IdentityTransport {
         };
         match survivors {
             0 => Ok(()),
-            n => Err(Severed::Faulted(format!(
-                "{n} ral worker thread(s) outlived teardown's grace period"
-            ))),
+            n => Err(Severed::Faulted(ConnectionFault::WorkersSurvived(n.into()))),
         }
     }
 

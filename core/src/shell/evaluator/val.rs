@@ -7,6 +7,7 @@
 //! Σ-free inspection could never read back out — that literal is built
 //! eagerly instead.
 
+use crate::fact::{EvalFailure, Expected, Reason, ValueShape};
 use std::sync::Arc;
 
 use crate::ir::Val;
@@ -31,19 +32,19 @@ pub(crate) fn form(val: &Val, env: &Env, sig: &Signature) -> Result<Value, Error
             .cloned()
             .ok_or_else(|| {
                 let hint = match name.as_ref() {
-                    "STATUS" => crate::typecheck::NO_STATUS_REGISTER.to_string(),
+                    "STATUS" => None,
                     _ => crate::typecheck::hyphen_boundary(name, |p| {
                         crate::shell::runtime::lookup(p, env, sig).is_some()
                     })
-                    .map_or_else(
-                        || {
-                            "check spelling, or ensure the variable is defined before this line"
-                                .into()
-                        },
-                        crate::typecheck::hyphen_boundary_hint,
-                    ),
+                    .map(crate::typecheck::hyphen_boundary_hint),
                 };
-                Error::new(format!("undefined variable: ${name}")).with_hint(hint)
+                let error = Error::new(Reason::Evaluation(Box::new(EvalFailure::MissingBinding(
+                    name.to_string(),
+                ))));
+                match hint {
+                    Some(hint) => error.with_hint(hint),
+                    None => error,
+                }
             }),
         Val::Thunk(node) => Ok(Value::Thunk(Closure::new(
             Arc::clone(node.shape()),
@@ -120,6 +121,31 @@ fn literal_names_bound(val: &Val, env: &Env) -> bool {
 /// Shared with argv-spread checking in `machine::close_argv`, and with
 /// [`super::assemble`]'s list rule.
 pub(crate) fn spread_type_err(val: &Value) -> Error {
-    Error::new(format!("spread requires a List, got {}", val.type_name()))
-        .with_hint("spread (...) expands a list")
+    val.expected("spread", Expected::Shape(ValueShape::List))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_bindings_and_spread_backstops_preserve_typed_causes() {
+        let shell = crate::test_helper::core_shell();
+        assert_eq!(
+            form(&Val::Variable("absent".into()), &Env::new(), &shell.sig)
+                .unwrap_err()
+                .reason,
+            Reason::Evaluation(Box::new(EvalFailure::MissingBinding("absent".into())))
+        );
+        assert!(matches!(
+            spread_type_err(&Value::Int(1)).reason,
+            Reason::Invalid(_)
+        ));
+        assert_eq!(
+            form(&Val::Variable("STATUS".into()), &Env::new(), &shell.sig)
+                .unwrap_err()
+                .hints(),
+            []
+        );
+    }
 }

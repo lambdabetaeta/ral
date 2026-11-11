@@ -134,7 +134,7 @@ fn read_at(
 fn not_absolute(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("{} is not an absolute path", shown(path)),
+        crate::fact::PathIoLeaf::AbsoluteRequired(shown(path)),
     )
 }
 

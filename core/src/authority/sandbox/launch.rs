@@ -28,6 +28,11 @@ use super::warrant::{Confinement as WarrantConfinement, Handoff, Slots, Warrant}
 use crate::Role;
 use crate::authority::policy::{Admitted, Baseline, GrantStack, Program};
 use crate::error::Error;
+use crate::fact::{BinaryRole, LaunchFailure, PinCause, PinFailure, Reason};
+
+#[cfg(unix)]
+use crate::fact::{ParcelRole, ParcelStep};
+
 use crate::path::{CwdPath, RealPath};
 #[cfg(target_os = "linux")]
 use crate::process::launch::EnvelopedLaunch;
@@ -40,6 +45,10 @@ use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Command;
+
+pub(super) fn refused(cause: LaunchFailure) -> Error {
+    Error::new(Reason::Launch(Box::new(cause)))
+}
 
 /// Whether the session keeps owning what it launches.  Read by the Linux
 /// backend, which decides two ties between the session and the envelope:
@@ -245,9 +254,12 @@ impl Image {
             }
             Self::Tool(tool) => {
                 let mut launch = super::reexec::launch(Role::BundledTool).map_err(|e| {
-                    Error::new(format!(
-                        "bundled tool '{tool}': cannot resolve ral's own program: {e}"
-                    ))
+                    refused(LaunchFailure::Pin(PinFailure {
+                        role: BinaryRole::Ral,
+                        spelling: None,
+                        cause: PinCause::CurrentExecutableRead(Box::new(crate::io::failure(&e))),
+                    }))
+                    .with_context(format!("bundled tool '{tool}'"))
                 })?;
                 launch.arg(tool);
                 launch
@@ -333,14 +345,20 @@ pub(super) fn issue(
     warrant: &Warrant<'_>,
     handoff: &mut Handoff,
 ) -> Result<(Slots, Report), Error> {
-    let parcel = warrant.parcel().map_err(Error::new)?;
-    let warrant_at = handoff.lend(parcel.as_fd()).map_err(Error::new)?;
+    let parcel = warrant.parcel().map_err(refused)?;
+    let warrant_at = handoff
+        .lend(parcel.as_fd(), ParcelRole::Warrant)
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
     let (reader, writer) = crate::process::cloexec_socketpair().map_err(|e| {
-        Error::new(format!(
-            "sandbox: cannot open the confined launch's report socket: {e}"
-        ))
+        refused(LaunchFailure::Parcel(super::warrant::parcel_io(
+            ParcelRole::ReportSocket,
+            ParcelStep::Create,
+            &e,
+        )))
     })?;
-    let (kept, report_at) = handoff.keep(writer.as_fd()).map_err(Error::new)?;
+    let (kept, report_at) = handoff
+        .keep(writer.as_fd(), ParcelRole::ReportSocket)
+        .map_err(|e| refused(LaunchFailure::Parcel(e)))?;
     let slots = Slots {
         warrant: warrant_at,
         report: report_at,
@@ -360,8 +378,8 @@ fn linux_sandboxed_command(
     ownership: Ownership,
     cwd: &CwdPath,
 ) -> Result<EnvelopedLaunch, Error> {
-    let bwrap = super::linux::envelope().map_err(super::unavailable)?;
-    let own = super::reexec::own().map_err(Error::new)?;
+    let bwrap = super::linux::envelope().map_err(|e| refused(LaunchFailure::Unavailable(e)))?;
+    let own = super::reexec::own().map_err(|e| refused(LaunchFailure::Pin(e)))?;
     let env = Envelope::probe(bwrap, own);
     enveloped(&env, projection, image, args, Some(cwd), ownership)
 }
@@ -378,8 +396,11 @@ pub(super) fn enveloped(
     chdir: Option<&CwdPath>,
     ownership: Ownership,
 ) -> Result<EnvelopedLaunch, Error> {
-    let rendered = projection.rendered().map_err(Error::new)?;
-    let shown = super::linux::Shown::of(&rendered).map_err(Error::new)?;
+    let rendered = projection
+        .rendered()
+        .map_err(|e| refused(LaunchFailure::Projection(e)))?;
+    let shown =
+        super::linux::Shown::of(&rendered).map_err(|e| refused(LaunchFailure::Projection(e)))?;
     let mut handoff = Handoff::default();
     let confinement = super::linux::landlock::build(
         &rendered.exec,
@@ -390,9 +411,9 @@ pub(super) fn enveloped(
     )?;
     let warrant = Warrant::new(WarrantConfinement(confinement), image, args);
     let (slots, report) = issue(&warrant, &mut handoff)?;
-    let (cmd, info, stdio) =
+    let (cmd, info, stdio, evidence) =
         super::linux::bwrap_command(env, shown, handoff, slots, &rendered, chdir, ownership)?;
-    Ok(bwrapped(cmd, info, stdio, report))
+    Ok(bwrapped(cmd, info, stdio, report).with_setup_evidence(evidence))
 }
 
 /// bwrap's `cmd` as a launch, with the payload's `--info-fd` peer and the
@@ -408,7 +429,7 @@ pub(super) fn bwrapped(
         cmd,
         stdio,
         // A host package rather than part of ral, so it may simply be absent.
-        super::linux::BWRAP,
+        crate::fact::LauncherRole::Bwrap,
         info.map(|fd| Box::new(move || fd.payload_pgid()) as _),
         report,
     )
@@ -425,19 +446,29 @@ fn macos_sandboxed_command(
     image: &Image,
     args: &[Cow<'_, str>],
 ) -> Result<crate::process::Launch, Error> {
-    let own = super::reexec::own().map_err(Error::new)?;
-    own.verify().map_err(Error::new)?;
-    let profile = super::macos::build_profile(projection).map_err(Error::new)?;
+    let own = super::reexec::own().map_err(|e| refused(LaunchFailure::Pin(e)))?;
+    own.verify().map_err(|e| refused(LaunchFailure::Pin(e)))?;
+    let profile = super::macos::build_profile(projection).map_err(refused)?;
     let mut handoff = Handoff::default();
     let (slots, report) = issue(
         &Warrant::new(WarrantConfinement(profile), image, args),
         &mut handoff,
     )?;
-    Ok(trampoline(own, handoff, slots, report))
+    let mut evidence = crate::process::launch::setup::Evidence::new().map_err(|e| {
+        crate::process::launch::prepare_io(
+            crate::fact::PrepareStep::ReadinessMark,
+            crate::fact::PrepareSubject::Child,
+            &e,
+        )
+    })?;
+    let mut cmd = own.command();
+    cmd.args(slots.argv());
+    handoff.install(&mut cmd, &mut evidence);
+    Ok(crate::process::Launch::trampolined(cmd, report).with_setup_evidence(evidence))
 }
 
 /// The pinned ral, summoned to its slots.
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn trampoline(
     own: &super::reexec::Pinned,
     handoff: Handoff,
@@ -446,8 +477,9 @@ pub(super) fn trampoline(
 ) -> crate::process::Launch {
     let mut cmd = own.command();
     cmd.args(slots.argv());
-    handoff.install(&mut cmd);
-    crate::process::Launch::trampolined(cmd, report)
+    let mut evidence = crate::process::launch::setup::Evidence::new().expect("test setup evidence");
+    handoff.install(&mut cmd, &mut evidence);
+    crate::process::Launch::trampolined(cmd, report).with_setup_evidence(evidence)
 }
 
 /// What an unrestricted in-process guard admits, for a test that builds a launch without
@@ -530,7 +562,7 @@ mod tests {
             };
             assert_eq!(flag, Role::Warrant.flag());
             for at in [warrant, report] {
-                Slot::parse(at).expect("a slot");
+                Slot::parse(at, crate::fact::HandoffField::Warrant).expect("a slot");
             }
         }
     }
@@ -1226,11 +1258,14 @@ mod tests {
                 ["--args", "--", Role::Warrant.flag()]
             );
             for at in [options, warrant, report, input, output, error] {
-                Slot::parse(at).expect("a slot");
+                Slot::parse(at, crate::fact::HandoffField::Warrant).expect("a slot");
             }
             assert!(
-                (trampoline.strip_prefix("/proc/self/fd/"))
-                    .is_some_and(|at| Slot::parse(at).is_ok()),
+                (trampoline.strip_prefix("/proc/self/fd/")).is_some_and(|at| Slot::parse(
+                    at,
+                    crate::fact::HandoffField::Warrant
+                )
+                .is_ok()),
                 "{args:?}"
             );
         }

@@ -1,5 +1,6 @@
 //! A float that is neither NaN nor infinite, by type.
 
+use serde::de::{Error as _, Unexpected};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::fmt;
@@ -28,6 +29,20 @@ impl Finite {
     #[must_use]
     pub const fn new(f: f64) -> Option<Self> {
         if f.is_finite() { Some(Self(f)) } else { None }
+    }
+
+    /// Validate the existing serialized IEEE-754 representation.
+    ///
+    /// # Errors
+    /// Returns a finite-bits failure for an infinity or NaN representation.
+    pub fn from_bits(bits: u64) -> Result<Self, crate::fact::DecodeFailure> {
+        Self::new(f64::from_bits(bits)).ok_or_else(|| {
+            crate::fact::DecodeFailure::new(crate::fact::DecodeCause::FiniteBits(
+                crate::fact::FiniteBitsFailure {
+                    bits: crate::fact::Count::from_u64(bits),
+                },
+            ))
+        })
     }
 
     #[must_use]
@@ -101,10 +116,27 @@ impl Serialize for Finite {
 
 impl<'de> Deserialize<'de> for Finite {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let bits = u64::deserialize(d)?;
-        Self::new(f64::from_bits(bits)).ok_or_else(|| {
-            serde::de::Error::custom(format!("{bits:#018x} are the bits of a NaN or an infinity"))
+        let float = f64::from_bits(u64::deserialize(d)?);
+        Self::new(float).ok_or_else(|| {
+            D::Error::invalid_value(Unexpected::Float(float), &"the bits of a finite float")
         })
+    }
+}
+
+impl super::json::JsonDecode for Finite {
+    fn decode_json(
+        value: super::json::JsonRef<'_, '_>,
+    ) -> Result<Self, crate::fact::DecodeFailure> {
+        Self::from_bits(super::json::decode_structural(value)?)
+    }
+}
+
+impl super::json::JsonEncode for Finite {
+    fn encode_json(
+        &self,
+        format: super::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(super::json::serialize_structural(self, format))
     }
 }
 

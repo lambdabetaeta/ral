@@ -64,7 +64,7 @@ impl Manifest {
         stop: &Stop,
         progress: Progress<'_>,
     ) -> Result<Self, String> {
-        let named = spelled(root)?;
+        let named = spelled(root).map_err(|error| error.describe())?;
         let mut manifest = Self::default();
         let mut files: u64 = 0;
         for entry in Walk::all(&named)

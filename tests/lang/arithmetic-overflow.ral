@@ -22,16 +22,9 @@ assert_eq 'bottom times one' $bottom !{mul $bottom 1}
 assert_eq 'top minus one' 9223372036854775806 !{add $top -1}
 assert_eq 'bottom plus one' -9223372036854775807 !{sub $bottom -1}
 
-# One step past either end is refused with a plain runtime error
+# One step past either end is refused with a plain runtime error, status 1
 let overflows = { |op a b|
-    try { let _ = $op $a $b; return false } { |e|
-        case $e[reason] [
-            `raised: { |_| return true },
-            `process: { |_| return false },
-            `timed-out: { |_| return false },
-            `cancelled: { |_| return false },
-        ]
-    }
+    try { let _ = $op $a $b; return false } { |e| return $[$e[status] == 1] }
 }
 assert_eq 'top + 1' true !{overflows $add $top 1}
 assert_eq 'bottom + -1' true !{overflows $add $bottom -1}

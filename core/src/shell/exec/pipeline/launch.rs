@@ -32,9 +32,13 @@ pub(super) fn stage_stdin(
         ByteIn::Parent => match shell.io.stdin.offered(input) {
             Source::Empty => return Ok(Source::Empty),
             Source::Terminal => return Ok(Source::Terminal),
-            Source::Reader(r) => r
-                .try_clone()
-                .map_err(|e| Error::io("could not duplicate stdin", &e))?,
+            Source::Reader(r) => r.try_clone().map_err(|e| {
+                Error::io(
+                    crate::fact::IoOperation::Duplicate,
+                    crate::fact::IoSubject::Stream(crate::fact::StandardStream::Stdin),
+                    &e,
+                )
+            })?,
         },
     };
     Ok(Source::Reader(reader.interruptible(scope.clone())))

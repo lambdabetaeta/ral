@@ -48,7 +48,7 @@ fn held_at(binds: &Binds, dest: &std::path::Path) -> rustix::fs::Stat {
 
 /// The `--info-fd` slot a kept render names: a number, nothing lent.
 fn info_slot() -> Slot {
-    Slot::parse("98").expect("a slot")
+    Slot::parse("98", crate::fact::HandoffField::Warrant).expect("a slot")
 }
 
 /// A handoff lending `/dev/null` as the warrant and report: for a launch
@@ -57,8 +57,12 @@ fn null_warrant() -> (Handoff, Slots) {
     use std::os::fd::AsFd;
     let null = std::fs::File::open("/dev/null").expect("open /dev/null");
     let mut handoff = Handoff::default();
-    let warrant = handoff.lend(null.as_fd()).expect("lends");
-    let report = handoff.lend(null.as_fd()).expect("lends");
+    let warrant = handoff
+        .lend(null.as_fd(), crate::fact::ParcelRole::Warrant)
+        .expect("lends");
+    let report = handoff
+        .lend(null.as_fd(), crate::fact::ParcelRole::Warrant)
+        .expect("lends");
     (
         handoff,
         Slots {
@@ -75,7 +79,7 @@ fn render(
     binds: &Binds,
     chdir: Option<&str>,
     ownership: Ownership,
-    host: HostEnvelope,
+    host: &HostEnvelope,
 ) -> Vec<String> {
     let rendered = policy.rendered().expect("ASCII paths render");
     let address = (ownership == Ownership::Kept).then(info_slot);
@@ -99,17 +103,21 @@ fn options(
     policy: &SandboxProjection,
     chdir: Option<&str>,
     ownership: Ownership,
-    host: HostEnvelope,
+    host: &HostEnvelope,
 ) -> Vec<String> {
-    render(policy, &binds(policy, host), chdir, ownership, host)
+    render(policy, &binds(policy, host.clone()), chdir, ownership, host)
 }
 
-fn options_on(host: HostEnvelope, policy: &SandboxProjection, ownership: Ownership) -> Vec<String> {
+fn options_on(
+    host: &HostEnvelope,
+    policy: &SandboxProjection,
+    ownership: Ownership,
+) -> Vec<String> {
     options(policy, None, ownership, host)
 }
 
 fn options_for(policy: &SandboxProjection) -> Vec<String> {
-    options_on(WHOLE, policy, Ownership::Kept)
+    options_on(&WHOLE, policy, Ownership::Kept)
 }
 
 fn position_of(args: &[String], mask: &[&str]) -> Option<usize> {
@@ -179,7 +187,7 @@ fn a_cwd_outside_the_grant_is_stood_up_empty_and_unwritable() {
         ("scratch", &granted, "/tmp", false),
         ("unrestricted", &unrestricted(), "/ral-ungranted/cwd", false),
     ] {
-        let args = options(policy, Some(cwd), Ownership::Kept, WHOLE);
+        let args = options(policy, Some(cwd), Ownership::Kept, &WHOLE);
         let mask = position_of(&args, &["--perms", "0555", "--tmpfs", cwd]);
         assert_eq!(mask.is_some(), stood_up, "{label}: {args:?}");
         if let Some(mask) = mask {
@@ -213,7 +221,7 @@ fn a_cwd_within_a_deny_is_refused_naming_both() {
             &rendered,
             Some(&CwdPath::new(cwd.to_path_buf()).expect("absolute cwd")),
             None,
-            WHOLE,
+            &WHOLE,
             &binds,
             &GpuNodes::default(),
             &[],
@@ -228,8 +236,8 @@ fn a_cwd_within_a_deny_is_refused_naming_both() {
             );
         };
         assert!(
-            why.contains(&*denied.to_string_lossy()) && why.contains(&*cwd.to_string_lossy()),
-            "{why}"
+            matches!(why, crate::fact::ProjectionFailure::HiddenWorkingDirectory(ref failure) if failure.exclusion == denied.to_string_lossy() && failure.cwd == cwd.to_string_lossy()),
+            "{why:?}"
         );
     }
     assert!(
@@ -319,7 +327,7 @@ fn bwrap_and_landlock_take_each_denys_mask_from_one_read() {
     );
     let binds = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default())
         .expect("the binds open");
-    let args = render(&policy, &binds, None, Ownership::Kept, WHOLE);
+    let args = render(&policy, &binds, None, Ownership::Kept, &WHOLE);
     let tmpfs = |p: &std::path::Path| {
         position_of(&args, &["--perms", "0000", "--tmpfs", &p.to_string_lossy()]).is_some()
     };
@@ -342,7 +350,7 @@ fn the_launched_file_is_shown_by_the_reads_alone_and_the_cwd_is_entered() {
         &deny_within(&elsewhere, &[]),
         Some("/"),
         Ownership::Kept,
-        WHOLE,
+        &WHOLE,
     );
     assert!(
         bound(&args, "--ro-bind-fd", &real).is_none(),
@@ -358,7 +366,12 @@ fn the_launched_file_is_shown_by_the_reads_alone_and_the_cwd_is_entered() {
         position_of(&args, &["--chdir", "/"]).is_some(),
         "the payload must start in the logical cwd: {args:?}"
     );
-    let args = options(&restricted(&[&dir], &[], &[]), None, Ownership::Kept, WHOLE);
+    let args = options(
+        &restricted(&[&dir], &[], &[]),
+        None,
+        Ownership::Kept,
+        &WHOLE,
+    );
     assert!(
         bound(&args, "--ro-bind-fd", &dir.to_string_lossy()).is_some()
             && bound(&args, "--ro-bind-fd", &real).is_none(),
@@ -530,7 +543,7 @@ fn a_deny_that_hides_proc_is_refused() {
             &rendered,
             None,
             None,
-            WHOLE,
+            &WHOLE,
             &binds,
             &GpuNodes::default(),
             &[],
@@ -553,7 +566,9 @@ fn an_unreachable_object_is_absent_only_where_no_grant_names_it() {
     if opened.is_ok() {
         eprintln!("skipping: this user reaches through a mode-0 directory");
     } else {
-        assert!(opened.is_err_and(|why| why.contains("Permission denied")));
+        assert!(opened.is_err_and(|why| matches!(why,
+            crate::fact::ProjectionFailure::Open(crate::fact::ProjectionOpenFailure::Failed(failure))
+            if matches!(failure.cause.leaf.as_ref(), crate::fact::IoLeaf::Os(cause) if cause.kind == crate::fact::IoKind::PermissionDenied))));
         assert!(matches!(open_object(&inner, true), Ok(None)));
     }
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -577,7 +592,12 @@ fn a_prefix_whose_component_became_a_symlink_since_render_is_refused() {
     let Err(why) = Binds::open(&on(&stand_in(), WHOLE), shown, &mut Handoff::default()) else {
         panic!("a symlinked component would show its target");
     };
-    assert!(why.contains("symbolic link"), "{why}");
+    assert!(matches!(
+        why,
+        crate::fact::LaunchFailure::Projection(crate::fact::ProjectionFailure::Open(
+            crate::fact::ProjectionOpenFailure::Linked(_)
+        ))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -624,12 +644,9 @@ fn a_position_turned_link_refuses_the_launch_as_a_redirected_allowance() {
     };
     assert_eq!(
         why,
-        format!(
-            "sandbox: '{}' was granted by its real path, but it now goes through a symbolic \
-             link; an allowance names what it named when granted. To allow the new target, \
-             grant it where the ceiling is set (in exarch, restart with a grant that names it)",
-            data.display()
-        )
+        crate::fact::LaunchFailure::Projection(crate::fact::ProjectionFailure::Open(
+            crate::fact::ProjectionOpenFailure::Linked(crate::path::shown(&data))
+        ))
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -673,7 +690,7 @@ fn every_bind_is_a_handle_by_slot_in_layer_order() {
     std::fs::write(&secret, "x").unwrap();
     let policy = restricted(&[&ro], &[&w], &[&secret]);
     let binds = binds(&policy, WHOLE);
-    let args = render(&policy, &binds, None, Ownership::Kept, WHOLE);
+    let args = render(&policy, &binds, None, Ownership::Kept, &WHOLE);
     let at = |args: &[String], piece: &[&str]| {
         position_of(args, piece).unwrap_or_else(|| panic!("no {piece:?}: {args:?}"))
     };
@@ -785,12 +802,11 @@ fn a_pinned_directory_turned_link_refuses_the_launch() {
     };
     assert_eq!(
         why,
-        format!(
-            "sandbox: the directory '{}' is pinned for this launch, but it now reaches '{}' \
-             through a symbolic link, which would be shown at its name; make it a directory \
-             again, or retry once nothing is relinking it",
-            p.display(),
-            elsewhere.display()
+        crate::fact::ProjectionFailure::PinnedDirectoryRedirected(
+            crate::fact::ProjectionFailurePinnedDirectoryRedirected {
+                granted: crate::path::shown(&p),
+                reached: crate::path::shown(&elsewhere),
+            }
         )
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -821,8 +837,13 @@ fn a_bwrap_that_cannot_mount_by_descriptor_launches_nothing() {
             .expect("a launch it cannot mount must be refused")
             .to_string()
     };
-    let why = refusal(Builds::Nothing("No permissions to create a new namespace"));
-    assert!(why.contains(&path) && why.contains("cannot build"), "{why}");
+    let why = refusal(Builds::Nothing(crate::fact::BwrapProbeFailure::Exited(
+        crate::fact::BwrapProbeFailureExited {
+            status: crate::fact::NativeStatus::Exited(1),
+            stderr: Some("No permissions to create a new namespace".into()),
+        },
+    )));
+    assert!(why.contains(&path), "{why}");
     assert!(
         why.contains("No permissions") && !why.contains("0.8.0"),
         "{why}"
@@ -882,7 +903,7 @@ fn the_by_hand_dev_has_no_devpts() {
         virtual_dev: false,
         ..WHOLE
     };
-    let args = options_on(host, &policy, Ownership::Kept);
+    let args = options_on(&host, &policy, Ownership::Kept);
     let devpts = |arg: &String| arg.starts_with("/dev/pts") || arg == "/dev/ptmx";
     assert!(
         !args.iter().any(devpts),
@@ -927,7 +948,7 @@ fn a_host_that_refuses_dev_gets_the_same_shape_by_hand() {
     );
 
     let by_hand = options_on(
-        HostEnvelope {
+        &HostEnvelope {
             virtual_dev: false,
             ..WHOLE
         },
@@ -970,7 +991,7 @@ fn render_gpu(policy: &SandboxProjection) -> Vec<String> {
         &rendered,
         None,
         None,
-        WHOLE,
+        &WHOLE,
         &binds(policy, WHOLE),
         &gpu(),
         &[],
@@ -1058,7 +1079,7 @@ fn every_envelope_owns_its_namespaces_and_the_probed_ones_where_the_host_allows(
     for (host, probed) in [(WHOLE, true), (masked, false)] {
         for policy in [&unrestricted(), &restricted] {
             for ownership in [Ownership::Kept, Ownership::Surrendered] {
-                let args = options_on(host, policy, ownership);
+                let args = options_on(&host, policy, ownership);
                 for flag in ["--unshare-ipc", "--unshare-uts"] {
                     assert!(
                         args.iter().any(|a| a == flag),
@@ -1202,7 +1223,7 @@ fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
 fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
     let pin = stand_in();
     let (handoff, slots) = null_warrant();
-    let (cmd, _info_fd, _stdio) = bwrap_command(
+    let (cmd, _info_fd, _stdio, _evidence) = bwrap_command(
         &on(&pin, WHOLE),
         plan(&unrestricted()),
         handoff,
@@ -1247,14 +1268,16 @@ fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         "{args:?}"
     );
     for stream in [input, output, error] {
-        Slot::parse(stream).expect("payload stream names a slot");
+        Slot::parse(stream, crate::fact::HandoffField::Warrant)
+            .expect("payload stream names a slot");
     }
-    let options = Slot::parse(options).expect("`--args` names a slot");
+    let options =
+        Slot::parse(options, crate::fact::HandoffField::Warrant).expect("`--args` names a slot");
     let parcel = std::fs::read(crate::path::proc_fd_path(options.fd()))
         .expect("the options' parcel is open");
     assert!(parcel.starts_with(b"--new-session\0"), "{parcel:?}");
     let trampoline = (trampoline.strip_prefix("/proc/self/fd/"))
-        .and_then(|at| Slot::parse(at).ok())
+        .and_then(|at| Slot::parse(at, crate::fact::HandoffField::Warrant).ok())
         .expect("the trampoline by its slot");
     let lent = stat_of(trampoline);
     let pinned = rustix::fs::fstat(pin.fd()).expect("fstat the pin");
@@ -1314,8 +1337,8 @@ fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
         exec: ExecProjection::default(),
     };
     let binds = binds(&policy, WHOLE);
-    let kept = render(&policy, &binds, None, Ownership::Kept, WHOLE);
-    let surrendered = render(&policy, &binds, None, Ownership::Surrendered, WHOLE);
+    let kept = render(&policy, &binds, None, Ownership::Kept, &WHOLE);
+    let surrendered = render(&policy, &binds, None, Ownership::Surrendered, &WHOLE);
 
     assert!(
         kept.contains(&"--die-with-parent".to_string()),
@@ -1341,5 +1364,19 @@ fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
     assert_eq!(
         untied, surrendered,
         "the two launches must otherwise be confined identically"
+    );
+}
+
+#[test]
+fn projection_open_errors_keep_custom_io_causes_before_os_fallback() {
+    use crate::fact::{IoCause, IoLeaf, PathIoLeaf, ProjectionOpenFailure};
+    let cause = IoCause::new(IoLeaf::Path(PathIoLeaf::NotHeld));
+    let error = super::super::shown::OpenError::Failed {
+        name: "/fixture".into(),
+        source: std::io::Error::other(cause.clone()),
+    };
+    assert!(
+        matches!(ProjectionOpenFailure::from(error), ProjectionOpenFailure::Failed(failure)
+        if failure.path == "/fixture" && *failure.cause == cause)
     );
 }

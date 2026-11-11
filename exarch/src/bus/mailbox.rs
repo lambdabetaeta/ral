@@ -484,8 +484,11 @@ impl Txn<'_> {
             .and_then(|_| self.shared.journal.sync())
         {
             if owed {
-                self.shared
-                    .report_failure(notice(ChildStatus::Failed(failure.to_string())));
+                self.shared.report_failure(notice(ChildStatus::Failed(
+                    crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(
+                        failure.failure(),
+                    )),
+                )));
             }
             return Err(failure);
         }
@@ -728,8 +731,7 @@ impl Shared {
     }
 
     fn poisoned(&self) -> Unavailable {
-        let failure = self.journal.cell_poisoned(format!(
-            "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log", self.id));
+        let failure = self.journal.cell_poisoned(self.id);
         self.home.cancel(CancelCause::Cancelled);
         self.notify();
         failure
@@ -974,8 +976,11 @@ impl AgentAddress {
         // Not `try_transact`: only a poisoned cell falls back here; a failed commit is `Txn::report`'s.
         self.transact(|txn| txn.report(status, &notice))
             .inspect_err(|poisoned| {
-                self.0
-                    .report_failure(notice(ChildStatus::Failed(poisoned.to_string())));
+                self.0.report_failure(notice(ChildStatus::Failed(
+                    crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(
+                        poisoned.failure(),
+                    )),
+                )));
             })?
     }
 

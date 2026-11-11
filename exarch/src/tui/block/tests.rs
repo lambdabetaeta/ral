@@ -19,14 +19,20 @@ fn notification_text_shares_one_wrap_boundary() {
 
 #[test]
 fn subagent_failure_wraps_at_each_width_without_losing_its_reason() {
-    let reason = "The ChatGPT user has reached their Subscription Sharing usage limit. \
+    let detail = "The ChatGPT user has reached their Subscription Sharing usage limit. \
                   Try again after the limit resets or use an API key instead.";
+    let failure = crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Provider(
+        crate::provider::ProviderError::Api {
+            model: "test-model".into(),
+            cause: crate::agent::testkit::service_response(429, detail),
+        }
+        .failure(),
+    ));
+    let reason = failure.to_string();
     let block = Block::chrome(
         Chrome::Subagent {
             name: "credential-diagnostics".into(),
-            outcome: Settlement::Failed {
-                reason: reason.into(),
-            },
+            outcome: Settlement::Failed { reason: failure },
             elapsed: std::time::Duration::from_secs(161),
         },
         None,
@@ -45,7 +51,7 @@ fn subagent_failure_wraps_at_each_width_without_losing_its_reason() {
         );
         let text: String = rows.iter().map(Row::plain).collect();
         let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        assert!(compact(&text).ends_with(&compact(reason)), "{text}");
+        assert!(compact(&text).ends_with(&compact(&reason)), "{text}");
     }
 }
 

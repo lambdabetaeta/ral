@@ -8,6 +8,7 @@
 //! component names a dotfile.
 
 use super::Walk;
+use crate::fact::{GlobFailure, GlobFailureHiddenOnly, GlobFailureSyntax};
 use crate::path::site::Silent;
 use crate::path::{LexicalPath, Resolver, utf8};
 use crate::site::site;
@@ -40,14 +41,12 @@ struct Pattern {
 }
 
 impl Pattern {
-    fn parse(raw: &str) -> Result<Self, String> {
+    fn parse(raw: &str) -> Result<Self, GlobFailure> {
         let (mut prefix, mut steps) = (PathBuf::new(), Vec::new());
         let pattern = site!(Silent::GlobComponents, Path::new(raw));
         for c in site!(Silent::GlobComponents, pattern => components()) {
             if c == Component::ParentDir && !steps.is_empty() {
-                return Err(format!(
-                    "'{raw}': a walk never climbs '..' after a wildcard; glob from the directory it climbs to, as in `glob '../x'`?"
-                ));
+                return Err(GlobFailure::ParentAfterWildcard);
             }
             match step(c)? {
                 Step::Name(name) if steps.is_empty() => prefix.push(name),
@@ -61,7 +60,10 @@ impl Pattern {
 impl Glob {
     /// Compile before resolving: names introduced by cwd anchoring or sigil
     /// expansion never reach the pattern compiler.
-    pub(in crate::path) fn resolve(raw: &str, resolver: &Resolver<'_>) -> Result<Self, String> {
+    pub(in crate::path) fn resolve(
+        raw: &str,
+        resolver: &Resolver<'_>,
+    ) -> Result<Self, GlobFailure> {
         let Pattern { prefix, steps } = Pattern::parse(raw)?;
         let root =
             resolver.resolve(utf8(&prefix).expect("components of a UTF-8 pattern are UTF-8"));
@@ -70,14 +72,9 @@ impl Glob {
 
     /// An absolute pattern spelled by the program, with no sigils or cwd.
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn absolute(raw: &str) -> Result<Self, String> {
+    pub(crate) fn absolute(raw: &str) -> Result<Self, GlobFailure> {
         let Pattern { prefix, steps } = Pattern::parse(raw)?;
-        let root = LexicalPath::absolute(&prefix).ok_or_else(|| {
-            format!(
-                "'{}': a glob walks from an absolute directory",
-                crate::path::shown(&prefix)
-            )
-        })?;
+        let root = LexicalPath::absolute(&prefix).ok_or(GlobFailure::NotAbsolute)?;
         Ok(Self { root, steps })
     }
 
@@ -138,7 +135,7 @@ impl Glob {
     }
 }
 
-fn step(c: Component<'_>) -> Result<Step, String> {
+fn step(c: Component<'_>) -> Result<Step, GlobFailure> {
     // A Windows namespace prefix may contain `?`; it is a root, not a name.
     let Component::Normal(os) = c else {
         return Ok(Step::Name(c.as_os_str().to_owned()));
@@ -155,11 +152,16 @@ fn step(c: Component<'_>) -> Result<Step, String> {
         .backslash_escape(false)
         .literal_separator(true)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            GlobFailure::Syntax(GlobFailureSyntax {
+                component: s.into(),
+                detail: error.to_string(),
+            })
+        })?;
     if hidden_only(&glob) {
-        return Err(format!(
-            "'{s}': a wildcard never matches a name starting with '.', and this one matches nothing else; name each file literally, or filter `list-dir`?"
-        ));
+        return Err(GlobFailure::HiddenOnly(GlobFailureHiddenOnly {
+            component: s.into(),
+        }));
     }
     Ok(Step::Wild(glob.compile_matcher()))
 }
@@ -183,7 +185,7 @@ fn hidden(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Glob;
+    use super::{Glob, GlobFailure};
     use crate::environ::EnvVars;
     use crate::path::{CwdPath, Resolver};
 
@@ -196,7 +198,7 @@ mod tests {
         }
     }
 
-    fn parse(rest: &str) -> Result<Glob, String> {
+    fn parse(rest: &str) -> Result<Glob, GlobFailure> {
         let pattern = rooted(rest);
         Glob::absolute(&pattern)
     }

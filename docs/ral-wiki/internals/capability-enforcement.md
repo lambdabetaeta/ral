@@ -1,7 +1,7 @@
 ---
-generated_at_commit: f1b0a4a4
-verified_at_commit: 257c6c00
-verified_at_date: 2026-11-09
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+verified_at_date: 2026-11-10
 anchors: [check_exec, check_exec_name, failure_trace, Admitted, admit, admit_name, Flag, ExecDenial, Refused, Denial, Withheld, refused, region, Table, Evidence, GrantStack, SandboxProjection, Fragment, decode_capability_map, Shell::freeze_ctx, sandboxed_command, Command::prepare, GuestJail::plan, Launch::apply_guest_jail, Entry::prepare, Entry::enter, GrantStack::net]
 ---
 
@@ -52,11 +52,13 @@ those facts.
 **The guard reads a `GrantStack` and returns domain data, never runtime control
 flow.** `authority/guard/enforce.rs`'s free `check_*(&GrantStack, …)` functions
 fold every layer, not just the top one. The model's refusals (`ExecDenial`,
-`Refused`) become a `Denial`: a `fact::Check` beside the `Error` that carries
-the refusal's message and hints. `shell/runtime/state/checks.rs` alone adds runtime status and control
-flow: `Shell::refused` records the check and raises an `Error`, preserving its
-wording. Flag and device refusals cross the same conversion without a check
-fact. The doors are:
+`Refused`) become a portable `Denial`: the refused request and its typed
+cause, with no stored `Error`, check, hints or classification flag.
+`Denial::audit_check` and `missing_allowance` derive observations from those
+facts. `shell/runtime/state/checks.rs` supplies control flow: `Shell::refused`
+and `exec_refused` record the selected denial once, then construct
+`Reason::Denied`; description and remedy are derived later. Flag and device
+refusals use the same reason but yield no audit check. The doors are:
 
 - `authority::guard::check_exec`, which returns the `Admitted` token every launch needs. Only
   `GrantStack::admit` mints one.

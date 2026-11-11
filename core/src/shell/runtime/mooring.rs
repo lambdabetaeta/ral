@@ -6,6 +6,7 @@ use super::Error;
 use super::flow::Settled;
 use super::state::Bequest;
 use super::value::Value;
+use crate::fact::{Reason, StateFailure};
 use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode, TerminalAccess};
 use crate::sync::LockExt as _;
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ pub const NO_DESK_HINT: &str =
 
 /// The refusal a host with no desk answers, as an error.
 pub fn no_desk() -> Error {
-    Error::new(NO_DESK).with_hint(NO_DESK_HINT)
+    Error::new(Reason::State(Box::new(StateFailure::NoDesk)))
 }
 
 /// The host's answer desk for the engine→host answered channel.  `enquire` is
@@ -301,6 +302,14 @@ mod tests {
     use crate::data::{FOValue, OPAQUE_TAG};
     use crate::shell::runtime::idle_handle;
     use std::sync::Mutex;
+
+    #[test]
+    fn no_desk_is_a_typed_state_refusal_without_stored_advice() {
+        let error = no_desk();
+        assert_eq!(error.reason, Reason::State(Box::new(StateFailure::NoDesk)));
+        assert_eq!(error.hints(), []);
+        assert_eq!(error.reason.advice(), [NO_DESK_HINT]);
+    }
 
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<FOValue>>);

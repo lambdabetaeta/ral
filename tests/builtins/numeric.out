@@ -7,11 +7,11 @@ float: 'nan' is not a finite number
 float overflow refused
 floor: 1.0e300 is outside the integer range
 trunc: -1.0e300 is outside the integer range
-round: places must be between 0 and 308, got -1
-round: places must be between 0 and 308, got 400
+round: element 1: places must be between 0 and 308, got -1
+round: element 1: places must be between 0 and 308, got 400
 int: 1.0e300 is outside the integer range
 int: 3.7 is not integral
-range: span from -2 to 9223372036854775807 exceeds the addressable range
+range: range -2..9223372036854775807 cannot be addressed
 true
-exit: status 4294967296 is outside 0..=255: an exit status is one byte
+exit: 4294967296 is outside 0..=255
 numeric tests done

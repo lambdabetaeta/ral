@@ -2,4 +2,4 @@
 # status: 1
 # at: 5:6
 # contains: couldn't match
-fail [reason: `raised "boom", frame: "deploy", site: [script: "manual", line: 1, col: 1], attempt: 3]
+fail [frame: "deploy", message: "boom", status: 1, site: [script: "manual", line: 1, col: 1], attempt: 3]

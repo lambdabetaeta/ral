@@ -3,6 +3,7 @@
 
 use super::datum::Datum;
 use super::{FOValue, byte_encoding};
+use crate::fact::{DecodeCause, DecodeFailure, Expected, Found, ShapeFailure, ValueShape};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::ops::Deref;
@@ -18,6 +19,18 @@ pub struct Bytes(Arc<Vec<u8>>);
 impl Bytes {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
+    }
+
+    /// The shared JSON byte leaf, without serde's custom-error channel.
+    ///
+    /// # Errors
+    /// Returns the typed base64 failure for malformed text.
+    pub fn from_base64(text: &str) -> Result<Self, DecodeFailure> {
+        byte_encoding::decode_base64(text).map(Self::from)
+    }
+
+    pub fn to_base64(&self) -> String {
+        byte_encoding::encode_base64(self)
     }
 
     /// Free while this is the only holder.
@@ -69,6 +82,22 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
+impl super::json::JsonDecode for Bytes {
+    fn decode_json(value: super::json::JsonRef<'_, '_>) -> Result<Self, DecodeFailure> {
+        let text: String = super::json::decode_structural(value)?;
+        Self::from_base64(&text)
+    }
+}
+
+impl super::json::JsonEncode for Bytes {
+    fn encode_json(
+        &self,
+        format: super::json::JsonFormat,
+    ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
+        Ok(super::json::serialize_structural(self, format))
+    }
+}
+
 impl Datum for Bytes {
     fn encode(self) -> FOValue {
         FOValue::Bytes {
@@ -76,9 +105,12 @@ impl Datum for Bytes {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        v.as_bytes()
-            .map(Self::from)
-            .ok_or_else(|| format!("expected Bytes, got {}", v.shape()))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        v.as_bytes().map(Self::from).ok_or_else(|| {
+            DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Bytes),
+                found: Found::of(v),
+            }))
+        })
     }
 }

@@ -32,7 +32,7 @@ within [dir: $d] {
     try {
         /bin/sh -c 'rm swapped; mkdir swapped' > swapped
     } { |e|
-        echo !{re-match '^swapped: ' !{describe $e}}
+        echo !{re-match '^could not write "swapped"' $e[message]}
     }
 }
 

@@ -11,7 +11,11 @@ use ral_core::authority::policy::{EditorVerb, Flag};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
-use ral_core::fact::FailureCode as _;
+use ral_core::fact::{
+    DataStep, EditorFailure, EditorFailureUnknownStyle, Expected, FailureCode as _, HostFailure,
+    InvalidCause, InvalidFailure, ProtocolData, ProtocolFailure, ProtocolFailureDecode, RalFailure,
+    Reason, ShapeFailure, UnexpectedPayload, UnknownTag, ValueShape,
+};
 use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{
@@ -25,7 +29,7 @@ use std::sync::Arc;
 use super::super::captured_line;
 use super::super::completion::{CommandAt, parse_at};
 use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Gated, HighlightReq};
-use super::super::highlight_style::style_ansi;
+use super::super::highlight_style::{style_ansi, style_names};
 
 /// Put `op` to the host, which `name` may do under `op`'s grant only.
 fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<Value> {
@@ -35,8 +39,17 @@ fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<
 /// `op`'s answer, decoded as a `T`.
 fn answer<T: Datum>(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<T> {
     shell.check(op.flag(), name)?;
-    Ok(T::decode(&shell.enquire(mooring, op.into().encode())?)
-        .map_err(|why| Error::new(format!("the host answered outside its shape: {why}")))?)
+    Ok(
+        T::decode(&shell.enquire(mooring, op.into().encode())?).map_err(|cause| {
+            Error::new(Reason::Protocol(Box::new(ProtocolFailure::Decode(
+                ProtocolFailureDecode {
+                    kind: ProtocolData::Answer,
+                    operation: name.into(),
+                    cause,
+                },
+            ))))
+        })?,
+    )
 }
 
 /// A non-negative offset, flooring a negative one at zero.
@@ -58,28 +71,107 @@ pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
 
 // ─── State write ─────────────────────────────────────────────────────────────
 
+fn invalid(operation: &str, path: Vec<DataStep>, cause: InvalidCause) -> Error {
+    Error::new(Reason::Invalid(Box::new(InvalidFailure {
+        operation: operation.into(),
+        path,
+        cause,
+    })))
+}
+
+fn shape(operation: &str, path: Vec<DataStep>, value: &Value, expected: Expected) -> Error {
+    invalid(
+        operation,
+        path,
+        InvalidCause::Shape(ShapeFailure {
+            expected,
+            found: value.found(),
+        }),
+    )
+}
+
 /// `_ed-set`'s request: each field is `` `keep `` or `` `set v ``.
 fn set_op(arg: &Value) -> Settled<EditorOp> {
     let map = arg.as_map("_ed-set")?;
-    let choice = |key: &str| match map.get(key).as_deref() {
-        Some(Value::Variant {
-            label,
-            payload: None,
-        }) if &**label == "keep" => Ok(None),
-        Some(Value::Variant {
-            label,
-            payload: Some(v),
-        }) if &**label == "set" => Ok(Some((**v).clone())),
-        _ => Err(Error::new(format!(
-            "_ed-set: {key} must be `keep or `set <value>"
-        ))),
+    let choice = |key: &str| {
+        let path = vec![DataStep::Field(key.into())];
+        match map.get(key).as_deref() {
+            Some(Value::Variant {
+                label,
+                payload: None,
+            }) if &**label == "keep" => Ok(None),
+            Some(Value::Variant {
+                label,
+                payload: Some(v),
+            }) if &**label == "set" => Ok(Some((**v).clone())),
+            Some(Value::Variant {
+                label,
+                payload: Some(v),
+            }) if &**label == "keep" => Err(invalid(
+                "_ed-set",
+                path,
+                InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                    tag: label.to_string(),
+                    found: v.found(),
+                }),
+            )),
+            Some(Value::Variant {
+                label,
+                payload: None,
+            }) if &**label == "set" => Err(invalid(
+                "_ed-set",
+                path,
+                InvalidCause::MissingPayload(label.to_string()),
+            )),
+            Some(Value::Variant { label, .. }) => Err(invalid(
+                "_ed-set",
+                path,
+                InvalidCause::UnknownTag(UnknownTag {
+                    tag: label.to_string(),
+                    offered: vec!["keep".into(), "set".into()],
+                }),
+            )),
+            Some(other) => Err(shape(
+                "_ed-set",
+                path,
+                other,
+                Expected::Tags(vec!["keep".into(), "set".into()]),
+            )),
+            None => Err(invalid(
+                "_ed-set",
+                vec![],
+                InvalidCause::MissingField(key.into()),
+            )),
+        }
     };
     let text = choice("text")?
-        .map(|v| v.as_str("_ed-set text").map(str::to_owned))
+        .map(|v| match v {
+            Value::String(s) => Ok(s.to_string()),
+            other => Err(shape(
+                "_ed-set",
+                vec![
+                    DataStep::Field("text".into()),
+                    DataStep::Payload("set".into()),
+                ],
+                &other,
+                Expected::Shape(ValueShape::String),
+            )),
+        })
         .transpose()?;
     let cursor = match choice("cursor")? {
         Some(Value::Int(n)) => Some(offset(n)),
-        Some(_) => return Err(Error::new("_ed-set: cursor must be Int").into()),
+        Some(other) => {
+            return Err(shape(
+                "_ed-set",
+                vec![
+                    DataStep::Field("cursor".into()),
+                    DataStep::Payload("set".into()),
+                ],
+                &other,
+                Expected::Shape(ValueShape::Int),
+            )
+            .into());
+        }
         None => None,
     };
     Ok(EditorOp::Set { text, cursor })
@@ -186,7 +278,15 @@ pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let prefix = args[0].as_str("_ed-history")?;
     let limit = match &args[1] {
         Value::Int(n) => offset(*n),
-        _ => return Err(Error::new("_ed-history: limit must be Int").into()),
+        other => {
+            return Err(shape(
+                "_ed-history",
+                vec![DataStep::Index(1_usize.into())],
+                other,
+                Expected::Shape(ValueShape::Int),
+            )
+            .into());
+        }
     };
     let history: Vec<String> = answer(shell, mooring, "_ed-history", EditorOp::History)?;
     let mut results: Vec<Value> = Vec::new();
@@ -275,24 +375,41 @@ pub fn builtin_ed_highlight(
     let spans = args[0]
         .as_list("_ed-highlight")?
         .iter()
-        .map(|v| highlight_req(&v))
+        .enumerate()
+        .map(|(index, v)| highlight_req(index, &v))
         .collect::<Settled<_>>()?;
     ask(shell, mooring, "_ed-highlight", EditorOp::Highlight(spans))
 }
 
 /// One `_ed-highlight` span: row-polymorphic, its style checked here.
-fn highlight_req(v: &Value) -> Settled<HighlightReq> {
+fn highlight_req(index: usize, v: &Value) -> Settled<HighlightReq> {
     let int_field = |v: &Value, field: &'static str| match v {
         Value::Int(n) => Ok(offset(*n)),
-        _ => Err(Error::new(format!("highlight span: {field} must be Int"))),
+        other => Err(shape(
+            "_ed-highlight",
+            vec![DataStep::Index(index.into()), DataStep::Field(field.into())],
+            other,
+            Expected::Shape(ValueShape::Int),
+        )),
     };
-    let m = v.as_map("_ed-highlight span")?;
+    let m = match v {
+        Value::Map(m) => m,
+        other => {
+            return Err(shape(
+                "_ed-highlight",
+                vec![DataStep::Index(index.into())],
+                other,
+                Expected::Shape(ValueShape::Map),
+            )
+            .into());
+        }
+    };
     let mut span = HighlightReq {
         start: 0,
         end: 0,
         style: String::new(),
     };
-    for (k, v) in &m {
+    for (k, v) in m {
         match k {
             "start" => span.start = int_field(&v, "start")?,
             "end" => span.end = int_field(&v, "end")?,
@@ -301,7 +418,13 @@ fn highlight_req(v: &Value) -> Settled<HighlightReq> {
         }
     }
     if style_ansi(&span.style).is_none() {
-        return Err(Error::new(format!("_ed-highlight: unknown style '{}'", span.style)).into());
+        return Err(Error::new(Reason::Host(Box::new(HostFailure::Ral(
+            RalFailure::Editor(EditorFailure::UnknownStyle(EditorFailureUnknownStyle {
+                style: span.style,
+                offered: style_names().map(str::to_owned).collect(),
+            })),
+        ))))
+        .into());
     }
     Ok(span)
 }
@@ -330,20 +453,15 @@ pub fn builtin_ed_state(
             let stored = Value::from(stored);
             // The cell outlives each run, so what it holds was decided by
             // whichever run last wrote it.
-            site.admit(&stored, shell.fixings()).map_err(|mismatch| {
-                mismatch.refusal("_ed-state (the plugin's persistent cell)", shell)
-            })?;
+            site.admit(&stored, shell.fixings())
+                .map_err(|mismatch| mismatch.refusal("_ed-state"))?;
             stored
         }
         None => args[0].clone(),
     };
     let new_val = ral_core::shell::evaluator::apply(&args[1], vec![current], mooring, shell)?;
-    let data = FOValue::try_from(&new_val).map_err(|e| {
-        Error::new(format!(
-            "_ed-state: the updater returned {}, but the state cell holds only data",
-            e.leaf
-        ))
-    })?;
+    let data = FOValue::try_from(&new_val)
+        .map_err(|e| invalid("_ed-state", vec![], InvalidCause::NonData(e.into())))?;
     ask(shell, mooring, "_ed-state", EditorOp::StateSet(Data(data)))?;
     Ok(new_val)
 }
@@ -620,16 +738,22 @@ mod tests {
         };
         let (result, asked) = run_with_cell(stale, line_run(BUMP));
         let Err(Break::Error(e)) = result else {
-            panic!("a stale cell must be refused, got {result:?}");
+            panic!("a stale cell must be refused")
         };
+        let Reason::Invalid(failure) = &e.reason else {
+            panic!("expected admission failure")
+        };
+        assert_eq!(failure.operation, "_ed-state");
+        assert_eq!(failure.path, Vec::<ral_core::fact::DataStep>::new());
         assert!(
-            e.describe()
-                .contains("_ed-state (the plugin's persistent cell)")
-                && e.describe().contains("the value is text (`'stale'`)"),
-            "{}",
-            e.describe()
+            matches!(&failure.cause, InvalidCause::Admission(ral_core::fact::AdmissionFailure { pointer, cause: ral_core::fact::AdmissionCause::Uses(ral_core::fact::AdmissionUses { found: ral_core::fact::Found::Text(preview), .. }) }) if pointer.is_empty() && preview.preview == "stale" && !preview.truncated)
         );
-        assert_eq!(asked, 1, "the read only: the updater must not have run");
+        assert!(e.witness().is_some());
+        assert!(e.rejection().is_none());
+        assert_eq!(e.hints(), []);
+        assert!(e.context().is_none());
+        assert!(e.describe().contains("_ed-state"));
+        assert_eq!(asked, 1, "the updater must not have run");
     }
 
     #[test]
@@ -706,5 +830,124 @@ mod tests {
                 cursor: Some(0)
             })
         ));
+    }
+    #[test]
+    fn editor_answer_decoding_and_existing_refusals_stay_distinct() {
+        struct Desk(Settled<FOValue>);
+        impl ral_core::shell::runtime::EnquiryDesk for Desk {
+            fn enquire(&self, _: FOValue, _: &ral_core::process::Scope) -> Settled<FOValue> {
+                self.0.clone()
+            }
+        }
+        fn run(answer: Settled<FOValue>) -> Error {
+            let mut runtime = ral_core::test_helper::core_runtime();
+            runtime.install_builtins(ED_BUILTINS);
+            let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+            let ral_core::shell::run::RunReport::Ran { ending, .. } =
+                shell.run(ral_core::shell::run::RunRequest {
+                    desk: Some(Arc::new(Desk(answer))),
+                    ..ral_core::shell::run::RunRequest::from(line_run("_ed-parse"))
+                })
+            else {
+                panic!("editor query must run")
+            };
+            let Err(Break::Error(error)) = ending.into_settled() else {
+                panic!("expected refusal")
+            };
+            error
+        }
+        let malformed = FOValue::Int { value: 9 };
+        let error = run(Ok(malformed.clone()));
+        assert_eq!(
+            error.reason,
+            Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
+                kind: ProtocolData::Answer,
+                operation: "_ed-parse".into(),
+                cause: EditorSnapshot::decode(&malformed).unwrap_err(),
+            })))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        let original = Error::new(Reason::State(Box::new(
+            ral_core::fact::StateFailure::NoDesk,
+        )))
+        .with_context("host transaction")
+        .with_hints(["first", "second"]);
+        let error = run(Err(original.clone().into()));
+        assert_eq!(error.reason, original.reason);
+        assert_eq!(error.context(), Some("host transaction"));
+        assert_eq!(error.hints(), original.hints());
+        assert!(error.rejection().is_none());
+    }
+
+    #[test]
+    fn editor_shape_failures_keep_field_payload_and_index_paths() {
+        let arg = Value::map(vec![
+            ("text".into(), Value::variant("keep", None)),
+            (
+                "cursor".into(),
+                Value::variant("set", Some(Value::string("3"))),
+            ),
+        ]);
+        let Err(Break::Error(error)) = set_op(&arg) else {
+            panic!("expected invalid cursor")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("expected shape failure")
+        };
+        assert_eq!(
+            failure.path,
+            vec![
+                DataStep::Field("cursor".into()),
+                DataStep::Payload("set".into())
+            ]
+        );
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Int),
+                found: Value::string("3").found()
+            })
+        );
+        let span = Value::map(vec![("end".into(), Value::Bool(false))]);
+        let Err(Break::Error(error)) = highlight_req(2, &span) else {
+            panic!("expected invalid end")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("expected shape failure")
+        };
+        assert_eq!(
+            failure.path,
+            vec![
+                DataStep::Index(2_usize.into()),
+                DataStep::Field("end".into())
+            ]
+        );
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Int),
+                found: ral_core::fact::Found::Bool(false)
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_highlight_style_retains_the_offered_vocabulary() {
+        let span = Value::map(vec![("style".into(), Value::string("unheard-of"))]);
+        let Err(Break::Error(error)) = highlight_req(0, &span) else {
+            panic!("expected unknown style")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                EditorFailure::UnknownStyle(EditorFailureUnknownStyle {
+                    style: "unheard-of".into(),
+                    offered: style_names().map(str::to_owned).collect(),
+                })
+            ))))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
     }
 }

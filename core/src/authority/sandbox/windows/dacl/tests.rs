@@ -411,3 +411,71 @@ fn carving_stamps_the_examined_object_after_its_name_is_replaced() {
         });
     });
 }
+
+#[test]
+fn dacl_runtime_failures_project_without_rendered_sources_or_redirect_targets() {
+    use crate::data::Datum;
+    use crate::fact::{DecodeCause, DecodeFailure, LaunchFailure, Reason};
+    let path = PathBuf::from(r"C:\granted");
+    let native = || io::Error::from_raw_os_error(5);
+    let causes = [
+        DaclError::NotLocal(path.clone()),
+        DaclError::NotUnicode(path.clone()),
+        DaclError::Redirected {
+            granted: path.clone(),
+            at: path.clone(),
+            target: Some(PathBuf::from(r"C:\WITHHELD-TARGET")),
+        },
+        DaclError::WriteDacDenied {
+            path: path.clone(),
+            operation: DaclOperation::SetSecurityInfo,
+            error: native(),
+        },
+        DaclError::Reachable {
+            denied: path.clone(),
+            at: path.clone(),
+        },
+        DaclError::AccessCheck {
+            op: AccessCheckOperation::Check,
+            error: native(),
+        },
+        DaclError::Win32 {
+            path: path.clone(),
+            operation: DaclOperation::GetAce,
+            cause: DaclWin32Cause::Io(Box::new(crate::io::failure(&native()))),
+        },
+        DaclError::LedgerIo(LedgerIoFailure::Io(Box::new(crate::io::failure(&native())))),
+        DaclError::LedgerParse {
+            path: path.clone(),
+            cause: JsonInputFailure::Decode(DecodeFailure::new(DecodeCause::MissingField(
+                "pid".into(),
+            ))),
+        },
+        DaclError::InvalidSid(SidFailure::Empty),
+        DaclError::MutexTimeout {
+            path,
+            timeout_ms: u32::MAX,
+        },
+    ];
+    for error in causes {
+        let failure = error.failure().unwrap();
+        assert!(!failure.describe().contains("WITHHELD-TARGET"));
+        let reason = Reason::Launch(Box::new(LaunchFailure::Dacl(failure)));
+        let encoded = reason.clone().encode();
+        assert!(!format!("{encoded:?}").contains("WITHHELD-TARGET"));
+        assert!(
+            !String::from_utf8(crate::data::json::to_datum_vec(&reason))
+                .unwrap()
+                .contains("WITHHELD-TARGET")
+        );
+        let decoded = Reason::decode(&encoded).unwrap();
+        assert_eq!(decoded, reason);
+        assert_eq!(decoded.describe(), reason.describe());
+        assert_eq!(decoded.advice(), reason.advice());
+    }
+    let own = DaclError::from(OwnError::Linked(PathBuf::from("ledger")));
+    assert!(
+        matches!(own.failure(), Ok(DaclFailure::LedgerIo(LedgerIoFailure::Io(cause)))
+        if matches!(cause.leaf.as_ref(), crate::fact::IoLeaf::Owned(crate::fact::OwnLeaf::Linked(_))))
+    );
+}

@@ -13,6 +13,7 @@
 use ral_core::authority::grant::freeze::FreezeCtx;
 use ral_core::authority::policy::GrantLayer;
 use ral_core::error::Error;
+use ral_core::fact::{ExarchFailure, HostFailure, PolicyFailure, PolicyFailureUnknownBase, Reason};
 use ral_core::io::terminal::TerminalState;
 use ral_core::source::SourceOrigin;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
@@ -78,10 +79,12 @@ pub(super) fn resolve_base(name: &str, ctx: &FreezeCtx) -> Result<GrantLayer, Er
             .iter()
             .map(Base::to_string)
             .collect::<Vec<_>>();
-        Error::new(format!(
-            "unknown base '{name}'; expected one of: {}",
-            offered.join(", ")
-        ))
+        Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+            ExarchFailure::Policy(PolicyFailure::UnknownBase(PolicyFailureUnknownBase {
+                name: name.into(),
+                offered,
+            })),
+        ))))
     })?;
     let mut shell = ral_core::HostSurface::default()
         .shell(TerminalState::default(), ctx.cwd().clone())

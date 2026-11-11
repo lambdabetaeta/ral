@@ -1,7 +1,7 @@
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use block2::{DynBlock, RcBlock};
@@ -15,6 +15,7 @@ use objc2_virtualization::{
     VZVirtioSocketListenerDelegate, VZVirtualMachine, VZVirtualMachineState,
 };
 
+use crate::dial::{DialBackend, DialError};
 use crate::error::{Error, Wire};
 use crate::site::{Silent, site};
 
@@ -29,11 +30,9 @@ pub(super) fn dial(
     queue: &DispatchQueue,
     machine: &VZVirtualMachine,
     port: u32,
-) -> std::io::Result<OwnedFd> {
-    use std::io::{Error as IoError, ErrorKind};
-
+) -> Result<OwnedFd, DialError> {
     let machine_ptr = core::ptr::from_ref(machine);
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<std::io::Result<OwnedFd>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<OwnedFd, DialError>>();
 
     on_queue(queue, move || {
         let done_tx = done_tx.clone();
@@ -42,37 +41,29 @@ pub(super) fn dial(
             let machine = &*machine_ptr;
             let devices = machine.socketDevices();
             let Some(device) = devices.firstObject() else {
-                let _ = done_tx.send(Err(IoError::new(
-                    ErrorKind::ConnectionRefused,
-                    "the machine has no virtio socket device",
-                )));
+                let _ = done_tx.send(Err(DialError::MissingSocketDevice));
                 return;
             };
             let Ok(socket) = device.downcast::<VZVirtioSocketDevice>() else {
-                let _ = done_tx.send(Err(IoError::new(
-                    ErrorKind::ConnectionRefused,
-                    "the machine's socket device is not virtio",
-                )));
+                let _ = done_tx.send(Err(DialError::NonVirtioSocketDevice));
                 return;
             };
             let completion = RcBlock::new(
                 move |connection: *mut VZVirtioSocketConnection,
                       error: *mut objc2_foundation::NSError| {
                     let outcome = if let Some(connection) = connection.as_ref() {
-                        BorrowedFd::borrow_raw(connection.fileDescriptor()).try_clone_to_owned()
+                        BorrowedFd::borrow_raw(connection.fileDescriptor())
+                            .try_clone_to_owned()
+                            .map_err(DialError::Io)
                     } else if let Some(error) = error.as_ref() {
-                        Err(IoError::new(
-                            ErrorKind::ConnectionRefused,
-                            format!(
-                                "the guest refused the dial: {}",
-                                error.localizedDescription()
-                            ),
-                        ))
+                        Err(DialError::Platform {
+                            backend: DialBackend::Virtualization,
+                            domain: error.domain().to_string(),
+                            code: error.code() as i64,
+                            detail: error.localizedDescription().to_string(),
+                        })
                     } else {
-                        Err(IoError::new(
-                            ErrorKind::ConnectionRefused,
-                            "the connect completed with neither a connection nor an error",
-                        ))
+                        Err(DialError::CompletionWithoutResult)
                     };
                     let _ = done_tx.send(outcome);
                 },
@@ -81,19 +72,14 @@ pub(super) fn dial(
         }
     });
 
-    done_rx
-        .recv_timeout(GUEST_DIAL_PATIENCE)
-        .unwrap_or_else(|_| {
-            Err(IoError::new(
-                ErrorKind::TimedOut,
-                format!(
-                    "nothing in the guest answered a dial to port {port} within {}s; a guest \
-                     with nothing bound there refuses within milliseconds, so a silence this \
-                     long means the machine never delivered the dial at all",
-                    GUEST_DIAL_PATIENCE.as_secs()
-                ),
-            ))
-        })
+    match done_rx.recv_timeout(GUEST_DIAL_PATIENCE) {
+        Ok(outcome) => outcome,
+        Err(RecvTimeoutError::Timeout) => Err(DialError::TimedOut {
+            port,
+            within: GUEST_DIAL_PATIENCE,
+        }),
+        Err(RecvTimeoutError::Disconnected) => Err(DialError::WaitDisconnected { port }),
+    }
 }
 
 pub(super) fn request_stop(queue: &DispatchQueue, machine: &VZVirtualMachine) {

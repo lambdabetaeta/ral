@@ -5,14 +5,14 @@ let d = temp-dir
 
 # A pipeline ends with its last stage; a non-match is a failure try can see
 /bin/echo hello | grep hello
-try { /bin/echo hello | grep zzz } { |e| echo 'no match:' $e[reason] }
+try { /bin/echo hello | grep zzz } { |e| echo 'no match:' $e[status] $e[message] }
 
 # An exit of 137 is an exit; only a real SIGKILL is a signal
-try { /bin/sh -c 'exit 137' } { |e| echo !{describe $e} }
-try { /bin/sh -c 'kill -KILL $$' } { |e| echo !{describe $e} }
+try { /bin/sh -c 'exit 137' } { |e| echo $e[message] }
+try { /bin/sh -c 'kill -KILL $$' } { |e| echo $e[message] }
 
 # The first external failure wins over a later stage's own complaint
-try { /bin/sh -c 'exit 42' | from-json; return () } { |e| echo !{describe $e} }
+try { /bin/sh -c 'exit 42' | from-json; return () } { |e| echo $e[message] }
 
 # 2>&1 inside a stage merges stderr into the bytes it hands on
 let both = !{!{/bin/sh -c 'printf out; printf err >&2' 2>&1} | from-string}

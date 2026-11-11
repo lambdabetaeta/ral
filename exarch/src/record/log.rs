@@ -16,93 +16,54 @@
 
 use super::{Commit, Cursor, Locus, NonEmpty, Publish, RECORD, Record, Recorded, Sum, Transient};
 use crate::app::now_unix_ms;
+use ral_core::data::json::JsonRef;
+use ral_core::fact::{
+    DecodeFailure, JsonEncodeFailure, JsonSyntaxFailure, RecordLineFailure,
+    RecordLineFailureSealMismatch, RecordReadFailure, RecordReadFailureLine,
+    RecordReadFailureLocusSealMismatch, RecordReadFailureMissingLocusRecord, RecordingFailure,
+    RecordingFailureCellPoisoned, RecordingFailureRecording, RecordingStage,
+};
 use ral_core::own::OwnDir;
 use ral_core::process::{Fatal, ScopeNode};
 use ral_core::sync::{LockExt as _, Torn};
-use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor, value::MapAccessDeserializer};
-use serde::{Deserialize, Serialize, Serializer};
-use serde_json::{error::Category, value::RawValue};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// One line of `record.jsonl`: a commit, sealed by the sum of its exact bytes.
-/// `S` is the seal as read: a [`Sum`], or the text standing where one will not
-/// parse. Read only through [`object`].
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Line<'a, S = Sum> {
-    sum: S,
-    #[serde(borrow)]
-    commit: &'a RawValue,
-}
-
-/// What a line's `commit` holds. Read only through [`object`].
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Body<R> {
-    at_unix_ms: u64,
-    records: R,
-}
-
-/// A `T` read from a JSON object alone: a derived struct also reads an array.
-struct Object<T>(T);
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(Fields(PhantomData)).map(Self)
-    }
-}
-
-/// The visitor of [`Object`]: a map's entries, as the fields of a `T`.
-struct Fields<T>(PhantomData<T>);
-
-impl<'de, T: Deserialize<'de>> Visitor<'de> for Fields<T> {
-    type Value = T;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a JSON object")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
-        T::deserialize(MapAccessDeserializer::new(map))
-    }
-}
-
-/// `text` as a `T`, however deep the writer nested it: every read of a line
-/// goes through here.
-fn from_json<'de, T: Deserialize<'de>>(text: &'de [u8]) -> serde_json::Result<T> {
-    let mut de = serde_json::Deserializer::from_slice(text);
-    // Unbounded depth is safe: `serde_stacker` grows the stack onto the heap.
-    de.disable_recursion_limit();
-    let value = T::deserialize(serde_stacker::Deserializer::new(&mut de))?;
-    de.end()?;
-    Ok(value)
-}
-
-/// `text`, which must be a JSON object, as a `T`.
-fn object<'de, T: Deserialize<'de>>(text: &'de [u8]) -> serde_json::Result<T> {
-    from_json(text).map(|Object(value)| value)
-}
+mod raw;
+use raw::{seal, unseal};
 
 /// Why a complete line yields no commit.
 #[derive(Debug)]
 enum Unsealed {
     /// Not JSON: damage.
-    Syntax(serde_json::Error),
+    Syntax(JsonSyntaxFailure),
     /// JSON, but not a `{sum, commit}` line: another writer's.
-    Shape(serde_json::Error),
+    Shape(DecodeFailure),
     /// The commit does not hash to its seal, which may not even be a sum: damage.
     Sum { sealed: String, actual: Sum },
     /// Sealed, but its records are not this exarch's: another writer's.
-    Records(serde_json::Error),
+    Records(DecodeFailure),
 }
 
 impl Unsealed {
+    fn failure(&self) -> RecordLineFailure {
+        match self {
+            Self::Syntax(cause) => RecordLineFailure::JsonSyntax(cause.clone()),
+            Self::Shape(cause) => RecordLineFailure::InvalidEnvelope(cause.clone()),
+            Self::Sum { sealed, actual } => {
+                RecordLineFailure::SealMismatch(RecordLineFailureSealMismatch {
+                    sealed: sealed.clone(),
+                    actual: actual.to_string(),
+                })
+            }
+            Self::Records(cause) => RecordLineFailure::InvalidRecords(cause.clone()),
+        }
+    }
+
     /// Whether a torn write could have left the line, rather than another writer.
     fn damaged(&self) -> bool {
         match self {
@@ -128,7 +89,8 @@ impl fmt::Display for Unsealed {
         match self {
             Self::Syntax(error) => write!(
                 f,
-                "is corrupt: it is not JSON ({error}), so the file was damaged or edited after it was written; {INTACT}"
+                "is corrupt: it is not JSON ({}), so the file was damaged or edited after it was written; {INTACT}",
+                error.describe()
             ),
             Self::Shape(error) => {
                 write!(f, "is not a commit this exarch writes ({error}); {OLDER}")
@@ -147,70 +109,17 @@ impl fmt::Display for Unsealed {
     }
 }
 
-/// A `T` written however deep: the writer's half of [`from_json`].
-struct Deep<'a, T>(&'a T);
-
-impl<T: Serialize> Serialize for Deep<'_, T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serde_stacker::Serializer::new(serializer))
-    }
-}
-
-/// `body` as one line's bytes, terminator excluded, and the sum sealing it.
-fn seal<R: Serialize>(body: &Body<R>) -> serde_json::Result<(Sum, Vec<u8>)> {
-    let commit = serde_json::value::to_raw_value(&Deep(body))?;
-    let sum = Sum::of(commit.get().as_bytes());
-    let line = serde_json::to_vec(&Line {
-        sum,
-        commit: &commit,
-    })?;
-    Ok((sum, line))
-}
-
-/// The commit `line` seals, if its sum holds.
-fn unseal(line: &[u8]) -> Result<(Sum, &RawValue), Unsealed> {
-    let Line { sum, commit } = object(line).map_err(|error| unreadable(line, error))?;
-    let actual = Sum::of(commit.get().as_bytes());
-    if actual == sum {
-        Ok((sum, commit))
-    } else {
-        Err(Unsealed::Sum {
-            sealed: sum.to_string(),
-            actual,
-        })
-    }
-}
-
-/// Why `line` reads as no [`Line`]: damage unless it is well-formed JSON of
-/// another shape. Re-reads `line`, but only on this error path.
-fn unreadable(line: &[u8], error: serde_json::Error) -> Unsealed {
-    match error.classify() {
-        Category::Syntax | Category::Eof | Category::Io => Unsealed::Syntax(error),
-        Category::Data => match from_json::<IgnoredAny>(line) {
-            Err(syntax) => Unsealed::Syntax(syntax),
-            Ok(_) => match object::<Line<'_, String>>(line) {
-                // A line in every respect but its seal, which no writer leaves.
-                Ok(Line { sum, commit }) => Unsealed::Sum {
-                    sealed: sum,
-                    actual: Sum::of(commit.get().as_bytes()),
-                },
-                Err(_) => Unsealed::Shape(error),
-            },
-        },
-    }
-}
-
-/// The records a sealed commit holds.
-fn records_of(commit: &RawValue) -> Result<NonEmpty<Record>, Unsealed> {
-    object::<Body<NonEmpty<Record>>>(commit.get().as_bytes())
-        .map(|body| body.records)
+/// The records a sealed commit holds, checked completely before hydration.
+fn records_of(commit: JsonRef<'_, '_>) -> Result<NonEmpty<Record>, Unsealed> {
+    crate::record::json::RawBody::read(commit)
+        .and_then(|body| body.validate())
         .map_err(Unsealed::Records)
 }
 
 /// The `number`th commit, spanning `bytes`, sealed as `body` by `sum`.
 fn commit_of(
     sum: Sum,
-    body: &RawValue,
+    body: JsonRef<'_, '_>,
     number: u64,
     bytes: Range<u64>,
 ) -> Result<Commit, Unsealed> {
@@ -234,20 +143,18 @@ fn flatten(
 /// `records` as the line `append` writes, terminator excluded.
 #[cfg(test)]
 pub(crate) fn commit_line(records: &[Record]) -> Vec<u8> {
-    seal(&Body {
-        at_unix_ms: 0,
-        records,
-    })
-    .expect("records serialise")
-    .1
+    match NonEmpty::collect(records.iter().cloned()) {
+        Some(records) => seal(0, &records).expect("records serialise").1,
+        None => raw::sealed_fixture(br#"{"at_unix_ms":0,"records":[]}"#),
+    }
 }
 
 /// The sum and records of one sealed line, if it is one.
 #[cfg(test)]
 pub(crate) fn parse_line(line: &[u8]) -> Option<(Sum, Vec<Record>)> {
-    let (sum, commit) = unseal(line).ok()?;
-    let body = object::<Body<Vec<Record>>>(commit.get().as_bytes()).ok()?;
-    Some((sum, body.records))
+    let line = unseal(line).ok()?;
+    let records = records_of(line.body()).ok()?;
+    Some((line.sum, records.into_iter().collect()))
 }
 
 /// The first recording failure, latched for good and cheap to clone.
@@ -262,7 +169,7 @@ enum Failure {
         cause: io::Error,
         syncing: bool,
     },
-    CellPoisoned(String),
+    CellPoisoned(super::AgentId),
 }
 
 impl Unavailable {
@@ -272,6 +179,29 @@ impl Unavailable {
             cause,
             syncing: false,
         }))
+    }
+
+    pub fn failure(&self) -> RecordingFailure {
+        match &*self.0 {
+            Failure::Recording {
+                record,
+                cause,
+                syncing,
+            } => RecordingFailure::Recording(RecordingFailureRecording {
+                record: record.as_ref().map(ral_core::path::shown),
+                stage: if *syncing {
+                    RecordingStage::Sync
+                } else {
+                    RecordingStage::Append
+                },
+                cause: ral_core::io::failure(cause),
+            }),
+            Failure::CellPoisoned(agent) => {
+                RecordingFailure::CellPoisoned(RecordingFailureCellPoisoned {
+                    agent: agent.get().into(),
+                })
+            }
+        }
     }
 
     pub fn kind(&self) -> io::ErrorKind {
@@ -290,7 +220,12 @@ impl fmt::Display for Unavailable {
                 cause,
                 syncing,
             } => (record, cause, *syncing),
-            Failure::CellPoisoned(why) => return f.write_str(why),
+            Failure::CellPoisoned(agent) => {
+                return write!(
+                    f,
+                    "a thread panicked inside agent {agent}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log"
+                );
+            }
         };
         if syncing {
             match record {
@@ -555,9 +490,9 @@ impl Log {
             .latch(Unavailable::new(self.record.clone(), cause))
     }
 
-    pub(super) fn cell_poisoned(&self, why: String) -> Unavailable {
+    pub(super) fn cell_poisoned(&self, agent: super::AgentId) -> Unavailable {
         self.failure
-            .latch(Unavailable(Arc::new(Failure::CellPoisoned(why))))
+            .latch(Unavailable(Arc::new(Failure::CellPoisoned(agent))))
     }
 
     /// End `home` when this writer fails, at once if it has.
@@ -673,11 +608,8 @@ impl Log {
         if let Some(failure) = self.failure.cause() {
             return Err(failure);
         }
-        let (sum, mut line) = seal(&Body {
-            at_unix_ms: now_unix_ms(),
-            records: &records,
-        })
-        .map_err(|error| self.fail(io::Error::other(error)))?;
+        let (sum, mut line) =
+            seal(now_unix_ms(), &records).map_err(|error| self.fail(io::Error::other(error)))?;
         line.push(b'\n');
         let start = inner.pos;
         if let Some(writer) = inner.writer.as_mut() {
@@ -780,7 +712,7 @@ impl Log {
             number += 1;
             Some(
                 unseal(&line)
-                    .and_then(|(sum, body)| commit_of(sum, body, number, start..pos))
+                    .and_then(|line| commit_of(line.sum, line.body(), number, start..pos))
                     .map_err(|fault| fault.at(number, path)),
             )
         }))
@@ -871,9 +803,6 @@ impl Snapshot {
     }
 }
 
-/// Why a locus no longer names what it was measured over.
-const STALE: &str = "the log at this path is no longer the file those byte ranges were measured in; a copied session directory or an edited log";
-
 /// Records read back by [`Locus`] from one log file, each line read once while
 /// consecutive loci lie on it. Messages name the line; the caller names the
 /// file.
@@ -890,7 +819,7 @@ impl LocusReader {
 
     /// The record `locus` names: refused unless its range still holds the
     /// line its sum sealed.
-    pub(super) fn record(&mut self, locus: &Locus) -> io::Result<&Record> {
+    pub(super) fn record(&mut self, locus: &Locus) -> Result<&Record, RecordReadFailure> {
         let line = match self.line.take() {
             Some(line) if line.holds(locus) => line,
             _ => self.line_at(locus)?,
@@ -903,26 +832,39 @@ impl LocusReader {
             .nth(index)
             .map(Recorded::value)
             .ok_or_else(|| {
-                io::Error::other(format!(
-                    "a locus named record {index} of line {number}, which holds fewer: {STALE}"
-                ))
+                RecordReadFailure::MissingLocusRecord(RecordReadFailureMissingLocusRecord {
+                    commit: number.into(),
+                    index: index.into(),
+                })
             })
     }
 
     /// The line `locus` lies on, read, sum-checked and only then parsed.
-    fn line_at(&mut self, locus: &Locus) -> io::Result<Commit> {
+    fn line_at(&mut self, locus: &Locus) -> Result<Commit, RecordReadFailure> {
         let (number, bytes) = (locus.seq().commit(), locus.bytes());
-        let _ = self.file.seek(SeekFrom::Start(bytes.start))?;
+        let _ = self
+            .file
+            .seek(SeekFrom::Start(bytes.start))
+            .map_err(|error| RecordReadFailure::Io(ral_core::io::failure(&error)))?;
         let mut buf = Vec::new();
         let _ = Read::by_ref(&mut self.file)
             .take(bytes.end.saturating_sub(bytes.start))
-            .read_to_end(&mut buf)?;
+            .read_to_end(&mut buf)
+            .map_err(|error| RecordReadFailure::Io(ral_core::io::failure(&error)))?;
         match buf.strip_suffix(b"\n").map(unseal) {
-            Some(Ok((sum, body))) if sum == locus.sum() => commit_of(sum, body, number, bytes)
-                .map_err(|fault| io::Error::other(format!("line {number} {fault}"))),
-            _ => Err(io::Error::other(format!(
-                "line {number} did not hash to the locus that named it: {STALE}"
-            ))),
+            Some(Ok(line)) if line.sum == locus.sum() => {
+                commit_of(line.sum, line.body(), number, bytes).map_err(|fault| {
+                    RecordReadFailure::Line(RecordReadFailureLine {
+                        commit: number.into(),
+                        cause: fault.failure(),
+                    })
+                })
+            }
+            _ => Err(RecordReadFailure::LocusSealMismatch(
+                RecordReadFailureLocusSealMismatch {
+                    commit: number.into(),
+                },
+            )),
         }
     }
 }

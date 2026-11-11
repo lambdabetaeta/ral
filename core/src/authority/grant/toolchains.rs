@@ -597,6 +597,7 @@ pub(crate) fn expand_in<W: Polar>(
             };
             refuse_the_world(
                 selector,
+                &dir.written,
                 || chosen.subject(Some(dir.real.followed().real())),
                 advice,
                 dir.real.followed(),
@@ -665,6 +666,9 @@ fn system_reads<'a>(
 mod tests {
     use super::*;
     use crate::authority::grant::freeze::Anchor;
+    use crate::fact::{
+        GrantFailure, GrantFailureWorldSelector, InvalidCause, Reason, WorldRelation,
+    };
     use crate::path::{Depth, Excluded, Subject};
     use std::path::Path;
 
@@ -775,24 +779,54 @@ mod tests {
         let err = expand_in::<W>(toolchain, env(pairs), Some(home))
             .err()
             .expect("a world-sized default must refuse the selector");
-        for part in [
-            format!("`dir `{}", <&str>::from(toolchain)),
+        assert_eq!(
+            err.describe(),
             format!(
-                "default directory {} resolves to {}",
+                "grant: {} resolves to {what}, so `` `dir `{} `` would run and read all of it.",
                 shown(default),
-                crate::test_helper::real(target)
-            ),
-            what.to_owned(),
-            "default directory or symlink".to_owned(),
-            "HOME/XDG base".to_owned(),
-        ] {
-            assert!(err.to_string().contains(&part), "{part}: {err}");
-        }
-        assert!(
-            !err.to_string().contains("set correctly"),
-            "{}",
-            err.to_string()
+                <&str>::from(toolchain)
+            )
         );
+        assert_eq!(
+            err.context(),
+            Some(
+                format!(
+                    "default directory {} resolves to {}",
+                    shown(default),
+                    crate::test_helper::real(target)
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            err.hints(),
+            [Box::<str>::from(
+                "Check the default directory or symlink and its HOME/XDG base."
+            )]
+        );
+        assert_eq!(err.reason.advice(), [] as [String; 0]);
+        let Reason::Invalid(failure) = &err.reason else {
+            panic!("a typed grant refusal");
+        };
+        assert_eq!(failure.operation, "grant");
+        assert_eq!(failure.path, [] as [crate::fact::DataStep; 0]);
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Grant(GrantFailure::WorldSelector(GrantFailureWorldSelector {
+                selector: Selector::Toolchain(toolchain),
+                requested: shown(default),
+                relation: match what {
+                    "the filesystem root" => WorldRelation::Root,
+                    "the home directory itself" => WorldRelation::Home,
+                    _ => WorldRelation::AncestorOfHome,
+                },
+            }))
+        );
+        let report = err.plain();
+        assert!(
+            report.contains("hint: Check the default directory or symlink and its HOME/XDG base.")
+        );
+        assert!(!report.contains("set correctly"), "{report}");
     }
 
     #[test]
@@ -1151,13 +1185,40 @@ mod tests {
                 Some(&home),
             )
             .unwrap_err();
+            let requested = crate::path::FrozenPath::from_surface(&value).shown();
             assert_eq!(
-                err.to_string(),
+                err.describe(),
                 format!(
-                    "RUSTUP_HOME is {value}, {what}, so `` `dir `rustup `` would run and read \
-                     all of it. Is RUSTUP_HOME set correctly?"
+                    "grant: {requested} resolves to {what}, so `` `dir `rustup `` would run and read all of it."
                 ),
             );
+            assert_eq!(
+                err.context(),
+                Some(format!("RUSTUP_HOME is {value}").as_str())
+            );
+            assert_eq!(
+                err.hints(),
+                [Box::<str>::from("Is RUSTUP_HOME set correctly?")]
+            );
+            assert_eq!(err.reason.advice(), [] as [String; 0]);
+            let Reason::Invalid(failure) = &err.reason else {
+                panic!("a typed grant refusal");
+            };
+            assert_eq!(failure.operation, "grant");
+            assert_eq!(failure.path, [] as [crate::fact::DataStep; 0]);
+            assert_eq!(
+                failure.cause,
+                InvalidCause::Grant(GrantFailure::WorldSelector(GrantFailureWorldSelector {
+                    selector: Selector::Toolchain(Toolchain::Rustup),
+                    requested,
+                    relation: match what {
+                        "the filesystem root" => WorldRelation::Root,
+                        "the home directory itself" => WorldRelation::Home,
+                        _ => WorldRelation::AncestorOfHome,
+                    },
+                }))
+            );
+            assert!(err.plain().contains("hint: Is RUSTUP_HOME set correctly?"));
         }
     }
 

@@ -1,14 +1,14 @@
 hi
 out
 4
-await: this worker's result was already claimed
+await: worker was already claimed
 partial
-reason= `raised boom
+message= boom
 [hi]
 polled
 3
 cancelled-nothing
-await: this worker's result was already claimed
+await: worker was already claimed
 2
 to-out
 to-err

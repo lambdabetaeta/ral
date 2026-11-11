@@ -78,6 +78,12 @@ impl fmt::Display for Torn {
 
 impl std::error::Error for Torn {}
 
+impl From<Torn> for crate::fact::IoCause {
+    fn from(_: Torn) -> Self {
+        Self::new(crate::fact::IoLeaf::Torn)
+    }
+}
+
 impl From<Torn> for io::Error {
     fn from(torn: Torn) -> Self {
         Self::other(torn)

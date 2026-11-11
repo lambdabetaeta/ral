@@ -1,5 +1,6 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
+use crate::fact::{AmbientSetting, Reason, StateFailure};
 use crate::shell::runtime::{Error, Mooring, Settled, Shell, Value};
 use crate::ty::Site;
 use std::sync::Arc;
@@ -56,8 +57,9 @@ pub(super) fn user(shell: &Shell) -> Result<Value, Error> {
         .user()
         .map(Value::string)
         .ok_or_else(|| {
-            Error::new("`user` needs USER (or USERNAME on Windows), and neither is set")
-                .with_hint("set USER, e.g. `within [env: [USER: \"me\"]] { … }`")
+            Error::new(Reason::State(Box::new(StateFailure::MissingAmbient(
+                AmbientSetting::User,
+            ))))
         })
 }
 
@@ -124,5 +126,15 @@ mod tests {
     #[test]
     fn nproc_is_positive() {
         assert!(matches!(nproc(), Value::Int(n) if n >= 1));
+    }
+    #[test]
+    fn absent_user_is_a_missing_ambient_setting() {
+        let shell = new_shell();
+        crate::host::test_support::with_vars_cleared(&["USER", "USERNAME"], || {
+            assert_eq!(
+                user(&shell).unwrap_err().reason,
+                Reason::State(Box::new(StateFailure::MissingAmbient(AmbientSetting::User)))
+            );
+        });
     }
 }

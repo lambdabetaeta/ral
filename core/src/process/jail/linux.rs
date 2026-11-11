@@ -4,6 +4,10 @@ use super::{Count, JailCgroup, JailPlan, Seq, exhausted};
 use crate::authority::sandbox::Ownership;
 #[cfg(seccomp)]
 use crate::authority::{policy::Net, sandbox::Programs};
+use crate::fact::{
+    CgroupLimitFile, JailFailure, JailFailureCreate, JailFailureDelegate, JailFailureLimit,
+    JailFailureMembership, LaunchFailure, MembershipStep, OsFailure, SequenceFailure,
+};
 use crate::process::site::Silent;
 use crate::site::site;
 use guest_abi::layout::EXEC_CONTROLLERS;
@@ -45,12 +49,13 @@ fn mkdir_if_missing(path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns the kernel's error for the parent directory's creation, or the
 /// file's open, lock, read, or write.
-pub(crate) fn next_guest_seq(path: &Path) -> io::Result<Seq> {
+pub(crate) fn next_guest_seq(path: &Path) -> Result<Seq, SequenceFailure> {
     use std::io::Read;
     use std::os::unix::fs::FileExt;
 
     if let Some(dir) = crate::path::spelled_parent(path) {
-        mkdir_if_missing(dir)?;
+        mkdir_if_missing(dir)
+            .map_err(|e| SequenceFailure::CreateParent(Box::new(crate::io::failure(&e))))?;
     }
     let mut file = site!(
         Silent::JailSeqFile,
@@ -59,24 +64,19 @@ pub(crate) fn next_guest_seq(path: &Path) -> io::Result<Seq> {
             .truncate(false)
             .read(true)
             .write(true) => open(path)
-    )?;
+    )
+    .map_err(|e| SequenceFailure::Open(Box::new(crate::io::failure(&e))))?;
     rustix::io::retry_on_intr(|| {
         rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-    })?;
+    })
+    .map_err(|e| SequenceFailure::Lock(OsFailure::from(&io::Error::from(e))))?;
     let mut contents = Vec::new();
-    file.read_to_end(&mut contents)?;
-    let count = Count::decode(&contents).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} holds {contents:?}, not a count of jailed commands; \
-                 restarting the guest resets it, since it lives in /run",
-                crate::path::shown(path)
-            ),
-        )
-    })?;
+    file.read_to_end(&mut contents)
+        .map_err(|e| SequenceFailure::Read(Box::new(crate::io::failure(&e))))?;
+    let count = Count::decode(&contents).ok_or(SequenceFailure::Malformed(contents))?;
     let (seq, next) = count.take().ok_or_else(exhausted)?;
-    file.write_all_at(&next.encode(), 0)?;
+    file.write_all_at(&next.encode(), 0)
+        .map_err(|e| SequenceFailure::Write(Box::new(crate::io::failure(&e))))?;
     Ok(seq)
 }
 
@@ -107,32 +107,25 @@ fn write_cpu_max(cgroup: &Path, quota_pct: u32) -> io::Result<()> {
 /// Returns the kernel's error for any mkdir, and refuses outright when a parent
 /// will not delegate: a jail that cannot be given its limits must not run the
 /// command uncapped instead.
-fn make_delegated(cgroup: &Path) -> io::Result<()> {
+fn make_delegated(cgroup: &Path) -> Result<(), JailFailure> {
     if site!(Silent::JailCgroupProbe, cgroup => exists()) {
         return Ok(());
     }
-    let parent = crate::path::spelled_parent(cgroup).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "{} has no parent, so it is not inside a cgroup2 mount. Is the jail root the \
-                 path this guest actually mounts cgroup2 at?",
-                crate::path::shown(cgroup)
-            ),
-        )
-    })?;
+    let parent = crate::path::spelled_parent(cgroup)
+        .ok_or_else(|| JailFailure::NoParent(crate::path::shown(cgroup)))?;
     make_delegated(parent)?;
     write_control(parent, "cgroup.subtree_control", EXEC_CONTROLLERS).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "could not delegate {EXEC_CONTROLLERS} from {}: {e}. Without them the cgroup below it \
-                 has no memory.max or pids.max to write, and the command would run uncapped.",
-                crate::path::shown(parent)
-            ),
-        )
+        JailFailure::Delegate(JailFailureDelegate {
+            parent: crate::path::shown(parent),
+            cause: Box::new(crate::io::failure(&e)),
+        })
     })?;
-    mkdir_if_missing(cgroup)
+    mkdir_if_missing(cgroup).map_err(|e| {
+        JailFailure::Create(JailFailureCreate {
+            cgroup: crate::path::shown(cgroup),
+            cause: Box::new(crate::io::failure(&e)),
+        })
+    })
 }
 
 /// Prepare membership and limits, opening `cgroup.procs` before pre-exec.
@@ -140,7 +133,9 @@ fn make_delegated(cgroup: &Path) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
-pub(super) fn prepare_cgroup(plan: &JailPlan) -> io::Result<(Option<JailCgroup>, OwnedFd)> {
+pub(super) fn prepare_cgroup(
+    plan: &JailPlan,
+) -> Result<(Option<JailCgroup>, OwnedFd), JailFailure> {
     make_delegated(&plan.cgroup)?;
     let cgroup = match plan.ownership {
         Ownership::Kept => Some(JailCgroup {
@@ -148,17 +143,34 @@ pub(super) fn prepare_cgroup(plan: &JailPlan) -> io::Result<(Option<JailCgroup>,
         }),
         Ownership::Surrendered => None,
     };
+    let limit = |file, e: io::Error| {
+        JailFailure::Limit(JailFailureLimit {
+            cgroup: crate::path::shown(&plan.cgroup),
+            file,
+            cause: Box::new(crate::io::failure(&e)),
+        })
+    };
     write_control(
         &plan.cgroup,
         "memory.max",
         &plan.limits.memory_max.to_string(),
-    )?;
-    write_control(&plan.cgroup, "pids.max", &plan.limits.pids_max.to_string())?;
-    write_cpu_max(&plan.cgroup, plan.limits.cpu_quota_pct)?;
+    )
+    .map_err(|e| limit(CgroupLimitFile::MemoryMax, e))?;
+    write_control(&plan.cgroup, "pids.max", &plan.limits.pids_max.to_string())
+        .map_err(|e| limit(CgroupLimitFile::PidsMax, e))?;
+    write_cpu_max(&plan.cgroup, plan.limits.cpu_quota_pct)
+        .map_err(|e| limit(CgroupLimitFile::CpuMax, e))?;
     let procs = site!(
         Silent::JailCgroupProcs,
         std::fs::OpenOptions::new().write(true) => open(plan.cgroup.join("cgroup.procs"))
-    )?;
+    )
+    .map_err(|e| {
+        JailFailure::Membership(JailFailureMembership {
+            cgroup: crate::path::shown(&plan.cgroup),
+            step: MembershipStep::OpenProcs,
+            cause: OsFailure::from(&e),
+        })
+    })?;
     Ok((cgroup, OwnedFd::from(procs)))
 }
 
@@ -208,6 +220,7 @@ pub(in crate::process) struct Entry {
     net: Option<Net>,
     cgroup_procs: OwnedFd,
     deny: &'static Programs,
+    cgroup: String,
 }
 
 #[cfg(seccomp)]
@@ -217,8 +230,9 @@ impl Entry {
     ) -> Result<(Option<JailCgroup>, Self), crate::error::Error> {
         let deny = crate::authority::sandbox::Filter::ENVELOPE
             .programs()
-            .map_err(super::refused)?;
-        let (cgroup, cgroup_procs) = prepare_cgroup(plan).map_err(super::refused)?;
+            .map_err(|e| super::refused(LaunchFailure::Filter(e.into())))?;
+        let (cgroup, cgroup_procs) =
+            prepare_cgroup(plan).map_err(|e| super::refused(LaunchFailure::Jail(e)))?;
         Ok((
             cgroup,
             Self {
@@ -226,52 +240,101 @@ impl Entry {
                 net: plan.net,
                 cgroup_procs,
                 deny,
+                cgroup: crate::path::shown(&plan.cgroup),
             },
         ))
+    }
+
+    pub(in crate::process) fn checks(
+        &self,
+        evidence: &mut crate::process::launch::setup::Evidence,
+    ) -> [(MembershipStep, crate::process::launch::setup::Check); 10] {
+        use MembershipStep::{
+            DropGroups, EnableLoopback, InstallFilter, LoopbackSocket, MarkDescriptors,
+            NoNewPrivileges, SetGid, SetUid, UnshareNetwork, WritePid,
+        };
+        [
+            WritePid,
+            UnshareNetwork,
+            LoopbackSocket,
+            EnableLoopback,
+            DropGroups,
+            SetGid,
+            SetUid,
+            NoNewPrivileges,
+            MarkDescriptors,
+            InstallFilter,
+        ]
+        .map(|step| {
+            (
+                step,
+                evidence.check(crate::process::launch::setup::Context::Jail(
+                    self.cgroup.clone(),
+                    step,
+                )),
+            )
+        })
     }
 
     /// Join the cgroup, isolate the network, drop identity, then confine.
     /// Gid precedes uid: an unprivileged process cannot change its gid.
     /// Only async-signal-safe work; no allocation or locks after fork.
-    pub(in crate::process) fn enter(&self) -> io::Result<()> {
+    pub(in crate::process) fn enter_checked(
+        &self,
+        checks: &[(MembershipStep, crate::process::launch::setup::Check); 10],
+    ) -> io::Result<()> {
+        self.enter_steps().map_err(|(step, error)| {
+            checks
+                .iter()
+                .find(|(prepared, _)| *prepared == step)
+                .expect("every child membership step has a prepared check")
+                .1
+                .fail(error)
+        })
+    }
+
+    fn enter_steps(&self) -> Result<(), (MembershipStep, io::Error)> {
         // SAFETY: each syscall uses live owned descriptors or stack data.
         unsafe {
-            write_pid(self.cgroup_procs.as_raw_fd(), libc::getpid())?;
+            write_pid(self.cgroup_procs.as_raw_fd(), libc::getpid())
+                .map_err(|e| (MembershipStep::WritePid, e))?;
             match self.net {
                 Some(Net::Offline) => isolate_network()?,
                 None => (),
             }
             if libc::setgroups(0, std::ptr::null()) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err((MembershipStep::DropGroups, io::Error::last_os_error()));
             }
             if libc::setresgid(self.uid, self.uid, self.uid) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err((MembershipStep::SetGid, io::Error::last_os_error()));
             }
             if libc::setresuid(self.uid, self.uid, self.uid) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err((MembershipStep::SetUid, io::Error::last_os_error()));
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err((MembershipStep::NoNewPrivileges, io::Error::last_os_error()));
             }
-            mark_descriptors()?;
-            self.deny.install()
+            mark_descriptors().map_err(|e| (MembershipStep::MarkDescriptors, e))?;
+            self.deny
+                .install()
+                .map_err(|e| (MembershipStep::InstallFilter, e))
         }
     }
 }
 
 #[cfg(seccomp)]
-fn isolate_network() -> io::Result<()> {
+fn isolate_network() -> Result<(), (MembershipStep, io::Error)> {
     // SAFETY: all storage is on the stack; the socket belongs to this call.
     unsafe {
         if libc::unshare(libc::CLONE_NEWNET) < 0 {
-            return Err(io::Error::last_os_error());
+            return Err((MembershipStep::UnshareNetwork, io::Error::last_os_error()));
         }
         let socket = site!(
             Silent::JailLoopbackSocket,
             libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0)
         );
         if socket < 0 {
-            return Err(io::Error::last_os_error());
+            return Err((MembershipStep::LoopbackSocket, io::Error::last_os_error()));
         }
         let mut interface: libc::ifreq = std::mem::zeroed();
         interface.ifr_name[..LO.len()].copy_from_slice(&LO);
@@ -279,7 +342,7 @@ fn isolate_network() -> io::Result<()> {
         let result = libc::ioctl(socket, SIOCSIFFLAGS, &raw const interface);
         let error = (result < 0).then(io::Error::last_os_error);
         libc::close(socket);
-        error.map_or(Ok(()), Err)
+        error.map_or(Ok(()), |e| Err((MembershipStep::EnableLoopback, e)))
     }
 }
 
@@ -343,15 +406,12 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"0000000011");
         std::fs::write(&path, b"abc").unwrap();
         let error = next_guest_seq(&path).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("not a count of jailed commands"));
+        assert_eq!(error, SequenceFailure::Malformed(b"abc".to_vec()));
         assert_eq!(std::fs::read(&path).unwrap(), b"abc");
         std::fs::write(&path, Count(SPAN).encode()).unwrap();
-        assert!(
-            next_guest_seq(&path)
-                .unwrap_err()
-                .to_string()
-                .contains("every uid")
+        assert_eq!(
+            next_guest_seq(&path).unwrap_err(),
+            SequenceFailure::Exhausted
         );
         assert_eq!(std::fs::read(&path).unwrap(), Count(SPAN).encode());
     }
@@ -464,7 +524,7 @@ mod tests {
             }
             in_child(move || {
                 user_namespace()?;
-                isolate_network()?;
+                isolate_network().map_err(|(_, e)| e)?;
                 loopback_and_unreachable_peer()
             })
             .unwrap();
@@ -546,8 +606,14 @@ mod tests {
 
             shared.limits.cpu_quota_pct = 0;
             assert_eq!(
-                prepare_cgroup(&shared).err().unwrap().raw_os_error(),
-                Some(libc::EINVAL),
+                prepare_cgroup(&shared).err().unwrap(),
+                JailFailure::Limit(JailFailureLimit {
+                    cgroup: crate::path::shown(&shared.cgroup),
+                    file: CgroupLimitFile::CpuMax,
+                    cause: Box::new(crate::io::failure(&io::Error::from_raw_os_error(
+                        libc::EINVAL
+                    ))),
+                }),
                 "zero CPU quota must fail after earlier setup succeeds"
             );
             round_trip();
@@ -576,8 +642,14 @@ mod tests {
             };
             kept.limits.cpu_quota_pct = 0;
             assert_eq!(
-                prepare_cgroup(&kept).err().unwrap().raw_os_error(),
-                Some(libc::EINVAL)
+                prepare_cgroup(&kept).err().unwrap(),
+                JailFailure::Limit(JailFailureLimit {
+                    cgroup: crate::path::shown(&kept.cgroup),
+                    file: CgroupLimitFile::CpuMax,
+                    cause: Box::new(crate::io::failure(&io::Error::from_raw_os_error(
+                        libc::EINVAL
+                    ))),
+                })
             );
             assert!(
                 !kept.cgroup.exists(),

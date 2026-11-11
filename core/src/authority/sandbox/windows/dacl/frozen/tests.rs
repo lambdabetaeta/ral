@@ -175,17 +175,23 @@ fn a_read_write_grant_stamps_dacl_and_label_through_the_held_handle() {
 }
 
 #[test]
-fn the_redirect_refusal_names_the_link_and_how_to_grant_its_target() {
+fn the_redirect_refusal_keeps_its_target_private_and_derives_its_advice() {
     let e = DaclError::Redirected {
         granted: PathBuf::from(r"\\?\C:\rustup"),
         at: PathBuf::from(r"\\?\C:\rustup"),
         target: Some(PathBuf::from(r"\\?\D:\x")),
     };
-    let text = e.to_string();
-    assert!(text.contains("is now a link to"), "{text}");
+    let failure = e.failure().unwrap();
     assert!(
-        text.contains("an allowance names what it named when granted"),
-        "{text}"
+        matches!(failure, crate::fact::DaclFailure::Redirected(ref redirected)
+        if redirected.target_kind == crate::fact::RedirectedTargetKind::JunctionOrLink)
+    );
+    assert!(!failure.describe().contains(r"D:\x"));
+    let advice = crate::fact::LaunchFailure::Dacl(failure).advice();
+    assert!(
+        advice
+            .iter()
+            .any(|hint| hint.contains("an allowance names what it named when granted"))
     );
 }
 
@@ -198,9 +204,25 @@ fn a_volume_mount_refusal_asks_for_a_drive_letter() {
         target: Some(PathBuf::from(target)),
     };
     for t in [r"\\?\Volume{1234}\", r"\??\volume{1234}\"] {
-        assert!(e(t).to_string().contains("drive letter"));
+        let failure = e(t).failure().unwrap();
+        assert!(failure.describe().contains("where a volume is mounted"));
+        assert!(!failure.describe().contains("drive letter"));
+        assert!(
+            failure
+                .advice()
+                .iter()
+                .any(|advice| advice.contains("drive letter"))
+        );
+        let error = crate::error::Error::new(crate::fact::Reason::Launch(Box::new(
+            crate::fact::LaunchFailure::Dacl(failure),
+        )));
+        assert!(error.plain().contains("drive letter"));
+        assert!(error.hints().is_empty());
     }
     for t in [r"\\?\D:\x", r"\\?\VolumeX", r"D:\Volume{1}"] {
-        assert!(e(t).to_string().contains("is now a link to"));
+        assert!(
+            matches!(e(t).failure(), Ok(crate::fact::DaclFailure::Redirected(redirected))
+            if redirected.target_kind == crate::fact::RedirectedTargetKind::JunctionOrLink)
+        );
     }
 }

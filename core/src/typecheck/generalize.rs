@@ -185,7 +185,8 @@ fn local<V: Ord + Copy, M: Copy, B>(
 }
 
 fn closed(scheme: Arc<Scheme>) -> Closed {
-    Closed::new(scheme).unwrap_or_else(|error| panic!("settlement left a live variable: {error}"))
+    Closed::new(scheme)
+        .unwrap_or_else(|open| panic!("settlement left a live variable: {}", open.describe()))
 }
 
 /// A stored scheme in a later unit: its weak residuals are ids of a unifier

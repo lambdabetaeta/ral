@@ -6,6 +6,7 @@
 use crate::provider::ProviderError;
 use crate::record::{Unavailable, Uncommitted};
 use ral_core::carrier::Severed;
+use ral_core::fact::{ContextFailure, ProviderStop};
 
 /// [`Self::Empty`] and [`Self::Stopped`] become nudges, [`Self::Cancelled`]
 /// does not.
@@ -19,7 +20,7 @@ pub enum Outcome {
     Replied,
     Empty,
     Stopped {
-        reason: String,
+        reason: ProviderStop,
     },
     Cancelled,
 }
@@ -34,7 +35,7 @@ pub enum Fault {
     /// around this one ends too.
     Severed(Severed),
     /// The session log refused a mutation as written; the session is usable.
-    Refused(String),
+    Refused(ContextFailure),
     /// Recording failed: the session has ended.
     Unavailable(Unavailable),
     /// A host-side panic: transport, surface decode, render.  An eval-side
@@ -67,5 +68,26 @@ impl From<Uncommitted> for Fault {
             Uncommitted::Refused(why) => Self::Refused(why),
             Uncommitted::Unavailable(failure) => Self::Unavailable(failure),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ral_core::fact::{ContextFailureToolResultCount, RecordingFailure};
+
+    #[test]
+    fn context_refusal_and_recording_unavailability_remain_distinct() {
+        let cause = ContextFailure::ToolResultCount(ContextFailureToolResultCount {
+            expected: 2usize.into(),
+            got: 1usize.into(),
+        });
+        assert!(matches!(Fault::from(Uncommitted::Refused(cause.clone())),
+            Fault::Refused(found) if found == cause));
+        let recorder = crate::record::Emitter::none();
+        let unavailable = recorder.cell_poisoned(crate::record::AgentId::new(u64::MAX));
+        assert!(matches!(Fault::from(Uncommitted::Unavailable(unavailable)),
+            Fault::Unavailable(failure) if matches!(failure.failure(), RecordingFailure::CellPoisoned(cell)
+                if cell.agent == u64::MAX.into())));
     }
 }

@@ -24,13 +24,17 @@
 //! therefore cannot mount; ral builds the ruleset before bwrap mounts and
 //! enters it afterwards.
 
-use super::super::unavailable;
+use super::super::launch::refused as launch_refused;
 use super::super::warrant::{Handoff, Slot};
 use super::Shown;
 use super::shown::{OpenError, leaf_fd, open_dir_nofollow, open_nofollow};
 use crate::authority::policy::{ExecDeny, KernelRules, Subject};
 use crate::authority::sandbox::{ExecProjection, RenderedFs};
 use crate::error::Error;
+use crate::fact::{
+    KernelFeatureFailure, LaunchFailure, OsFailure, ParcelRole, RulesetFailure,
+    RulesetFailureAdmit, UnavailableFailure,
+};
 use crate::path::{Dir, Hold, Installing, Kind, LeafMode, Located, Object, ObjectId, RealPath};
 use crate::site::{Silent, site};
 use libc::{c_int, c_uint};
@@ -298,16 +302,20 @@ impl Landlocked {
     /// Enter the promised ruleset, fail-closed: there is nothing to degrade
     /// to, and the kernel accepted the exact handled set when the parent
     /// created it.
-    pub(crate) fn enter(&self) -> Result<(), String> {
+    pub(crate) fn enter(&self) -> Result<(), RulesetFailure> {
         let at = self.at;
-        let ruleset = Ruleset(at.take().ok_or_else(|| RulesetError::Missing(at.fd()))?);
+        let ruleset = Ruleset(
+            at.take()
+                .ok_or_else(|| RulesetFailure::MissingFd(at.fd()))?,
+        );
         if self.refer_root {
-            let root = open_dir_nofollow(&RealPath::universal())?
-                .ok_or("landlock: the envelope has no root to admit")?;
+            let root = open_dir_nofollow(&RealPath::universal())
+                .map_err(|e| RulesetFailure::Open(e.into()))?
+                .ok_or(RulesetFailure::MissingRoot)?;
             (ruleset.admit(root.as_fd(), Rights::REFER))
-                .map_err(|e| RulesetError::admit("/", e))?;
+                .map_err(|e| RulesetFailure::from(RulesetError::admit("/", e)))?;
         }
-        Ok(ruleset.restrict_self()?)
+        ruleset.restrict_self().map_err(RulesetFailure::from)
     }
 }
 
@@ -345,15 +353,15 @@ fn plan(exec: &ExecProjection, landlock: Landlock) -> Result<Option<Plan>, Error
         Landlock::At(abi) => abi,
         Landlock::Absent if !restricted => return Ok(None),
         Landlock::Absent => {
-            return Err(unavailable(
-                "landlock: this kernel cannot enforce the grant's limits on which programs \
-                 may run, because Landlock is unavailable; ral refuses rather than run them \
-                 unchecked.  Is the kernel older than 5.13, or does it have Landlock disabled?",
-            ));
+            return Err(launch_refused(LaunchFailure::Unavailable(
+                UnavailableFailure::Kernel(KernelFeatureFailure::LandlockAbsent),
+            )));
         }
-        Landlock::Unprobed(_) => {
-            return Err(unavailable(format!(
-                "landlock: {landlock}; refusing to launch confined"
+        Landlock::Unprobed(errno) => {
+            return Err(launch_refused(LaunchFailure::Unavailable(
+                UnavailableFailure::Kernel(KernelFeatureFailure::LandlockProbe(OsFailure::from(
+                    &io::Error::from_raw_os_error(errno),
+                ))),
             )));
         }
     };
@@ -391,7 +399,7 @@ pub(crate) fn build(
     };
     let ruleset = Ruleset::create(handled, scoped).map_err(|e| refused(RulesetError::Create(e)))?;
     if let Some(table) = kernel_table(exec) {
-        admit_exec(&ruleset, table, fs, shown).map_err(Error::new)?;
+        admit_exec(&ruleset, table, fs, shown).map_err(refused)?;
     }
     if handled.contains(Rights::RESOLVE_UNIX) {
         admit_sockets(fs, &shown.roots, &mut |admit| {
@@ -401,13 +409,15 @@ pub(crate) fn build(
     }
     Ok(Some(Landlocked {
         refer_root: handled.contains(Rights::REFER),
-        at: handoff.lend(ruleset.as_fd()).map_err(Error::new)?,
+        at: handoff
+            .lend(ruleset.as_fd(), ParcelRole::Ruleset)
+            .map_err(|e| launch_refused(LaunchFailure::Parcel(e)))?,
     }))
 }
 
 /// `e` as the launch's refusal.
 fn refused(e: RulesetError) -> Error {
-    Error::new(String::from(e))
+    launch_refused(LaunchFailure::Ruleset(e.into()))
 }
 
 /// Stated writes alone admit outside sockets; denies are masked by bwrap.
@@ -449,7 +459,7 @@ fn admit_exec(
     table: &KernelRules,
     fs: &RenderedFs,
     shown: &Shown,
-) -> Result<(), String> {
+) -> Result<(), RulesetError> {
     let sink = &mut |admit: Admit<'_>| ruleset.admit(admit.fd, Rights::EXECUTE);
     admit_files(table, sink)?;
     let walks = vetoes_walk(table, fs);
@@ -692,25 +702,11 @@ pub(super) enum RulesetError {
     Admit { name: String, source: io::Error },
     Open(OpenError),
     Restrict(io::Error),
-    Missing(c_int),
 }
 
 impl fmt::Display for RulesetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Create(e) => write!(f, "landlock: this kernel refused the ruleset: {e}"),
-            Self::Admit { name, source } => write!(f, "landlock: cannot admit {name}: {source}"),
-            Self::Open(e) => e.fmt(f),
-            Self::Restrict(e) => write!(
-                f,
-                "landlock: cannot enter the ruleset: {e}; refusing to run unconfined"
-            ),
-            Self::Missing(at) => write!(
-                f,
-                "landlock: the launch promised a Landlock ruleset at fd {at} and none \
-                 arrived; refusing to run unconfined"
-            ),
-        }
+        f.write_str(&RulesetFailure::from(self).describe())
     }
 }
 
@@ -729,9 +725,23 @@ impl From<OpenError> for RulesetError {
     }
 }
 
-impl From<RulesetError> for String {
+impl From<&RulesetError> for RulesetFailure {
+    fn from(e: &RulesetError) -> Self {
+        match e {
+            RulesetError::Create(e) => Self::Create(OsFailure::from(e)),
+            RulesetError::Admit { name, source } => Self::Admit(RulesetFailureAdmit {
+                name: name.clone(),
+                cause: Box::new(crate::io::failure(source)),
+            }),
+            RulesetError::Open(e) => Self::Open(e.into()),
+            RulesetError::Restrict(e) => Self::Restrict(OsFailure::from(e)),
+        }
+    }
+}
+
+impl From<RulesetError> for RulesetFailure {
     fn from(e: RulesetError) -> Self {
-        e.to_string()
+        Self::from(&e)
     }
 }
 

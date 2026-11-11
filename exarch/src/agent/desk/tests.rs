@@ -26,6 +26,9 @@ use crate::record::{Display, Record, Transient};
 use crate::schedule::{Asked, parse_duration};
 use ral_core::data::datum::tag;
 use ral_core::fact::ExitCode as _;
+use ral_core::fact::{
+    DecodeCause, DecodeFailure, Expected, Found, ShapeFailure, UnknownField, UnknownTag,
+};
 use ral_core::shell::runtime::NurseryId;
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -343,7 +346,15 @@ fn unknown_class_answers_the_extension_error() {
                 payload: None,
             })
             .expect_err("an unrecognised class must not answer Ok");
-        assert_eq!(err.describe(), "unrecognised enquiry class `no-such-class`");
+        assert_eq!(
+            err.reason,
+            request_failure(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                tag: "no-such-class".into(),
+                offered: ["agents", "schedules", "pins", "context", "transcript"]
+                    .map(str::to_owned)
+                    .to_vec()
+            })))
+        );
     });
 }
 
@@ -351,17 +362,26 @@ fn unknown_class_answers_the_extension_error() {
 /// down: a tag extends a family the way a class extends the desk.
 #[test]
 fn unknown_tag_answers_the_extension_error_too() {
-    for class in ["agents", "schedules", "pins", "context", "transcript"] {
+    for (class, tags) in [
+        ("agents", <Agents as crate::enquiry::Family>::TAGS),
+        ("schedules", <Schedules as crate::enquiry::Family>::TAGS),
+        ("pins", <Pins as crate::enquiry::Family>::TAGS),
+        ("context", <Context as crate::enquiry::Family>::TAGS),
+        ("transcript", <Transcript as crate::enquiry::Family>::TAGS),
+    ] {
         with_desk(|desk, _agent| {
             let err = desk
                 .handle(&family_req(class, "no-such-tag", None))
                 .expect_err("an unrecognised tag must not answer Ok");
-            assert!(
-                err.describe().starts_with(&format!(
-                    "unrecognised tag in `` exarch-{class} `no-such-tag ``: "
-                )),
-                "got: {}",
-                err.describe()
+            assert_eq!(
+                err.reason,
+                request_failure(
+                    DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                        tag: "no-such-tag".into(),
+                        offered: tags.iter().map(|s| (*s).into()).collect()
+                    }))
+                    .payload(class)
+                )
             );
         });
     }
@@ -374,10 +394,16 @@ fn non_variant_request_errors_didactically() {
         let err = desk
             .handle(&FOValue::Unit)
             .expect_err("a non-variant request must not answer Ok");
-        assert!(
-            err.describe().contains("must be a variant"),
-            "error must name the expected shape, got: {}",
-            err.describe()
+        assert_eq!(
+            err.reason,
+            request_failure(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Tags(
+                    ["agents", "schedules", "pins", "context", "transcript"]
+                        .map(str::to_owned)
+                        .to_vec()
+                ),
+                found: Found::Unit
+            })))
         );
     });
 }
@@ -524,4 +550,12 @@ fn a_desk_dispatch_returns_its_state_and_retained_enquiries_answer_no_desk() {
         .unwrap_err();
     assert_eq!(error.reason, no_desk().reason);
     assert_eq!(error.hints(), no_desk().hints());
+}
+
+fn request_failure(cause: DecodeFailure) -> Reason {
+    Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
+        kind: ProtocolData::Request,
+        operation: "exarch enquiry".into(),
+        cause,
+    })))
 }

@@ -27,9 +27,13 @@ pub(in crate::provider::allowance) fn read(
     };
     let runtime = blocking_runtime("codex usage")?;
     runtime.block_on(async {
-        cell.prepare()
-            .await
-            .map_err(|e| format!("refresh login for {}: {e}", roster.label(account)))?;
+        cell.prepare().await.map_err(|e| {
+            format!(
+                "refresh login for {}: {}",
+                roster.label(account),
+                e.describe()
+            )
+        })?;
         let token = cell.snapshot();
         let request = token.request_headers("application/json").into_iter().fold(
             crate::provider::tls::client().get(USAGE_URL),

@@ -89,8 +89,7 @@ fn identity_engine(tag: &str) -> RootEngine {
     }
 }
 
-/// A killed child's crash-shaped ledger, in a run directory of its own; the
-/// state home is returned to keep that directory alive.
+/// A killed child's unfinished exchange; the state home keeps its record alive.
 fn crashed_run() -> (ral_core::own::TestDir, OwnDir) {
     // A state home of this test's own, with the run made in it: the child
     // reaches the same directory through `XDG_STATE_HOME`, as exarch's own
@@ -119,9 +118,16 @@ fn crashed_run() -> (ral_core::own::TestDir, OwnDir) {
         }
     });
     if !ready {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("scripted child did not leave its crash-shaped ledger");
+        let record = std::fs::read_to_string(&record_log);
+        let status = child.try_wait();
+        let killed = child.kill();
+        let reaped = child.wait();
+        panic!(
+            "{}: scripted child did not record 'crash prompt' after 200 polls at 10ms; \
+             child status before termination: {status:?}; kill: {killed:?}; \
+             wait: {reaped:?}; record read: {record:?}",
+            record_log.display()
+        );
     }
     child.kill().expect("terminate scripted child");
     let _ = child.wait();

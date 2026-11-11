@@ -6,6 +6,10 @@ mod tests;
 
 use super::{OAuthToken, RefreshError, account_id, read_at, refresh, write_all_at};
 use crate::provider::identity::AccountId;
+use ral_core::fact::{
+    CredentialCause, CredentialCauseRefresh, CredentialCauseStore, CredentialFailure,
+    CredentialService, CredentialStoreOperation, DurationFact, RefreshFailure, RefreshOutcome,
+};
 use ral_core::own::OwnDir;
 use ral_core::sync::LockExt;
 use std::collections::BTreeMap;
@@ -32,7 +36,7 @@ static GATE: AsyncMutex<()> = AsyncMutex::const_new(());
 type Registry = BTreeMap<(PathBuf, AccountId), Arc<Owned>>;
 // Ambiguous and unsaved outcomes outlive their last consumer.
 static HANDLES: Mutex<Registry> = Mutex::new(BTreeMap::new());
-type Completion = watch::Receiver<Option<Result<(), String>>>;
+type Completion = watch::Receiver<Option<Result<(), CredentialFailure>>>;
 
 struct Owned {
     store: OwnDir,
@@ -132,7 +136,7 @@ impl CredentialHandle {
     ///
     /// # Errors
     /// Removal, an unresolved rotation, a lease deadline, or an issuer failure.
-    pub async fn prepare(&self) -> Result<(), String> {
+    pub async fn prepare(&self) -> Result<(), CredentialFailure> {
         self.prepare_until(Instant::now() + DEADLINE, async |current| {
             refresh(&current).await
         })
@@ -140,7 +144,11 @@ impl CredentialHandle {
     }
 
     /// `deadline` bounds the lease and the decision to submit, not the exchange.
-    async fn prepare_until<F, Fut>(&self, deadline: Instant, exchange: F) -> Result<(), String>
+    async fn prepare_until<F, Fut>(
+        &self,
+        deadline: Instant,
+        exchange: F,
+    ) -> Result<(), CredentialFailure>
     where
         F: FnOnce(OAuthToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<OAuthToken, RefreshError>> + Send,
@@ -159,7 +167,7 @@ impl CredentialHandle {
                 EXECUTOR.spawn(async move {
                     let settled = rotation
                         .await
-                        .unwrap_or_else(|_| Err(owner.recovery("refresh owner panicked")));
+                        .unwrap_or_else(|_| Err(owner.failure(CredentialCause::OwnerPanicked)));
                     let mut state = owner.0.state.lock_ignore_poison();
                     publish.send_replace(Some(settled));
                     state.pending = None;
@@ -175,15 +183,29 @@ impl CredentialHandle {
             result
                 .changed()
                 .await
-                .map_err(|_| "OAuth refresh owner stopped".to_string())?;
+                .map_err(|_| self.failure(CredentialCause::OwnerStopped))?;
         }
     }
 
-    fn recovery(&self, reason: &str) -> String {
-        format!(
-            "OAuth account {:?} {reason}; sign in again to that service using that account",
-            self.0.id.as_str()
-        )
+    fn failure(&self, cause: CredentialCause) -> CredentialFailure {
+        let login = self.0.state.lock_ignore_poison().credential.token().login();
+        CredentialFailure {
+            account: self.0.id.as_str().to_owned(),
+            service: match login {
+                super::Login::Chatgpt => CredentialService::Chatgpt,
+                super::Login::Codex => CredentialService::Codex,
+                super::Login::Grok => CredentialService::Grok,
+            },
+            cause,
+        }
+    }
+
+    fn store_failure(
+        &self,
+        operation: CredentialStoreOperation,
+        error: &ral_core::own::OwnError,
+    ) -> CredentialFailure {
+        self.failure(store_cause(operation, error.into()))
     }
 
     fn set(&self, live: Live) {
@@ -198,30 +220,31 @@ impl CredentialHandle {
         live
     }
 
-    async fn rotate<F, Fut>(&self, deadline: Instant, exchange: F) -> Result<(), String>
+    async fn rotate<F, Fut>(&self, deadline: Instant, exchange: F) -> Result<(), CredentialFailure>
     where
         F: FnOnce(OAuthToken) -> Fut,
         Fut: Future<Output = Result<OAuthToken, RefreshError>>,
     {
-        let lease = lease(&self.0.store, deadline).await?;
-        let (host, mut tokens) = read_at(&lease.store)?;
+        let lease = lease(&self.0.store, deadline)
+            .await
+            .map_err(|cause| self.failure(cause))?;
+        let (host, mut tokens) = read_at(&lease.store)
+            .map_err(|error| self.store_failure(CredentialStoreOperation::Read, &error))?;
         let Some(index) = tokens
             .iter()
             .position(|token| account_id(token) == self.0.id)
         else {
             lease.retire(&self.snapshot());
-            return Err(self.recovery("has been removed"));
+            return Err(self.failure(CredentialCause::Removed));
         };
         let current = match self.reconcile(&tokens[index]) {
             Live::Uncertain(_) => {
-                return Err(self.recovery("has an unresolved refresh outcome"));
+                return Err(self.failure(CredentialCause::UnresolvedRotation));
             }
             Live::Unsaved { successor, .. } => {
                 tokens[index] = successor.clone();
                 write_all_at(&lease.store, host.as_deref(), &tokens).map_err(|error| {
-                    self.recovery(&format!(
-                        "could not persist its rotated credential: {error}"
-                    ))
+                    self.store_failure(CredentialStoreOperation::PersistSuccessor, &error)
                 })?;
                 lease.publish(&successor);
                 successor
@@ -232,10 +255,7 @@ impl CredentialHandle {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(
-                "OAuth preparation deadline passed while waiting for the credential store; nothing was sent to the issuer, so retrying is safe"
-                    .into(),
-            );
+            return Err(self.failure(CredentialCause::PreparationDeadline));
         }
         let fresh = self.submit(current.clone(), exchange).await?;
         self.set(Live::Unsaved {
@@ -244,9 +264,7 @@ impl CredentialHandle {
         });
         tokens[index] = fresh.clone();
         write_all_at(&lease.store, host.as_deref(), &tokens).map_err(|error| {
-            self.recovery(&format!(
-                "rotated but could not save its credential: {error}"
-            ))
+            self.store_failure(CredentialStoreOperation::PersistFreshRotation, &error)
         })?;
         lease.publish(&fresh);
         drop(lease);
@@ -254,7 +272,11 @@ impl CredentialHandle {
     }
 
     /// Only a failure that provably did not rotate `current` leaves it `Ready`.
-    async fn submit<F, Fut>(&self, current: OAuthToken, exchange: F) -> Result<OAuthToken, String>
+    async fn submit<F, Fut>(
+        &self,
+        current: OAuthToken,
+        exchange: F,
+    ) -> Result<OAuthToken, CredentialFailure>
     where
         F: FnOnce(OAuthToken) -> Fut,
         Fut: Future<Output = Result<OAuthToken, RefreshError>>,
@@ -264,26 +286,28 @@ impl CredentialHandle {
         let failure = match timeout(EXCHANGE_BUDGET, exchange(current.clone())).await {
             Ok(Ok(fresh)) => return Ok(fresh),
             Ok(Err(error)) => error,
-            Err(_) => {
-                RefreshError::Ambiguous(format!("no answer within {}s", EXCHANGE_BUDGET.as_secs()))
+            Err(_) => RefreshError::Ambiguous(RefreshFailure::TimedOut(DurationFact {
+                seconds: EXCHANGE_BUDGET.as_secs().into(),
+                nanos: EXCHANGE_BUDGET.subsec_nanos(),
+            })),
+        };
+        let (outcome, cause) = match failure {
+            RefreshError::Ambiguous(cause) => (RefreshOutcome::Ambiguous, cause),
+            RefreshError::NotSubmitted(cause) => {
+                self.set(Live::Ready(current));
+                (RefreshOutcome::NotSubmitted, cause)
+            }
+            RefreshError::Rejected(cause) => {
+                self.set(Live::Ready(current));
+                (RefreshOutcome::Rejected, cause)
             }
         };
-        let account = self.0.id.as_str();
-        match failure {
-            RefreshError::Ambiguous(reason) => Err(self.recovery(&format!(
-                "could not confirm its refresh ({reason}), so the issuer may have rotated its credential"
-            ))),
-            RefreshError::NotSubmitted(reason) => {
-                self.set(Live::Ready(current));
-                Err(format!(
-                    "OAuth account {account:?} could not refresh: {reason}; nothing was sent to the issuer, so retrying is safe"
-                ))
-            }
-            RefreshError::Rejected(reason) => {
-                self.set(Live::Ready(current));
-                Err(format!("OAuth account {account:?} could not refresh: {reason}"))
-            }
-        }
+        Err(
+            self.failure(CredentialCause::Refresh(CredentialCauseRefresh {
+                outcome,
+                cause,
+            })),
+        )
     }
 }
 
@@ -315,7 +339,7 @@ impl StoreLease {
     }
 
     pub(super) fn credentials(&self) -> Result<Vec<CredentialHandle>, String> {
-        let (_, tokens) = read_at(&self.store)?;
+        let (_, tokens) = read_at(&self.store).map_err(|error| error.to_string())?;
         Ok(tokens
             .iter()
             .map(|token| {
@@ -343,7 +367,7 @@ impl StoreLease {
         &self,
         token: &OAuthToken,
     ) -> Result<(CredentialHandle, bool), String> {
-        let (host, mut tokens) = read_at(&self.store)?;
+        let (host, mut tokens) = read_at(&self.store).map_err(|error| error.to_string())?;
         let id = account_id(token);
         let replaced =
             if let Some(existing) = tokens.iter_mut().find(|entry| account_id(entry) == id) {
@@ -353,22 +377,22 @@ impl StoreLease {
                 tokens.push(token.clone());
                 false
             };
-        write_all_at(&self.store, host.as_deref(), &tokens)?;
+        write_all_at(&self.store, host.as_deref(), &tokens).map_err(|error| error.to_string())?;
         Ok((self.publish(token), replaced))
     }
 
     pub(super) fn host_id(&self) -> Result<String, String> {
-        let (host, tokens) = read_at(&self.store)?;
+        let (host, tokens) = read_at(&self.store).map_err(|error| error.to_string())?;
         if let Some(host) = host {
             return Ok(host);
         }
         let host = uuid::Uuid::new_v4().urn().to_string();
-        write_all_at(&self.store, Some(&host), &tokens)?;
+        write_all_at(&self.store, Some(&host), &tokens).map_err(|error| error.to_string())?;
         Ok(host)
     }
 
     pub(super) fn remove(&self, account: &str) -> Result<Option<OAuthToken>, String> {
-        let (host, mut tokens) = read_at(&self.store)?;
+        let (host, mut tokens) = read_at(&self.store).map_err(|error| error.to_string())?;
         let matched = super::matching_indices(&tokens, account, None);
         let [pos] = matched[..] else {
             return if matched.is_empty() {
@@ -383,17 +407,22 @@ impl StoreLease {
         };
         let removed = tokens.remove(pos);
         if tokens.is_empty() {
-            self.store.remove(super::TOKEN_FILE)?;
+            self.store
+                .remove(super::TOKEN_FILE)
+                .map_err(|error| error.to_string())?;
         } else {
-            write_all_at(&self.store, host.as_deref(), &tokens)?;
+            write_all_at(&self.store, host.as_deref(), &tokens)
+                .map_err(|error| error.to_string())?;
         }
         self.retire(&removed);
         Ok(Some(removed))
     }
 
     pub(super) fn clear(&self) -> Result<Vec<OAuthToken>, String> {
-        let (_, tokens) = read_at(&self.store)?;
-        self.store.remove(super::TOKEN_FILE)?;
+        let (_, tokens) = read_at(&self.store).map_err(|error| error.to_string())?;
+        self.store
+            .remove(super::TOKEN_FILE)
+            .map_err(|error| error.to_string())?;
         for token in &tokens {
             self.retire(token);
         }
@@ -401,11 +430,13 @@ impl StoreLease {
     }
 }
 
-async fn lease(store: &OwnDir, deadline: Instant) -> Result<StoreLease, String> {
+async fn lease(store: &OwnDir, deadline: Instant) -> Result<StoreLease, CredentialCause> {
     timeout_at(deadline, async {
         let gate = GATE.lock().await;
         // Never replace or unlink this rendezvous file.
-        let file = store.open_write("oauth.lock")?;
+        let file = store
+            .open_write("oauth.lock")
+            .map_err(|error| store_cause(CredentialStoreOperation::OpenLease, (&error).into()))?;
         loop {
             match file.try_lock() {
                 Ok(()) => {
@@ -417,16 +448,16 @@ async fn lease(store: &OwnDir, deadline: Instant) -> Result<StoreLease, String> 
                 }
                 Err(TryLockError::WouldBlock) => sleep(Duration::from_millis(25)).await,
                 Err(TryLockError::Error(error)) => {
-                    return Err(format!("could not lock OAuth store: {error}"));
+                    return Err(store_cause(
+                        CredentialStoreOperation::LockLease,
+                        ral_core::io::failure(&error),
+                    ));
                 }
             }
         }
     })
     .await
-    .map_err(|_| {
-        "timed out waiting for the OAuth credential store; another exarch or synod process may be holding it, so try again shortly"
-            .to_string()
-    })?
+    .map_err(|_| CredentialCause::LeaseTimedOut)?
 }
 
 /// Synchronous callers are startup or background jobs, never a UI frame.
@@ -441,7 +472,9 @@ pub(super) fn transaction<R: Send + 'static>(
     let (send, receive) = oneshot::channel();
     EXECUTOR.spawn(async move {
         let result = async {
-            let lease = lease(&store, Instant::now() + DEADLINE).await?;
+            let lease = lease(&store, Instant::now() + DEADLINE)
+                .await
+                .map_err(|cause| cause.describe())?;
             change(&lease)
         }
         .await;
@@ -450,4 +483,11 @@ pub(super) fn transaction<R: Send + 'static>(
     receive
         .blocking_recv()
         .map_err(|_| "OAuth transaction owner stopped".to_string())?
+}
+
+fn store_cause(
+    operation: CredentialStoreOperation,
+    cause: ral_core::fact::IoCause,
+) -> CredentialCause {
+    CredentialCause::Store(CredentialCauseStore { operation, cause })
 }

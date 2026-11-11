@@ -230,7 +230,9 @@ mod tests {
             (
                 Failure::NotRunnable(NotRunnable {
                     found: "cmd".into(),
-                    why: Unrunnable::Io("boom".into()),
+                    why: Unrunnable::Io(Box::new(crate::io::failure(&std::io::Error::from(
+                        std::io::ErrorKind::Other,
+                    )))),
                 }),
                 126,
             ),

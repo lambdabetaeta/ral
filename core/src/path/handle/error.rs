@@ -148,6 +148,7 @@ pub(super) fn directory_error() -> io::Error {
 /// Whether `e` is a staged write's [`DirectoryRefused`]: read off its
 /// `PermissionDenied`, as [`is_loop`] reads `ELOOP`.  `false` for any other
 /// error, including the leaf's own refusal.
+#[cfg(all(test, unix))]
 pub(crate) fn directory_refused(e: &io::Error) -> bool {
     e.get_ref()
         .is_some_and(<dyn std::error::Error + Send + Sync>::is::<DirectoryRefused>)
@@ -160,4 +161,154 @@ pub(crate) fn directory_refused(e: &io::Error) -> bool {
 #[cfg(test)]
 pub(crate) fn directory_refusal_for_test() -> io::Error {
     directory_error()
+}
+
+/// The custom path payloads, including every wrapper's original source.
+pub(crate) fn io_failure(error: &io::Error) -> Option<crate::fact::IoCause> {
+    use crate::fact::{
+        IoCause, IoContext, IoLeaf, PathIoContext, PathIoContextDangling, PathIoContextUnsynced,
+        PathIoLeaf, PathIoLeafEntryName, PathIoLeafLoop,
+    };
+    let inner = error.get_ref()?;
+    let leaf = if let Some(leaf) = inner.downcast_ref::<PathIoLeaf>() {
+        leaf.clone()
+    } else if let Some(looped) = inner.downcast_ref::<Looped>() {
+        PathIoLeaf::Loop(PathIoLeafLoop {
+            at: looped
+                .trace
+                .as_ref()
+                .map(|trace| crate::path::shown(trace.real().as_path())),
+        })
+    } else if let Some(dangling) = inner.downcast_ref::<Dangling>() {
+        return Some(crate::io::failure(&dangling.error).at(IoContext::Path(
+            PathIoContext::Dangling(PathIoContextDangling {
+                target: crate::path::shown(&dangling.target),
+            }),
+        )));
+    } else if let Some(unsynced) = inner.downcast_ref::<Unsynced>() {
+        return Some(crate::io::failure(&unsynced.error).at(IoContext::Path(
+            PathIoContext::Unsynced(PathIoContextUnsynced {
+                at: crate::path::shown(unsynced.at.as_path()),
+            }),
+        )));
+    } else if inner.is::<DirectoryRefused>() {
+        PathIoLeaf::DirectoryNotWritable
+    } else {
+        let name = inner.downcast_ref::<super::names::NotAnEntryName>()?;
+        PathIoLeaf::EntryName(PathIoLeafEntryName {
+            name: crate::path::shown(name.name()),
+            cause: name.into(),
+        })
+    };
+    Some(IoCause::new(IoLeaf::Path(leaf)))
+}
+
+impl fmt::Display for crate::fact::PathIoLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
+impl std::error::Error for crate::fact::PathIoLeaf {}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::fact::*;
+
+    #[test]
+    fn intrinsic_path_leaves_do_not_become_os_sentences() {
+        let text = || "entry".to_owned();
+        let leaves = [
+            PathIoLeaf::DirectoryNotWritable,
+            PathIoLeaf::NotHeld,
+            PathIoLeaf::LinkHasNoData,
+            PathIoLeaf::RootHasNoEntry,
+            PathIoLeaf::UpdateNeedsHeldFile,
+            PathIoLeaf::SpecialFileNotReplaceable,
+            PathIoLeaf::NotDirectory(text()),
+            PathIoLeaf::NotLink(text()),
+            PathIoLeaf::RelativeWalk,
+            PathIoLeaf::MalformedRoot,
+            PathIoLeaf::MoreThanRoot(text()),
+            PathIoLeaf::ParentInPosition(text()),
+            PathIoLeaf::NonCanonicalPosition(text()),
+            PathIoLeaf::EmptyLinkTarget,
+            PathIoLeaf::VettingRefused,
+            PathIoLeaf::AbsoluteRequired(text()),
+            PathIoLeaf::EntryName(PathIoLeafEntryName {
+                name: text(),
+                cause: EntryNameFailure::Separator,
+            }),
+            PathIoLeaf::NoFileEntry,
+            PathIoLeaf::DirectoryChanged,
+            PathIoLeaf::EntryMoved(text()),
+            PathIoLeaf::StoredNameUnheld(PathIoLeafStoredNameUnheld {
+                requested: text(),
+                answered: "other".into(),
+            }),
+            PathIoLeaf::StoredNameAmbiguous(PathIoLeafStoredNameAmbiguous {
+                name: text(),
+                spellings: 2_usize.into(),
+            }),
+            PathIoLeaf::Untraversable(text()),
+            PathIoLeaf::PrivateAncestorOwnerOrMode,
+            PathIoLeaf::PrivateDirectoryOwnerOrMode,
+            PathIoLeaf::ExtendedAcl,
+            PathIoLeaf::NoProtectedBoundary(PathIoLeafNoProtectedBoundary {
+                limit: 256_usize.into(),
+            }),
+            PathIoLeaf::ScopedDirectoryReparse,
+            PathIoLeaf::OwnerOnlyDaclMismatch,
+            PathIoLeaf::UnsafeAncestorDacl,
+            PathIoLeaf::KernelReplyShort(KernelReply::MacosAttributes),
+            PathIoLeaf::KernelReplyShort(KernelReply::WindowsInformation),
+            PathIoLeaf::VolumeAttributesUnsupported(PathIoLeafVolumeAttributesUnsupported {
+                required: 7,
+                returned: 3,
+            }),
+            PathIoLeaf::MissingPathTerminator,
+            PathIoLeaf::UnsupportedReparseTag(0x1234),
+            PathIoLeaf::RequiredInformationClass(PathIoLeafRequiredInformationClass {
+                operation: WindowsPathOperation::Rename,
+                class: WindowsInformationClass::FileRenameInformationEx,
+                cause: (&io::Error::from_raw_os_error(87)).into(),
+            }),
+            PathIoLeaf::Loop(PathIoLeafLoop { at: None }),
+        ];
+        for leaf in leaves {
+            assert_eq!(
+                crate::io::failure(&io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    leaf.clone()
+                )),
+                IoCause::new(IoLeaf::Path(leaf))
+            );
+        }
+    }
+
+    #[test]
+    fn source_wrappers_contribute_one_outermost_first_link_each() {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        let at = RealPath::unwalked_for_test(root);
+        let source = io::Error::other(PathIoLeaf::NotHeld);
+        let source = dangling_error(source, PathBuf::from("target"));
+        let source = unsynced_error(source, at.clone());
+        let cause = crate::io::failure(&source);
+        assert_eq!(*cause.leaf, IoLeaf::Path(PathIoLeaf::NotHeld));
+        assert_eq!(
+            cause.context,
+            vec![
+                IoContext::Path(PathIoContext::Unsynced(PathIoContextUnsynced {
+                    at: crate::path::shown(at.as_path())
+                })),
+                IoContext::Path(PathIoContext::Dangling(PathIoContextDangling {
+                    target: "target".into()
+                })),
+            ]
+        );
+        assert_eq!(
+            *crate::io::failure(&loop_error()).leaf,
+            IoLeaf::Path(PathIoLeaf::Loop(PathIoLeafLoop { at: None }))
+        );
+    }
 }

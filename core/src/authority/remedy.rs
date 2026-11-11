@@ -26,14 +26,6 @@ pub(crate) fn add_to_fs(what: &str, list: FsList) -> String {
     format!("add {what} to the grant's fs {list} list")
 }
 
-/// An allowance keeps the real path it was frozen to, so a link put on that
-/// path since redirects nothing.
-#[cfg(any(target_os = "linux", windows))]
-pub(crate) fn grant_the_new_target() -> &'static str {
-    "an allowance names what it named when granted. To allow the new target, grant it where \
-     the ceiling is set (in exarch, restart with a grant that names it)"
-}
-
 /// Let the grant's exec `allow` list name the program, in any key's form.
 pub(crate) fn add_to_exec() -> &'static str {
     "add it to the grant's exec `allow` list: `` `name git `` for a command name, \

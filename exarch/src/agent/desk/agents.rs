@@ -7,12 +7,19 @@ use crate::agent::{Agent, Body};
 use crate::bus::{AgentMessage, Input, Refused};
 use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
 use crate::provider::Provider;
-use crate::record::{Born, ChildStatus, Memory};
+use crate::record::{Born, ChildFailure, ChildStatus, Memory};
 use crate::shell_eval;
-use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
+use ral_core::fact::{
+    AgentFailure, AgentFailureEnded, AgentFailureNoLiveAgent, AgentFailureNotDescendant,
+    AgentFailureNotOwned, AgentFailureQueuedUnsynced, AgentFailureReplyAbsent,
+    AgentFailureReplyFailed, AgentFailureReplyPending, AgentFailureReplyStopped,
+    AgentFailureReplyUnavailable, AgentFailureResting, AgentFailureSelfMessage, EngineCause,
+    EngineFailure, EngineStep, ExarchFailure, ForkKind, HelperFailure, InvariantFailure,
+    IoOperation, IoSubject, ProtocolFailure, ProtocolFailureWrongForkKind, Reason,
+};
 use ral_core::shell::runtime::no_desk;
 use std::sync::Arc;
 
@@ -25,21 +32,16 @@ impl ExarchDesk {
         let call = &self.call;
         body.log
             .check_available()
-            .map_err(|why| Error::new(why.to_string()))?;
+            .map_err(|why| super::failure(ExarchFailure::Recording(why.failure())))?;
         let Name(name) = spec.name;
         if call.handle.0.fuel == 0 {
-            return Err(Error::new(
-                "`` exarch-agents `start `` refused: no spawn fuel remains at this depth. \
-                 Fuel bounds how deep a chain of spawns may recurse, not how many helpers \
-                 you may start here. You may still stop a descendant's exchange or dismiss \
-                 one of your own helpers.",
-            ));
+            return Err(agent_failure(AgentFailure::NoFuel));
         }
         let reserved = call
             .fleet
             .registry
             .name(&name)
-            .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
+            .map_err(|why| agent_failure(why.failure()).with_context("exarch-agents `start"))?;
         let provider = self.child_provider(&body, &spec.model)?;
         let inherited = (spec.memory == Memory::Mnemon).then(|| body.log.inherited_context());
         let child = Agent::born(
@@ -50,7 +52,7 @@ impl ExarchDesk {
             provider,
             inherited,
         )
-        .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}")))?;
+        .map_err(|why| why.with_context("exarch-agents `start"))?;
         self.spawn_child(&mut body, child, &name, spec.prompt)
     }
 
@@ -64,12 +66,10 @@ impl ExarchDesk {
         let s = &self.call;
         match model {
             Selection::Inherit => Ok(body.client.clone()),
-            Selection::Role(name) => s
-                .fleet
-                .launch
-                .roles
-                .get(name)
-                .map_err(|why| Error::new(format!("`` exarch-agents `start `` refused: {why}"))),
+            Selection::Role(name) => s.fleet.launch.roles.get(name).map_err(|why| {
+                agent_failure(AgentFailure::UnknownProviderRole(why))
+                    .with_context("exarch-agents `start")
+            }),
         }
     }
 
@@ -87,15 +87,12 @@ impl ExarchDesk {
             (EngineKind::Wire { engine }, ForkClaim::Sealed(seed)) => {
                 self.make_engine(engine, seed).map_err(refused)
             }
-            (EngineKind::Identity(_), ForkClaim::Sealed(_)) => Err(refused(Error::new(
-                "this host runs its children in its own process, so the fork must be `parked \
-                 <nursery id>`: a sealed bequest names a wire this desk does not have",
-            ))),
-            (EngineKind::Wire { .. }, ForkClaim::Parked(_)) => Err(refused(Error::new(
-                "this host makes its children over a wire, so the fork must be `sealed <bytes>`: \
-                 a session that says it is parked in process is naming a nursery this desk does \
-                 not have",
-            ))),
+            (EngineKind::Identity(_), ForkClaim::Sealed(_)) => {
+                Err(refused(wrong_fork(ForkKind::Park, ForkKind::Seal)))
+            }
+            (EngineKind::Wire { .. }, ForkClaim::Parked(_)) => {
+                Err(refused(wrong_fork(ForkKind::Seal, ForkKind::Park)))
+            }
         }
     }
 
@@ -109,29 +106,31 @@ impl ExarchDesk {
     ) -> Result<Engine, Error> {
         let s = &self.call;
         let factory = s.fleet.launch.factory.as_ref().ok_or_else(|| {
-            Error::new(
-                "this wire session has no engine factory: a construction bug, since a fuelled \
-                 wire launch is refused at Fleet::found without one",
-            )
+            Error::new(Reason::Invariant(Box::new(
+                InvariantFailure::MissingEngineFactory,
+            )))
         })?;
-        let stream = factory
-            .engine()
-            .map_err(|why| Error::new(format!("could not make a helper engine: {why}")))?;
+        let stream = factory.engine().map_err(|cause| {
+            super::failure(ExarchFailure::Engine(EngineFailure {
+                step: EngineStep::Factory,
+                cause: EngineCause::Factory(cause),
+            }))
+        })?;
         let transport = ral_core::carrier::WireTransport::adopt(
             stream,
             ral_core::protocol::channel::Liveness::default(),
         )
-        .map_err(|e| Error::new(format!("could not adopt the helper engine's wire: {e}")))?;
+        .map_err(|e| {
+            super::failure(ExarchFailure::Engine(EngineFailure {
+                step: EngineStep::Adopt,
+                cause: EngineCause::Io(ral_core::io::failure(&e)),
+            }))
+        })?;
         Engine::wire(
             transport,
             ral_core::protocol::Attach::child(engine.clone(), seal),
         )
-        .map_err(|lost| match lost {
-            Severed::Refused(why) => why.to_error(),
-            lost => Error::new(
-                crate::agent::EngineLost::starting(&lost, s.handle.run_dir()).to_string(),
-            ),
-        })
+        .map_err(|lost| crate::agent::engine::failure(EngineStep::Attach, &lost))
     }
 
     fn spawn_child(
@@ -159,11 +158,11 @@ impl ExarchDesk {
         call.commit_act(body, DeskAct::Spawn, Some(name), prompt, thread.is_err());
         let thread = thread.map_err(|error| {
             body.failures.extend(error.failures);
-            Error::new(format!(
-                "could not spawn a worker thread for agent '{}': {}",
-                handle.id(),
-                error.cause
-            ))
+            Error::io(
+                IoOperation::StartThread,
+                IoSubject::Thread(handle.id().to_string()),
+                &error.cause,
+            )
         })?;
         body.nursery.adopt(handle, thread);
         Ok(self.summary())
@@ -192,13 +191,9 @@ impl ExarchDesk {
                     };
                     Ok(Said::new(text.clone(), text))
                 }
-                None => Err(Said::new(
-                    "refused: not a descendant",
-                    format!(
-                        "agent '{name}' is not an agent you started; {} may only reach a descendant of yours",
-                        ral_core::text::code("exarch-agents `stop")
-                    ),
-                )),
+                None => Err(AgentFailure::NotDescendant(AgentFailureNotDescendant {
+                    name: name.into(),
+                })),
             },
         };
         self.conclude(&body, DeskAct::Stop, name, verdict)
@@ -219,10 +214,9 @@ impl ExarchDesk {
                 };
                 Ok(Said::new("", format!("agent '{name}' {outcome}")))
             }
-            None => Err(Said::new(
-                "refused: not your own helper",
-                "dismiss only an agent you started; its parent may dismiss it".into(),
-            )),
+            None => Err(AgentFailure::NotOwned(AgentFailureNotOwned {
+                name: name.into(),
+            })),
         };
         self.conclude(&body, DeskAct::Dismiss, name, verdict)
     }
@@ -231,26 +225,29 @@ impl ExarchDesk {
         let body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         let verdict = match call.fleet.registry.resolve(&name) {
-            None => Err(Said::new(
-                "refused: no live agent by that name",
-                format!("no live agent named '{name}'; did it finish already?"),
-            )),
-            Some(to) if to.id() == call.handle.id() => Err(Said::new(
-                "refused: that is you",
-                format!(
-                    "agent '{name}' is you; `` exarch-agents `message `` reaches another agent: to wake yourself, arm a `exarch-schedules` fire"
-                ),
-            )),
+            None => Err(AgentFailure::NoLiveAgent(AgentFailureNoLiveAgent {
+                name: name.clone(),
+            })),
+            Some(to) if to.id() == call.handle.id() => {
+                Err(AgentFailure::SelfMessage(AgentFailureSelfMessage {
+                    name: name.clone(),
+                }))
+            }
             Some(to) => {
                 let said = Said::new(text.clone(), format!("sent message to agent '{name}'"));
                 match to.message(&call.handle, text) {
                     Ok(()) => Ok(said),
-                    Err(Refused::Ended) => Err(Said::new(
-                        "refused: the agent ended",
-                        format!("agent '{name}' has ended; start a new one"),
-                    )),
+                    Err(Refused::Ended) => Err(AgentFailure::Ended(AgentFailureEnded {
+                        name: name.clone(),
+                    })),
                     Err(Refused::Unsynced(why)) => {
-                        let message = Refused::Unsynced(why).to_string();
+                        let error = agent_failure(AgentFailure::QueuedUnsynced(
+                            AgentFailureQueuedUnsynced {
+                                name: name.clone(),
+                                cause: why.failure(),
+                            },
+                        ));
+                        let message = error.plain();
                         call.commit_act(
                             &body,
                             DeskAct::Message,
@@ -258,22 +255,18 @@ impl ExarchDesk {
                             message.clone(),
                             false,
                         );
-                        body.log.record_emitter().emit_or_end(
-                            crate::record::Forensic::HarnessResult {
-                                text: message.clone(),
-                            },
-                        );
-                        return Err(Error::new(message));
+                        body.log
+                            .record_emitter()
+                            .emit_or_end(crate::record::Forensic::HarnessResult { text: message });
+                        return Err(error);
                     }
                     Err(Refused::Resting) => {
                         let parent = to.parent().expect("a resting helper has a parent");
                         let parent = &parent.0.name;
-                        Err(Said::new(
-                            "refused: the agent rests",
-                            format!(
-                                "agent '{name}' has answered '{parent}' and rests; only '{parent}' can message it now"
-                            ),
-                        ))
+                        Err(AgentFailure::Resting(AgentFailureResting {
+                            name: name.clone(),
+                            parent: parent.clone(),
+                        }))
                     }
                 }
             }
@@ -289,20 +282,22 @@ impl ExarchDesk {
         body: &Body,
         act: DeskAct,
         subject: &str,
-        verdict: Result<Said, Said>,
+        verdict: Result<Said, AgentFailure>,
     ) -> Result<FOValue, Error> {
         let s = &self.call;
-        let refused = verdict.is_err();
-        let (Ok(Said { payload, text }) | Err(Said { payload, text })) = verdict;
-        s.commit_act(body, act, Some(subject), payload, refused);
+        let (payload, text, answer) = match verdict {
+            Ok(Said { payload, text }) => (payload, text, Ok(())),
+            Err(cause) => {
+                let error = agent_failure(cause);
+                let text = error.plain();
+                (format!("refused: {text}"), text, Err(error))
+            }
+        };
+        s.commit_act(body, act, Some(subject), payload, answer.is_err());
         body.log
             .record_emitter()
-            .emit_or_end(crate::record::Forensic::HarnessResult { text: text.clone() });
-        if refused {
-            Err(Error::new(text))
-        } else {
-            Ok(self.summary())
-        }
+            .emit_or_end(crate::record::Forensic::HarnessResult { text });
+        answer.map(|()| self.summary())
     }
 
     /// The loop takes the staged reply after this batch returns.
@@ -314,13 +309,9 @@ impl ExarchDesk {
             .0
             .address
             .transact(|txn| txn.mail().returns())
-            .map_err(|why| Error::new(why.to_string()))?;
+            .map_err(|why| super::failure(ExarchFailure::Recording(why.failure())))?;
         if !returns {
-            return Err(Error::new(
-                "exarch-agents `reply` refused: you converse with the human; you do not return. \
-                 `reply` hands a spawned or headless agent's answer to whoever started it; \
-                 a conversing agent keeps talking, turn after turn, and holds no `reply` to call.",
-            ));
+            return Err(agent_failure(AgentFailure::NoReturnRecipient));
         }
         let display = shell_eval::ral_value_to_text(&value).unwrap_or_default();
         let payload = if display.is_empty() {
@@ -337,47 +328,44 @@ impl ExarchDesk {
     pub(super) fn agent_read(&self, name: String) -> Result<FOValue, Error> {
         let body = self.loan.get().ok_or_else(no_desk)?;
         let content = match body.nursery.named(&name) {
-            None => Err(format!(
-                "you started no agent named '{name}'; {} reads only your own helpers, and a clear forgets earlier ones",
-                ral_core::text::code("exarch-agents `read")
-            )),
+            None => Err(agent_failure(AgentFailure::NotOwned(
+                AgentFailureNotOwned { name: name.clone() },
+            ))),
             Some(helper) => {
                 let live = helper.is_live();
                 match helper.status() {
-                    Err(why) => Err(format!(
-                        "agent '{name}' has ended and its state is unavailable: {why}"
+                    Err(why) => Err(agent_failure(AgentFailure::ReplyUnavailable(
+                        AgentFailureReplyUnavailable {
+                            name: name.clone(),
+                            cause: why.failure(),
+                        },
+                    ))),
+                    Ok(status) if live && status.reply_pending() => Err(agent_failure(
+                        AgentFailure::ReplyPending(AgentFailureReplyPending { name: name.clone() }),
                     )),
-                    Ok(status) => {
-                        if live && status.reply_pending() {
-                            Err(format!(
-                                "agent '{name}' has not replied yet: it is still working; wait for its notice instead of polling"
-                            ))
-                        } else {
-                            match status.report {
-                                Some(ChildStatus::Replied(reply)) => Ok(reply),
-                                Some(ChildStatus::Failed(reason)) => Err(format!(
-                                    "agent '{name}' failed without a reply to read: {reason}"
-                                )),
-                                Some(ChildStatus::Stopped) => Err(format!(
-                                    "agent '{name}' stopped without a reply to read; message it to continue"
-                                )),
-                                None => Err(format!("agent '{name}' has no reply to read")),
-                            }
+                    Ok(status) => match status.report {
+                        Some(ChildStatus::Replied(reply)) => Ok(reply),
+                        Some(ChildStatus::Failed(failure)) => Err(reply_failure(&name, failure)),
+                        Some(ChildStatus::Stopped) => {
+                            Err(agent_failure(AgentFailure::ReplyStopped(
+                                AgentFailureReplyStopped { name: name.clone() },
+                            )))
                         }
-                    }
+                        None => Err(agent_failure(AgentFailure::ReplyAbsent(
+                            AgentFailureReplyAbsent { name: name.clone() },
+                        ))),
+                    },
                 }
             }
         };
         let text = match &content {
             Ok(_) => format!("read agent '{name}'s reply"),
-            Err(text) => text.clone(),
+            Err(error) => error.plain(),
         };
         body.log
             .record_emitter()
             .emit_or_end(crate::record::Forensic::HarnessResult { text });
-        content
-            .map(|reply| Deposit { name, reply }.encode())
-            .map_err(Error::new)
+        content.map(|reply| Deposit { name, reply }.encode())
     }
 }
 
@@ -395,4 +383,26 @@ impl Said {
             text,
         }
     }
+}
+
+fn agent_failure(cause: AgentFailure) -> Error {
+    super::failure(ExarchFailure::Agent(cause))
+}
+
+fn wrong_fork(expected: ForkKind, actual: ForkKind) -> Error {
+    Error::new(Reason::Protocol(Box::new(ProtocolFailure::WrongForkKind(
+        ProtocolFailureWrongForkKind { expected, actual },
+    ))))
+}
+
+fn reply_failure(name: &str, failure: ChildFailure) -> Error {
+    let cause = match failure {
+        ChildFailure::Refused(wire) => return wire.to_error(),
+        ChildFailure::Cause(cause) => cause,
+        ChildFailure::Panicked(_) => HelperFailure::Panicked,
+    };
+    agent_failure(AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+        name: name.into(),
+        cause,
+    }))
 }

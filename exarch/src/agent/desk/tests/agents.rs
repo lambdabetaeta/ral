@@ -153,20 +153,34 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
                 .describe()
                 .contains("still working")
         );
+        let error = desk.agent_read("grandchild".into()).unwrap_err();
         assert!(
-            desk.agent_read("grandchild".into())
-                .unwrap_err()
-                .describe()
-                .contains("reads only your own helpers")
+            matches!(&error.reason, Reason::Host(host) if matches!(host.as_ref(), HostFailure::Exarch(ExarchFailure::Agent(ral_core::fact::AgentFailure::NotOwned(value))) if value.name == "grandchild"))
         );
+        assert!(error.plain().contains("reads only your own helpers"));
         child
-            .report(ChildStatus::Failed("engine failed".into()))
+            .report(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                ral_core::fact::HelperFailure::Connection(
+                    ral_core::fact::ConnectionFailure::Closed(
+                        ral_core::fact::ConnectionClosed::TransportDropped,
+                    ),
+                ),
+            )))
             .unwrap();
-        assert!(
-            desk.agent_read("helper".into())
-                .unwrap_err()
-                .describe()
-                .contains("failed without a reply to read: engine failed")
+        assert_eq!(
+            desk.agent_read("helper".into()).unwrap_err().reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                ral_core::fact::AgentFailure::ReplyFailed(
+                    ral_core::fact::AgentFailureReplyFailed {
+                        name: "helper".into(),
+                        cause: ral_core::fact::HelperFailure::Connection(
+                            ral_core::fact::ConnectionFailure::Closed(
+                                ral_core::fact::ConnectionClosed::TransportDropped
+                            )
+                        ),
+                    }
+                )
+            ))))
         );
         let silent = test_agent(
             &fleet,
@@ -182,12 +196,10 @@ fn read_distinguishes_working_failed_stopped_and_unowned_helpers() {
                 .contains("has no reply to read")
         );
         child.report(ChildStatus::Stopped).unwrap();
-        assert!(
-            desk.agent_read("helper".into())
-                .unwrap_err()
-                .describe()
-                .contains("stopped without a reply to read; message it to continue")
-        );
+        let error = desk.agent_read("helper".into()).unwrap_err();
+        assert!(error.describe().contains("stopped without a reply to read"));
+        assert!(!error.describe().contains("message it to continue"));
+        assert!(error.plain().contains("hint: message it to continue"));
     });
 }
 
@@ -307,15 +319,9 @@ fn a_refused_role_never_registers_a_child() {
         )])),
         ..crate::agent::fleet::Launch::for_test()
     };
-    for (launch, said) in [
-        (
-            crate::agent::fleet::Launch::for_test(),
-            "no roles are configured, so every child runs on your own model",
-        ),
-        (
-            configured,
-            "no role 'other': the configured roles are cheap; or pass model: `inherit",
-        ),
+    for (launch, offered) in [
+        (crate::agent::fleet::Launch::for_test(), vec![]),
+        (configured, vec!["cheap".into()]),
     ] {
         with_fleet_desk(3, launch, |desk, _, _agent| {
             // Refused before any fork is taken up, so none need be parked.
@@ -328,13 +334,19 @@ fn a_refused_role_never_registers_a_child() {
                     },
                 ))
                 .expect_err("an unbound role must be refused");
-            assert!(
-                err.describe()
-                    .contains("`` exarch-agents `start `` refused")
-                    && err.describe().contains(said),
-                "the refusal must name the tag and the reason, got: {}",
-                err.describe()
+            assert_eq!(
+                err.reason,
+                Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                    ral_core::fact::AgentFailure::UnknownProviderRole(
+                        ral_core::fact::AgentFailureUnknownProviderRole {
+                            name: "other".into(),
+                            offered
+                        }
+                    )
+                ))))
             );
+            assert_eq!(err.context(), Some("exarch-agents `start"));
+            assert_eq!(err.hints(), []);
             assert_eq!(
                 summary(&desk.call.handle, &desk.call.fleet).live,
                 0,
@@ -370,8 +382,13 @@ fn start_refuses_a_spec_missing_a_field_by_name() {
             .handle(&spoilt_start(|spec| spec.retain(|(key, _)| key != "name")))
             .expect_err("a spec missing `name` must be refused");
         assert_eq!(
-            err.describe(),
-            "`` exarch-agents `start ``: `spec: no `name field in a record of 3 fields"
+            err.reason,
+            request_failure(
+                DecodeFailure::new(DecodeCause::MissingField("name".into()))
+                    .field("spec")
+                    .payload("start")
+                    .payload("agents")
+            )
         );
     });
 }
@@ -384,8 +401,18 @@ fn start_refuses_a_misspelt_spec_field() {
             .handle(&spoilt_start(|spec| spec[1].0 = "nmae".into()))
             .expect_err("`nmae` is not a field the spec carries");
         assert_eq!(
-            err.describe(),
-            "`` exarch-agents `start ``: `spec: unknown field `nmae`: did you mean `name`?"
+            err.reason,
+            request_failure(
+                DecodeFailure::new(DecodeCause::UnknownField(UnknownField {
+                    field: "nmae".into(),
+                    offered: ["prompt", "name", "type", "model"]
+                        .map(str::to_owned)
+                        .to_vec()
+                }))
+                .field("spec")
+                .payload("start")
+                .payload("agents")
+            )
         );
     });
 }
@@ -613,7 +640,7 @@ fn stop_scopes_to_descendants_without_ending_their_lives_or_helpers() {
                 desk.agent_stop("parent")
                     .unwrap_err()
                     .describe()
-                    .contains("not an agent you started")
+                    .contains("not a descendant of yours")
             );
             assert!(desk.agent_stop("sibling").is_err());
             assert!(desk.agent_stop("mid").is_err());
@@ -700,7 +727,7 @@ fn stop_answers_say_what_they_did_or_why_they_refused() {
                     .describe()
                     .into_owned();
                 assert!(
-                    message.contains(&format!("agent '{refused}' is not an agent you started"))
+                    message.contains(&format!("agent '{refused}' is not a descendant of yours"))
                         && message.contains("may only reach a descendant of yours"),
                     "{message}"
                 );
@@ -872,9 +899,13 @@ fn dismiss_refuses_a_grandchild_and_leaves_both_lives_untouched() {
         let error = desk
             .ask(Request::Agents(Agents::Dismiss("grandchild".into())))
             .unwrap_err();
-        assert_eq!(
-            error.describe(),
-            "dismiss only an agent you started; its parent may dismiss it"
+        assert!(
+            matches!(&error.reason, Reason::Host(host) if matches!(host.as_ref(), HostFailure::Exarch(ExarchFailure::Agent(ral_core::fact::AgentFailure::NotOwned(value))) if value.name == "grandchild"))
+        );
+        assert!(
+            error
+                .plain()
+                .contains("dismiss only an agent you started; its parent may dismiss it")
         );
         assert!(child.is_live());
         assert!(grandchild.is_live());
@@ -988,10 +1019,18 @@ fn reply_refuses_a_poisoned_mail_cell_without_staging_a_value() {
             .is_err()
         );
         let error = desk.agent_reply(text("not staged")).unwrap_err();
-        assert_eq!(error.describe(), agent.status().err().unwrap().to_string());
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Recording(
+                agent.status().err().unwrap().failure()
+            ))))
+        );
+        assert!(
+            matches!(&error.reason, Reason::Host(host) if matches!(host.as_ref(), HostFailure::Exarch(ExarchFailure::Recording(ral_core::fact::RecordingFailure::CellPoisoned(value))) if value.agent == agent.id().get().into()))
+        );
         assert!(
             error
-                .describe()
+                .plain()
                 .contains("resuming the run rebuilds its state from the log")
         );
         assert!(desk.loan.get().unwrap().reply.is_none());
@@ -1074,4 +1113,132 @@ fn a_helper_started_with_inherit_after_a_model_switch_runs_on_the_switched_provi
         }
     }
     assert_eq!(host.end(), [] as [String; 0]);
+}
+
+#[test]
+fn agent_read_preserves_causes_refusal_envelopes_and_portable_panic() {
+    use crate::record::ChildFailure;
+    use ral_core::fact::{
+        AgentFailure, AgentFailureReplyFailed, ExarchFailure, HelperFailure, HostFailure,
+        ProtocolFailure, ProtocolFailureVersionMismatch, Reason,
+    };
+    use ral_core::protocol::WireError;
+
+    let original = Error::new(Reason::Protocol(Box::new(
+        ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
+            front: 43,
+            engine: 44,
+        }),
+    )))
+    .with_context("original host context")
+    .with_hint("first")
+    .with_hint("second");
+    for failure in [
+        ChildFailure::Cause(HelperFailure::NoReply),
+        ChildFailure::Cause(HelperFailure::Provider(
+            crate::provider::ProviderError::stream_ended_without_end("test-service", "test-model")
+                .failure(),
+        )),
+        ChildFailure::Panicked("private lifecycle panic evidence".into()),
+        ChildFailure::Refused(WireError::of(&original)),
+    ] {
+        with_spawnable_desk(3, |desk, fleet, agent| {
+            let child = test_agent(
+                &fleet,
+                TestAgentSpec::child("helper", &agent, agent.mailbox.home().child()),
+            )
+            .unwrap();
+            adopt_synthetic(&desk, &child);
+            child.report(ChildStatus::Failed(failure.clone())).unwrap();
+            let error = desk.agent_read("helper".into()).unwrap_err();
+            match failure {
+                ChildFailure::Refused(_) => {
+                    assert_eq!(error.reason, original.reason);
+                    assert_eq!(error.context(), original.context());
+                    assert_eq!(error.hints(), original.hints());
+                }
+                ChildFailure::Cause(cause) => {
+                    assert_eq!(
+                        error.reason,
+                        Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                            AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+                                name: "helper".into(),
+                                cause
+                            })
+                        ))))
+                    );
+                    assert_eq!(error.hints(), []);
+                }
+                ChildFailure::Panicked(_) => {
+                    assert_eq!(
+                        error.reason,
+                        Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                            AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+                                name: "helper".into(),
+                                cause: HelperFailure::Panicked
+                            })
+                        ))))
+                    );
+                    assert_eq!(error.hints(), []);
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn queued_unsynced_message_keeps_admission_and_the_original_recording_failure() {
+    use ral_core::fact::{
+        AgentFailure, AgentFailureQueuedUnsynced, ExarchFailure, HostFailure, Reason,
+    };
+    with_spawnable_desk(3, |desk, fleet, agent| {
+        let child = crate::agent::Agent::born(
+            &fleet,
+            crate::agent::build::Parent::Agent(&agent, agent.mailbox.home().child()),
+            fleet.registry.name("helper").unwrap(),
+            crate::agent::engine::Engine::adopted(crate::boot::test_transport()),
+            Arc::new(Provider::scripted("test-model", Script::new())),
+            None,
+        )
+        .unwrap();
+        let recorder = child.recorder();
+        recorder.before_sync(|| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        let error = desk
+            .message(Message {
+                to: "helper".into(),
+                text: "admitted once".into(),
+            })
+            .unwrap_err();
+        let cause = recorder.check_available().unwrap_err().failure();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Agent(
+                AgentFailure::QueuedUnsynced(AgentFailureQueuedUnsynced {
+                    name: "helper".into(),
+                    cause
+                })
+            ))))
+        );
+        assert!(
+            error.hints().is_empty(),
+            "no intrinsic resend advice is stored at the producer"
+        );
+        assert_eq!(child.handle().0.address.queued_posts().len(), 1);
+        assert_eq!(
+            desk.call.acts.borrow().as_slice(),
+            [(DeskAct::Message, Some("helper".into()))]
+        );
+        let records = crate::record::read_records(
+            &desk
+                .loan
+                .get()
+                .unwrap()
+                .log
+                .dir()
+                .path()
+                .join(crate::record::RECORD),
+        )
+        .unwrap();
+        assert!(records.iter().any(|record| matches!(record, Record::Display(Display::HarnessCall { verb, failed: false, .. }) if verb == "message")));
+    });
 }

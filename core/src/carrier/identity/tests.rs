@@ -214,36 +214,36 @@ mod enquiry_tests {
         else {
             panic!("an absent desk is an error, not a stop");
         };
-        assert_eq!(
-            err.hints(),
-            [Box::<str>::from(crate::shell::runtime::NO_DESK_HINT)]
-        );
+        assert_eq!(err.hints(), []);
+        assert_eq!(err.reason.advice(), [crate::shell::runtime::NO_DESK_HINT]);
     }
 
-    /// A host's refusal keeps its message line and hints, and nothing else,
-    /// as over the wire.
+    /// Identity uses exactly the wire's reason/report normalization.
     #[test]
     fn a_host_refusal_reads_as_over_the_wire() {
-        struct Refuser;
+        use crate::carrier::testkit::{assert_normalized, host_error, reason_families};
+        struct Refuser(Error);
         impl Host for Refuser {
             fn surface(&self, _val: &FOValue) {}
             fn enquire(&self, _req: FOValue) -> Result<FOValue, Error> {
-                Err(Error::new("no").with_context("ask").with_hint("try again"))
+                Err(self.0.clone())
             }
         }
-        let desk = IdentityDesk {
-            host: Arc::new(Refuser),
-            events: no_events(),
-        };
-        let Err(Break::Error(err)) = crate::shell::runtime::EnquiryDesk::enquire(
-            &desk,
-            FOValue::Unit,
-            &crate::process::DurableRoot::default().child(),
-        ) else {
-            panic!("a refusal is an error, not a stop");
-        };
-        assert_eq!(err.describe(), "ask: no");
-        assert_eq!(err.hints(), [Box::<str>::from("try again")]);
+        for reason in reason_families() {
+            let original = host_error(reason);
+            let desk = IdentityDesk {
+                host: Arc::new(Refuser(original.clone())),
+                events: no_events(),
+            };
+            let Err(Break::Error(err)) = crate::shell::runtime::EnquiryDesk::enquire(
+                &desk,
+                FOValue::Unit,
+                &crate::process::DurableRoot::default().child(),
+            ) else {
+                panic!("a refusal is an error, not a stop");
+            };
+            assert_normalized(&original, &err);
+        }
     }
 
     /// A no-op receiver, for a desk built without a real dispatch behind it.
@@ -456,10 +456,13 @@ mod teardown_tests {
             engine.shell.local.workers.live_ticket()
         };
         for _ in 0..2 {
-            let Err(Severed::Faulted(msg)) = transport.end() else {
+            let Err(Severed::Faulted(cause)) = transport.end() else {
                 panic!("a worker outliving teardown must fault the end");
             };
-            assert!(msg.starts_with("1 ral worker thread(s)"), "{msg}");
+            assert_eq!(
+                cause,
+                crate::fact::ConnectionFault::WorkersSurvived(1u64.into())
+            );
         }
         drop(ticket);
         assert_eq!(transport.end(), Ok(()));
@@ -677,10 +680,12 @@ mod probe_tests {
     #[test]
     fn a_severed_identity_refuses_what_follows() {
         let transport = fresh();
-        let first = Severed::Faulted("the first".into());
+        let first = Severed::Faulted(crate::fact::ConnectionFault::ReadingForDispatch);
         assert_eq!(transport.sever(first.clone()), first);
         assert_eq!(
-            transport.sever(Severed::Faulted("the second".into())),
+            transport.sever(Severed::Closed(
+                crate::fact::ConnectionClosed::TransportDropped
+            )),
             first
         );
         assert_eq!(transport.cwd(), Err(ProbeError::Severed(first.clone())));
@@ -709,14 +714,86 @@ mod probe_tests {
             .adopt_parked(id)
             .err()
             .expect("a bequest adopts once");
-        assert!(
-            again.describe().contains("no forked session is parked"),
-            "{again}"
+        assert_eq!(
+            again.reason,
+            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NurseryMissing(
+                id.0.into()
+            ),))
         );
+        let description = format!("no forked session is parked under nursery id {}", id.0);
+        let advice = "was it adopted already, or has the run that forked it ended?";
+        assert_eq!(again.describe(), description);
+        assert_eq!(again.reason.advice(), [advice]);
+        assert_eq!(again.hints(), []);
+        assert!(again.context().is_none());
+        assert_eq!(again.plain(), format!("{description}\nhint: {advice}"));
         let based = transport
             .adopt_parked(park(SpawnGrant::Base("confined".into())))
             .err()
             .expect("a bare engine has no base lexicon");
-        assert!(based.describe().contains("`confined`"), "{based}");
+        assert_eq!(
+            based.reason,
+            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoChildEngines))
+        );
+    }
+}
+
+mod typed_refusal_reports {
+    use super::*;
+    use crate::carrier::testkit::{assert_enquiry_report, host_error, reason_families};
+    use crate::data::datum::Datum as _;
+    use crate::fact::Reason;
+
+    static ASK: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
+        "ask",
+        crate::carrier::testkit::enquiring_runtime,
+        |_, _| Ok(()),
+    )];
+    static REFUSE: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
+        "refuse",
+        crate::carrier::testkit::enquiring_runtime,
+        |root, _| {
+            Err(host_error(
+                Reason::decode(&root.config).expect("fixture reason"),
+            ))
+        },
+    )];
+
+    struct Refuser(Error);
+    impl Host for Refuser {
+        fn surface(&self, _: &FOValue) {}
+        fn enquire(&self, _: FOValue) -> Result<FOValue, Error> {
+            Err(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn every_identity_attach_refusal_family_has_the_wire_normalization() {
+        for reason in reason_families() {
+            let mut request = crate::carrier::testkit::attach(&REFUSE);
+            let crate::protocol::Origin::Root(root) = &mut request.origin else {
+                unreachable!()
+            };
+            root.config = reason.clone().encode();
+            let Err(Severed::Refused(wire)) = IdentityTransport::boot(&REFUSE, &request) else {
+                panic!("the installer refuses before evaluation");
+            };
+            crate::carrier::testkit::assert_normalized(&host_error(reason), &wire.to_error());
+        }
+    }
+
+    #[test]
+    fn every_identity_enquiry_report_claims_engine_provenance_without_reclassifying_the_reason() {
+        let transport = crate::carrier::testkit::boot(&ASK);
+        for reason in reason_families() {
+            let report = dispatch_to_report(
+                &transport,
+                Run::captured("ask-host", crate::source::SourceOrigin::named("engine.ral")),
+                Arc::new(Refuser(host_error(reason.clone()))),
+                None,
+            )
+            .unwrap();
+            assert_enquiry_report(&report, &reason);
+        }
     }
 }

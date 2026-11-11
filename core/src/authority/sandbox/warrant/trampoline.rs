@@ -12,6 +12,11 @@
 
 use super::super::launch::Image;
 use super::{Confined, Slots, Warrant};
+use crate::fact::{
+    HandoffField, LaunchFailure, LaunchImageSubject, LauncherFailure, LauncherFailureChildFork,
+    LauncherFailureChildPipe, LauncherFailureChildSetup, LauncherFailureNonNativeExecError,
+    LauncherFailureSpawnBeforeSetup, OsFailure, WarrantFailure, WarrantFailureMissingDescriptor,
+};
 use crate::path::RealPath;
 #[cfg(target_os = "linux")]
 use crate::path::shown;
@@ -44,20 +49,35 @@ pub(crate) fn serve_warrant(args: &[OsString]) -> u8 {
             }
         },
         Err(e) => {
-            crate::io::terminal::cmd_error("ral", &e);
+            crate::io::terminal::cmd_error("ral", &terminal_refusal(&e));
             UNSTARTED
         }
     }
 }
 
+fn terminal_refusal(failure: &LaunchFailure) -> String {
+    use std::fmt::Write as _;
+    let mut message = failure.describe();
+    for advice in failure.advice() {
+        let _ = write!(message, "\nhint: {advice}");
+    }
+    message
+}
+
 /// The slots `args` name, and the report socket at the second.
-fn received(args: &[OsString]) -> Result<(Slots, Witness), String> {
-    let slots = Slots::parse(args)?;
+fn received(args: &[OsString]) -> Result<(Slots, Witness), LaunchFailure> {
+    let slots = Slots::parse(args).map_err(LaunchFailure::Warrant)?;
     let at = slots.report;
-    let fd = at
-        .take()
-        .ok_or_else(|| format!("no report socket at fd {at}"))?;
-    let witness = Witness::new(fd).ok_or_else(|| format!("fd {at} is not ral's report socket"))?;
+    let fd = at.take().ok_or_else(|| {
+        LaunchFailure::Warrant(WarrantFailure::MissingDescriptor(
+            WarrantFailureMissingDescriptor {
+                field: HandoffField::Report,
+                fd: at.fd(),
+            },
+        ))
+    })?;
+    let witness = Witness::new(fd)
+        .ok_or_else(|| LaunchFailure::Warrant(WarrantFailure::NotReportSocket(at.fd())))?;
     Ok((slots, witness))
 }
 
@@ -79,7 +99,10 @@ impl Confined {
             Image::File { real, arg0 } => {
                 let mut program = program(&real, &arg0, self.args);
                 let e = site!(Silent::RespawnExec, &mut program => exec());
-                witness.unstarted(&e);
+                witness.unstarted(
+                    &e,
+                    LaunchImageSubject::File(crate::path::shown(real.as_path())),
+                );
                 UNSTARTED
             }
             Image::Tool(tool) => {
@@ -98,7 +121,7 @@ enum Unbegun {
     /// The `execve` of the program's own file failed.
     Program(io::Error),
     /// ral's own: a fork, or the child's setup before it became the program.
-    Ours(String),
+    Ours(LaunchFailure),
 }
 
 #[cfg(target_os = "linux")]
@@ -107,11 +130,17 @@ impl Confined {
     fn run(self, witness: Witness) -> u8 {
         let caught = outlive_group_signals();
         let supervisor = rustix::process::getpid();
+        let subject = match &self.image {
+            Image::File { real, .. } => {
+                LaunchImageSubject::File(crate::path::shown(real.as_path()))
+            }
+            Image::Tool(tool) => LaunchImageSubject::Bundled(tool.to_string()),
+        };
         let (witness, started) = start(self.image, self.args, &caught, supervisor, witness);
         match started {
             Ok(pid) => supervise(witness, pid),
             Err(Unbegun::Program(e)) => {
-                witness.unstarted(&e);
+                witness.unstarted(&e, subject);
                 UNSTARTED
             }
             Err(Unbegun::Ours(why)) => {
@@ -183,9 +212,14 @@ fn start_file(
     args: Vec<OsString>,
     supervisor: Pid,
 ) -> Result<Pid, Unbegun> {
-    let ours =
-        |why: String| Unbegun::Ours(format!("cannot spawn {}: {why}", shown(real.as_path())));
-    let (hears, tells) = crate::process::cloexec_pipe().map_err(|e| ours(e.to_string()))?;
+    let subject = LaunchImageSubject::File(shown(real.as_path()));
+    let ours = |cause| Unbegun::Ours(LaunchFailure::Launcher(cause));
+    let (hears, tells) = crate::process::cloexec_pipe().map_err(|e| {
+        ours(LauncherFailure::ChildPipe(LauncherFailureChildPipe {
+            subject: subject.clone(),
+            cause: OsFailure::from(&e),
+        }))
+    })?;
     let mut program = program(real, arg0, args);
     // SAFETY: `die_with` and the write make only async-signal-safe syscalls.
     unsafe {
@@ -201,9 +235,23 @@ fn start_file(
     spawned
         .map(|child| Pid::from_child(&child))
         .map_err(|e| match Dawn::heard(hears) {
-            Dawn::Begun => Unbegun::Program(e),
-            Dawn::Failed(setup) => ours(format!("its setup failed: {setup}")),
-            Dawn::Silent => ours(e.to_string()),
+            Dawn::Begun if e.raw_os_error().is_some() => Unbegun::Program(e),
+            Dawn::Begun => ours(LauncherFailure::NonNativeExecError(
+                LauncherFailureNonNativeExecError {
+                    subject: subject.clone(),
+                    cause: Box::new(crate::io::failure(&e)),
+                },
+            )),
+            Dawn::Failed(setup) => ours(LauncherFailure::ChildSetup(LauncherFailureChildSetup {
+                subject: subject.clone(),
+                cause: OsFailure::from(&setup),
+            })),
+            Dawn::Silent => ours(LauncherFailure::SpawnBeforeSetup(
+                LauncherFailureSpawnBeforeSetup {
+                    subject: subject.clone(),
+                    cause: OsFailure::from(&e),
+                },
+            )),
         })
 }
 
@@ -217,10 +265,19 @@ fn start_tool(
     supervisor: Pid,
     witness: Witness,
 ) -> (Witness, Result<Pid, Unbegun>) {
-    let ours = |why: String| Unbegun::Ours(format!("bundled tool `{tool}`: {why}"));
+    let subject = LaunchImageSubject::Bundled(tool.to_owned());
+    let ours = |cause| Unbegun::Ours(LaunchFailure::Launcher(cause));
     let (hears, tells) = match crate::process::cloexec_pipe() {
         Ok(pipe) => pipe,
-        Err(e) => return (witness, Err(ours(format!("cannot open a pipe: {e}")))),
+        Err(e) => {
+            return (
+                witness,
+                Err(ours(LauncherFailure::ChildPipe(LauncherFailureChildPipe {
+                    subject,
+                    cause: OsFailure::from(&e),
+                }))),
+            );
+        }
     };
     // SAFETY: the warrant role starts no thread, so the child may run
     // anything.
@@ -233,15 +290,26 @@ fn start_tool(
             drop(tells);
             let started = match Dawn::heard(hears) {
                 Dawn::Begun => Ok(pid),
-                Dawn::Failed(e) => Err(ours(format!("could not begin: {e}"))),
-                Dawn::Silent => Err(ours("its child died before it began".to_owned())),
+                Dawn::Failed(e) => Err(ours(LauncherFailure::ChildSetup(
+                    LauncherFailureChildSetup {
+                        subject,
+                        cause: OsFailure::from(&e),
+                    },
+                ))),
+                Dawn::Silent => Err(ours(LauncherFailure::ChildDiedBeforeSetup(subject))),
             };
             if started.is_err() {
                 let _ = crate::process::reap(pid);
             }
             (witness, started)
         }
-        Err(e) => (witness, Err(ours(format!("cannot fork: {e}")))),
+        Err(e) => (
+            witness,
+            Err(ours(LauncherFailure::ChildFork(LauncherFailureChildFork {
+                subject,
+                cause: OsFailure::from(&e),
+            }))),
+        ),
     }
 }
 
@@ -344,6 +412,7 @@ fn outlive_group_signals() -> Vec<c_int> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -365,6 +434,34 @@ mod tests {
             let args: Vec<OsString> = args.iter().map(OsString::from).collect();
             assert_eq!(serve_warrant(&args), UNSTARTED, "{args:?}");
         }
+    }
+
+    #[test]
+    fn a_malformed_standalone_warrant_prints_its_explanation_then_intrinsic_advice_once() {
+        const HELPER: &str = "RAL_MALFORMED_WARRANT_TEST";
+        if std::env::var_os(HELPER).is_some() {
+            assert_eq!(serve_warrant(&[]), UNSTARTED);
+            return;
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "authority::sandbox::warrant::trampoline::tests::a_malformed_standalone_warrant_prints_its_explanation_then_intrinsic_advice_once", "--nocapture"])
+            .env(HELPER, "1")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::process::spawn(&mut command)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "ral: --warrant received 0 descriptors; it takes warrant and report descriptors, plus three stream descriptors under a Linux envelope\nhint: --warrant is how ral starts its own confined children, never a command to run by hand.\n"
+        );
+        let failure = LaunchFailure::Warrant(WarrantFailure::Magic);
+        assert_eq!(terminal_refusal(&failure), "not a ral-warrant/5 warrant");
     }
 
     /// A pid no process has: a child asked to die with it finds its parent
@@ -422,7 +519,12 @@ mod tests {
         let (real, arg0) = file("/bin/sh");
         let started = start_file(&real, &arg0, Vec::new(), a_stranger());
         assert!(
-            matches!(&started, Err(Unbegun::Ours(why)) if why.contains("its setup failed")),
+            matches!(
+                &started,
+                Err(Unbegun::Ours(LaunchFailure::Launcher(
+                    LauncherFailure::ChildSetup(_)
+                )))
+            ),
             "{started:?}"
         );
     }
@@ -444,7 +546,12 @@ mod tests {
     fn a_tool_that_cannot_begin_is_refused_not_exited() {
         let (_, started) = start_tool("true", Vec::new(), &[], a_stranger(), witness());
         assert!(
-            matches!(&started, Err(Unbegun::Ours(why)) if why.contains("could not begin")),
+            matches!(
+                &started,
+                Err(Unbegun::Ours(LaunchFailure::Launcher(
+                    LauncherFailure::ChildSetup(_)
+                )))
+            ),
             "{started:?}"
         );
     }

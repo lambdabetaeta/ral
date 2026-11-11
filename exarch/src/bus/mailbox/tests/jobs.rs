@@ -261,7 +261,12 @@ fn helper_and_parent_traffic_in_both_directions_never_deadlocks() {
                 scope.spawn(|| {
                     barrier.wait();
                     down.end(CancelCause::Cancelled);
-                    publish(&down, ChildStatus::Failed("ended".into()));
+                    publish(
+                        &down,
+                        ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                            ral_core::fact::HelperFailure::EndedBeforeReporting,
+                        )),
+                    );
                 });
                 scope.spawn(|| {
                     barrier.wait();

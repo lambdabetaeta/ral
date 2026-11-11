@@ -392,8 +392,8 @@ fn unalias_detach_refuses_because_no_run_frame_holds_it() {
     let mut shell = with_detach();
     let message = refusal(&mut shell, "unalias detach");
     assert!(
-        message.contains("no alias named"),
-        "expected a no-alias refusal, got {message:?}"
+        message.contains("is not installed"),
+        "expected a not-installed refusal, got {message:?}"
     );
 }
 

@@ -153,8 +153,10 @@ fn inactive_under(
     use crate::app::{RECORD, RunLock};
     use crate::record::AgentId;
     let relative = ral_core::path::relative_key(
-        &ral_core::path::spelled(held.path()).map_err(io::Error::other)?,
-        &ral_core::path::spelled(root.path()).map_err(io::Error::other)?,
+        &ral_core::path::spelled(held.path())
+            .map_err(|failure| io::Error::other(failure.describe()))?,
+        &ral_core::path::spelled(root.path())
+            .map_err(|failure| io::Error::other(failure.describe()))?,
     )
     .ok_or_else(|| io::Error::other(UNMANAGED))?;
     let parts: Vec<_> = relative.split('/').collect();

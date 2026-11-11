@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40af72fb
-generated_at_date: 2026-11-09
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_date: 2026-11-10
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -138,13 +138,13 @@ authority and returns domain data, never runtime values or control flow.
 - `enforce.rs` — the guards over the model's judgments: `check_exec`
   (`GrantStack::admit`), `check_exec_name` (`GrantStack::admit_name`, a head's
   failed-walk name judged as running it would be),
-  `fs_denial` (the wording of a `Refused`, one clause per case shared with
-  `Display for Refused`), `check_flag`, and `check_device_name`.
-  The exec and fs checks return
-  `Result<_, Box<Denial>>`, a `Denial { check, error: Error }`, over
-  `Refused::{Guarded, Withheld}`: a `fact::Check` and the runtime `Error`
-  that refuses, hint included.
-  Flag and device checks return `Result<(), Error>`. The judgment is reusable
+  `fs_denial` (projection of `Refused::{Guarded, Withheld}`), `check_flag`,
+  and `check_device_name`. Exec checks return `Result<_, Box<Denial>>`;
+  `fs_denial` returns `Denial`; flag and device checks return
+  `Result<(), Denial>`. `fact::Denial` retains only the portable request and
+  cause: no stored error, check, hint or missing-allowance flag.
+  `audit_check` and `missing_allowance` derive their answers from those facts;
+  `describe` and `advice` derive presentation. The judgment is reusable
   without the report: `GrantStack::refusal_fs` decides — `Refused::Guarded`
   first, for a write onto a boot-pinned sandbox binary (the supplied
   `Baseline`'s protected identities), before any grant is folded: the empty
@@ -162,8 +162,9 @@ authority and returns domain data, never runtime values or control flow.
   `audit_deputy_prefixes`, `has_active_capabilities`). `Shell::locate` is the
   one path every read and open takes: the device-name refusal, then
   `GrantStack::locate` (`path::walk` to the object, `GrantStack::judge` on its
-  transcript), handing back the handle vouched for. `Shell::refused` mints a `Denial`'s `Break` and records its check
-  through `Shell::record_check` with no `Mooring`, so on the trail alone.
+  transcript), handing back the handle vouched for. `Shell::refused` records
+  the selected denial's derived check through `Shell::record_check` with no
+  `Mooring`, so on the trail alone, then mints `Reason::Denied` and its `Break`.
   `Shell::exec_refused`, taking the `Denial` that `guard::check_exec` or
   `check_exec_name` returned to a head or `test_access`, records an exec
   refusal against its call's `Mooring` and mints its `Break`.
@@ -265,7 +266,7 @@ and the `Error → Break` conversion; substantive freezing stays in
 - `spawn.rs` — `SpawnGrant` (`Inherit`, `Base`, `Restrict`), a spawn's grant
   as it crosses to a child that has not yet resolved it, frozen against the
   child's own `FreezeCtx` through `Shell::freeze_ctx`; `GrantNarrower` is the
-  host-supplied `fn(&str, &FreezeCtx) -> Result<GrantLayer, String>` that
+  host-supplied `fn(&str, &FreezeCtx) -> Result<GrantLayer, Error>` that
   resolves a named base.
 
 ## Path resolution
@@ -440,8 +441,9 @@ entry unseen. The root comes first and is filtered by nothing. Entries append
 through `LexicalPath::join`, preserving the parent's spelling, including dots
 in Windows verbatim paths; `PathBuf::join` would normalize those away.
 `Entries` yields `Result<WalkEntry, process::Cancellation>`; `WalkEntry::name`
-takes an optional cwd base and returns `Result<String, String>`, with no runtime
-types. Relative names omit a leading `.` component but retain `..`.
+borrows an optional cwd base (`Option<&CwdPath>`) and returns
+`Result<String, path::NotUtf8>`, with no runtime types. Relative names omit a
+leading `.` component but retain `..`.
 A name reads back as itself: one a sigil would claim is spelled `./~/x`
 (`sigil::literal_relative`), and one no ral string can hold is refused when asked
 for. `Shell::admitted_walk` (`shell/runtime/walk.rs`) wraps this as `AdmittedWalk`:

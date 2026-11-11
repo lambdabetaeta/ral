@@ -31,6 +31,15 @@ pub use typed::{
     record_row, variant_row,
 };
 
+impl From<Side> for crate::fact::NumberOrText {
+    fn from(side: Side) -> Self {
+        match side {
+            Side::Number => Self::Number,
+            Side::Text => Self::Text,
+        }
+    }
+}
+
 /// The sigil that marks a tag: bare on the label itself, written where a
 /// variant or a tag label is shown.
 pub const TAG_PREFIX: char = '`';

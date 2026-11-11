@@ -294,7 +294,10 @@ fn a_sealed_attach_is_a_child_of_its_parent() {
     .expect("an engine attaches with its parent's seal");
     assert_eq!(
         engine
-            .read(|t| t.env_var("PARENT_MARK"))
+            .read(
+                ral_core::fact::ProbeSubject::EnvVar("PARENT_MARK".into()),
+                |t| t.env_var("PARENT_MARK")
+            )
             .expect("the child answers"),
         Some("1".to_string())
     );

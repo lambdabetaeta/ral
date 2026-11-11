@@ -241,8 +241,7 @@ between them, at the last point the engine's `SourceDb` is in hand.
 whether `command_exit` and `single_command` both earn their seat once the
 renderer is the one consumer — settled *yes*: `command_exit` gates the
 exit-code remedy, `single_command` picks between its two wordings. One
-`PROTOCOL_VERSION` bump, 5 → 6, covers the whole batch (the plan scheduled
-two; the waves landed in one sitting, so the shapes moved together).
+`PROTOCOL_VERSION` bump, 5 → 6, covers the whole batch.
 
 ### Rider: `schedule`'s label is mandatory
 

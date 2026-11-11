@@ -1,8 +1,9 @@
 //! How a computation ended: the one type; every observer is a projection.
 
-use super::{ErrorRecord, Failure, Reason};
+use super::{ErrorFact, ErrorRecord, Failure, Reason};
 use crate::data::FOValue;
 use crate::data::datum::{self, Datum};
+use crate::fact::{DecodeCause, DecodeFailure, Expected, Found, ShapeFailure, UnknownTag};
 use crate::process::CancelCause;
 use crate::ty::{Ty, Typed, closed_variant};
 use std::borrow::Cow;
@@ -143,9 +144,12 @@ impl<V: Datum, F: Datum, S: Datum> Datum for Ending<V, F, S> {
         datum::tag(label, Some(payload))
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let Some((label, payload)) = datum::untag(v) else {
-            return Err(format!("expected a tag, got {}", v.shape()));
+            return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Tags(tag::ALL.map(str::to_owned).to_vec()),
+                found: Found::of(v),
+            })));
         };
         let payload = payload.unwrap_or(&FOValue::Unit);
         match label {
@@ -155,13 +159,13 @@ impl<V: Datum, F: Datum, S: Datum> Datum for Ending<V, F, S> {
             tag::STOPPED => S::decode(payload).map(Self::Stopped),
             tag::PANIC => String::decode(payload).map(Self::Panic),
             other => {
-                return Err(format!(
-                    "unknown tag `{other}: expected {}",
-                    tag::ALL.map(|label| format!("`{label}")).join(", ")
-                ));
+                return Err(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                    tag: other.into(),
+                    offered: tag::ALL.map(str::to_owned).to_vec(),
+                })));
             }
         }
-        .map_err(|why| format!("`{label}: {why}"))
+        .map_err(|why| why.payload(label))
     }
 }
 
@@ -195,7 +199,17 @@ impl FailureCode for Reason {
             Self::Process(process) => process.failure.failure_code(),
             Self::TimedOut => CancelCause::TimedOut.failure_code(),
             Self::Cancelled => CancelCause::Cancelled.failure_code(),
-            Self::Raised(_) => NonZeroU8::MIN,
+            Self::Raised(claim) => claim.status,
+            Self::Denied(_)
+            | Self::Io(_)
+            | Self::Invalid(_)
+            | Self::Evaluation(_)
+            | Self::State(_)
+            | Self::Compile(_)
+            | Self::Launch(_)
+            | Self::Protocol(_)
+            | Self::Host(_)
+            | Self::Invariant(_) => NonZeroU8::MIN,
         }
     }
 }
@@ -212,9 +226,15 @@ impl FailureCode for Failure {
     }
 }
 
-impl FailureCode for ErrorRecord {
+impl FailureCode for ErrorFact {
     fn failure_code(&self) -> NonZeroU8 {
         self.reason.failure_code()
+    }
+}
+
+impl FailureCode for ErrorRecord {
+    fn failure_code(&self) -> NonZeroU8 {
+        self.status
     }
 }
 
@@ -222,11 +242,11 @@ impl FailureCode for ErrorRecord {
 pub type Done = Ending<(), ErrorRecord, CancelCause>;
 
 impl Done {
-    /// The head and its detail; failures use [`ErrorRecord::describe`].
+    /// The head and its detail; a failure's detail is its `message`.
     pub fn parts(&self) -> (Cow<'static, str>, Option<String>) {
         match self {
             Self::Ok(()) => ("returned".into(), None),
-            Self::Err(f) => ("failed".into(), Some(f.describe().into_owned())),
+            Self::Err(f) => ("failed".into(), Some(f.message.clone())),
             Self::Exited(n) => (format!("ran `exit {n}`").into(), None),
             Self::Stopped(s) => (s.message().into(), None),
             Self::Panic(t) => ("panicked".into(), Some(t.clone())),
@@ -251,11 +271,12 @@ mod tests {
     use strum::VariantArray as _;
 
     fn failure() -> ErrorRecord {
-        ErrorRecord {
-            frame: "fail".into(),
-            reason: Reason::Raised("boom".into()),
-            site: crate::test_helper::site(),
-        }
+        ErrorFact::new(
+            Reason::raised("boom"),
+            "fail".into(),
+            crate::test_helper::site(),
+        )
+        .record()
     }
 
     fn dones() -> [Done; 5] {

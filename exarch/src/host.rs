@@ -39,7 +39,8 @@ impl Host {
             .name(FIRST_NAME)
             .map_err(|why| io::Error::other(why.to_string()))?;
         Self::adopt(vec![(
-            Agent::born(&fleet, Parent::Human, name, engine, provider, None)?,
+            Agent::born(&fleet, Parent::Human, name, engine, provider, None)
+                .map_err(io::Error::other)?,
             None,
         )])
     }

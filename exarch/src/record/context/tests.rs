@@ -4,6 +4,10 @@ use super::*;
 use crate::record::{
     AgentId, AgentLog, GrepHit, Inherited, RECORD, Seq, ToolResult, Voice, fixture_dir,
 };
+use ral_core::fact::{
+    ContextFailure, ContextFailureCurrentlyWritten, ContextFailureStraddledEviction,
+    ContextFailureWithdrawn, WithdrawalEvidence,
+};
 use regex::Regex;
 
 /// A turn in the context. Its records are elided: every fold under test
@@ -95,7 +99,9 @@ fn under(from: u64, to: u64) -> Location {
 /// so a placeholder locus is address enough.
 fn step(context: &mut Context, protocol: Transcript) -> Result<(), Refusal> {
     let seq = Seq::new(context.log_len() as u64 + 1, 0);
-    context.step_transcript(Recorded::new(Locus::placeholder(seq), protocol))
+    context
+        .step_transcript(Recorded::new(Locus::placeholder(seq), protocol))
+        .map_err(Refusal::from)
 }
 
 /// Evict through the fold, as a recorded cut does.
@@ -383,7 +389,10 @@ fn a_run_cutting_an_eviction_is_refused() {
     for (from, to) in [(4, 5), (2, 3)] {
         assert_eq!(
             context.resolve_cut(span(from, to)).unwrap_err(),
-            "turns 3–4 stand together under one note: name from: 3, to: 4 whole, or leave it"
+            ContextFailure::StraddledEviction(ContextFailureStraddledEviction {
+                requested: span(from, to).into(),
+                covering: span(3, 4).into()
+            })
         );
     }
 }
@@ -509,11 +518,14 @@ fn rewind_withdraws_by_id_and_refuses_an_anchor_inside_an_eviction() {
     );
     assert_eq!(
         context.rewindable(9).unwrap_err(),
-        "turn 9 is not recorded: the latest is 6"
+        super::not_recorded_refusal_turn(9, Some(6))
     );
     assert_eq!(
         context.rewindable(6).unwrap_err(),
-        "turn 6 lies under the eviction over turns 5–6: rewind to turn 5 or turn 7"
+        ContextFailure::StraddledEviction(ContextFailureStraddledEviction {
+            requested: span(6, 6).into(),
+            covering: span(5, 6).into()
+        })
     );
     assert!(matches!(
         step(&mut context, Transcript::Rewound { anchor: 2 }),
@@ -540,7 +552,10 @@ fn rewind_withdraws_by_id_and_refuses_an_anchor_inside_an_eviction() {
     assert!(context.token_measure_is_stale(0));
     assert_eq!(
         context.rewindable(6).unwrap_err(),
-        "turn 6 was already rewound or cleared away; the earliest you can rewind to is turn 1"
+        ContextFailure::Withdrawn(ContextFailureWithdrawn {
+            turn: 6u64.into(),
+            evidence: WithdrawalEvidence::EarliestRetained(1u64.into())
+        })
     );
     context
         .rewindable(1)
@@ -556,8 +571,10 @@ fn rewind_withdraws_by_id_and_refuses_an_anchor_inside_an_eviction() {
     assert_eq!(context.next_id(), 7);
     assert_eq!(
         context.rewindable(1).unwrap_err(),
-        "turn 1 was already rewound or cleared away; nothing has been said since the last \
-         /clear or /rewind"
+        ContextFailure::Withdrawn(ContextFailureWithdrawn {
+            turn: 1u64.into(),
+            evidence: WithdrawalEvidence::NothingRetained
+        })
     );
     for (anchor, said) in [(1, "already withdrawn"), (9, "never recorded")] {
         assert!(
@@ -780,11 +797,11 @@ fn a_cut_refuses_the_unclosed_turn() {
     context.state = State::AwaitingAssistantAfterUser;
     assert_eq!(
         context.resolve_cut(span(2, 2)).unwrap_err(),
-        "turn 2 is being written now: an eviction keeps the work in hand"
+        ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten { turn: 2u64.into() })
     );
     assert_eq!(
         context.resolve_cut(span(9, 9)).unwrap_err(),
-        "turn 9 is not recorded: the latest is 2"
+        super::not_recorded_refusal_turn(9, Some(2))
     );
 }
 
@@ -1005,14 +1022,52 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
         }],
         evictions: Vec::new(),
     };
-    let Err(Refusal::Unreadable(error)) = step(&mut context, link) else {
+    let Err(Refusal::ReadBack(error)) = Context::step(
+        &mut context,
+        Recorded::new(Locus::placeholder(Seq::new(1, 0)), Record::Transcript(link)),
+    ) else {
         panic!("a missing parent file is unreadable")
     };
     let named = sessions.path().join(source.to_string()).join(RECORD);
     assert!(
-        error.to_string().contains(&ral_core::path::shown(&named)),
-        "{error}"
+        matches!(error, ContextFailure::ReadBack(ref failure)
+        if failure.turn == 1u64.into() && failure.source == source.get().into()
+            && failure.record == ral_core::path::shown(&named)
+            && matches!(failure.cause, ral_core::fact::RecordReadFailure::Io(_))),
+        "{error:?}"
     );
     assert_eq!(context.log_len(), 0);
     assert_eq!(context.transcript_index(), Vec::<SpanRow>::new());
+}
+
+#[test]
+fn the_read_free_live_fold_rejects_inheritance_without_touching_an_ancestor() {
+    let mut context = Context::new(AgentId::new(0), fixture_dir());
+    let protocol = Transcript::Inherited {
+        turns: vec![Linked {
+            row: TurnRow {
+                id: 1,
+                role: Role::User,
+                kind: TurnKind::Inherited,
+                label: "ancestor".into(),
+                bytes: 10,
+                location: Location::Resident,
+            },
+            at: Pointer {
+                source: AgentId::new(u64::MAX),
+                loci: vec![Locus::placeholder(Seq::new(1, 0))],
+            },
+        }],
+        evictions: Vec::new(),
+    };
+    let failure = context
+        .step_live(Recorded::new(Locus::placeholder(Seq::new(1, 0)), protocol))
+        .unwrap_err();
+    assert!(matches!(
+        *failure.record,
+        Record::Transcript(Transcript::Inherited { .. })
+    ));
+    assert_eq!(context.log_len(), 0);
+    assert_eq!(context.transcript_index(), Vec::<SpanRow>::new());
+    assert_eq!(context.state, State::ReadyForUser);
 }

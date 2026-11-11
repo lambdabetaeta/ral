@@ -9,6 +9,8 @@
 
 use super::ledger::ledger_dir;
 use super::{DaclError, GrantKind, PathMutexGuard};
+use crate::data::json::{self, JsonDecode, JsonEncode, JsonFormat, JsonRef};
+use crate::fact::{DecodeFailure, JsonEncodeFailure};
 use crate::own::OwnError;
 use crate::path::Visibility;
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,17 @@ use std::collections::BTreeSet;
 struct StampStore {
     #[serde(default)]
     stamps: BTreeSet<String>,
+}
+
+impl JsonDecode for StampStore {
+    fn decode_json(value: JsonRef<'_, '_>) -> Result<Self, DecodeFailure> {
+        json::decode_structural(value)
+    }
+}
+impl JsonEncode for StampStore {
+    fn encode_json(&self, format: JsonFormat) -> Result<Vec<u8>, JsonEncodeFailure> {
+        Ok(json::serialize_structural(self, format))
+    }
 }
 
 /// Keyed on the canonical spelling exactly as [`super::fs_capability_name`] is, and
@@ -51,7 +64,11 @@ pub(super) const STAMP_STORE_FILE_NAME: &str = "stamps.json";
 pub(super) fn stamp_recorded(key: &str) -> bool {
     ledger_dir()
         .ok()
-        .and_then(|dir| dir.load::<StampStore>(STAMP_STORE_FILE_NAME).ok().flatten())
+        .and_then(|dir| {
+            dir.load_json::<StampStore>(STAMP_STORE_FILE_NAME)
+                .ok()
+                .flatten()
+        })
         .is_some_and(|s| s.stamps.contains(key))
 }
 
@@ -66,7 +83,7 @@ pub(super) fn record_stamp(key: &str) -> Result<(), DaclError> {
 pub(super) fn update_stamp(key: &str, complete: bool) -> Result<(), DaclError> {
     let dir = ledger_dir()?;
     let _guard = PathMutexGuard::acquire(&dir.path().join(STAMP_STORE_FILE_NAME))?;
-    let mut store: StampStore = match dir.load(STAMP_STORE_FILE_NAME) {
+    let mut store: StampStore = match dir.load_json(STAMP_STORE_FILE_NAME) {
         Ok(found) => found.unwrap_or_default(),
         Err(OwnError::Json { .. }) => StampStore::default(),
         Err(e) => return Err(e.into()),
@@ -79,7 +96,7 @@ pub(super) fn update_stamp(key: &str, complete: bool) -> Result<(), DaclError> {
     if !changed {
         return Ok(());
     }
-    Ok(dir.store(STAMP_STORE_FILE_NAME, &store, Visibility::Public)?)
+    Ok(dir.store_json(STAMP_STORE_FILE_NAME, &store, Visibility::Public)?)
 }
 
 #[cfg(test)]

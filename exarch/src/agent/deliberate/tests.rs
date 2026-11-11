@@ -164,7 +164,7 @@ fn a_severed_engine_cuts_its_batch_short_and_answers_the_loss() {
     let crate::agent::engine::EngineKind::Identity(transport) = session.engine().kind() else {
         panic!("an identity root");
     };
-    let cause = Severed::Closed("engine lost mid-batch".into());
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
     let lost = cause.clone();
     T2_CANCEL.set(Some(Box::new(move || {
         transport.sever(lost);
@@ -586,8 +586,9 @@ fn provider_error_mid_deliberation_does_not_wedge_session() {
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![ral_call("c1", "let x12_a = 7")]))
-            .then(Reply::error(ProviderError::Other(
-                "stream ended without End event".into(),
+            .then(Reply::error(ProviderError::stream_ended_without_end(
+                "test-service",
+                "test-model",
             )))
             .then(Reply::text("ok")),
     );
@@ -641,7 +642,10 @@ fn overflow() -> Reply {
         sent: Some(250_015),
         limit: Some(250_000),
         listed: None,
-        body: None,
+        cause: Box::new(crate::agent::testkit::service_response(
+            400,
+            "prompt is too long: 250015 tokens > 250000 maximum",
+        )),
     })
 }
 
@@ -967,7 +971,9 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
                 Input::Child {
                     id: worker.id(),
                     name: "worker".into(),
-                    status: ChildStatus::Failed("found it".into()),
+                    status: ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                        ral_core::fact::HelperFailure::NoReply,
+                    )),
                     elapsed: Duration::ZERO,
                 }
             })
@@ -991,7 +997,7 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
             rendered.contains(if surface {
                 "errand finished"
             } else {
-                "found it"
+                "ended without calling `reply`"
             }),
             "{rendered}"
         );
@@ -1070,7 +1076,10 @@ fn answer_suppresses_awaited_and_stopping_done_events_while_replaying_cards() {
         .unwrap()
         .unwrap();
     let exchange = open_for_drain(&session);
-    let rows = session.engine().read(|t| t.workers()).unwrap();
+    let rows = session
+        .engine()
+        .read(ral_core::fact::ProbeSubject::Workers, |t| t.workers())
+        .unwrap();
     assert!(
         matches!(rows.as_slice(), [row] if matches!(row.state, WorkerState::Stopping)),
         "{rows:?}"
@@ -1156,7 +1165,7 @@ fn answer_delivers_current_surfaces_and_drops_old_generation_batches() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !session
         .engine()
-        .read(|t| t.workers())
+        .read(ral_core::fact::ProbeSubject::Workers, |t| t.workers())
         .unwrap()
         .iter()
         .any(|r| matches!(r.state, WorkerState::Ready(_)))
@@ -1261,7 +1270,7 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
     let crate::agent::engine::EngineKind::Identity(transport) = session.engine().kind() else {
         panic!("identity engine")
     };
-    let cause = Severed::Closed("probe severed".into());
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
     {
         use ral_core::sync::LockExt as _;
         *ARM_SEVER.lock_ignore_poison() = Some((
@@ -1347,7 +1356,9 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
                 .post(Input::Child {
                     id,
                     name: "grandchild".into(),
-                    status: ChildStatus::Failed("boundary delivery".into()),
+                    status: ChildStatus::Failed(crate::record::ChildFailure::Cause(
+                        ral_core::fact::HelperFailure::NoReply,
+                    )),
                     elapsed: Duration::ZERO,
                 })
                 .unwrap(),
@@ -1406,7 +1417,11 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
             assert!(
                 serde_json::to_string(&child.rendered_messages())
                     .unwrap()
-                    .contains("boundary delivery")
+                    .contains(if source == 3 {
+                        "agent 'grandchild' failed after 0 secs: ended without calling `reply`"
+                    } else {
+                        "boundary delivery"
+                    })
             );
         }
         assert!(child.is_ready());
@@ -1580,7 +1595,10 @@ fn an_old_models_late_overflow_after_switch_records_nothing() {
         sent: Some(101),
         limit: Some(100),
         listed: None,
-        body: None,
+        cause: Box::new(crate::agent::testkit::service_response(
+            400,
+            "prompt is too long: 101 tokens > 100 maximum",
+        )),
     };
     assert!(matches!(
         session.relieve(&DurableRoot::default().child(), error, false),

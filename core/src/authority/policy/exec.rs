@@ -246,6 +246,10 @@ impl ExecDeny {
         }
     }
 
+    pub(crate) fn target(&self) -> Target {
+        self.key().target()
+    }
+
     /// The key a grant writes, resolved.
     fn key(&self) -> Key<'_> {
         match self {
@@ -1314,7 +1318,7 @@ pub(super) mod tests {
                 why.describe()
             );
             assert!(
-                why.hints().iter().any(|h| h.contains("`dir")),
+                why.reason.advice().iter().any(|h| h.contains("`dir")),
                 "a `dir` hint"
             );
         }

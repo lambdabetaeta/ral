@@ -9,6 +9,11 @@ use super::super::{FsProjection, RenderedProjection, TOKEN};
 use super::host::HostEnvelope;
 use super::{Envelope, Options};
 use crate::authority::policy::FsOp;
+use crate::fact::{
+    BinaryRole, LaunchFailure, ParcelRole, PathIoLeaf, PinCause, PinFailure, ProjectionFailure,
+    ProjectionFailureCopyHandle, ProjectionFailurePinnedDirectoryRedirected,
+    ProjectionFailureResolve, ProjectionOpenFailure, ProjectionOpenFailureFailed,
+};
 use crate::path::{
     Dir, Installing, Kind, LeafMode, LexicalPath, Located, Object, RealPath, Rendered, Trace,
     is_loop, render_real, walk_lenient,
@@ -62,17 +67,16 @@ impl Bind {
     /// The pinned directory `name` onto itself; `None` where nothing stands
     /// there.  A name that now reaches another object refuses the launch:
     /// bound, it would show that object at `name`.
-    fn pin(name: &Rendered) -> Result<Option<Self>, String> {
+    fn pin(name: &Rendered) -> Result<Option<Self>, ProjectionFailure> {
         let Some((position, real)) = object(name.as_str())? else {
             return Ok(None);
         };
         if real != *name {
-            return Err(format!(
-                "sandbox: the directory '{}' is pinned for this launch, but it now reaches '{}' \
-                 through a symbolic link, which would be shown at its name; make it a directory \
-                 again, or retry once nothing is relinking it",
-                crate::path::shown(name.as_str()),
-                crate::path::shown(real.as_str())
+            return Err(ProjectionFailure::PinnedDirectoryRedirected(
+                ProjectionFailurePinnedDirectoryRedirected {
+                    granted: crate::path::shown(name.as_str()),
+                    reached: crate::path::shown(real.as_str()),
+                },
             ));
         }
         Ok(Some(Self {
@@ -129,22 +133,26 @@ impl Binds {
         env: &Envelope<'_>,
         shown: Shown,
         handoff: &mut Handoff,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, LaunchFailure> {
         let Shown {
             binds: mut planned,
             tolerated,
             denies,
             ..
         } = shown;
-        if let Some(tree) = cgroup_tree(env.host)
-            && let (Some(object), Some((_, dest))) = (object(&tree)?, object(CGROUP)?)
+        if let Some(tree) = cgroup_tree(&env.host)
+            && let (Some(object), Some((_, dest))) = (
+                object(&tree).map_err(LaunchFailure::Projection)?,
+                object(CGROUP).map_err(LaunchFailure::Projection)?,
+            )
         {
             planned.push(Bind::read_only(Layer::Over, dest, object));
         }
         let mut opened = BTreeMap::new();
         for bind in &planned {
             if !opened.contains_key(&bind.position) {
-                let held = open_object(&bind.position, tolerated.contains(&bind.position))?;
+                let held = open_object(&bind.position, tolerated.contains(&bind.position))
+                    .map_err(LaunchFailure::Projection)?;
                 opened.insert(bind.position.clone(), held);
             }
         }
@@ -153,16 +161,28 @@ impl Binds {
             // Absent: a name that shows nothing binds nothing.
             if let Some(Some(held)) = opened.get(&bind.position) {
                 let source = leaf_fd(held).map_err(|e| {
-                    format!(
-                        "sandbox: cannot copy the handle on {}: {e}",
-                        bind.object.as_str()
-                    )
+                    LaunchFailure::Projection(ProjectionFailure::CopyHandle(
+                        ProjectionFailureCopyHandle {
+                            path: bind.object.as_str().to_owned(),
+                            cause: Box::new(crate::io::failure(&e)),
+                        },
+                    ))
                 })?;
-                lent.push((handoff.lend(source)?, bind));
+                lent.push((
+                    handoff
+                        .lend(source, ParcelRole::Bind(bind.dest.as_str().to_owned()))
+                        .map_err(LaunchFailure::Parcel)?,
+                    bind,
+                ));
             }
         }
         for (bind, pin) in pinned([env.bwrap, env.trampoline])? {
-            lent.push((handoff.lend(pin)?, bind));
+            lent.push((
+                handoff
+                    .lend(pin, ParcelRole::Bind(bind.dest.as_str().to_owned()))
+                    .map_err(LaunchFailure::Parcel)?,
+                bind,
+            ));
         }
         Ok(Self { lent, denies })
     }
@@ -222,7 +242,7 @@ impl Shown {
     /// a read-only one wins.  Then each pinned directory onto itself, which
     /// shows nothing new and so roots nothing.  Each deny is read once, for
     /// its mask.
-    pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, String> {
+    pub(crate) fn of(policy: &RenderedProjection) -> Result<Self, ProjectionFailure> {
         let FsProjection::Restricted(lists) = &policy.fs else {
             return Ok(Self {
                 binds: Vec::new(),
@@ -308,7 +328,7 @@ fn binds(objects: &[Object], op: FsOp) -> impl Iterator<Item = Bind> {
 /// `None` where it names nothing.
 pub(super) fn object(
     name: &(impl AsRef<Path> + ?Sized),
-) -> Result<Option<(RealPath, Rendered)>, String> {
+) -> Result<Option<(RealPath, Rendered)>, ProjectionFailure> {
     let name = name.as_ref();
     let Some(spelling) = LexicalPath::absolute(name) else {
         return Ok(None);
@@ -319,10 +339,10 @@ pub(super) fn object(
             Ok(rendered.map(|name| (real, name)))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "sandbox: cannot resolve {}: {e}",
-            crate::path::shown(name)
-        )),
+        Err(e) => Err(ProjectionFailure::Resolve(ProjectionFailureResolve {
+            path: crate::path::shown(name),
+            cause: Box::new(crate::io::failure(&e)),
+        })),
     }
 }
 
@@ -331,14 +351,14 @@ pub(super) fn object(
 pub(super) fn open_object(
     position: &RealPath,
     optional: bool,
-) -> Result<Option<Located<Installing>>, String> {
+) -> Result<Option<Located<Installing>>, ProjectionFailure> {
     match open_nofollow(position) {
         Err(OpenError::Failed { source, .. })
             if optional && source.kind() == io::ErrorKind::PermissionDenied =>
         {
             Ok(None)
         }
-        opened => Ok(opened?),
+        opened => opened.map_err(|e| ProjectionFailure::Open(e.into())),
     }
 }
 
@@ -352,8 +372,11 @@ pub(super) fn open_nofollow(real: &RealPath) -> Result<Option<Located<Installing
 
 /// The descriptor `held` lends, which every position held on Linux has.
 pub(super) fn leaf_fd(held: &Located<Installing>) -> io::Result<std::os::fd::BorrowedFd<'_>> {
-    held.leaf_fd()
-        .ok_or_else(|| io::Error::other("the object is not held"))
+    held.leaf_fd().ok_or_else(|| {
+        io::Error::other(crate::fact::IoCause::new(crate::fact::IoLeaf::Path(
+            PathIoLeaf::NotHeld,
+        )))
+    })
 }
 
 /// [`open_nofollow`] where `real` must be a directory: `None` also where it
@@ -387,21 +410,25 @@ impl OpenError {
 
 impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Linked(name) => write!(
-                f,
-                "sandbox: '{name}' was granted by its real path, but it now goes through a \
-                 symbolic link; {}",
-                crate::authority::remedy::grant_the_new_target()
-            ),
-            Self::Failed { name, source } => write!(f, "sandbox: cannot open {name}: {source}"),
+        f.write_str(&ProjectionOpenFailure::from(self).describe())
+    }
+}
+
+impl From<&OpenError> for ProjectionOpenFailure {
+    fn from(e: &OpenError) -> Self {
+        match e {
+            OpenError::Linked(name) => Self::Linked(name.clone()),
+            OpenError::Failed { name, source } => Self::Failed(ProjectionOpenFailureFailed {
+                path: name.clone(),
+                cause: Box::new(crate::io::failure(source)),
+            }),
         }
     }
 }
 
-impl From<OpenError> for String {
+impl From<OpenError> for ProjectionOpenFailure {
     fn from(e: OpenError) -> Self {
-        e.to_string()
+        Self::from(&e)
     }
 }
 
@@ -410,15 +437,19 @@ impl From<OpenError> for String {
 /// projection bound: no confined child rewrites a pinned inode in place, nor
 /// moves it, a mountpoint being unrenamable.  An unlinked pin has no name to
 /// lock, and runs by descriptor all the same.
-fn pinned<'a>(pins: [&'a Pinned; 2]) -> Result<Vec<(Bind, BorrowedFd<'a>)>, String> {
+fn pinned<'a>(pins: [&'a Pinned; 2]) -> Result<Vec<(Bind, BorrowedFd<'a>)>, LaunchFailure> {
     let mut locked: Vec<(Bind, BorrowedFd<'a>)> = Vec::new();
-    for pin in pins {
+    for (role, pin) in [BinaryRole::Bwrap, BinaryRole::Ral].into_iter().zip(pins) {
         let what = crate::path::shown(pin.arg0());
-        let names = pin
-            .names()
-            .map_err(|e| format!("sandbox: cannot find where the pinned {what} lives now: {e}"))?;
+        let names = pin.names().map_err(|e| {
+            LaunchFailure::Pin(PinFailure {
+                role,
+                spelling: Some(what),
+                cause: PinCause::CurrentNameRead(Box::new(crate::io::failure(&e))),
+            })
+        })?;
         let Some(name) = names else { continue };
-        let Some((position, dest)) = object(&name)? else {
+        let Some((position, dest)) = object(&name).map_err(LaunchFailure::Projection)? else {
             continue;
         };
         if locked.iter().all(|(bind, _)| bind.dest != dest) {
@@ -442,7 +473,7 @@ pub(super) const CGROUP: &str = "/sys/fs/cgroup";
 /// Without the namespace the host's tree is the true one.  Over the
 /// projection's binds, so a grant reading `/sys` wholesale still gets the
 /// tree its `/proc` describes.
-fn cgroup_tree(host: HostEnvelope) -> Option<String> {
+fn cgroup_tree(host: &HostEnvelope) -> Option<String> {
     if host.private_cgroup {
         own_cgroup().map(|own| format!("{CGROUP}{own}"))
     } else {

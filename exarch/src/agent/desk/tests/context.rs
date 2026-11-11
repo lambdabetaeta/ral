@@ -178,7 +178,10 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
         let error = desk
             .ask(transcript_read_request(&[9]))
             .expect_err("a read must not reach past what is recorded");
-        assert_eq!(error.describe(), "turn 9 is not recorded: the latest is 4");
+        assert_eq!(
+            error.describe(),
+            "exarch: context: turn 9 is not recorded: the latest is 4"
+        );
 
         desk.loan
             .get()
@@ -191,7 +194,16 @@ fn transcript_read_names_the_role_of_every_turn_it_answers() {
             .expect_err("the turn being written is not readable");
         assert_eq!(
             error.describe(),
-            "turn 5 is being written now: it is the one turn the transcript cannot read back yet"
+            "exarch: context: turn 5 is being written now"
+        );
+        assert_eq!(error.context(), Some("exarch-transcript `read"));
+        assert_eq!(error.hints(), []);
+        assert_eq!(
+            error
+                .plain()
+                .matches("it is the one turn the transcript cannot read back yet")
+                .count(),
+            1
         );
     });
 }
@@ -254,8 +266,15 @@ fn transcript_grep_refuses_a_field_it_does_not_read() {
             ))
             .expect_err("`turn` is not a field `grep` reads");
         assert_eq!(
-            err.describe(),
-            "`` exarch-transcript `grep ``: unknown field `turn`: did you mean `turns`?"
+            err.reason,
+            request_failure(
+                DecodeFailure::new(DecodeCause::UnknownField(UnknownField {
+                    field: "turn".into(),
+                    offered: vec!["pattern".into(), "turns".into()]
+                }))
+                .payload("grep")
+                .payload("transcript")
+            )
         );
         desk.ask(transcript_grep_request("answer", Some(&[1, 2])))
             .expect("the spelt field still narrows the search");
@@ -326,28 +345,32 @@ fn context_evict_refuses_a_note_that_is_not_one_short_line() {
             append_prompt_and_answer(log, "one", "answer");
             append_prompt_and_answer(log, "two", "answer");
         }
-        let single_line = "`note: text must be a single line: the eviction keeps one short line";
+        use ral_core::fact::{NoteFailure, NoteFailureTooLong};
+        let long = "x".repeat(241);
         let cases = [
+            ("", NoteFailure::Empty),
             (
-                "",
-                "`note: text must not be empty: the eviction keeps one short line, and it is the \
-             only trace of the run left in your context",
+                long.as_str(),
+                NoteFailure::TooLong(NoteFailureTooLong {
+                    bytes: 241u64.into(),
+                    limit: 240u64.into(),
+                }),
             ),
-            (
-                &*"x".repeat(241),
-                "`note: text is 241 bytes; the eviction keeps one short line: 240 at most. What is \
-             the one thing your future self needs to know?",
-            ),
-            ("line one\nline two", single_line),
-            ("line one\rline two", single_line),
+            ("line one\nline two", NoteFailure::Multiline),
+            ("line one\rline two", NoteFailure::Multiline),
         ];
         for (note, refusal) in cases {
             let err = desk
                 .ask(context_evict_request(1, 1, note))
                 .expect_err("a note that is not one short line is refused");
             assert_eq!(
-                err.describe(),
-                format!("`` exarch-context `evict ``: {refusal}")
+                err.reason,
+                request_failure(
+                    DecodeFailure::new(DecodeCause::Note(refusal))
+                        .field("note")
+                        .payload("evict")
+                        .payload("context")
+                )
             );
         }
     });
@@ -377,8 +400,15 @@ fn context_evict_refuses_a_field_it_does_not_read() {
             ))
             .expect_err("`through` is not a field `evict` reads");
         assert_eq!(
-            err.describe(),
-            "`` exarch-context `evict ``: unknown field `through`: expected `from`, `to`, `note`"
+            err.reason,
+            request_failure(
+                DecodeFailure::new(DecodeCause::UnknownField(UnknownField {
+                    field: "through".into(),
+                    offered: vec!["from".into(), "to".into(), "note".into()]
+                }))
+                .payload("evict")
+                .payload("context")
+            )
         );
         desk.ask(context_evict_request(1, 2, "the parser is fixed"))
             .expect("the fields the tag does read still evict");
@@ -455,4 +485,142 @@ fn the_index_and_grep_name_items_by_span() {
             (3, 4, Some("eviction"), 1)
         );
     });
+}
+
+#[test]
+fn context_doors_keep_refusal_separate_from_recording_unavailability() {
+    use ral_core::fact::{
+        ContextFailure, ContextFailureCurrentlyWritten, ExarchFailure, HostFailure, Reason,
+    };
+    with_desk(|desk, _| {
+        let error = desk
+            .locate_then_read(
+                None,
+                |log| log.context().locate_read(&[]),
+                |read| read.turns().map(|_| FOValue::Unit),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Context(
+                ContextFailure::EmptySelection
+            ))))
+        );
+        assert_eq!(error.context(), None);
+        assert_eq!(error.hints(), []);
+        for (request, context, advice, other_advice) in [
+            (
+                transcript_read_request(&[]),
+                "exarch-transcript `read",
+                "`!{range a b}` builds a run of ids",
+                "omit turns to search the whole transcript",
+            ),
+            (
+                transcript_grep_request("answer", Some(&[])),
+                "exarch-transcript `grep",
+                "omit turns to search the whole transcript",
+                "`!{range a b}` builds a run of ids",
+            ),
+        ] {
+            let error = desk.ask(request).unwrap_err();
+            assert_eq!(
+                error.reason,
+                Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Context(
+                    ContextFailure::EmptySelection
+                ))))
+            );
+            assert_eq!(error.context(), Some(context));
+            assert_eq!(error.hints(), []);
+            assert_eq!(error.plain().matches(advice).count(), 1);
+            assert!(!error.plain().contains(other_advice));
+        }
+        let mut body = desk.loan.get().unwrap();
+        append_prompt_and_answer(&mut body.log, "complete", "answer");
+        body.log
+            .append_user("currently written".into(), None, Voice::Human)
+            .unwrap();
+        drop(body);
+        for (request, context, advice, other_advice) in [
+            (
+                transcript_read_request(&[3]),
+                "exarch-transcript `read",
+                "it is the one turn the transcript cannot read back yet",
+                "an eviction keeps the work in hand",
+            ),
+            (
+                transcript_grep_request("answer", Some(&[3])),
+                "exarch-transcript `grep",
+                "it is the one turn the transcript cannot read back yet",
+                "an eviction keeps the work in hand",
+            ),
+            (
+                context_evict_request(3, 3, "refused"),
+                "exarch-context `evict",
+                "an eviction keeps the work in hand",
+                "it is the one turn the transcript cannot read back yet",
+            ),
+        ] {
+            let error = desk.ask(request).unwrap_err();
+            assert_eq!(
+                error.reason,
+                Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Context(
+                    ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten {
+                        turn: 3u64.into(),
+                    })
+                ))))
+            );
+            assert_eq!(error.context(), Some(context));
+            assert_eq!(error.hints(), []);
+            assert_eq!(error.plain().matches(advice).count(), 1);
+            assert!(!error.plain().contains(other_advice));
+        }
+        let recorder = desk.loan.get().unwrap().log.record_emitter();
+        recorder.fail_after(0);
+        let Request::Context(Context::Evict(evict)) = context_evict_request(1, 2, "cannot append")
+        else {
+            unreachable!()
+        };
+        let error = desk.context_evict(evict).unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Recording(
+                recorder.check_available().unwrap_err().failure()
+            ))))
+        );
+        assert_eq!(error.context(), None);
+        assert_eq!(error.hints(), []);
+        assert!(!error.plain().contains("an eviction keeps the work in hand"));
+        for request in [
+            transcript_read_request(&[]),
+            transcript_grep_request("answer", Some(&[])),
+            context_evict_request(1, 2, "unavailable"),
+        ] {
+            let unavailable = desk.ask(request).unwrap_err();
+            assert_eq!(unavailable.reason, error.reason);
+            assert_eq!(unavailable.context(), None);
+            assert_eq!(unavailable.hints(), []);
+        }
+    });
+}
+
+#[test]
+fn context_doors_preserve_no_desk_after_the_loan_returns() {
+    let desk = with_desk(|desk, _| desk);
+    let original = no_desk();
+    for request in [
+        transcript_read_request(&[]),
+        transcript_grep_request("answer", Some(&[])),
+        context_evict_request(1, 2, "no desk"),
+    ] {
+        let request = request.encode();
+        for error in [
+            desk.dispatch(&request).unwrap_err(),
+            desk.handle(&request).unwrap_err(),
+        ] {
+            assert_eq!(error.reason, original.reason);
+            assert_eq!(error.context(), original.context());
+            assert_eq!(error.hints(), original.hints());
+            assert_eq!(error.plain(), original.plain());
+        }
+    }
 }

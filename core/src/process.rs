@@ -62,7 +62,7 @@ pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 #[cfg(unix)]
 pub(crate) use fork::{Forked, fork, reap};
 #[cfg(unix)]
-use group::{SpawnError, spawn_with_pgid};
+use group::SpawnError;
 #[cfg(unix)]
 pub(crate) use signal::reset_child_signals;
 #[cfg(unix)]

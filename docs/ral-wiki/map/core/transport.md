@@ -1,7 +1,7 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-03
-covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs]
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
+covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
 
 # Map: core / transport
@@ -67,9 +67,10 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   records ral reads back live in `fact` (`ErrorRecord`, `Observation`, `Io`,
   `Receipt`, ...), below the checker, which reads their types off the
   declarations (`ErrorRecord::ty()`). That closed record is exactly
-  `[reason, frame, site]`: one reason with its payload, a frame name and a
-  total `CallSite`, with no status or derived message. It crosses the wire
-  unchanged ([[decisions/261105_the-error-record|the error record]]).
+  `[frame, message, status, site]`: a frame name, the reason's wording and
+  failure code, and a total `CallSite`. The wire carries the `ErrorFact` it
+  projects from instead, `{frame, reason, site}`: the typed `Reason` is `Datum`
+  but never `Typed` ([[decisions/261105_the-error-record|the error record]]).
   `poll`'s polymorphic shape is
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`shell::runtime::error`, `shell::runtime::audit`).
@@ -169,8 +170,9 @@ each alias arm with its scheme
   The decoded bequest goes to `Shell::child_of`, which pushes the grant
   exactly as for a parked one; `bequeath` has already snapshotted the fixings
   and construction takes ownership of them, and a sealed child runs no recipe.
-- `seal(&Bequest) -> Result<Sealed, String>` encodes and frames one
-  `EngineSeed` into `Sealed`, bytes the host relays and never reads (the
+- `seal(&Bequest) -> Result<Sealed, Error>` encodes and frames one
+  `EngineSeed` into `Sealed`, preserving interning errors and projecting frame
+  encoding refusal to `Reason::Protocol`. The host relays these bytes unread (the
   opacity law, [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
   `Sealed::unseal` is `pub(crate)`, so only an engine can read one. `Sealed`
   is a `Datum` over `Bytes`, which is how a seal rides the enquiry as
@@ -198,12 +200,45 @@ frames (`core/src/protocol/channel.rs`).**
 
 - `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB
   — before the reader allocates a body and before the writer sends one, so an
-  oversized frame fails locally with a sentence instead of killing the peer
+  oversized frame returns typed actual/limit counts instead of killing the peer
   mid-stream. The writer's check is `encode`'s alone: it hands back an
   `Encoded` (a fused length and its body), which `put` writes, failing only
   on I/O.
 - Neither side caps depth: both encode and decode under `serde_stacker`, which
   grows the stack onto the heap, so a legal nest of any depth crosses and only
   the fuse bounds it.
-- A body that fails to decode is dumped to an owner-only file, named in the
-  error.
+- `FrameReadError` separates its portable `FrameFailure` from report-only
+  `FrameDump`: either the owner-only raw-dump path or the I/O error that
+  prevented preserving it. Neither dump evidence nor its rendering becomes
+  the decode cause.
+
+## Typed JSON boundaries
+
+**Syntax, structural shape and domain validation are separate steps.**
+`data::json::from_slice<T: JsonDecode>(&[u8]) -> Result<T, JsonInputFailure>`
+borrows the input bytes. Failure distinguishes syntax from a typed
+`DecodeFailure` with its logical field/index/tag path. `JsonDocument` retains source ranges and object entries,
+so validation can see duplicate keys and original numeric spellings instead
+of inferring causes from serde's diagnostic text.
+
+- `RawFOValue` and `RawDatum<T>` retain unchecked leaves until validation.
+  The raw graphs in `protocol/json.rs`, `seed/json.rs` and `carrier/json.rs`
+  validate their domain leaves before returning usable values; a wire reason
+  uses the same `Datum` as an error fact, not a second reason schema. The seed
+  has no mirror of the IR or of schemes: `Arc<Comp>` and `Arc<Scheme>` cross
+  through their own serde impls, and the semantic step closes each scheme
+  (`Closed::new`, refusing with `DecodeCause::OpenScheme` at its path; a
+  non-finite float is `DecodeCause::FiniteBits`). A thunk whose code holds a
+  native is refused on encode with `JsonEncodeCause::NativeComputation`.
+- `JsonEncode` returns `JsonEncodeFailure` before writing a frame. Audited raw
+  representations serialize only after fallible leaves have been checked;
+  `serialize_structural` is not a blanket encoding fallback.
+- Exarch's `record/json.rs` keeps record shape separate from the log's byte
+  envelope. Its `Mirror::check` precedes `hydrate`, including nested
+  `RawDatum`, `RawFOValue` and `RawSevered` leaves. Hydration does not turn a
+  semantic decoder's message into a reason.
+- `record/log/raw.rs` borrows the commit's exact source slice. It validates
+  syntax and envelope, verifies the seal over those bytes, then validates the
+  records. Writing encodes the body once and hashes and writes that same
+  buffer. Read-back never reserializes a parsed value to check integrity.
+  `RecordLineFailure` distinguishes syntax, envelope, seal and record failures.

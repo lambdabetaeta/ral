@@ -155,7 +155,15 @@ pub(crate) mod engine {
 
     /// Everything a script's session is before its boot dispatch.
     fn batch_root(root: &Root, shell: &mut ral_core::Shell) -> Result<(), Error> {
-        let config = BatchConfig::decode(&root.config).map_err(Error::new)?;
+        let config = BatchConfig::decode(&root.config).map_err(|cause| {
+            Error::new(ral_core::fact::Reason::Protocol(Box::new(
+                ral_core::fact::ProtocolFailure::Decode(ral_core::fact::ProtocolFailureDecode {
+                    kind: ral_core::fact::ProtocolData::RootConfig,
+                    operation: "batch".into(),
+                    cause,
+                }),
+            )))
+        })?;
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_args(config.args);
         boot_builtin::register(shell)
@@ -178,10 +186,36 @@ pub(crate) mod engine {
         _grant: &str,
         _ctx: &ral_core::authority::grant::freeze::FreezeCtx,
     ) -> Result<ral_core::authority::policy::GrantLayer, Error> {
-        Err(Error::new(
-            "the ral shell's engine spawns no child engines, so it has no grant policy to hold \
-             one to: was this meant to run under exarch?",
-        ))
+        Err(Error::new(ral_core::fact::Reason::State(Box::new(
+            ral_core::fact::StateFailure::NoChildEngines,
+        ))))
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ral_core::data::FOValue;
+        use ral_core::fact::{ProtocolData, ProtocolFailure, ProtocolFailureDecode, Reason};
+
+        #[test]
+        fn batch_root_preserves_the_config_decode_failure() {
+            let malformed = FOValue::Int { value: 3 };
+            let root = Root::new(ral_core::path::EnginePath::Host(
+                ral_core::test_helper::process_cwd().as_path().into(),
+            ))
+            .with_config(malformed.clone());
+            let mut shell = ral_core::test_helper::core_shell();
+            let error = batch_root(&root, &mut shell).unwrap_err();
+            assert_eq!(
+                error.reason,
+                Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
+                    kind: ProtocolData::RootConfig,
+                    operation: BATCH.into(),
+                    cause: BatchConfig::decode(&malformed).err().unwrap(),
+                })))
+            );
+            assert_eq!(error.hints(), []);
+            assert!(error.context().is_none());
+        }
     }
 }
 

@@ -169,7 +169,9 @@ pub fn run() -> Result<(), String> {
     }
     let seed = cli::load_seed(c.prompt.take(), c.file.take())?;
 
-    let store = wallet::Wallet::of(app::EXARCH, config::CONFIG_FILE, config::LABEL)?.prepare()?;
+    let store = wallet::Wallet::of(app::EXARCH, config::CONFIG_FILE, config::LABEL)
+        .map_err(|error| error.to_string())?
+        .prepare()?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
     let search = net_policy::load()?.search;
 
@@ -183,7 +185,9 @@ pub fn run() -> Result<(), String> {
     }
 
     let launch_cwd = ral_core::host::cwd().ok_or("launch cwd: unavailable")?;
-    let state_dir = app::EXARCH.project(launch_cwd.as_path())?;
+    let state_dir = app::EXARCH
+        .project(launch_cwd.as_path())
+        .map_err(|error| error.to_string())?;
 
     let holdings = Holdings::new(store, app::EXARCH);
     let saved = provider::state::load(&state_dir);
@@ -224,9 +228,11 @@ pub fn run() -> Result<(), String> {
     // Held for the whole run: the lock is the launcher's, not the node's.
     let (run, _run_lock, resumes) = resolve_run(launch_cwd.as_path(), c.resume.take())?;
     if headless && resumes {
-        let open = record::AgentLog::human_children(&run.dir("sessions")?)
-            .map_err(|e| format!("could not inspect {run}: {e}"))?
-            .len();
+        let open = record::AgentLog::human_children(
+            &run.dir("sessions").map_err(|error| error.to_string())?,
+        )
+        .map_err(|e| format!("could not inspect {run}: {e}"))?
+        .len();
         if open != 1 {
             return Err(format!(
                 "a headless run reopens exactly one session; this run has {open} open: resume it in the TUI, which reopens all of them"
@@ -394,8 +400,10 @@ fn resolve_run(
     if let Some(target) = resume {
         if let Some(target) = target {
             let run = app::EXARCH
-                .own(XdgKind::State)?
-                .within(&app::normalize_resume_target(&target)?)?;
+                .own(XdgKind::State)
+                .map_err(|error| error.to_string())?
+                .within(&app::normalize_resume_target(&target)?)
+                .map_err(|error| error.to_string())?;
             return match lock_resumable(&run)? {
                 Ok(lock) => Ok((run, lock, true)),
                 Err(Declined::NoOpenSession) => Err(format!(
@@ -407,11 +415,13 @@ fn resolve_run(
                 )),
             };
         }
-        let project = app::EXARCH.project(cwd)?;
+        let project = app::EXARCH
+            .project(cwd)
+            .map_err(|error| error.to_string())?;
         let candidates = app::resume_candidates(&project)
             .map_err(|error| format!("could not inspect resumable runs: {error}"))?;
         for name in candidates {
-            let run = project.dir(&name)?;
+            let run = project.dir(&name).map_err(|error| error.to_string())?;
             if let Ok(lock) = lock_resumable(&run)? {
                 return Ok((run, lock, true));
             }

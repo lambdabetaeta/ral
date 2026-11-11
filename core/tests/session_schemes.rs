@@ -542,7 +542,7 @@ fn imported_weak_functions_protect_every_higher_order_route() {
         assert!(check_errors(&sh, later).is_empty(), "{later}");
         let message = refusal(top_level(&mut sh, later));
         assert!(message.contains("imported value"), "{later}: {message}");
-        assert!(message.contains("text"), "{message}");
+        assert!(message.contains("Str \"bad\""), "{message}");
     }
 }
 
@@ -678,7 +678,7 @@ fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
     assert!(check_errors(&sh, "let marker = 1\nlet n = $[$m[a] + 1]").is_empty());
     let message = refusal(top_level(&mut sh, "let marker = 1\nlet n = $[$m[a] + 1]"));
     assert!(
-        message.starts_with("$m: the value at `/a` is text (`'x'`)"),
+        message.starts_with("$m: the value at `/a` is Str \"x\""),
         "{message}"
     );
     assert!(
@@ -718,7 +718,7 @@ fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
     assert!(check_errors(&sh, second).is_empty());
     top_level(&mut sh, first).unwrap();
     let message = refusal(top_level(&mut sh, second));
-    assert!(message.contains("is a number and"), "{message}");
+    assert!(message.contains("is number and"), "{message}");
     assert!(
         message.contains("is text, and this script compares them"),
         "{message}"

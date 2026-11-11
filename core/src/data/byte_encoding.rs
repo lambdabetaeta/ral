@@ -21,6 +21,42 @@ pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<
     }
 }
 
+pub(super) fn encode_base64(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
+
+pub(super) fn decode_base64(text: &str) -> Result<Vec<u8>, crate::fact::DecodeFailure> {
+    use crate::fact::{
+        Base64Failure, Base64FailureInvalidByte, Base64FailureInvalidLastSymbol,
+        Base64FailureInvalidLength, Count, DecodeCause, DecodeFailure,
+    };
+    STANDARD.decode(text).map_err(|error| {
+        let cause = match error {
+            base64::DecodeError::InvalidByte(index, byte) => {
+                Base64Failure::InvalidByte(Base64FailureInvalidByte {
+                    index: Count::from(index),
+                    byte,
+                })
+            }
+            base64::DecodeError::InvalidLength(length) => {
+                Base64Failure::InvalidLength(Base64FailureInvalidLength {
+                    length: Count::from(length),
+                })
+            }
+            base64::DecodeError::InvalidLastSymbol {
+                offset,
+                symbol,
+                symbol_value: _,
+            } => Base64Failure::InvalidLastSymbol(Base64FailureInvalidLastSymbol {
+                index: Count::from(offset),
+                byte: symbol,
+            }),
+            base64::DecodeError::InvalidPadding => Base64Failure::InvalidPadding,
+        };
+        DecodeFailure::new(DecodeCause::Base64(cause))
+    })
+}
+
 struct ByteVisitor;
 
 impl Visitor<'_> for ByteVisitor {
@@ -31,8 +67,7 @@ impl Visitor<'_> for ByteVisitor {
     }
 
     fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
-        STANDARD
-            .decode(value)
+        decode_base64(value)
             .map_err(|error| E::custom(format!("invalid base64 byte string: {error}")))
     }
 
@@ -73,6 +108,23 @@ mod tests {
     fn malformed_base64_is_refused() {
         let error = serde_json::from_str::<FOValue>(r#"{"bytes":{"value":"??"}}"#).unwrap_err();
         assert!(error.to_string().contains("invalid base64 byte string"));
+    }
+
+    #[test]
+    fn decode_base64_retains_noncanonical_final_symbol() {
+        use crate::fact::{
+            Base64Failure, Base64FailureInvalidLastSymbol, Count, DecodeCause, DecodeFailure,
+        };
+
+        assert_eq!(
+            super::decode_base64("Zh=="),
+            Err(DecodeFailure::new(DecodeCause::Base64(
+                Base64Failure::InvalidLastSymbol(Base64FailureInvalidLastSymbol {
+                    index: Count::from_u64(1),
+                    byte: b'h',
+                })
+            )))
+        );
     }
 
     #[test]

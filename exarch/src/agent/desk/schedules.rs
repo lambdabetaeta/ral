@@ -7,6 +7,9 @@ use jiff::Timestamp;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
+use ral_core::fact::{
+    ExarchFailure, ScheduleFailure, ScheduleFailureNoGrant, ScheduleFailureRecording,
+};
 use ral_core::shell::runtime::no_desk;
 
 use super::{DeskAct, ExarchDesk};
@@ -19,12 +22,9 @@ impl ExarchDesk {
         if self.call.fleet.launch.allow_schedule {
             return Ok(());
         }
-        Err(Error::new(format!(
-            "`{verb}` refused: this agent does not hold the self-wakeup grant. An agent \
-                 that can wake itself indefinitely holds real authority, so the grant is off \
-                 by default; relaunch with `--allow-schedule` if this session genuinely needs \
-                 to schedule its own wakeups."
-        )))
+        Err(failure(ScheduleFailure::NoGrant(ScheduleFailureNoGrant {
+            verb: verb.into(),
+        })))
     }
 
     /// `` `add `` — arm a self-wakeup through
@@ -56,8 +56,8 @@ impl ExarchDesk {
                     .schedule(txn, trigger, prompt, label.clone())
                     .map(|receipt| (receipt, live_table(txn)))
             })
-            .map_err(|why| why.to_string())
-            .flatten();
+            .map_err(|why| recording(Some(&label), Some(&described), &why))
+            .and_then(|scheduled| scheduled.map_err(failure));
         let (payload, content) = match &result {
             Ok((receipt, _)) => (
                 described,
@@ -67,7 +67,10 @@ impl ExarchDesk {
                     receipt.next_in.as_secs()
                 ),
             ),
-            Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
+            Err(e) => (
+                format!("refused: {}", e.plain()),
+                format!("could not schedule: {}", e.plain()),
+            ),
         };
         call.commit_act(
             &body,
@@ -78,12 +81,8 @@ impl ExarchDesk {
         );
         body.log
             .record_emitter()
-            .emit_or_end(crate::record::Forensic::HarnessResult {
-                text: content.clone(),
-            });
-        result
-            .map(|(_, table)| table)
-            .map_err(|_| Error::new(content))
+            .emit_or_end(crate::record::Forensic::HarnessResult { text: content });
+        result.map(|(_, table)| table)
     }
 
     /// A snapshot of this agent's live wakeups — every `` `exarch-schedules ``
@@ -95,7 +94,7 @@ impl ExarchDesk {
             .0
             .address
             .transact(live_table)
-            .map_err(|why| Error::new(why.to_string()))
+            .map_err(|why| recording(None, None, &why))
     }
 
     /// `` `remove `` — take one scheduled wakeup off the table by label. Only
@@ -115,7 +114,7 @@ impl ExarchDesk {
                 let removed = body.schedules.unschedule(txn, label)?;
                 Ok((removed, live_table(txn)))
             })
-            .map_err(|why| Error::new(why.to_string()))?;
+            .map_err(|why| recording(Some(label), None, &why))?;
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {
@@ -139,4 +138,20 @@ fn live_table(txn: &mut Txn<'_>) -> FOValue {
         .map(|(label, schedule)| ScheduleInfo::of(label, schedule, now))
         .collect::<Vec<_>>()
         .encode()
+}
+
+fn failure(cause: ScheduleFailure) -> Error {
+    super::failure(ExarchFailure::Schedule(cause))
+}
+
+fn recording(
+    label: Option<&str>,
+    trigger: Option<&str>,
+    why: &crate::record::Unavailable,
+) -> Error {
+    failure(ScheduleFailure::Recording(ScheduleFailureRecording {
+        label: label.map(str::to_owned),
+        trigger: trigger.map(str::to_owned),
+        cause: why.failure(),
+    }))
 }

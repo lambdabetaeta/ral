@@ -132,7 +132,7 @@ impl Agent {
                     });
                 }
             },
-            &mut || recorder.sync().map_err(|failure| failure.to_string()),
+            &mut || recorder.sync().map_err(|failure| failure.failure()),
             exchange,
         );
         recorder.check_available()?;
@@ -236,7 +236,7 @@ impl Agent {
                     }
                 }
                 Some(reason) => Outcome::Stopped {
-                    reason: reason.raw().to_string(),
+                    reason: crate::provider::provider_stop(&reason),
                 },
             })),
         }

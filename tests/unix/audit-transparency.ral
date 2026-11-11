@@ -41,7 +41,7 @@ let failed = audit { fail 'no index' }
 echo !{succeeded $failed}
 case $failed[outcome] [
     `ok:  { |_| echo 'unreachable' },
-    `err: { |e| echo "$e[frame] !{describe $e}" },
+    `err: { |e| echo "$e[frame] $e[message]" },
 ]
 
 # Nested audit: the inner audit still returns its own report, but its real

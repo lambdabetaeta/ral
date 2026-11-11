@@ -230,11 +230,12 @@ pub(crate) fn test_agent(fleet: &Arc<Fleet>, spec: TestAgentSpec) -> Result<Test
 /// `scope_has` it ticks no epoch and no ledger.
 pub(crate) fn probe_count(
     session: &Agent,
+    subject: ral_core::fact::ProbeSubject,
     probe: impl FnOnce(&dyn ral_core::carrier::Transport) -> Result<u64, ral_core::carrier::ProbeError>,
 ) -> u64 {
     session
         .engine()
-        .read(probe)
+        .read(subject, probe)
         .expect("an identity engine never severs")
 }
 
@@ -301,8 +302,7 @@ pub(crate) fn schedule(
     session
         .mailbox
         .transact(|txn| body.schedules.schedule(txn, trigger, prompt, label))
-        .map_err(|why| why.to_string())
-        .flatten()
+        .expect("the fixture mailbox is intact")
         .expect("a fixture's schedule records")
 }
 
@@ -620,5 +620,29 @@ pub(crate) struct ReleaseOnDrop(HeldWorker);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         self.0.release();
+    }
+}
+
+/// An actual service response, independent of local lifecycle failures.
+pub(crate) fn service_response(status: u16, body: &str) -> ral_core::fact::ServiceFailure {
+    use ral_core::fact::{
+        GenaiFailure, GenaiFailureHttpError, ServiceCause, ServiceFailure, ServiceOperation,
+    };
+    ServiceFailure {
+        service: "test-service".into(),
+        operation: ServiceOperation::Chat,
+        context: vec![],
+        cause: Box::new(ServiceCause::Genai(GenaiFailure::HttpError(
+            GenaiFailureHttpError {
+                status: u32::from(status),
+                canonical_reason: reqwest::StatusCode::from_u16(status)
+                    .unwrap()
+                    .canonical_reason()
+                    .unwrap_or("")
+                    .into(),
+                body: body.into(),
+                headers: vec![],
+            },
+        ))),
     }
 }

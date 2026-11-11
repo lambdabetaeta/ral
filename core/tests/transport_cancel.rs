@@ -28,7 +28,11 @@ static BARE: [EngineInstaller; 1] = [EngineInstaller {
     tag: "bare",
     runtime: |_| HostSurface::default().runtime(TerminalState::default()),
     root: |_, _| Ok(()),
-    narrow: |_, _| Err(ral_core::error::Error::new("this engine makes no children")),
+    narrow: |_, _| {
+        Err(ral_core::error::Error::new(ral_core::fact::Reason::State(
+            Box::new(ral_core::fact::StateFailure::NoChildEngines),
+        )))
+    },
 }];
 
 #[test]

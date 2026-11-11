@@ -1,0 +1,9 @@
+3 sh: exited with status 3
+127 /nonexistent/ral-no-such-command: command not found
+127 ral-no-such-command: command not found
+139 sh: killed by signal 11 (SIGSEGV)
+126
+true
+126
+true
+try status tests done

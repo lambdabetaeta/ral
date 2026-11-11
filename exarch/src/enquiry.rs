@@ -12,8 +12,12 @@ use crate::schedule::{Asked, CronSchedule, ScheduleInfo, fmt_duration, parse_dur
 use ral_core::SpawnGrant;
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum, exact_keys, field, tag, untag};
+use ral_core::fact::{
+    AgentNameFailure, CardFailure, DecodeCause, DecodeFailure, Expected, Found, NoteFailure,
+    NoteFailureTooLong, RegexCause, RegexFailure, ShapeFailure, UnexpectedPayload, UnknownTag,
+    ValueShape,
+};
 use ral_core::shell::runtime::NurseryId;
-use ral_core::text::code;
 use ral_core::ty::{Ty, Typed, closed_record};
 use ral_core::{memoized_ty, record, variant};
 use regex::Regex;
@@ -37,63 +41,61 @@ pub(crate) trait Family: Sized {
     fn request(self) -> Request;
     fn encode(self) -> FOValue;
     /// `None` for a tag the family does not know.
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>>;
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>>;
 }
 
 /// A model's argument to `exarch-<class>`, read as the request it makes.
 ///
 /// # Errors
-/// The refusal, naming the builtin and tag it was written against.
-pub(crate) fn family<F: Family>(word: &FOValue) -> Result<F, String> {
+/// The typed refusal at its argument path.
+pub(crate) fn family<F: Family>(word: &FOValue) -> Result<F, DecodeFailure> {
     read_tag::<F, F>(word, F::decode)
 }
 
 fn read_tag<F: Family, T>(
     word: &FOValue,
-    decode: impl FnOnce(&str, Option<&FOValue>) -> Option<Result<T, String>>,
-) -> Result<T, String> {
-    let class = F::CLASS;
-    let offered = || offer(F::TAGS);
-    let (label, payload) = untag(word).ok_or_else(|| {
-        format!(
-            "{} takes a tag naming what to do ({}); got {}",
-            code(&format!("exarch-{class}")),
-            offered(),
-            word.shape()
-        )
-    })?;
-    decode(label, payload)
-        .ok_or_else(|| {
-            format!(
-                "unrecognised tag in {}: {} takes {}",
-                code(&format!("exarch-{class} `{label}")),
-                code(&format!("exarch-{class}")),
-                offered()
-            )
-        })?
-        .map_err(|why| format!("{}: {why}", code(&format!("exarch-{class} `{label}"))))
+    decode: impl FnOnce(&str, Option<&FOValue>) -> Option<Result<T, DecodeFailure>>,
+) -> Result<T, DecodeFailure> {
+    let (label, payload) = tagged(word, F::TAGS)?;
+    decode(label, payload).ok_or_else(|| unknown(label, F::TAGS))?
 }
 
-fn offer(tags: &[&str]) -> String {
-    let tags: Vec<String> = tags.iter().map(|t| code(&format!("`{t}"))).collect();
-    match tags.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
-        _ => tags.concat(),
-    }
-}
-
-fn bare(payload: Option<&FOValue>) -> Result<(), String> {
-    payload.map_or(Ok(()), |p| {
-        Err(format!("takes no payload, got {}", p.shape()))
+fn tagged<'a>(
+    v: &'a FOValue,
+    tags: &[&str],
+) -> Result<(&'a str, Option<&'a FOValue>), DecodeFailure> {
+    untag(v).ok_or_else(|| {
+        DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+            expected: Expected::Tags(tags.iter().map(|tag| (*tag).into()).collect()),
+            found: Found::of(v),
+        }))
     })
 }
 
-fn carried(payload: Option<&FOValue>) -> Result<&FOValue, String> {
-    payload.ok_or_else(|| "requires a payload".to_string())
+fn unknown(tag: &str, tags: &[&str]) -> DecodeFailure {
+    DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+        tag: tag.into(),
+        offered: tags.iter().map(|tag| (*tag).into()).collect(),
+    }))
 }
 
-fn datum<T: Datum>(payload: Option<&FOValue>) -> Result<T, String> {
-    carried(payload).and_then(T::decode)
+fn bare(tag: &str, payload: Option<&FOValue>) -> Result<(), DecodeFailure> {
+    payload.map_or(Ok(()), |p| {
+        Err(DecodeFailure::new(DecodeCause::UnexpectedPayload(
+            UnexpectedPayload {
+                tag: tag.into(),
+                found: Found::of(p),
+            },
+        )))
+    })
+}
+
+fn carried<'a>(tag: &str, payload: Option<&'a FOValue>) -> Result<&'a FOValue, DecodeFailure> {
+    payload.ok_or_else(|| DecodeFailure::new(DecodeCause::MissingPayload(tag.into())))
+}
+
+fn datum<T: Datum>(tag: &str, payload: Option<&FOValue>) -> Result<T, DecodeFailure> {
+    T::decode(carried(tag, payload)?).map_err(|why| why.payload(tag))
 }
 
 fn class<F: Family>(family: F) -> FOValue {
@@ -111,36 +113,34 @@ impl Datum for Request {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        let (label, word) = untag(v).ok_or_else(|| {
-            format!(
-                "an enquiry must be a variant naming its class, got {}",
-                v.shape()
-            )
-        })?;
-        let word = || {
-            word.ok_or_else(|| {
-                format!(
-                    "{} takes a tag naming what to do, got no payload at all",
-                    code(&format!("exarch-{label}"))
-                )
-            })
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const CLASSES: &[&str] = &[
+            Agents::CLASS,
+            Schedules::CLASS,
+            Pins::CLASS,
+            Context::CLASS,
+            Transcript::CLASS,
+        ];
+        let (label, word) = tagged(v, CLASSES)?;
+        let decode = |word| match label {
+            Agents::CLASS => family(word).map(Self::Agents),
+            Schedules::CLASS => family(word).map(Self::Schedules),
+            Pins::CLASS => family(word).map(Self::Pins),
+            Context::CLASS => family(word).map(Self::Context),
+            Transcript::CLASS => family(word).map(Self::Transcript),
+            _ => Err(unknown(label, CLASSES)),
         };
-        match label {
-            Agents::CLASS => family(word()?).map(Self::Agents),
-            Schedules::CLASS => family(word()?).map(Self::Schedules),
-            Pins::CLASS => family(word()?).map(Self::Pins),
-            Context::CLASS => family(word()?).map(Self::Context),
-            Transcript::CLASS => family(word()?).map(Self::Transcript),
-            other => Err(format!("unrecognised enquiry class `{other}`")),
+        if !CLASSES.contains(&label) {
+            return Err(unknown(label, CLASSES));
         }
+        decode(carried(label, word)?).map_err(|why| why.payload(label))
     }
 }
 
 impl Request {
     /// How the answer this request is owed is checked, named before the
     /// request crosses.
-    pub(crate) fn owed(&self) -> fn(&FOValue) -> Result<(), String> {
+    pub(crate) fn owed(&self) -> fn(&FOValue) -> Result<(), DecodeFailure> {
         match self {
             Self::Agents(Agents::List) => is::<Vec<AgentInfo>>,
             Self::Agents(Agents::Read(_)) => is::<Deposit>,
@@ -157,23 +157,22 @@ impl Request {
     }
 }
 
-fn is<T: Datum>(v: &FOValue) -> Result<(), String> {
+fn is<T: Datum>(v: &FOValue) -> Result<(), DecodeFailure> {
     T::decode(v).map(drop)
 }
 
-fn unit(v: &FOValue) -> Result<(), String> {
-    match v {
-        FOValue::Unit => Ok(()),
-        other => Err(format!("expected (), got {}", other.shape())),
-    }
+fn unit(v: &FOValue) -> Result<(), DecodeFailure> {
+    <()>::decode(v)
 }
 
 /// `` `some `` a slot's card, or `` `none `` for an empty one.
-fn pinned(v: &FOValue) -> Result<(), String> {
-    match untag(v) {
-        Some(("none", None)) => Ok(()),
-        Some(("some", Some(card))) => is::<Card>(card),
-        _ => Err(format!("expected `none or `some card, got {}", v.shape())),
+fn pinned(v: &FOValue) -> Result<(), DecodeFailure> {
+    const TAGS: &[&str] = &["none", "some"];
+    let (label, payload) = tagged(v, TAGS)?;
+    match label {
+        "none" => bare(label, payload),
+        "some" => datum::<Card>(label, payload).map(drop),
+        _ => Err(unknown(label, TAGS)),
     }
 }
 
@@ -211,15 +210,15 @@ impl Family for Agents {
         }
     }
 
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>> {
         Some(match label {
-            "list" => bare(payload).map(|()| Self::List),
-            "start" => datum(payload).map(Self::Start),
-            "message" => datum(payload).map(Self::Message),
-            "stop" => datum(payload).map(Self::Stop),
-            "dismiss" => datum(payload).map(Self::Dismiss),
+            "list" => bare(label, payload).map(|()| Self::List),
+            "start" => datum(label, payload).map(Self::Start),
+            "message" => datum(label, payload).map(Self::Message),
+            "stop" => datum(label, payload).map(Self::Stop),
+            "dismiss" => datum(label, payload).map(Self::Dismiss),
             "reply" => Ok(Self::Reply(payload.cloned().unwrap_or(FOValue::Unit))),
-            "read" => datum(payload).map(Self::Read),
+            "read" => datum(label, payload).map(Self::Read),
             _ => return None,
         })
     }
@@ -234,10 +233,10 @@ pub(crate) enum Word {
 
 impl Word {
     /// # Errors
-    /// The refusal, in the words the desk would use.
-    pub(crate) fn decode(word: &FOValue) -> Result<Self, String> {
+    /// The same typed refusal the desk would return.
+    pub(crate) fn decode(word: &FOValue) -> Result<Self, DecodeFailure> {
         read_tag::<Agents, _>(word, |label, payload| match label {
-            "start" => Some(datum(payload).map(Self::Spawn)),
+            "start" => Some(datum(label, payload).map(Self::Spawn)),
             label => <Agents as Family>::decode(label, payload).map(|ask| ask.map(Self::Ask)),
         })
     }
@@ -270,9 +269,12 @@ impl Datum for Launch {
         FOValue::Map { entries }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let FOValue::Map { entries } = v else {
-            return Err(format!("expected a record, got {}", v.shape()));
+            return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Map),
+                found: Found::of(v),
+            })));
         };
         let rest = entries.iter().filter(|(k, _)| k != "grant").cloned();
         Ok(Self {
@@ -307,8 +309,8 @@ record!(Spec {
 /// so no path can mint an agent around it, however a name reached it.
 ///
 /// # Errors
-/// The sentence to show, naming the rule and the name that broke it.
-pub fn check_name(name: &str) -> Result<(), String> {
+/// The name that violates the tab-bar contract.
+pub fn check_name(name: &str) -> Result<(), AgentNameFailure> {
     if !name.is_empty()
         && name.len() <= 24
         && name
@@ -317,10 +319,7 @@ pub fn check_name(name: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    Err(format!(
-        "`name` must be non-empty, at most 24 characters, and only ASCII letters, digits, `-`, \
-         or `_` (the tab-bar contract); got {name:?}"
-    ))
+    Err(AgentNameFailure { name: name.into() })
 }
 
 /// An agent's name, admitted by [`check_name`]; `Fleet::claim`
@@ -332,9 +331,9 @@ impl Datum for Name {
         self.0.encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let name = String::decode(v)?;
-        check_name(&name)?;
+        check_name(&name).map_err(|cause| DecodeFailure::new(DecodeCause::AgentName(cause)))?;
         Ok(Self(name))
     }
 }
@@ -347,14 +346,12 @@ impl Datum for Memory {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("amnemon", None)) => Ok(Self::Amnemon),
-            Some(("mnemon", None)) => Ok(Self::Mnemon),
-            _ => Err(format!(
-                "expected `amnemon (blank context) or `mnemon (inherits your conversation), got {}",
-                v.shape()
-            )),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let (label, payload) = tagged(v, &["amnemon", "mnemon"])?;
+        match label {
+            "amnemon" => bare(label, payload).map(|()| Self::Amnemon),
+            "mnemon" => bare(label, payload).map(|()| Self::Mnemon),
+            _ => Err(unknown(label, &["amnemon", "mnemon"])),
         }
     }
 }
@@ -373,29 +370,29 @@ impl Datum for Grant {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("inherit", None)) => Ok(Self(SpawnGrant::Inherit)),
-            Some((base, None)) if crate::policy::spawn_bases().any(|b| b == base) => {
-                Ok(Self(SpawnGrant::Base(base.to_string())))
-            }
-            Some(("restrict", Some(record @ FOValue::Map { .. }))) => {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let tags: Vec<_> = std::iter::once("inherit")
+            .chain(crate::policy::spawn_bases())
+            .chain(["restrict"])
+            .collect();
+        let (label, payload) = tagged(v, &tags)?;
+        match label {
+            "inherit" => bare(label, payload).map(|()| Self(SpawnGrant::Inherit)),
+            "restrict" => {
+                let record = carried(label, payload)?;
+                if !matches!(record, FOValue::Map { .. }) {
+                    return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                        expected: Expected::Shape(ValueShape::Map),
+                        found: Found::of(record),
+                    }))
+                    .payload(label));
+                }
                 Ok(Self(SpawnGrant::Restrict(record.clone())))
             }
-            Some(("restrict", Some(other))) => Err(format!(
-                "`restrict must carry a capability record [exec, fs, net, gpu, editor, shell], got {}",
-                other.shape()
-            )),
-            _ => Err(format!(
-                "expected `inherit, {}, or `restrict [exec: …, fs: …, net: …, gpu: …, \
-                 editor: …, shell: …]: `inherit is how you decline to narrow at all, and `restrict must carry \
-                 a capability record of the same shape `grant [...]` takes, every key optional: got {}",
-                crate::policy::spawn_bases()
-                    .map(|b| format!("`{b}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                v.shape()
-            )),
+            base if crate::policy::spawn_bases().any(|b| b == base) => {
+                bare(label, payload).map(|()| Self(SpawnGrant::Base(base.into())))
+            }
+            _ => Err(unknown(label, &tags)),
         }
     }
 }
@@ -415,20 +412,19 @@ impl Datum for Selection {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("inherit", None)) => Ok(Self::Inherit),
-            Some(("role", Some(FOValue::String { value }))) if !value.is_empty() => {
-                Ok(Self::Role(value.clone()))
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["inherit", "role"];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "inherit" => bare(label, payload).map(|()| Self::Inherit),
+            "role" => {
+                let name: String = datum(label, payload)?;
+                if name.is_empty() {
+                    return Err(DecodeFailure::new(DecodeCause::EmptyProviderRole).payload(label));
+                }
+                Ok(Self::Role(name))
             }
-            Some(("role", payload)) => Err(format!(
-                "`role must carry a non-empty Str, got {}",
-                payload.map_or_else(|| "nothing".to_string(), FOValue::shape)
-            )),
-            _ => Err(format!(
-                "expected `inherit (your own model) or `role '<name>' (one the human bound at launch), got {}",
-                v.shape()
-            )),
+            _ => Err(unknown(label, TAGS)),
         }
     }
 }
@@ -451,16 +447,13 @@ impl Datum for ForkClaim {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("parked", Some(id))) => u64::decode(id).map(|id| Self::Parked(NurseryId(id))),
-            Some(("sealed", Some(bytes))) => {
-                ral_core::seed::Sealed::decode(bytes).map(Self::Sealed)
-            }
-            _ => Err(format!(
-                "expected `parked <nursery id> or `sealed <bytes>, got {}",
-                v.shape()
-            )),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["parked", "sealed"];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "parked" => datum::<u64>(label, payload).map(|id| Self::Parked(NurseryId(id))),
+            "sealed" => datum(label, payload).map(Self::Sealed),
+            _ => Err(unknown(label, TAGS)),
         }
     }
 }
@@ -491,11 +484,11 @@ impl Datum for Deposit {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         exact_keys(v, &["name", "reply"])?;
         Ok(Self {
             name: field(v, "name")?,
-            reply: v.field("reply").cloned().ok_or("no `reply field")?,
+            reply: field(v, "reply")?,
         })
     }
 }
@@ -543,7 +536,7 @@ impl Datum for AgentInfo {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         exact_keys(
             v,
             &["name", "spawner", "state", "idle-s", "elapsed-s", "log-dir"],
@@ -574,14 +567,13 @@ impl Datum for Spawner {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("human", None)) => Ok(Self::Human),
-            Some(("agent", Some(name))) => String::decode(name).map(Self::Agent),
-            _ => Err(format!(
-                "expected `human or `agent <name>, got {}",
-                v.shape()
-            )),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["human", "agent"];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "human" => bare(label, payload).map(|()| Self::Human),
+            "agent" => datum(label, payload).map(Self::Agent),
+            _ => Err(unknown(label, TAGS)),
         }
     }
 }
@@ -612,17 +604,22 @@ impl Datum for RosterState {
         tag(label, None)
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("busy", None)) => Ok(Self::Busy),
-            Some(("waiting-on-agents", None)) => Ok(Self::WaitingOnAgents),
-            Some(("replied", None)) => Ok(Self::Replied),
-            Some(("waiting", None)) => Ok(Self::Waiting),
-            _ => Err(format!(
-                "expected `busy, `waiting-on-agents, `replied or `waiting, got {}",
-                v.shape()
-            )),
-        }
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        ral_core::data::datum::labelled(
+            v,
+            &[
+                Self::Busy,
+                Self::WaitingOnAgents,
+                Self::Replied,
+                Self::Waiting,
+            ],
+            |state| match state {
+                Self::Busy => "busy",
+                Self::WaitingOnAgents => "waiting-on-agents",
+                Self::Replied => "replied",
+                Self::Waiting => "waiting",
+            },
+        )
     }
 }
 
@@ -650,11 +647,11 @@ impl Family for Schedules {
         }
     }
 
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>> {
         Some(match label {
-            "list" => bare(payload).map(|()| Self::List),
-            "add" => datum(payload).map(Self::Add),
-            "remove" => datum(payload).map(Self::Remove),
+            "list" => bare(label, payload).map(|()| Self::List),
+            "add" => datum(label, payload).map(Self::Add),
+            "remove" => datum(label, payload).map(Self::Remove),
             _ => return None,
         })
     }
@@ -673,7 +670,7 @@ record!(Add {
 });
 
 /// Parsed on arrival at either end, so a malformed expression carries its
-/// parser's own message home.
+/// parser's typed cause home.
 impl Datum for Asked {
     fn encode(self) -> FOValue {
         match self {
@@ -682,20 +679,23 @@ impl Datum for Asked {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("cron", Some(expr))) => {
-                let expr = String::decode(expr)?;
-                let schedule = CronSchedule::parse(&expr)?;
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["cron", "after"];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "cron" => {
+                let expr: String = datum(label, payload)?;
+                let schedule = CronSchedule::parse(&expr)
+                    .map_err(|cause| DecodeFailure::new(DecodeCause::Cron(cause)).payload(label))?;
                 Ok(Self::Cron { schedule, expr })
             }
-            Some(("after", Some(delay))) => {
-                parse_duration(&String::decode(delay)?).map(Self::After)
+            "after" => {
+                let delay: String = datum(label, payload)?;
+                parse_duration(&delay).map(Self::After).map_err(|cause| {
+                    DecodeFailure::new(DecodeCause::Duration(cause)).payload(label)
+                })
             }
-            _ => Err(format!(
-                "expected `cron '<5-field-cron-expr>' or `after '<n><unit>', got {}",
-                v.shape()
-            )),
+            _ => Err(unknown(label, TAGS)),
         }
     }
 }
@@ -733,12 +733,12 @@ impl Family for Pins {
         }
     }
 
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>> {
         Some(match label {
-            "set" => datum(payload).map(Self::Set),
-            "clear" => datum(payload).map(Self::Clear),
-            "read" => datum(payload).map(Self::Read),
-            "list" => bare(payload).map(|()| Self::List),
+            "set" => datum(label, payload).map(Self::Set),
+            "clear" => datum(label, payload).map(Self::Clear),
+            "read" => datum(label, payload).map(Self::Read),
+            "list" => bare(label, payload).map(|()| Self::List),
             _ => return None,
         })
     }
@@ -759,16 +759,14 @@ impl Datum for Card {
         encode_card(&self)
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        value_to_card(v)
-            .filter(|card| !card.marks().is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "expected a card with at least one mark, got {}: did you mean `` exarch-pins \
-                     `clear `` to empty the slot?",
-                    v.shape()
-                )
-            })
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let card = value_to_card(v).ok_or_else(|| {
+            DecodeFailure::new(DecodeCause::Card(CardFailure::NotCard(Found::of(v))))
+        })?;
+        if card.marks().is_empty() {
+            return Err(DecodeFailure::new(DecodeCause::Card(CardFailure::Empty)));
+        }
+        Ok(card)
     }
 }
 
@@ -794,10 +792,10 @@ impl Family for Context {
         }
     }
 
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>> {
         Some(match label {
-            "survey" => bare(payload).map(|()| Self::Survey),
-            "evict" => datum(payload).map(Self::Evict),
+            "survey" => bare(label, payload).map(|()| Self::Survey),
+            "evict" => datum(label, payload).map(Self::Evict),
             _ => return None,
         })
     }
@@ -831,10 +829,11 @@ impl Datum for Evict {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         exact_keys(v, &["from", "to", "note"])?;
         Ok(Self {
-            span: Span::new(field(v, "from")?, field(v, "to")?).map_err(|e| e.to_string())?,
+            span: Span::new(field(v, "from")?, field(v, "to")?)
+                .map_err(|e| DecodeFailure::new(DecodeCause::TurnSpan(e.into())))?,
             note: field(v, "note")?,
         })
     }
@@ -859,25 +858,22 @@ impl Datum for Note {
         self.0.encode()
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         let note = String::decode(v)?;
-        if note.is_empty() {
-            return Err(
-                "text must not be empty: the eviction keeps one short line, and it is the only \
-                 trace of the run left in your context"
-                    .into(),
-            );
-        }
-        if note.len() > Self::CAP {
-            return Err(format!(
-                "text is {} bytes; the eviction keeps one short line: {} at most. What is the one \
-                 thing your future self needs to know?",
-                note.len(),
-                Self::CAP
-            ));
-        }
-        if note.contains(['\n', '\r']) {
-            return Err("text must be a single line: the eviction keeps one short line".into());
+        let cause = if note.is_empty() {
+            Some(NoteFailure::Empty)
+        } else if note.len() > Self::CAP {
+            Some(NoteFailure::TooLong(NoteFailureTooLong {
+                bytes: note.len().into(),
+                limit: Self::CAP.into(),
+            }))
+        } else if note.contains(['\n', '\r']) {
+            Some(NoteFailure::Multiline)
+        } else {
+            None
+        };
+        if let Some(cause) = cause {
+            return Err(DecodeFailure::new(DecodeCause::Note(cause)));
         }
         Ok(Self(note))
     }
@@ -960,11 +956,11 @@ impl Family for Transcript {
         }
     }
 
-    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, String>> {
+    fn decode(label: &str, payload: Option<&FOValue>) -> Option<Result<Self, DecodeFailure>> {
         Some(match label {
-            "index" => bare(payload).map(|()| Self::Index),
-            "read" => datum(payload).map(Self::Read),
-            "grep" => datum(payload).map(Self::Grep),
+            "index" => bare(label, payload).map(|()| Self::Index),
+            "read" => datum(label, payload).map(Self::Read),
+            "grep" => datum(label, payload).map(Self::Grep),
             _ => return None,
         })
     }
@@ -1012,11 +1008,19 @@ impl Datum for Grep {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         exact_keys(v, &["pattern", "turns"])?;
         let pattern: String = field(v, "pattern")?;
         Ok(Self {
-            pattern: Regex::new(&pattern).map_err(|e| format!("`pattern: {e}"))?,
+            pattern: Regex::new(&pattern).map_err(|e| {
+                let cause = match e {
+                    regex::Error::Syntax(detail) => RegexCause::Syntax(detail),
+                    regex::Error::CompiledTooBig(limit) => RegexCause::CompiledTooBig(limit.into()),
+                    other => RegexCause::Unclassified(other.to_string()),
+                };
+                DecodeFailure::new(DecodeCause::Regex(RegexFailure { pattern, cause }))
+                    .field("pattern")
+            })?,
             turns: field(v, "turns")?,
         })
     }
@@ -1076,9 +1080,10 @@ impl Datum for Span {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         exact_keys(v, &["from", "to"])?;
-        Self::new(field(v, "from")?, field(v, "to")?).map_err(|e| e.to_string())
+        Self::new(field(v, "from")?, field(v, "to")?)
+            .map_err(|e| DecodeFailure::new(DecodeCause::TurnSpan(e.into())))
     }
 }
 
@@ -1092,15 +1097,14 @@ impl Datum for Location {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some(("resident", None)) => Ok(Self::Resident),
-            Some(("withdrawn", None)) => Ok(Self::Withdrawn),
-            Some(("evicted", Some(span))) => Span::decode(span).map(Self::Evicted),
-            _ => Err(format!(
-                "expected `resident, `evicted [from: Int, to: Int] or `withdrawn, got {}",
-                v.shape()
-            )),
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["resident", "withdrawn", "evicted"];
+        let (label, payload) = tagged(v, TAGS)?;
+        match label {
+            "resident" => bare(label, payload).map(|()| Self::Resident),
+            "withdrawn" => bare(label, payload).map(|()| Self::Withdrawn),
+            "evicted" => datum(label, payload).map(Self::Evicted),
+            _ => Err(unknown(label, TAGS)),
         }
     }
 }
@@ -1203,11 +1207,14 @@ impl Datum for Bare {
         tag(&self.0, None)
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        match untag(v) {
-            Some((label, None)) => Ok(Self(label.into())),
-            _ => Err(format!("expected a bare tag, got {}", v.shape())),
-        }
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let (label, payload) = untag(v).ok_or_else(|| {
+            DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Variant),
+                found: Found::of(v),
+            }))
+        })?;
+        bare(label, payload).map(|()| Self(label.into()))
     }
 }
 
@@ -1246,46 +1253,49 @@ impl Datum for TranscriptPart {
         tag(label, Some(FOValue::Map { entries }))
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
-        fn record<'a>(r: &'a FOValue, keys: &[&str]) -> Result<&'a FOValue, String> {
-            exact_keys(r, keys).map(|()| r)
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        const TAGS: &[&str] = &["text", "program", "result", "reasoning", "binary", "custom"];
+        let (label, payload) = tagged(v, TAGS)?;
+        if !TAGS.contains(&label) {
+            return Err(unknown(label, TAGS));
         }
-        match untag(v) {
-            Some(("text", Some(r))) => Ok(Self::Text(field(record(r, &["content"])?, "content")?)),
-            Some(("program", Some(r))) => {
-                let r = record(r, &["tool", "source", "keys"])?;
+        let r = carried(label, payload)?;
+        (|| match label {
+            "text" | "result" | "reasoning" => {
+                exact_keys(r, &["content"])?;
+                let content = field(r, "content")?;
+                Ok(match label {
+                    "text" => Self::Text(content),
+                    "result" => Self::Result(content),
+                    _ => Self::Reasoning(content),
+                })
+            }
+            "program" => {
+                exact_keys(r, &["tool", "source", "keys"])?;
                 Ok(Self::Program {
                     tool: field(r, "tool")?,
                     source: field(r, "source")?,
                     keys: field(r, "keys")?,
                 })
             }
-            Some(("result", Some(r))) => {
-                Ok(Self::Result(field(record(r, &["content"])?, "content")?))
-            }
-            Some(("reasoning", Some(r))) => {
-                Ok(Self::Reasoning(field(record(r, &["content"])?, "content")?))
-            }
-            Some(("binary", Some(r))) => {
-                let r = record(r, &["content-type", "name", "bytes"])?;
+            "binary" => {
+                exact_keys(r, &["content-type", "name", "bytes"])?;
                 Ok(Self::Binary {
                     content_type: field(r, "content-type")?,
                     name: field(r, "name")?,
                     bytes: field(r, "bytes")?,
                 })
             }
-            Some(("custom", Some(r))) => {
-                let r = record(r, &["provider", "model"])?;
+            "custom" => {
+                exact_keys(r, &["provider", "model"])?;
                 Ok(Self::Custom {
                     provider: field(r, "provider")?,
                     model: field(r, "model")?,
                 })
             }
-            _ => Err(format!(
-                "expected `text, `program, `result, `reasoning, `binary or `custom, got {}",
-                v.shape()
-            )),
-        }
+            _ => Err(unknown(label, TAGS)),
+        })()
+        .map_err(|why: DecodeFailure| why.payload(label))
     }
 }
 
@@ -1390,10 +1400,7 @@ mod tests {
         let Err(why) = family::<Agents>(&tag("cancel", Some("scout".to_string().encode()))) else {
             panic!("cancel was removed, not aliased to either gesture");
         };
-        assert!(why.starts_with("unrecognised tag in `` exarch-agents `cancel ``"));
-        for verb in ["stop", "dismiss"] {
-            assert!(why.contains(&format!("`{verb}")), "{why}");
-        }
+        assert_eq!(why, unknown("cancel", Agents::TAGS));
     }
 
     #[test]
@@ -1666,7 +1673,11 @@ mod tests {
         };
         assert_eq!(
             why,
-            "`restrict must carry a capability record [exec, fs, net, gpu, editor, shell], got a Str"
+            DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Shape(ValueShape::Map),
+                found: Found::of(&"everything".to_string().encode()),
+            }))
+            .payload("restrict")
         );
     }
 
@@ -1675,9 +1686,8 @@ mod tests {
         let Err(why) = Grant::decode(&tag("bogus", None)) else {
             panic!("`bogus is no grant");
         };
-        for label in bare_grant_tags().chain(["restrict"]) {
-            assert!(why.contains(label), "must name `{label}`, got: {why}");
-        }
+        let tags: Vec<_> = bare_grant_tags().chain(["restrict"]).collect();
+        assert_eq!(why, unknown("bogus", &tags));
     }
 
     /// A base carrying a payload is refused, never truncated to its label:
@@ -1703,20 +1713,23 @@ mod tests {
         }
         let err =
             crate::policy::base_layer("bogus", &ctx).expect_err("an unknown base must be refused");
-        let said = err.describe();
-        let offered: std::collections::BTreeSet<&str> = said
-            .rsplit_once("expected one of: ")
-            .unwrap_or_else(|| panic!("the refusal must enumerate the bases, got: {err}"))
-            .1
-            .split(", ")
-            .collect();
+        let ral_core::fact::Reason::Host(host) = err.reason else {
+            panic!("host failure")
+        };
+        let ral_core::fact::HostFailure::Exarch(ral_core::fact::ExarchFailure::Policy(
+            ral_core::fact::PolicyFailure::UnknownBase(base),
+        )) = *host
+        else {
+            panic!("unknown policy base")
+        };
+        assert_eq!(base.name, "bogus");
         assert!(
-            crate::policy::spawn_bases().all(|l| offered.contains(l)),
-            "every grant base must be one the policy layer offers, got: {offered:?}"
+            crate::policy::spawn_bases()
+                .all(|label| base.offered.iter().any(|offered| offered == label))
         );
     }
 
-    fn evict_with(entries: &[(&str, FOValue)]) -> Result<Context, String> {
+    fn evict_with(entries: &[(&str, FOValue)]) -> Result<Context, DecodeFailure> {
         let entries = entries
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
@@ -1735,7 +1748,7 @@ mod tests {
         };
         assert_eq!(
             why,
-            "`` exarch-context `evict ``: no `note field in a record of 2 fields"
+            DecodeFailure::new(DecodeCause::MissingField("note".into())).payload("evict")
         );
         let turns = FOValue::List {
             items: vec![int(1), int(2)],
@@ -1870,6 +1883,102 @@ mod tests {
         let Err(why) = family::<Pins>(&tag("list", Some(FOValue::Int { value: 1 }))) else {
             panic!("`list takes nothing");
         };
-        assert_eq!(why, "`` exarch-pins `list ``: takes no payload, got an Int");
+        assert_eq!(
+            why,
+            DecodeFailure::new(DecodeCause::UnexpectedPayload(UnexpectedPayload {
+                tag: "list".into(),
+                found: Found::Int(1),
+            }))
+        );
+    }
+
+    #[test]
+    fn nested_schedule_requests_preserve_domain_causes_and_payload_paths() {
+        let request = |trigger| {
+            tag(
+                "schedules",
+                Some(tag(
+                    "add",
+                    Some(FOValue::Map {
+                        entries: vec![
+                            ("trigger".into(), trigger),
+                            ("label".into(), "nightly".to_string().encode()),
+                            ("prompt".into(), "wake".to_string().encode()),
+                        ],
+                    }),
+                )),
+            )
+        };
+        for (label, text, cause) in [
+            (
+                "cron",
+                "* * * *",
+                DecodeCause::Cron(CronSchedule::parse("* * * *").unwrap_err()),
+            ),
+            (
+                "after",
+                "0m",
+                DecodeCause::Duration(parse_duration("0m").unwrap_err()),
+            ),
+        ] {
+            let Err(error) = Request::decode(&request(tag(label, Some(text.to_string().encode()))))
+            else {
+                panic!("malformed trigger")
+            };
+            assert_eq!(
+                error,
+                DecodeFailure::new(cause)
+                    .payload(label)
+                    .field("trigger")
+                    .payload("add")
+                    .payload("schedules")
+            );
+        }
+    }
+
+    #[test]
+    fn name_note_and_regex_validation_keep_typed_causes_at_their_present_fields() {
+        let mut start = launch(Memory::Amnemon, Selection::Inherit);
+        start.spec.name = Name("bad name".into());
+        let Err(error) = Word::decode(&tag("start", Some(start.encode()))) else {
+            panic!("invalid name")
+        };
+        assert_eq!(
+            error,
+            DecodeFailure::new(DecodeCause::AgentName(AgentNameFailure {
+                name: "bad name".into()
+            }))
+            .field("name")
+            .payload("start")
+        );
+        let Err(error) = Evict::decode(&FOValue::Map {
+            entries: vec![
+                ("from".into(), 1u64.encode()),
+                ("to".into(), 2u64.encode()),
+                ("note".into(), String::new().encode()),
+            ],
+        }) else {
+            panic!("empty note")
+        };
+        assert_eq!(
+            error,
+            DecodeFailure::new(DecodeCause::Note(NoteFailure::Empty)).field("note")
+        );
+        let value = FOValue::Map {
+            entries: vec![
+                ("pattern".into(), "[".to_string().encode()),
+                ("turns".into(), tag("all", None)),
+            ],
+        };
+        let Err(error) = Grep::decode(&value) else {
+            panic!("invalid regex")
+        };
+        assert_eq!(
+            error.path,
+            [ral_core::fact::DataStep::Field("pattern".into())]
+        );
+        assert!(
+            matches!(*error.cause, DecodeCause::Regex(RegexFailure { pattern, cause: RegexCause::Syntax(_) }) if pattern == "[")
+        );
     }
 }

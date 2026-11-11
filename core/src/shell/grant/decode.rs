@@ -14,6 +14,7 @@
 //! depth.  Every list denotes a set: a repeat adds nothing and is no error.
 
 use crate::authority::grant::freeze::{Anchor, FreezeCtx, Place, Selector};
+use crate::authority::grant::freeze::{grant_error, invalid_error};
 use crate::authority::grant::value::Target;
 use crate::authority::grant::{Keyed, Placed, Polar, name_rules};
 use crate::authority::policy::{
@@ -21,16 +22,58 @@ use crate::authority::policy::{
 };
 use crate::data::FOValue;
 use crate::error::Error;
+use crate::fact::{
+    DataStep, Expected, Found, GrantFailure, GrantFailureRefusedKey, GrantForm, InvalidCause,
+    Reason, ShapeFailure, TextPreview, UnexpectedPayload, ValueShape,
+};
+
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
 use crate::shell::runtime::{List, Map, Value, settings_map};
-use crate::syntax::quote::quote_word;
-use crate::text::{indefinite, near_names};
+use crate::text::near_names;
 use crate::typecheck::contract::{
     DIR_TARGET, EDITOR, EXEC_TARGET, Form as ContractForm, GPU, Holds, NET, PLACE, SHELL, Table,
     Vocab, code, declared,
 };
 use std::collections::BTreeSet;
 use std::str::FromStr;
+
+fn found(value: &Value) -> Found {
+    match value {
+        Value::Unit => Found::Unit,
+        Value::Bool(v) => Found::Bool(*v),
+        Value::Int(v) => Found::Int(*v),
+        Value::Float(v) => Found::Float(*v),
+        Value::String(v) => Found::Text(TextPreview::new(v.as_str())),
+        Value::Bytes(_) => Found::Bytes,
+        Value::List(_) => Found::List,
+        Value::Map(_) => Found::Map,
+        Value::Variant { label, .. } => Found::Variant(label.to_string()),
+        Value::Thunk(c) if c.comp().lam().is_none() => Found::Block,
+        Value::Thunk(_) | Value::Native(_) => Found::Function,
+        Value::Handle(_) => Found::Handle,
+    }
+}
+
+fn shape(value: &Value, expected: Expected) -> Error {
+    invalid_error(InvalidCause::Shape(ShapeFailure {
+        expected,
+        found: found(value),
+    }))
+}
+
+fn at(mut error: Error, step: DataStep) -> Error {
+    if let Reason::Invalid(failure) = &mut error.reason {
+        failure.path.insert(0, step);
+    }
+    error
+}
+
+fn at_field(error: Error, field: &str) -> Error {
+    at(error, DataStep::Field(field.into()))
+}
+fn at_index(error: Error, index: usize) -> Error {
+    at(error, DataStep::Index(index.into()))
+}
 
 /// The declared table of a nested grant key, whose words refuse an unknown
 /// key at that depth.
@@ -60,33 +103,32 @@ impl<'a> Tag<'a> {
         }
     }
 
-    /// The string payload, `what` naming what it should hold; `vocab` advises.
-    fn text(&self, vocab: &Vocab, what: &str) -> Result<&'a str, Error> {
-        let tag = code(&format!("`{}", self.label));
+    /// The string payload; `vocab` supplies contextual surface advice.
+    fn text(&self, vocab: &Vocab) -> Result<&'a str, Error> {
         match self.payload {
             Some(Value::String(s)) => Ok(s.as_str()),
-            Some(other) => Err(Error::new(format!(
-                "{tag} takes {what}, got {}",
-                other.type_name()
-            ))
+            Some(other) => Err(at(
+                shape(other, Expected::Shape(ValueShape::String)),
+                DataStep::Payload(self.label.into()),
+            )
             .with_hint(vocab.payload)),
-            None => Err(Error::new(format!(
-                "{tag} needs a payload: {what}, as in {}",
-                code(&format!("`{} …", self.label))
-            ))
-            .with_hint(vocab.payload)),
+            None => Err(
+                invalid_error(InvalidCause::MissingPayload(self.label.into()))
+                    .with_hint(vocab.payload),
+            ),
         }
     }
 
-    /// A nullary tag takes no payload.
     fn nullary(&self, vocab: &Vocab) -> Result<(), Error> {
         match self.payload {
             None => Ok(()),
-            Some(_) => Err(Error::new(format!(
-                "{0} takes no payload; write it bare, {0}",
-                code(&format!("`{}", self.label))
-            ))
-            .with_hint(vocab.payload)),
+            Some(value) => Err(
+                invalid_error(InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                    tag: self.label.into(),
+                    found: found(value),
+                }))
+                .with_hint(vocab.payload),
+            ),
         }
     }
 }
@@ -96,51 +138,30 @@ fn within(prefix: &str) -> impl Fn(Error) -> Error + '_ {
     move |e| e.with_context(prefix)
 }
 
-fn describe(value: &Value) -> String {
-    match value {
-        Value::String(s) => format!("the string {}", quote_word(s.as_str())),
-        other => other.type_name().to_string(),
-    }
-}
-
-/// A tag `vocab`'s row lacks, in the words the checker uses for it.
 fn unknown_tag(vocab: &Vocab, tag: &str) -> Error {
-    let (message, advice) = vocab.refuse(tag);
-    let error = Error::new(message);
-    match advice {
-        Some(advice) => error.with_hint(advice),
-        None => error,
-    }
+    grant_error(vocab.refuse(tag))
 }
 
-/// A value that is no tag at all, where `vocab` wants one.
 fn untagged(vocab: &Vocab, value: &Value) -> Error {
-    Error::new(format!(
-        "expected {}, got {}",
-        indefinite(vocab.noun),
-        describe(value)
-    ))
+    shape(
+        value,
+        Expected::Tags((vocab.row)().into_iter().map(|(tag, _)| tag).collect()),
+    )
     .with_hint(vocab.untagged)
 }
 
-fn list_of(value: &Value, noun: &str) -> Result<List, Error> {
+fn list_of(value: &Value) -> Result<List, Error> {
     match value {
         Value::List(items) => Ok(items.clone()),
-        other => Err(Error::new(format!(
-            "expected a list of {noun}, got {}",
-            describe(other)
-        ))),
+        other => Err(shape(other, Expected::Shape(ValueShape::List))),
     }
 }
 
-/// A nested table is a record; `empty` is how one admitting nothing is written.
 fn table_of<'a>(value: &'a Value, empty: &str) -> Result<&'a Map, Error> {
     match value {
-        Value::Map(m) => Ok(m),
-        other => Err(Error::new(format!(
-            "a grant table is a record, got {}; for a table that admits nothing write `{empty}`",
-            describe(other)
-        ))),
+        Value::Map(map) => Ok(map),
+        other => Err(shape(other, Expected::Shape(ValueShape::Map))
+            .with_hint(format!("for a table that admits nothing write `{empty}`"))),
     }
 }
 
@@ -151,7 +172,7 @@ fn place_of(tag: &Tag) -> Result<Option<Place>, Error> {
     let Some(anchor) = Anchor::of_tag(tag.label) else {
         return Ok(None);
     };
-    Ok(Some(anchor.place(tag.text(&PLACE, "a path")?)))
+    Ok(Some(anchor.place(tag.text(&PLACE)?)))
 }
 
 fn selector_of(tag: &Tag) -> Result<Option<Selector>, Error> {
@@ -174,10 +195,15 @@ fn freeze_places<W: Polar>(
     ctx: &FreezeCtx,
 ) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     list.iter()
-        .filter_map(|item| {
+        .enumerate()
+        .filter_map(|(index, item)| {
             decode_place(&item)
-                .and_then(|place| ctx.walked::<W>(&place))
-                .and_then(|placed| placed.map(Placed::grant).transpose())
+                .and_then(|place| {
+                    ctx.walked::<W>(&place)
+                        .and_then(|placed| placed.map(Placed::grant).transpose())
+                        .map_err(|e| at(e, DataStep::Payload(place.anchor.tag().into_owned())))
+                })
+                .map_err(|error| at(error, DataStep::Index(index.into())))
                 .transpose()
         })
         .collect()
@@ -188,15 +214,31 @@ fn freeze_places<W: Polar>(
 /// `fs: [read: [...], write: [...], deny: [...]]`, lists of places, where
 /// `deny` carves holes inside the `read`/`write` prefix regions.
 fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
-    let at = within(err_prefix);
+    let at = |error| within(err_prefix)(error);
     let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
-    for (sub, paths) in table_of(value, "fs: [read: []]").map_err(&at)? {
-        let list = |paths: &Value| list_of(paths, "places").map_err(&at);
+    for (sub, paths) in table_of(value, "fs: [read: []]").map_err(at)? {
+        let list = |paths: &Value| list_of(paths).map_err(|e| at_field(e, sub)).map_err(at);
         match sub {
-            "read" => read = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
-            "write" => write = freeze_places::<Trace>(&list(&paths)?, ctx).map_err(&at)?,
-            "deny" => deny = freeze_places::<Excluded>(&list(&paths)?, ctx).map_err(&at)?,
-            _ => return Err(at(Error::new(nested("fs").unknown_key(sub)))),
+            "read" => {
+                read = freeze_places::<Trace>(&list(&paths)?, ctx)
+                    .map_err(|e| at_field(e, "read"))
+                    .map_err(at)?;
+            }
+            "write" => {
+                write = freeze_places::<Trace>(&list(&paths)?, ctx)
+                    .map_err(|e| at_field(e, "write"))
+                    .map_err(at)?;
+            }
+            "deny" => {
+                deny = freeze_places::<Excluded>(&list(&paths)?, ctx)
+                    .map_err(|e| at_field(e, "deny"))
+                    .map_err(at)?;
+            }
+            _ => {
+                return Err(at(invalid_error(InvalidCause::UnknownField(
+                    nested("fs").unknown_key(sub),
+                ))));
+            }
         }
     }
     Ok(FsLayer::new(read, write, deny))
@@ -224,11 +266,12 @@ fn decode_verbs<V: FromStr + Ord>(
     vocab: &Vocab,
     err_prefix: &str,
 ) -> Result<BTreeSet<V>, Error> {
-    let at = within(err_prefix);
-    list_of(value, &format!("{}s", vocab.noun))
-        .map_err(&at)?
+    let at = |error| within(err_prefix)(error);
+    list_of(value)
+        .map_err(at)?
         .iter()
-        .map(|item| nullary_tag(&item, vocab))
+        .enumerate()
+        .map(|(index, item)| nullary_tag(&item, vocab).map_err(|e| at_index(e, index)))
         .collect::<Result<_, _>>()
         .map_err(at)
 }
@@ -241,15 +284,7 @@ fn bare_name(name: &str) -> Result<(), Error> {
     if !path_shaped(name) {
         return Ok(());
     }
-    Err(Error::new(format!(
-        "{} takes a bare command name, not {}",
-        code("`name"),
-        quote_word(name)
-    ))
-    .with_hint(
-        "for a path write `` `absolute /path `` or `` `cwd relative/path ``; \
-         for a directory of programs, `` `dir `absolute /path ``",
-    ))
+    Err(grant_error(GrantFailure::BareNameRequired(name.into())))
 }
 
 /// Whether `name` reads as a place rather than a command name: empty,
@@ -275,16 +310,9 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Err
     if let Placed::Walked(walked) = &placed
         && walked.real.followed().kind() == Some(Kind::Dir)
     {
-        let cited = |target: Target| code(&target.to_string());
-        return Err(Error::new(format!(
-            "{} is a directory, so as an exec target it names a binary that \
-             cannot exist",
-            cited(Target::File(place.clone()))
-        ))
-        .with_hint(format!(
-            "did you mean {}?",
-            cited(Target::Dir(place.clone()))
-        )));
+        return Err(grant_error(GrantFailure::ProgramIsDirectory(Target::File(
+            place.clone(),
+        ))));
     }
     Ok(vec![W::file(placed.grant()?)?])
 }
@@ -292,16 +320,15 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Err
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
 fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let payload = tag.payload.ok_or_else(|| {
-        Error::new(format!("{} needs a place or a selector", code("`dir")))
-            .with_hint(DIR_TARGET.untagged)
+        invalid_error(InvalidCause::MissingPayload("dir".into())).with_hint(DIR_TARGET.untagged)
     })?;
     let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
     let dirs = if let Some(selector) = selector_of(&inner)? {
         ctx.selector::<W>(selector)?
     } else if let Some(place) = place_of(&inner)? {
-        ctx.walked::<W>(&place)?
-            .map(Placed::grant)
-            .transpose()?
+        ctx.walked::<W>(&place)
+            .and_then(|placed| placed.map(Placed::grant).transpose())
+            .map_err(|e| at(e, DataStep::Payload(place.anchor.tag().into_owned())))?
             .into_iter()
             .collect()
     } else {
@@ -316,14 +343,23 @@ fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, 
     let tag = Tag::of(value).ok_or_else(|| untagged(&EXEC_TARGET, value))?;
     match tag.label {
         "name" => {
-            let name = tag.text(&EXEC_TARGET, "a command name")?;
-            bare_name(name)?;
+            let name = tag.text(&EXEC_TARGET)?;
+            bare_name(name).map_err(|e| at(e, DataStep::Payload("name".into())))?;
             let path = ctx.var("PATH");
             name_rules::<W>(name, path.as_deref(), cfg!(unix))
+                .map_err(|e| at(e, DataStep::Payload("name".into())))
         }
-        "dir" => dir_rules::<W>(&tag, ctx),
+        "dir" => dir_rules::<W>(&tag, ctx).map_err(|e| {
+            if tag.payload.is_some() {
+                at(e, DataStep::Payload("dir".into()))
+            } else {
+                e
+            }
+        }),
         _ => match place_of(&tag)? {
-            Some(place) => file_rules::<W>(&place, ctx),
+            Some(place) => {
+                file_rules::<W>(&place, ctx).map_err(|e| at(e, DataStep::Payload(tag.label.into())))
+            }
             None => Err(unknown_tag(&EXEC_TARGET, tag.label)),
         },
     }
@@ -333,7 +369,10 @@ fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, 
 fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let rules: Vec<_> = list
         .iter()
-        .map(|item| decode_target::<W>(&item, ctx))
+        .enumerate()
+        .map(|(index, item)| {
+            decode_target::<W>(&item, ctx).map_err(|error| at(error, DataStep::Index(index.into())))
+        })
         .collect::<Result<_, _>>()?;
     Ok(rules.into_iter().flatten().collect())
 }
@@ -341,16 +380,22 @@ fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, E
 /// `exec: [allow: [...], deny: [...]]`.  Argument restrictions are gone: a
 /// target is admitted or denied whatever its arguments.
 fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
-    let at = within(err_prefix);
+    let at = |error| within(err_prefix)(error);
     let mut rules = Vec::new();
-    for (key, targets) in table_of(value, "exec: [allow: []]").map_err(&at)? {
+    for (key, targets) in table_of(value, "exec: [allow: []]").map_err(at)? {
         let decode = match key {
             "allow" => decode_targets::<Trace>,
             "deny" => decode_targets::<Excluded>,
             other => return Err(at(unknown_exec_key(other, &targets))),
         };
-        let list = list_of(&targets, "targets").map_err(&at)?;
-        rules.extend(decode(&list, ctx).map_err(&at)?);
+        let list = list_of(&targets)
+            .map_err(|e| at_field(e, key))
+            .map_err(at)?;
+        rules.extend(
+            decode(&list, ctx)
+                .map_err(|e| at_field(e, key))
+                .map_err(at)?,
+        );
     }
     Ok(rules.into_iter().collect())
 }
@@ -366,7 +411,7 @@ fn is_old_policy(value: &Value) -> bool {
 }
 
 fn unknown_exec_key(key: &str, value: &Value) -> Error {
-    let err = Error::new(nested("exec").unknown_key(key));
+    let err = invalid_error(InvalidCause::UnknownField(nested("exec").unknown_key(key)));
     if !is_old_policy(value) || !near_names(key, ["allow", "deny"], 1).is_empty() {
         return err;
     }
@@ -399,30 +444,48 @@ pub(crate) fn decode_capability_map(
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, Error> {
     let entries = settings_map(value).ok_or_else(|| {
-        Error::new(format!(
-            "{err_prefix} expects a record or `()`, got {}",
-            value.type_name()
-        ))
+        shape(
+            value,
+            Expected::AnyOf(vec![ValueShape::Map, ValueShape::Unit]),
+        )
+        .with_context(err_prefix)
     })?;
     let (mut exec, mut fs, mut net, mut gpu, mut editor, mut shell) =
         (None, None, None, None, None, None);
     for (k, v) in &*entries {
-        let at = format!("{err_prefix} {k}");
-        match k {
-            "exec" => exec = Some(decode_exec(&v, &at, ctx)?),
-            "fs" => fs = Some(decode_fs(&v, &at, ctx)?),
-            "net" => net = Some(decode_veto::<Net>(&v, &NET, &at)?),
-            "gpu" => gpu = Some(decode_veto::<Gpu>(&v, &GPU, &at)?),
-            "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &at)?),
-            "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &at)?),
-            other => {
-                let table = declared(ContractForm::Grant);
-                return Err(Error::new(match table.holds(other) {
-                    Some(Holds::Refused(advice)) => format!("{err_prefix}: {advice}"),
-                    _ => format!("{err_prefix}: {}", table.unknown_key(other)),
-                }));
+        let context = format!("{err_prefix} {k}");
+        let decoded = (|| -> Result<(), Error> {
+            match k {
+                "exec" => exec = Some(decode_exec(&v, &context, ctx)?),
+                "fs" => fs = Some(decode_fs(&v, &context, ctx)?),
+                "net" => net = Some(decode_veto::<Net>(&v, &NET, &context)?),
+                "gpu" => gpu = Some(decode_veto::<Gpu>(&v, &GPU, &context)?),
+                "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &context)?),
+                "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &context)?),
+                other => {
+                    let table = declared(ContractForm::Grant);
+                    return Err(match table.holds(other) {
+                        Some(Holds::Refused(cause)) => {
+                            grant_error(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                                form: GrantForm::Grant,
+                                key: other.into(),
+                                cause: *cause,
+                            }))
+                        }
+                        _ => invalid_error(InvalidCause::UnknownField(table.unknown_key(other))),
+                    }
+                    .with_context(err_prefix));
+                }
             }
-        }
+            Ok(())
+        })();
+        decoded.map_err(|error| {
+            if matches!(k, "exec" | "fs" | "net" | "gpu" | "editor" | "shell") {
+                at_field(error, k)
+            } else {
+                error
+            }
+        })?;
     }
     Ok(GrantLayer {
         exec,
@@ -588,6 +651,31 @@ mod tests {
 
     fn refusal(value: &Value) -> Error {
         decode(value).unwrap_err()
+    }
+
+    fn assert_invalid(error: &Error, path: Vec<DataStep>, cause: InvalidCause) {
+        assert_eq!(
+            error.reason,
+            Reason::Invalid(Box::new(crate::fact::InvalidFailure {
+                operation: "grant".into(),
+                path,
+                cause,
+            }))
+        );
+    }
+
+    fn assert_shape(error: &Error, path: Vec<DataStep>, expected: Expected, found: Found) {
+        let description = format!("expected {}, got {}", expected.describe(), found.describe());
+        assert!(error.describe().ends_with(&description), "{error}");
+        assert_invalid(
+            error,
+            path,
+            InvalidCause::Shape(ShapeFailure { expected, found }),
+        );
+    }
+
+    fn tags(vocab: &Vocab) -> Expected {
+        Expected::Tags((vocab.row)().into_iter().map(|(tag, _)| tag).collect())
     }
 
     fn exec_refusal(exec_value: Value) -> Error {
@@ -849,7 +937,7 @@ mod tests {
         ] {
             let e = exec_refusal(exec(vec![tagged("name", name)], vec![]));
             assert!(e.to_string().contains("bare command name"), "{name}: {e}");
-            assert!(e.hints()[0].contains("`` `absolute /path ``"));
+            assert!(e.reason.advice()[0].contains("`` `absolute /path ``"));
         }
     }
 
@@ -864,6 +952,15 @@ mod tests {
     #[test]
     fn an_unknown_target_tag_lists_the_targets_and_offers_the_nearest() {
         let e = exec_refusal(exec(vec![tagged("nmae", "git")], vec![]));
+        assert_invalid(
+            &e,
+            vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+            ],
+            InvalidCause::Grant(EXEC_TARGET.refuse("nmae")),
+        );
         assert!(
             e.to_string().contains("`` `nmae `` is not an exec target;"),
             "{e}"
@@ -882,7 +979,7 @@ mod tests {
     fn an_unwrapped_selector_is_refused_with_the_dir_hint() {
         for sel in ["path", "system", "homebrew"] {
             let e = exec_refusal(exec(vec![bare(sel)], vec![]));
-            let hint = &e.hints()[0];
+            let hint = &e.reason.advice()[0];
             assert!(hint.contains(&format!("write `` `dir `{sel} ``")), "{hint}");
         }
     }
@@ -893,7 +990,7 @@ mod tests {
         let path = tmp.path().to_string_lossy().into_owned();
         let e = exec_refusal(exec(vec![tagged("absolute", &path)], vec![]));
         assert!(e.to_string().contains("is a directory"), "{e}");
-        assert!(e.hints()[0].contains("`dir `absolute"), "dir hint");
+        assert!(e.reason.advice()[0].contains("`dir `absolute"), "dir hint");
     }
 
     #[test]
@@ -903,15 +1000,35 @@ mod tests {
             dir(bare("path")),
             Value::string("/x"),
         ] {
-            let e = exec_refusal(exec(vec![dir(payload)], vec![]));
-            assert!(e.to_string().contains("place or a selector"), "{e}");
+            let e = exec_refusal(exec(vec![dir(payload.clone())], vec![]));
+            let path = vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("dir".into()),
+            ];
+            if let Some(tag) = Tag::of(&payload) {
+                assert_invalid(&e, path, InvalidCause::Grant(DIR_TARGET.refuse(tag.label)));
+                assert!(e.describe().contains("place or a selector"), "{e}");
+            } else {
+                assert_shape(&e, path, tags(&DIR_TARGET), found(&payload));
+                assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.untagged)]);
+                assert!(e.hints()[0].contains("place or a selector"));
+            }
         }
         let e = exec_refusal(exec(vec![bare("dir")], vec![]));
-        assert!(
-            e.to_string()
-                .contains("`` `dir `` needs a place or a selector"),
-            "{e}"
+        assert_invalid(
+            &e,
+            vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+            ],
+            InvalidCause::MissingPayload("dir".into()),
         );
+        assert!(e.describe().contains("tag `dir` needs a payload"), "{e}");
+        assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.untagged)]);
+        assert!(e.hints()[0].contains("place or a selector"));
     }
 
     #[test]
@@ -920,7 +1037,21 @@ mod tests {
             vec![dir(Value::variant("system", Some(Value::Bool(true))))],
             vec![],
         ));
+        assert_invalid(
+            &e,
+            vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("dir".into()),
+            ],
+            InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                tag: "system".into(),
+                found: Found::Bool(true),
+            }),
+        );
         assert!(e.to_string().contains("takes no payload"), "{e}");
+        assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.payload)]);
     }
 
     /// Per-command maps, string policies and subcommand lists are gone, and
@@ -934,21 +1065,44 @@ mod tests {
             rec(&[("cargo", list(vec![Value::string("build")]))]),
         ] {
             let e = exec_refusal(value.clone());
-            let text = format!(
-                "{e} {}",
-                e.hints().first().map(|h| &**h).unwrap_or_default()
-            );
-            assert!(
-                text.contains("record") || text.contains("no longer supported"),
-                "{value:?}: {text}"
-            );
+            if let Value::Map(entries) = &value {
+                let (key, _) = entries.iter().next().unwrap();
+                assert_invalid(
+                    &e,
+                    vec![DataStep::Field("exec".into())],
+                    InvalidCause::UnknownField(nested("exec").unknown_key(key)),
+                );
+                assert!(e.hints()[0].contains("no longer supported"));
+            } else {
+                assert_shape(
+                    &e,
+                    vec![DataStep::Field("exec".into())],
+                    Expected::Shape(ValueShape::Map),
+                    found(&value),
+                );
+                assert_eq!(
+                    e.hints(),
+                    [Box::<str>::from(
+                        "for a table that admits nothing write `exec: [allow: []]`"
+                    )]
+                );
+            }
+            assert_eq!(e.context(), Some("test exec"));
         }
     }
 
     #[test]
     fn a_misspelt_exec_key_offers_the_real_ones() {
         let e = exec_refusal(rec(&[("alow", list(vec![]))]));
-        assert!(e.to_string().contains("takes allow, deny"), "{e}");
+        assert_invalid(
+            &e,
+            vec![DataStep::Field("exec".into())],
+            InvalidCause::UnknownField(crate::fact::UnknownField {
+                field: "alow".into(),
+                offered: vec!["allow".into(), "deny".into()],
+            }),
+        );
+        assert!(e.describe().contains("offered: allow, deny"), "{e}");
         assert!(e.to_string().ends_with("(did you mean 'allow'?)"), "{e}");
         assert_eq!(e.hints(), [] as [Box<str>; 0]);
     }
@@ -963,7 +1117,12 @@ mod tests {
         }
         for value in [list(vec![bare("git")]), Value::Bool(true), rec(&[])] {
             let e = exec_refusal(rec(&[("only", value)]));
-            assert!(e.to_string().contains("unknown key 'only'"), "{e}");
+            assert_invalid(
+                &e,
+                vec![DataStep::Field("exec".into())],
+                InvalidCause::UnknownField(nested("exec").unknown_key("only")),
+            );
+            assert!(e.describe().contains("unknown field \"only\""), "{e}");
             assert!(e.hints().is_empty(), "{:?}", e.hints());
         }
     }
@@ -975,7 +1134,12 @@ mod tests {
             "fs",
             rec(&[("raed", list(vec![tagged("cwdd", ".")]))]),
         )]));
-        assert!(e.to_string().contains("unknown key 'raed'"), "{e}");
+        assert_invalid(
+            &e,
+            vec![DataStep::Field("fs".into())],
+            InvalidCause::UnknownField(nested("fs").unknown_key("raed")),
+        );
+        assert!(e.describe().contains("unknown field \"raed\""), "{e}");
     }
 
     /// Specific advice replaces the nearest-tag guess, which would contradict it.
@@ -983,7 +1147,7 @@ mod tests {
     fn a_dir_of_a_name_gives_its_advice_and_no_guess() {
         let e = exec_refusal(exec(vec![dir(tagged("name", "git"))], vec![]));
         assert!(!e.to_string().contains("did you mean"), "{e}");
-        assert!(e.hints()[0].contains("`` `name git ``"));
+        assert!(e.reason.advice()[0].contains("`` `name git ``"));
     }
 
     #[test]
@@ -1001,7 +1165,24 @@ mod tests {
     #[test]
     fn a_unit_exec_table_shows_the_record_it_wants() {
         let e = exec_refusal(Value::Unit);
-        assert!(e.to_string().contains("exec: [allow: []]"), "{e}");
+        assert_shape(
+            &e,
+            vec![DataStep::Field("exec".into())],
+            Expected::Shape(ValueShape::Map),
+            Found::Unit,
+        );
+        assert_eq!(e.context(), Some("test exec"));
+        assert_eq!(
+            e.hints(),
+            [Box::<str>::from(
+                "for a table that admits nothing write `exec: [allow: []]`"
+            )]
+        );
+        assert_eq!(e.reason.advice(), [] as [String; 0]);
+        assert!(
+            e.plain()
+                .contains("hint: for a table that admits nothing write `exec: [allow: []]`")
+        );
     }
 
     // ── fs ──
@@ -1027,12 +1208,31 @@ mod tests {
             bare("system"),
             bare("homebrew"),
         ] {
-            let e = fs_refusal(vec![item]);
+            let e = fs_refusal(vec![item.clone()]);
+            let tag = Tag::of(&item).unwrap();
+            assert_invalid(
+                &e,
+                vec![
+                    DataStep::Field("fs".into()),
+                    DataStep::Field("read".into()),
+                    DataStep::Index(0usize.into()),
+                ],
+                InvalidCause::Grant(PLACE.refuse(tag.label)),
+            );
             assert!(e.to_string().contains("is not a place"), "{e}");
-            assert!(e.hints()[0].contains("fs lists take places"));
+            assert!(e.reason.advice()[0].contains("fs lists take places"));
         }
         let e = fs_refusal(vec![Value::string("/tmp")]);
-        assert!(e.to_string().contains("expected a place"), "{e}");
+        assert_shape(
+            &e,
+            vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("read".into()),
+                DataStep::Index(0usize.into()),
+            ],
+            tags(&PLACE),
+            Found::Text(TextPreview::new("/tmp")),
+        );
         assert!(e.hints()[0].contains("`absolute /tmp"));
         let m = fs_refusal(vec![tagged("cwdd", "x")]).to_string();
         assert!(
@@ -1045,8 +1245,18 @@ mod tests {
             m.ends_with("`` `xdg-bin `` (did you mean `` `cwd ``?)"),
             "{m}"
         );
-        let m = fs_refusal(vec![bare("cwd")]).to_string();
-        assert!(m.contains("`` `cwd `` needs a payload"), "{m}");
+        let e = fs_refusal(vec![bare("cwd")]);
+        assert_invalid(
+            &e,
+            vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("read".into()),
+                DataStep::Index(0usize.into()),
+            ],
+            InvalidCause::MissingPayload("cwd".into()),
+        );
+        assert!(e.describe().contains("tag `cwd` needs a payload"), "{e}");
+        assert_eq!(e.hints(), [Box::<str>::from(PLACE.payload)]);
     }
 
     #[test]
@@ -1258,8 +1468,14 @@ mod tests {
         let layer = decode(&rec(&[("net", bare("offline"))])).unwrap();
         assert_eq!(layer.axes().net, Some(Net::Offline));
         for value in [Value::Bool(true), Value::Bool(false)] {
-            let e = refusal(&rec(&[("net", value)]));
-            assert!(e.to_string().contains("expected a net mode"), "{e}");
+            let e = refusal(&rec(&[("net", value.clone())]));
+            assert_shape(
+                &e,
+                vec![DataStep::Field("net".into())],
+                tags(&NET),
+                found(&value),
+            );
+            assert_eq!(e.context(), Some("test net"));
             assert!(
                 e.hints()[0].contains("omit `net` to inherit, or write `` net: `offline ``"),
                 "hint"
@@ -1280,8 +1496,14 @@ mod tests {
         let layer = decode(&rec(&[("gpu", bare("withheld"))])).unwrap();
         assert_eq!(layer.axes().gpu, Some(Gpu::Withheld));
         for value in [Value::Bool(true), Value::Bool(false)] {
-            let e = refusal(&rec(&[("gpu", value)]));
-            assert!(e.to_string().contains("expected a GPU mode"), "{e}");
+            let e = refusal(&rec(&[("gpu", value.clone())]));
+            assert_shape(
+                &e,
+                vec![DataStep::Field("gpu".into())],
+                tags(&GPU),
+                found(&value),
+            );
+            assert_eq!(e.context(), Some("test gpu"));
             assert!(
                 e.hints()[0].contains("omit `gpu` to inherit, or write `` gpu: `withheld ``"),
                 "hint"
@@ -1330,11 +1552,25 @@ mod tests {
     #[test]
     fn the_boolean_record_surface_is_refused() {
         for key in ["editor", "shell"] {
-            let m = refusal(&rec(&[(key, rec(&[("read", Value::Bool(true))]))])).to_string();
-            assert!(m.contains("expected a list of"), "{m}");
+            let e = refusal(&rec(&[(key, rec(&[("read", Value::Bool(true))]))]));
+            assert_shape(
+                &e,
+                vec![DataStep::Field(key.into())],
+                Expected::Shape(ValueShape::List),
+                Found::Map,
+            );
+            assert_eq!(e.context(), Some(format!("test {key}").as_str()));
         }
         let e = refusal(&rec(&[("shell", list(vec![Value::string("chdir")]))]));
-        assert!(e.to_string().contains("expected a verb"), "{e}");
+        assert_shape(
+            &e,
+            vec![
+                DataStep::Field("shell".into()),
+                DataStep::Index(0usize.into()),
+            ],
+            tags(&SHELL),
+            Found::Text(TextPreview::new("chdir")),
+        );
         assert!(e.hints()[0].contains("`shell` takes the list of verbs"));
         let m = refusal(&rec(&[(
             "editor",
@@ -1347,11 +1583,20 @@ mod tests {
     #[test]
     fn detach_is_a_shell_verb_not_a_key() {
         let e = refusal(&rec(&[("detach", Value::Bool(true))]));
-        assert!(e.to_string().contains("`detach` is a shell verb"), "{e}");
-        assert!(
-            e.to_string().contains("`` shell: [`chdir, `detach] ``"),
-            "{e}"
+        assert_invalid(
+            &e,
+            vec![],
+            InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                form: GrantForm::Grant,
+                key: "detach".into(),
+                cause: crate::fact::RefusedGrantKey::DetachMovedToShell,
+            })),
         );
+        assert_eq!(e.context(), Some("test"));
+        assert!(e.reason.advice()[0].contains("`detach` is a shell verb"));
+        assert!(e.reason.advice()[0].contains("`` shell: [`chdir, `detach] ``"));
+        assert_eq!(e.hints(), []);
+        assert!(e.plain().contains("`` shell: [`chdir, `detach] ``"));
     }
 
     // ── drift ──
@@ -1385,9 +1630,20 @@ mod tests {
         let table = declared(ContractForm::Grant);
         for key in table.keys {
             match &key.holds {
-                Holds::Refused(advice) => {
+                Holds::Refused(cause) => {
                     let e = refusal(&rec(&[(key.label, Value::Unit)]));
-                    assert_eq!(e.to_string(), format!("test: {advice}"));
+                    assert_invalid(
+                        &e,
+                        vec![],
+                        InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
+                            form: GrantForm::Grant,
+                            key: key.label.into(),
+                            cause: *cause,
+                        })),
+                    );
+                    assert_eq!(e.reason.advice(), [cause.advice()]);
+                    assert_eq!(e.context(), Some("test"));
+                    assert_eq!(e.hints(), []);
                 }
                 Holds::Table(sub) => {
                     for inner in sub.keys {
@@ -1410,18 +1666,247 @@ mod tests {
     fn an_unknown_key_is_refused_in_its_tables_words_at_each_depth() {
         let table = declared(ContractForm::Grant);
         let e = refusal(&rec(&[("bogus", Value::Unit)]));
-        assert_eq!(
-            e.to_string(),
-            format!("test: {}", table.unknown_key("bogus"))
+        assert_invalid(
+            &e,
+            vec![],
+            InvalidCause::UnknownField(table.unknown_key("bogus")),
         );
+        assert_eq!(e.context(), Some("test"));
         for key in table.keys {
             if let Holds::Table(sub) = &key.holds {
                 let e = refusal(&rec(&[(key.label, rec(&[("bogus", list(vec![]))]))]));
-                assert_eq!(
-                    e.to_string(),
-                    format!("test {}: {}", key.label, sub.unknown_key("bogus"))
+                assert_invalid(
+                    &e,
+                    vec![DataStep::Field(key.label.into())],
+                    InvalidCause::UnknownField(sub.unknown_key("bogus")),
                 );
+                assert_eq!(e.context(), Some(format!("test {}", key.label).as_str()));
             }
         }
+    }
+    #[test]
+    fn grant_decode_dir_subpath_failure_keeps_both_payload_steps() {
+        let error = exec_refusal(exec(vec![dir(tagged("cwd", "/x"))], vec![]));
+        assert_invalid(
+            &error,
+            vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("dir".into()),
+                DataStep::Payload("cwd".into()),
+            ],
+            InvalidCause::Grant(GrantFailure::Subpath(crate::fact::GrantFailureSubpath {
+                anchor: Anchor::Cwd,
+                raw: "/x".into(),
+                cause: crate::fact::RelativeSubpathRefusal::Rooted,
+            })),
+        );
+        assert_eq!(error.context(), Some("test exec"));
+        assert!(error.describe().contains("takes a relative path"));
+        assert!(error.describe().contains("`absolute /x"));
+        assert_eq!(error.hints(), []);
+    }
+
+    #[test]
+    fn grant_decode_fs_root_exclusion_keeps_its_anchor_payload_step() {
+        let error = refusal(&rec(&[(
+            "fs",
+            rec(&[("deny", list(vec![tagged("absolute", "/")]))]),
+        )]));
+        assert_invalid(
+            &error,
+            vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("deny".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("absolute".into()),
+            ],
+            InvalidCause::Grant(GrantFailure::RootExclusion(Anchor::Absolute.place("/"))),
+        );
+        assert_eq!(error.context(), Some("test fs"));
+        assert!(error.describe().contains("filesystem root"));
+        assert!(error.reason.advice()[0].contains("grant none"));
+        assert_eq!(error.hints(), []);
+    }
+
+    #[test]
+    fn grant_decode_prefixes_only_present_payload_values_once() {
+        for (value, cause, payload_path) in [
+            (
+                Value::variant("cwd", Some(Value::Bool(true))),
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::String),
+                    found: Found::Bool(true),
+                }),
+                vec![DataStep::Payload("cwd".into())],
+            ),
+            (
+                bare("cwd"),
+                InvalidCause::MissingPayload("cwd".into()),
+                vec![],
+            ),
+            (
+                bare("unknown"),
+                InvalidCause::Grant(PLACE.refuse("unknown")),
+                vec![],
+            ),
+        ] {
+            let error = fs_refusal(vec![value]);
+            let mut path = vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("read".into()),
+                DataStep::Index(0usize.into()),
+            ];
+            path.extend(payload_path);
+            assert_invalid(&error, path, cause);
+        }
+        for (inner, cause, payload_path) in [
+            (
+                Value::variant("cwd", Some(Value::Bool(true))),
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::String),
+                    found: Found::Bool(true),
+                }),
+                vec![DataStep::Payload("cwd".into())],
+            ),
+            (
+                bare("cwd"),
+                InvalidCause::MissingPayload("cwd".into()),
+                vec![],
+            ),
+            (
+                bare("unknown"),
+                InvalidCause::Grant(DIR_TARGET.refuse("unknown")),
+                vec![],
+            ),
+            (
+                Value::variant("system", Some(Value::Bool(true))),
+                InvalidCause::UnexpectedPayload(UnexpectedPayload {
+                    tag: "system".into(),
+                    found: Found::Bool(true),
+                }),
+                vec![],
+            ),
+        ] {
+            let error = exec_refusal(exec(vec![dir(inner)], vec![]));
+            let mut path = vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("dir".into()),
+            ];
+            path.extend(payload_path);
+            assert_invalid(&error, path, cause);
+        }
+        let context = FreezeCtx::at(
+            EnvVars::from_pairs([
+                ("PATH", ""),
+                ("HOME", if cfg!(windows) { r"C:\h" } else { "/h" }),
+            ])
+            .unwrap(),
+            crate::path::CwdPath::new(if cfg!(windows) {
+                r"C:\work".into()
+            } else {
+                "/work".into()
+            })
+            .unwrap(),
+        );
+        let error = decode_capability_map(
+            &rec(&[("exec", exec(vec![dir(bare("path"))], vec![]))]),
+            "test",
+            &context,
+        )
+        .unwrap_err();
+        assert_invalid(
+            &error,
+            vec![
+                DataStep::Field("exec".into()),
+                DataStep::Field("allow".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("dir".into()),
+            ],
+            InvalidCause::Grant(GrantFailure::EmptyPathSelector),
+        );
+    }
+
+    #[test]
+    fn grant_decode_keeps_shape_paths_and_unknown_fields_at_their_containing_record() {
+        let error = refusal(&rec(&[(
+            "fs",
+            rec(&[("read", list(vec![tagged("cwd", "ok"), Value::Bool(false)]))]),
+        )]));
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("a typed input refusal");
+        };
+        assert_eq!(
+            failure.path,
+            vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("read".into()),
+                DataStep::Index(1usize.into())
+            ]
+        );
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: tags(&PLACE),
+                found: Found::Bool(false),
+            })
+        );
+
+        let error = refusal(&rec(&[("fs", rec(&[("unknown", Value::Bool(false))]))]));
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("a typed field refusal");
+        };
+        assert_eq!(failure.path, vec![DataStep::Field("fs".into())]);
+        assert_eq!(
+            failure.cause,
+            InvalidCause::UnknownField(nested("fs").unknown_key("unknown"))
+        );
+    }
+
+    #[test]
+    fn grant_decode_keeps_payload_paths_and_bounded_text_previews() {
+        let error = fs_refusal(vec![Value::variant("cwd", Some(Value::Bool(true)))]);
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("a typed payload refusal");
+        };
+        assert_eq!(
+            failure.path,
+            vec![
+                DataStep::Field("fs".into()),
+                DataStep::Field("read".into()),
+                DataStep::Index(0usize.into()),
+                DataStep::Payload("cwd".into())
+            ]
+        );
+        let InvalidCause::Shape(shape) = failure.cause else {
+            panic!("a shape refusal");
+        };
+        assert_eq!(shape.expected, Expected::Shape(ValueShape::String));
+        assert_eq!(shape.found, Found::Bool(true));
+        assert_eq!(
+            found(&Value::string("abcdefghijklmnopqrstuvwxyz")),
+            Found::Text(TextPreview::new("abcdefghijklmnopqrstuvwxyz"))
+        );
+    }
+
+    #[test]
+    fn grant_decode_missing_payload_and_refused_key_are_typed() {
+        let error = fs_refusal(vec![bare("cwd")]);
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("a typed payload refusal");
+        };
+        assert_eq!(failure.cause, InvalidCause::MissingPayload("cwd".into()));
+        let error = refusal(&rec(&[("detach", Value::Bool(true))]));
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("a typed key refusal");
+        };
+        assert_eq!(failure.path, [] as [DataStep; 0]);
+        assert!(matches!(
+            failure.cause,
+            InvalidCause::Grant(GrantFailure::RefusedKey(_))
+        ));
     }
 }

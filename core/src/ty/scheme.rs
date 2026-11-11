@@ -7,6 +7,7 @@ use super::kind::Kind;
 use super::{
     CompTy, CompTyNode, CompTyVar, Grade, GradeVar, RowNode, RowVar, Term, Ty, TyNode, TyVar, Var,
 };
+use crate::fact::OpenScheme;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Deref;
@@ -213,12 +214,13 @@ pub struct Closed(Arc<Scheme>);
 impl Closed {
     /// # Errors
     /// `scheme` writes a variable it gives no role.
-    pub(crate) fn new(scheme: Arc<Scheme>) -> Result<Self, String> {
-        let foreign = scheme.foreign().next();
+    pub(crate) fn new(scheme: Arc<Scheme>) -> Result<Self, OpenScheme> {
+        let foreign = scheme.foreign().next().map(|var| format!("{var:?}"));
         match foreign {
-            Some(var) => Err(format!(
-                "scheme `{scheme}` is not closed: it writes {var:?}, which it neither quantifies, anchors by μ, nor records as weak"
-            )),
+            Some(variable) => Err(OpenScheme {
+                scheme: scheme.to_string(),
+                variable,
+            }),
             None => Ok(Self(scheme)),
         }
     }
@@ -251,7 +253,8 @@ impl serde::Serialize for Closed {
 
 impl<'de> serde::Deserialize<'de> for Closed {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::new(Arc::new(Scheme::deserialize(deserializer)?)).map_err(serde::de::Error::custom)
+        Self::new(Arc::new(Scheme::deserialize(deserializer)?))
+            .map_err(|open| serde::de::Error::custom(open.describe()))
     }
 }
 
@@ -270,7 +273,7 @@ impl Binders {
         let mut binders = Self(Scheme::mono(Ty::unit()));
         let ty = rule(&mut binders);
         Closed::new(Arc::new(Scheme { ty, ..binders.0 }))
-            .unwrap_or_else(|error| panic!("builtin scheme: {error}"))
+            .unwrap_or_else(|open| panic!("builtin scheme: {}", open.describe()))
     }
 
     pub fn ty(&mut self, kind: Kind) -> TyVar {

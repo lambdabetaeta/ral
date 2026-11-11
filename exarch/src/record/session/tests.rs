@@ -3,6 +3,10 @@ use crate::provider::Tuning;
 use crate::record::context::{ItemKind, Location};
 use crate::record::{Spent, TurnKind};
 use genai::chat::{ContentPart, ToolCall};
+use ral_core::fact::{
+    ContextFailure, ContextFailureCurrentlyWritten, ContextFailureTurnNotRecorded,
+    RecordReadFailure,
+};
 use ral_core::own::TestDir;
 use regex::Regex;
 use std::fs;
@@ -188,12 +192,18 @@ fn continues_resolution_requires_the_live_prompt() {
 fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_an_eviction() {
     let mut live = fresh_root();
     live.append_user("live".into(), None, Voice::Human).unwrap();
+    let failure = live
+        .evict(span(1, 1), None, EditAuthority::Model)
+        .unwrap_err();
+    let Uncommitted::Refused(cause) = &failure else {
+        panic!("context refusal")
+    };
     assert_eq!(
-        live.evict(span(1, 1), None, EditAuthority::Model)
-            .unwrap_err()
-            .to_string(),
-        "turn 1 is being written now: an eviction keeps the work in hand"
+        cause,
+        &ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten { turn: 1u64.into() })
     );
+    assert_eq!(failure.to_string(), "turn 1 is being written now");
+    assert_eq!(cause.advice(), [] as [String; 0]);
 
     let mut unknown = fresh_root();
     complete_round(&mut unknown, "one", "one");
@@ -209,12 +219,40 @@ fn evict_refuses_the_unclosed_turn_the_unknown_and_a_run_cutting_an_eviction() {
     unknown
         .evict(span(1, 2), None, EditAuthority::Harness)
         .unwrap();
+    let failure = unknown
+        .evict(span(1, 1), None, EditAuthority::Model)
+        .unwrap_err();
+    let Uncommitted::Refused(cause) = &failure else {
+        panic!("context refusal")
+    };
     assert_eq!(
-        unknown
-            .evict(span(1, 1), None, EditAuthority::Model)
-            .unwrap_err()
-            .to_string(),
-        "turns 1–2 stand together under one note: name from: 1, to: 2 whole, or leave it"
+        cause,
+        &ContextFailure::StraddledEviction(ral_core::fact::ContextFailureStraddledEviction {
+            requested: ral_core::fact::TurnSpan {
+                from: 1u64.into(),
+                to: 1u64.into()
+            },
+            covering: ral_core::fact::TurnSpan {
+                from: 1u64.into(),
+                to: 2u64.into()
+            }
+        })
+    );
+    assert_eq!(
+        failure.to_string(),
+        "turn 1 cuts the eviction over turns 1–2; the covered turns stand together under one note"
+    );
+    assert_eq!(
+        cause
+            .advice()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[
+            "for an eviction, name from: 1, to: 2 whole, or leave it",
+            "to rewind around this note, use its boundaries: turn 1 or turn 3"
+        ]
     );
 }
 
@@ -624,19 +662,50 @@ fn evict_refuses_a_run_cutting_an_eviction_and_the_unclosed_turn() {
         complete_round(&mut s, prompt, prompt);
     }
     s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
+    let failure = s.evict(span(2, 2), None, EditAuthority::Model).unwrap_err();
+    let Uncommitted::Refused(cause) = &failure else {
+        panic!("context refusal")
+    };
     assert_eq!(
-        s.evict(span(2, 2), None, EditAuthority::Model)
-            .unwrap_err()
-            .to_string(),
-        "turns 1–4 stand together under one note: name from: 1, to: 4 whole, or leave it"
+        cause,
+        &ContextFailure::StraddledEviction(ral_core::fact::ContextFailureStraddledEviction {
+            requested: ral_core::fact::TurnSpan {
+                from: 2u64.into(),
+                to: 2u64.into()
+            },
+            covering: ral_core::fact::TurnSpan {
+                from: 1u64.into(),
+                to: 4u64.into()
+            }
+        })
+    );
+    assert_eq!(
+        failure.to_string(),
+        "turn 2 cuts the eviction over turns 1–4; the covered turns stand together under one note"
+    );
+    assert_eq!(
+        cause
+            .advice()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &[
+            "for an eviction, name from: 1, to: 4 whole, or leave it",
+            "to rewind around this note, use its boundaries: turn 1 or turn 5"
+        ]
     );
     s.append_user("four".into(), None, Voice::Human).unwrap();
+    let failure = s.evict(span(7, 7), None, EditAuthority::Model).unwrap_err();
+    let Uncommitted::Refused(cause) = &failure else {
+        panic!("context refusal")
+    };
     assert_eq!(
-        s.evict(span(7, 7), None, EditAuthority::Model)
-            .unwrap_err()
-            .to_string(),
-        "turn 7 is being written now: an eviction keeps the work in hand"
+        cause,
+        &ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten { turn: 7u64.into() })
     );
+    assert_eq!(failure.to_string(), "turn 7 is being written now");
+    assert_eq!(cause.advice(), [] as [String; 0]);
     assert_eq!(
         s.evict(span(99, 99), None, EditAuthority::Model)
             .unwrap_err()
@@ -666,7 +735,10 @@ fn read_transcript_reads_evicted_turns_byte_identically() {
     assert_eq!(after, before);
     assert_eq!(
         s.context().read_transcript(&[9]).unwrap_err(),
-        "turn 9 is not recorded: the latest is 4"
+        ContextFailure::TurnNotRecorded(ContextFailureTurnNotRecorded {
+            turn: 9u64.into(),
+            reach: Some(4u64.into())
+        })
     );
 }
 
@@ -697,8 +769,9 @@ fn a_record_that_does_not_hash_to_its_locus_is_refused_by_name() {
         .read_transcript(&[1, 2])
         .expect_err("a record that no longer hashes to its locus is unreadable");
     assert!(
-        refusal.contains("did not hash to the locus that named it"),
-        "the refusal must name the sum mismatch, got: {refusal}"
+        matches!(refusal, ContextFailure::ReadBack(ref failure)
+        if matches!(failure.cause, RecordReadFailure::LocusSealMismatch(_))),
+        "{refusal:?}"
     );
 }
 
@@ -764,7 +837,7 @@ fn a_transcript_read_refuses_the_turn_being_written() {
     .unwrap();
     assert_eq!(
         s.context().read_transcript(&[1, 2]).unwrap_err(),
-        "turn 2 is being written now: it is the one turn the transcript cannot read back yet"
+        ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten { turn: 2u64.into() })
     );
     assert_eq!(
         s.context()
@@ -775,7 +848,7 @@ fn a_transcript_read_refuses_the_turn_being_written() {
     );
     assert_eq!(
         s.context().read_transcript(&[]).unwrap_err(),
-        "`turns` names no turn: `!{range a b}` builds a run of ids"
+        ContextFailure::EmptySelection
     );
 }
 
@@ -818,13 +891,16 @@ fn grep_walks_resident_then_freed() {
         s.context()
             .grep_transcript(&regex("parser"), Some(&[9]))
             .unwrap_err(),
-        "turn 9 is not recorded: the latest is 4"
+        ContextFailure::TurnNotRecorded(ContextFailureTurnNotRecorded {
+            turn: 9u64.into(),
+            reach: Some(4u64.into())
+        })
     );
     assert_eq!(
         s.context()
             .grep_transcript(&regex("parser"), Some(&[]))
             .unwrap_err(),
-        "`turns` names no turn: omit it to search the whole transcript"
+        ContextFailure::EmptySelection
     );
 }
 
@@ -2382,11 +2458,10 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         .read_transcript(&[1, 2])
         .expect_err("a line the read cannot follow stops the lineage");
     assert!(
-        refusal.starts_with(&format!(
-            "turn 1 could not be read back from {}: ",
-            ral_core::path::shown(&source)
-        )) && refusal.contains("did not hash to the locus that named it"),
-        "{refusal}"
+        matches!(refusal, ContextFailure::ReadBack(ref failure)
+        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+            && matches!(failure.cause, RecordReadFailure::LocusSealMismatch(_))),
+        "{refusal:?}"
     );
 
     fs::remove_file(&source).expect("delete the ancestor's log");
@@ -2395,11 +2470,10 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         .read_transcript(&[1, 2])
         .expect_err("a deleted ancestor's log stops the lineage");
     assert!(
-        refusal.starts_with(&format!(
-            "turn 1 could not be read back from {}: ",
-            ral_core::path::shown(&source)
-        )),
-        "{refusal}"
+        matches!(refusal, ContextFailure::ReadBack(ref failure)
+        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+            && matches!(failure.cause, RecordReadFailure::Io(_))),
+        "{refusal:?}"
     );
 }
 
@@ -2692,11 +2766,10 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
         .read_transcript(&[1, 2])
         .expect_err("a read that names an unreadable turn is refused");
     assert!(
-        refusal.starts_with(&format!(
-            "turn 1 could not be read back from {}: ",
-            ral_core::path::shown(&source)
-        )),
-        "{refusal}"
+        matches!(refusal, ContextFailure::ReadBack(ref failure)
+        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+            && matches!(failure.cause, RecordReadFailure::Io(_))),
+        "{refusal:?}"
     );
 }
 
@@ -2883,10 +2956,153 @@ fn an_unreadable_parent_refuses_the_fork_by_file() {
     )
     .err()
     .expect("the parent's file is gone");
-    let text = error.to_string();
     assert!(
-        text.contains("turn 1 was inherited from")
-            && text.contains(&ral_core::path::shown(&source)),
-        "{text}"
+        matches!(&error.reason, Reason::Host(host)
+        if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
+            if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
+                && failure.record == ral_core::path::shown(&source)
+                && matches!(failure.cause, RecordReadFailure::Io(_)))),
+        "{error:?}"
     );
+    let orphan_path = parent.sessions_root().path().join("5").join(RECORD);
+    let prefix = crate::record::read_records(&orphan_path).unwrap();
+    assert!(
+        matches!(
+            prefix.as_slice(),
+            [
+                Record::Control(Control::SessionStarted(_)),
+                Record::Transcript(Transcript::Inherited { .. })
+            ]
+        ),
+        "the failed opening keeps its prefix, but appends no System: {prefix:?}"
+    );
+}
+
+#[test]
+fn context_mutation_refusals_keep_operation_state_role_and_result_ids() {
+    use ral_core::fact::{
+        ContextFailureAssistantRole, ContextFailureDuplicateToolResult, ContextFailureMutation,
+        ContextFailureToolResultCount, ContextFailureUnknownToolResult, ContextOperation,
+        ContextState, ProviderMessageRole,
+    };
+    let mut log = fresh_root();
+    assert_eq!(
+        log.render_messages().unwrap_err(),
+        ContextFailure::Mutation(ContextFailureMutation {
+            operation: ContextOperation::RenderRequest,
+            state: ContextState::ReadyForUser,
+        })
+    );
+    log.append_user("question".into(), None, Voice::Human)
+        .unwrap();
+    assert!(matches!(
+        log.append_assistant(ChatMessage::user("wrong role"), Vec::new(), None),
+        Err(Uncommitted::Refused(ContextFailure::AssistantRole(
+            ContextFailureAssistantRole {
+                found: ProviderMessageRole::User,
+            }
+        )))
+    ));
+    let ids = vec!["a".into(), "b".into()];
+    for (results, expected) in [
+        (
+            vec![ToolResult {
+                id: "a".into(),
+                content: String::new(),
+            }],
+            ContextFailure::ToolResultCount(ContextFailureToolResultCount {
+                expected: 2usize.into(),
+                got: 1usize.into(),
+            }),
+        ),
+        (
+            vec![
+                ToolResult {
+                    id: "a".into(),
+                    content: String::new(),
+                },
+                ToolResult {
+                    id: "c".into(),
+                    content: String::new(),
+                },
+            ],
+            ContextFailure::UnknownToolResult(ContextFailureUnknownToolResult { id: "c".into() }),
+        ),
+        (
+            vec![
+                ToolResult {
+                    id: "a".into(),
+                    content: String::new(),
+                },
+                ToolResult {
+                    id: "a".into(),
+                    content: String::new(),
+                },
+            ],
+            ContextFailure::DuplicateToolResult(ContextFailureDuplicateToolResult {
+                id: "a".into(),
+            }),
+        ),
+    ] {
+        assert_eq!(validate_result_ids(&ids, &results), Err(expected));
+    }
+}
+
+#[test]
+fn a_corrupt_inherited_ancestor_fails_opening_as_context_not_recording() {
+    let mut parent = fresh_root();
+    complete_round(&mut parent, "alpha", "alpha");
+    let source = record_path(&parent);
+    let inherited = parent.inherited_context();
+    let bytes = fs::read_to_string(&source).unwrap();
+    fs::write(&source, bytes.replace("alpha", "gamma")).unwrap();
+    let error = AgentLog::create(
+        parent.sessions_root(),
+        AgentId::new(5),
+        Opening {
+            parent: Some(parent.id()),
+            name: "orphan",
+            returns: true,
+            selected: &Selected::for_test("model"),
+            system: "system",
+            inherited: Some(inherited),
+        },
+    )
+    .err()
+    .expect("the ancestor changed under its loci");
+    assert!(
+        matches!(&error.reason, Reason::Host(host)
+        if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
+            if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
+                && failure.record == ral_core::path::shown(&source)
+                && matches!(failure.cause, RecordReadFailure::LocusSealMismatch(_)))),
+        "{error:?}"
+    );
+    let prefix =
+        crate::record::read_records(&parent.sessions_root().path().join("5").join(RECORD)).unwrap();
+    assert!(matches!(
+        prefix.as_slice(),
+        [
+            Record::Control(Control::SessionStarted(_)),
+            Record::Transcript(Transcript::Inherited { .. })
+        ]
+    ));
+}
+
+#[test]
+fn a_live_append_failure_remains_recording_unavailable_before_the_fold_moves() {
+    let mut log = fresh_root();
+    let before = log.context().log_len();
+    log.record_emitter().fail_after(0);
+    let Err(Uncommitted::Unavailable(unavailable)) =
+        log.append_user("question".into(), None, Voice::Human)
+    else {
+        panic!("an append failure ends the recorder, not a refusal")
+    };
+    assert!(
+        matches!(unavailable.failure(), ral_core::fact::RecordingFailure::Recording(failure)
+        if failure.stage == ral_core::fact::RecordingStage::Append)
+    );
+    assert_eq!(log.context().log_len(), before);
+    assert!(log.check_available().is_err());
 }

@@ -11,6 +11,7 @@
 
 pub mod profile;
 
+use crate::fact::{DepthFailure, DepthKind, ModuleCycle, Reason, StateFailure};
 use crate::ir::Toplevel;
 use crate::shell::evaluator::{Mode, Ran};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
@@ -78,24 +79,27 @@ pub(crate) fn module_phrases(
 ) -> Settled<Ran> {
     let ModuleLoad { top, origin } = load;
     if shell.context.modules.stack.contains(origin) {
-        let cycle: Vec<String> = shell
+        let mut chain: Vec<String> = shell
             .context
             .modules
             .stack
             .iter()
             .map(SourceOrigin::to_string)
             .collect();
-        return Err(Error::new(format!(
-            "circular dependency: {} -> {origin}",
-            cycle.join(" -> ")
-        ))
+        chain.push(origin.to_string());
+        return Err(Error::new(Reason::State(Box::new(StateFailure::ModuleCycle(
+            ModuleCycle { chain },
+        ))))
         .into());
     }
     if shell.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
-        return Err(Error::new(format!(
-            "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
-        ))
-        .into());
+        return Err(
+            Error::new(Reason::State(Box::new(StateFailure::Depth(DepthFailure {
+                kind: DepthKind::Source,
+                limit: MAX_SOURCE_DEPTH.into(),
+            }))))
+            .into(),
+        );
     }
     let frame = ModuleStackFrame::enter(shell, origin.clone());
     let ran = crate::shell::evaluator::run_phrases(&top.phrases, env, mode, mooring, frame.shell);
@@ -146,9 +150,107 @@ pub(crate) fn check_source(
         origin.file(),
         contract,
     )
-    .map_err(|error| Error::new(error.to_string()).with_rejection(error.reject(text)))?;
+    .map_err(|error| {
+        Error::new(Reason::Compile(Box::new(error.failure(origin.to_string()))))
+            .with_rejection(error.reject(text))
+    })?;
     if shell.local.bindings.armed() {
         shell.local.bindings.renew(top.referenced_names());
     }
     Ok(top)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fact::{CompilePhase, FailureCode as _};
+    use crate::shell::runtime::Break;
+
+    #[test]
+    fn check_source_keeps_compile_summary_separate_from_rich_rejection() {
+        for (source, parse) in [("let = ", true), ("$[1 + true]", false)] {
+            let mut shell = crate::test_helper::core_shell();
+            let origin = SourceOrigin::named("<load-summary>");
+            let Err(Break::Error(error)) = check_source(source, &origin, &mut shell, None) else {
+                panic!("source must fail compilation");
+            };
+            let Reason::Compile(summary) = &error.reason else {
+                panic!("compile summary")
+            };
+            assert_eq!(summary.source, "<load-summary>");
+            let rejection = error.rejection().expect("rich report");
+            assert_eq!(rejection.source.origin(), &origin);
+            assert_eq!(rejection.source.as_str(), source);
+            match &summary.phase {
+                CompilePhase::Parse => assert!(parse),
+                CompilePhase::Types(errors) => {
+                    assert!(!parse);
+                    assert_eq!(errors.count, rejection.reports.len().into());
+                }
+            }
+            assert_eq!(error.failure_code().get(), 1);
+            assert!(
+                rejection
+                    .render()
+                    .contains(if parse { "P0001" } else { "T0010" })
+            );
+            assert!(
+                !error
+                    .describe()
+                    .contains(if parse { "P0001" } else { "T0010" })
+            );
+            assert_eq!(error.fact(&shell).reason(), &error.reason);
+            assert_eq!(error.hints(), []);
+        }
+    }
+
+    #[test]
+    fn module_phrases_refuses_cycle_and_depth_without_changing_the_stack() {
+        let mut shell = crate::test_helper::core_shell();
+        let origin = SourceOrigin::named("<cycle>");
+        let top = check_source("return 1", &origin, &mut shell, None).unwrap();
+        shell.context.modules.stack = vec![SourceOrigin::named("<outer>"), origin.clone()];
+        let Err(Break::Error(error)) = module_phrases(
+            ModuleLoad {
+                top: &top,
+                origin: &origin,
+            },
+            shell.env.clone(),
+            Mode::Local,
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("cycle refusal");
+        };
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::ModuleCycle(ModuleCycle {
+                chain: vec!["<outer>".into(), "<cycle>".into(), "<cycle>".into()],
+            })))
+        );
+        assert_eq!(shell.context.modules.stack.len(), 2);
+        shell.context.modules.stack = (0..MAX_SOURCE_DEPTH)
+            .map(|i| SourceOrigin::named(format!("<depth-{i}>")))
+            .collect();
+        let Err(Break::Error(error)) = module_phrases(
+            ModuleLoad {
+                top: &top,
+                origin: &origin,
+            },
+            shell.env.clone(),
+            Mode::Local,
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("depth refusal");
+        };
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::Depth(DepthFailure {
+                kind: DepthKind::Source,
+                limit: MAX_SOURCE_DEPTH.into(),
+            })))
+        );
+        assert_eq!(shell.context.modules.stack.len(), MAX_SOURCE_DEPTH);
+    }
 }

@@ -55,10 +55,12 @@ impl Prepared {
             .map_err(|why| program.unstarted(why, &confinement))?;
         match survivor {
             Survivor::Named(pid) => Ok(pid),
-            Survivor::Unnamed(why) => Err(Error::new(format!(
-                "detach: '{}' is running, but its pid is unknown: {why}",
-                program.shown
-            ))
+            Survivor::Unnamed(cause) => Err(Error::new(crate::fact::Reason::Launch(Box::new(
+                crate::fact::LaunchFailure::DetachedPid(crate::fact::DetachedPidFailure {
+                    program: program.shown,
+                    cause,
+                }),
+            )))
             .into()),
         }
     }

@@ -8,6 +8,7 @@ mod byte_encoding;
 mod bytes;
 pub mod datum;
 mod finite;
+pub mod json;
 pub mod print;
 mod string;
 
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// A first-order ral value — data all the way down.  The extension slot `X`
 /// is uninhabited by default, so a bare `FOValue` is first-order by
 /// construction rather than by a checked invariant.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FOValue<X = NoExt> {
     Unit,
@@ -52,6 +53,35 @@ pub enum FOValue<X = NoExt> {
         payload: Option<Box<Self>>,
     },
     Ext(X),
+}
+
+impl<X: Clone> Clone for FOValue<X> {
+    fn clone(&self) -> Self {
+        // Every child re-enters this guard; one outer stack growth is insufficient.
+        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
+            Self::Unit => Self::Unit,
+            Self::Bool { value } => Self::Bool { value: *value },
+            Self::Int { value } => Self::Int { value: *value },
+            Self::Float { value } => Self::Float { value: *value },
+            Self::String { value } => Self::String {
+                value: value.clone(),
+            },
+            Self::Bytes { value } => Self::Bytes {
+                value: value.clone(),
+            },
+            Self::List { items } => Self::List {
+                items: items.clone(),
+            },
+            Self::Map { entries } => Self::Map {
+                entries: entries.clone(),
+            },
+            Self::Variant { label, payload } => Self::Variant {
+                label: label.clone(),
+                payload: payload.clone(),
+            },
+            Self::Ext(value) => Self::Ext(value.clone()),
+        })
+    }
 }
 
 /// Uninhabited: a bare `FOValue` has no `Ext` arm.

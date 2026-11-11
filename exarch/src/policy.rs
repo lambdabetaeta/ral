@@ -23,6 +23,7 @@ use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Ta
 use ral_core::authority::policy::{GrantLayer, GrantStack};
 use ral_core::environ::EnvVars;
 use ral_core::error::Error;
+use ral_core::fact::{ExarchFailure, HostFailure, PolicyFailure, Reason};
 use ral_core::io::terminal::TerminalState;
 use ral_core::path::CwdPath;
 use ral_core::shell::grant::decode_fragment;
@@ -195,10 +196,9 @@ fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
 /// bundled tool.
 fn self_layer(own: Option<&Path>, ctx: &FreezeCtx) -> Result<GrantLayer, Error> {
     let exe = own.ok_or_else(|| {
-        Error::new(
-            "exarch could not pin its own binary at startup (is it missing or unreadable?), \
-             so cannot exclude it from exec",
-        )
+        Error::new(Reason::Host(Box::new(HostFailure::Exarch(
+            ExarchFailure::Policy(PolicyFailure::OwnBinaryUnpinned),
+        ))))
     })?;
     let exec = ExecTable {
         deny: vec![Target::File(Place::from(&host_absolute(exe)?))],
@@ -297,12 +297,19 @@ mod tests {
     fn a_refused_carve_out_is_refused_in_the_decoders_words() {
         let ctx = ctx_at(&std::env::temp_dir());
         let why = deny_layer(&[PathBuf::from("/")], &ctx).unwrap_err();
-        assert!(why.describe().contains("filesystem root"), "{why}");
+        let Reason::Invalid(failure) = &why.reason else {
+            panic!("invalid grant")
+        };
+        assert!(matches!(
+            failure.cause,
+            ral_core::fact::InvalidCause::Grant(ral_core::fact::GrantFailure::RootExclusion(_))
+        ));
+        assert_eq!(why.hints(), []);
         assert!(
-            why.hints()
+            why.reason
+                .advice()
                 .iter()
-                .any(|h| h.starts_with("To withhold every path")),
-            "{why:?}"
+                .any(|hint| hint.starts_with("To withhold every path"))
         );
     }
 
@@ -318,10 +325,23 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
-            err.describe(),
-            "exarch could not pin its own binary at startup (is it missing or unreadable?), \
-             so cannot exclude it from exec"
+            err.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Policy(
+                PolicyFailure::OwnBinaryUnpinned
+            ))))
         );
+    }
+
+    #[test]
+    fn a_spawn_base_narrower_returns_the_original_typed_policy_refusal() {
+        let ctx = ctx_at(&std::env::temp_dir());
+        let direct = base_layer("unknown-base", &ctx).unwrap_err();
+        let narrowed = ral_core::SpawnGrant::Base("unknown-base".into())
+            .layer(base_layer, &ctx)
+            .unwrap_err();
+        assert_eq!(narrowed.reason, direct.reason);
+        assert_eq!(narrowed.context(), direct.context());
+        assert_eq!(narrowed.hints(), direct.hints());
     }
 
     #[test]

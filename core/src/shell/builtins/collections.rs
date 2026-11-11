@@ -6,7 +6,12 @@
 //! unwrapped, from the doors that performed them.
 
 use crate::error::Error;
+use crate::fact::{
+    AddressableRange, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, Utf8Subject,
+    ValueShape,
+};
 use crate::shell::evaluator::{apply, expr};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
@@ -29,16 +34,7 @@ fn call(func: &Value, item: Value, mooring: &Mooring, shell: &mut Shell) -> Sett
 /// `nth i xs`: the position read, at a position computed at run time.
 pub(super) fn builtin_nth(args: &[Value]) -> Settled<Value> {
     let (i, xs) = (&args[0], &args[1]);
-    let n = i
-        .as_int()
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| {
-            Error::new(format!(
-                "list index must be a non-negative Int, got {} '{i}'",
-                i.type_name()
-            ))
-            .with_hint("list indices are zero-based integers")
-        })?;
+    let n = super::strings::as_index(i, "nth", 0)?;
     Ok(expr::position(xs, n)?)
 }
 
@@ -73,12 +69,9 @@ pub(super) fn builtin_filter(
         .filter_map(
             |item| match call(&args[0], item.as_ref().clone(), mooring, shell) {
                 Ok(Value::Bool(keep)) => keep.then(|| Ok(item.into_owned())),
-                Ok(other) => Some(Err(Error::new(format!(
-                    "filter: predicate must return Bool, got {} '{}'",
-                    other.type_name(),
-                    other
-                ))
-                .into())),
+                Ok(other) => Some(Err(other
+                    .expected("filter", Expected::Shape(ValueShape::Bool))
+                    .into())),
                 Err(e) => Some(Err(e)),
             },
         )
@@ -120,33 +113,29 @@ pub(super) fn builtin_sort_by(
 }
 
 pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let start = match &args[0] {
-        Value::Int(n) => *n,
-        other => {
-            return Err(Error::new(format!(
-                "range: expected Int for start, got {}",
-                other.type_name()
-            ))
-            .into());
-        }
+    let integer = |index: usize| match &args[index] {
+        Value::Int(n) => Ok(*n),
+        other => Err(Error::new(Reason::Invalid(Box::new(
+            InvalidFailure::new(
+                "range".into(),
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Int),
+                    found: other.found(),
+                }),
+            )
+            .index(index.into()),
+        )))),
     };
-    let end = match &args[1] {
-        Value::Int(n) => *n,
-        other => {
-            return Err(Error::new(format!(
-                "range: expected Int for end, got {}",
-                other.type_name()
-            ))
-            .into());
-        }
-    };
+    let start = integer(0)?;
+    let end = integer(1)?;
     let count = if end > start {
         end.checked_sub(start)
             .and_then(|span| usize::try_from(span).ok())
             .ok_or_else(|| {
-                Error::new(format!(
-                    "range: span from {start} to {end} exceeds the addressable range"
-                ))
+                invalid(
+                    "range",
+                    InvalidCause::AddressableRange(AddressableRange { start, end }),
+                )
             })?
     } else {
         0
@@ -186,11 +175,8 @@ pub(super) fn builtin_fold_lines(
     let func = &args[0];
     let mut acc = args[1].clone();
     for line in super::util::stdin_lines("fold-lines", shell)? {
-        let line = crate::shell::runtime::decode_utf8_strict(
-            line?,
-            "fold-lines: input is not valid UTF-8",
-            "from-lines decodes lossily",
-        )?;
+        let line =
+            crate::shell::runtime::decode_utf8_strict(line?, "fold-lines", Utf8Subject::Input)?;
         acc = apply(func, vec![acc, Value::string(line)], mooring, shell)?;
     }
     Ok(acc)
@@ -299,5 +285,40 @@ mod tests {
         let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)
             .expect("a short range pays no poll and completes");
         assert_eq!(v.as_list("range").expect("list").len(), 10);
+    }
+    #[test]
+    fn filter_requires_a_boolean_predicate_result() {
+        let mut shell = crate::test_helper::core_shell();
+        let mooring = Mooring::adrift();
+        let predicate = lambda(&mooring, &mut shell, "{ |x| $x }");
+        let Err(Break::Error(error)) = builtin_filter(
+            &[predicate, Value::list(vec![Value::Int(1)])],
+            &mooring,
+            &mut shell,
+        ) else {
+            panic!("non-boolean predicate result")
+        };
+        assert_eq!(
+            error.reason,
+            Value::Int(1)
+                .expected("filter", Expected::Shape(ValueShape::Bool))
+                .reason
+        );
+    }
+
+    #[test]
+    fn range_start_and_end_shape_backstops_keep_the_argument_index() {
+        let shell = crate::test_helper::core_shell();
+        for (args, index) in [
+            ([Value::Unit, Value::Int(1)], 0usize),
+            ([Value::Int(1), Value::Unit], 1usize),
+        ] {
+            let Err(Break::Error(error)) = builtin_range(&args, &shell) else {
+                panic!("invalid range operand")
+            };
+            assert!(
+                matches!(error.reason, Reason::Invalid(f) if f.path == [crate::fact::DataStep::Index(index.into())] && matches!(&f.cause, InvalidCause::Shape(_)))
+            );
+        }
     }
 }

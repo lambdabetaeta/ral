@@ -13,7 +13,7 @@
 
 use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
-use crate::fact::FailureCode as _;
+use crate::fact::{FailureCode as _, IoOperation, IoSubject, Reason, StandardStream, StateFailure};
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
 use crate::process::{Deadline, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
@@ -26,6 +26,8 @@ use std::num::NonZeroU8;
 use std::sync::Arc;
 
 mod report;
+#[cfg(unix)]
+pub(crate) use report::ReportFault;
 
 /// Parse/type diagnostics from a run that never reached evaluation.
 ///
@@ -247,9 +249,9 @@ impl Shell {
             Program::Hook { ref name, ref args } => {
                 let Some(hook) = self.hook(name).cloned() else {
                     return RunReport::Static {
-                        diagnostics: StaticDiagnostics::Host(Error::new(format!(
-                            "hook '{name}' is not registered"
-                        ))),
+                        diagnostics: StaticDiagnostics::Host(Error::new(Reason::State(Box::new(
+                            StateFailure::MissingHook(name.into()),
+                        )))),
                     };
                 };
 
@@ -312,7 +314,8 @@ impl Shell {
                 Err(e) => {
                     return RunReport::Static {
                         diagnostics: StaticDiagnostics::Host(Error::io(
-                            "could not duplicate the session's stdin",
+                            IoOperation::Duplicate,
+                            IoSubject::Stream(StandardStream::Stdin),
                             &e,
                         )),
                     };

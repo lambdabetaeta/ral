@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f26144e0
-verified_at_date: 2026-11-09
+verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+verified_at_date: 2026-11-10
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
 ---
 
@@ -439,18 +439,19 @@ landed.** A cancel that lands before a spawn meets a poll point; one that
 lands after meets a torn-down child. Both doors mint the one constructor
 `Break::stopped(cause, owner)`, so the two cannot disagree. Two traits
 project status. `FailureCode::failure_code() -> NonZeroU8` belongs to what can
-only fail: a cause, a `Stop`, a `Reason`, an `Error`, an `ErrorRecord`.
+only fail: a cause, a `Stop`, a `Reason`, an `Error`, an `ErrorFact`, an `ErrorRecord`.
 `ExitCode::code() -> u8` belongs to what can also succeed: an ending (`Ok` is
 0, an `exit n` is `n`, a panic 101, the rest delegate) and a `Break`. `Stop`
 holds cause, owner and `Option<Prov>`; `End = Ending<Value, Error, Stop>`
-holds the ending. Runtime error and data record share the one `Reason`:
+holds the ending. Runtime error and wire fact share the one `Reason`:
 
-    Reason  = Process(program, Failure) | Cancelled | TimedOut | Raised(String)
+    Reason  = Process(program, Failure) | Cancelled | TimedOut | Raised(Claim)
     Failure = Exited(i32) | Signaled(i32) | NotFound | NotRunnable(detail)
 
 `Reason::describe` is the one wording; the one `FailureCode for Reason`
 table supplies failure codes (`Process` delegating to `Failure`), with errors,
-records and process-layer failures delegating. `Reason::stopped` is
+facts and process-layer failures delegating; an `ErrorRecord` stores the
+projected status. `Reason::stopped` is
 the one conversion from a cause (`Cancelled`, `TimedOut`); its words and
 codes come from `CancelCause`.
 A worker completes otherwise unlocated errors from its inherited register
@@ -469,15 +470,15 @@ External raw exits remain in
 `Failure::Exited` for messages and hints until the failure-code projection
 clamps through `failure_byte` into `1..=255`. A negative Windows `NTSTATUS`
 must not become success. `exit` refuses outside `0..=255`; `fail` takes text,
-yielding code 1. `raise` trusts the closed record unchanged, refusing
-a failure of `exited 0` and signals outside `1..=127`. There is no stored
-status on the error record. Host `Static`/`Faulted` statuses stay `NonZeroU8`
+yielding code 1. `raise` re-raises a caught record's exact reason, and takes a
+hand-built record as a `Claim`, refusing status 0 and above 255. A `Reason`
+stores no status, except a claim's own. Host `Static`/`Faulted` statuses stay `NonZeroU8`
 ([[design/endings|endings]],
 [[decisions/261105_the-error-record|the error record]]):
 
 | break | code |
 |---|---:|
-| `Raised(text)` | 1 |
+| `Raised(Claim)` | the claim's status (1 for `fail`) |
 | `exit n` | n |
 | `ExitCode(n)` | n clamped into `1..=255` |
 | `Signal(s)` | 128 + s, clamped into `1..=255` |
@@ -491,8 +492,8 @@ status on the error record. Host `Static`/`Faulted` statuses stay `NonZeroU8`
 | `stop ReaderGone` | 141 (`128 + SIGPIPE`) |
 | `Panic(_)` | 101 |
 
-Errors reach ral code as `[reason, frame, site]`. `Reason` lives in
-`fact/error.rs`; the exit code is its projection. `` `cancelled `` and
+Errors reach ral code as `[frame, message, status, site]`. `Reason` lives in
+`fact/error.rs`; the message and status are its projections. `` `cancelled `` and
 `` `timed-out `` are the two converted worker-stop facts. A stop has no
 record: no `try` sees it.
 

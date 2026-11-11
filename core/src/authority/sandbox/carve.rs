@@ -32,6 +32,7 @@
 //! each opened entry is judged by position and identity.
 
 use crate::authority::sandbox::TOKEN;
+use crate::fact::{CarveStep, ProjectionFailure, ProjectionFailureCarve};
 use crate::path::{
     Depth, Dir, Excluded, Installing, Kind, LeafMode, Located, RealPath, Subject, Walked, shown,
 };
@@ -39,19 +40,20 @@ use std::io;
 
 /// A directory on the way to an exclusion that could not be held or listed:
 /// what cannot be listed cannot be carved, and is not granted whole instead.
-fn unlisted(at: &RealPath, e: &io::Error) -> String {
-    format!(
-        "sandbox: cannot list '{}' to grant around an exclusion in it: {e}",
-        shown(at.as_path())
-    )
+fn unlisted(at: &RealPath, step: CarveStep, e: &io::Error) -> ProjectionFailure {
+    ProjectionFailure::Carve(ProjectionFailureCarve {
+        path: shown(at.as_path()),
+        step,
+        cause: Box::new(crate::io::failure(e)),
+    })
 }
 
-fn entries(dir: &Dir<Installing>) -> Result<Vec<Located<Installing>>, String> {
+fn entries(dir: &Dir<Installing>) -> Result<Vec<Located<Installing>>, ProjectionFailure> {
     dir.read_dir()
-        .map_err(|e| unlisted(dir.real(), &e))?
+        .map_err(|e| unlisted(dir.real(), CarveStep::ListDirectory, &e))?
         .map(|entry| {
             dir.locate(entry.name(), LeafMode::NoFollow)
-                .map_err(|e| unlisted(&entry.real(), &e))
+                .map_err(|e| unlisted(&entry.real(), CarveStep::LocateEntry, &e))
         })
         .collect()
 }
@@ -73,7 +75,10 @@ pub(crate) struct Carving {
 ///
 /// # Errors
 /// A directory that cannot be held or listed ends the plan.
-pub(crate) fn carve(allowances: &[RealPath], exclusions: &[&Excluded]) -> Result<Carving, String> {
+pub(crate) fn carve(
+    allowances: &[RealPath],
+    exclusions: &[&Excluded],
+) -> Result<Carving, ProjectionFailure> {
     let positions: Vec<_> = exclusions.iter().map(|e| e.followed().real()).collect();
     let mut carving = Carving::default();
     for allowance in allowances {
@@ -90,7 +95,7 @@ pub(crate) fn carve(allowances: &[RealPath], exclusions: &[&Excluded]) -> Result
         // Absent: nothing to grant. Not a directory: nothing to carve.
         let held = allowance
             .open_dir_nofollow(&TOKEN)
-            .map_err(|e| unlisted(allowance, &e))?;
+            .map_err(|e| unlisted(allowance, CarveStep::OpenDirectory, &e))?;
         let mut pending: Vec<_> = held.into_iter().collect();
         while let Some(dir) = pending.pop() {
             for entry in entries(&dir)? {

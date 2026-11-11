@@ -10,7 +10,7 @@ mod common;
 
 use ral_core::protocol::Run;
 use ral_core::shell::run::RunReport;
-use ral_core::shell::runtime::{Break, Shell, Value};
+use ral_core::shell::runtime::{Shell, Value};
 use ral_core::source::SourceOrigin;
 
 /// Evaluate `input` through the public run entry on an already-configured
@@ -19,10 +19,11 @@ use ral_core::source::SourceOrigin;
 fn run_on(shell: &mut Shell, input: &str) -> ral_core::shell::runtime::Settled<Value> {
     match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
         RunReport::Ran { ending, .. } => ending.into_settled(),
-        // A static diagnostic reads as a failed run: no value was produced.
         RunReport::Static { diagnostics } => {
-            let msg = diagnostics.render(shell.exit_hints()).0;
-            Err(ral_core::shell::runtime::Error::new(msg).into())
+            panic!(
+                "expected a valid runtime fixture:\n{}",
+                diagnostics.render(shell.exit_hints()).0
+            )
         }
     }
 }
@@ -86,18 +87,21 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
 /// `$STATUS` is not a name: `try` binds a record carrying the failure reason.
 #[test]
 fn status_is_an_unbound_variable_that_names_its_replacement() {
-    let Err(Break::Error(e)) = eval("return $STATUS") else {
-        panic!("$STATUS must not resolve");
+    let mut shell = common::prelude_shell();
+    let RunReport::Static { diagnostics } = shell.run(Run::foreground(
+        "return $STATUS",
+        SourceOrigin::named("<test>"),
+    )) else {
+        panic!("$STATUS must be rejected statically");
     };
+    let rendered = diagnostics.render(shell.exit_hints()).0;
     assert!(
-        e.describe().contains("undefined variable: $STATUS"),
-        "unexpected diagnostic: {}",
-        e.describe()
+        rendered.contains("undefined variable: $STATUS"),
+        "unexpected diagnostic: {rendered}"
     );
     assert!(
-        e.describe().contains("`try`"),
-        "the diagnostic must point at `try`: {}",
-        e.describe()
+        rendered.contains("`try`"),
+        "the diagnostic must point at `try`: {rendered}"
     );
 }
 

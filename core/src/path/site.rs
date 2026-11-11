@@ -162,10 +162,6 @@ pub(in crate::path) enum Silent {
     GlobWildcard,
     /// A walked name taken relative to the cwd the caller named: lexical.
     WalkedRelative,
-    /// The refusal of a name no ral string can hold, and where its longest
-    /// UTF-8 spelling stops: a read of a path already in hand, for the error
-    /// text.
-    Unnameable,
     /// The spellings above a root already walked, whose ignore files discovery
     /// reads.  The files are read through the walk, so this lists names and
     /// opens nothing.

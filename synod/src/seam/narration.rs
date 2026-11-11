@@ -29,7 +29,8 @@ fn provider_error_severity(record: &ProviderError) -> Severity {
     match record {
         ProviderError::Api { .. }
         | ProviderError::Overflow { .. }
-        | ProviderError::Other(_)
+        | ProviderError::Terminal(_)
+        | ProviderError::Credential(_)
         | ProviderError::Unavailable(_) => Severity::Bad,
         ProviderError::Cancelled(_)
         | ProviderError::Transient { .. }
@@ -525,15 +526,42 @@ mod tests {
         }
     }
 
+    fn service_failure(cause: ral_core::fact::ServiceCause) -> ral_core::fact::ServiceFailure {
+        ral_core::fact::ServiceFailure {
+            service: "fixture-service".into(),
+            operation: ral_core::fact::ServiceOperation::Chat,
+            context: Vec::new(),
+            cause: Box::new(cause),
+        }
+    }
+
+    fn terminal_provider_error() -> ProviderError {
+        ProviderError::Terminal(service_failure(ral_core::fact::ServiceCause::Url(
+            ral_core::fact::ProviderUrlFailure::InvalidPort,
+        )))
+    }
+
     #[test]
     fn a_stall_is_a_warning_beside_graded_provider_errors() {
         use exarch::provider::{CancelSite, CutShort};
+        use ral_core::fact::{
+            CredentialCause, CredentialFailure, CredentialService, GenaiFailure,
+            GenaiFailureHttpError, RetryableProviderCause, ServiceCause, StreamTimeoutKind,
+        };
 
+        let response = || {
+            service_failure(ServiceCause::Genai(GenaiFailure::HttpError(
+                GenaiFailureHttpError {
+                    status: 400,
+                    canonical_reason: "Bad Request".into(),
+                    body: "no".into(),
+                    headers: Vec::new(),
+                },
+            )))
+        };
         let api = || ProviderError::Api {
-            status: None,
             model: "m".into(),
-            message: "no".into(),
-            body: None,
+            cause: response(),
         };
         let overflow = ProviderError::Overflow {
             model: "m".into(),
@@ -541,13 +569,13 @@ mod tests {
             sent: None,
             limit: None,
             listed: None,
-            body: None,
+            cause: Box::new(response()),
         };
         let transient = ProviderError::Transient {
-            cause: "c".into(),
+            cause: RetryableProviderCause::Service(service_failure(ServiceCause::StreamTimeout(
+                StreamTimeoutKind::Read,
+            ))),
             attempts: 1,
-            body: None,
-            status: None,
         };
         let cut = ProviderError::Truncated {
             cause: Box::new(CutShort::OutputCap {
@@ -557,7 +585,16 @@ mod tests {
         let graded = [
             (api(), "provider_error", "bad"),
             (overflow, "provider_error", "bad"),
-            (ProviderError::Other("x".into()), "provider_error", "bad"),
+            (terminal_provider_error(), "provider_error", "bad"),
+            (
+                ProviderError::Credential(CredentialFailure {
+                    account: "fixture-account".into(),
+                    service: CredentialService::Codex,
+                    cause: CredentialCause::Removed,
+                }),
+                "provider_error",
+                "bad",
+            ),
             (
                 ProviderError::Cancelled(CancelSite::MidStream),
                 "provider_error",
@@ -580,7 +617,7 @@ mod tests {
             text: "boom".into(),
         };
         let provider = Forensic::ProviderError {
-            error: ProviderError::Other("x".into()),
+            error: terminal_provider_error(),
         };
         assert!(forensic(Role::Helper, &error).is_none());
         assert!(forensic(Role::Helper, &provider).is_none());
@@ -857,7 +894,7 @@ mod tests {
         let Some(SynodEvent::HelperDone { ok, .. }) = router.route_fact(
             AgentId::new(0),
             &done(Settlement::Failed {
-                reason: "boom".to_string(),
+                reason: exarch::record::ChildFailure::Panicked("boom".into()),
             }),
         ) else {
             panic!("expected a HelperDone event");
@@ -894,7 +931,7 @@ mod tests {
             (
                 "report",
                 vec![
-                    json!({"status": {"status": {"failed": "ended"}}}),
+                    json!({"status": {"status": {"failed": {"panicked": "ended"}}}}),
                     json!({"unscheduled": {"label": "wake"}}),
                     json!({"withdrawn": {"posts": [2, 3]}}),
                 ],

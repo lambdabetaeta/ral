@@ -88,7 +88,8 @@ pub(crate) fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>
 /// quoted string without lying about its contents, or if the file could not
 /// be replaced.
 pub fn save_declared(file: &UserFile, services: &[Service], label: &str) -> Result<(), String> {
-    Ok(file.replace(&declarations_source(services, label)?)?)
+    file.replace(&declarations_source(services, label)?)
+        .map_err(|error| error.to_string())
 }
 
 /// `services` as the source [`load_declared`] reads back.

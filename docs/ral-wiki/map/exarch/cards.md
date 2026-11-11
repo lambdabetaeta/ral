@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-06
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
 covers_paths: [exarch/src/record/fault.rs, exarch/src/card.rs, exarch/src/card/diff.rs, exarch/src/card/change.rs, exarch/src/card/value.rs, exarch/src/card/decode.rs, exarch/src/card/encode.rs, exarch/src/card/observation.rs, exarch/src/card/done.rs, exarch/src/card/testkit.rs, exarch/src/card/resources.rs, exarch/src/shell_eval.rs, exarch/src/agent/desk.rs, exarch/src/bus/post.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/diff.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/stream.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
@@ -100,7 +100,7 @@ its own rows (`agent/resources.rs`) and the frontend appends the rows it owns
 stores it through `Datum`; `settled_spans` reads `Done::parts` for the head
 and optional detail: `returned`, `failed: …`, ``ran `exit 3` ``, the cause's
 message (`timed out`), or `panicked: …`. Failures use
-`ErrorRecord::describe`, derived from the reason alone, not stored message text.
+the record's `message`, derived from the typed reason.
 Only `Ok(())` has role `ok`; the others have role `bad`. A worker is not a
 process, so a failure is not worded `exit N`:
 `errand #7 (building) finished after 3 mins 12 secs (failed): build failed`.

@@ -1,18 +1,30 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
 use crate::error::Error;
+use crate::fact::{
+    ArityFailure, CountRule, Expected, InvalidCause, InvalidFailure, IoOperation, IoSubject,
+    Number, NumberRange, OperationState, Reason, RegexCause, RegexFailure, ShapeFailure,
+    StandardStream, StateFailure, ValueShape,
+};
 use crate::io::Source;
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Shell, Value};
 
-/// Arity floor for a builtin; `name` rides the error text.
+/// Arity floor for a builtin, retaining its semantic operation.
 ///
 /// # Errors
 /// Returns `Err` if `args.len() < min`.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
     if args.len() < min {
-        let noun = if min == 1 { "argument" } else { "arguments" };
-        return Err(Error::new(format!("{name} requires {min} {noun}")).into());
+        return Err(invalid(
+            name,
+            InvalidCause::Arity(ArityFailure {
+                expected: CountRule::AtLeast(min.into()),
+                got: args.len().into(),
+            }),
+        )
+        .into());
     }
     Ok(())
 }
@@ -21,30 +33,30 @@ pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()>
 /// other spelling, for a `Bytes` value already in hand.
 pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     let items = val.as_list(ctx)?;
-    let mut out = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
-        match item.as_ref() {
-            Value::Int(n) => match u8::try_from(*n) {
-                Ok(b) => out.push(b),
-                Err(_) => {
-                    return Err(Error::new(format!(
-                        "{ctx}: byte at index {idx} out of range: {n}"
-                    ))
-                    .with_hint("bytes must be Int values in range 0..255")
-                    .into());
-                }
-            },
-            _ => {
-                return Err(Error::new(format!(
-                    "{ctx}: expected Int at index {idx}, got {}",
-                    item.type_name()
-                ))
-                .with_hint("bytes must be Int values in range 0..255")
-                .into());
-            }
-        }
-    }
-    Ok(out)
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let cause = match item.as_ref() {
+                Value::Int(n) => match u8::try_from(*n) {
+                    Ok(byte) => return Ok(byte),
+                    Err(_) => InvalidCause::Range(NumberRange {
+                        value: Number::Int(*n),
+                        minimum: Number::Int(0),
+                        maximum: Number::Int(255),
+                    }),
+                },
+                _ => InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Int),
+                    found: item.found(),
+                }),
+            };
+            Err(Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(ctx.into(), cause).index(index.into()),
+            )))
+            .into())
+        })
+        .collect()
 }
 
 /// The one stdin policy every reading builtin shares: the installed reader
@@ -54,16 +66,20 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
 /// here.
 pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io::BufRead>> {
     if matches!(shell.io.stdin, Source::Terminal) {
-        return Err(Error::new(format!(
-            "{name}: no input (pipe bytes or pass a value as argument)"
-        ))
+        return Err(Error::new(Reason::State(Box::new(StateFailure::NoByteInput(
+            OperationState {
+                operation: name.into(),
+            },
+        ))))
         .into());
     }
-    let Some(reader) = shell
-        .io
-        .stdin
-        .reader()
-        .map_err(|e| Error::io("could not duplicate stdin", &e))?
+    let Some(reader) = shell.io.stdin.reader().map_err(|e| {
+        Error::io(
+            IoOperation::Duplicate,
+            IoSubject::Stream(StandardStream::Stdin),
+            &e,
+        )
+    })?
     else {
         return Ok(Box::new(std::io::empty()));
     };
@@ -87,7 +103,13 @@ pub(crate) fn read_lines<R: std::io::BufRead>(
                 line.truncate(crate::io::without_terminator(&line).len());
                 Some(Ok(line))
             }
-            Err(e) => Some(Err(Error::new(format!("{name}: {e}")).into())),
+            Err(e) => Some(Err(Error::io(
+                IoOperation::Read,
+                IoSubject::Stream(StandardStream::Stdin),
+                &e,
+            )
+            .with_context(name)
+            .into())),
         }
     })
 }
@@ -120,15 +142,16 @@ pub(crate) fn lossy_line_list(lines: impl Iterator<Item = Settled<Vec<u8>>>) -> 
     Ok(Value::list(lines))
 }
 
-/// Dig the cause line out of the regex crate's multi-line parse error.
-pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
-    let cause = full
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with("error:"))
-        .and_then(|l| l.trim_start().strip_prefix("error:"))
-        .map_or("invalid pattern", str::trim);
-    format!("{ctx}: invalid pattern '{pattern}': {cause}")
+/// Classify the regex compiler's refusal before rendering it.
+pub fn regex_failure(pattern: &str, error: &regex::Error) -> RegexFailure {
+    RegexFailure {
+        pattern: pattern.into(),
+        cause: match error {
+            regex::Error::Syntax(detail) => RegexCause::Syntax(detail.clone()),
+            regex::Error::CompiledTooBig(limit) => RegexCause::CompiledTooBig((*limit).into()),
+            other => RegexCause::Unclassified(other.to_string()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -162,7 +185,9 @@ mod stdin_tests {
         let Err(refused) = stdin_reader("from-lines", &shell) else {
             panic!("a terminal stdin must be refused");
         };
-        assert!(refused.to_string().contains("no input"), "{refused}");
+        assert!(
+            matches!(refused, crate::shell::runtime::Break::Error(error) if matches!(&error.reason, crate::fact::Reason::State(failure) if matches!(**failure, crate::fact::StateFailure::NoByteInput(_))))
+        );
     }
 
     /// A non-tty fd 0 reaches a reading builtin as the reader it became.
@@ -181,5 +206,70 @@ mod stdin_tests {
             .read_to_string(&mut buf)
             .expect("read");
         assert_eq!(buf, "bytes");
+    }
+    #[test]
+    fn reading_from_a_terminal_is_a_resource_state_refusal() {
+        let mut shell = crate::test_helper::core_shell();
+        shell.io.stdin = Source::Terminal;
+        let Err(crate::shell::runtime::Break::Error(error)) = stdin_reader("from-string", &shell)
+        else {
+            panic!("no byte input")
+        };
+        assert_eq!(
+            error.reason,
+            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoByteInput(
+                crate::fact::OperationState {
+                    operation: "from-string".into()
+                }
+            )))
+        );
+        assert_eq!(error.hints(), []);
+    }
+    #[test]
+    fn read_lines_preserves_the_io_cause_and_caller_context() {
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        let Err(crate::shell::runtime::Break::Error(error)) =
+            super::read_lines("from-lines", std::io::BufReader::new(FailedRead))
+                .next()
+                .expect("failed read")
+        else {
+            panic!("read refusal")
+        };
+        assert_eq!(error.context(), Some("from-lines"));
+        let crate::fact::Reason::Io(failure) = error.reason else {
+            panic!("I/O reason")
+        };
+        assert_eq!(failure.operation, crate::fact::IoOperation::Read);
+        assert_eq!(
+            failure.subject,
+            crate::fact::IoSubject::Stream(crate::fact::StandardStream::Stdin)
+        );
+        assert_eq!(
+            failure.cause,
+            crate::io::failure(&std::io::ErrorKind::PermissionDenied.into())
+        );
+    }
+
+    #[test]
+    fn arity_floors_and_regex_limits_keep_lossless_counts() {
+        let Err(crate::shell::runtime::Break::Error(error)) = super::check_arity(&[], 2, "read")
+        else {
+            panic!("arity floor")
+        };
+        assert!(
+            matches!(error.reason, crate::fact::Reason::Invalid(f) if f.cause == crate::fact::InvalidCause::Arity(crate::fact::ArityFailure {
+                expected: crate::fact::CountRule::AtLeast(2usize.into()), got: 0usize.into(),
+            }))
+        );
+        let limit = usize::MAX;
+        assert_eq!(
+            super::regex_failure("pattern", &regex::Error::CompiledTooBig(limit)).cause,
+            crate::fact::RegexCause::CompiledTooBig(limit.into())
+        );
     }
 }

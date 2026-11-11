@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 248aff5c
-generated_at_date: 2026-11-06
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_date: 2026-11-10
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -46,7 +46,7 @@ there is no separate reducer arm. Beside it sits an optional diagnostic facet,
 which is not a typing rule: it diagnoses a decoder handed an argument
 ([[internals/builtins-registry|builtins-registry]]). A caught record handed to
 `fail` instead earns generic shape guidance from `shape_hint`/`row_has_reason`
-in `typecheck/explain.rs`, pointing to `raise $e` or `describe $e`.
+in `typecheck/explain.rs`, pointing to `raise $e` or `$e[message]`.
 An entry's first-class
 form is its scheme, so it has one by construction, every entry in the table
 having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
@@ -203,7 +203,8 @@ Bodies are grouped by concern, one submodule each:
   worker's one-shot `CapturedBytes::take` at completion),
   `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``
   (the ok/err half of `End::outcome`, its `` `err `` payload built through
-  `Error::record`, the record `try` hands its handler), or
+  `outcome_value` and `Value::failure`, the witnessed record `try` hands its
+  handler), or
   `` `consumed [elapsed] ``. A worker stopped from elsewhere settles with its
   own `cancelled`/`timed-out` error; on a `Ready` handle an `exit`, a
   foreign stop or a panic is re-raised, as `await` re-raises them, while `poll`
@@ -318,10 +319,12 @@ Bodies are grouped by concern, one submodule each:
   rather than the caller's own block-local scope. Module loads carry no cache,
   so the guards keep re-evaluation terminating — see
   [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
-- `misc.rs` — `fail` takes a `String`, raising `Reason::Raised`; `raise`
-  decodes the closed `[reason, frame, site]` record and trusts it unchanged,
-  refusing a failure of `exited 0` and signals outside `1..=127`. `describe` delegates to
-  `ErrorRecord::describe`. `exit` refuses outside `0..=255`. See
+- `misc.rs` — `fail` takes a `String`, raising `Reason::raised` (a `Claim`
+  of status 1); `raise` re-raises the `ErrorFact` a witnessed map holds
+  (`Map::witness`) and otherwise decodes the closed `[frame, message, status,
+  site]` record into a claim, refusing status 0 (`InvalidCause::ZeroStatus`)
+  and above 255. There is no `describe` builtin. `exit` refuses outside
+  `0..=255`. See
   [[decisions/261105_the-error-record|the error record]]. `builtin_surface` is the body
   `SURFACE_BUILTIN` (above) wraps: it forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;

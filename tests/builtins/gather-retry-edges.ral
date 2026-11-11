@@ -19,10 +19,10 @@ gather {
 echo after
 
 # An unawaited worker's failure is the gather's
-assert_eq 'unawaited failure' true !{try { gather { let h = spawn "bad" { fail boom }; return false } } { |e| return $[$e[reason] == `raised boom] }}
+assert_eq 'unawaited failure' true !{try { gather { let h = spawn "bad" { fail boom }; return false } } { |e| return $[$e[message] == boom] }}
 
 # A failure in the body cancels workers still running
-assert_eq 'body failure' true !{try { gather { let h = spawn "long" { sleep 30 }; fail stop } } { |e| return $[$e[reason] == `raised stop] }}
+assert_eq 'body failure' true !{try { gather { let h = spawn "long" { sleep 30 }; fail stop } } { |e| return $[$e[message] == stop] }}
 
 # gathers nest, and none leaves a worker behind
 assert_eq 'nested' 5 !{gather {
@@ -46,8 +46,8 @@ assert_eq 'attempts made' 3 !{int !{from-line < "$d/n"}}
 # Exhausted, the last error is raised as it stands
 echo 0 > "$d/m"
 let e = try { retry 3 { let n = int !{from-line < "$d/m"}; echo $[$n + 1] > "$d/m"; fail "try $n" } } { |e| return $e }
-assert_eq 'exhausted reason' true $[$e[reason] == `raised 'try 2']
-assert_eq 'exhausted is the last error' 'try 2' !{describe $e}
+assert_eq 'exhausted is the last error' 'try 2' $e[message]
+assert_eq 'exhausted status' 1 $e[status]
 assert_eq 'exhausted attempts' 3 !{int !{from-line < "$d/m"}}
 
 # A count below one still runs the body once

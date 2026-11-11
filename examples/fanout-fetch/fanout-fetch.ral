@@ -15,9 +15,9 @@ let fetch = { |url|
     let dst = "$out_dir/!{re-replace-all '[^a-zA-Z0-9.]+' '_' $url}"
     try {
         curl -fsSL --max-time 15 $url > $dst
-        return [url: $url, path: $dst, ok: true, reason: '']
+        return [url: $url, path: $dst, ok: true, message: '']
     } { |err|
-        return [url: $url, path: '', ok: false, reason: !{describe $err}]
+        return [url: $url, path: '', ok: false, message: $err[message]]
     }
 }
 
@@ -30,5 +30,5 @@ let bad = filter { |r| return $[not $r[ok]] } $results
 echo "fetched: !{length $ok} ok, !{length $bad} failed"
 
 for $bad { |r|
-    warn "!{styled red '  fail'} reason=$r[reason]  $r[url]"
+    warn "!{styled red '  fail'} $r[message]  $r[url]"
 }

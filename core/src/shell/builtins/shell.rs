@@ -2,6 +2,10 @@
 
 use crate::authority::policy::{Flag, ShellVerb};
 use crate::error::Error;
+use crate::fact::{
+    ArityFailure, CountRule, Expected, InvalidCause, Reason, StateFailure, ValueShape,
+};
+use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Shell, Value};
 
 /// `alias NAME BODY` — the interactive door to [`Shell::install_alias`],
@@ -10,24 +14,21 @@ pub(super) fn builtin_alias(args: &[Value], shell: &mut Shell) -> Settled<Value>
     let (name, thunk) = match args {
         [Value::String(name), thunk @ Value::Thunk(_)] => (name.to_string(), thunk.clone()),
         [Value::String(_), other] => {
-            return Err(Error::new(format!(
-                "alias: body must be a block, got {}",
-                other.type_name()
-            ))
-            .into());
+            return Err(other.expected("alias", Expected::Closure).into());
         }
         [other, _] => {
-            return Err(Error::new(format!(
-                "alias: name must be a String, got {}",
-                other.type_name()
-            ))
-            .into());
+            return Err(other
+                .expected("alias", Expected::Shape(ValueShape::String))
+                .into());
         }
         _ => {
-            return Err(Error::new(format!(
-                "alias: expected `alias NAME {{ |args| BODY }}`, got {} args",
-                args.len()
-            ))
+            return Err(invalid(
+                "alias",
+                InvalidCause::Arity(ArityFailure {
+                    expected: CountRule::Exactly(2usize.into()),
+                    got: args.len().into(),
+                }),
+            )
             .into());
         }
     };
@@ -40,22 +41,28 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
     let name = match args {
         [Value::String(s)] => s.as_str(),
         [other] => {
-            return Err(Error::new(format!(
-                "unalias: name must be a String, got {}",
-                other.type_name()
-            ))
-            .into());
+            return Err(other
+                .expected("unalias", Expected::Shape(ValueShape::String))
+                .into());
         }
         _ => {
-            return Err(Error::new(format!(
-                "unalias: expected `unalias NAME`, got {} args",
-                args.len()
-            ))
+            return Err(invalid(
+                "unalias",
+                InvalidCause::Arity(ArityFailure {
+                    expected: CountRule::Exactly(1usize.into()),
+                    got: args.len().into(),
+                }),
+            )
             .into());
         }
     };
     if !shell.remove_alias(name) {
-        return Err(Error::new(format!("unalias: no alias named '{name}'")).into());
+        return Err(
+            Error::new(Reason::State(Box::new(StateFailure::AliasMissing(
+                name.into(),
+            ))))
+            .into(),
+        );
     }
     Ok(Value::Unit)
 }
@@ -67,18 +74,13 @@ pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value>
     // success that moved nowhere.
     let path = match &args[0] {
         Value::String(s) if s.is_empty() => {
-            return Err(Error::new(
-                "cd: the empty string names no directory; did you mean `cd .`, or `cd ~`?",
-            )
-            .into());
+            return Err(invalid("cd", InvalidCause::EmptyPath).into());
         }
         Value::String(s) => s.as_str(),
         other => {
-            return Err(Error::new(format!(
-                "cd: expected a String path, got {}",
-                other.type_name()
-            ))
-            .into());
+            return Err(other
+                .expected("cd", Expected::Shape(ValueShape::String))
+                .into());
         }
     };
 

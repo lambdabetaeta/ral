@@ -14,10 +14,10 @@ let beta_h = spawn { echo beta }
 await $beta_h
 await $a
 
-# A failing child: await re-raises its reason; `try` dispatches to the handler.
+# A failing child: await re-raises its failure; `try` dispatches to the handler.
 let h = spawn { sh -c 'exit 3' }
 try { await $h; echo "child ok=true" } { |e|
-    echo 'child ok=false reason=' $e[reason]
+    echo 'child ok=false status=' $e[status] $e[message]
 }
 
 # Handles are values: store in a list, then await each.

@@ -18,10 +18,7 @@ fn glob(dir: &std::path::Path, pattern: &str) -> Result<(), String> {
     else {
         panic!("the glob must compile");
     };
-    ending
-        .into_settled()
-        .map(drop)
-        .map_err(|b| format!("{b:?}"))
+    ending.into_settled().map(drop).map_err(|b| b.to_string())
 }
 
 #[test]
@@ -48,7 +45,7 @@ fn a_matching_non_utf8_name_is_refused_and_a_sibling_is_harmless() {
     assert!(
         glob(tmp.path(), "*.txt")
             .unwrap_err()
-            .contains("not valid UTF-8")
+            .contains("is not UTF-8")
     );
     glob(tmp.path(), "ok*").unwrap();
 }

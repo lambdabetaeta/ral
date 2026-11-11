@@ -102,9 +102,9 @@ fn run_trampoline(
     let rendered = policy.rendered().expect("renders");
     let env = Envelope {
         trampoline: own,
-        ..*env
+        ..env.clone()
     };
-    let (cmd, info, stdio) = bwrap_command(
+    let (cmd, info, stdio, evidence) = bwrap_command(
         &env,
         plan(policy),
         handoff,
@@ -114,7 +114,7 @@ fn run_trampoline(
         Ownership::Kept,
     )
     .expect("the launch builds");
-    let mut launch = bwrapped(cmd, info, stdio, report);
+    let mut launch = bwrapped(cmd, info, stdio, report).with_setup_evidence(evidence);
     launch.launch_mut().stdin(crate::process::StdioSpec::Null);
     launch.output()
 }

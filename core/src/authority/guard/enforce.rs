@@ -4,62 +4,60 @@
 //! an fs read or write, a boolean flag, folds the whole dynamic
 //! [`GrantStack`], so a verdict is authority intersected across every layer,
 //! never one frame.  The judgments are the model's ([`GrantStack::admit`],
-//! [`GrantStack::read`]); this module words their refusals and, for the exec and fs
+//! [`GrantStack::read`]); this module captures their refusals and, for the exec and fs
 //! guards, which reach a real OS resource, builds the [`Denial`] the shell
 //! records.  The sandbox projects the same authority off the same folds,
 //! so the two cannot drift.
 
 use crate::authority::policy::{
-    Admitted, Baseline, ExecDenial, Flag, FsDeny, FsOp, GrantStack, LocateError, Program, Refused,
+    Admitted, Baseline, ExecDenial, Flag, FsOp, GrantStack, LocateError, Program, Refused,
     ShellVerb, Withheld,
 };
-use crate::authority::remedy::{self, FsList};
-use crate::error::Error;
-use crate::fact::{Check, Resource};
 use crate::path::{LexicalPath, MatchedBy, Trace};
-use crate::text::code;
 use std::fmt::{self, Display};
 
-/// A refused exec or fs check: the fact the trail keeps, and the refusal the
-/// caller raises.  An admitted check is never recorded: a trail of every
-/// permitted read says nothing an auditor asked.
-pub(crate) struct Denial {
-    pub check: Check,
-    pub error: Error,
-    /// Refused for a missing allowance alone: no exclusion, nor ral's pinned
-    /// binary, refused it.
-    pub missing_allowance: bool,
+pub(crate) use crate::fact::Denial;
+use crate::fact::{
+    EditorFlag, ExclusionMatch, FlagId, ReadOrWrite, ShellFlag, SingleOrNested, Withholding,
+    WithholdingExcluded,
+};
+
+fn layers(layers: impl Iterator) -> SingleOrNested {
+    if layers.count() > 1 {
+        SingleOrNested::Nested
+    } else {
+        SingleOrNested::Single
+    }
 }
 
-impl Denial {
-    fn new(
-        resource: Resource,
-        fields: impl IntoIterator<Item = (&'static str, String)>,
-        error: Error,
-        missing_allowance: bool,
-    ) -> Self {
-        let fields = fields
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        Self {
-            check: Check::new(resource, fields),
-            error,
-            missing_allowance,
+impl From<MatchedBy> for ExclusionMatch {
+    fn from(value: MatchedBy) -> Self {
+        match value {
+            MatchedBy::Name => Self::Name,
+            MatchedBy::FoldedName => Self::FoldedName,
+            MatchedBy::Identity => Self::Identity,
         }
     }
 }
 
-/// What an enclosing grant may do to a missing allowance, said only where
-/// more than one of `layers` supplies the axis.
-fn nested(layers: impl Iterator) -> Option<&'static str> {
-    (layers.count() > 1).then_some(
-        "an enclosing grant may be the one that withholds it, and a nested grant cannot add \
-         authority its caller withholds",
-    )
+fn withholding<T, U>(
+    why: Withheld<T>,
+    nested: impl FnOnce() -> SingleOrNested,
+    scope: impl FnOnce(T) -> U,
+) -> Withholding<U> {
+    match why {
+        Withheld::MissingAllowance => Withholding::MissingAllowance(nested()),
+        Withheld::Excluded {
+            scope: denied,
+            matched_by,
+        } => Withholding::Excluded(WithholdingExcluded {
+            scope: scope(*denied),
+            matched_by: matched_by.into(),
+        }),
+    }
 }
 
-/// The exclusion half of a refusal; its fix is [`remedy::remove_the_exclusion`].
+/// The domain carrier remains printable outside a computation.
 fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -> String {
     match matched_by {
         MatchedBy::Name => format!("{subject} is excluded by {scope}"),
@@ -77,8 +75,9 @@ fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -
 fn says(refused: &Refused, subject: impl Display) -> String {
     match refused {
         Refused::Guarded(pinned) => format!(
-            "{subject} is the {pinned} binary ral pinned at startup, which confines every \
-             command run under a grant"
+            "{subject} is the {} binary ral pinned at startup, which confines every \
+             command run under a grant",
+            <&str>::from(*pinned)
         ),
         Refused::Withheld(Withheld::MissingAllowance) => {
             format!("no allowance of the active grant covers {subject}")
@@ -116,10 +115,9 @@ pub(crate) fn check_exec(
         Program::Tool(name) => Some(name),
         Program::File { .. } => None,
     };
-    grants.admit(baseline, program).map_err(|why| {
-        let error = exec_error(grants, baseline, shown, tool, &why);
-        Box::new(exec_denial(shown, &why, error))
-    })
+    grants
+        .admit(baseline, program)
+        .map_err(|why| Box::new(exec_denial(grants, baseline, shown, tool, why)))
 }
 
 /// Judge a name a head's walk reached no object at, as running it would be.
@@ -129,109 +127,43 @@ pub(crate) fn check_exec_name(
     shown: &str,
     trace: &Trace,
 ) -> Result<(), Box<Denial>> {
-    grants.admit_name(baseline, trace).map_err(|why| {
-        let error = exec_error(grants, baseline, shown, None, &why);
-        Box::new(exec_denial(shown, &why, error))
-    })
+    grants
+        .admit_name(baseline, trace)
+        .map_err(|why| Box::new(exec_denial(grants, baseline, shown, None, why)))
 }
 
-/// The words of an exec refusal; `tool` names a bundled program.
-fn exec_error(
+fn exec_denial(
     grants: &GrantStack,
     baseline: &Baseline,
     shown: &str,
     tool: Option<&str>,
-    why: &ExecDenial,
-) -> Error {
-    let head = format!("command '{shown}' denied by active grant");
+    why: ExecDenial,
+) -> Denial {
     match why {
-        ExecDenial::Run(Withheld::MissingAllowance) => match nested(grants.exec()) {
-            Some(nested) => Error::new(format!(
-                "{head}: some layer's exec `allow` list does not let it run"
-            ))
-            .with_hint(nested),
-            None => Error::new(format!(
-                "{head}: nothing in the grant's exec `allow` list lets it run"
-            ))
-            .with_hint(remedy::add_to_exec()),
-        },
-        ExecDenial::Run(Withheld::Excluded { scope, matched_by }) => Error::new(format!(
-            "{head}: {}",
-            excluded(
-                format_args!("'{shown}'"),
-                code(&scope.to_string()),
-                *matched_by
-            )
-        ))
-        .with_hint(remedy::remove_the_exclusion()),
-        ExecDenial::Read(why) => Error::new(format!(
-            "{head}: {}",
-            read_cause(baseline, shown, tool, why)
-        ))
-        .with_hint(read_hint(why, nested(grants.fs()))),
-    }
-}
-
-/// Why running a command is refused for what it reads: a host file, or for a
-/// bundled tool ral's binary, which it runs.
-fn read_cause(
-    baseline: &Baseline,
-    shown: &str,
-    tool: Option<&str>,
-    why: &Withheld<FsDeny>,
-) -> String {
-    let (lead, subject) = match tool {
-        Some(tool) => (
-            format!("'{tool}' is built into ral, and "),
-            baseline.image().map_or_else(
-                || "ral's binary".to_string(),
-                |own| format!("ral's binary '{}'", own.real()),
-            ),
+        ExecDenial::Run(why) => Denial::exec_run(
+            shown.into(),
+            withholding(why, || layers(grants.exec()), |scope| scope.target()),
         ),
-        None => (String::new(), format!("'{shown}'")),
-    };
-    match why {
-        Withheld::MissingAllowance => {
-            format!("{lead}{subject} may run, but it is not readable under the active grant")
+        ExecDenial::Read(why) => {
+            let cause = withholding(why, || layers(grants.fs()), |scope| scope.to_string());
+            match (tool, cause) {
+                (Some(tool), Withholding::Excluded(exclusion)) => Denial::bundled_read(
+                    shown.into(),
+                    tool.into(),
+                    baseline.image().map(|image| image.real().to_string()),
+                    exclusion,
+                ),
+                (_, cause) => Denial::exec_read(shown.into(), cause),
+            }
         }
-        Withheld::Excluded { scope, matched_by } => format!(
-            "{lead}{}",
-            excluded(subject, format_args!("the fs deny '{scope}'"), *matched_by)
-        ),
     }
-}
-
-fn read_hint(why: &Withheld<FsDeny>, nested: Option<&str>) -> String {
-    match (why, nested) {
-        (Withheld::MissingAllowance, Some(nested)) => nested.to_string(),
-        (Withheld::MissingAllowance, None) => format!(
-            "running a program reads it: {}",
-            remedy::add_to_fs("it", FsList::Read)
-        ),
-        (Withheld::Excluded { .. }, _) => remedy::remove_the_exclusion().to_string(),
-    }
-}
-
-fn exec_denial(shown: &str, why: &ExecDenial, error: Error) -> Denial {
-    let deny = match why {
-        ExecDenial::Run(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
-        ExecDenial::Read(Withheld::Excluded { scope, .. }) => Some(scope.to_string()),
-        _ => None,
-    };
-    let missing_allowance = matches!(
-        why,
-        ExecDenial::Run(Withheld::MissingAllowance) | ExecDenial::Read(Withheld::MissingAllowance)
-    );
-    let fields =
-        std::iter::once(("name", shown.to_string())).chain(deny.map(|deny| ("deny", deny)));
-    Denial::new(Resource::Exec, fields, error, missing_allowance)
 }
 
 /// Refuse a name the host would read as a DOS device (Windows only).  No grant
 /// can admit it: it names no object to judge.
-pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Error> {
+pub(crate) fn check_device_name(path: &LexicalPath) -> Result<(), Denial> {
     path.reserved_device_refusal()
-        .map_or(Ok(()), |m| Err(Error::new(m)))
+        .map_or(Ok(()), |device| Err(Denial::device(path.shown(), device)))
 }
 
 /// Name a refusal by the request, never by a withheld link's target.
@@ -241,60 +173,36 @@ pub(crate) fn fs_denial(
     op: FsOp,
     path: &LexicalPath,
 ) -> Denial {
-    let name = <&str>::from(op);
-    let path = path.shown();
-    let said = says(&refused, &path);
-    let missing_allowance = matches!(refused, Refused::Withheld(Withheld::MissingAllowance));
-    let (verdict, detail, hint) = match refused {
-        Refused::Withheld(Withheld::MissingAllowance) => {
-            let hint = nested(grants.fs()).map_or_else(
-                || {
-                    remedy::add_to_fs(
-                        "it",
-                        match op {
-                            FsOp::Read => FsList::Either,
-                            FsOp::Write => FsList::Write,
-                        },
-                    )
-                },
-                str::to_owned,
-            );
-            ("denied by grant", None, hint)
-        }
-        Refused::Withheld(Withheld::Excluded { scope, .. }) => (
-            "denied by grant",
-            Some(("deny", scope.to_string())),
-            remedy::remove_the_exclusion().to_string(),
+    match refused {
+        Refused::Withheld(why) => Denial::fs_withheld(
+            path.shown(),
+            match op {
+                FsOp::Read => ReadOrWrite::Read,
+                FsOp::Write => ReadOrWrite::Write,
+            },
+            withholding(why, || layers(grants.fs()), |scope| scope.to_string()),
         ),
-        Refused::Guarded(pinned) => (
-            "refused",
-            Some(("pinned", pinned.to_string())),
-            "ral never writes into the binary that enforces its grants, whatever the grant \
-             allows. Install a new one by replacing the file rather than rewriting it: a \
-             rename leaves this session's pinned copy intact"
-                .to_string(),
-        ),
-    };
-    let error = Error::new(format!("fs {name} {verdict}: {said}")).with_hint(hint);
-    let fields = [("op", name.to_string()), ("path", path)]
-        .into_iter()
-        .chain(detail);
-    Denial::new(Resource::Fs, fields, error, missing_allowance)
+        Refused::Guarded(pinned) => Denial::pinned_write(path.shown(), pinned),
+    }
 }
 
-/// Refuse a verb or builtin some layer of the stack withholds; `who` names it
-/// in the refusal.  Silence permits.
-pub(crate) fn check_flag(grants: &GrantStack, flag: Flag, who: &str) -> Result<(), Error> {
+/// Flags do not introduce an audit observation.
+pub(crate) fn check_flag(grants: &GrantStack, flag: Flag, who: &str) -> Result<(), Denial> {
     if grants.permits(flag) {
         return Ok(());
     }
-    Err(Error::new(match flag {
-        Flag::Shell(ShellVerb::Detach) => format!(
-            "{who}: an active grant withholds it, so nothing here may outlive this session. \
-             Would `spawn` do, since it ends when the session does?"
-        ),
-        _ => format!("denied: {who} requires {}", flag.key()),
-    }))
+    let flag = match flag {
+        Flag::Editor(verb) => FlagId::Editor(match verb {
+            crate::authority::policy::EditorVerb::Read => EditorFlag::Read,
+            crate::authority::policy::EditorVerb::Write => EditorFlag::Write,
+            crate::authority::policy::EditorVerb::Tui => EditorFlag::Tui,
+        }),
+        Flag::Shell(verb) => FlagId::Shell(match verb {
+            ShellVerb::Chdir => ShellFlag::Chdir,
+            ShellVerb::Detach => ShellFlag::Detach,
+        }),
+    };
+    Err(Denial::flag(who.into(), flag))
 }
 
 #[cfg(all(test, unix))]

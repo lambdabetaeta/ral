@@ -20,7 +20,7 @@ mod unix;
 #[cfg(unix)]
 pub(crate) use unix::Survivor;
 #[cfg(unix)]
-pub(super) use unix::{SpawnError, spawn_detached, spawn_with_pgid};
+pub(super) use unix::{SpawnError, spawn_detached_with_evidence, spawn_with_evidence};
 
 #[cfg(windows)]
 mod windows;

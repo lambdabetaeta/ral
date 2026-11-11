@@ -19,6 +19,13 @@ use crate::record::{Schedule, Unavailable};
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, ToSpan, Zoned};
+use ral_core::fact::{
+    CronCause, CronCauseField, CronCauseFieldCount, CronFailure, CronField, CronFieldCause,
+    CronFieldCauseDescendingRange, CronFieldCauseInvalidStep, CronFieldCauseOutOfRange,
+    CronFieldCauseUnknownValue, DurationCause, DurationCauseInvalidCount, DurationCauseUnknownUnit,
+    DurationFailure, NumberFault, ScheduleFailure, ScheduleFailureDuplicateLiveLabel,
+    ScheduleFailureNoFutureOccurrence, ScheduleFailureRecording,
+};
 use ral_core::process::{Deadline, arm_callback};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -80,21 +87,32 @@ impl CronSchedule {
     ///
     /// # Errors
     /// Wrong field count, or a malformed field.
-    pub fn parse(expr: &str) -> Result<Self, String> {
+    pub fn parse(expr: &str) -> Result<Self, CronFailure> {
         let fields: Vec<&str> = expr.split_whitespace().collect();
         if fields.len() != 5 {
-            return Err(format!(
-                "a cron expression has five fields (minute hour day-of-month month day-of-week), got {}",
-                fields.len()
-            ));
+            return Err(CronFailure {
+                expression: expr.into(),
+                cause: CronCause::FieldCount(CronCauseFieldCount {
+                    got: fields.len().into(),
+                }),
+            });
         }
-        let minute = parse_field(fields[0], 0, 59, &[])?;
-        let hour = parse_field(fields[1], 0, 23, &[])?;
-        let dom = parse_field(fields[2], 1, 31, &[])?;
-        let month = parse_field(fields[3], 1, 12, MONTHS)?;
-        // 7 is a second spelling of Sunday: admit it, then fold its bit onto
-        // 0 so the matcher reads one.
-        let mut dow = parse_field(fields[4], 0, 7, WEEKDAYS)?;
+        let parse = |index: usize, field: CronField, min: u8, max: u8, names: &[(&str, u8)]| {
+            parse_field(fields[index], min, max, names).map_err(|cause| CronFailure {
+                expression: expr.into(),
+                cause: CronCause::Field(CronCauseField {
+                    field,
+                    specification: fields[index].into(),
+                    cause,
+                }),
+            })
+        };
+        let minute = parse(0, CronField::Minute, 0, 59, &[])?;
+        let hour = parse(1, CronField::Hour, 0, 23, &[])?;
+        let dom = parse(2, CronField::DayOfMonth, 1, 31, &[])?;
+        let month = parse(3, CronField::Month, 1, 12, MONTHS)?;
+        // Sunday accepts 7, then folds onto 0.
+        let mut dow = parse(4, CronField::DayOfWeek, 0, 7, WEEKDAYS)?;
         if dow & (1 << 7) != 0 {
             dow = (dow & !(1 << 7)) | 1;
         }
@@ -177,20 +195,23 @@ fn bit(mask: u64, v: i8) -> bool {
 }
 
 /// Parse one cron field into an allowed-value bitmask over `[min, max]`.
-fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64, String> {
+fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64, CronFieldCause> {
     let spec = spec.trim();
     if spec.is_empty() {
-        return Err("empty cron field".into());
+        return Err(CronFieldCause::Empty);
     }
     let mut mask = 0u64;
     for part in spec.split(',') {
         let (range, step) = match part.split_once('/') {
             Some((r, s)) => {
-                let step: u8 = s
-                    .parse()
-                    .map_err(|_| format!("invalid step `{s}` in cron field `{spec}`"))?;
+                let step: u8 = s.parse().map_err(|error| {
+                    CronFieldCause::InvalidStep(CronFieldCauseInvalidStep {
+                        text: s.into(),
+                        fault: number_fault(&error),
+                    })
+                })?;
                 if step == 0 {
-                    return Err(format!("cron step cannot be zero in `{spec}`"));
+                    return Err(CronFieldCause::ZeroStep);
                 }
                 (r, step)
             }
@@ -206,7 +227,13 @@ fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64
             if part.contains('/') { (v, max) } else { (v, v) }
         };
         if lo > hi {
-            return Err(format!("cron range `{range}` is descending in `{spec}`"));
+            return Err(CronFieldCause::DescendingRange(
+                CronFieldCauseDescendingRange {
+                    range: range.into(),
+                    from: lo,
+                    to: hi,
+                },
+            ));
         }
         let mut v = lo;
         loop {
@@ -221,7 +248,7 @@ fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64
 }
 
 /// Resolve one cron atom — a number or a name — to a value in `[min, max]`.
-fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, String> {
+fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, CronFieldCause> {
     let tok = tok.trim();
     let v = if let Ok(n) = tok.parse::<u8>() {
         n
@@ -231,10 +258,19 @@ fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, Stri
             .iter()
             .find(|(name, _)| *name == lower)
             .map(|(_, n)| *n)
-            .ok_or_else(|| format!("unrecognised cron value `{tok}`"))?
+            .ok_or_else(|| {
+                CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
+                    token: tok.into(),
+                    offered: names.iter().map(|(name, _)| (*name).into()).collect(),
+                })
+            })?
     };
     if v < min || v > max {
-        return Err(format!("cron value `{tok}` out of range {min}..={max}"));
+        return Err(CronFieldCause::OutOfRange(CronFieldCauseOutOfRange {
+            token: tok.into(),
+            minimum: min,
+            maximum: max,
+        }));
     }
     Ok(v)
 }
@@ -314,29 +350,49 @@ impl Trigger {
 ///
 /// # Errors
 /// A missing or unknown unit, a non-numeric count, or a zero duration.
-pub fn parse_duration(s: &str) -> Result<Duration, String> {
+pub fn parse_duration(s: &str) -> Result<Duration, DurationFailure> {
+    let failure = |cause| DurationFailure {
+        text: s.into(),
+        cause,
+    };
     let s = s.trim();
     let (num, unit) = s.split_at(
         s.find(|c: char| !c.is_ascii_digit())
-            .ok_or_else(|| format!("duration `{s}` needs a unit (s/m/h/d), e.g. 30m"))?,
+            .ok_or_else(|| failure(DurationCause::MissingUnit))?,
     );
-    let n: u64 = num
-        .parse()
-        .map_err(|_| format!("invalid duration count in `{s}`"))?;
+    let n: u64 = num.parse().map_err(|error| {
+        failure(DurationCause::InvalidCount(DurationCauseInvalidCount {
+            text: num.into(),
+            fault: number_fault(&error),
+        }))
+    })?;
     let mult: u64 = match unit.trim() {
         "s" => 1,
         "m" => 60,
         "h" => 3600,
         "d" => 86_400,
-        other => return Err(format!("unknown duration unit `{other}` (use s/m/h/d)")),
+        other => {
+            return Err(failure(DurationCause::UnknownUnit(
+                DurationCauseUnknownUnit { unit: other.into() },
+            )));
+        }
     };
     let secs = n
         .checked_mul(mult)
-        .ok_or_else(|| format!("duration `{s}` is too large"))?;
+        .ok_or_else(|| failure(DurationCause::Overflow))?;
     if secs == 0 {
-        return Err("duration must be greater than zero".into());
+        return Err(failure(DurationCause::Zero));
     }
     Ok(Duration::from_secs(secs))
+}
+
+fn number_fault(error: &std::num::ParseIntError) -> NumberFault {
+    match error.kind() {
+        std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+            NumberFault::OutOfRange
+        }
+        _ => NumberFault::Syntax,
+    }
 }
 
 /// The inverse of [`parse_duration`], in the coarsest unit that divides.
@@ -425,11 +481,13 @@ impl ScheduleRegistry {
         trigger: Trigger,
         prompt: String,
         label: String,
-    ) -> Result<ScheduleReceipt, String> {
+    ) -> Result<ScheduleReceipt, ScheduleFailure> {
         let now = Timestamp::now();
-        let next = trigger
-            .next_after(now)
-            .ok_or_else(|| "this trigger has no next occurrence".to_string())?;
+        let next = trigger.next_after(now).ok_or_else(|| {
+            ScheduleFailure::NoFutureOccurrence(ScheduleFailureNoFutureOccurrence {
+                trigger: trigger.describe(),
+            })
+        })?;
         let schedule = Schedule {
             prompt,
             trigger: trigger.describe(),
@@ -437,12 +495,15 @@ impl ScheduleRegistry {
             next_unix_ms: unix_ms(next),
             fires: 0,
         };
-        if !txn
-            .schedule(label.clone(), schedule)
-            .map_err(|why| why.to_string())?
-        {
-            return Err(format!(
-                "label '{label}' is already borne by a live schedule: pick another, or `` exarch-schedules `remove `` it first"
+        if !txn.schedule(label.clone(), schedule).map_err(|why| {
+            ScheduleFailure::Recording(ScheduleFailureRecording {
+                label: Some(label.clone()),
+                trigger: Some(trigger.describe()),
+                cause: why.failure(),
+            })
+        })? {
+            return Err(ScheduleFailure::DuplicateLiveLabel(
+                ScheduleFailureDuplicateLiveLabel { label },
             ));
         }
         let id = ScheduleId::new(self.next_id);
@@ -576,7 +637,7 @@ mod tests {
         trigger: Trigger,
         prompt: &str,
         label: &str,
-    ) -> Result<ScheduleReceipt, String> {
+    ) -> Result<ScheduleReceipt, ScheduleFailure> {
         mailbox
             .transact(|txn| registry.schedule(txn, trigger, prompt.into(), label.into()))
             .unwrap()
@@ -806,8 +867,12 @@ mod tests {
             "nightly",
         )
         .expect_err("a duplicate label must be refused");
-        assert!(err.contains("nightly"), "must name the label: {err}");
-        assert!(err.contains("already borne"), "must name the rule: {err}");
+        assert_eq!(
+            err,
+            ScheduleFailure::DuplicateLiveLabel(ScheduleFailureDuplicateLiveLabel {
+                label: "nightly".into()
+            })
+        );
         assert_eq!(listed(&mailbox).len(), 1);
     }
 
@@ -1578,5 +1643,155 @@ mod tests {
         fire(&mut registry, &mailbox, Timestamp::now());
         assert_eq!(commit_count(&log), before + 1);
         assert_eq!(address.queued_posts().len(), 1);
+    }
+
+    #[test]
+    fn cron_keeps_field_count_and_every_field_cause() {
+        assert_eq!(
+            CronSchedule::parse("* * * *").unwrap_err(),
+            CronFailure {
+                expression: "* * * *".into(),
+                cause: CronCause::FieldCount(CronCauseFieldCount { got: 4usize.into() }),
+            }
+        );
+        for (spec, cause) in [
+            ("", CronFieldCause::Empty),
+            (
+                "*/x",
+                CronFieldCause::InvalidStep(CronFieldCauseInvalidStep {
+                    text: "x".into(),
+                    fault: NumberFault::Syntax,
+                }),
+            ),
+            (
+                "*/256",
+                CronFieldCause::InvalidStep(CronFieldCauseInvalidStep {
+                    text: "256".into(),
+                    fault: NumberFault::OutOfRange,
+                }),
+            ),
+            ("*/0", CronFieldCause::ZeroStep),
+            (
+                "nope",
+                CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
+                    token: "nope".into(),
+                    offered: vec![],
+                }),
+            ),
+            (
+                "256",
+                CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
+                    token: "256".into(),
+                    offered: vec![],
+                }),
+            ),
+            (
+                "60",
+                CronFieldCause::OutOfRange(CronFieldCauseOutOfRange {
+                    token: "60".into(),
+                    minimum: 0,
+                    maximum: 59,
+                }),
+            ),
+            (
+                "5-1",
+                CronFieldCause::DescendingRange(CronFieldCauseDescendingRange {
+                    range: "5-1".into(),
+                    from: 5,
+                    to: 1,
+                }),
+            ),
+        ] {
+            assert_eq!(parse_field(spec, 0, 59, &[]).unwrap_err(), cause);
+        }
+        for (expr, field, specification) in [
+            ("60 * * * *", CronField::Minute, "60"),
+            ("* 24 * * *", CronField::Hour, "24"),
+            ("* * 32 * *", CronField::DayOfMonth, "32"),
+            ("* * * 13 *", CronField::Month, "13"),
+            ("* * * * 8", CronField::DayOfWeek, "8"),
+        ] {
+            let failure = CronSchedule::parse(expr).unwrap_err();
+            assert_eq!(failure.expression, expr);
+            let CronCause::Field(cause) = failure.cause else {
+                panic!("field failure")
+            };
+            assert_eq!(cause.field, field);
+            assert_eq!(cause.specification, specification);
+        }
+        assert_eq!(
+            resolve("wrong", 1, 12, MONTHS).unwrap_err(),
+            CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
+                token: "wrong".into(),
+                offered: MONTHS.iter().map(|(name, _)| (*name).into()).collect(),
+            })
+        );
+    }
+
+    #[test]
+    fn duration_keeps_original_text_numeric_fault_and_validation_precedence() {
+        for (text, cause) in [
+            ("20", DurationCause::MissingUnit),
+            (
+                "h",
+                DurationCause::InvalidCount(DurationCauseInvalidCount {
+                    text: String::new(),
+                    fault: NumberFault::Syntax,
+                }),
+            ),
+            (
+                "18446744073709551616s",
+                DurationCause::InvalidCount(DurationCauseInvalidCount {
+                    text: "18446744073709551616".into(),
+                    fault: NumberFault::OutOfRange,
+                }),
+            ),
+            (
+                "2x",
+                DurationCause::UnknownUnit(DurationCauseUnknownUnit { unit: "x".into() }),
+            ),
+            ("0s", DurationCause::Zero),
+            ("18446744073709551615d", DurationCause::Overflow),
+        ] {
+            assert_eq!(
+                parse_duration(text).unwrap_err(),
+                DurationFailure {
+                    text: text.into(),
+                    cause
+                }
+            );
+        }
+        assert_eq!(parse_duration(" 2h ").unwrap(), Duration::from_hours(2));
+    }
+
+    #[test]
+    fn no_future_occurrence_keeps_the_trigger_without_committing() {
+        let (mailbox, log) = mailbox();
+        let mut registry = ScheduleRegistry::new();
+        let commits = || {
+            let (_, _, commits) = log.record_emitter().reader().since(None).unwrap();
+            commits.count()
+        };
+        let before = commits();
+        let error = mailbox
+            .transact(|txn| {
+                registry.schedule(
+                    txn,
+                    Trigger::After(Duration::MAX),
+                    "never".into(),
+                    "never".into(),
+                )
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ScheduleFailure::NoFutureOccurrence(ScheduleFailureNoFutureOccurrence {
+                trigger: format!("after {}", fmt_duration(Duration::MAX)),
+            })
+        );
+        assert!(registry.by_label.is_empty());
+        assert!(mailbox.transact(|txn| txn.schedules().is_empty()).unwrap());
+        assert_eq!(commits(), before);
     }
 }

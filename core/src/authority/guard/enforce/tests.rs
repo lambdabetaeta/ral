@@ -60,7 +60,7 @@ fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
     assert!(
         matches!(
             open.judge::<Writing, _>(&baseline, held(&own)),
-            Err(Refused::Guarded("ral"))
+            Err(Refused::Guarded(crate::fact::PinnedBinary::Ral))
         ),
         "a write onto the pinned executable must be guarded under an open stack"
     );
@@ -80,7 +80,7 @@ fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
         assert!(
             matches!(
                 open.judge::<Writing, _>(&baseline, held(&link)),
-                Err(Refused::Guarded("ral"))
+                Err(Refused::Guarded(crate::fact::PinnedBinary::Ral))
             ),
             "a hard link names the pinned inode too"
         );
@@ -218,7 +218,7 @@ mod words {
     fn refusal(grants: &GrantStack, real: &str) -> Error {
         match check_exec(grants, &Baseline::default(), "t", file(real)) {
             Ok(_) => panic!("{real} should be refused"),
-            Err(denial) => denial.error,
+            Err(denial) => Error::new(crate::fact::Reason::Denied(denial)),
         }
     }
 
@@ -233,7 +233,7 @@ mod words {
         let one = refusal(&grants([only.clone()]), &t);
         assert!(one.describe().contains("lets it run"), "{}", one.describe());
         assert_eq!(
-            one.hints().first().map(|h| &**h),
+            one.reason.advice().first().map(|h| &**h),
             Some(
                 "add it to the grant's exec `allow` list: `` `name git `` for a command name, \
                  `` `absolute /path/to/it `` for a file, or `` `dir `absolute /path `` for its \
@@ -248,7 +248,7 @@ mod words {
             "{}",
             two.describe()
         );
-        assert!(two.hints()[0].contains("enclosing grant"));
+        assert!(two.reason.advice()[0].contains("enclosing grant"));
     }
 
     /// An exclusion is named with its `dir` constructor, and its hint is the
@@ -263,7 +263,7 @@ mod words {
         let named = format!("`dir `absolute '{}'", crate::path::shown(&x));
         assert!(e.describe().contains(&named), "{}", e.describe());
         assert_eq!(
-            e.hints().first().map(|h| &**h),
+            e.reason.advice().first().map(|h| &**h),
             Some(
                 "an allowance cannot override an exclusion; remove the exclusion from the \
                  policy that imposes it"
@@ -301,10 +301,8 @@ mod words {
         for caps in [by_exec, by_fs] {
             let grants = grants([caps]);
             let refused = refusal(&grants, &sh);
-            let guard = refused
-                .hints()
-                .first()
-                .expect("an exclusion's refusal hints");
+            let advice = refused.reason.advice();
+            let guard = advice.first().expect("an exclusion's refusal hints");
             let projection = SandboxProjection::of(&grants, &Baseline::default(), None)
                 .expect("fs is restricted");
             let kernel = interpreter_hint(&projection, std::path::Path::new(&sh))
@@ -327,12 +325,18 @@ mod words {
         let Err(denial) = check_exec(&grants, &baseline, "t", program) else {
             panic!("an exclusion refuses the program");
         };
-        assert_eq!(denial.check.resource, Resource::Exec);
-        assert_eq!(denial.check.fields["name"], "t");
-        assert!(!denial.check.fields.contains_key("resolved"));
-        assert!(!denial.error.describe().contains(&tree.at("/x/t")));
-        assert!(denial.check.fields.contains_key("deny"));
-        assert!(!denial.check.fields.contains_key("args"));
+        assert_eq!(denial.audit_check().unwrap().resource, Resource::Exec);
+        assert_eq!(denial.audit_check().unwrap().fields["name"], "t");
+        assert!(
+            !denial
+                .audit_check()
+                .unwrap()
+                .fields
+                .contains_key("resolved")
+        );
+        assert!(!denial.describe().contains(&tree.at("/x/t")));
+        assert!(denial.audit_check().unwrap().fields.contains_key("deny"));
+        assert!(!denial.audit_check().unwrap().fields.contains_key("args"));
     }
 
     #[cfg(unix)]
@@ -356,19 +360,26 @@ mod words {
             let Err(denial) = check_exec(&grants, &baseline, &link, file(&link)) else {
                 panic!("the guard must refuse the same object");
             };
-            assert_eq!(denial.check.resource, Resource::Exec);
+            assert_eq!(denial.audit_check().unwrap().resource, Resource::Exec);
             assert_eq!(
-                denial.check.fields,
+                denial.audit_check().unwrap().fields,
                 std::collections::BTreeMap::from([("name".into(), link.clone())])
             );
             let Err(plain) = check_exec(&grants, &baseline, &link, file(&target)) else {
                 panic!("the target is outside the admitted folder");
             };
-            assert_eq!(denial.error.describe(), plain.error.describe());
-            assert_eq!(denial.error.hints(), plain.error.hints());
-            for text in std::iter::once(&*denial.error.describe())
-                .chain(denial.error.hints().iter().map(|h| &**h))
-                .chain(denial.check.fields.values().map(String::as_str))
+            assert_eq!(denial.describe(), plain.describe());
+            assert_eq!(denial.advice(), plain.advice());
+            for text in std::iter::once(&*denial.describe())
+                .chain(denial.advice().iter().map(|h| &**h))
+                .chain(
+                    denial
+                        .audit_check()
+                        .unwrap()
+                        .fields
+                        .values()
+                        .map(String::as_str),
+                )
             {
                 assert!(!text.contains(&tree.at("/elsewhere")), "{text}");
             }
@@ -413,7 +424,7 @@ mod words {
             e.describe()
         );
         assert_eq!(
-            e.hints().first().map(|h| &**h),
+            e.reason.advice().first().map(|h| &**h),
             Some("running a program reads it: add it to the grant's fs `read` list")
         );
         let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t));
@@ -442,14 +453,14 @@ mod words {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
-            denial.error.describe().contains("'ls' is built into ral"),
+            denial.describe().contains("'ls' is built into ral"),
             "{}",
-            denial.error.describe()
+            denial.describe()
         );
         assert!(
-            denial.error.describe().contains("ral's binary"),
+            denial.describe().contains("ral's binary"),
             "{}",
-            denial.error.describe()
+            denial.describe()
         );
     }
 
@@ -471,7 +482,7 @@ mod words {
                 "no allowance of the active grant covers it"
             );
             assert_eq!(
-                fs_denial(&grants, refused, op, &path).error.describe(),
+                fs_denial(&grants, refused, op, &path).describe(),
                 format!(
                     "fs {} denied by grant: no allowance of the active grant covers {}",
                     <&str>::from(&op),
@@ -540,11 +551,19 @@ mod fs_facts {
             let at = std::path::Path::new("/nowhere/x");
             let denial = denial_at(&grants, &Baseline::default(), op, at);
             let shown = LexicalPath::absolute(at).unwrap().shown();
-            assert_eq!(denial.check.resource, Resource::Fs);
-            assert_eq!(denial.check.fields["op"], <&str>::from(&op));
-            assert_eq!(denial.check.fields["path"], shown);
-            assert_eq!(denial.check.fields.len(), 2, "{:?}", denial.check.fields);
-            assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
+            assert_eq!(denial.audit_check().unwrap().resource, Resource::Fs);
+            assert_eq!(
+                denial.audit_check().unwrap().fields["op"],
+                <&str>::from(&op)
+            );
+            assert_eq!(denial.audit_check().unwrap().fields["path"], shown);
+            assert_eq!(
+                denial.audit_check().unwrap().fields.len(),
+                2,
+                "{:?}",
+                denial.audit_check().unwrap().fields
+            );
+            assert!(denial.advice().iter().any(|h| !h.is_empty()));
         }
     }
 
@@ -561,7 +580,7 @@ mod fs_facts {
             deny_paths: vec![spell(&secret)],
         });
         let denial = denial_at(&grants, &Baseline::default(), FsOp::Read, &secret);
-        let fields = &denial.check.fields;
+        let fields = &denial.audit_check().unwrap().fields;
         assert_eq!(fields["op"], <&str>::from(FsOp::Read));
         assert_eq!(
             fields["path"],
@@ -569,7 +588,7 @@ mod fs_facts {
         );
         assert!(fields["deny"].contains("secret"), "{fields:?}");
         assert!(!fields.contains_key("pinned"));
-        assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
+        assert!(denial.advice().iter().any(|h| !h.is_empty()));
     }
 
     #[test]
@@ -582,13 +601,13 @@ mod fs_facts {
             FsOp::Write,
             &own,
         );
-        let fields = &denial.check.fields;
-        assert_eq!(denial.check.resource, Resource::Fs);
+        let fields = &denial.audit_check().unwrap().fields;
+        assert_eq!(denial.audit_check().unwrap().resource, Resource::Fs);
         assert_eq!(fields["op"], <&str>::from(FsOp::Write));
         assert_eq!(fields["path"], LexicalPath::absolute(&own).unwrap().shown());
         assert_eq!(fields["pinned"], "ral");
         assert!(!fields.contains_key("deny"));
-        assert!(denial.error.hints().iter().any(|h| !h.is_empty()));
+        assert!(denial.advice().iter().any(|h| !h.is_empty()));
     }
 }
 
@@ -615,5 +634,69 @@ fn a_flag_is_permitted_by_silence_or_by_its_listing() {
             permitted,
             "{flag:?}"
         );
+    }
+}
+
+#[test]
+fn guard_refusals_are_portable_and_flags_have_no_audit_observation() {
+    use crate::authority::guard::{check_flag, fs_denial};
+    use crate::authority::policy::{
+        EditorVerb, Flag, FsLayer, GrantLayer, Refused, ShellVerb, Withheld,
+    };
+    use crate::data::datum::Datum;
+    use crate::fact::{Denial, SingleOrNested, Withholding};
+    use crate::path::LexicalPath;
+    use std::collections::BTreeSet;
+
+    let restricted = GrantLayer {
+        fs: Some(FsLayer::default()),
+        editor: Some(BTreeSet::default()),
+        shell: Some(BTreeSet::default()),
+        ..GrantLayer::default()
+    };
+    let mut stack = GrantStack::root();
+    stack.push(restricted.clone());
+    let path = LexicalPath::absolute(std::path::Path::new(if cfg!(windows) {
+        r"C:\typed-fixture"
+    } else {
+        "/typed-fixture"
+    }))
+    .unwrap();
+    for (count, expected) in [(1, SingleOrNested::Single), (2, SingleOrNested::Nested)] {
+        if count == 2 {
+            stack.push(restricted.clone());
+        }
+        let refusal = fs_denial(
+            &stack,
+            Refused::Withheld(Withheld::MissingAllowance),
+            FsOp::Read,
+            &path,
+        );
+        assert_eq!(
+            refusal,
+            Denial::fs_withheld(
+                path.shown(),
+                crate::fact::ReadOrWrite::Read,
+                Withholding::MissingAllowance(expected)
+            )
+        );
+        assert!(refusal.missing_allowance());
+        let decoded = Denial::decode(&refusal.clone().encode()).unwrap();
+        assert_eq!(decoded, refusal);
+        assert_eq!(decoded.audit_check(), refusal.audit_check());
+        assert_eq!(decoded.missing_allowance(), refusal.missing_allowance());
+    }
+    for flag in [
+        Flag::Editor(EditorVerb::Read),
+        Flag::Editor(EditorVerb::Write),
+        Flag::Editor(EditorVerb::Tui),
+        Flag::Shell(ShellVerb::Chdir),
+        Flag::Shell(ShellVerb::Detach),
+    ] {
+        let refusal = check_flag(&stack, flag, "fixture").unwrap_err();
+        assert!(matches!(refusal, Denial::Flag(_)));
+        assert!(refusal.audit_check().is_none());
+        assert!(!refusal.missing_allowance());
+        assert_eq!(Denial::decode(&refusal.clone().encode()).unwrap(), refusal);
     }
 }

@@ -1,0 +1,6555 @@
+//! Portable host failure facts.
+
+use super::decode::{DecodeFailure, JsonInputFailure};
+use super::io::{IoCause, IoKind};
+use super::protocol::ConnectionFailure;
+use super::shared::{
+    AgentNameFailure, Count, CronFailure, DurationFact, DurationFailure, InvertedTurnSpan,
+    JsonSyntaxFailure, RegexCause, Utf8Failure,
+};
+pub use crate::path::Kind as EntryKind;
+use crate::process::CancelCause;
+use crate::{label, record, variant};
+use std::fmt::Write as _;
+use strum::{IntoStaticStr, VariantArray};
+
+pub type RefreshPayloadFailure = JsonInputFailure;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFailure {
+    Ral(RalFailure),
+    Exarch(ExarchFailure),
+}
+variant!(HostFailure { Ral(RalFailure): "ral", Exarch(ExarchFailure): "exarch" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RalFailure {
+    Boot(BootFailure),
+    Editor(EditorFailure),
+    Plugin(PluginFailure),
+    Keybinding(KeybindingFailure),
+}
+variant!(RalFailure { Boot(BootFailure): "boot", Editor(EditorFailure): "editor", Plugin(PluginFailure): "plugin", Keybinding(KeybindingFailure): "keybinding" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootFailure {
+    AlreadyBooted,
+    ProfileNotAbsolute(BootFailureProfileNotAbsolute),
+}
+variant!(BootFailure { AlreadyBooted: "already-booted", ProfileNotAbsolute(BootFailureProfileNotAbsolute): "profile-not-absolute" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorFailure {
+    NoPluginContext,
+    UnknownStyle(EditorFailureUnknownStyle),
+    Command(EditorFailureCommand),
+    Draft(EditorFailureDraft),
+    Workspace(EditorFailureWorkspace),
+}
+variant!(EditorFailure { NoPluginContext: "no-plugin-context", UnknownStyle(EditorFailureUnknownStyle): "unknown-style", Command(EditorFailureCommand): "command", Draft(EditorFailureDraft): "draft", Workspace(EditorFailureWorkspace): "workspace" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum EditorVariable {
+    Visual,
+    Editor,
+}
+label!(EditorVariable);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum EditorCommandCause {
+    Nul,
+    Unbalanced,
+    NoProgram,
+}
+label!(EditorCommandCause);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum DraftOperation {
+    Write,
+    Read,
+}
+label!(DraftOperation);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftFailure {
+    TooLarge(DraftFailureTooLarge),
+    Read(IoCause),
+    Utf8(Utf8Failure),
+}
+variant!(DraftFailure { TooLarge(DraftFailureTooLarge): "too-large", Read(IoCause): "read", Utf8(Utf8Failure): "utf8" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum EditorWorkspaceStep {
+    TemporaryDirectory,
+    CreateDirectory,
+    CreateBuffer,
+    WriteBuffer,
+    BufferPath,
+    LocateBuffer,
+    InspectBuffer,
+    OpenBuffer,
+    RemoveWorkspace,
+}
+label!(EditorWorkspaceStep);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorWorkspaceFailure {
+    Io(IoCause),
+    ExpectedRegularFile(EditorWorkspaceFailureExpectedRegularFile),
+}
+variant!(EditorWorkspaceFailure { Io(IoCause): "io", ExpectedRegularFile(EditorWorkspaceFailureExpectedRegularFile): "expected-regular-file" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginFailure {
+    AlreadyLoaded(PluginFailureAlreadyLoaded),
+    NotLoaded(PluginFailureNotLoaded),
+    NotFound(PluginFailureNotFound),
+    OptionsWithoutFactory(PluginFailureOptionsWithoutFactory),
+    FactoryReturnedBlock(PluginFailureFactoryReturnedBlock),
+    UnknownHookEvent(PluginFailureUnknownHookEvent),
+    AliasInstallationEscaped(PluginFailureAliasInstallationEscaped),
+}
+variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotLoaded(PluginFailureNotLoaded): "not-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", FactoryReturnedBlock(PluginFailureFactoryReturnedBlock): "factory-returned-block", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", AliasInstallationEscaped(PluginFailureAliasInstallationEscaped): "alias-installation-escaped" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeybindingFailure {
+    Notation(KeybindingFailureNotation),
+    ReservedAction(KeybindingFailureReservedAction),
+    SequencePrefix(KeybindingFailureSequencePrefix),
+    GuardRegex(KeybindingFailureGuardRegex),
+    UnguardedBuiltinShadow(KeybindingFailureUnguardedBuiltinShadow),
+}
+variant!(KeybindingFailure { Notation(KeybindingFailureNotation): "notation", ReservedAction(KeybindingFailureReservedAction): "reserved-action", SequencePrefix(KeybindingFailureSequencePrefix): "sequence-prefix", GuardRegex(KeybindingFailureGuardRegex): "guard-regex", UnguardedBuiltinShadow(KeybindingFailureUnguardedBuiltinShadow): "unguarded-builtin-shadow" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyNotationFailure {
+    Empty,
+    DuplicateModifier(KeyNotationFailureDuplicateModifier),
+    UnknownKey(KeyNotationFailureUnknownKey),
+    ControlCharacter(KeyNotationFailureControlCharacter),
+    ShiftedCharacter(KeyNotationFailureShiftedCharacter),
+    UppercaseControl(KeyNotationFailureUppercaseControl),
+    TerminalAlias(KeyNotationFailureTerminalAlias),
+}
+variant!(KeyNotationFailure { Empty: "empty", DuplicateModifier(KeyNotationFailureDuplicateModifier): "duplicate-modifier", UnknownKey(KeyNotationFailureUnknownKey): "unknown-key", ControlCharacter(KeyNotationFailureControlCharacter): "control-character", ShiftedCharacter(KeyNotationFailureShiftedCharacter): "shifted-character", UppercaseControl(KeyNotationFailureUppercaseControl): "uppercase-control", TerminalAlias(KeyNotationFailureTerminalAlias): "terminal-alias" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum KeyModifier {
+    Ctrl,
+    Alt,
+    Shift,
+}
+label!(KeyModifier);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ReservedKeyAction {
+    Interrupt,
+    EndOfFile,
+}
+label!(ReservedKeyAction);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum TerminalKeyAlias {
+    Backspace,
+    Tab,
+    Enter,
+    Escape,
+}
+label!(TerminalKeyAlias);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum BuiltinKeyAction {
+    TextInsertion,
+    Completion,
+    AcceptLine,
+    KeymapEscape,
+    HistoryNavigation,
+    CursorMovement,
+    Deletion,
+}
+label!(BuiltinKeyAction);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExarchFailure {
+    Policy(PolicyFailure),
+    Agent(AgentFailure),
+    Engine(EngineFailure),
+    Recording(RecordingFailure),
+    Context(ContextFailure),
+    Schedule(ScheduleFailure),
+    Edit(EditFailure),
+    Skill(SkillFailure),
+}
+variant!(ExarchFailure { Policy(PolicyFailure): "policy", Agent(AgentFailure): "agent", Engine(EngineFailure): "engine", Recording(RecordingFailure): "recording", Context(ContextFailure): "context", Schedule(ScheduleFailure): "schedule", Edit(EditFailure): "edit", Skill(SkillFailure): "skill" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyFailure {
+    OwnBinaryUnpinned,
+    UnknownBase(PolicyFailureUnknownBase),
+    EscapedLoad(PolicyFailureEscapedLoad),
+}
+variant!(PolicyFailure { OwnBinaryUnpinned: "own-binary-unpinned", UnknownBase(PolicyFailureUnknownBase): "unknown-base", EscapedLoad(PolicyFailureEscapedLoad): "escaped-load" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscapedLoad {
+    Exit(u8),
+    Stopped(CancelCause),
+}
+variant!(EscapedLoad { Exit(u8): "exit", Stopped(CancelCause): "stopped" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentFailure {
+    NoFuel,
+    NameMalformed(AgentNameFailure),
+    NameTaken(AgentFailureNameTaken),
+    UnknownProviderRole(AgentFailureUnknownProviderRole),
+    NotDescendant(AgentFailureNotDescendant),
+    NotOwned(AgentFailureNotOwned),
+    SelfMessage(AgentFailureSelfMessage),
+    NoLiveAgent(AgentFailureNoLiveAgent),
+    Ended(AgentFailureEnded),
+    Resting(AgentFailureResting),
+    NoReturnRecipient,
+    ReplyPending(AgentFailureReplyPending),
+    ReplyAbsent(AgentFailureReplyAbsent),
+    ReplyStopped(AgentFailureReplyStopped),
+    ReplyFailed(AgentFailureReplyFailed),
+    ReplyUnavailable(AgentFailureReplyUnavailable),
+    QueuedUnsynced(AgentFailureQueuedUnsynced),
+}
+variant!(AgentFailure { NoFuel: "no-fuel", NameMalformed(AgentNameFailure): "name-malformed", NameTaken(AgentFailureNameTaken): "name-taken", UnknownProviderRole(AgentFailureUnknownProviderRole): "unknown-provider-role", NotDescendant(AgentFailureNotDescendant): "not-descendant", NotOwned(AgentFailureNotOwned): "not-owned", SelfMessage(AgentFailureSelfMessage): "self-message", NoLiveAgent(AgentFailureNoLiveAgent): "no-live-agent", Ended(AgentFailureEnded): "ended", Resting(AgentFailureResting): "resting", NoReturnRecipient: "no-return-recipient", ReplyPending(AgentFailureReplyPending): "reply-pending", ReplyAbsent(AgentFailureReplyAbsent): "reply-absent", ReplyStopped(AgentFailureReplyStopped): "reply-stopped", ReplyFailed(AgentFailureReplyFailed): "reply-failed", ReplyUnavailable(AgentFailureReplyUnavailable): "reply-unavailable", QueuedUnsynced(AgentFailureQueuedUnsynced): "queued-unsynced" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFailure {
+    pub step: EngineStep,
+    pub cause: EngineCause,
+}
+record!(EngineFailure {
+    step: "step",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum EngineStep {
+    Factory,
+    Adopt,
+    Attach,
+    Starting,
+}
+label!(EngineStep);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineCause {
+    Factory(EngineFactoryFailure),
+    Io(IoCause),
+    Connection(ConnectionFailure),
+}
+variant!(EngineCause { Factory(EngineFactoryFailure): "factory", Io(IoCause): "io", Connection(ConnectionFailure): "connection" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingFailure {
+    Recording(RecordingFailureRecording),
+    CellPoisoned(RecordingFailureCellPoisoned),
+}
+variant!(RecordingFailure { Recording(RecordingFailureRecording): "recording", CellPoisoned(RecordingFailureCellPoisoned): "cell-poisoned" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum RecordingStage {
+    Append,
+    Sync,
+}
+label!(RecordingStage);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSpan {
+    pub from: Count,
+    pub to: Count,
+}
+record!(TurnSpan {
+    from: "from",
+    to: "to"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextFailure {
+    EmptySelection,
+    InvertedSpan(InvertedTurnSpan),
+    TurnNotRecorded(ContextFailureTurnNotRecorded),
+    Withdrawn(ContextFailureWithdrawn),
+    CurrentlyWritten(ContextFailureCurrentlyWritten),
+    StraddledEviction(ContextFailureStraddledEviction),
+    ReadBack(ContextFailureReadBack),
+    Mutation(ContextFailureMutation),
+    SteeringWithoutTurn,
+    AssistantRole(ContextFailureAssistantRole),
+    ToolResultCount(ContextFailureToolResultCount),
+    UnknownToolResult(ContextFailureUnknownToolResult),
+    DuplicateToolResult(ContextFailureDuplicateToolResult),
+}
+variant!(ContextFailure { EmptySelection: "empty-selection", InvertedSpan(InvertedTurnSpan): "inverted-span", TurnNotRecorded(ContextFailureTurnNotRecorded): "turn-not-recorded", Withdrawn(ContextFailureWithdrawn): "withdrawn", CurrentlyWritten(ContextFailureCurrentlyWritten): "currently-written", StraddledEviction(ContextFailureStraddledEviction): "straddled-eviction", ReadBack(ContextFailureReadBack): "read-back", Mutation(ContextFailureMutation): "mutation", SteeringWithoutTurn: "steering-without-turn", AssistantRole(ContextFailureAssistantRole): "assistant-role", ToolResultCount(ContextFailureToolResultCount): "tool-result-count", UnknownToolResult(ContextFailureUnknownToolResult): "unknown-tool-result", DuplicateToolResult(ContextFailureDuplicateToolResult): "duplicate-tool-result" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ContextOperation {
+    RenderRequest,
+    Import,
+    AcceptUser,
+    AcceptSteering,
+    AppendAssistant,
+    AppendToolResults,
+    Clear,
+    Rewind,
+}
+label!(ContextOperation);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextState {
+    ReadyForUser,
+    AwaitingAssistantAfterUser,
+    AwaitingToolResults(ContextStateAwaitingToolResults),
+    AwaitingAssistantAfterToolResults,
+}
+variant!(ContextState { ReadyForUser: "ready-for-user", AwaitingAssistantAfterUser: "awaiting-assistant-after-user", AwaitingToolResults(ContextStateAwaitingToolResults): "awaiting-tool-results", AwaitingAssistantAfterToolResults: "awaiting-assistant-after-tool-results" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleFailure {
+    NoGrant(ScheduleFailureNoGrant),
+    Cron(CronFailure),
+    Duration(DurationFailure),
+    NoFutureOccurrence(ScheduleFailureNoFutureOccurrence),
+    DuplicateLiveLabel(ScheduleFailureDuplicateLiveLabel),
+    Recording(ScheduleFailureRecording),
+}
+variant!(ScheduleFailure { NoGrant(ScheduleFailureNoGrant): "no-grant", Cron(CronFailure): "cron", Duration(DurationFailure): "duration", NoFutureOccurrence(ScheduleFailureNoFutureOccurrence): "no-future-occurrence", DuplicateLiveLabel(ScheduleFailureDuplicateLiveLabel): "duplicate-live-label", Recording(ScheduleFailureRecording): "recording" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditFailure {
+    NoEdits,
+    HashAbsent(EditFailureHashAbsent),
+    HashAmbiguous(EditFailureHashAmbiguous),
+    DuplicateTargetLine(EditFailureDuplicateTargetLine),
+    EmptyFrom,
+    MultipleLiteralMatches(EditFailureMultipleLiteralMatches),
+    NoLiteralMatch(EditFailureNoLiteralMatch),
+}
+variant!(EditFailure { NoEdits: "no-edits", HashAbsent(EditFailureHashAbsent): "hash-absent", HashAmbiguous(EditFailureHashAmbiguous): "hash-ambiguous", DuplicateTargetLine(EditFailureDuplicateTargetLine): "duplicate-target-line", EmptyFrom: "empty-from", MultipleLiteralMatches(EditFailureMultipleLiteralMatches): "multiple-literal-matches", NoLiteralMatch(EditFailureNoLiteralMatch): "no-literal-match" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiteralMiss {
+    Escapes,
+    Indentation(Count),
+    Absent,
+}
+variant!(LiteralMiss { Escapes: "escapes", Indentation(Count): "indentation", Absent: "absent" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillFailure {
+    InvalidName(SkillFailureInvalidName),
+    Missing(SkillFailureMissing),
+    Read(SkillFailureRead),
+    Yaml(SkillFailureYaml),
+    Frontmatter(SkillFailureFrontmatter),
+}
+variant!(SkillFailure { InvalidName(SkillFailureInvalidName): "invalid-name", Missing(SkillFailureMissing): "missing", Read(SkillFailureRead): "read", Yaml(SkillFailureYaml): "yaml", Frontmatter(SkillFailureFrontmatter): "frontmatter" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillPlace {
+    Disk(String),
+    Builtin,
+}
+variant!(SkillPlace { Disk(String): "disk", Builtin: "builtin" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontmatterFailure {
+    Missing,
+    NotMapping(FrontmatterFailureNotMapping),
+    MissingField(SkillField),
+    FieldShape(FrontmatterFailureFieldShape),
+    InvalidName(FrontmatterFailureInvalidName),
+    DirectoryNameMismatch(FrontmatterFailureDirectoryNameMismatch),
+}
+variant!(FrontmatterFailure { Missing: "missing", NotMapping(FrontmatterFailureNotMapping): "not-mapping", MissingField(SkillField): "missing-field", FieldShape(FrontmatterFailureFieldShape): "field-shape", InvalidName(FrontmatterFailureInvalidName): "invalid-name", DirectoryNameMismatch(FrontmatterFailureDirectoryNameMismatch): "directory-name-mismatch" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum SkillField {
+    Name,
+    Description,
+}
+label!(SkillField);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum PodKind {
+    Null,
+    String,
+    Integer,
+    Float,
+    Boolean,
+    Array,
+    Hash,
+}
+label!(PodKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineFactoryFailure {
+    Unsupported(EngineFactoryFailureUnsupported),
+    MachineThreadStopped,
+    MissingSocketDevice,
+    NonVirtioSocketDevice,
+    CompletionWithoutResult,
+    DialTimedOut(EngineFactoryFailureDialTimedOut),
+    DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected),
+    Platform(EngineFactoryFailurePlatform),
+    Io(IoCause),
+}
+variant!(EngineFactoryFailure { Unsupported(EngineFactoryFailureUnsupported): "unsupported", MachineThreadStopped: "machine-thread-stopped", MissingSocketDevice: "missing-socket-device", NonVirtioSocketDevice: "non-virtio-socket-device", CompletionWithoutResult: "completion-without-result", DialTimedOut(EngineFactoryFailureDialTimedOut): "dial-timed-out", DialWaitDisconnected(EngineFactoryFailureDialWaitDisconnected): "dial-wait-disconnected", Platform(EngineFactoryFailurePlatform): "platform", Io(IoCause): "io" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum FactoryBackend {
+    Broker,
+    HyperV,
+    Virtualization,
+}
+label!(FactoryBackend);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordReadFailure {
+    Io(IoCause),
+    NonTranscriptRecord,
+    MissingLocusRecord(RecordReadFailureMissingLocusRecord),
+    LocusSealMismatch(RecordReadFailureLocusSealMismatch),
+    Line(RecordReadFailureLine),
+}
+variant!(RecordReadFailure { Io(IoCause): "io", NonTranscriptRecord: "non-transcript-record", MissingLocusRecord(RecordReadFailureMissingLocusRecord): "missing-locus-record", LocusSealMismatch(RecordReadFailureLocusSealMismatch): "locus-seal-mismatch", Line(RecordReadFailureLine): "line" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordLineFailure {
+    JsonSyntax(JsonSyntaxFailure),
+    InvalidEnvelope(DecodeFailure),
+    SealMismatch(RecordLineFailureSealMismatch),
+    InvalidRecords(DecodeFailure),
+}
+variant!(RecordLineFailure { JsonSyntax(JsonSyntaxFailure): "json-syntax", InvalidEnvelope(DecodeFailure): "invalid-envelope", SealMismatch(RecordLineFailureSealMismatch): "seal-mismatch", InvalidRecords(DecodeFailure): "invalid-records" });
+
+/// Context is outermost first; no link contains an enclosing failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub context: Vec<ProviderContext>,
+    pub leaf: ProviderLeaf,
+}
+record!(ProviderFailure {
+    context: "context",
+    leaf: "leaf"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProviderContext {
+    Truncated,
+}
+label!(ProviderContext);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderLeaf {
+    Unavailable(RecordingFailure),
+    Cancelled(ProviderCancelSite),
+    Transient(ProviderLeafTransient),
+    Refused(ProviderRefusal),
+    Api(ProviderLeafApi),
+    Overflow(ProviderLeafOverflow),
+    OutputCap(ProviderLeafOutputCap),
+    Terminal(ServiceFailure),
+    Credential(CredentialFailure),
+}
+variant!(ProviderLeaf { Unavailable(RecordingFailure): "unavailable", Cancelled(ProviderCancelSite): "cancelled", Transient(ProviderLeafTransient): "transient", Refused(ProviderRefusal): "refused", Api(ProviderLeafApi): "api", Overflow(ProviderLeafOverflow): "overflow", OutputCap(ProviderLeafOutputCap): "output-cap", Terminal(ServiceFailure): "terminal", Credential(CredentialFailure): "credential" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProviderCancelSite {
+    BeforeRequest,
+    MidStream,
+    Backoff,
+}
+label!(ProviderCancelSite);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryableProviderCause {
+    Service(ServiceFailure),
+    StreamEndedWithoutEnd(RetryableProviderCauseStreamEndedWithoutEnd),
+}
+variant!(RetryableProviderCause { Service(ServiceFailure): "service", StreamEndedWithoutEnd(RetryableProviderCauseStreamEndedWithoutEnd): "stream-ended-without-end" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRefusal {
+    pub limit: ProviderLimit,
+    pub resets_at: Option<ProviderInstant>,
+    pub received: ProviderInstant,
+    pub cause: ProviderRefusalCause,
+}
+record!(ProviderRefusal {
+    limit: "limit",
+    resets_at: "resets-at",
+    received: "received",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProviderLimit {
+    Rate,
+    Allowance,
+}
+label!(ProviderLimit);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRefusalCause {
+    Service(ServiceFailure),
+    Held(ProviderRefusalCauseHeld),
+}
+variant!(ProviderRefusalCause { Service(ServiceFailure): "service", Held(ProviderRefusalCauseHeld): "held" });
+
+/// Numeric meaning is seconds × `1_000_000_000` + `subsec_nanoseconds`, in i128.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInstant {
+    pub seconds: i64,
+    pub subsec_nanoseconds: i32,
+}
+record!(ProviderInstant {
+    seconds: "seconds",
+    subsec_nanoseconds: "subsec-nanoseconds"
+});
+
+/// Context is outermost first; the service owns the operation name and cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceFailure {
+    pub service: String,
+    pub operation: ServiceOperation,
+    pub context: Vec<ServiceContext>,
+    pub cause: Box<ServiceCause>,
+}
+record!(ServiceFailure {
+    service: "service",
+    operation: "operation",
+    context: "context",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ServiceOperation {
+    Chat,
+    BuildRefreshClient,
+    RefreshRequest,
+    RefreshResponse,
+}
+label!(ServiceOperation);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceContext {
+    GenaiWebAdapterCall(ProviderAdapter),
+    GenaiWebModelCall(ProviderModel),
+    GenaiWebStream(ProviderModel),
+    UnknownWebStreamSource(ServiceContextUnknownWebStreamSource),
+}
+variant!(ServiceContext { GenaiWebAdapterCall(ProviderAdapter): "genai-web-adapter-call", GenaiWebModelCall(ProviderModel): "genai-web-model-call", GenaiWebStream(ProviderModel): "genai-web-stream", UnknownWebStreamSource(ServiceContextUnknownWebStreamSource): "unknown-web-stream-source" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceCause {
+    Genai(GenaiFailure),
+    Webc(WebcFailure),
+    Reqwest(ReqwestFailure),
+    StreamTimeout(StreamTimeoutKind),
+    Utf8(Utf8Failure),
+    Io(IoCause),
+    Url(ProviderUrlFailure),
+    ValueExt(ValueExtFailure),
+    Json(ForeignJsonFailure),
+    UnknownWebStreamSource(ServiceCauseUnknownWebStreamSource),
+    RefreshResponse(RefreshServiceResponse),
+}
+variant!(ServiceCause { Genai(GenaiFailure): "genai", Webc(WebcFailure): "webc", Reqwest(ReqwestFailure): "reqwest", StreamTimeout(StreamTimeoutKind): "stream-timeout", Utf8(Utf8Failure): "utf8", Io(IoCause): "io", Url(ProviderUrlFailure): "url", ValueExt(ValueExtFailure): "value-ext", Json(ForeignJsonFailure): "json", UnknownWebStreamSource(ServiceCauseUnknownWebStreamSource): "unknown-web-stream-source", RefreshResponse(RefreshServiceResponse): "refresh-response" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub adapter: ProviderAdapter,
+    pub name: String,
+}
+record!(ProviderModel {
+    adapter: "adapter",
+    name: "name"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ProviderMessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+label!(ProviderMessageRole);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum StreamTimeoutKind {
+    Headers,
+    Read,
+}
+label!(StreamTimeoutKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenaiFailure {
+    ChatReqHasNoMessages(ProviderModel),
+    LastChatMessageIsNotUser(GenaiFailureLastChatMessageIsNotUser),
+    MessageRoleNotSupported(GenaiFailureMessageRoleNotSupported),
+    MessageContentTypeNotSupported(GenaiFailureMessageContentTypeNotSupported),
+    JsonModeWithoutInstruction,
+    VerbosityParsing(GenaiFailureVerbosityParsing),
+    ReasoningParsing(GenaiFailureReasoningParsing),
+    ServiceTierParsing(GenaiFailureServiceTierParsing),
+    PromptCacheRetentionParsing(GenaiFailurePromptCacheRetentionParsing),
+    NoChatResponse(ProviderModel),
+    InvalidJsonResponseElement(GenaiFailureInvalidJsonResponseElement),
+    RequiresApiKey(ProviderModel),
+    NoAuthResolver(ProviderModel),
+    NoAuthData(ProviderModel),
+    ModelMapperFailed(GenaiFailureModelMapperFailed),
+    ChatResponseGeneration(GenaiFailureChatResponseGeneration),
+    ChatResponse(GenaiFailureChatResponse),
+    StreamParse(GenaiFailureStreamParse),
+    HttpError(GenaiFailureHttpError),
+    Resolver(GenaiFailureResolver),
+    AdapterNotSupported(GenaiFailureAdapterNotSupported),
+    CacheBreakpointNoEligibleContent(GenaiFailureCacheBreakpointNoEligibleContent),
+    AdapterKindMismatch(GenaiFailureAdapterKindMismatch),
+    Internal(GenaiFailureInternal),
+    ClientBuildFail(GenaiFailureClientBuildFail),
+    JsonValueExt(ValueExtFailure),
+    SerdeJson(ForeignJsonFailure),
+}
+variant!(GenaiFailure { ChatReqHasNoMessages(ProviderModel): "chat-req-has-no-messages", LastChatMessageIsNotUser(GenaiFailureLastChatMessageIsNotUser): "last-chat-message-is-not-user", MessageRoleNotSupported(GenaiFailureMessageRoleNotSupported): "message-role-not-supported", MessageContentTypeNotSupported(GenaiFailureMessageContentTypeNotSupported): "message-content-type-not-supported", JsonModeWithoutInstruction: "json-mode-without-instruction", VerbosityParsing(GenaiFailureVerbosityParsing): "verbosity-parsing", ReasoningParsing(GenaiFailureReasoningParsing): "reasoning-parsing", ServiceTierParsing(GenaiFailureServiceTierParsing): "service-tier-parsing", PromptCacheRetentionParsing(GenaiFailurePromptCacheRetentionParsing): "prompt-cache-retention-parsing", NoChatResponse(ProviderModel): "no-chat-response", InvalidJsonResponseElement(GenaiFailureInvalidJsonResponseElement): "invalid-json-response-element", RequiresApiKey(ProviderModel): "requires-api-key", NoAuthResolver(ProviderModel): "no-auth-resolver", NoAuthData(ProviderModel): "no-auth-data", ModelMapperFailed(GenaiFailureModelMapperFailed): "model-mapper-failed", ChatResponseGeneration(GenaiFailureChatResponseGeneration): "chat-response-generation", ChatResponse(GenaiFailureChatResponse): "chat-response", StreamParse(GenaiFailureStreamParse): "stream-parse", HttpError(GenaiFailureHttpError): "http-error", Resolver(GenaiFailureResolver): "resolver", AdapterNotSupported(GenaiFailureAdapterNotSupported): "adapter-not-supported", CacheBreakpointNoEligibleContent(GenaiFailureCacheBreakpointNoEligibleContent): "cache-breakpoint-no-eligible-content", AdapterKindMismatch(GenaiFailureAdapterKindMismatch): "adapter-kind-mismatch", Internal(GenaiFailureInternal): "internal", ClientBuildFail(GenaiFailureClientBuildFail): "client-build-fail", JsonValueExt(ValueExtFailure): "json-value-ext", SerdeJson(ForeignJsonFailure): "serde-json" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderResponseHeader {
+    pub name: String,
+    pub value: crate::data::Bytes,
+}
+record!(ProviderResponseHeader {
+    name: "name",
+    value: "value"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAdapter {
+    OpenAi,
+    OpenAiResp,
+    Gemini,
+    GeminiIx,
+    Anthropic,
+    Fireworks,
+    Together,
+    Groq,
+    Aihubmix,
+    Kimi,
+    Mimo,
+    Moonshot,
+    Nebius,
+    Xai,
+    DeepSeek,
+    Mistral,
+    Zai,
+    BigModel,
+    Aliyun,
+    QwenCloud,
+    Baidu,
+    Cohere,
+    Ollama,
+    OllamaCloud,
+    Omlx,
+    Vertex,
+    GithubCopilot,
+    OpenCodeGo,
+    BedrockApi,
+    OpenRouter,
+    AtlasCloud,
+    Requesty,
+    ApiRoute,
+    Heabsy,
+    Runcrate,
+    CloudGpu,
+    Cheapaimodel,
+    MiniMax,
+    Custom(u8),
+}
+variant!(ProviderAdapter { OpenAi: "open-ai", OpenAiResp: "open-ai-resp", Gemini: "gemini", GeminiIx: "gemini-ix", Anthropic: "anthropic", Fireworks: "fireworks", Together: "together", Groq: "groq", Aihubmix: "aihubmix", Kimi: "kimi", Mimo: "mimo", Moonshot: "moonshot", Nebius: "nebius", Xai: "xai", DeepSeek: "deep-seek", Mistral: "mistral", Zai: "zai", BigModel: "big-model", Aliyun: "aliyun", QwenCloud: "qwen-cloud", Baidu: "baidu", Cohere: "cohere", Ollama: "ollama", OllamaCloud: "ollama-cloud", Omlx: "omlx", Vertex: "vertex", GithubCopilot: "github-copilot", OpenCodeGo: "open-code-go", BedrockApi: "bedrock-api", OpenRouter: "open-router", AtlasCloud: "atlas-cloud", Requesty: "requesty", ApiRoute: "api-route", Heabsy: "heabsy", Runcrate: "runcrate", CloudGpu: "cloud-gpu", Cheapaimodel: "cheapaimodel", MiniMax: "mini-max", Custom(u8): "custom" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebcFailure {
+    ResponseFailedNotJson(WebcFailureResponseFailedNotJson),
+    ResponseFailedInvalidJson(WebcFailureResponseFailedInvalidJson),
+    ResponseFailedStatus(WebcFailureResponseFailedStatus),
+    JsonValueExt(ValueExtFailure),
+}
+variant!(WebcFailure { ResponseFailedNotJson(WebcFailureResponseFailedNotJson): "response-failed-not-json", ResponseFailedInvalidJson(WebcFailureResponseFailedInvalidJson): "response-failed-invalid-json", ResponseFailedStatus(WebcFailureResponseFailedStatus): "response-failed-status", JsonValueExt(ValueExtFailure): "json-value-ext" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolverFailure {
+    ApiKeyEnvNotFound(ResolverFailureApiKeyEnvNotFound),
+    AuthDataNotSingleValue,
+    Custom(ResolverFailureCustom),
+}
+variant!(ResolverFailure { ApiKeyEnvNotFound(ResolverFailureApiKeyEnvNotFound): "api-key-env-not-found", AuthDataNotSingleValue: "auth-data-not-single-value", Custom(ResolverFailureCustom): "custom" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueExtFailure {
+    Custom(ValueExtFailureCustom),
+    PropertyNotFound(ValueExtFailurePropertyNotFound),
+    PropertyValueNotOfType(ValueExtFailurePropertyValueNotOfType),
+    ValueNotOfType(ValueExtFailureValueNotOfType),
+    SerdeJson(ForeignJsonFailure),
+}
+variant!(ValueExtFailure { Custom(ValueExtFailureCustom): "custom", PropertyNotFound(ValueExtFailurePropertyNotFound): "property-not-found", PropertyValueNotOfType(ValueExtFailurePropertyValueNotOfType): "property-value-not-of-type", ValueNotOfType(ValueExtFailureValueNotOfType): "value-not-of-type", SerdeJson(ForeignJsonFailure): "serde-json" });
+
+/// Only genai/value-ext decoding diagnostics; local schemas use `JsonInputFailure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignJsonFailure {
+    pub category: ForeignJsonCategory,
+    pub line: Count,
+    pub column: Count,
+    pub io_kind: Option<IoKind>,
+    pub detail: String,
+}
+record!(ForeignJsonFailure {
+    category: "category",
+    line: "line",
+    column: "column",
+    io_kind: "io-kind",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ForeignJsonCategory {
+    Io,
+    Syntax,
+    Data,
+    Eof,
+}
+label!(ForeignJsonCategory);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqwestFailure {
+    pub summary: ReqwestSummary,
+    pub sources: Vec<ReqwestSource>,
+}
+record!(ReqwestFailure {
+    summary: "summary",
+    sources: "sources"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqwestSummary {
+    pub class: ReqwestClass,
+    pub timeout: bool,
+    pub connect: bool,
+    pub dns: bool,
+    pub url: Option<String>,
+}
+record!(ReqwestSummary {
+    class: "class",
+    timeout: "timeout",
+    connect: "connect",
+    dns: "dns",
+    url: "url"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReqwestClass {
+    Builder,
+    Redirect,
+    Status(u32),
+    Request,
+    Body,
+    Decode,
+    Upgrade,
+    Unclassified(ReqwestClassUnclassified),
+}
+variant!(ReqwestClass { Builder: "builder", Redirect: "redirect", Status(u32): "status", Request: "request", Body: "body", Decode: "decode", Upgrade: "upgrade", Unclassified(ReqwestClassUnclassified): "unclassified" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReqwestSource {
+    Reqwest(ReqwestSummary),
+    Io(IoCause),
+    Json(ForeignJsonFailure),
+    Url(ProviderUrlFailure),
+    Utf8(Utf8Failure),
+    Foreign(ReqwestSourceForeign),
+}
+variant!(ReqwestSource { Reqwest(ReqwestSummary): "reqwest", Io(IoCause): "io", Json(ForeignJsonFailure): "json", Url(ProviderUrlFailure): "url", Utf8(Utf8Failure): "utf8", Foreign(ReqwestSourceForeign): "foreign" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderUrlFailure {
+    EmptyHost,
+    Idna,
+    InvalidPort,
+    InvalidIpv4Address,
+    InvalidIpv6Address,
+    InvalidDomainCharacter,
+    RelativeWithoutBase,
+    RelativeWithCannotBeABaseBase,
+    SetHostOnCannotBeABaseUrl,
+    Overflow,
+    Unclassified(ProviderUrlFailureUnclassified),
+}
+variant!(ProviderUrlFailure { EmptyHost: "empty-host", Idna: "idna", InvalidPort: "invalid-port", InvalidIpv4Address: "invalid-ipv4-address", InvalidIpv6Address: "invalid-ipv6-address", InvalidDomainCharacter: "invalid-domain-character", RelativeWithoutBase: "relative-without-base", RelativeWithCannotBeABaseBase: "relative-with-cannot-be-a-base-base", SetHostOnCannotBeABaseUrl: "set-host-on-cannot-be-a-base-url", Overflow: "overflow", Unclassified(ProviderUrlFailureUnclassified): "unclassified" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialFailure {
+    pub account: String,
+    pub service: CredentialService,
+    pub cause: CredentialCause,
+}
+record!(CredentialFailure {
+    account: "account",
+    service: "service",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum CredentialService {
+    Chatgpt,
+    Codex,
+    Grok,
+}
+label!(CredentialService);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialCause {
+    OwnerPanicked,
+    OwnerStopped,
+    Removed,
+    UnresolvedRotation,
+    Store(CredentialCauseStore),
+    LeaseTimedOut,
+    PreparationDeadline,
+    Refresh(CredentialCauseRefresh),
+}
+variant!(CredentialCause { OwnerPanicked: "owner-panicked", OwnerStopped: "owner-stopped", Removed: "removed", UnresolvedRotation: "unresolved-rotation", Store(CredentialCauseStore): "store", LeaseTimedOut: "lease-timed-out", PreparationDeadline: "preparation-deadline", Refresh(CredentialCauseRefresh): "refresh" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum CredentialStoreOperation {
+    OpenLease,
+    LockLease,
+    Read,
+    PersistSuccessor,
+    PersistFreshRotation,
+}
+label!(CredentialStoreOperation);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum RefreshOutcome {
+    NotSubmitted,
+    Rejected,
+    Ambiguous,
+}
+label!(RefreshOutcome);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshFailure {
+    TimedOut(DurationFact),
+    Service(ServiceFailure),
+    Response(RefreshFailureResponse),
+    MissingToken(RefreshTokenField),
+    EmptyToken(RefreshTokenField),
+    InvalidExpiry(RefreshFailureInvalidExpiry),
+    ExpiryOverflow(RefreshFailureExpiryOverflow),
+}
+variant!(RefreshFailure { TimedOut(DurationFact): "timed-out", Service(ServiceFailure): "service", Response(RefreshFailureResponse): "response", MissingToken(RefreshTokenField): "missing-token", EmptyToken(RefreshTokenField): "empty-token", InvalidExpiry(RefreshFailureInvalidExpiry): "invalid-expiry", ExpiryOverflow(RefreshFailureExpiryOverflow): "expiry-overflow" });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum RefreshTokenField {
+    AccessToken,
+    RefreshToken,
+    IdToken,
+}
+label!(RefreshTokenField);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshServiceResponse {
+    pub status: u32,
+    pub body: RefreshResponseBody,
+}
+record!(RefreshServiceResponse {
+    status: "status",
+    body: "body"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshResponseBody {
+    Detail(RefreshResponseBodyDetail),
+    ReadFailed(ReqwestFailure),
+}
+variant!(RefreshResponseBody { Detail(RefreshResponseBodyDetail): "detail", ReadFailed(ReqwestFailure): "read-failed" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshResponseDetail {
+    Text(RefreshResponseDetailText),
+    Html,
+    Empty,
+}
+variant!(RefreshResponseDetail { Text(RefreshResponseDetailText): "text", Html: "html", Empty: "empty" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperFailure {
+    NoReply,
+    EndedBeforeReporting,
+    Cancelled,
+    ProviderStopped(ProviderStop),
+    Provider(ProviderFailure),
+    Connection(ConnectionFailure),
+    Context(ContextFailure),
+    Recording(RecordingFailure),
+    Panicked,
+}
+variant!(HelperFailure { NoReply: "no-reply", EndedBeforeReporting: "ended-before-reporting", Cancelled: "cancelled", ProviderStopped(ProviderStop): "provider-stopped", Provider(ProviderFailure): "provider", Connection(ConnectionFailure): "connection", Context(ContextFailure): "context", Recording(RecordingFailure): "recording", Panicked: "panicked" });
+
+/// Payloads are raw provider stop codes, never host prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderStop {
+    Completed(String),
+    MaxTokens(String),
+    ToolCall(String),
+    ContentFilter(String),
+    StopSequence(String),
+    Unclassified(String),
+}
+variant!(ProviderStop { Completed(String): "completed", MaxTokens(String): "max-tokens", ToolCall(String): "tool-call", ContentFilter(String): "content-filter", StopSequence(String): "stop-sequence", Unclassified(String): "unclassified" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WithdrawalEvidence {
+    Unavailable,
+    EarliestRetained(Count),
+    NothingRetained,
+}
+variant!(WithdrawalEvidence { Unavailable: "unavailable", EarliestRetained(Count): "earliest-retained", NothingRetained: "nothing-retained" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootFailureProfileNotAbsolute {
+    pub path: String,
+}
+record!(BootFailureProfileNotAbsolute { path: "path" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorFailureUnknownStyle {
+    pub style: String,
+    pub offered: Vec<String>,
+}
+record!(EditorFailureUnknownStyle {
+    style: "style",
+    offered: "offered"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorFailureCommand {
+    pub variable: EditorVariable,
+    pub cause: EditorCommandCause,
+}
+record!(EditorFailureCommand {
+    variable: "variable",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorFailureDraft {
+    pub operation: DraftOperation,
+    pub cause: DraftFailure,
+}
+record!(EditorFailureDraft {
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorFailureWorkspace {
+    pub step: EditorWorkspaceStep,
+    pub path: Option<String>,
+    pub cause: EditorWorkspaceFailure,
+}
+record!(EditorFailureWorkspace {
+    step: "step",
+    path: "path",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftFailureTooLarge {
+    pub limit: Count,
+}
+record!(DraftFailureTooLarge { limit: "limit" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorWorkspaceFailureExpectedRegularFile {
+    pub found: Option<EntryKind>,
+}
+record!(EditorWorkspaceFailureExpectedRegularFile { found: "found" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureAlreadyLoaded {
+    pub name: String,
+}
+record!(PluginFailureAlreadyLoaded { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureNotLoaded {
+    pub name: String,
+}
+record!(PluginFailureNotLoaded { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureNotFound {
+    pub requested: String,
+}
+record!(PluginFailureNotFound {
+    requested: "requested"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureOptionsWithoutFactory {
+    pub plugin: String,
+}
+record!(PluginFailureOptionsWithoutFactory { plugin: "plugin" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureFactoryReturnedBlock {
+    pub plugin: String,
+}
+record!(PluginFailureFactoryReturnedBlock { plugin: "plugin" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureUnknownHookEvent {
+    pub event: String,
+    pub offered: Vec<String>,
+}
+record!(PluginFailureUnknownHookEvent {
+    event: "event",
+    offered: "offered"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginFailureAliasInstallationEscaped {
+    pub alias: String,
+    pub cause: EscapedLoad,
+}
+record!(PluginFailureAliasInstallationEscaped {
+    alias: "alias",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingFailureNotation {
+    pub key: String,
+    pub cause: KeyNotationFailure,
+}
+record!(KeybindingFailureNotation {
+    key: "key",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingFailureReservedAction {
+    pub key: String,
+    pub action: ReservedKeyAction,
+}
+record!(KeybindingFailureReservedAction {
+    key: "key",
+    action: "action"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingFailureSequencePrefix {
+    pub key: String,
+}
+record!(KeybindingFailureSequencePrefix { key: "key" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingFailureGuardRegex {
+    pub key: String,
+    pub pattern: String,
+    pub cause: RegexCause,
+}
+record!(KeybindingFailureGuardRegex {
+    key: "key",
+    pattern: "pattern",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingFailureUnguardedBuiltinShadow {
+    pub key: String,
+    pub action: BuiltinKeyAction,
+}
+record!(KeybindingFailureUnguardedBuiltinShadow {
+    key: "key",
+    action: "action"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureDuplicateModifier {
+    pub chord: String,
+    pub modifier: KeyModifier,
+}
+record!(KeyNotationFailureDuplicateModifier {
+    chord: "chord",
+    modifier: "modifier"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureUnknownKey {
+    pub token: String,
+}
+record!(KeyNotationFailureUnknownKey { token: "token" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureControlCharacter {
+    pub character: String,
+}
+record!(KeyNotationFailureControlCharacter {
+    character: "character"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureShiftedCharacter {
+    pub chord: String,
+    pub character: String,
+    pub control: bool,
+    pub alt: bool,
+}
+record!(KeyNotationFailureShiftedCharacter {
+    chord: "chord",
+    character: "character",
+    control: "control",
+    alt: "alt"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureUppercaseControl {
+    pub chord: String,
+}
+record!(KeyNotationFailureUppercaseControl { chord: "chord" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyNotationFailureTerminalAlias {
+    pub chord: String,
+    pub alt: bool,
+    pub alias: TerminalKeyAlias,
+}
+record!(KeyNotationFailureTerminalAlias {
+    chord: "chord",
+    alt: "alt",
+    alias: "alias"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyFailureUnknownBase {
+    pub name: String,
+    pub offered: Vec<String>,
+}
+record!(PolicyFailureUnknownBase {
+    name: "name",
+    offered: "offered"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyFailureEscapedLoad {
+    pub flag: String,
+    pub cause: EscapedLoad,
+}
+record!(PolicyFailureEscapedLoad {
+    flag: "flag",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureNameTaken {
+    pub name: String,
+}
+record!(AgentFailureNameTaken { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureUnknownProviderRole {
+    pub name: String,
+    pub offered: Vec<String>,
+}
+record!(AgentFailureUnknownProviderRole {
+    name: "name",
+    offered: "offered"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureNotDescendant {
+    pub name: String,
+}
+record!(AgentFailureNotDescendant { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureNotOwned {
+    pub name: String,
+}
+record!(AgentFailureNotOwned { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureSelfMessage {
+    pub name: String,
+}
+record!(AgentFailureSelfMessage { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureNoLiveAgent {
+    pub name: String,
+}
+record!(AgentFailureNoLiveAgent { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureEnded {
+    pub name: String,
+}
+record!(AgentFailureEnded { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureResting {
+    pub name: String,
+    pub parent: String,
+}
+record!(AgentFailureResting {
+    name: "name",
+    parent: "parent"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureReplyPending {
+    pub name: String,
+}
+record!(AgentFailureReplyPending { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureReplyAbsent {
+    pub name: String,
+}
+record!(AgentFailureReplyAbsent { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureReplyStopped {
+    pub name: String,
+}
+record!(AgentFailureReplyStopped { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureReplyFailed {
+    pub name: String,
+    pub cause: HelperFailure,
+}
+record!(AgentFailureReplyFailed {
+    name: "name",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureReplyUnavailable {
+    pub name: String,
+    pub cause: RecordingFailure,
+}
+record!(AgentFailureReplyUnavailable {
+    name: "name",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureQueuedUnsynced {
+    pub name: String,
+    pub cause: RecordingFailure,
+}
+record!(AgentFailureQueuedUnsynced {
+    name: "name",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingFailureRecording {
+    pub record: Option<String>,
+    pub stage: RecordingStage,
+    pub cause: IoCause,
+}
+record!(RecordingFailureRecording {
+    record: "record",
+    stage: "stage",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingFailureCellPoisoned {
+    pub agent: Count,
+}
+record!(RecordingFailureCellPoisoned { agent: "agent" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureTurnNotRecorded {
+    pub turn: Count,
+    pub reach: Option<Count>,
+}
+record!(ContextFailureTurnNotRecorded {
+    turn: "turn",
+    reach: "reach"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureWithdrawn {
+    pub turn: Count,
+    pub evidence: WithdrawalEvidence,
+}
+record!(ContextFailureWithdrawn {
+    turn: "turn",
+    evidence: "evidence"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureCurrentlyWritten {
+    pub turn: Count,
+}
+record!(ContextFailureCurrentlyWritten { turn: "turn" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureStraddledEviction {
+    pub requested: TurnSpan,
+    pub covering: TurnSpan,
+}
+record!(ContextFailureStraddledEviction {
+    requested: "requested",
+    covering: "covering"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureReadBack {
+    pub turn: Count,
+    pub source: Count,
+    pub record: String,
+    pub cause: RecordReadFailure,
+}
+record!(ContextFailureReadBack {
+    turn: "turn",
+    source: "source",
+    record: "record",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureMutation {
+    pub operation: ContextOperation,
+    pub state: ContextState,
+}
+record!(ContextFailureMutation {
+    operation: "operation",
+    state: "state"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureAssistantRole {
+    pub found: ProviderMessageRole,
+}
+record!(ContextFailureAssistantRole { found: "found" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureToolResultCount {
+    pub expected: Count,
+    pub got: Count,
+}
+record!(ContextFailureToolResultCount {
+    expected: "expected",
+    got: "got"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureUnknownToolResult {
+    pub id: String,
+}
+record!(ContextFailureUnknownToolResult { id: "id" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFailureDuplicateToolResult {
+    pub id: String,
+}
+record!(ContextFailureDuplicateToolResult { id: "id" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextStateAwaitingToolResults {
+    pub pending: Count,
+}
+record!(ContextStateAwaitingToolResults { pending: "pending" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleFailureNoGrant {
+    pub verb: String,
+}
+record!(ScheduleFailureNoGrant { verb: "verb" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleFailureNoFutureOccurrence {
+    pub trigger: String,
+}
+record!(ScheduleFailureNoFutureOccurrence { trigger: "trigger" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleFailureDuplicateLiveLabel {
+    pub label: String,
+}
+record!(ScheduleFailureDuplicateLiveLabel { label: "label" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleFailureRecording {
+    pub label: Option<String>,
+    pub trigger: Option<String>,
+    pub cause: RecordingFailure,
+}
+record!(ScheduleFailureRecording {
+    label: "label",
+    trigger: "trigger",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFailureHashAbsent {
+    pub path: String,
+    pub hash: String,
+}
+record!(EditFailureHashAbsent {
+    path: "path",
+    hash: "hash"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFailureHashAmbiguous {
+    pub path: String,
+    pub hash: String,
+    pub lines: Vec<Count>,
+}
+record!(EditFailureHashAmbiguous {
+    path: "path",
+    hash: "hash",
+    lines: "lines"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFailureDuplicateTargetLine {
+    pub path: String,
+    pub line: Count,
+}
+record!(EditFailureDuplicateTargetLine {
+    path: "path",
+    line: "line"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFailureMultipleLiteralMatches {
+    pub path: String,
+    pub matches: Count,
+    pub lines: Vec<Count>,
+}
+record!(EditFailureMultipleLiteralMatches {
+    path: "path",
+    matches: "matches",
+    lines: "lines"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFailureNoLiteralMatch {
+    pub path: String,
+    pub evidence: LiteralMiss,
+}
+record!(EditFailureNoLiteralMatch {
+    path: "path",
+    evidence: "evidence"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFailureInvalidName {
+    pub name: String,
+}
+record!(SkillFailureInvalidName { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFailureMissing {
+    pub name: String,
+}
+record!(SkillFailureMissing { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFailureRead {
+    pub name: String,
+    pub place: SkillPlace,
+    pub cause: IoCause,
+}
+record!(SkillFailureRead {
+    name: "name",
+    place: "place",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFailureYaml {
+    pub name: String,
+    pub place: SkillPlace,
+    pub detail: String,
+}
+record!(SkillFailureYaml {
+    name: "name",
+    place: "place",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFailureFrontmatter {
+    pub name: String,
+    pub place: SkillPlace,
+    pub cause: FrontmatterFailure,
+}
+record!(SkillFailureFrontmatter {
+    name: "name",
+    place: "place",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterFailureNotMapping {
+    pub found: PodKind,
+}
+record!(FrontmatterFailureNotMapping { found: "found" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterFailureFieldShape {
+    pub field: SkillField,
+    pub found: PodKind,
+}
+record!(FrontmatterFailureFieldShape {
+    field: "field",
+    found: "found"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterFailureInvalidName {
+    pub name: String,
+}
+record!(FrontmatterFailureInvalidName { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterFailureDirectoryNameMismatch {
+    pub declared: String,
+    pub directory: String,
+}
+record!(FrontmatterFailureDirectoryNameMismatch {
+    declared: "declared",
+    directory: "directory"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFactoryFailureUnsupported {
+    pub backend: FactoryBackend,
+}
+record!(EngineFactoryFailureUnsupported { backend: "backend" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFactoryFailureDialTimedOut {
+    pub port: u32,
+    pub within: DurationFact,
+}
+record!(EngineFactoryFailureDialTimedOut {
+    port: "port",
+    within: "within"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFactoryFailureDialWaitDisconnected {
+    pub port: u32,
+}
+record!(EngineFactoryFailureDialWaitDisconnected { port: "port" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFactoryFailurePlatform {
+    pub backend: FactoryBackend,
+    pub domain: String,
+    pub code: i64,
+    pub detail: String,
+}
+record!(EngineFactoryFailurePlatform {
+    backend: "backend",
+    domain: "domain",
+    code: "code",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordReadFailureMissingLocusRecord {
+    pub commit: Count,
+    pub index: Count,
+}
+record!(RecordReadFailureMissingLocusRecord {
+    commit: "commit",
+    index: "index"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordReadFailureLocusSealMismatch {
+    pub commit: Count,
+}
+record!(RecordReadFailureLocusSealMismatch { commit: "commit" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordReadFailureLine {
+    pub commit: Count,
+    pub cause: RecordLineFailure,
+}
+record!(RecordReadFailureLine {
+    commit: "commit",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLineFailureSealMismatch {
+    pub sealed: String,
+    pub actual: String,
+}
+record!(RecordLineFailureSealMismatch {
+    sealed: "sealed",
+    actual: "actual"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLeafTransient {
+    pub cause: RetryableProviderCause,
+    pub attempts: Count,
+}
+record!(ProviderLeafTransient {
+    cause: "cause",
+    attempts: "attempts"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLeafApi {
+    pub model: String,
+    pub cause: ServiceFailure,
+}
+record!(ProviderLeafApi {
+    model: "model",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLeafOverflow {
+    pub model: String,
+    pub provider: Option<String>,
+    pub sent: Option<Count>,
+    pub limit: Option<Count>,
+    pub listed: Option<Count>,
+    pub cause: ServiceFailure,
+}
+record!(ProviderLeafOverflow {
+    model: "model",
+    provider: "provider",
+    sent: "sent",
+    limit: "limit",
+    listed: "listed",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLeafOutputCap {
+    pub stop_reason: String,
+}
+record!(ProviderLeafOutputCap {
+    stop_reason: "stop-reason"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryableProviderCauseStreamEndedWithoutEnd {
+    pub service: String,
+    pub model: String,
+}
+record!(RetryableProviderCauseStreamEndedWithoutEnd {
+    service: "service",
+    model: "model"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRefusalCauseHeld {
+    pub service: String,
+    pub model: String,
+}
+record!(ProviderRefusalCauseHeld {
+    service: "service",
+    model: "model"
+});
+
+/// Only an unknown foreign `WebStream` wrapper with a further source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceContextUnknownWebStreamSource {
+    pub detail: String,
+}
+record!(ServiceContextUnknownWebStreamSource { detail: "detail" });
+
+/// Only an unknown terminal foreign `WebStream` source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceCauseUnknownWebStreamSource {
+    pub detail: String,
+}
+record!(ServiceCauseUnknownWebStreamSource { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureLastChatMessageIsNotUser {
+    pub model: ProviderModel,
+    pub actual_role: ProviderMessageRole,
+}
+record!(GenaiFailureLastChatMessageIsNotUser {
+    model: "model",
+    actual_role: "actual-role"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureMessageRoleNotSupported {
+    pub model: ProviderModel,
+    pub role: ProviderMessageRole,
+}
+record!(GenaiFailureMessageRoleNotSupported {
+    model: "model",
+    role: "role"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureMessageContentTypeNotSupported {
+    pub model: ProviderModel,
+    pub detail: String,
+}
+record!(GenaiFailureMessageContentTypeNotSupported {
+    model: "model",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureVerbosityParsing {
+    pub actual: String,
+}
+record!(GenaiFailureVerbosityParsing { actual: "actual" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureReasoningParsing {
+    pub actual: String,
+}
+record!(GenaiFailureReasoningParsing { actual: "actual" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureServiceTierParsing {
+    pub actual: String,
+}
+record!(GenaiFailureServiceTierParsing { actual: "actual" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailurePromptCacheRetentionParsing {
+    pub actual: String,
+}
+record!(GenaiFailurePromptCacheRetentionParsing { actual: "actual" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureInvalidJsonResponseElement {
+    pub detail: String,
+}
+record!(GenaiFailureInvalidJsonResponseElement { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureModelMapperFailed {
+    pub model: ProviderModel,
+    pub cause: ResolverFailure,
+}
+record!(GenaiFailureModelMapperFailed {
+    model: "model",
+    cause: "cause"
+});
+
+/// Retains the foreign response and intrinsic cause, never the request payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureChatResponseGeneration {
+    pub model: ProviderModel,
+    pub response_body: String,
+    pub detail: String,
+}
+record!(GenaiFailureChatResponseGeneration {
+    model: "model",
+    response_body: "response-body",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureChatResponse {
+    pub model: ProviderModel,
+    pub body: String,
+}
+record!(GenaiFailureChatResponse {
+    model: "model",
+    body: "body"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureStreamParse {
+    pub model: ProviderModel,
+    pub cause: ForeignJsonFailure,
+}
+record!(GenaiFailureStreamParse {
+    model: "model",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureHttpError {
+    pub status: u32,
+    pub canonical_reason: String,
+    pub body: String,
+    pub headers: Vec<ProviderResponseHeader>,
+}
+record!(GenaiFailureHttpError {
+    status: "status",
+    canonical_reason: "canonical-reason",
+    body: "body",
+    headers: "headers"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureResolver {
+    pub model: ProviderModel,
+    pub cause: ResolverFailure,
+}
+record!(GenaiFailureResolver {
+    model: "model",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureAdapterNotSupported {
+    pub adapter: ProviderAdapter,
+    pub feature: String,
+}
+record!(GenaiFailureAdapterNotSupported {
+    adapter: "adapter",
+    feature: "feature"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureCacheBreakpointNoEligibleContent {
+    pub model: ProviderModel,
+    pub scope: String,
+}
+record!(GenaiFailureCacheBreakpointNoEligibleContent {
+    model: "model",
+    scope: "scope"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureAdapterKindMismatch {
+    pub bound: ProviderAdapter,
+    pub requested: ProviderAdapter,
+    pub model: String,
+}
+record!(GenaiFailureAdapterKindMismatch {
+    bound: "bound",
+    requested: "requested",
+    model: "model"
+});
+
+/// The intrinsic genai diagnostic is verbatim, including endpoint text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureInternal {
+    pub detail: String,
+}
+record!(GenaiFailureInternal { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenaiFailureClientBuildFail {
+    pub detail: String,
+}
+record!(GenaiFailureClientBuildFail { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebcFailureResponseFailedNotJson {
+    pub content_type: String,
+    pub body: String,
+}
+record!(WebcFailureResponseFailedNotJson {
+    content_type: "content-type",
+    body: "body"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebcFailureResponseFailedInvalidJson {
+    pub body: String,
+    pub detail: String,
+}
+record!(WebcFailureResponseFailedInvalidJson {
+    body: "body",
+    detail: "detail"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebcFailureResponseFailedStatus {
+    pub status: u32,
+    pub body: String,
+    pub headers: Vec<ProviderResponseHeader>,
+}
+record!(WebcFailureResponseFailedStatus {
+    status: "status",
+    body: "body",
+    headers: "headers"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolverFailureApiKeyEnvNotFound {
+    pub env_name: String,
+}
+record!(ResolverFailureApiKeyEnvNotFound {
+    env_name: "env-name"
+});
+
+/// Only the foreign resolver diagnostic, not a locally authored refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolverFailureCustom {
+    pub detail: String,
+}
+record!(ResolverFailureCustom { detail: "detail" });
+
+/// Only the foreign value-ext diagnostic, not a local validator message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueExtFailureCustom {
+    pub detail: String,
+}
+record!(ValueExtFailureCustom { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueExtFailurePropertyNotFound {
+    pub name: String,
+}
+record!(ValueExtFailurePropertyNotFound { name: "name" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueExtFailurePropertyValueNotOfType {
+    pub name: String,
+    pub required_library_type: String,
+}
+record!(ValueExtFailurePropertyValueNotOfType {
+    name: "name",
+    required_library_type: "required-library-type"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueExtFailureValueNotOfType {
+    pub required_library_type: String,
+}
+record!(ValueExtFailureValueNotOfType {
+    required_library_type: "required-library-type"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqwestClassUnclassified {
+    pub detail: String,
+}
+record!(ReqwestClassUnclassified { detail: "detail" });
+
+/// Only an unknown object in the exposed reqwest source chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReqwestSourceForeign {
+    pub detail: String,
+}
+record!(ReqwestSourceForeign { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUrlFailureUnclassified {
+    pub detail: String,
+}
+record!(ProviderUrlFailureUnclassified { detail: "detail" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialCauseStore {
+    pub operation: CredentialStoreOperation,
+    pub cause: IoCause,
+}
+record!(CredentialCauseStore {
+    operation: "operation",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialCauseRefresh {
+    pub outcome: RefreshOutcome,
+    pub cause: RefreshFailure,
+}
+record!(CredentialCauseRefresh {
+    outcome: "outcome",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshFailureResponse {
+    pub status: u32,
+    pub cause: RefreshPayloadFailure,
+}
+record!(RefreshFailureResponse {
+    status: "status",
+    cause: "cause"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshFailureInvalidExpiry {
+    pub seconds: Count,
+}
+record!(RefreshFailureInvalidExpiry { seconds: "seconds" });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshFailureExpiryOverflow {
+    pub now: Count,
+    pub seconds: Count,
+}
+record!(RefreshFailureExpiryOverflow {
+    now: "now",
+    seconds: "seconds"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshResponseBodyDetail {
+    pub code: Option<String>,
+    pub detail: RefreshResponseDetail,
+}
+record!(RefreshResponseBodyDetail {
+    code: "code",
+    detail: "detail"
+});
+
+/// Sanitized response prefix, at most 200 characters, with no appended ellipsis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshResponseDetailText {
+    pub preview: String,
+    pub truncated: bool,
+}
+record!(RefreshResponseDetailText {
+    preview: "preview",
+    truncated: "truncated"
+});
+
+impl HostFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Ral(value) => format!("ral: {}", value.describe()),
+            Self::Exarch(value) => format!("exarch: {}", value.describe()),
+        }
+    }
+}
+
+impl RalFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Boot(value) => value.describe(),
+            Self::Editor(value) => value.describe(),
+            Self::Plugin(value) => value.describe(),
+            Self::Keybinding(value) => value.describe(),
+        }
+    }
+}
+
+impl BootFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::AlreadyBooted => "the session has already booted".into(),
+            Self::ProfileNotAbsolute(value) => value.describe(),
+        }
+    }
+}
+
+impl EditorFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoPluginContext => "no plugin context (not inside a plugin handler)".into(),
+            Self::UnknownStyle(value) => value.describe(),
+            Self::Command(value) => value.describe(),
+            Self::Draft(value) => value.describe(),
+            Self::Workspace(value) => value.describe(),
+        }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        let mut advice = match self {
+            Self::Command(command) => match command.cause {
+                EditorCommandCause::Nul => vec!["remove it".into()],
+                EditorCommandCause::Unbalanced => vec![
+                    "it is split into words as a POSIX shell would, with nothing expanded".into(),
+                ],
+                EditorCommandCause::NoProgram => Vec::new(),
+            },
+            Self::Draft(_) | Self::Workspace(_) => Vec::new(),
+            Self::NoPluginContext | Self::UnknownStyle(_) => return Vec::new(),
+        };
+        advice.push("the input buffer was not changed".into());
+        advice
+    }
+}
+
+impl EditorVariable {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Visual => "VISUAL",
+            Self::Editor => "EDITOR",
+        }
+        .into()
+    }
+}
+
+impl EditorCommandCause {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl DraftOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl DraftFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TooLarge(value) => value.describe(),
+            Self::Read(value) => format!("could not read the draft: {}", value.describe()),
+            Self::Utf8(value) => format!("the draft is not UTF-8: {}", value.describe()),
+        }
+    }
+}
+
+impl EditorWorkspaceStep {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TemporaryDirectory => "find a temporary directory",
+            Self::CreateDirectory => "create the editor workspace",
+            Self::CreateBuffer => "create the draft file",
+            Self::WriteBuffer => "write the draft file",
+            Self::BufferPath => "get the draft file path",
+            Self::LocateBuffer => "locate the draft file",
+            Self::InspectBuffer => "inspect the draft file",
+            Self::OpenBuffer => "open the draft file",
+            Self::RemoveWorkspace => "remove the editor workspace",
+        }
+        .into()
+    }
+}
+
+impl EditorWorkspaceFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Io(value) => value.describe(),
+            Self::ExpectedRegularFile(value) => value.describe(),
+        }
+    }
+}
+
+impl PluginFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::AlreadyLoaded(value) => value.describe(),
+            Self::NotLoaded(value) => value.describe(),
+            Self::NotFound(value) => value.describe(),
+            Self::OptionsWithoutFactory(value) => value.describe(),
+            Self::FactoryReturnedBlock(value) => value.describe(),
+            Self::UnknownHookEvent(value) => value.describe(),
+            Self::AliasInstallationEscaped(value) => value.describe(),
+        }
+    }
+}
+
+impl KeybindingFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Notation(value) => value.describe(),
+            Self::ReservedAction(value) => value.describe(),
+            Self::SequencePrefix(value) => value.describe(),
+            Self::GuardRegex(value) => value.describe(),
+            Self::UnguardedBuiltinShadow(value) => value.describe(),
+        }
+    }
+}
+
+impl KeyNotationFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Empty => "the key notation is empty".into(),
+            Self::DuplicateModifier(value) => value.describe(),
+            Self::UnknownKey(value) => value.describe(),
+            Self::ControlCharacter(value) => value.describe(),
+            Self::ShiftedCharacter(value) => value.describe(),
+            Self::UppercaseControl(value) => value.describe(),
+            Self::TerminalAlias(value) => value.describe(),
+        }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Empty => vec!["name a key such as 'ctrl-r'".into()],
+            Self::DuplicateModifier(_) => Vec::new(),
+            Self::UnknownKey(_) => vec!["a key is one character, f1 to f12, or one of tab, enter, escape, up, down, left, right, home, end, delete, backspace".into()],
+            Self::ControlCharacter(_) => vec!["name the key that sends it, e.g. 'ctrl-c' or 'escape'".into()],
+            Self::ShiftedCharacter(value) => {
+                if !value.character.chars().all(char::is_alphabetic) || value.character.is_empty() {
+                    return Vec::new();
+                }
+                let character = if value.control { value.character.to_lowercase() } else { value.character.to_uppercase() };
+                vec![format!("did you mean '{}{}{character}'?", if value.control { "ctrl-" } else { "" }, if value.alt { "alt-" } else { "" })]
+            }
+            Self::UppercaseControl(value) => vec![format!("did you mean '{}'?", value.chord.to_ascii_lowercase().escape_debug())],
+            Self::TerminalAlias(value) => vec![format!("did you mean '{}{}'?", if value.alt { "alt-" } else { "" }, value.alias.describe())],
+        }
+    }
+}
+
+impl KeyModifier {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ReservedKeyAction {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl TerminalKeyAlias {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl BuiltinKeyAction {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ExarchFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Policy(value) => format!("policy: {}", value.describe()),
+            Self::Agent(value) => format!("agent: {}", value.describe()),
+            Self::Engine(value) => format!("engine: {}", value.describe()),
+            Self::Recording(value) => format!("recording: {}", value.describe()),
+            Self::Context(value) => format!("context: {}", value.describe()),
+            Self::Schedule(value) => format!("schedule: {}", value.describe()),
+            Self::Edit(value) => format!("edit: {}", value.describe()),
+            Self::Skill(value) => format!("skill: {}", value.describe()),
+        }
+    }
+}
+
+impl PolicyFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::OwnBinaryUnpinned => "could not pin exarch's own binary at startup (is it missing or unreadable?), so cannot exclude it from exec".into(),
+            Self::UnknownBase(value) => value.describe(),
+            Self::EscapedLoad(value) => value.describe(),
+        }
+    }
+}
+
+impl EscapedLoad {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Exit(value) => format!("exit: {value}"),
+            Self::Stopped(value) => format!("stopped: {}", <&str>::from(*value).to_owned()),
+        }
+    }
+}
+
+impl AgentFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoFuel => "no spawn fuel remains at this depth. Fuel bounds how deep a chain of spawns may recurse, not how many helpers may be started at an allowed depth".into(),
+            Self::NameMalformed(cause) => cause.describe(),
+            Self::NoReturnRecipient => "you converse with the human; you do not return. `reply` hands a spawned or headless agent's answer to whoever started it; a conversing agent keeps talking, turn after turn".into(),
+            Self::NameTaken(value) => value.describe(),
+            Self::UnknownProviderRole(value) => value.describe(),
+            Self::NotDescendant(value) => value.describe(),
+            Self::NotOwned(value) => value.describe(),
+            Self::SelfMessage(value) => value.describe(),
+            Self::NoLiveAgent(value) => value.describe(),
+            Self::Ended(value) => value.describe(),
+            Self::Resting(value) => value.describe(),
+            Self::ReplyPending(value) => value.describe(),
+            Self::ReplyAbsent(value) => value.describe(),
+            Self::ReplyStopped(value) => value.describe(),
+            Self::ReplyFailed(value) => value.describe(),
+            Self::ReplyUnavailable(value) => value.describe(),
+            Self::QueuedUnsynced(value) => value.describe(),
+        }
+    }
+}
+
+impl EngineFailure {
+    pub fn describe(&self) -> String {
+        let headline = match self.step {
+            EngineStep::Factory => "could not make a helper engine",
+            EngineStep::Adopt => "could not adopt the helper engine's wire",
+            EngineStep::Attach => "could not attach the helper engine",
+            EngineStep::Starting => "could not start the agent's engine",
+        };
+        format!("{headline}: {}", self.cause.describe())
+    }
+}
+
+impl EngineStep {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl EngineCause {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Factory(value) => value.describe(),
+            Self::Io(value) => value.describe(),
+            Self::Connection(value) => value.describe(),
+        }
+    }
+}
+
+impl RecordingFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Recording(value) => value.describe(),
+            Self::CellPoisoned(value) => value.describe(),
+        }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Recording(_) => vec!["this session can record nothing more; its record keeps everything before the failure, so the run can be resumed once the cause is fixed".into()],
+            Self::CellPoisoned(_) => vec![
+                "a thread panicked inside the agent's transaction, so its state may no longer match its log".into(),
+                "resuming the run rebuilds its state from the log".into(),
+            ],
+        }
+    }
+}
+
+impl RecordingStage {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl TurnSpan {
+    pub fn describe(&self) -> String {
+        if self.from == self.to {
+            format!("turn {}", self.from)
+        } else {
+            format!("turns {}–{}", self.from, self.to)
+        }
+    }
+}
+
+impl ContextFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::EmptySelection => "`turns` names no turn".into(),
+            Self::InvertedSpan(value) => value.describe(),
+            Self::TurnNotRecorded(value) => value.describe(),
+            Self::Withdrawn(value) => value.describe(),
+            Self::CurrentlyWritten(value) => value.describe(),
+            Self::StraddledEviction(value) => value.describe(),
+            Self::ReadBack(value) => value.describe(),
+            Self::Mutation(value) => value.describe(),
+            Self::SteeringWithoutTurn => {
+                "cannot accept a steering prompt: no turn is being written".into()
+            }
+            Self::AssistantRole(value) => value.describe(),
+            Self::ToolResultCount(value) => value.describe(),
+            Self::UnknownToolResult(value) => value.describe(),
+            Self::DuplicateToolResult(value) => value.describe(),
+        }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::StraddledEviction(value) => value.advice(),
+            Self::ReadBack(_) => vec!["check that the recorded session file is present, readable, and unchanged; was its directory moved, copied or edited?".into()],
+            Self::EmptySelection | Self::InvertedSpan(_) | Self::TurnNotRecorded(_)
+            | Self::Withdrawn(_) | Self::CurrentlyWritten(_) | Self::Mutation(_)
+            | Self::SteeringWithoutTurn | Self::AssistantRole(_) | Self::ToolResultCount(_)
+            | Self::UnknownToolResult(_) | Self::DuplicateToolResult(_) => Vec::new(),
+        }
+    }
+}
+
+impl ContextOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ContextState {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ReadyForUser => "ready for your next prompt".into(),
+            Self::AwaitingAssistantAfterUser => "waiting for the model's reply".into(),
+            Self::AwaitingToolResults(value) => value.describe(),
+            Self::AwaitingAssistantAfterToolResults => {
+                "waiting for the model to read the tool results".into()
+            }
+        }
+    }
+}
+
+impl ScheduleFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoGrant(value) => value.describe(),
+            Self::Cron(value) => value.describe(),
+            Self::Duration(value) => value.describe(),
+            Self::NoFutureOccurrence(value) => value.describe(),
+            Self::DuplicateLiveLabel(value) => value.describe(),
+            Self::Recording(value) => value.describe(),
+        }
+    }
+}
+
+impl EditFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoEdits => "no edits given".into(),
+            Self::HashAbsent(value) => value.describe(),
+            Self::HashAmbiguous(value) => value.describe(),
+            Self::DuplicateTargetLine(value) => value.describe(),
+            Self::EmptyFrom => "FROM must be non-empty".into(),
+            Self::MultipleLiteralMatches(value) => value.describe(),
+            Self::NoLiteralMatch(value) => value.describe(),
+        }
+    }
+}
+
+impl LiteralMiss {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Escapes => "escapes".to_owned(),
+            Self::Indentation(value) => format!("indentation: {value}"),
+            Self::Absent => "absent".to_owned(),
+        }
+    }
+}
+
+impl SkillFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::InvalidName(value) => value.describe(),
+            Self::Missing(value) => value.describe(),
+            Self::Read(value) => value.describe(),
+            Self::Yaml(value) => value.describe(),
+            Self::Frontmatter(value) => value.describe(),
+        }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Missing(_) => vec!["did you mean one that skill-list shows?".into()],
+            Self::InvalidName(_) | Self::Read(_) | Self::Yaml(_) | Self::Frontmatter(_) => {
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl SkillPlace {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Disk(value) => value.clone(),
+            Self::Builtin => "built into exarch".into(),
+        }
+    }
+}
+
+impl FrontmatterFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Missing => "missing YAML frontmatter".into(),
+            Self::NotMapping(value) => value.describe(),
+            Self::MissingField(field) => format!(
+                "frontmatter must contain a String {} field",
+                field.describe()
+            ),
+            Self::FieldShape(value) => value.describe(),
+            Self::InvalidName(value) => value.describe(),
+            Self::DirectoryNameMismatch(value) => value.describe(),
+        }
+    }
+}
+
+impl SkillField {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl PodKind {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl EngineFactoryFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Unsupported(value) => value.describe(),
+            Self::MachineThreadStopped => {
+                "the machine thread stopped before the guest connection could be obtained".into()
+            }
+            Self::MissingSocketDevice => "the machine has no virtio socket device".into(),
+            Self::NonVirtioSocketDevice => "the machine's socket device is not virtio".into(),
+            Self::CompletionWithoutResult => {
+                "the guest connection completed with neither a connection nor an error".into()
+            }
+            Self::DialTimedOut(value) => value.describe(),
+            Self::DialWaitDisconnected(value) => value.describe(),
+            Self::Platform(value) => value.describe(),
+            Self::Io(value) => value.describe(),
+        }
+    }
+}
+
+impl FactoryBackend {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Broker => "broker",
+            Self::HyperV => "Hyper-V",
+            Self::Virtualization => "Virtualization.framework",
+        }
+        .into()
+    }
+}
+
+impl RecordReadFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Io(value) => value.describe(),
+            Self::NonTranscriptRecord => "a pointer named a non-transcript record: a turn's address no longer names the records it was measured over".into(),
+            Self::MissingLocusRecord(value) => value.describe(),
+            Self::LocusSealMismatch(value) => value.describe(),
+            Self::Line(value) => value.describe(),
+        }
+    }
+}
+
+impl RecordLineFailure {
+    pub fn describe(&self) -> String {
+        const INTACT: &str = "the lines before it are intact, and nothing from it on can be read.";
+        const OLDER: &str = "was this session recorded by an older exarch? Older sessions can be neither resumed nor exported.";
+        match self {
+            Self::JsonSyntax(value) => format!(
+                "is corrupt: it is not JSON ({}), so the file was damaged or edited after it was written; {INTACT}",
+                value.describe()
+            ),
+            Self::InvalidEnvelope(value) => format!(
+                "is not a commit this exarch writes ({}); {OLDER}",
+                value.describe()
+            ),
+            Self::SealMismatch(value) => value.describe(),
+            Self::InvalidRecords(value) => format!(
+                "holds records this exarch does not read ({}); {OLDER}",
+                value.describe()
+            ),
+        }
+    }
+}
+
+impl ProviderFailure {
+    pub fn describe(&self) -> String {
+        self.context
+            .iter()
+            .rev()
+            .fold(self.leaf.describe(), |inner, context| match context {
+                ProviderContext::Truncated => format!("reply truncated: {inner}"),
+            })
+    }
+}
+
+impl ProviderContext {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProviderLeaf {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Unavailable(value) => format!("unavailable: {}", value.describe()),
+            Self::Cancelled(value) => format!("cancelled: {}", value.describe()),
+            Self::Transient(value) => format!("transient: {}", value.describe()),
+            Self::Refused(value) => format!("refused: {}", value.describe()),
+            Self::Api(value) => format!("api: {}", value.describe()),
+            Self::Overflow(value) => format!("overflow: {}", value.describe()),
+            Self::OutputCap(value) => format!("output cap: {}", value.describe()),
+            Self::Terminal(value) => format!("terminal: {}", value.describe()),
+            Self::Credential(value) => format!("credential: {}", value.describe()),
+        }
+    }
+}
+
+impl ProviderCancelSite {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl RetryableProviderCause {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Service(value) => format!("service: {}", value.describe()),
+            Self::StreamEndedWithoutEnd(value) => {
+                format!("stream ended without end: {}", value.describe())
+            }
+        }
+    }
+}
+
+impl ProviderRefusal {
+    pub fn describe(&self) -> String {
+        format!(
+            "limit: {}, resets at: {}, received: {}, cause: {}",
+            self.limit.describe(),
+            self.resets_at
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), ProviderInstant::describe),
+            self.received.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ProviderLimit {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ProviderRefusalCause {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Service(value) => format!("service: {}", value.describe()),
+            Self::Held(value) => format!("held: {}", value.describe()),
+        }
+    }
+}
+
+impl ProviderInstant {
+    pub fn describe(&self) -> String {
+        format!(
+            "{}ns since the Unix epoch",
+            i128::from(self.seconds) * 1_000_000_000 + i128::from(self.subsec_nanoseconds)
+        )
+    }
+}
+
+impl ServiceFailure {
+    pub fn describe(&self) -> String {
+        let cause = self
+            .context
+            .iter()
+            .rev()
+            .fold(self.cause.describe(), |inner, context| {
+                format!("{}: {inner}", context.describe())
+            });
+        format!("{} {}: {cause}", self.service, self.operation.describe())
+    }
+}
+
+impl ServiceOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ServiceContext {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::GenaiWebAdapterCall(value) => {
+                format!("genai web adapter call: {}", value.describe())
+            }
+            Self::GenaiWebModelCall(value) => format!("genai web model call: {}", value.describe()),
+            Self::GenaiWebStream(value) => format!("genai web stream: {}", value.describe()),
+            Self::UnknownWebStreamSource(value) => {
+                format!("unknown web stream source: {}", value.describe())
+            }
+        }
+    }
+}
+
+impl ServiceCause {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Genai(value) => format!("genai: {}", value.describe()),
+            Self::Webc(value) => format!("webc: {}", value.describe()),
+            Self::Reqwest(value) => format!("reqwest: {}", value.describe()),
+            Self::StreamTimeout(value) => format!("stream timeout: {}", value.describe()),
+            Self::Utf8(value) => format!("utf8: {}", value.describe()),
+            Self::Io(value) => format!("io: {}", value.describe()),
+            Self::Url(value) => format!("url: {}", value.describe()),
+            Self::ValueExt(value) => format!("value ext: {}", value.describe()),
+            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::UnknownWebStreamSource(value) => {
+                format!("unknown web stream source: {}", value.describe())
+            }
+            Self::RefreshResponse(value) => format!("refresh response: {}", value.describe()),
+        }
+    }
+}
+
+impl ProviderModel {
+    pub fn describe(&self) -> String {
+        format!("{} model {:?}", self.adapter.describe(), self.name)
+    }
+}
+
+impl ProviderMessageRole {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl StreamTimeoutKind {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl GenaiFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ChatReqHasNoMessages(value) => {
+                format!("chat req has no messages: {}", value.describe())
+            }
+            Self::LastChatMessageIsNotUser(value) => {
+                format!("last chat message is not user: {}", value.describe())
+            }
+            Self::MessageRoleNotSupported(value) => {
+                format!("message role not supported: {}", value.describe())
+            }
+            Self::MessageContentTypeNotSupported(value) => {
+                format!("message content type not supported: {}", value.describe())
+            }
+            Self::JsonModeWithoutInstruction => "json mode without instruction".to_owned(),
+            Self::VerbosityParsing(value) => format!("verbosity parsing: {}", value.describe()),
+            Self::ReasoningParsing(value) => format!("reasoning parsing: {}", value.describe()),
+            Self::ServiceTierParsing(value) => {
+                format!("service tier parsing: {}", value.describe())
+            }
+            Self::PromptCacheRetentionParsing(value) => {
+                format!("prompt cache retention parsing: {}", value.describe())
+            }
+            Self::NoChatResponse(value) => format!("no chat response: {}", value.describe()),
+            Self::InvalidJsonResponseElement(value) => {
+                format!("invalid json response element: {}", value.describe())
+            }
+            Self::RequiresApiKey(value) => format!("requires api key: {}", value.describe()),
+            Self::NoAuthResolver(value) => format!("no auth resolver: {}", value.describe()),
+            Self::NoAuthData(value) => format!("no auth data: {}", value.describe()),
+            Self::ModelMapperFailed(value) => format!("model mapper failed: {}", value.describe()),
+            Self::ChatResponseGeneration(value) => {
+                format!("chat response generation: {}", value.describe())
+            }
+            Self::ChatResponse(value) => format!("chat response: {}", value.describe()),
+            Self::StreamParse(value) => format!("stream parse: {}", value.describe()),
+            Self::HttpError(value) => format!("http error: {}", value.describe()),
+            Self::Resolver(value) => format!("resolver: {}", value.describe()),
+            Self::AdapterNotSupported(value) => {
+                format!("adapter not supported: {}", value.describe())
+            }
+            Self::CacheBreakpointNoEligibleContent(value) => {
+                format!("cache breakpoint no eligible content: {}", value.describe())
+            }
+            Self::AdapterKindMismatch(value) => {
+                format!("adapter kind mismatch: {}", value.describe())
+            }
+            Self::Internal(value) => format!("internal: {}", value.describe()),
+            Self::ClientBuildFail(value) => format!("client build fail: {}", value.describe()),
+            Self::JsonValueExt(value) => format!("json value ext: {}", value.describe()),
+            Self::SerdeJson(value) => format!("serde json: {}", value.describe()),
+        }
+    }
+}
+
+impl ProviderResponseHeader {
+    pub fn describe(&self) -> String {
+        format!(
+            "name: {}, value: {} bytes",
+            self.name,
+            self.value.as_slice().len()
+        )
+    }
+}
+
+impl ProviderAdapter {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::OpenAi => "open ai".to_owned(),
+            Self::OpenAiResp => "open ai resp".to_owned(),
+            Self::Gemini => "gemini".to_owned(),
+            Self::GeminiIx => "gemini ix".to_owned(),
+            Self::Anthropic => "anthropic".to_owned(),
+            Self::Fireworks => "fireworks".to_owned(),
+            Self::Together => "together".to_owned(),
+            Self::Groq => "groq".to_owned(),
+            Self::Aihubmix => "aihubmix".to_owned(),
+            Self::Kimi => "kimi".to_owned(),
+            Self::Mimo => "mimo".to_owned(),
+            Self::Moonshot => "moonshot".to_owned(),
+            Self::Nebius => "nebius".to_owned(),
+            Self::Xai => "xai".to_owned(),
+            Self::DeepSeek => "deep seek".to_owned(),
+            Self::Mistral => "mistral".to_owned(),
+            Self::Zai => "zai".to_owned(),
+            Self::BigModel => "big model".to_owned(),
+            Self::Aliyun => "aliyun".to_owned(),
+            Self::QwenCloud => "qwen cloud".to_owned(),
+            Self::Baidu => "baidu".to_owned(),
+            Self::Cohere => "cohere".to_owned(),
+            Self::Ollama => "ollama".to_owned(),
+            Self::OllamaCloud => "ollama cloud".to_owned(),
+            Self::Omlx => "omlx".to_owned(),
+            Self::Vertex => "vertex".to_owned(),
+            Self::GithubCopilot => "github copilot".to_owned(),
+            Self::OpenCodeGo => "open code go".to_owned(),
+            Self::BedrockApi => "bedrock api".to_owned(),
+            Self::OpenRouter => "open router".to_owned(),
+            Self::AtlasCloud => "atlas cloud".to_owned(),
+            Self::Requesty => "requesty".to_owned(),
+            Self::ApiRoute => "api route".to_owned(),
+            Self::Heabsy => "heabsy".to_owned(),
+            Self::Runcrate => "runcrate".to_owned(),
+            Self::CloudGpu => "cloud gpu".to_owned(),
+            Self::Cheapaimodel => "cheapaimodel".to_owned(),
+            Self::MiniMax => "mini max".to_owned(),
+            Self::Custom(value) => format!("custom: {value}"),
+        }
+    }
+}
+
+impl WebcFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ResponseFailedNotJson(value) => {
+                format!("response failed not json: {}", value.describe())
+            }
+            Self::ResponseFailedInvalidJson(value) => {
+                format!("response failed invalid json: {}", value.describe())
+            }
+            Self::ResponseFailedStatus(value) => {
+                format!("response failed status: {}", value.describe())
+            }
+            Self::JsonValueExt(value) => format!("json value ext: {}", value.describe()),
+        }
+    }
+}
+
+impl ResolverFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ApiKeyEnvNotFound(value) => {
+                format!("api key env not found: {}", value.describe())
+            }
+            Self::AuthDataNotSingleValue => "auth data not single value".to_owned(),
+            Self::Custom(value) => format!("custom: {}", value.describe()),
+        }
+    }
+}
+
+impl ValueExtFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Custom(value) => format!("custom: {}", value.describe()),
+            Self::PropertyNotFound(value) => format!("property not found: {}", value.describe()),
+            Self::PropertyValueNotOfType(value) => {
+                format!("property value not of type: {}", value.describe())
+            }
+            Self::ValueNotOfType(value) => format!("value not of type: {}", value.describe()),
+            Self::SerdeJson(value) => format!("serde json: {}", value.describe()),
+        }
+    }
+}
+
+impl ForeignJsonFailure {
+    pub fn describe(&self) -> String {
+        format!(
+            "category: {}, line: {}, column: {}, io kind: {}, detail: {}",
+            self.category.describe(),
+            self.line,
+            self.column,
+            self.io_kind
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), super::io::IoKind::describe),
+            self.detail
+        )
+    }
+}
+
+impl ForeignJsonCategory {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl ReqwestFailure {
+    pub fn describe(&self) -> String {
+        format!(
+            "summary: {}, sources: {}",
+            self.summary.describe(),
+            self.sources
+                .iter()
+                .map(ReqwestSource::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl ReqwestSummary {
+    pub fn describe(&self) -> String {
+        format!(
+            "class: {}, timeout: {}, connect: {}, dns: {}, url: {}",
+            self.class.describe(),
+            self.timeout,
+            self.connect,
+            self.dns,
+            self.url.as_deref().unwrap_or("none")
+        )
+    }
+}
+
+impl ReqwestClass {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Builder => "builder".to_owned(),
+            Self::Redirect => "redirect".to_owned(),
+            Self::Status(value) => format!("status: {value}"),
+            Self::Request => "request".to_owned(),
+            Self::Body => "body".to_owned(),
+            Self::Decode => "decode".to_owned(),
+            Self::Upgrade => "upgrade".to_owned(),
+            Self::Unclassified(value) => format!("unclassified: {}", value.describe()),
+        }
+    }
+}
+
+impl ReqwestSource {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Reqwest(value) => format!("reqwest: {}", value.describe()),
+            Self::Io(value) => format!("io: {}", value.describe()),
+            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::Url(value) => format!("url: {}", value.describe()),
+            Self::Utf8(value) => format!("utf8: {}", value.describe()),
+            Self::Foreign(value) => format!("foreign: {}", value.describe()),
+        }
+    }
+}
+
+impl ProviderUrlFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::EmptyHost => "empty host".to_owned(),
+            Self::Idna => "idna".to_owned(),
+            Self::InvalidPort => "invalid port".to_owned(),
+            Self::InvalidIpv4Address => "invalid ipv4 address".to_owned(),
+            Self::InvalidIpv6Address => "invalid ipv6 address".to_owned(),
+            Self::InvalidDomainCharacter => "invalid domain character".to_owned(),
+            Self::RelativeWithoutBase => "relative without base".to_owned(),
+            Self::RelativeWithCannotBeABaseBase => "relative with cannot be a base base".to_owned(),
+            Self::SetHostOnCannotBeABaseUrl => "set host on cannot be a base url".to_owned(),
+            Self::Overflow => "overflow".to_owned(),
+            Self::Unclassified(value) => format!("unclassified: {}", value.describe()),
+        }
+    }
+}
+
+impl CredentialFailure {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} account {:?}: {}",
+            self.service.describe(),
+            self.account,
+            self.cause.describe()
+        )
+    }
+}
+
+impl CredentialService {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl CredentialCause {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::OwnerPanicked => "owner panicked".to_owned(),
+            Self::OwnerStopped => "owner stopped".to_owned(),
+            Self::Removed => "removed".to_owned(),
+            Self::UnresolvedRotation => "unresolved rotation".to_owned(),
+            Self::Store(value) => format!("store: {}", value.describe()),
+            Self::LeaseTimedOut => "lease timed out".to_owned(),
+            Self::PreparationDeadline => "preparation deadline".to_owned(),
+            Self::Refresh(value) => format!("refresh: {}", value.describe()),
+        }
+    }
+}
+
+impl CredentialStoreOperation {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl RefreshOutcome {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl RefreshFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TimedOut(value) => {
+                format!("timed out: {}.{:09} seconds", value.seconds, value.nanos)
+            }
+            Self::Service(value) => format!("service: {}", value.describe()),
+            Self::Response(value) => format!("response: {}", value.describe()),
+            Self::MissingToken(value) => format!("missing token: {}", value.describe()),
+            Self::EmptyToken(value) => format!("empty token: {}", value.describe()),
+            Self::InvalidExpiry(value) => format!("invalid expiry: {}", value.describe()),
+            Self::ExpiryOverflow(value) => format!("expiry overflow: {}", value.describe()),
+        }
+    }
+}
+
+impl RefreshTokenField {
+    pub fn describe(&self) -> String {
+        <&str>::from(*self).replace('-', " ")
+    }
+}
+
+impl RefreshServiceResponse {
+    pub fn describe(&self) -> String {
+        format!("status: {}, body: {}", self.status, self.body.describe())
+    }
+}
+
+impl RefreshResponseBody {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Detail(value) => format!("detail: {}", value.describe()),
+            Self::ReadFailed(value) => format!("read failed: {}", value.describe()),
+        }
+    }
+}
+
+impl RefreshResponseDetail {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Text(text) => {
+                format!("{}{}", text.preview, if text.truncated { "…" } else { "" })
+            }
+            Self::Html => "HTML response".into(),
+            Self::Empty => "empty response".into(),
+        }
+    }
+}
+
+impl HelperFailure {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NoReply => "ended without calling `reply`".to_owned(),
+            Self::EndedBeforeReporting => "ended before reporting".to_owned(),
+            Self::Cancelled => "cancelled".to_owned(),
+            Self::ProviderStopped(value) => format!("provider stopped: {}", value.describe()),
+            Self::Provider(value) => format!("provider: {}", value.describe()),
+            Self::Connection(value) => format!("engine connection failed: {}", value.describe()),
+            Self::Context(value) => format!("context: {}", value.describe()),
+            Self::Recording(value) => value.describe(),
+            Self::Panicked => "panicked".to_owned(),
+        }
+    }
+}
+
+impl ProviderStop {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Completed(value) => format!("completed: {value}"),
+            Self::MaxTokens(value) => format!("max tokens: {value}"),
+            Self::ToolCall(value) => format!("tool call: {value}"),
+            Self::ContentFilter(value) => format!("content filter: {value}"),
+            Self::StopSequence(value) => format!("stop sequence: {value}"),
+            Self::Unclassified(value) => format!("unclassified: {value}"),
+        }
+    }
+}
+
+impl WithdrawalEvidence {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Unavailable => "unavailable".to_owned(),
+            Self::EarliestRetained(value) => format!("earliest retained: {value}"),
+            Self::NothingRetained => "nothing retained".to_owned(),
+        }
+    }
+}
+
+impl BootFailureProfileNotAbsolute {
+    pub fn describe(&self) -> String {
+        format!("the --capabilities profile {} is not absolute", self.path)
+    }
+}
+
+impl EditorFailureUnknownStyle {
+    pub fn describe(&self) -> String {
+        format!(
+            "unknown style '{}'; available styles: {}",
+            self.style,
+            self.offered.join(", ")
+        )
+    }
+}
+
+impl EditorFailureCommand {
+    pub fn describe(&self) -> String {
+        let variable = self.variable.describe();
+        match self.cause {
+            EditorCommandCause::Nul => format!("{variable} contains a NUL byte"),
+            EditorCommandCause::Unbalanced => {
+                format!("{variable} has an unmatched quote or a trailing backslash")
+            }
+            EditorCommandCause::NoProgram => {
+                format!("{variable} names no program: its first word is empty")
+            }
+        }
+    }
+}
+
+impl EditorFailureDraft {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} draft: {}",
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl EditorFailureWorkspace {
+    pub fn describe(&self) -> String {
+        let path = self
+            .path
+            .as_ref()
+            .map_or_else(String::new, |path| format!(" {path:?}"));
+        format!(
+            "could not {}{path}: {}",
+            self.step.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl DraftFailureTooLarge {
+    pub fn describe(&self) -> String {
+        let bytes = self.limit.to_u64();
+        let limit = if bytes.is_multiple_of(1 << 20) {
+            format!("{} MiB", bytes >> 20)
+        } else {
+            format!("{bytes} bytes")
+        };
+        format!("the draft exceeds the {limit} limit")
+    }
+}
+
+impl EditorWorkspaceFailureExpectedRegularFile {
+    pub fn describe(&self) -> String {
+        let found = match self.found {
+            None => return "the draft file is missing".into(),
+            Some(EntryKind::File) => "a regular file",
+            Some(EntryKind::Dir) => "a directory",
+            Some(EntryKind::Symlink) => "a symlink",
+            Some(EntryKind::Other) => "another kind of non-regular file",
+        };
+        format!("expected a regular draft file, got {found}")
+    }
+}
+
+impl PluginFailureAlreadyLoaded {
+    pub fn describe(&self) -> String {
+        format!("plugin '{}' is already loaded", self.name)
+    }
+}
+
+impl PluginFailureNotLoaded {
+    pub fn describe(&self) -> String {
+        format!("plugin '{}' is not loaded", self.name)
+    }
+}
+
+impl PluginFailureNotFound {
+    pub fn describe(&self) -> String {
+        format!("plugin '{}' was not found", self.requested)
+    }
+}
+
+impl PluginFailureOptionsWithoutFactory {
+    pub fn describe(&self) -> String {
+        format!("plugin '{}' takes no configuration", self.plugin)
+    }
+}
+
+impl PluginFailureFactoryReturnedBlock {
+    pub fn describe(&self) -> String {
+        format!("plugin '{}' returned a Block as its manifest", self.plugin)
+    }
+}
+
+impl PluginFailureUnknownHookEvent {
+    pub fn describe(&self) -> String {
+        format!("unknown hook event '{}'", self.event)
+    }
+}
+
+impl PluginFailureAliasInstallationEscaped {
+    pub fn describe(&self) -> String {
+        format!(
+            "installation of alias '{}' escaped: {}",
+            self.alias,
+            self.cause.describe()
+        )
+    }
+}
+
+impl KeybindingFailureNotation {
+    pub fn describe(&self) -> String {
+        format!(
+            "keybinding '{}': {}",
+            self.key.escape_debug(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl KeybindingFailureReservedAction {
+    pub fn describe(&self) -> String {
+        format!(
+            "keybinding '{}' is reserved for {} and cannot be bound by a plugin",
+            self.key.escape_debug(),
+            self.action.describe()
+        )
+    }
+}
+
+impl KeybindingFailureSequencePrefix {
+    pub fn describe(&self) -> String {
+        format!(
+            "keybinding '{}' does not begin with plain ctrl-x",
+            self.key.escape_debug()
+        )
+    }
+}
+
+impl KeybindingFailureGuardRegex {
+    pub fn describe(&self) -> String {
+        format!(
+            "keybinding '{}': invalid guard regex {:?}: {}",
+            self.key.escape_debug(),
+            self.pattern,
+            self.cause.describe()
+        )
+    }
+}
+
+impl KeybindingFailureUnguardedBuiltinShadow {
+    pub fn describe(&self) -> String {
+        format!(
+            "unguarded keybinding '{}' would shadow the built-in {} on every press",
+            self.key.escape_debug(),
+            self.action.describe()
+        )
+    }
+}
+
+impl KeyNotationFailureDuplicateModifier {
+    pub fn describe(&self) -> String {
+        format!(
+            "modifier '{}' appears twice in '{}'",
+            self.modifier.describe(),
+            self.chord.escape_debug()
+        )
+    }
+}
+
+impl KeyNotationFailureUnknownKey {
+    pub fn describe(&self) -> String {
+        format!("'{}' is not a key", self.token.escape_debug())
+    }
+}
+
+impl KeyNotationFailureControlCharacter {
+    pub fn describe(&self) -> String {
+        format!("'{}' is a control character", self.character.escape_debug())
+    }
+}
+
+impl KeyNotationFailureShiftedCharacter {
+    pub fn describe(&self) -> String {
+        format!(
+            "'{}' shifts a character, and the shifted character is itself the key",
+            self.chord.escape_debug()
+        )
+    }
+}
+
+impl KeyNotationFailureUppercaseControl {
+    pub fn describe(&self) -> String {
+        format!(
+            "'{}' is the same key to a terminal as its lowercase form",
+            self.chord.escape_debug()
+        )
+    }
+}
+
+impl KeyNotationFailureTerminalAlias {
+    pub fn describe(&self) -> String {
+        format!(
+            "'{}' is {} to a terminal",
+            self.chord.escape_debug(),
+            self.alias.describe()
+        )
+    }
+}
+
+impl PolicyFailureUnknownBase {
+    pub fn describe(&self) -> String {
+        let name = self.name.escape_debug();
+        if self.offered.is_empty() {
+            format!("unknown base '{name}'; no bases were offered")
+        } else {
+            format!(
+                "unknown base '{name}'; expected one of: {}",
+                self.offered
+                    .iter()
+                    .map(|name| name.escape_debug().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+}
+
+impl PolicyFailureEscapedLoad {
+    pub fn describe(&self) -> String {
+        match &self.cause {
+            EscapedLoad::Exit(status) => {
+                format!("policy load for {} exited with status {status}", self.flag)
+            }
+            EscapedLoad::Stopped(cause) => format!(
+                "policy load for {} stopped: {}",
+                self.flag,
+                <&str>::from(*cause)
+            ),
+        }
+    }
+}
+
+impl AgentFailureNameTaken {
+    pub fn describe(&self) -> String {
+        format!(
+            "an agent already bears the name '{}'",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureUnknownProviderRole {
+    pub fn describe(&self) -> String {
+        if self.offered.is_empty() {
+            format!(
+                "no role '{}': no roles are configured, so every child runs on your own model",
+                self.name.escape_debug()
+            )
+        } else {
+            format!(
+                "no role '{}': the configured roles are {}",
+                self.name.escape_debug(),
+                self.offered
+                    .iter()
+                    .map(|name| format!("'{}'", name.escape_debug()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+}
+
+impl AgentFailureNotDescendant {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' is not a descendant of yours; exarch-agents `stop may only reach a descendant of yours",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureNotOwned {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' is not one of your own helpers",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureSelfMessage {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' is you; exarch-agents `message reaches another agent",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureNoLiveAgent {
+    pub fn describe(&self) -> String {
+        format!(
+            "no live agent named '{}'; did it finish already?",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureEnded {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' has ended; nothing was queued",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureResting {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' has answered '{}' and rests; only '{}' can message it now; nothing was queued",
+            self.name.escape_debug(),
+            self.parent.escape_debug(),
+            self.parent.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureReplyPending {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' has not replied yet; it is still working",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureReplyAbsent {
+    pub fn describe(&self) -> String {
+        format!("agent '{}' has no reply to read", self.name.escape_debug())
+    }
+}
+
+impl AgentFailureReplyStopped {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' stopped without a reply to read",
+            self.name.escape_debug()
+        )
+    }
+}
+
+impl AgentFailureReplyFailed {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' failed without a reply to read: {}",
+            self.name.escape_debug(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl AgentFailureReplyUnavailable {
+    pub fn describe(&self) -> String {
+        format!(
+            "agent '{}' has ended and its state is unavailable: {}",
+            self.name.escape_debug(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl AgentFailureQueuedUnsynced {
+    pub fn describe(&self) -> String {
+        format!(
+            "message to {:?} was queued, but recording failed; it may already have been read: {}",
+            self.name,
+            self.cause.describe()
+        )
+    }
+}
+
+impl RecordingFailureRecording {
+    pub fn describe(&self) -> String {
+        let subject = match &self.record {
+            Some(path) => format!("record '{}'", path.escape_debug()),
+            None => "recording".into(),
+        };
+        format!(
+            "session ended because {subject} {} failed: {}",
+            self.stage.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl RecordingFailureCellPoisoned {
+    pub fn describe(&self) -> String {
+        format!(
+            "session ended because agent {}'s state cell is poisoned",
+            self.agent
+        )
+    }
+}
+
+impl ContextFailureTurnNotRecorded {
+    pub fn describe(&self) -> String {
+        match self.reach {
+            Some(reach) => format!("turn {} is not recorded: the latest is {reach}", self.turn),
+            None => format!(
+                "turn {} is not recorded: nothing has been recorded yet",
+                self.turn
+            ),
+        }
+    }
+}
+
+impl ContextFailureWithdrawn {
+    pub fn describe(&self) -> String {
+        let turn = self.turn;
+        match self.evidence {
+            WithdrawalEvidence::Unavailable => {
+                format!("turn {turn} was rewound or cleared away: it is no longer in your context")
+            }
+            WithdrawalEvidence::EarliestRetained(reach) => format!(
+                "turn {turn} was already rewound or cleared away; the earliest you can rewind to is turn {reach}"
+            ),
+            WithdrawalEvidence::NothingRetained => format!(
+                "turn {turn} was already rewound or cleared away; nothing has been said since the last /clear or /rewind"
+            ),
+        }
+    }
+}
+
+impl ContextFailureCurrentlyWritten {
+    pub fn describe(&self) -> String {
+        format!("turn {} is being written now", self.turn)
+    }
+}
+
+impl ContextFailureStraddledEviction {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} cuts the eviction over {}; the covered turns stand together under one note",
+            self.requested.describe(),
+            self.covering.describe()
+        )
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        let TurnSpan { from, to } = self.covering;
+        vec![
+            format!("for an eviction, name from: {from}, to: {to} whole, or leave it"),
+            match to.to_u64().checked_add(1) {
+                Some(next) => format!(
+                    "to rewind around this note, use its boundaries: turn {from} or turn {next}"
+                ),
+                None => format!("to rewind around this note, use its first boundary: turn {from}"),
+            },
+        ]
+    }
+}
+
+impl ContextFailureReadBack {
+    pub fn describe(&self) -> String {
+        format!(
+            "turn {} could not be read back from {} (source agent {}): {}",
+            self.turn,
+            self.record,
+            self.source,
+            self.cause.describe()
+        )
+    }
+}
+
+impl ContextFailureMutation {
+    pub fn describe(&self) -> String {
+        let state = self.state.describe();
+        match self.operation {
+            ContextOperation::RenderRequest => {
+                format!("cannot render request while the session is {state}")
+            }
+            ContextOperation::Import => {
+                format!("cannot import context while the session is {state}")
+            }
+            ContextOperation::AcceptUser => {
+                format!("cannot accept a new user prompt while the session is {state}")
+            }
+            ContextOperation::AcceptSteering => format!(
+                "tool results must be complete before accepting a steering prompt; the session is {state}"
+            ),
+            ContextOperation::AppendAssistant => {
+                format!("assistant message is not expected while the session is {state}")
+            }
+            ContextOperation::AppendToolResults => {
+                format!("tool results are not expected while the session is {state}")
+            }
+            ContextOperation::Clear => format!("cannot clear while the session is {state}"),
+            ContextOperation::Rewind => format!("cannot rewind while the session is {state}"),
+        }
+    }
+}
+
+impl ContextFailureAssistantRole {
+    pub fn describe(&self) -> String {
+        format!(
+            "a {} message arrived where the assistant's reply was expected",
+            self.found.describe()
+        )
+    }
+}
+
+impl ContextFailureToolResultCount {
+    pub fn describe(&self) -> String {
+        format!(
+            "tool result count mismatch: expected {}, got {}",
+            self.expected, self.got
+        )
+    }
+}
+
+impl ContextFailureUnknownToolResult {
+    pub fn describe(&self) -> String {
+        format!("unknown tool result id {}", self.id.escape_debug())
+    }
+}
+
+impl ContextFailureDuplicateToolResult {
+    pub fn describe(&self) -> String {
+        format!("duplicate tool result id {}", self.id.escape_debug())
+    }
+}
+
+impl ContextStateAwaitingToolResults {
+    pub fn describe(&self) -> String {
+        format!(
+            "waiting for {} tool result{}",
+            self.pending,
+            if self.pending.to_u64() == 1 { "" } else { "s" }
+        )
+    }
+}
+
+impl ScheduleFailureNoGrant {
+    pub fn describe(&self) -> String {
+        format!("{}: scheduling is not allowed in this session", self.verb)
+    }
+}
+
+impl ScheduleFailureNoFutureOccurrence {
+    pub fn describe(&self) -> String {
+        format!(
+            "trigger '{}' has no next occurrence within the supported time/search horizon",
+            self.trigger.escape_debug()
+        )
+    }
+}
+
+impl ScheduleFailureDuplicateLiveLabel {
+    pub fn describe(&self) -> String {
+        format!(
+            "label '{}' is already borne by a live schedule",
+            self.label.escape_debug()
+        )
+    }
+}
+
+impl ScheduleFailureRecording {
+    pub fn describe(&self) -> String {
+        let mut description = "could not record schedule".to_owned();
+        if let Some(label) = &self.label {
+            let _ = write!(description, " '{}'", label.escape_debug());
+        }
+        if let Some(trigger) = &self.trigger {
+            let _ = write!(description, " for trigger '{}'", trigger.escape_debug());
+        }
+        format!("{description}: {}", self.cause.describe())
+    }
+}
+
+impl EditFailureHashAbsent {
+    pub fn describe(&self) -> String {
+        format!("no line in {} hashes to {}", self.path, self.hash)
+    }
+}
+
+impl EditFailureHashAmbiguous {
+    pub fn describe(&self) -> String {
+        format!(
+            "hash {} matches multiple lines in {}: {}",
+            self.hash,
+            self.path,
+            self.lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl EditFailureDuplicateTargetLine {
+    pub fn describe(&self) -> String {
+        format!("two edits name line {} in {}", self.line, self.path)
+    }
+}
+
+impl EditFailureMultipleLiteralMatches {
+    pub fn describe(&self) -> String {
+        format!(
+            "FROM matches {} times in {}, on {} {}; must match exactly once",
+            self.matches,
+            self.path,
+            if self.lines.len() == 1 {
+                "line"
+            } else {
+                "lines"
+            },
+            self.lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl EditFailureNoLiteralMatch {
+    pub fn describe(&self) -> String {
+        let path = &self.path;
+        match &self.evidence {
+            LiteralMiss::Escapes => {
+                format!("FROM was not found in {path}, and FROM carries a literal backslash escape")
+            }
+            LiteralMiss::Indentation(line) => format!(
+                "FROM was not found in {path}, but line {line} matches FROM's first non-empty line apart from leading whitespace"
+            ),
+            LiteralMiss::Absent => format!("FROM was not found in {path}"),
+        }
+    }
+}
+
+fn describe_invalid_skill_name(name: &str) -> String {
+    format!(
+        "'{}' is not a skill name; use 1–64 lowercase ASCII letters or digits, with single interior hyphens",
+        name.escape_debug()
+    )
+}
+
+impl SkillFailureInvalidName {
+    pub fn describe(&self) -> String {
+        describe_invalid_skill_name(&self.name)
+    }
+}
+
+impl SkillFailureMissing {
+    pub fn describe(&self) -> String {
+        format!("no skill named '{}'", self.name.escape_debug())
+    }
+}
+
+impl SkillFailureRead {
+    pub fn describe(&self) -> String {
+        format!(
+            "could not read skill '{}' from {}: {}",
+            self.name.escape_debug(),
+            self.place.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl SkillFailureYaml {
+    pub fn describe(&self) -> String {
+        format!(
+            "could not load skill '{}' from {}: invalid YAML frontmatter: {}",
+            self.name.escape_debug(),
+            self.place.describe(),
+            self.detail
+        )
+    }
+}
+
+impl SkillFailureFrontmatter {
+    pub fn describe(&self) -> String {
+        format!(
+            "could not load skill '{}' from {}: {}",
+            self.name.escape_debug(),
+            self.place.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl FrontmatterFailureNotMapping {
+    pub fn describe(&self) -> String {
+        format!(
+            "YAML frontmatter must be a mapping, got {}",
+            self.found.describe()
+        )
+    }
+}
+
+impl FrontmatterFailureFieldShape {
+    pub fn describe(&self) -> String {
+        format!(
+            "frontmatter field {} must be a String, got {}",
+            self.field.describe(),
+            self.found.describe()
+        )
+    }
+}
+
+impl FrontmatterFailureInvalidName {
+    pub fn describe(&self) -> String {
+        describe_invalid_skill_name(&self.name)
+    }
+}
+
+impl FrontmatterFailureDirectoryNameMismatch {
+    pub fn describe(&self) -> String {
+        format!(
+            "frontmatter name '{}' must match directory name '{}'",
+            self.declared.escape_debug(),
+            self.directory.escape_debug()
+        )
+    }
+}
+
+impl EngineFactoryFailureUnsupported {
+    pub fn describe(&self) -> String {
+        format!(
+            "the {} backend does not support connecting to a guest socket",
+            self.backend.describe()
+        )
+    }
+}
+
+impl EngineFactoryFailureDialTimedOut {
+    pub fn describe(&self) -> String {
+        format!(
+            "no guest connection result arrived for port {} within {}.{:09} seconds",
+            self.port, self.within.seconds, self.within.nanos
+        )
+    }
+}
+
+impl EngineFactoryFailureDialWaitDisconnected {
+    pub fn describe(&self) -> String {
+        format!(
+            "the guest connection result channel disconnected while waiting for port {}",
+            self.port
+        )
+    }
+}
+
+impl EngineFactoryFailurePlatform {
+    pub fn describe(&self) -> String {
+        format!(
+            "{} refused the guest connection: {} error {}: {}",
+            self.backend.describe(),
+            self.domain,
+            self.code,
+            self.detail
+        )
+    }
+}
+
+impl RecordReadFailureMissingLocusRecord {
+    pub fn describe(&self) -> String {
+        format!(
+            "a locus named record {} of line {}, which holds fewer: the log at this path is no longer the file those byte ranges were measured in; it may be a copied session directory or an edited log",
+            self.index, self.commit
+        )
+    }
+}
+
+impl RecordReadFailureLocusSealMismatch {
+    pub fn describe(&self) -> String {
+        format!(
+            "line {} did not hash to the locus that named it: the log at this path is no longer the file those byte ranges were measured in; it may be a copied session directory or an edited log",
+            self.commit
+        )
+    }
+}
+
+impl RecordReadFailureLine {
+    pub fn describe(&self) -> String {
+        format!("line {} {}", self.commit, self.cause.describe())
+    }
+}
+
+impl RecordLineFailureSealMismatch {
+    pub fn describe(&self) -> String {
+        format!(
+            "is corrupt: its commit hashes to {} but was sealed as {:?}, so the file changed after it was written (edited by hand, or damaged on disk); the lines before it are intact, and nothing from it on can be read.",
+            self.actual, self.sealed
+        )
+    }
+}
+
+impl ProviderLeafTransient {
+    pub fn describe(&self) -> String {
+        format!(
+            "cause: {}, attempts: {}",
+            self.cause.describe(),
+            self.attempts
+        )
+    }
+}
+
+impl ProviderLeafApi {
+    pub fn describe(&self) -> String {
+        format!("model: {}, cause: {}", self.model, self.cause.describe())
+    }
+}
+
+impl ProviderLeafOverflow {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, provider: {}, sent: {}, limit: {}, listed: {}, cause: {}",
+            self.model,
+            self.provider.as_deref().unwrap_or("none"),
+            self.sent
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), ToString::to_string),
+            self.limit
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), ToString::to_string),
+            self.listed
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), ToString::to_string),
+            self.cause.describe()
+        )
+    }
+}
+
+impl ProviderLeafOutputCap {
+    pub fn describe(&self) -> String {
+        format!("stop reason: {}", self.stop_reason)
+    }
+}
+
+impl RetryableProviderCauseStreamEndedWithoutEnd {
+    pub fn describe(&self) -> String {
+        format!("service: {}, model: {}", self.service, self.model)
+    }
+}
+
+impl ProviderRefusalCauseHeld {
+    pub fn describe(&self) -> String {
+        format!("service: {}, model: {}", self.service, self.model)
+    }
+}
+
+impl ServiceContextUnknownWebStreamSource {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl ServiceCauseUnknownWebStreamSource {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl GenaiFailureLastChatMessageIsNotUser {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, actual role: {}",
+            self.model.describe(),
+            self.actual_role.describe()
+        )
+    }
+}
+
+impl GenaiFailureMessageRoleNotSupported {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, role: {}",
+            self.model.describe(),
+            self.role.describe()
+        )
+    }
+}
+
+impl GenaiFailureMessageContentTypeNotSupported {
+    pub fn describe(&self) -> String {
+        format!("model: {}, detail: {}", self.model.describe(), self.detail)
+    }
+}
+
+impl GenaiFailureVerbosityParsing {
+    pub fn describe(&self) -> String {
+        format!("actual: {}", self.actual)
+    }
+}
+
+impl GenaiFailureReasoningParsing {
+    pub fn describe(&self) -> String {
+        format!("actual: {}", self.actual)
+    }
+}
+
+impl GenaiFailureServiceTierParsing {
+    pub fn describe(&self) -> String {
+        format!("actual: {}", self.actual)
+    }
+}
+
+impl GenaiFailurePromptCacheRetentionParsing {
+    pub fn describe(&self) -> String {
+        format!("actual: {}", self.actual)
+    }
+}
+
+impl GenaiFailureInvalidJsonResponseElement {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl GenaiFailureModelMapperFailed {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, cause: {}",
+            self.model.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl GenaiFailureChatResponseGeneration {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, response body: {}, detail: {}",
+            self.model.describe(),
+            self.response_body,
+            self.detail
+        )
+    }
+}
+
+impl GenaiFailureChatResponse {
+    pub fn describe(&self) -> String {
+        format!("model: {}, body: {}", self.model.describe(), self.body)
+    }
+}
+
+impl GenaiFailureStreamParse {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, cause: {}",
+            self.model.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl GenaiFailureHttpError {
+    pub fn describe(&self) -> String {
+        format!(
+            "status: {}, canonical reason: {}, body: {}, headers: {}",
+            self.status,
+            self.canonical_reason,
+            self.body,
+            self.headers
+                .iter()
+                .map(ProviderResponseHeader::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl GenaiFailureResolver {
+    pub fn describe(&self) -> String {
+        format!(
+            "model: {}, cause: {}",
+            self.model.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl GenaiFailureAdapterNotSupported {
+    pub fn describe(&self) -> String {
+        format!(
+            "adapter: {}, feature: {}",
+            self.adapter.describe(),
+            self.feature
+        )
+    }
+}
+
+impl GenaiFailureCacheBreakpointNoEligibleContent {
+    pub fn describe(&self) -> String {
+        format!("model: {}, scope: {}", self.model.describe(), self.scope)
+    }
+}
+
+impl GenaiFailureAdapterKindMismatch {
+    pub fn describe(&self) -> String {
+        format!(
+            "bound: {}, requested: {}, model: {}",
+            self.bound.describe(),
+            self.requested.describe(),
+            self.model
+        )
+    }
+}
+
+impl GenaiFailureInternal {
+    pub fn describe(&self) -> String {
+        self.detail.clone()
+    }
+}
+
+impl GenaiFailureClientBuildFail {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl WebcFailureResponseFailedNotJson {
+    pub fn describe(&self) -> String {
+        format!("content type: {}, body: {}", self.content_type, self.body)
+    }
+}
+
+impl WebcFailureResponseFailedInvalidJson {
+    pub fn describe(&self) -> String {
+        format!("body: {}, detail: {}", self.body, self.detail)
+    }
+}
+
+impl WebcFailureResponseFailedStatus {
+    pub fn describe(&self) -> String {
+        format!(
+            "status: {}, body: {}, headers: {}",
+            self.status,
+            self.body,
+            self.headers
+                .iter()
+                .map(ProviderResponseHeader::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl ResolverFailureApiKeyEnvNotFound {
+    pub fn describe(&self) -> String {
+        format!("env name: {}", self.env_name)
+    }
+}
+
+impl ResolverFailureCustom {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl ValueExtFailureCustom {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl ValueExtFailurePropertyNotFound {
+    pub fn describe(&self) -> String {
+        format!("name: {}", self.name)
+    }
+}
+
+impl ValueExtFailurePropertyValueNotOfType {
+    pub fn describe(&self) -> String {
+        format!(
+            "name: {}, required library type: {}",
+            self.name, self.required_library_type
+        )
+    }
+}
+
+impl ValueExtFailureValueNotOfType {
+    pub fn describe(&self) -> String {
+        format!("required library type: {}", self.required_library_type)
+    }
+}
+
+impl ReqwestClassUnclassified {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl ReqwestSourceForeign {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl ProviderUrlFailureUnclassified {
+    pub fn describe(&self) -> String {
+        format!("detail: {}", self.detail)
+    }
+}
+
+impl CredentialCauseStore {
+    pub fn describe(&self) -> String {
+        format!(
+            "operation: {}, cause: {}",
+            self.operation.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl CredentialCauseRefresh {
+    pub fn describe(&self) -> String {
+        format!(
+            "outcome: {}, cause: {}",
+            self.outcome.describe(),
+            self.cause.describe()
+        )
+    }
+}
+
+impl RefreshFailureResponse {
+    pub fn describe(&self) -> String {
+        format!("status: {}, cause: {}", self.status, self.cause.describe())
+    }
+}
+
+impl RefreshFailureInvalidExpiry {
+    pub fn describe(&self) -> String {
+        format!("seconds: {}", self.seconds)
+    }
+}
+
+impl RefreshFailureExpiryOverflow {
+    pub fn describe(&self) -> String {
+        format!("now: {}, seconds: {}", self.now, self.seconds)
+    }
+}
+
+impl RefreshResponseBodyDetail {
+    pub fn describe(&self) -> String {
+        format!(
+            "code: {}, detail: {}",
+            self.code.as_deref().unwrap_or("none"),
+            self.detail.describe()
+        )
+    }
+}
+
+impl RefreshResponseDetailText {
+    pub fn describe(&self) -> String {
+        format!("preview: {}, truncated: {}", self.preview, self.truncated)
+    }
+}
+
+impl ProviderFailure {
+    pub fn new(leaf: ProviderLeaf) -> Self {
+        Self {
+            context: Vec::new(),
+            leaf,
+        }
+    }
+
+    pub fn at(mut self, context: ProviderContext) -> Self {
+        self.context.insert(0, context);
+        self
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        match &self.leaf {
+            ProviderLeaf::Credential(credential) => credential.advice(),
+            ProviderLeaf::Unavailable(recording) => recording.advice(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ServiceFailure {
+    pub fn at(mut self, context: ServiceContext) -> Self {
+        self.context.insert(0, context);
+        self
+    }
+
+    pub fn status(&self) -> Option<u32> {
+        self.cause.status()
+    }
+
+    pub fn body(&self) -> Option<&str> {
+        self.cause.body()
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        match self.cause.as_ref() {
+            ServiceCause::Reqwest(cause) => cause.summary.url.as_deref(),
+            ServiceCause::RefreshResponse(response) => match &response.body {
+                RefreshResponseBody::ReadFailed(cause) => cause.summary.url.as_deref(),
+                RefreshResponseBody::Detail(_) => None,
+            },
+            ServiceCause::Genai(_)
+            | ServiceCause::Webc(_)
+            | ServiceCause::StreamTimeout(_)
+            | ServiceCause::Utf8(_)
+            | ServiceCause::Io(_)
+            | ServiceCause::Url(_)
+            | ServiceCause::ValueExt(_)
+            | ServiceCause::Json(_)
+            | ServiceCause::UnknownWebStreamSource(_) => None,
+        }
+    }
+}
+
+impl ServiceCause {
+    pub fn status(&self) -> Option<u32> {
+        match self {
+            Self::Genai(GenaiFailure::HttpError(response)) => Some(response.status),
+            Self::Webc(WebcFailure::ResponseFailedStatus(response)) => Some(response.status),
+            Self::Reqwest(cause) => match cause.summary.class {
+                ReqwestClass::Status(status) => Some(status),
+                _ => None,
+            },
+            Self::RefreshResponse(response) => Some(response.status),
+            Self::Genai(_)
+            | Self::Webc(_)
+            | Self::StreamTimeout(_)
+            | Self::Utf8(_)
+            | Self::Io(_)
+            | Self::Url(_)
+            | Self::ValueExt(_)
+            | Self::Json(_)
+            | Self::UnknownWebStreamSource(_) => None,
+        }
+    }
+
+    pub fn body(&self) -> Option<&str> {
+        match self {
+            Self::Genai(cause) => match cause {
+                GenaiFailure::ChatResponseGeneration(response) => Some(&response.response_body),
+                GenaiFailure::ChatResponse(response) => Some(&response.body),
+                GenaiFailure::HttpError(response) => Some(&response.body),
+                _ => None,
+            },
+            Self::Webc(cause) => match cause {
+                WebcFailure::ResponseFailedNotJson(response) => Some(&response.body),
+                WebcFailure::ResponseFailedInvalidJson(response) => Some(&response.body),
+                WebcFailure::ResponseFailedStatus(response) => Some(&response.body),
+                WebcFailure::JsonValueExt(_) => None,
+            },
+            Self::RefreshResponse(response) => match &response.body {
+                RefreshResponseBody::Detail(detail) => match &detail.detail {
+                    RefreshResponseDetail::Text(text) => Some(&text.preview),
+                    RefreshResponseDetail::Html | RefreshResponseDetail::Empty => None,
+                },
+                RefreshResponseBody::ReadFailed(_) => None,
+            },
+            Self::Reqwest(_)
+            | Self::StreamTimeout(_)
+            | Self::Utf8(_)
+            | Self::Io(_)
+            | Self::Url(_)
+            | Self::ValueExt(_)
+            | Self::Json(_)
+            | Self::UnknownWebStreamSource(_) => None,
+        }
+    }
+}
+
+impl RefreshServiceResponse {
+    pub fn expired_or_revoked(&self) -> bool {
+        self.status == 401
+            || match &self.body {
+                RefreshResponseBody::Detail(detail) => detail.code.as_deref().is_some_and(|code| {
+                    matches!(
+                        code,
+                        "invalid_grant"
+                            | "invalid_refresh_token"
+                            | "token_expired"
+                            | "refresh_token_expired"
+                            | "refresh_token_invalidated"
+                            | "refresh_token_reused"
+                    )
+                }),
+                RefreshResponseBody::ReadFailed(_) => false,
+            }
+    }
+}
+
+impl CredentialFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match &self.cause {
+            CredentialCause::Refresh(refresh) => match &refresh.cause {
+                RefreshFailure::Service(service) => match service.cause.as_ref() {
+                    ServiceCause::RefreshResponse(response) if response.expired_or_revoked() => {
+                        vec![format!(
+                            "the {} login for {:?} has expired or been revoked; use account {:?} on {} to sign in again",
+                            self.service.describe(),
+                            self.account,
+                            self.account,
+                            self.service.describe(),
+                        )]
+                    }
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl AgentFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::NoFuel => vec!["you may still stop a descendant's exchange or dismiss one of your own helpers".into()],
+            Self::NameTaken(_) => vec!["pick another name, or wait for its owner to finish teardown; names stay reserved through teardown".into()],
+            Self::UnknownProviderRole(role) if role.offered.is_empty() => vec!["pass model: `inherit".into(), "only the human can add a role, by launching exarch with --role NAME=MODEL".into()],
+            Self::UnknownProviderRole(_) => vec!["choose a configured role, or pass model: `inherit".into()],
+            Self::NotOwned(_) => vec!["exarch-agents `read reads only your own helpers, and /clear forgets earlier ones".into(), "dismiss only an agent you started; its parent may dismiss it".into()],
+            Self::SelfMessage(_) => vec!["to wake yourself, arm an exarch-schedules fire".into()],
+            Self::Ended(_) => vec!["start a new agent".into()],
+            Self::QueuedUnsynced(value) => {
+                let mut advice = vec!["the message was queued and may already have been read; do not automatically resend it".into()];
+                advice.extend(value.cause.advice());
+                advice
+            },
+            Self::ReplyUnavailable(value) => value.cause.advice(),
+            Self::ReplyPending(_) => vec!["wait for its notice instead of polling".into()],
+            Self::ReplyStopped(_) => vec!["message it to continue".into()],
+            Self::ReplyFailed(reply) => reply.cause.advice(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl EditFailure {
+    pub fn advice(&self) -> Vec<String> {
+        let advice = match self {
+            Self::HashAbsent(_) | Self::HashAmbiguous(_) => {
+                "re-read with view-hash/view-hash-around before editing; the witness may be stale"
+            }
+            Self::MultipleLiteralMatches(_) => {
+                "widen FROM with a neighbouring line to make it unique, or change every occurrence by composing string-replace / re-replace-all over from-string and to-string"
+            }
+            Self::NoLiteralMatch(miss) => match &miss.evidence {
+                LiteralMiss::Escapes => {
+                    "ral strings are verbatim: write real newlines inside a raw #'…'# string, not literal backslash escapes"
+                }
+                LiteralMiss::Indentation(_) => {
+                    "copy the exact text, indentation included, from view-text-around"
+                }
+                LiteralMiss::Absent => {
+                    "re-read the file with view-text-around before editing; it may already contain the intended text"
+                }
+            },
+            Self::NoEdits => "pass a list of [hash: …, line: …] records",
+            Self::DuplicateTargetLine(_) | Self::EmptyFrom => return Vec::new(),
+        };
+        vec![advice.into()]
+    }
+}
+
+impl PluginFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::NotFound(_) => vec!["is it in <config>/ral/plugins or RAL_PATH?".into()],
+            Self::OptionsWithoutFactory(_) => {
+                vec!["its entry in the rc's plugins map wants the empty options map `[:]`".into()]
+            }
+            Self::FactoryReturnedBlock(_) => {
+                vec!["expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])".into()]
+            }
+            Self::UnknownHookEvent(value) => {
+                vec![format!("Valid events: {}", value.offered.join(", "))]
+            }
+            Self::AlreadyLoaded(_) | Self::NotLoaded(_) | Self::AliasInstallationEscaped(_) => {
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl KeybindingFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Notation(value) => value.cause.advice(),
+            Self::SequencePrefix(_) => vec!["a key sequence begins with ctrl-x, the prefix the line editor leaves free for sequences".into()],
+            Self::UnguardedBuiltinShadow(_) => vec!["add a 'guard:' regex so unmatched presses fall through".into()],
+            Self::ReservedAction(_) | Self::GuardRegex(_) => Vec::new(),
+        }
+    }
+}
+
+impl HostFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Ral(RalFailure::Keybinding(cause)) => cause.advice(),
+            Self::Ral(RalFailure::Plugin(cause)) => cause.advice(),
+            Self::Ral(RalFailure::Editor(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Agent(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Edit(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Skill(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Recording(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Context(cause)) => cause.advice(),
+            Self::Exarch(ExarchFailure::Schedule(cause)) => cause.advice(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::{IoLeaf, Reason};
+
+    fn projection(failure: RalFailure, description: &str, advice: &[&str]) {
+        let reason = Reason::Host(Box::new(HostFailure::Ral(failure)));
+        let description = format!("ral: {description}");
+        assert_eq!(reason.describe(), description);
+        assert_eq!(reason.advice(), advice);
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(decoded, reason);
+        assert_eq!(decoded.describe(), description);
+        assert_eq!(decoded.advice(), advice);
+        let error = Error::new(decoded);
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        let mut plain = description;
+        for hint in advice {
+            plain.push_str("\nhint: ");
+            plain.push_str(hint);
+        }
+        assert_eq!(error.plain(), plain);
+    }
+
+    fn notation(key: &str, cause: KeyNotationFailure, description: &str, advice: &[&str]) {
+        assert_eq!(cause.describe(), description);
+        assert_eq!(cause.advice(), advice);
+        let description = format!("keybinding '{}': {description}", key.escape_debug());
+        projection(
+            RalFailure::Keybinding(KeybindingFailure::Notation(KeybindingFailureNotation {
+                key: key.into(),
+                cause,
+            })),
+            &description,
+            advice,
+        );
+    }
+
+    #[test]
+    fn key_notation_empty_modifier_unknown_and_control_character_keep_exact_remedies() {
+        notation(
+            "",
+            KeyNotationFailure::Empty,
+            "the key notation is empty",
+            &["name a key such as 'ctrl-r'"],
+        );
+        for (modifier, chord) in [
+            (KeyModifier::Ctrl, "ctrl-ctrl-r"),
+            (KeyModifier::Alt, "alt-alt-r"),
+            (KeyModifier::Shift, "shift-shift-tab"),
+        ] {
+            notation(
+                chord,
+                KeyNotationFailure::DuplicateModifier(KeyNotationFailureDuplicateModifier {
+                    chord: chord.into(),
+                    modifier,
+                }),
+                &format!(
+                    "modifier '{}' appears twice in '{chord}'",
+                    modifier.describe()
+                ),
+                &[],
+            );
+        }
+        notation(
+            "ctrl-x hyper-r",
+            KeyNotationFailure::UnknownKey(KeyNotationFailureUnknownKey {
+                token: "hyper-r".into(),
+            }),
+            "'hyper-r' is not a key",
+            &[
+                "a key is one character, f1 to f12, or one of tab, enter, escape, up, down, left, right, home, end, delete, backspace",
+            ],
+        );
+        notation(
+            "\u{3}",
+            KeyNotationFailure::ControlCharacter(KeyNotationFailureControlCharacter {
+                character: "\u{3}".into(),
+            }),
+            "'\\u{3}' is a control character",
+            &["name the key that sends it, e.g. 'ctrl-c' or 'escape'"],
+        );
+    }
+
+    #[test]
+    fn shifted_character_suggestions_preserve_modifiers_and_unicode_case_expansion() {
+        for (chord, character, control, alt, suggestion) in [
+            ("shift-a", "a", false, false, Some("A")),
+            ("shift-alt-ß", "ß", false, true, Some("alt-SS")),
+            (
+                "shift-ctrl-alt-İ",
+                "İ",
+                true,
+                true,
+                Some("ctrl-alt-i\u{307}"),
+            ),
+            ("shift-ctrl-A", "A", true, false, Some("ctrl-a")),
+            ("shift-1", "1", false, false, None),
+        ] {
+            let advice = suggestion.map(|suggestion| format!("did you mean '{suggestion}'?"));
+            let advice: Vec<&str> = advice.as_deref().into_iter().collect();
+            notation(
+                chord,
+                KeyNotationFailure::ShiftedCharacter(KeyNotationFailureShiftedCharacter {
+                    chord: chord.into(),
+                    character: character.into(),
+                    control,
+                    alt,
+                }),
+                &format!(
+                    "'{chord}' shifts a character, and the shifted character is itself the key"
+                ),
+                &advice,
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_control_and_terminal_aliases_keep_lowercase_and_alt_suggestions() {
+        notation(
+            "ctrl-alt-R",
+            KeyNotationFailure::UppercaseControl(KeyNotationFailureUppercaseControl {
+                chord: "ctrl-alt-R".into(),
+            }),
+            "'ctrl-alt-R' is the same key to a terminal as its lowercase form",
+            &["did you mean 'ctrl-alt-r'?"],
+        );
+        for (character, alias, named) in [
+            ("h", TerminalKeyAlias::Backspace, "backspace"),
+            ("i", TerminalKeyAlias::Tab, "tab"),
+            ("m", TerminalKeyAlias::Enter, "enter"),
+            ("[", TerminalKeyAlias::Escape, "escape"),
+        ] {
+            for alt in [false, true] {
+                let prefix = if alt { "alt-" } else { "" };
+                let chord = format!("ctrl-{prefix}{character}");
+                notation(
+                    &chord,
+                    KeyNotationFailure::TerminalAlias(KeyNotationFailureTerminalAlias {
+                        chord: chord.clone(),
+                        alt,
+                        alias,
+                    }),
+                    &format!("'{chord}' is {named} to a terminal"),
+                    &[&format!("did you mean '{prefix}{named}'?")],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keybinding_sequence_reserved_guard_and_shadow_keep_key_action_and_cause() {
+        projection(
+            RalFailure::Keybinding(KeybindingFailure::SequencePrefix(
+                KeybindingFailureSequencePrefix {
+                    key: "ctrl-alt-x y".into(),
+                },
+            )),
+            "keybinding 'ctrl-alt-x y' does not begin with plain ctrl-x",
+            &[
+                "a key sequence begins with ctrl-x, the prefix the line editor leaves free for sequences",
+            ],
+        );
+        for (key, action, description) in [
+            ("ctrl-c", ReservedKeyAction::Interrupt, "interrupt"),
+            ("ctrl-d", ReservedKeyAction::EndOfFile, "end of file"),
+        ] {
+            projection(
+                RalFailure::Keybinding(KeybindingFailure::ReservedAction(
+                    KeybindingFailureReservedAction {
+                        key: key.into(),
+                        action,
+                    },
+                )),
+                &format!(
+                    "keybinding '{key}' is reserved for {description} and cannot be bound by a plugin"
+                ),
+                &[],
+            );
+        }
+        projection(
+            RalFailure::Keybinding(KeybindingFailure::GuardRegex(KeybindingFailureGuardRegex {
+                key: "ctrl-r".into(),
+                pattern: "[".into(),
+                cause: RegexCause::Syntax("unclosed class".into()),
+            })),
+            "keybinding 'ctrl-r': invalid guard regex \"[\": regex syntax: unclosed class",
+            &[],
+        );
+        projection(
+            RalFailure::Keybinding(KeybindingFailure::UnguardedBuiltinShadow(
+                KeybindingFailureUnguardedBuiltinShadow {
+                    key: "ctrl-r".into(),
+                    action: BuiltinKeyAction::HistoryNavigation,
+                },
+            )),
+            "unguarded keybinding 'ctrl-r' would shadow the built-in history navigation on every press",
+            &["add a 'guard:' regex so unmatched presses fall through"],
+        );
+    }
+
+    #[test]
+    fn plugin_lifecycle_lookup_factory_and_event_refusals_keep_subjects_and_remedies() {
+        projection(
+            RalFailure::Plugin(PluginFailure::AlreadyLoaded(PluginFailureAlreadyLoaded {
+                name: "p".into(),
+            })),
+            "plugin 'p' is already loaded",
+            &[],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::NotLoaded(PluginFailureNotLoaded {
+                name: "p".into(),
+            })),
+            "plugin 'p' is not loaded",
+            &[],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::NotFound(PluginFailureNotFound {
+                requested: "./p.ral".into(),
+            })),
+            "plugin './p.ral' was not found",
+            &["is it in <config>/ral/plugins or RAL_PATH?"],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::OptionsWithoutFactory(
+                PluginFailureOptionsWithoutFactory { plugin: "p".into() },
+            )),
+            "plugin 'p' takes no configuration",
+            &["its entry in the rc's plugins map wants the empty options map `[:]`"],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::FactoryReturnedBlock(
+                PluginFailureFactoryReturnedBlock { plugin: "p".into() },
+            )),
+            "plugin 'p' returned a Block as its manifest",
+            &["expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])"],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::UnknownHookEvent(
+                PluginFailureUnknownHookEvent {
+                    event: "before".into(),
+                    offered: vec!["pre-exec".into(), "post-exec".into()],
+                },
+            )),
+            "unknown hook event 'before'",
+            &["Valid events: pre-exec, post-exec"],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::AliasInstallationEscaped(
+                PluginFailureAliasInstallationEscaped {
+                    alias: "ll".into(),
+                    cause: EscapedLoad::Exit(7),
+                },
+            )),
+            "installation of alias 'll' escaped: exit: 7",
+            &[],
+        );
+        projection(
+            RalFailure::Plugin(PluginFailure::AliasInstallationEscaped(
+                PluginFailureAliasInstallationEscaped {
+                    alias: "ll".into(),
+                    cause: EscapedLoad::Stopped(CancelCause::Cancelled),
+                },
+            )),
+            "installation of alias 'll' escaped: stopped: cancelled",
+            &[],
+        );
+    }
+
+    #[test]
+    fn boot_and_editor_context_refusals_explain_session_profile_and_handler() {
+        projection(
+            RalFailure::Boot(BootFailure::AlreadyBooted),
+            "the session has already booted",
+            &[],
+        );
+        projection(
+            RalFailure::Boot(BootFailure::ProfileNotAbsolute(
+                BootFailureProfileNotAbsolute {
+                    path: "relative.ral".into(),
+                },
+            )),
+            "the --capabilities profile relative.ral is not absolute",
+            &[],
+        );
+        projection(
+            RalFailure::Editor(EditorFailure::NoPluginContext),
+            "no plugin context (not inside a plugin handler)",
+            &[],
+        );
+        projection(
+            RalFailure::Editor(EditorFailure::UnknownStyle(EditorFailureUnknownStyle {
+                style: "unknown".into(),
+                offered: vec!["bold".into(), "red".into()],
+            })),
+            "unknown style 'unknown'; available styles: bold, red",
+            &[],
+        );
+    }
+
+    #[test]
+    fn editor_command_variables_causes_and_ordered_advice_are_separate_channels() {
+        for (variable, name) in [
+            (EditorVariable::Visual, "VISUAL"),
+            (EditorVariable::Editor, "EDITOR"),
+        ] {
+            for (cause, description, remedy) in [
+                (
+                    EditorCommandCause::Nul,
+                    format!("{name} contains a NUL byte"),
+                    Some("remove it"),
+                ),
+                (
+                    EditorCommandCause::Unbalanced,
+                    format!("{name} has an unmatched quote or a trailing backslash"),
+                    Some("it is split into words as a POSIX shell would, with nothing expanded"),
+                ),
+                (
+                    EditorCommandCause::NoProgram,
+                    format!("{name} names no program: its first word is empty"),
+                    None,
+                ),
+            ] {
+                let mut advice: Vec<&str> = remedy.into_iter().collect();
+                advice.push("the input buffer was not changed");
+                projection(
+                    RalFailure::Editor(EditorFailure::Command(EditorFailureCommand {
+                        variable,
+                        cause,
+                    })),
+                    &description,
+                    &advice,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn editor_buffer_advice_does_not_leak_to_process_or_authority_refusals() {
+        use crate::fact::{Denial, Failure, SingleOrNested, Withholding};
+        for reason in [
+            Reason::process("editor", Failure::NotFound),
+            Reason::Denied(Box::new(Denial::exec_run(
+                "editor".into(),
+                Withholding::MissingAllowance(SingleOrNested::Single),
+            ))),
+        ] {
+            let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+            assert_eq!(decoded, reason);
+            assert!(
+                decoded
+                    .advice()
+                    .iter()
+                    .all(|advice| !advice.contains("input buffer"))
+            );
+            assert!(!Error::new(decoded).plain().contains("input buffer"));
+        }
+    }
+
+    #[test]
+    fn editor_draft_limits_keep_exact_bytes_and_read_utf8_evidence() {
+        for (bytes, limit) in [
+            (16 << 20, "16 MiB"),
+            ((16 << 20) + 1, "16777217 bytes"),
+            (u64::MAX, "18446744073709551615 bytes"),
+        ] {
+            for (operation, verb) in [
+                (DraftOperation::Write, "write"),
+                (DraftOperation::Read, "read"),
+            ] {
+                projection(
+                    RalFailure::Editor(EditorFailure::Draft(EditorFailureDraft {
+                        operation,
+                        cause: DraftFailure::TooLarge(DraftFailureTooLarge {
+                            limit: Count::from_u64(bytes),
+                        }),
+                    })),
+                    &format!("{verb} draft: the draft exceeds the {limit} limit"),
+                    &["the input buffer was not changed"],
+                );
+            }
+        }
+        projection(
+            RalFailure::Editor(EditorFailure::Draft(EditorFailureDraft {
+                operation: DraftOperation::Read,
+                cause: DraftFailure::Read(IoCause::new(IoLeaf::Torn)),
+            })),
+            "read draft: could not read the draft: state was left torn by a failed mutation",
+            &["the input buffer was not changed"],
+        );
+        for (error_len, cause) in [
+            (
+                Some(Count::from_u64(2)),
+                "invalid UTF-8 at byte 3 (2 invalid bytes)",
+            ),
+            (None, "incomplete UTF-8 at byte 3"),
+        ] {
+            projection(
+                RalFailure::Editor(EditorFailure::Draft(EditorFailureDraft {
+                    operation: DraftOperation::Read,
+                    cause: DraftFailure::Utf8(Utf8Failure {
+                        valid_up_to: Count::from_u64(3),
+                        error_len,
+                    }),
+                })),
+                &format!("read draft: the draft is not UTF-8: {cause}"),
+                &["the input buffer was not changed"],
+            );
+        }
+    }
+
+    #[test]
+    fn editor_workspace_refusals_keep_step_optional_path_and_actual_file_kind() {
+        for (found, cause) in [
+            (None, "the draft file is missing"),
+            (
+                Some(EntryKind::Dir),
+                "expected a regular draft file, got a directory",
+            ),
+            (
+                Some(EntryKind::Symlink),
+                "expected a regular draft file, got a symlink",
+            ),
+            (
+                Some(EntryKind::Other),
+                "expected a regular draft file, got another kind of non-regular file",
+            ),
+            (
+                Some(EntryKind::File),
+                "expected a regular draft file, got a regular file",
+            ),
+        ] {
+            projection(
+                RalFailure::Editor(EditorFailure::Workspace(EditorFailureWorkspace {
+                    step: EditorWorkspaceStep::InspectBuffer,
+                    path: Some("/tmp/draft".into()),
+                    cause: EditorWorkspaceFailure::ExpectedRegularFile(
+                        EditorWorkspaceFailureExpectedRegularFile { found },
+                    ),
+                })),
+                &format!("could not inspect the draft file \"/tmp/draft\": {cause}"),
+                &["the input buffer was not changed"],
+            );
+        }
+        for (step, action) in [
+            (
+                EditorWorkspaceStep::TemporaryDirectory,
+                "find a temporary directory",
+            ),
+            (
+                EditorWorkspaceStep::CreateDirectory,
+                "create the editor workspace",
+            ),
+            (EditorWorkspaceStep::CreateBuffer, "create the draft file"),
+            (EditorWorkspaceStep::WriteBuffer, "write the draft file"),
+            (EditorWorkspaceStep::BufferPath, "get the draft file path"),
+            (EditorWorkspaceStep::LocateBuffer, "locate the draft file"),
+            (EditorWorkspaceStep::InspectBuffer, "inspect the draft file"),
+            (EditorWorkspaceStep::OpenBuffer, "open the draft file"),
+            (
+                EditorWorkspaceStep::RemoveWorkspace,
+                "remove the editor workspace",
+            ),
+        ] {
+            for path in [None, Some("/tmp/draft")] {
+                let at = if path.is_some() {
+                    " \"/tmp/draft\""
+                } else {
+                    ""
+                };
+                projection(
+                    RalFailure::Editor(EditorFailure::Workspace(EditorFailureWorkspace {
+                        step,
+                        path: path.map(str::to_owned),
+                        cause: EditorWorkspaceFailure::Io(IoCause::new(IoLeaf::Torn)),
+                    })),
+                    &format!("could not {action}{at}: state was left torn by a failed mutation"),
+                    &["the input buffer was not changed"],
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod policy_edit_skill_presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::{IoLeaf, Reason};
+    use std::fmt::Debug;
+
+    fn product<T>(value: T, describe: fn(&T) -> String, expected: &str) -> T
+    where
+        T: Datum + Clone + Debug + PartialEq,
+    {
+        assert_eq!(describe(&value), expected);
+        let decoded = T::decode(&value.clone().encode()).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(describe(&decoded), expected);
+        value
+    }
+
+    fn projection(failure: ExarchFailure, description: &str, advice: &[&str]) {
+        let reason = Reason::Host(Box::new(HostFailure::Exarch(failure)));
+        let description = format!("exarch: {description}");
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(decoded, reason);
+        for reason in [reason, decoded] {
+            assert_eq!(reason.describe(), description);
+            assert_eq!(reason.advice(), advice);
+            let error = Error::new(reason);
+            assert_eq!(error.hints(), []);
+            assert!(error.context().is_none());
+            let mut plain = description.clone();
+            for hint in advice {
+                plain.push_str("\nhint: ");
+                plain.push_str(hint);
+            }
+            assert_eq!(error.plain(), plain);
+        }
+    }
+
+    fn policy(failure: PolicyFailure, description: &str) {
+        let failure = product(failure, PolicyFailure::describe, description);
+        projection(
+            ExarchFailure::Policy(failure),
+            &format!("policy: {description}"),
+            &[],
+        );
+    }
+
+    fn edit(failure: EditFailure, description: &str, advice: &[&str]) {
+        let failure = product(failure, EditFailure::describe, description);
+        assert_eq!(failure.advice(), advice);
+        projection(
+            ExarchFailure::Edit(failure),
+            &format!("edit: {description}"),
+            advice,
+        );
+    }
+
+    fn skill(failure: SkillFailure, description: &str, advice: &[&str]) {
+        let failure = product(failure, SkillFailure::describe, description);
+        assert_eq!(failure.advice(), advice);
+        projection(
+            ExarchFailure::Skill(failure),
+            &format!("skill: {description}"),
+            advice,
+        );
+    }
+
+    fn frontmatter(cause: FrontmatterFailure, description: &str) {
+        let cause = product(cause, FrontmatterFailure::describe, description);
+        for (place, shown) in [
+            (
+                SkillPlace::Disk("./skills/../skills/demo".into()),
+                "./skills/../skills/demo",
+            ),
+            (SkillPlace::Builtin, "built into exarch"),
+        ] {
+            let place = product(place, SkillPlace::describe, shown);
+            let description = format!("could not load skill 'demo' from {shown}: {description}");
+            let payload = product(
+                SkillFailureFrontmatter {
+                    name: "demo".into(),
+                    place,
+                    cause: cause.clone(),
+                },
+                SkillFailureFrontmatter::describe,
+                &description,
+            );
+            skill(SkillFailure::Frontmatter(payload), &description, &[]);
+        }
+    }
+
+    #[test]
+    fn policy_binary_and_base_descriptions_keep_recorded_order_and_empty_offerings() {
+        policy(
+            PolicyFailure::OwnBinaryUnpinned,
+            "could not pin exarch's own binary at startup (is it missing or unreadable?), so cannot exclude it from exec",
+        );
+        for (name, offered, description) in [
+            (
+                "other",
+                vec!["strict", "minimal"],
+                "unknown base 'other'; expected one of: strict, minimal",
+            ),
+            (
+                "other",
+                vec![],
+                "unknown base 'other'; no bases were offered",
+            ),
+            (
+                "o'\n",
+                vec!["z\n", "a'"],
+                "unknown base 'o\\'\\n'; expected one of: z\\n, a\\'",
+            ),
+        ] {
+            let payload = product(
+                PolicyFailureUnknownBase {
+                    name: name.into(),
+                    offered: offered.into_iter().map(str::to_owned).collect(),
+                },
+                PolicyFailureUnknownBase::describe,
+                description,
+            );
+            policy(PolicyFailure::UnknownBase(payload), description);
+        }
+    }
+
+    #[test]
+    fn policy_escaped_load_keeps_flag_exit_byte_and_every_closed_stop_cause() {
+        for status in [0, 7, 255] {
+            let description = format!("policy load for --capabilities exited with status {status}");
+            let payload = product(
+                PolicyFailureEscapedLoad {
+                    flag: "--capabilities".into(),
+                    cause: EscapedLoad::Exit(status),
+                },
+                PolicyFailureEscapedLoad::describe,
+                &description,
+            );
+            policy(PolicyFailure::EscapedLoad(payload), &description);
+        }
+        for (cause, shown) in [
+            (CancelCause::ReaderGone, "reader-gone"),
+            (CancelCause::Interrupted, "interrupted"),
+            (CancelCause::Cancelled, "cancelled"),
+            (CancelCause::TimedOut, "timed-out"),
+            (CancelCause::Terminated, "terminated"),
+            (CancelCause::Aborted, "aborted"),
+        ] {
+            let description = format!("policy load for --policy stopped: {shown}");
+            let payload = product(
+                PolicyFailureEscapedLoad {
+                    flag: "--policy".into(),
+                    cause: EscapedLoad::Stopped(cause),
+                },
+                PolicyFailureEscapedLoad::describe,
+                &description,
+            );
+            policy(PolicyFailure::EscapedLoad(payload), &description);
+        }
+    }
+
+    #[test]
+    fn edit_empty_hash_and_duplicate_target_descriptions_keep_single_remedies() {
+        edit(
+            EditFailure::NoEdits,
+            "no edits given",
+            &["pass a list of [hash: …, line: …] records"],
+        );
+        edit(EditFailure::EmptyFrom, "FROM must be non-empty", &[]);
+        let stale =
+            &["re-read with view-hash/view-hash-around before editing; the witness may be stale"];
+        let description = "no line in ./f.txt hashes to deadbeef";
+        let absent = product(
+            EditFailureHashAbsent {
+                path: "./f.txt".into(),
+                hash: "deadbeef".into(),
+            },
+            EditFailureHashAbsent::describe,
+            description,
+        );
+        edit(EditFailure::HashAbsent(absent), description, stale);
+        let description =
+            "hash deadbeef matches multiple lines in ./f.txt: 8, 2, 18446744073709551615";
+        let ambiguous = product(
+            EditFailureHashAmbiguous {
+                path: "./f.txt".into(),
+                hash: "deadbeef".into(),
+                lines: vec![
+                    Count::from_u64(8),
+                    Count::from_u64(2),
+                    Count::from_u64(u64::MAX),
+                ],
+            },
+            EditFailureHashAmbiguous::describe,
+            description,
+        );
+        edit(EditFailure::HashAmbiguous(ambiguous), description, stale);
+        let description = "two edits name line 18446744073709551615 in ./f.txt";
+        let duplicate = product(
+            EditFailureDuplicateTargetLine {
+                path: "./f.txt".into(),
+                line: Count::from_u64(u64::MAX),
+            },
+            EditFailureDuplicateTargetLine::describe,
+            description,
+        );
+        edit(
+            EditFailure::DuplicateTargetLine(duplicate),
+            description,
+            &[],
+        );
+    }
+
+    #[test]
+    fn edit_literal_occurrences_are_not_the_unique_line_count() {
+        for (matches, lines, description) in [
+            (
+                3,
+                vec![8, 2],
+                "FROM matches 3 times in f.txt, on lines 8, 2; must match exactly once",
+            ),
+            (
+                3,
+                vec![2],
+                "FROM matches 3 times in f.txt, on line 2; must match exactly once",
+            ),
+            (
+                u64::MAX,
+                vec![2],
+                "FROM matches 18446744073709551615 times in f.txt, on line 2; must match exactly once",
+            ),
+        ] {
+            let payload = product(
+                EditFailureMultipleLiteralMatches {
+                    path: "f.txt".into(),
+                    matches: Count::from_u64(matches),
+                    lines: lines.into_iter().map(Count::from_u64).collect(),
+                },
+                EditFailureMultipleLiteralMatches::describe,
+                description,
+            );
+            edit(
+                EditFailure::MultipleLiteralMatches(payload),
+                description,
+                &[
+                    "widen FROM with a neighbouring line to make it unique, or change every occurrence by composing string-replace / re-replace-all over from-string and to-string",
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn edit_literal_miss_evidence_explains_only_the_observed_match() {
+        for (evidence, description, advice) in [
+            (
+                LiteralMiss::Escapes,
+                "FROM was not found in f.txt, and FROM carries a literal backslash escape",
+                "ral strings are verbatim: write real newlines inside a raw #'…'# string, not literal backslash escapes",
+            ),
+            (
+                LiteralMiss::Indentation(Count::from_u64(u64::MAX)),
+                "FROM was not found in f.txt, but line 18446744073709551615 matches FROM's first non-empty line apart from leading whitespace",
+                "copy the exact text, indentation included, from view-text-around",
+            ),
+            (
+                LiteralMiss::Absent,
+                "FROM was not found in f.txt",
+                "re-read the file with view-text-around before editing; it may already contain the intended text",
+            ),
+        ] {
+            let payload = product(
+                EditFailureNoLiteralMatch {
+                    path: "f.txt".into(),
+                    evidence,
+                },
+                EditFailureNoLiteralMatch::describe,
+                description,
+            );
+            edit(EditFailure::NoLiteralMatch(payload), description, &[advice]);
+        }
+    }
+
+    #[test]
+    fn skill_names_share_the_complete_rule_and_missing_skill_has_only_list_advice() {
+        for name in [
+            "",
+            "-demo",
+            "demo-",
+            "demo--name",
+            "Upper",
+            "é",
+            "o'\n",
+            &"a".repeat(65),
+        ] {
+            let description = format!(
+                "'{}' is not a skill name; use 1–64 lowercase ASCII letters or digits, with single interior hyphens",
+                name.escape_debug()
+            );
+            let invalid = product(
+                SkillFailureInvalidName { name: name.into() },
+                SkillFailureInvalidName::describe,
+                &description,
+            );
+            skill(SkillFailure::InvalidName(invalid), &description, &[]);
+            let declared = product(
+                FrontmatterFailureInvalidName { name: name.into() },
+                FrontmatterFailureInvalidName::describe,
+                &description,
+            );
+            frontmatter(FrontmatterFailure::InvalidName(declared), &description);
+        }
+        for (name, description) in [
+            ("1-demo", "no skill named '1-demo'"),
+            ("o'\n", "no skill named 'o\\'\\n'"),
+        ] {
+            let payload = product(
+                SkillFailureMissing { name: name.into() },
+                SkillFailureMissing::describe,
+                description,
+            );
+            skill(
+                SkillFailure::Missing(payload),
+                description,
+                &["did you mean one that skill-list shows?"],
+            );
+        }
+    }
+
+    #[test]
+    fn skill_read_and_yaml_keep_name_recorded_place_and_nested_cause_or_detail() {
+        for (place, shown) in [
+            (
+                SkillPlace::Disk("./a/../skills/demo".into()),
+                "./a/../skills/demo",
+            ),
+            (SkillPlace::Builtin, "built into exarch"),
+        ] {
+            let place = product(place, SkillPlace::describe, shown);
+            let description = format!(
+                "could not read skill 'o\\'\\n' from {shown}: state was left torn by a failed mutation"
+            );
+            let read = product(
+                SkillFailureRead {
+                    name: "o'\n".into(),
+                    place: place.clone(),
+                    cause: IoCause::new(IoLeaf::Torn),
+                },
+                SkillFailureRead::describe,
+                &description,
+            );
+            skill(SkillFailure::Read(read), &description, &[]);
+            let description = format!(
+                "could not load skill 'o\\'\\n' from {shown}: invalid YAML frontmatter: parser detail\nline 2"
+            );
+            let yaml = product(
+                SkillFailureYaml {
+                    name: "o'\n".into(),
+                    place,
+                    detail: "parser detail\nline 2".into(),
+                },
+                SkillFailureYaml::describe,
+                &description,
+            );
+            skill(SkillFailure::Yaml(yaml), &description, &[]);
+        }
+    }
+
+    #[test]
+    fn frontmatter_missing_fields_and_all_pod_heads_remain_distinct() {
+        frontmatter(FrontmatterFailure::Missing, "missing YAML frontmatter");
+        for (field, shown) in [
+            (SkillField::Name, "name"),
+            (SkillField::Description, "description"),
+        ] {
+            frontmatter(
+                FrontmatterFailure::MissingField(field),
+                &format!("frontmatter must contain a String {shown} field"),
+            );
+        }
+        for (found, head) in [
+            (PodKind::Null, "null"),
+            (PodKind::String, "string"),
+            (PodKind::Integer, "integer"),
+            (PodKind::Float, "float"),
+            (PodKind::Boolean, "boolean"),
+            (PodKind::Array, "array"),
+            (PodKind::Hash, "hash"),
+        ] {
+            let description = format!("YAML frontmatter must be a mapping, got {head}");
+            let not_mapping = product(
+                FrontmatterFailureNotMapping { found },
+                FrontmatterFailureNotMapping::describe,
+                &description,
+            );
+            frontmatter(FrontmatterFailure::NotMapping(not_mapping), &description);
+            for (field, shown) in [
+                (SkillField::Name, "name"),
+                (SkillField::Description, "description"),
+            ] {
+                let description = format!("frontmatter field {shown} must be a String, got {head}");
+                let shape = product(
+                    FrontmatterFailureFieldShape { field, found },
+                    FrontmatterFailureFieldShape::describe,
+                    &description,
+                );
+                frontmatter(FrontmatterFailure::FieldShape(shape), &description);
+            }
+        }
+    }
+
+    #[test]
+    fn frontmatter_directory_mismatch_quotes_both_recorded_names() {
+        let description =
+            "frontmatter name 'declared\\'\\n' must match directory name 'directory\\'\\t'";
+        let mismatch = product(
+            FrontmatterFailureDirectoryNameMismatch {
+                declared: "declared'\n".into(),
+                directory: "directory'\t".into(),
+            },
+            FrontmatterFailureDirectoryNameMismatch::describe,
+            description,
+        );
+        frontmatter(
+            FrontmatterFailure::DirectoryNameMismatch(mismatch),
+            description,
+        );
+    }
+}
+
+#[cfg(test)]
+mod recording_context_presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::error::decode::DecodeCause;
+    use crate::fact::error::shared::JsonCategory;
+    use crate::fact::{IoLeaf, Reason};
+    use std::fmt::Debug;
+
+    const RECORDING_ADVICE: &str = "this session can record nothing more; its record keeps everything before the failure, so the run can be resumed once the cause is fixed";
+    const READ_BACK_ADVICE: &str = "check that the recorded session file is present, readable, and unchanged; was its directory moved, copied or edited?";
+    const STALE: &str = "the log at this path is no longer the file those byte ranges were measured in; it may be a copied session directory or an edited log";
+    const INTACT: &str = "the lines before it are intact, and nothing from it on can be read.";
+    const OLDER: &str = "was this session recorded by an older exarch? Older sessions can be neither resumed nor exported.";
+
+    fn product<T>(value: T, describe: fn(&T) -> String, expected: &str) -> T
+    where
+        T: Datum + Clone + Debug + PartialEq,
+    {
+        assert_eq!(describe(&value), expected);
+        let decoded = T::decode(&value.clone().encode()).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(describe(&decoded), expected);
+        value
+    }
+
+    fn projection(failure: ExarchFailure, description: &str) {
+        let reason = Reason::Host(Box::new(HostFailure::Exarch(failure)));
+        let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+        assert_eq!(decoded, reason);
+        for reason in [reason, decoded] {
+            assert_eq!(reason.describe(), format!("exarch: {description}"));
+            let error = Error::new(reason);
+            assert_eq!(error.hints(), []);
+            assert!(error.context().is_none());
+        }
+    }
+
+    fn recording(failure: RecordingFailure, description: &str, advice: &[&str]) {
+        let decoded = RecordingFailure::decode(&failure.clone().encode()).unwrap();
+        assert_eq!(decoded, failure);
+        for value in [&failure, &decoded] {
+            assert_eq!(value.describe(), description);
+            assert_eq!(value.advice(), advice);
+        }
+        projection(
+            ExarchFailure::Recording(failure),
+            &format!("recording: {description}"),
+        );
+    }
+
+    fn context(failure: ContextFailure, description: &str, advice: &[&str]) {
+        let decoded = ContextFailure::decode(&failure.clone().encode()).unwrap();
+        assert_eq!(decoded, failure);
+        for value in [&failure, &decoded] {
+            assert_eq!(value.describe(), description);
+            assert_eq!(value.advice(), advice);
+        }
+        projection(
+            ExarchFailure::Context(failure),
+            &format!("context: {description}"),
+        );
+    }
+
+    #[test]
+    fn recording_stages_and_optional_record_paths_delegate_without_extra_labels() {
+        for (stage, shown_stage) in [
+            (RecordingStage::Append, "append"),
+            (RecordingStage::Sync, "sync"),
+        ] {
+            let stage = product(stage, RecordingStage::describe, shown_stage);
+            for (record, subject) in [
+                (None, "recording"),
+                (Some("./a/../session"), "record './a/../session'"),
+                (Some("o'\n\t\\"), "record 'o\\'\\n\\t\\\\'"),
+            ] {
+                let description = format!(
+                    "session ended because {subject} {shown_stage} failed: state was left torn by a failed mutation"
+                );
+                let payload = product(
+                    RecordingFailureRecording {
+                        record: record.map(str::to_owned),
+                        stage,
+                        cause: IoCause::new(IoLeaf::Torn),
+                    },
+                    RecordingFailureRecording::describe,
+                    &description,
+                );
+                recording(
+                    RecordingFailure::Recording(payload),
+                    &description,
+                    &[RECORDING_ADVICE],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poisoned_cell_keeps_full_agent_id_and_ordered_rebuild_advice() {
+        for agent in [0_u64, 1_u64 << 63, u64::MAX] {
+            let description =
+                format!("session ended because agent {agent}'s state cell is poisoned");
+            let payload = product(
+                RecordingFailureCellPoisoned {
+                    agent: agent.into(),
+                },
+                RecordingFailureCellPoisoned::describe,
+                &description,
+            );
+            recording(
+                RecordingFailure::CellPoisoned(payload),
+                &description,
+                &[
+                    "a thread panicked inside the agent's transaction, so its state may no longer match its log",
+                    "resuming the run rebuilds its state from the log",
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn selection_and_current_turn_remain_operation_neutral() {
+        context(ContextFailure::EmptySelection, "`turns` names no turn", &[]);
+        let inverted = product(
+            InvertedTurnSpan {
+                from: u64::MAX.into(),
+                to: 0_u64.into(),
+            },
+            InvertedTurnSpan::describe,
+            "turn span starts at 18446744073709551615 after its end 0",
+        );
+        context(
+            ContextFailure::InvertedSpan(inverted),
+            "turn span starts at 18446744073709551615 after its end 0",
+            &[],
+        );
+        let current = product(
+            ContextFailureCurrentlyWritten {
+                turn: u64::MAX.into(),
+            },
+            ContextFailureCurrentlyWritten::describe,
+            "turn 18446744073709551615 is being written now",
+        );
+        context(
+            ContextFailure::CurrentlyWritten(current),
+            "turn 18446744073709551615 is being written now",
+            &[],
+        );
+        for (reach, description) in [
+            (
+                None,
+                "turn 18446744073709551615 is not recorded: nothing has been recorded yet",
+            ),
+            (
+                Some(u64::MAX.into()),
+                "turn 18446744073709551615 is not recorded: the latest is 18446744073709551615",
+            ),
+        ] {
+            let payload = product(
+                ContextFailureTurnNotRecorded {
+                    turn: u64::MAX.into(),
+                    reach,
+                },
+                ContextFailureTurnNotRecorded::describe,
+                description,
+            );
+            context(ContextFailure::TurnNotRecorded(payload), description, &[]);
+        }
+    }
+
+    #[test]
+    fn withdrawn_turn_distinguishes_all_retained_evidence() {
+        for (evidence, description) in [
+            (
+                WithdrawalEvidence::Unavailable,
+                "turn 7 was rewound or cleared away: it is no longer in your context",
+            ),
+            (
+                WithdrawalEvidence::EarliestRetained(u64::MAX.into()),
+                "turn 7 was already rewound or cleared away; the earliest you can rewind to is turn 18446744073709551615",
+            ),
+            (
+                WithdrawalEvidence::NothingRetained,
+                "turn 7 was already rewound or cleared away; nothing has been said since the last /clear or /rewind",
+            ),
+        ] {
+            let payload = product(
+                ContextFailureWithdrawn {
+                    turn: 7_u64.into(),
+                    evidence,
+                },
+                ContextFailureWithdrawn::describe,
+                description,
+            );
+            context(ContextFailure::Withdrawn(payload), description, &[]);
+        }
+    }
+
+    #[test]
+    fn straddled_eviction_uses_covering_bounds_and_checked_unsigned_successor() {
+        for (requested, requested_text, covering, covering_text, first_advice, second_advice) in [
+            (
+                (4_u64, 4_u64),
+                "turn 4",
+                (3_u64, 6_u64),
+                "turns 3–6",
+                "for an eviction, name from: 3, to: 6 whole, or leave it",
+                "to rewind around this note, use its boundaries: turn 3 or turn 7",
+            ),
+            (
+                (4, 5),
+                "turns 4–5",
+                (3, 6),
+                "turns 3–6",
+                "for an eviction, name from: 3, to: 6 whole, or leave it",
+                "to rewind around this note, use its boundaries: turn 3 or turn 7",
+            ),
+            (
+                (4, 4),
+                "turn 4",
+                (4, 4),
+                "turn 4",
+                "for an eviction, name from: 4, to: 4 whole, or leave it",
+                "to rewind around this note, use its boundaries: turn 4 or turn 5",
+            ),
+            (
+                (0, 0),
+                "turn 0",
+                (0, i64::MAX.unsigned_abs()),
+                "turns 0–9223372036854775807",
+                "for an eviction, name from: 0, to: 9223372036854775807 whole, or leave it",
+                "to rewind around this note, use its boundaries: turn 0 or turn 9223372036854775808",
+            ),
+            (
+                (u64::MAX - 1, u64::MAX - 1),
+                "turn 18446744073709551614",
+                (2, u64::MAX - 1),
+                "turns 2–18446744073709551614",
+                "for an eviction, name from: 2, to: 18446744073709551614 whole, or leave it",
+                "to rewind around this note, use its boundaries: turn 2 or turn 18446744073709551615",
+            ),
+            (
+                (4, 4),
+                "turn 4",
+                (3, u64::MAX),
+                "turns 3–18446744073709551615",
+                "for an eviction, name from: 3, to: 18446744073709551615 whole, or leave it",
+                "to rewind around this note, use its first boundary: turn 3",
+            ),
+        ] {
+            let requested = product(
+                TurnSpan {
+                    from: requested.0.into(),
+                    to: requested.1.into(),
+                },
+                TurnSpan::describe,
+                requested_text,
+            );
+            let covering = product(
+                TurnSpan {
+                    from: covering.0.into(),
+                    to: covering.1.into(),
+                },
+                TurnSpan::describe,
+                covering_text,
+            );
+            let description = format!(
+                "{requested_text} cuts the eviction over {covering_text}; the covered turns stand together under one note"
+            );
+            let payload = ContextFailureStraddledEviction {
+                requested,
+                covering,
+            };
+            let decoded =
+                ContextFailureStraddledEviction::decode(&payload.clone().encode()).unwrap();
+            assert_eq!(decoded, payload);
+            for value in [&payload, &decoded] {
+                assert_eq!(value.describe(), description);
+                assert_eq!(value.advice(), [first_advice, second_advice]);
+            }
+            context(
+                ContextFailure::StraddledEviction(payload),
+                &description,
+                &[first_advice, second_advice],
+            );
+        }
+    }
+
+    #[test]
+    fn every_mutation_operation_explains_every_state_and_pending_count() {
+        for (state, shown) in [
+            (ContextState::ReadyForUser, "ready for your next prompt"),
+            (
+                ContextState::AwaitingAssistantAfterUser,
+                "waiting for the model's reply",
+            ),
+            (
+                ContextState::AwaitingToolResults(ContextStateAwaitingToolResults {
+                    pending: 0_u64.into(),
+                }),
+                "waiting for 0 tool results",
+            ),
+            (
+                ContextState::AwaitingToolResults(ContextStateAwaitingToolResults {
+                    pending: 1_u64.into(),
+                }),
+                "waiting for 1 tool result",
+            ),
+            (
+                ContextState::AwaitingToolResults(ContextStateAwaitingToolResults {
+                    pending: 2_u64.into(),
+                }),
+                "waiting for 2 tool results",
+            ),
+            (
+                ContextState::AwaitingToolResults(ContextStateAwaitingToolResults {
+                    pending: u64::MAX.into(),
+                }),
+                "waiting for 18446744073709551615 tool results",
+            ),
+            (
+                ContextState::AwaitingAssistantAfterToolResults,
+                "waiting for the model to read the tool results",
+            ),
+        ] {
+            let state = product(state, ContextState::describe, shown);
+            if let ContextState::AwaitingToolResults(payload) = &state {
+                product(
+                    payload.clone(),
+                    ContextStateAwaitingToolResults::describe,
+                    shown,
+                );
+            }
+            for (operation, prefix) in [
+                (
+                    ContextOperation::RenderRequest,
+                    "cannot render request while the session is",
+                ),
+                (
+                    ContextOperation::Import,
+                    "cannot import context while the session is",
+                ),
+                (
+                    ContextOperation::AcceptUser,
+                    "cannot accept a new user prompt while the session is",
+                ),
+                (
+                    ContextOperation::AcceptSteering,
+                    "tool results must be complete before accepting a steering prompt; the session is",
+                ),
+                (
+                    ContextOperation::AppendAssistant,
+                    "assistant message is not expected while the session is",
+                ),
+                (
+                    ContextOperation::AppendToolResults,
+                    "tool results are not expected while the session is",
+                ),
+                (ContextOperation::Clear, "cannot clear while the session is"),
+                (
+                    ContextOperation::Rewind,
+                    "cannot rewind while the session is",
+                ),
+            ] {
+                let description = format!("{prefix} {shown}");
+                let payload = product(
+                    ContextFailureMutation {
+                        operation,
+                        state: state.clone(),
+                    },
+                    ContextFailureMutation::describe,
+                    &description,
+                );
+                context(ContextFailure::Mutation(payload), &description, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn steering_roles_and_tool_results_preserve_counts_and_escape_complete_ids() {
+        context(
+            ContextFailure::SteeringWithoutTurn,
+            "cannot accept a steering prompt: no turn is being written",
+            &[],
+        );
+        for (found, role) in [
+            (ProviderMessageRole::System, "system"),
+            (ProviderMessageRole::User, "user"),
+            (ProviderMessageRole::Assistant, "assistant"),
+            (ProviderMessageRole::Tool, "tool"),
+        ] {
+            let description =
+                format!("a {role} message arrived where the assistant's reply was expected");
+            let payload = product(
+                ContextFailureAssistantRole { found },
+                ContextFailureAssistantRole::describe,
+                &description,
+            );
+            context(ContextFailure::AssistantRole(payload), &description, &[]);
+        }
+        for (expected, got, description) in [
+            (
+                u64::MAX,
+                0_u64,
+                "tool result count mismatch: expected 18446744073709551615, got 0",
+            ),
+            (
+                0,
+                u64::MAX,
+                "tool result count mismatch: expected 0, got 18446744073709551615",
+            ),
+        ] {
+            let payload = product(
+                ContextFailureToolResultCount {
+                    expected: expected.into(),
+                    got: got.into(),
+                },
+                ContextFailureToolResultCount::describe,
+                description,
+            );
+            context(ContextFailure::ToolResultCount(payload), description, &[]);
+        }
+        for (id, shown) in [
+            ("", ""),
+            ("result-1", "result-1"),
+            ("o'\n\t\0\\\u{1b}終", "o\\'\\n\\t\\0\\\\\\u{1b}終"),
+        ] {
+            let description = format!("unknown tool result id {shown}");
+            let unknown = product(
+                ContextFailureUnknownToolResult { id: id.into() },
+                ContextFailureUnknownToolResult::describe,
+                &description,
+            );
+            assert_eq!(unknown.id, id);
+            context(
+                ContextFailure::UnknownToolResult(unknown),
+                &description,
+                &[],
+            );
+            let description = format!("duplicate tool result id {shown}");
+            let duplicate = product(
+                ContextFailureDuplicateToolResult { id: id.into() },
+                ContextFailureDuplicateToolResult::describe,
+                &description,
+            );
+            assert_eq!(duplicate.id, id);
+            context(
+                ContextFailure::DuplicateToolResult(duplicate),
+                &description,
+                &[],
+            );
+        }
+        let id = "tool".repeat(256);
+        let unknown = product(
+            ContextFailureUnknownToolResult { id: id.clone() },
+            ContextFailureUnknownToolResult::describe,
+            &format!("unknown tool result id {id}"),
+        );
+        context(
+            ContextFailure::UnknownToolResult(unknown),
+            &format!("unknown tool result id {id}"),
+            &[],
+        );
+        let duplicate = product(
+            ContextFailureDuplicateToolResult { id: id.clone() },
+            ContextFailureDuplicateToolResult::describe,
+            &format!("duplicate tool result id {id}"),
+        );
+        context(
+            ContextFailure::DuplicateToolResult(duplicate),
+            &format!("duplicate tool result id {id}"),
+            &[],
+        );
+    }
+
+    fn read_back(cause: RecordReadFailure, description: &str) {
+        let cause = product(cause, RecordReadFailure::describe, description);
+        let description = format!(
+            "turn 18446744073709551615 could not be read back from ./old/../session (source agent 9223372036854775808): {description}"
+        );
+        let payload = product(
+            ContextFailureReadBack {
+                turn: u64::MAX.into(),
+                source: (1_u64 << 63).into(),
+                record: "./old/../session".into(),
+                cause,
+            },
+            ContextFailureReadBack::describe,
+            &description,
+        );
+        context(
+            ContextFailure::ReadBack(payload),
+            &description,
+            &[READ_BACK_ADVICE],
+        );
+    }
+
+    #[test]
+    fn read_back_preserves_every_record_read_cause_and_zero_based_locus_index() {
+        read_back(
+            RecordReadFailure::Io(IoCause::new(IoLeaf::Torn)),
+            "state was left torn by a failed mutation",
+        );
+        read_back(
+            RecordReadFailure::NonTranscriptRecord,
+            "a pointer named a non-transcript record: a turn's address no longer names the records it was measured over",
+        );
+        for index in [0_u64, u64::MAX] {
+            let description = format!(
+                "a locus named record {index} of line 18446744073709551615, which holds fewer: {STALE}"
+            );
+            let payload = product(
+                RecordReadFailureMissingLocusRecord {
+                    commit: u64::MAX.into(),
+                    index: index.into(),
+                },
+                RecordReadFailureMissingLocusRecord::describe,
+                &description,
+            );
+            read_back(RecordReadFailure::MissingLocusRecord(payload), &description);
+        }
+        let description =
+            format!("line 18446744073709551615 did not hash to the locus that named it: {STALE}");
+        let payload = product(
+            RecordReadFailureLocusSealMismatch {
+                commit: u64::MAX.into(),
+            },
+            RecordReadFailureLocusSealMismatch::describe,
+            &description,
+        );
+        read_back(RecordReadFailure::LocusSealMismatch(payload), &description);
+    }
+
+    fn read_line(cause: RecordLineFailure, predicate: &str) {
+        let cause = product(cause, RecordLineFailure::describe, predicate);
+        let description = format!("line 18446744073709551615 {predicate}");
+        let payload = product(
+            RecordReadFailureLine {
+                commit: u64::MAX.into(),
+                cause,
+            },
+            RecordReadFailureLine::describe,
+            &description,
+        );
+        read_back(RecordReadFailure::Line(payload), &description);
+    }
+
+    #[test]
+    fn record_line_predicates_keep_syntax_positions_decode_paths_and_escaped_seals() {
+        for (class, kind) in [
+            (JsonCategory::Syntax, "syntax error"),
+            (JsonCategory::Eof, "ended unexpectedly"),
+        ] {
+            let syntax = JsonSyntaxFailure {
+                class,
+                line: u64::MAX.into(),
+                column: (1_u64 << 63).into(),
+                detail: "expected value".into(),
+            };
+            let predicate = format!(
+                "is corrupt: it is not JSON (JSON {kind} at line 18446744073709551615, column 9223372036854775808: expected value), so the file was damaged or edited after it was written; {INTACT}"
+            );
+            read_line(RecordLineFailure::JsonSyntax(syntax), &predicate);
+        }
+        let decode = DecodeFailure::new(DecodeCause::MissingField("required".into()))
+            .field("a\n")
+            .index(u64::MAX.into())
+            .payload("commit");
+        let cause = "payload `commit`: element 18446744073709551615: field \"a\\n\": missing field \"required\"";
+        assert_eq!(decode.describe(), cause);
+        read_line(
+            RecordLineFailure::InvalidEnvelope(decode.clone()),
+            &format!("is not a commit this exarch writes ({cause}); {OLDER}"),
+        );
+        read_line(
+            RecordLineFailure::InvalidRecords(decode),
+            &format!("holds records this exarch does not read ({cause}); {OLDER}"),
+        );
+        let predicate = format!(
+            "is corrupt: its commit hashes to actual-sum but was sealed as \"bad\\\"\\n\\t\\\\\", so the file changed after it was written (edited by hand, or damaged on disk); {INTACT}"
+        );
+        let payload = product(
+            RecordLineFailureSealMismatch {
+                sealed: "bad\"\n\t\\".into(),
+                actual: "actual-sum".into(),
+            },
+            RecordLineFailureSealMismatch::describe,
+            &predicate,
+        );
+        read_line(RecordLineFailure::SealMismatch(payload), &predicate);
+    }
+}
+
+impl ScheduleFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::NoGrant(_) => {
+                vec!["relaunch exarch with --allow-schedule to allow self-wakeups".into()]
+            }
+            Self::DuplicateLiveLabel(_) => {
+                vec!["pick another label, or remove it first with exarch-schedules `remove".into()]
+            }
+            Self::Recording(value) => value.cause.advice(),
+            Self::Cron(_) | Self::Duration(_) | Self::NoFutureOccurrence(_) => Vec::new(),
+        }
+    }
+}
+
+impl HelperFailure {
+    pub fn advice(&self) -> Vec<String> {
+        match self {
+            Self::Provider(value) => value.advice(),
+            Self::Context(value) => value.advice(),
+            Self::Recording(value) => value.advice(),
+            Self::NoReply
+            | Self::EndedBeforeReporting
+            | Self::Cancelled
+            | Self::ProviderStopped(_)
+            | Self::Connection(_)
+            | Self::Panicked => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_schedule_presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::{IoKind, IoLeaf, OsFailure, Reason};
+
+    fn check(value: &ExarchFailure, description: &str, advice: &[&str]) {
+        let decoded = ExarchFailure::decode(&value.clone().encode()).unwrap();
+        assert_eq!(&decoded, value);
+        for value in [value, &decoded] {
+            let reason = Reason::Host(Box::new(HostFailure::Exarch(value.clone())));
+            assert_eq!(reason.describe(), description);
+            assert_eq!(reason.advice(), advice);
+            let error = Error::new(reason);
+            assert_eq!(error.hints(), []);
+            let mut expected = description.to_owned();
+            for hint in advice {
+                let _ = write!(expected, "\nhint: {hint}");
+            }
+            assert_eq!(error.plain(), expected);
+        }
+    }
+
+    #[test]
+    fn agent_products_and_variants_agree_with_exact_remedies() {
+        macro_rules! agent {
+            ($variant:ident, $product:expr, $description:expr, $advice:expr) => {{
+                let product = $product;
+                assert_eq!(product.describe(), $description);
+                check(
+                    &ExarchFailure::Agent(AgentFailure::$variant(product)),
+                    &format!("exarch: agent: {}", $description),
+                    $advice,
+                );
+            }};
+        }
+        let name = "a'\n";
+        agent!(
+            NameTaken,
+            AgentFailureNameTaken { name: name.into() },
+            "an agent already bears the name 'a\\'\\n'",
+            &[
+                "pick another name, or wait for its owner to finish teardown; names stay reserved through teardown"
+            ]
+        );
+        agent!(
+            NotDescendant,
+            AgentFailureNotDescendant { name: "a".into() },
+            "agent 'a' is not a descendant of yours; exarch-agents `stop may only reach a descendant of yours",
+            &[]
+        );
+        agent!(
+            NotOwned,
+            AgentFailureNotOwned { name: "a".into() },
+            "agent 'a' is not one of your own helpers",
+            &[
+                "exarch-agents `read reads only your own helpers, and /clear forgets earlier ones",
+                "dismiss only an agent you started; its parent may dismiss it"
+            ]
+        );
+        agent!(
+            SelfMessage,
+            AgentFailureSelfMessage { name: "a".into() },
+            "agent 'a' is you; exarch-agents `message reaches another agent",
+            &["to wake yourself, arm an exarch-schedules fire"]
+        );
+        agent!(
+            NoLiveAgent,
+            AgentFailureNoLiveAgent { name: "a".into() },
+            "no live agent named 'a'; did it finish already?",
+            &[]
+        );
+        agent!(
+            Ended,
+            AgentFailureEnded { name: "a".into() },
+            "agent 'a' has ended; nothing was queued",
+            &["start a new agent"]
+        );
+        agent!(
+            Resting,
+            AgentFailureResting {
+                name: "a".into(),
+                parent: "p".into()
+            },
+            "agent 'a' has answered 'p' and rests; only 'p' can message it now; nothing was queued",
+            &[]
+        );
+        agent!(
+            ReplyPending,
+            AgentFailureReplyPending { name: "a".into() },
+            "agent 'a' has not replied yet; it is still working",
+            &["wait for its notice instead of polling"]
+        );
+        agent!(
+            ReplyAbsent,
+            AgentFailureReplyAbsent { name: "a".into() },
+            "agent 'a' has no reply to read",
+            &[]
+        );
+        agent!(
+            ReplyStopped,
+            AgentFailureReplyStopped { name: "a".into() },
+            "agent 'a' stopped without a reply to read",
+            &["message it to continue"]
+        );
+        agent!(
+            UnknownProviderRole,
+            AgentFailureUnknownProviderRole {
+                name: "r".into(),
+                offered: vec![]
+            },
+            "no role 'r': no roles are configured, so every child runs on your own model",
+            &[
+                "pass model: `inherit",
+                "only the human can add a role, by launching exarch with --role NAME=MODEL"
+            ]
+        );
+        agent!(
+            UnknownProviderRole,
+            AgentFailureUnknownProviderRole {
+                name: "r".into(),
+                offered: vec!["z".into(), "a'\n".into()]
+            },
+            "no role 'r': the configured roles are 'z', 'a\\'\\n'",
+            &["choose a configured role, or pass model: `inherit"]
+        );
+        check(
+            &ExarchFailure::Agent(AgentFailure::NoFuel),
+            "exarch: agent: no spawn fuel remains at this depth. Fuel bounds how deep a chain of spawns may recurse, not how many helpers may be started at an allowed depth",
+            &["you may still stop a descendant's exchange or dismiss one of your own helpers"],
+        );
+        check(
+            &ExarchFailure::Agent(AgentFailure::NoReturnRecipient),
+            "exarch: agent: you converse with the human; you do not return. `reply` hands a spawned or headless agent's answer to whoever started it; a conversing agent keeps talking, turn after turn",
+            &[],
+        );
+    }
+
+    #[test]
+    fn recording_advice_reaches_every_direct_and_nested_route_once() {
+        for recording in [
+            RecordingFailure::CellPoisoned(RecordingFailureCellPoisoned {
+                agent: u64::MAX.into(),
+            }),
+            RecordingFailure::Recording(RecordingFailureRecording {
+                record: Some("log".into()),
+                stage: RecordingStage::Sync,
+                cause: IoCause::new(IoLeaf::Os(OsFailure {
+                    kind: IoKind::PermissionDenied,
+                    raw: None,
+                    detail: None,
+                })),
+            }),
+        ] {
+            let advice = recording.advice();
+            let borrowed: Vec<_> = advice.iter().map(String::as_str).collect();
+            for failure in [
+                ExarchFailure::Recording(recording.clone()),
+                ExarchFailure::Schedule(ScheduleFailure::Recording(ScheduleFailureRecording {
+                    label: None,
+                    trigger: None,
+                    cause: recording.clone(),
+                })),
+                ExarchFailure::Agent(AgentFailure::ReplyUnavailable(
+                    AgentFailureReplyUnavailable {
+                        name: "a".into(),
+                        cause: recording.clone(),
+                    },
+                )),
+                ExarchFailure::Agent(AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+                    name: "a".into(),
+                    cause: HelperFailure::Recording(recording.clone()),
+                })),
+                ExarchFailure::Agent(AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+                    name: "a".into(),
+                    cause: HelperFailure::Provider(ProviderFailure::new(
+                        ProviderLeaf::Unavailable(recording.clone()),
+                    )),
+                })),
+            ] {
+                check(
+                    &failure,
+                    &format!("exarch: {}", failure.describe()),
+                    &borrowed,
+                );
+            }
+            let queued =
+                ExarchFailure::Agent(AgentFailure::QueuedUnsynced(AgentFailureQueuedUnsynced {
+                    name: "a".into(),
+                    cause: recording,
+                }));
+            let mut expected = vec![
+                "the message was queued and may already have been read; do not automatically resend it",
+            ];
+            expected.extend(borrowed);
+            check(
+                &queued,
+                &format!("exarch: {}", queued.describe()),
+                &expected,
+            );
+        }
+    }
+
+    #[test]
+    fn helper_stops_connections_panics_and_context_advice_stay_distinct() {
+        use crate::fact::{ConnectionClosed, ConnectionFailure, ProtocolPeer};
+        for (helper, text) in [
+            (HelperFailure::NoReply, "ended without calling `reply`"),
+            (
+                HelperFailure::EndedBeforeReporting,
+                "ended before reporting",
+            ),
+            (HelperFailure::Cancelled, "cancelled"),
+            (HelperFailure::Panicked, "panicked"),
+            (
+                HelperFailure::ProviderStopped(ProviderStop::ContentFilter("raw-code".into())),
+                "provider stopped: content filter: raw-code",
+            ),
+        ] {
+            assert_eq!(helper.describe(), text);
+            let reply = AgentFailureReplyFailed {
+                name: "a".into(),
+                cause: helper,
+            };
+            assert_eq!(
+                reply.describe(),
+                format!("agent 'a' failed without a reply to read: {text}")
+            );
+            check(
+                &ExarchFailure::Agent(AgentFailure::ReplyFailed(reply)),
+                &format!("exarch: agent: agent 'a' failed without a reply to read: {text}"),
+                &[],
+            );
+        }
+        let connection = ConnectionFailure::Closed(ConnectionClosed::Eof(ProtocolPeer::Engine));
+        let helper = HelperFailure::Connection(connection.clone());
+        assert_eq!(
+            helper.describe(),
+            format!("engine connection failed: {}", connection.describe())
+        );
+        assert_eq!(helper.advice(), Vec::<String>::new());
+        let context = ContextFailure::StraddledEviction(ContextFailureStraddledEviction {
+            requested: TurnSpan {
+                from: 2u64.into(),
+                to: 2u64.into(),
+            },
+            covering: TurnSpan {
+                from: 1u64.into(),
+                to: u64::MAX.into(),
+            },
+        });
+        let advice = context.advice();
+        let failure = ExarchFailure::Agent(AgentFailure::ReplyFailed(AgentFailureReplyFailed {
+            name: "a".into(),
+            cause: HelperFailure::Context(context),
+        }));
+        check(
+            &failure,
+            &format!("exarch: {}", failure.describe()),
+            &advice.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn schedule_labels_triggers_and_nested_recording_keep_present_evidence() {
+        for label in [None, Some("a'\n")] {
+            for trigger in [None, Some("after 1h")] {
+                for stage in [RecordingStage::Append, RecordingStage::Sync] {
+                    let cause = RecordingFailure::Recording(RecordingFailureRecording {
+                        record: None,
+                        stage,
+                        cause: IoCause::new(IoLeaf::Os(OsFailure {
+                            kind: IoKind::PermissionDenied,
+                            raw: None,
+                            detail: None,
+                        })),
+                    });
+                    let product = ScheduleFailureRecording {
+                        label: label.map(str::to_owned),
+                        trigger: trigger.map(str::to_owned),
+                        cause,
+                    };
+                    let description = format!(
+                        "could not record schedule{}{}: {}",
+                        label
+                            .map(|s| format!(" '{}'", s.escape_debug()))
+                            .unwrap_or_default(),
+                        trigger
+                            .map(|s| format!(" for trigger '{}'", s.escape_debug()))
+                            .unwrap_or_default(),
+                        product.cause.describe()
+                    );
+                    assert_eq!(product.describe(), description);
+                    check(
+                        &ExarchFailure::Schedule(ScheduleFailure::Recording(product)),
+                        &format!("exarch: schedule: {description}"),
+                        &[
+                            "this session can record nothing more; its record keeps everything before the failure, so the run can be resumed once the cause is fixed",
+                        ],
+                    );
+                }
+            }
+        }
+        check(
+            &ExarchFailure::Schedule(ScheduleFailure::NoGrant(ScheduleFailureNoGrant {
+                verb: "add".into(),
+            })),
+            "exarch: schedule: add: scheduling is not allowed in this session",
+            &["relaunch exarch with --allow-schedule to allow self-wakeups"],
+        );
+        check(
+            &ExarchFailure::Schedule(ScheduleFailure::NoFutureOccurrence(
+                ScheduleFailureNoFutureOccurrence {
+                    trigger: "after MAX".into(),
+                },
+            )),
+            "exarch: schedule: trigger 'after MAX' has no next occurrence within the supported time/search horizon",
+            &[],
+        );
+        check(
+            &ExarchFailure::Schedule(ScheduleFailure::DuplicateLiveLabel(
+                ScheduleFailureDuplicateLiveLabel {
+                    label: "wake".into(),
+                },
+            )),
+            "exarch: schedule: label 'wake' is already borne by a live schedule",
+            &["pick another label, or remove it first with exarch-schedules `remove"],
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_factory_presentation_tests {
+    use super::*;
+    use crate::data::datum::Datum;
+    use crate::error::Error;
+    use crate::fact::{ConnectionClosed, IoKind, IoLeaf, OsFailure, ProtocolPeer, Reason};
+
+    fn check(factory: &EngineFactoryFailure, expected: &str) {
+        let decoded = EngineFactoryFailure::decode(&factory.clone().encode()).unwrap();
+        assert_eq!(&decoded, factory);
+        for factory in [factory, &decoded] {
+            assert_eq!(factory.describe(), expected);
+            for (step, headline) in [
+                (EngineStep::Factory, "could not make a helper engine"),
+                (
+                    EngineStep::Adopt,
+                    "could not adopt the helper engine's wire",
+                ),
+                (EngineStep::Attach, "could not attach the helper engine"),
+                (EngineStep::Starting, "could not start the agent's engine"),
+            ] {
+                let failure = EngineFailure {
+                    step,
+                    cause: EngineCause::Factory(factory.clone()),
+                };
+                assert_eq!(failure.describe(), format!("{headline}: {expected}"));
+                let reason = Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Engine(
+                    failure,
+                ))));
+                let decoded = Reason::decode(&reason.clone().encode()).unwrap();
+                for reason in [reason, decoded] {
+                    assert_eq!(reason.advice(), Vec::<String>::new());
+                    let error = Error::new(reason);
+                    assert_eq!(error.hints(), []);
+                    assert_eq!(
+                        error.plain(),
+                        format!("exarch: engine: {headline}: {expected}")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_factory_case_retains_backend_duration_port_signed_code_and_detail() {
+        for (backend, name) in [
+            (FactoryBackend::Broker, "broker"),
+            (FactoryBackend::HyperV, "Hyper-V"),
+            (FactoryBackend::Virtualization, "Virtualization.framework"),
+        ] {
+            let product = EngineFactoryFailureUnsupported { backend };
+            let expected =
+                format!("the {name} backend does not support connecting to a guest socket");
+            assert_eq!(product.describe(), expected);
+            check(&EngineFactoryFailure::Unsupported(product), &expected);
+            for code in [i64::MIN, 0, i64::MAX] {
+                let product = EngineFactoryFailurePlatform {
+                    backend,
+                    domain: "foreign.domain".into(),
+                    code,
+                    detail: "unchanged\nforeign detail".into(),
+                };
+                let expected = format!(
+                    "{name} refused the guest connection: foreign.domain error {code}: unchanged\nforeign detail"
+                );
+                assert_eq!(product.describe(), expected);
+                check(&EngineFactoryFailure::Platform(product), &expected);
+            }
+        }
+        for (factory, expected) in [
+            (
+                EngineFactoryFailure::MachineThreadStopped,
+                "the machine thread stopped before the guest connection could be obtained",
+            ),
+            (
+                EngineFactoryFailure::MissingSocketDevice,
+                "the machine has no virtio socket device",
+            ),
+            (
+                EngineFactoryFailure::NonVirtioSocketDevice,
+                "the machine's socket device is not virtio",
+            ),
+            (
+                EngineFactoryFailure::CompletionWithoutResult,
+                "the guest connection completed with neither a connection nor an error",
+            ),
+        ] {
+            check(&factory, expected);
+        }
+        let timeout = EngineFactoryFailureDialTimedOut {
+            port: u32::MAX,
+            within: DurationFact {
+                seconds: u64::MAX.into(),
+                nanos: 999_999_999,
+            },
+        };
+        let expected = "no guest connection result arrived for port 4294967295 within 18446744073709551615.999999999 seconds";
+        assert_eq!(timeout.describe(), expected);
+        check(&EngineFactoryFailure::DialTimedOut(timeout), expected);
+        let disconnected = EngineFactoryFailureDialWaitDisconnected { port: u32::MAX };
+        let expected =
+            "the guest connection result channel disconnected while waiting for port 4294967295";
+        assert_eq!(disconnected.describe(), expected);
+        check(
+            &EngineFactoryFailure::DialWaitDisconnected(disconnected),
+            expected,
+        );
+        let io = IoCause::new(IoLeaf::Os(OsFailure {
+            kind: IoKind::PermissionDenied,
+            raw: None,
+            detail: None,
+        }));
+        check(&EngineFactoryFailure::Io(io.clone()), &io.describe());
+        assert_eq!(EngineCause::Io(io.clone()).describe(), io.describe());
+        let connection = ConnectionFailure::Closed(ConnectionClosed::Eof(ProtocolPeer::Engine));
+        assert_eq!(
+            EngineCause::Connection(connection.clone()).describe(),
+            connection.describe()
+        );
+    }
+}

@@ -142,11 +142,6 @@ impl Emitter {
         self.log.bind(home);
     }
 
-    /// Latch `cause` unless a failure stands, ending the bound home.
-    pub(super) fn fail(&self, cause: io::Error) -> Unavailable {
-        self.log.fail(cause)
-    }
-
     /// Fail after writing `bytes` more bytes to this writer's real file.
     #[cfg(test)]
     pub(crate) fn fail_after(&self, bytes: usize) {
@@ -218,8 +213,8 @@ impl Emitter {
     }
 
     /// End the bound home when its cell can no longer be trusted.
-    pub(crate) fn cell_poisoned(&self, why: String) -> Unavailable {
-        self.log.cell_poisoned(why)
+    pub(crate) fn cell_poisoned(&self, agent: super::AgentId) -> Unavailable {
+        self.log.cell_poisoned(agent)
     }
 
     /// [`Self::commit`] of one record.

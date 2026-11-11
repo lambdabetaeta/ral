@@ -2,7 +2,7 @@ propagation works
 caught
 recovered
 all arms failed
-`raised boom
+boom
 7
-`raised release failed
+release failed
 failure propagation tests done

@@ -76,7 +76,7 @@ pub(crate) use handle::directory_refusal_for_test;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use handle::steps_taken;
 pub(crate) use handle::{
-    Access, StagedWrite, Streamed, Streaming, dangling, directory_refused, failure_trace, is_loop,
+    Access, StagedWrite, Streamed, Streaming, dangling, failure_trace, io_failure, is_loop,
     open_discard, sync_dir, sync_dir_chain, unsynced, walk_dir_made, walk_dir_made_synced,
 };
 pub use handle::{
@@ -103,6 +103,7 @@ pub use lex::{
 };
 #[cfg(windows)]
 pub(crate) use lex::{is_batch_image, is_volume_guid};
+pub(crate) use namespace::RawEnginePath;
 pub use namespace::{EnginePath, GuestPath};
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;
@@ -115,7 +116,7 @@ pub(crate) use render::rendered_ancestors;
 #[cfg(unix)]
 pub(crate) use render::{Object, Rendered, pinned_dirs, render_excluded, render_objects};
 pub use resolver::{Resolver, spelled};
-pub(crate) use rules::PathRules;
+pub use rules::PathRules;
 pub use show::shown;
 pub(crate) use sigil::SigilHead;
 #[cfg(test)]
@@ -128,3 +129,5 @@ pub(crate) use which::locate_in;
 pub(crate) use which::with_exec_extensions;
 pub(crate) use which::{Candidate, search};
 pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
+
+pub(crate) use handle::json::{RawExcluded, RawOsString};

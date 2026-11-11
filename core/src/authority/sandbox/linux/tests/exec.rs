@@ -1240,7 +1240,9 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
     let sh = Program::file("/bin/sh".into()).expect("/bin/sh exists");
     let null = std::fs::File::open("/dev/null").expect("open /dev/null");
     let mut withheld = Handoff::default();
-    let at = withheld.lend(null.as_fd()).expect("lends");
+    let at = withheld
+        .lend(null.as_fd(), crate::fact::ParcelRole::Ruleset)
+        .expect("lends");
     let promise = Some(Landlocked {
         refer_root: false,
         at,
@@ -1253,8 +1255,9 @@ fn a_promised_ruleset_that_never_arrived_runs_nothing() {
         crate::authority::sandbox::launch::issue(&warrant, &mut handoff).expect("issues");
     let mut cmd = own.command();
     cmd.args(slots.argv());
-    handoff.install(&mut cmd);
-    let mut launch = crate::process::Launch::trampolined(cmd, report);
+    let mut evidence = crate::process::launch::setup::Evidence::new().unwrap();
+    handoff.install(&mut cmd, &mut evidence);
+    let mut launch = crate::process::Launch::trampolined(cmd, report).with_setup_evidence(evidence);
     launch.stdin(crate::process::StdioSpec::Null);
     let ran = launch.output();
     drop(withheld);

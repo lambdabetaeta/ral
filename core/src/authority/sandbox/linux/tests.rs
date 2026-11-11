@@ -259,7 +259,7 @@ fn envelope_launches(policy: &SandboxProjection) -> Option<Envelope<'static>> {
     let bwrap = match envelope() {
         Ok(bwrap) => bwrap,
         Err(why) => {
-            skip(why);
+            skip(why.describe());
             return None;
         }
     };

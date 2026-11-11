@@ -10,9 +10,9 @@
 //! in-process counter so this module's own tests stay portable; the `linux`
 //! submodule remains the only place a decision reaches the kernel.
 
+use crate::fact::{JailFailure, JailFailureSequence, LaunchFailure, SequenceFailure};
 #[cfg(any(test, seccomp))]
 use std::ffi::OsString;
-use std::io;
 use std::path::PathBuf;
 #[cfg(seccomp)]
 use std::sync::OnceLock;
@@ -49,8 +49,8 @@ static GUEST: OnceLock<GuestJail> = OnceLock::new();
 
 /// Why the guest jail made no child of a launch: nothing ran.
 #[cfg(seccomp)]
-pub(crate) fn refused(why: impl std::fmt::Display) -> crate::error::Error {
-    crate::error::Error::new(format!("guest jail: {why}"))
+pub(crate) fn refused(why: LaunchFailure) -> crate::error::Error {
+    super::launch::refused(why)
 }
 
 #[cfg(seccomp)]
@@ -139,12 +139,8 @@ impl Count {
     }
 }
 
-fn exhausted() -> io::Error {
-    io::Error::other(format!(
-        "the guest jail has given out every uid from {BASE_UID} to {}; \
-         restarting the guest resets the count in /run",
-        u32::MAX - 1
-    ))
+fn exhausted() -> SequenceFailure {
+    SequenceFailure::Exhausted
 }
 
 /// The transient cgroup a jailed exec was placed in, owned: dropping it kills
@@ -244,7 +240,11 @@ impl GuestJail {
     /// # Errors
     /// Returns the sequence file's io error, on a Linux guest, if it cannot
     /// be opened, locked, read, or written.
-    pub(crate) fn plan(&self, ownership: Ownership, net: Option<Net>) -> io::Result<JailPlan> {
+    pub(crate) fn plan(
+        &self,
+        ownership: Ownership,
+        net: Option<Net>,
+    ) -> Result<JailPlan, LaunchFailure> {
         let seq = self.next_seq()?;
         let cgroup = match ownership {
             Ownership::Kept => self
@@ -264,21 +264,31 @@ impl GuestJail {
     }
 
     #[cfg(target_os = "linux")]
-    fn next_seq(&self) -> io::Result<Seq> {
-        linux::next_guest_seq(&self.seq_file)
+    fn next_seq(&self) -> Result<Seq, LaunchFailure> {
+        linux::next_guest_seq(&self.seq_file).map_err(|cause| {
+            LaunchFailure::Jail(JailFailure::Sequence(JailFailureSequence {
+                path: crate::path::shown(&self.seq_file),
+                cause,
+            }))
+        })
     }
 
     /// Relaxed suffices: uniqueness wants only the atomicity of the
     /// increment, never an ordering.
     #[cfg(not(target_os = "linux"))]
-    fn next_seq(&self) -> io::Result<Seq> {
+    fn next_seq(&self) -> Result<Seq, LaunchFailure> {
         self.counter
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Seq::new(n).map(|_| n + 1)
             })
             .ok()
             .and_then(Seq::new)
-            .ok_or_else(exhausted)
+            .ok_or_else(|| {
+                LaunchFailure::Jail(JailFailure::Sequence(JailFailureSequence {
+                    path: crate::path::shown(&self.seq_file),
+                    cause: exhausted(),
+                }))
+            })
     }
 }
 
@@ -298,17 +308,21 @@ mod tests {
     /// test rather than something to report: `/run/ral/jail.seq` needs a
     /// real guest boot's root, absent on an unprivileged CI runner or dev
     /// container. Any other error is still a bug and still panics.
-    fn unwrap_or_skip<T>(result: io::Result<T>) -> Option<T> {
+    fn unwrap_or_skip<T>(result: Result<T, LaunchFailure>) -> Option<T> {
         match result {
             Ok(v) => Some(v),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(e)
+                if matches!(&e, LaunchFailure::Jail(JailFailure::Sequence(JailFailureSequence { cause: SequenceFailure::CreateParent(cause) | SequenceFailure::Open(cause), .. }))
+                if matches!(cause.leaf.as_ref(), crate::fact::IoLeaf::Os(os) if os.kind == crate::fact::IoKind::PermissionDenied)) =>
+            {
                 eprintln!(
-                    "skipping: {e}; /run/ral/jail.seq needs a real guest boot's \
-                     root, absent on this host"
+                    "skipping: {}; /run/ral/jail.seq needs a real guest boot's \
+                     root, absent on this host",
+                    e.describe()
                 );
                 None
             }
-            Err(e) => panic!("plan: {e}"),
+            Err(e) => panic!("plan: {}", e.describe()),
         }
     }
 
@@ -319,7 +333,7 @@ mod tests {
         let Some(plans) = unwrap_or_skip(
             (0..8)
                 .map(|_| jail.plan(Ownership::Kept, None))
-                .collect::<io::Result<Vec<_>>>(),
+                .collect::<Result<Vec<_>, _>>(),
         ) else {
             return;
         };

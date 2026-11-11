@@ -122,20 +122,17 @@ impl Roles {
     ///
     /// # Errors
     /// If no role is configured, or none is called `name`.
-    pub(crate) fn get(&self, name: &str) -> Result<Arc<Provider>, String> {
-        self.0.get(name).cloned().ok_or_else(|| {
-            if self.is_empty() {
-                "no roles are configured, so every child runs on your own model: pass model: \
-                 `inherit. Only the human can add a role, by launching exarch with --role NAME=MODEL"
-                    .into()
-            } else {
-                let names: Vec<_> = self.0.keys().map(String::as_str).collect();
-                format!(
-                    "no role '{name}': the configured roles are {}; or pass model: `inherit",
-                    names.join(", ")
-                )
-            }
-        })
+    pub(crate) fn get(
+        &self,
+        name: &str,
+    ) -> Result<Arc<Provider>, ral_core::fact::AgentFailureUnknownProviderRole> {
+        self.0
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ral_core::fact::AgentFailureUnknownProviderRole {
+                name: name.into(),
+                offered: self.0.keys().cloned().collect(),
+            })
     }
 
     /// The prompt section teaching the roles: the guide, then one line per role.
@@ -278,9 +275,12 @@ mod tests {
             crate::provider::scripted::Script::default(),
         ));
         let err = Roles::default().get("r").err().unwrap();
-        assert!(
-            err.starts_with("no roles are configured") && err.contains("--role NAME=MODEL"),
-            "{err}"
+        assert_eq!(
+            err,
+            ral_core::fact::AgentFailureUnknownProviderRole {
+                name: "r".into(),
+                offered: vec![]
+            }
         );
         let roles = Roles(BTreeMap::from([
             ("a".into(), Arc::clone(&provider)),
@@ -288,7 +288,10 @@ mod tests {
         ]));
         assert_eq!(
             roles.get("r").err().unwrap(),
-            "no role 'r': the configured roles are a, b; or pass model: `inherit"
+            ral_core::fact::AgentFailureUnknownProviderRole {
+                name: "r".into(),
+                offered: vec!["a".into(), "b".into()]
+            }
         );
         assert!(Arc::ptr_eq(&roles.get("a").unwrap(), &provider));
     }

@@ -2,12 +2,16 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+#[cfg(unix)]
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use strum::{IntoStaticStr, VariantArray};
 
-use super::names::{EntryName, Name, RootName, Spelling, lexical, rooted, split};
+#[cfg(unix)]
+use super::names::lexical_error;
+use super::names::{EntryName, Name, RootName, Spelling, lexical, rooted_lexical, split_lexical};
+use crate::fact::LexicalPathFailure;
 use crate::label;
 use crate::path::identity::windows_stored_components;
 use crate::path::site::Silent;
@@ -143,30 +147,22 @@ impl RealPath {
 
     /// `raw` as a position, lexically checked: absolute, a parsed root, no
     /// `.` or `..`, and spelled as the walk spells one.
-    fn parse(raw: &OsStr) -> io::Result<Self> {
+    pub(super) fn parse(raw: &OsStr) -> Result<Self, LexicalPathFailure> {
         let path = lexical(raw);
-        rooted(path)?;
-        let Spelling { root, names } = split(path)?;
-        let root = root.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        rooted_lexical(path)?;
+        let Spelling { root, names } =
+            split_lexical(path).map_err(|error| LexicalPathFailure::EntryName((&error).into()))?;
+        let root = root.ok_or(LexicalPathFailure::MalformedRoot)?;
         let names = names
             .into_iter()
             .map(|name| match name {
                 Name::Entry(name, _) => Ok(name),
-                Name::Parent => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} holds `..`, which no position does", shown(path)),
-                )),
+                Name::Parent => Err(LexicalPathFailure::ParentInPosition),
             })
-            .collect::<io::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         let real = Self::assemble(&root, &names);
         if real.0.as_os_str() != raw {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{} is not spelled as the walk spells a position: no `.`, no doubled or trailing separator",
-                    shown(path)
-                ),
-            ));
+            return Err(LexicalPathFailure::NonCanonicalPosition);
         }
         Ok(real)
     }
@@ -178,7 +174,7 @@ impl RealPath {
     /// `raw` is not a position's spelling.
     #[cfg(unix)]
     pub(crate) fn off_the_wire(raw: &OsStr) -> io::Result<Self> {
-        Self::parse(raw)
+        Self::parse(raw).map_err(|cause| lexical_error(raw, &cause))
     }
 
     /// This position's entry `name`.
@@ -286,7 +282,7 @@ impl Serialize for RealPath {
 
 impl<'de> Deserialize<'de> for RealPath {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(&OsString::deserialize(d)?).map_err(D::Error::custom)
+        Self::parse(&OsString::deserialize(d)?).map_err(|cause| D::Error::custom(cause.describe()))
     }
 }
 
@@ -309,12 +305,12 @@ impl<'de> Deserialize<'de> for RealPath {
 /// wire is one the walk could have made.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize)]
 pub struct Trace {
-    root: RootName,
-    root_id: ObjectId,
-    steps: Vec<Step>,
-    tail: Vec<EntryName>,
-    real: RealPath,
-    passed: Vec<RealPath>,
+    pub(super) root: RootName,
+    pub(super) root_id: ObjectId,
+    pub(super) steps: Vec<Step>,
+    pub(super) tail: Vec<EntryName>,
+    pub(super) real: RealPath,
+    pub(super) passed: Vec<RealPath>,
 }
 
 impl Trace {
@@ -424,36 +420,10 @@ impl Trace {
     }
 }
 
-/// A trace as it crosses the wire, before its shape is checked.
-#[derive(Deserialize)]
-struct WireTrace {
-    root: RootName,
-    root_id: ObjectId,
-    steps: Vec<Step>,
-    tail: Vec<EntryName>,
-    real: RealPath,
-    passed: Vec<RealPath>,
-}
-
 impl<'de> Deserialize<'de> for Trace {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let wire = WireTrace::deserialize(d)?;
-        let walkable = wire.steps.split_last().is_none_or(|(last, above)| {
-            above.iter().all(|s| s.kind == Kind::Dir)
-                && (wire.tail.is_empty() || last.kind == Kind::Dir)
-        });
-        if !walkable {
-            return Err(D::Error::custom(
-                "a trace descends through directories alone: a file or a link has nothing beneath it",
-            ));
-        }
-        let trace = Self::new(wire.root, wire.root_id, wire.steps, wire.tail, wire.passed);
-        if trace.real != wire.real {
-            return Err(D::Error::custom(format!(
-                "a trace of {} claims to be of {}",
-                trace.real, wire.real
-            )));
-        }
-        Ok(trace)
+        super::json::RawTrace::deserialize(d)?
+            .validate()
+            .map_err(D::Error::custom)
     }
 }

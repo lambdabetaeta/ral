@@ -239,12 +239,17 @@ impl Agent {
     /// # Errors
     /// The engine's severance.
     pub(super) fn scratch_bytes(&self) -> Result<Option<(String, u64)>, Severed> {
-        let Some(scratch) = self.engine().read(|t| t.env_var(crate::app::SCRATCH_VAR))? else {
+        let Some(scratch) = self.engine().read(
+            ral_core::fact::ProbeSubject::EnvVar(crate::app::SCRATCH_VAR.into()),
+            |t| t.env_var(crate::app::SCRATCH_VAR),
+        )?
+        else {
             return Ok(None);
         };
-        let bytes = self
-            .engine()
-            .read(|t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))))?;
+        let bytes = self.engine().read(
+            ral_core::fact::ProbeSubject::PathBytes(ral_core::path::shown(&scratch)),
+            |t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))),
+        )?;
         Ok(Some((scratch, bytes)))
     }
 

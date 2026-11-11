@@ -3,9 +3,10 @@
 //! parsing and installing `within`'s options.
 
 use crate::environ::EnvVars;
+use crate::fact::{Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape};
 use crate::shell::runtime::{
-    Error, FrameHandle, HandlerArity, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
-    arm_closure, refused_arm,
+    Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value, arm_closure,
+    refused_arm,
 };
 
 use crate::path::{CwdPath, Reading};
@@ -84,16 +85,48 @@ impl WithinScope {
 /// `env:` — a map of scalar overrides.
 fn parse_env(v: &Value) -> Settled<EnvVars> {
     let mut env = EnvVars::new();
-    for (name, value) in &v.as_map("within env")? {
+    let Value::Map(values) = v else {
+        return Err(Error::new(Reason::Invalid(Box::new(
+            InvalidFailure::new(
+                "within".into(),
+                InvalidCause::Shape(ShapeFailure {
+                    expected: Expected::Shape(ValueShape::Map),
+                    found: v.found(),
+                }),
+            )
+            .field("env".into()),
+        )))
+        .into());
+    };
+    for (name, value) in values {
         let text = value.scalar_text().ok_or_else(|| {
-            Error::new(format!(
-                "within env: value for '{name}' must be a scalar (string, int, float, or \
-                 bool), got {}",
-                value.type_name()
-            ))
+            Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(
+                    "within".into(),
+                    InvalidCause::Shape(ShapeFailure {
+                        expected: Expected::AnyOf(vec![
+                            ValueShape::String,
+                            ValueShape::Int,
+                            ValueShape::Float,
+                            ValueShape::Bool,
+                        ]),
+                        found: value.found(),
+                    }),
+                )
+                .field(name.to_string())
+                .field("env".into()),
+            )))
         })?;
-        env.insert(name.to_string(), text)
-            .map_err(|reserved| Error::new(format!("within env: {reserved}")))?;
+        env.insert(name.to_string(), text).map_err(|reserved| {
+            Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new(
+                    "within".into(),
+                    InvalidCause::ReservedEnvironment(reserved.into()),
+                )
+                .field(name.to_string())
+                .field("env".into()),
+            )))
+        })?;
     }
     Ok(env)
 }
@@ -105,12 +138,21 @@ fn parse_env(v: &Value) -> Settled<EnvVars> {
 fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
-        return Err(Error::new("within dir: path cannot be empty").into());
+        return Err(Error::new(Reason::Invalid(Box::new(
+            InvalidFailure::new("within".into(), InvalidCause::EmptyPath).field("dir".into()),
+        )))
+        .into());
     }
     let rp = shell.resolve(&path);
     let dir = shell.locate_dir::<Reading>(&rp)?;
-    Ok(CwdPath::new(dir.real().as_path().to_path_buf())
-        .map_err(|e| Error::new(format!("within dir: {e}")))?)
+    Ok(
+        CwdPath::new(dir.real().as_path().to_path_buf()).map_err(|e| {
+            Error::new(Reason::Invalid(Box::new(
+                InvalidFailure::new("within".into(), InvalidCause::Path((&e).into()))
+                    .field("dir".into()),
+            )))
+        })?,
+    )
 }
 
 /// `handlers:` — one named handler per entry, each vetted against its
@@ -124,9 +166,18 @@ fn parse_handlers(arms: Vec<(String, Value)>, shell: &Shell) -> Settled<Vec<Hand
 /// `handler:` — the catch-all, which stands in for *every* command, so its
 /// value is its output.
 fn parse_catch_all(v: &Value, shell: &Shell) -> Settled<Value> {
-    let closure = arm_closure(v, "within handler: catch-all", HandlerArity::CatchAll)?;
-    crate::typecheck::catch_all_stands_in(closure.comp(), shell.closure_schemes(closure))
-        .map_err(|error| refused_arm("within handler", &error, closure.comp().span, shell))?;
+    let closure = arm_closure(v, HandlerRole::CatchAll, "handler")?;
+    crate::typecheck::catch_all_stands_in(closure.comp(), shell.closure_schemes(closure)).map_err(
+        |errors| {
+            refused_arm(
+                HandlerRole::CatchAll,
+                "handler",
+                &errors,
+                closure.comp().span,
+                shell,
+            )
+        },
+    )?;
     Ok(v.clone())
 }
 
@@ -396,5 +447,50 @@ mod tests {
             let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
             let _ = WithinScope::parse(&opts, None, &mut shell);
         }
+    }
+    #[test]
+    fn within_input_failures_keep_field_paths_and_reserved_names() {
+        use crate::fact::{DataStep, ReservedVar};
+        let failure = |result: Settled<EnvVars>| {
+            let Err(crate::shell::runtime::Break::Error(Error {
+                reason: Reason::Invalid(f),
+                ..
+            })) = result
+            else {
+                panic!("invalid environment")
+            };
+            *f
+        };
+        assert_eq!(
+            failure(parse_env(&Value::Int(1))).path,
+            vec![DataStep::Field("env".into())]
+        );
+        let scalar = failure(parse_env(&Value::map(vec![(
+            "X".into(),
+            Value::list(vec![]),
+        )])));
+        assert_eq!(scalar.operation, "within");
+        assert_eq!(
+            scalar.path,
+            vec![DataStep::Field("env".into()), DataStep::Field("X".into())]
+        );
+        assert!(matches!(scalar.cause, InvalidCause::Shape(_)));
+        let reserved = failure(parse_env(&Value::map(vec![(
+            "PWD".into(),
+            Value::string("/tmp"),
+        )])));
+        assert_eq!(
+            reserved.cause,
+            InvalidCause::ReservedEnvironment(ReservedVar::Pwd)
+        );
+        let mut shell = crate::test_helper::core_shell();
+        let Err(crate::shell::runtime::Break::Error(error)) =
+            parse_dir(&Value::string(""), &mut shell)
+        else {
+            panic!("empty directory")
+        };
+        assert!(
+            matches!(error.reason, Reason::Invalid(f) if f.path == [DataStep::Field("dir".into())] && f.cause == InvalidCause::EmptyPath)
+        );
     }
 }

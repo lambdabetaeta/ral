@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3e3fbc84
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
 ---
 
 # Endings
@@ -14,7 +14,7 @@ its own, not an implicit failure of the run or session that started it.
 Ending<V, F, S> = Ok(V) | Err(F) | Exited(u8) | Stopped(S) | Panic(String)
 End              = Ending<Value, Error, Stop>
 Done             = Ending<(), ErrorRecord, CancelCause>
-protocol::Ending = Ending<FOValue, ErrorRecord, CancelCause>
+protocol::Ending = Ending<FOValue, ErrorFact, CancelCause>
 ```
 
 - `Stop { cause, owner: Option<ScopeId>, at: Option<Prov> }` retains the
@@ -29,12 +29,13 @@ protocol::Ending = Ending<FOValue, ErrorRecord, CancelCause>
 - A caught run panic is `Ran { ending: Panic(text), … }`, status 101
   (`PANIC_CODE`), with the checkpoint restored and capture and trail discarded.
   `Report::Faulted` means only that the report was lost: what ran is unknown.
-- The wire error is the `ErrorRecord` itself, serialized through its
-  first-order encoding: `[reason, frame, site]`, with a total site and no stored
-  status or derived message. The wire and `Done` share `F`. A non-data result
-  (handle, block or function) becomes `Err`, code 1, completed from the run's
-  retained base and rendered with its stored hint.
-  Exarch's exit tip reads the record's `reason()`.
+- The wire error is the `ErrorFact` (`{frame, reason, site}`, a total site),
+  serialized through its first-order encoding with the typed reason. `Done`
+  carries its projection, the `ErrorRecord` a program reads: `[frame, message,
+  status, site]`, with `message` and `status` derived from the reason. A
+  non-data result (handle, block or function) becomes `Err`, code 1, completed
+  from the run's retained base and rendered with its reason-derived advice.
+  Exarch's exit tip reads the wire fact's `reason()`.
 - `Report::Ran(Ran { ending, rendered, single_command, captured, trail })`
   holds rendering and run context outside the cases; hosts pass the `Ran`
   whole. `Ok` has no redundant status; command-exit wording is derived.
@@ -81,7 +82,7 @@ carets or compact reports; `Panic` draws spanless `run panicked: …`.
 **A failure that reports success is unrepresentable.** Two traits split the
 family by whether success is in range. `FailureCode::failure_code(&self) ->
 NonZeroU8` belongs to what can only fail: `CancelCause`, `Stop`,
-`Failure`, `Reason`, `Error`, `ErrorRecord`.
+`Failure`, `Reason`, `Error`, `ErrorFact`, `ErrorRecord`.
 `ExitCode::code(&self) -> u8` belongs to what may succeed: an `Ending` (`0`,
 the failure's code, the chosen exit byte, the cause's code, or 101) and a
 `Break`. `Report::code` delegates for `Ran` and reads the nonzero status of
@@ -91,24 +92,27 @@ the failure's code, the chosen exit byte, the cause's code, or 101) and a
 |---|---|
 | External failure | retain raw `i32` in `Failure::Exited`; `failure_byte` clamps into `1..=255` when deriving the failure code |
 | `exit n` | refuse outside `0..=255` |
-| `fail m` | `String`, reason `Raised(m)`, code 1 |
-| `raise e` | closed record, trusted unchanged; refuse a failure of `exited 0` and signals outside `1..=127` |
+| `fail m` | `String`, reason `Raised(Claim { m, 1 })`, code 1 |
+| `raise e` | a witnessed record re-raises its exact reason; a hand-built one is a `Claim`, refused at status 0 and above 255 |
 
 - The clamp's floor is **1**, not 0: Windows `NTSTATUS` read as `i32` may be
   negative, and a failed command must not become success. `Failure::Exited`
   keeps its raw `i32` for the message and the denial/limit hints; those hints
   read the raw reason, never `code`.
-- **One failure-code table lives on `Reason`.** `Error`, `ErrorRecord` and
-  process failures delegate to it, `process` through `Failure`: `exited`
+- **One failure-code table lives on `Reason`.** `Error`, `ErrorFact` and
+  process failures delegate to it (`ErrorRecord` stores its status), `process` through `Failure`: `exited`
   clamps, `signaled` gives 128+s, `not-found` 127, `not-runnable` 126,
-  `timed-out` 124, `cancelled` 143, `raised` 1. `Reason::stopped` maps the two
+  `timed-out` 124, `cancelled` 143, `raised` its claim's status (1 for `fail`). Typed operational families
+  (`denied`, `io`, `invalid`, `evaluation`, `state`, `compile`, `launch`,
+  `protocol`, `host`) and `invariant` also give 1. `Reason::stopped` maps the two
   causes a worker converts, `Cancelled` and `TimedOut`, onto their reasons, so
   a converted stop takes its code and words from the table. A panic belongs to
   the ending, code 101.
 - Stored host rejection statuses (`Rejection.status`, `Report::Static` and
-  `Faulted`) remain `NonZeroU8`. A desk refusal is plain `raised`, with no
-  status field. Serde and data's `NonZeroU8` decoder refuse 0; data's `u8`
-  decoder refuses integers outside `0..=255`. Neither is another clamp.
+  `Faulted`) remain `NonZeroU8`. A desk refusal retains its typed `Reason`,
+  with no status field; `WireError` carries it separately from report context
+  and ordered stored hints. Serde and data's `NonZeroU8` decoder refuse 0;
+  data's `u8` decoder refuses integers outside `0..=255`. Neither is another clamp.
 - `exited n` is an ending (the computation ran `exit n`) and, separately, a
   `Failure` of a process (`process [.., failure: exited n]`); it is not itself a
   `Reason`. See [[decisions/261105_the-error-record|the error record]].
@@ -196,7 +200,7 @@ is `DoneEvent::unclaimed_in(&rows)`:
 A claim before that check suppresses the announcement. A later `await` cannot
 retract an announcement already made at an earlier prompt or admission.
 `Done::parts`/`said` supplies every host's words: `returned`, `failed: …`
-(`ErrorRecord::describe`), ``ran `exit 3` ``, the cause's message, or
+(the record's `message`), ``ran `exit 3` ``, the cause's message, or
 `panicked: …`. A worker is not a process; its failure is not worded `exit N`.
 
 ## Shapes not taken

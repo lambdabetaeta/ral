@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent::Admission;
 use crate::agent::nursery::Joined;
-use crate::bus::{ENDED_BEFORE_REPORTING, Refused, Source};
+use crate::bus::{Refused, Source};
 use crate::record::{ChildStatus, RECORD, Settlement, read_records};
 use std::sync::Arc;
 
@@ -170,10 +170,8 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
             script.then(Reply::stopped("early-stop"))
         }),
         Script::new().then(Reply::error(ProviderError::Api {
-            status: Some(400),
             model: "test-model".into(),
-            message: "terminal failure".into(),
-            body: None,
+            cause: crate::agent::testkit::service_response(400, "terminal failure"),
         })),
         Script::new().then(Reply::panicking()),
     ] {
@@ -234,9 +232,11 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
     ));
     let _teardown = child.teardown();
     let (_, status) = next_child(&parent);
-    assert!(matches!(status, ChildStatus::Failed(ref why) if why == ENDED_BEFORE_REPORTING));
     assert!(
-        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(ref why)) if why == ENDED_BEFORE_REPORTING)
+        matches!(status, ChildStatus::Failed(ref why) if why == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
+    );
+    assert!(
+        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(ref why)) if why == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
     );
     drop(child);
     let records = read_records(&log).unwrap();
@@ -248,7 +248,9 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
         })
         .collect();
     assert_eq!(reports.len(), 2);
-    assert!(matches!(reports[1], ChildStatus::Failed(why) if why == ENDED_BEFORE_REPORTING));
+    assert!(
+        matches!(reports[1], ChildStatus::Failed(why) if why == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
+    );
     let last_report = records
         .iter()
         .rposition(|record| {
@@ -591,7 +593,10 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
                 &mut child,
                 scripted(
                     "test-model",
-                    Script::new().then(Reply::error(ProviderError::Other("no reply".into()))),
+                    Script::new().then(Reply::error(ProviderError::Api {
+                        model: "test-model".into(),
+                        cause: crate::agent::testkit::service_response(400, "no reply"),
+                    })),
                 ),
             );
             let Next::Take { input, exchange } = child.mailbox.next(child.rest()) else {
@@ -1058,7 +1063,9 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
     assert_eq!(root.teardown().failures, [] as [String; 0]);
     assert_eq!(
         handle.status().unwrap().report,
-        Some(ChildStatus::Failed(ENDED_BEFORE_REPORTING.into()))
+        Some(ChildStatus::Failed(crate::record::ChildFailure::Cause(
+            ral_core::fact::HelperFailure::EndedBeforeReporting
+        )))
     );
     assert!(!handle.status().unwrap().owes);
     assert_eq!(
@@ -1182,15 +1189,15 @@ fn a_dead_helpers_unread_parent_post_is_paid_before_the_parents_reply_reminder_w
     assert!(!parent.rest().pending);
     let records = read_records(&helper.log_dir().path().join(RECORD)).unwrap();
     let commits: Vec<_> = journal.since(None).unwrap().2.map(Result::unwrap).collect();
-    let failure_commit = commits.iter().find(|commit| commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING))).unwrap();
+    let failure_commit = commits.iter().find(|commit| commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting)))).unwrap();
     assert!(failure_commit.records().iter().any(|record| matches!(record.value(), Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
-    assert_eq!(records.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == ENDED_BEFORE_REPORTING)).count(), 1);
+    assert_eq!(records.iter().filter(|record| matches!(record, Record::Control(crate::record::Control::Status { status: ChildStatus::Failed(reason) }) if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))).count(), 1);
     assert!(records.iter().any(|record| matches!(record, Record::Control(crate::record::Control::Withdrawn { posts }) if posts.iter().copied().collect::<Vec<_>>() == pending)));
     let Next::Take { input, exchange } = parent.mailbox.next(parent.rest()) else {
         panic!("failure before Gone")
     };
     assert!(
-        matches!(&input, Input::Child { status: ChildStatus::Failed(reason), .. } if reason == ENDED_BEFORE_REPORTING)
+        matches!(&input, Input::Child { status: ChildStatus::Failed(reason), .. } if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::EndedBeforeReporting))
     );
     let prompt = parent.admit(input).unwrap();
     set_provider(

@@ -130,7 +130,7 @@ impl<A: Reads> Located<A> {
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "updating requires an existing held regular file",
+                        crate::fact::PathIoLeaf::UpdateNeedsHeldFile,
                     ));
                 }
             }
@@ -148,7 +148,7 @@ impl<A: Reads> Located<A> {
             #[cfg(not(target_os = "macos"))]
             (Data::Special, _) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "the object could not be held, so nothing is opened through it",
+                crate::fact::PathIoLeaf::NotHeld,
             )),
             (Data::Absent, Access::Read | Access::Update) => Err(io::ErrorKind::NotFound.into()),
             (Data::Absent, _) => host::create(self.dir(), self.absent_name()?, access, visibility),

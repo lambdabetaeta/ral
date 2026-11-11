@@ -522,6 +522,18 @@ impl TypeError {
             self.unit.as_ref(),
         )
     }
+
+    /// This error as the runtime reports a refused block: code, message, hint.
+    pub(crate) fn diagnostic(&self) -> crate::fact::TypeDiagnostic {
+        let message = self.message();
+        crate::fact::TypeDiagnostic {
+            code: self.kind.code().into(),
+            message: match self.hint() {
+                Some(hint) => format!("{message} ({hint})"),
+                None => message,
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for TypeError {

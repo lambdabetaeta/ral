@@ -6,7 +6,7 @@ use ral_core::fact::Failure;
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerState;
 use ral_core::shell::runtime::{Done, Owner};
-use ral_core::shell::runtime::{ErrorRecord, Reason};
+use ral_core::shell::runtime::{ErrorFact, Reason};
 
 fn born(ids: &[u64]) -> HashSet<u64> {
     ids.iter().copied().collect()
@@ -45,8 +45,8 @@ fn settled_ending() -> Ending {
 }
 
 fn failure(message: &str) -> Ending {
-    Ending::Err(ErrorRecord::new(
-        Reason::Raised(message.into()),
+    Ending::Err(ErrorFact::new(
+        Reason::raised(message),
         "<test>".into(),
         ral_core::test_helper::site(),
     ))
@@ -336,7 +336,7 @@ fn only_an_external_failure_carries_the_exit_tip() {
             ("site".into(), ral_core::test_helper::site().encode()),
         ],
     };
-    let ending = Ending::Err(ErrorRecord::decode(&record).unwrap());
+    let ending = Ending::Err(ErrorFact::decode(&record).unwrap());
     for single_command in [true, false] {
         let ran = Ran {
             single_command,

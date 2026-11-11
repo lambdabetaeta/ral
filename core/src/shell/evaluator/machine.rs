@@ -7,6 +7,12 @@
 //! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
 //! loops. Every call pushes one `Arg` frame per argument, then forces.
 
+use crate::fact::{
+    ApplyFailure, ArityFailure, CallOrForce, CaptureLimit, CaseArmFailure, CountRule, DepthFailure,
+    DepthKind, EvalFailure, Expected, InvalidCause, InvariantFailure, Reason, StateFailure,
+    ValueShape,
+};
+use crate::shell::runtime::invalid;
 use std::sync::Arc;
 
 use crate::io::{self, Sink};
@@ -212,14 +218,7 @@ fn forced_name(mut value: &Val) -> Option<&Name> {
 /// Unreachable for a checked program, Let-fun binding a function unrun
 /// (SPEC §17.8); kept a clean error, not a panic.
 fn bare_lambda_error() -> Error {
-    Error::new(
-        "tried to evaluate a bare lambda in computation position: a function value must be \
-         applied to arguments or held as a thunk",
-    )
-    .with_hint(
-        "either call this function with all its arguments, or hold it in a block with a \
-         parameter, such as `{ |x| f 1 $x }`, to pass it as a value",
-    )
+    Error::new(Reason::Invariant(Box::new(InvariantFailure::BareLambda)))
 }
 
 /// `t as Value else Halt(bare lambda)` — the `F`-holed frames' shared move.
@@ -231,20 +230,19 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
 }
 
 fn capture_overflowed() -> Error {
-    Error::new(format!(
-        "capture exceeded {} MiB and nothing was kept: a prefix is not what the command wrote",
-        io::SINK_BUFFER_CAP / (1024 * 1024)
-    ))
-    .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
+    Error::new(Reason::State(Box::new(StateFailure::CaptureLimit(
+        CaptureLimit {
+            bytes: io::SINK_BUFFER_CAP.into(),
+        },
+    ))))
 }
 
 /// `V` meeting an argument: unreachable for a checked program, which applies
 /// only what it has forced; kept a clean error, not a panic.
 fn not_a_function(v: &Value) -> Error {
-    Error::new(format!("{} is not a function", v.type_name())).with_hint(
-        "the type checker forces every function before it is applied, so this is a fault \
-         in ral rather than in your program: please report the source that produced it",
-    )
+    Error::new(Reason::Invariant(Box::new(
+        InvariantFailure::AppliedUnforcedValue(v.shape()),
+    )))
 }
 
 fn rec_node(group: &Arc<GroupNode>, index: usize) -> Arc<Comp> {
@@ -297,10 +295,13 @@ fn run_boundary(
     let arity = entry.decl.fixed_arity();
     if argv.len() != arity {
         let name = &entry.decl.name;
-        return Err(Error::new(format!(
-            "{name}: takes {arity} argument(s) in one call, got {}",
-            argv.len()
-        ))
+        return Err(invalid(
+            name,
+            InvalidCause::Arity(ArityFailure {
+                expected: CountRule::Exactly(arity.into()),
+                got: argv.len().into(),
+            }),
+        )
         .into());
     }
     super::call::run_native(entry, argv, site, span, mooring, shell)
@@ -400,15 +401,13 @@ impl Machine {
     fn room(&self, n: usize, shell: &Shell) -> Settled<()> {
         let depth = self.stack.len() - self.call_site_frames;
         if depth + n > shell.session.stack_limit {
-            return Err(Error::new(format!(
-                "recursion limit exceeded ({} frames)",
-                shell.session.stack_limit
-            ))
-            .with_hint(
-                "usually a runaway recursive function: \
-                     raise via rc recursion-limit: or --recursion-limit",
-            )
-            .into());
+            return Err(
+                Error::new(Reason::State(Box::new(StateFailure::Depth(DepthFailure {
+                    kind: DepthKind::EvalStack,
+                    limit: shell.session.stack_limit.into(),
+                }))))
+                .into(),
+            );
         }
         Ok(())
     }
@@ -491,11 +490,12 @@ impl Machine {
                 comp: native_code(entry, span),
                 env: Env::new(),
             }),
-            other => Err(Error::new(format!(
-                "cannot force {}: ! requires a Block",
-                other.type_name()
-            ))
-            .with_hint("wrap in a block: !{ expr }")
+            other => Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
+                ApplyFailure {
+                    operation: CallOrForce::Force,
+                    found: other.found(),
+                },
+            ))))
             .into()),
         }
     }
@@ -653,12 +653,9 @@ impl Machine {
                     Self::force_val(&if b { then } else { else_ }.item, env, comp.span, shell)?
                 }
                 other => {
-                    return Err(Error::new(format!(
-                        "if: expected Bool, got {} '{}'",
-                        other.type_name(),
-                        other
-                    ))
-                    .into());
+                    return Err(other
+                        .expected("if", Expected::Shape(ValueShape::Bool))
+                        .into());
                 }
             },
 
@@ -833,23 +830,19 @@ impl Machine {
         let (label, payload) = match form(&scrutinee.item, &env, &shell.sig)? {
             Value::Variant { label, payload } => (label, payload),
             other => {
-                return Err(Error::new(format!(
-                    "case: scrutinee must be a variant, got {} {}",
-                    other.type_name(),
-                    other
-                ))
-                .into());
+                return Err(other
+                    .expected("case", Expected::Shape(ValueShape::Variant))
+                    .into());
             }
         };
         let Some(arm) = arms.iter().find(|arm| arm.tag.item == *label) else {
-            let handled: Vec<String> = arms
-                .iter()
-                .map(|a| format!("{}{}", crate::ty::TAG_PREFIX, a.tag.item))
-                .collect();
-            return Err(Error::new(format!(
-                "case: no arm for variant `{label}`; this case matches: {}",
-                handled.join(", ")
-            ))
+            let handled: Vec<String> = arms.iter().map(|a| a.tag.item.clone()).collect();
+            return Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::CaseArm(
+                CaseArmFailure {
+                    tag: label.to_string(),
+                    handled,
+                },
+            ))))
             .into());
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
@@ -1109,7 +1102,7 @@ impl Machine {
 
             Frame::Try { handler, span } => match s {
                 Break::Error(e) => {
-                    let record = Value::from_datum(e.record(shell));
+                    let record = Value::failure(e.fact(shell));
                     self.call(handler, vec![record], span, shell)
                         .map_err(|b| b.locate("try", span, shell))
                 }
@@ -1131,7 +1124,7 @@ impl Machine {
             Frame::Audit { scope, .. } => match s {
                 Break::Error(e) => {
                     let trail = shell.local.audit.close(scope);
-                    let record = e.record(shell);
+                    let record = e.fact(shell);
                     Ok(Focus::Return(Terminal::Value(report_value(
                         Err(record),
                         trail,
@@ -1207,14 +1200,13 @@ fn run(
     shell: &mut Shell,
 ) -> Settled<Value> {
     if shell.local.machine_depth >= NESTED_MACHINE_LIMIT {
-        return Err(Error::new(format!(
-            "native re-entry depth exceeded ({NESTED_MACHINE_LIMIT})"
-        ))
-        .with_hint(
-            "a builtin such as `map` applied a function that itself applied `map`, too deep: \
-                 restructure with a tail-recursive loop",
-        )
-        .into());
+        return Err(
+            Error::new(Reason::State(Box::new(StateFailure::Depth(DepthFailure {
+                kind: DepthKind::NativeReentry,
+                limit: NESTED_MACHINE_LIMIT.into(),
+            }))))
+            .into(),
+        );
     }
     shell.local.machine_depth += 1;
     let mut m = Machine::default();
@@ -1325,7 +1317,22 @@ mod tests {
     #[cfg(unix)]
     fn failure_hints(source: &str, shell: &mut Shell) -> Vec<String> {
         match run_source(source, shell) {
-            Err(Break::Error(e)) => e.hints().iter().map(ToString::to_string).collect(),
+            Err(Break::Error(e)) => {
+                let rendered = e.render(shell.sources(), None, shell.exit_hints());
+                let compact = e.compact(shell.exit_hints());
+                let hints: Vec<_> = crate::io::ansi::strip(&compact)
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("hint: ").map(str::to_owned))
+                    .collect();
+                let mut previous = 0;
+                for hint in &hints {
+                    assert_eq!(rendered.matches(hint.as_str()).count(), 1, "{rendered}");
+                    let at = rendered.find(hint).expect("full report retains the hint");
+                    assert!(at >= previous, "{rendered}");
+                    previous = at + hint.len();
+                }
+                hints
+            }
             other => panic!("expected an error, got {other:?}"),
         }
     }
@@ -1386,6 +1393,8 @@ mod tests {
             grant.contains("grant") && !grant.contains("#'"),
             "{hints:?}"
         );
+        assert_eq!(hints.iter().filter(|hint| *hint == grant).count(), 1);
+        assert_eq!(hints.iter().filter(|hint| *hint == text).count(), 1);
         let hints = failure_hints(&format!("{dir} x"), &mut shell);
         assert!(
             !hints.is_empty() && hints.iter().all(|h| !h.contains(AS_TEXT)),
@@ -1577,7 +1586,7 @@ mod tests {
         match out {
             Err(Break::Error(e)) => {
                 assert!(
-                    e.describe().contains("is not a function"),
+                    matches!(&e.reason, Reason::Invariant(f) if **f == InvariantFailure::AppliedUnforcedValue(ValueShape::Int)),
                     "got {:?}",
                     e.describe()
                 );
@@ -1904,7 +1913,7 @@ mod tests {
         match out {
             Err(Break::Error(e)) => {
                 assert!(
-                    e.describe().contains("recursion limit exceeded"),
+                    matches!(&e.reason, Reason::State(f) if **f == StateFailure::Depth(DepthFailure { kind: DepthKind::EvalStack, limit: 4usize.into() })),
                     "got {:?}",
                     e.describe()
                 );
@@ -2050,7 +2059,7 @@ mod tests {
             match out {
                 Err(Break::Error(e)) => {
                     assert!(
-                        e.describe().contains("native re-entry depth exceeded"),
+                        matches!(&e.reason, Reason::State(failure) if matches!(**failure, StateFailure::Depth(DepthFailure { kind: DepthKind::NativeReentry, .. }))),
                         "expected the depth-exceeded error, got {:?}",
                         e.describe()
                     );
@@ -2061,5 +2070,124 @@ mod tests {
         handle
             .join()
             .expect("nested map re-entry must not overflow a worker's own stack");
+    }
+    #[test]
+    fn unchecked_machine_backstops_keep_invariant_state_and_apply_distinct() {
+        assert_eq!(
+            bare_lambda_error().reason,
+            Reason::Invariant(Box::new(InvariantFailure::BareLambda))
+        );
+        assert_eq!(
+            not_a_function(&Value::Unit).reason,
+            Reason::Invariant(Box::new(InvariantFailure::AppliedUnforcedValue(
+                ValueShape::Unit
+            )))
+        );
+        assert_eq!(
+            capture_overflowed().reason,
+            Reason::State(Box::new(StateFailure::CaptureLimit(CaptureLimit {
+                bytes: io::SINK_BUFFER_CAP.into()
+            })))
+        );
+        let Err(Break::Error(error)) = Machine::force(Value::Int(1), None) else {
+            panic!("force refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Evaluation(Box::new(EvalFailure::Apply(ApplyFailure {
+                operation: CallOrForce::Force,
+                found: crate::fact::Found::Int(1)
+            })))
+        );
+        let mut shell = new_shell();
+        shell.local.machine_depth = NESTED_MACHINE_LIMIT;
+        let Err(Break::Error(error)) = run(
+            |_, _, _| panic!("depth check must precede seeding"),
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("depth refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::Depth(DepthFailure {
+                kind: DepthKind::NativeReentry,
+                limit: NESTED_MACHINE_LIMIT.into()
+            })))
+        );
+    }
+    #[test]
+    fn unchecked_condition_case_and_boundary_arity_are_typed() {
+        let mut shell = new_shell();
+        let node = CompKind::If {
+            cond: Spanned::synthetic(Val::Int(1)),
+            then: Spanned::synthetic(Val::Unit),
+            else_: Spanned::synthetic(Val::Unit),
+        };
+        let Err(Break::Error(error)) = evaluate(
+            Arc::new(Spanned::synthetic(node)),
+            Env::new(),
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("invalid condition")
+        };
+        assert_eq!(
+            error.reason,
+            Value::Int(1)
+                .expected("if", Expected::Shape(ValueShape::Bool))
+                .reason
+        );
+        let arms = [CaseArm {
+            tag: Spanned::synthetic("other".into()),
+            body: Spanned::synthetic(Val::Unit),
+        }];
+        let mut machine = Machine::default();
+        let Err(Break::Error(error)) = machine.step_case(
+            &Spanned::synthetic(Val::Int(1)),
+            &arms,
+            None,
+            Env::new(),
+            &shell,
+        ) else {
+            panic!("invalid scrutinee")
+        };
+        assert_eq!(
+            error.reason,
+            Value::Int(1)
+                .expected("case", Expected::Shape(ValueShape::Variant))
+                .reason
+        );
+        let scrutinee = Spanned::synthetic(Val::Variant {
+            label: "tag".into(),
+            payload: Box::new(Val::Unit),
+        });
+        let Err(Break::Error(error)) =
+            machine.step_case(&scrutinee, &arms, None, Env::new(), &shell)
+        else {
+            panic!("missing arm")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Evaluation(Box::new(EvalFailure::CaseArm(CaseArmFailure {
+                tag: "tag".into(),
+                handled: vec!["other".into()]
+            })))
+        );
+        let entry = &crate::shell::builtins::BOUNDARY_BUILTINS[0];
+        let arity = entry.decl.fixed_arity();
+        let Err(Break::Error(error)) = run_boundary(
+            entry,
+            &vec![Value::Unit; arity + 1],
+            None,
+            None,
+            &Mooring::adrift(),
+            &mut shell,
+        ) else {
+            panic!("arity backstop")
+        };
+        assert!(
+            matches!(error.reason, Reason::Invalid(f) if f.cause == InvalidCause::Arity(ArityFailure { expected: CountRule::Exactly(arity.into()), got: (arity + 1).into() }))
+        );
     }
 }

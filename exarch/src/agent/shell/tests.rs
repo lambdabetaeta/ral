@@ -127,7 +127,11 @@ fn let_bound_context_read_does_not_echo_the_transcript() {
 #[test]
 fn worker_panic_preserves_completed_bindings_and_clean_context() {
     let mut session = dressed_trunk(|runtime| runtime.install_builtins(PANIC_BUILTINS));
-    let baseline_grant_depth = probe_count(&session, ral_core::test_access::grant_depth);
+    let baseline_grant_depth = probe_count(
+        &session,
+        ral_core::fact::ProbeSubject::GrantDepth,
+        ral_core::test_access::grant_depth,
+    );
     set_provider(
         &mut session,
         scripted(
@@ -148,7 +152,11 @@ fn worker_panic_preserves_completed_bindings_and_clean_context() {
     );
     assert!(matches!(outcome, Ok(Outcome::Complete)), "{outcome:?}");
     assert_eq!(
-        probe_count(&session, ral_core::test_access::grant_depth),
+        probe_count(
+            &session,
+            ral_core::fact::ProbeSubject::GrantDepth,
+            ral_core::test_access::grant_depth
+        ),
         baseline_grant_depth,
         "the panicking call's grant frame must not leak into the next run"
     );
@@ -334,7 +342,7 @@ fn boot_names_survive_past_the_idle_bound() {
     let emit = Emitter::new(tx, session.id());
     let boot_name = session
         .engine()
-        .read(|t| t.bindings())
+        .read(ral_core::fact::ProbeSubject::Bindings, |t| t.bindings())
         .unwrap()
         .into_iter()
         .next()

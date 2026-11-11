@@ -29,6 +29,24 @@ pub struct InvertedSpan {
     to: u64,
 }
 
+impl From<InvertedSpan> for ral_core::fact::InvertedTurnSpan {
+    fn from(InvertedSpan { from, to }: InvertedSpan) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+impl From<Span> for ral_core::fact::TurnSpan {
+    fn from(span: Span) -> Self {
+        Self {
+            from: span.from.into(),
+            to: span.to.into(),
+        }
+    }
+}
+
 impl fmt::Display for InvertedSpan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { from, to } = self;

@@ -95,7 +95,7 @@ impl Grant {
     /// Resolve at selection; the machine checks again at boot because the folder may disappear.
     pub(crate) fn open(folder: &Path) -> Result<Self, String> {
         let shown = shown(folder);
-        let dir = walk_dir(&spelled(folder)?).map_err(|e| match e.kind() {
+        let dir = walk_dir(&spelled(folder).map_err(|error| error.describe())?).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
                  or choose the folder again from the picker."
@@ -271,9 +271,12 @@ impl Territory {
 
 /// Walk leniently to protect absent settings trees; lookup failure refuses the grant.
 fn position(path: &Path) -> Result<RealPath, String> {
-    walk_lenient(&spelled(path)?, LeafMode::Follow)
-        .map(|trace| trace.real().clone())
-        .map_err(|e| format!("Synod could not look up {}: {e}.", shown(path)))
+    walk_lenient(
+        &spelled(path).map_err(|error| error.describe())?,
+        LeafMode::Follow,
+    )
+    .map(|trace| trace.real().clone())
+    .map_err(|e| format!("Synod could not look up {}: {e}.", shown(path)))
 }
 
 fn settings_trees(

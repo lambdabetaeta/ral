@@ -81,8 +81,8 @@ pub(crate) type FsRules = Table<FsAllow, FsDeny>;
 /// write it" and survive a meet with a layer that only reads it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsLayer {
-    read: FsRules,
-    write: FsRules,
+    pub(super) read: FsRules,
+    pub(super) write: FsRules,
 }
 
 impl FsLayer {
@@ -232,7 +232,7 @@ impl Denies<FsAllow> for FsDeny {
 pub struct Baseline {
     reads: Vec<FsAllow>,
     image: Option<&'static Trace>,
-    protected: Vec<(ObjectId, &'static str)>,
+    protected: Vec<(ObjectId, crate::fact::PinnedBinary)>,
 }
 
 impl FromIterator<FsAllow> for Baseline {
@@ -248,7 +248,7 @@ impl Baseline {
     pub(crate) fn with_images(
         mut self,
         image: Option<&'static Trace>,
-        protected: Vec<(ObjectId, &'static str)>,
+        protected: Vec<(ObjectId, crate::fact::PinnedBinary)>,
     ) -> Self {
         self.image = image;
         self.protected = protected;
@@ -259,7 +259,7 @@ impl Baseline {
         self.image
     }
 
-    fn protected(&self, id: ObjectId) -> Option<&'static str> {
+    fn protected(&self, id: ObjectId) -> Option<crate::fact::PinnedBinary> {
         self.protected
             .iter()
             .find_map(|&(held, name)| (held == id).then_some(name))
@@ -371,7 +371,7 @@ impl ReadRegion {
 /// under an unrestricted stack too; `Withheld` is the stack's.
 #[derive(Debug)]
 pub enum Refused {
-    Guarded(&'static str),
+    Guarded(crate::fact::PinnedBinary),
     Withheld(Withheld<FsDeny>),
 }
 

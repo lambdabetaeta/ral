@@ -327,7 +327,7 @@ impl Child {
         let file = self.handle.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "the object could not be held, so it is not entered",
+                crate::fact::PathIoLeaf::NotHeld,
             )
         })?;
         let held = Held {
@@ -565,13 +565,13 @@ impl<A: Authority> Located<A> {
             Leaf::Dir { .. } => Err(io::ErrorKind::IsADirectory.into()),
             Leaf::Held { stat, .. } if stat.kind == Kind::Symlink => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "a link has no data",
+                crate::fact::PathIoLeaf::LinkHasNoData,
             )),
             Leaf::Held { file, stat, .. } => Ok(Data::Held(file, stat)),
             Leaf::Stated { stat, .. } if stat.kind == Kind::Other => Ok(Data::Special),
             Leaf::Stated { .. } => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "the object could not be held, so nothing is opened through it",
+                crate::fact::PathIoLeaf::NotHeld,
             )),
             Leaf::Absent { .. } => Ok(Data::Absent),
         }
@@ -602,7 +602,7 @@ impl<A: Authority> Located<A> {
         let name = self.leaf_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "a root is no directory's entry",
+                crate::fact::PathIoLeaf::RootHasNoEntry,
             )
         })?;
         Ok((kind, name))

@@ -11,6 +11,7 @@
 use super::WorkerId;
 use crate::data::datum::{Datum, field, tag, untag};
 use crate::data::{Bytes, FOValue};
+use crate::fact::{CheckDecisionFailure, DecodeCause, DecodeFailure};
 use crate::io::{Retained, Streams};
 use crate::ir::WriteMode;
 use crate::source::CallSite;
@@ -201,13 +202,14 @@ impl Datum for Check {
         }
     }
 
-    fn decode(v: &FOValue) -> Result<Self, String> {
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
         crate::data::datum::exact_keys(v, &["resource", "decision", "fields"])?;
         let resource: Resource = field(v, "resource")?;
         let decision: Decision = field(v, "decision")?;
         if decision != resource.decision() {
-            let (kind, label) = (<&str>::from(resource), <&str>::from(decision));
-            return Err(format!("a `{kind} check is never `{label}"));
+            return Err(DecodeFailure::new(DecodeCause::CheckDecision(
+                CheckDecisionFailure { resource, decision },
+            )));
         }
         Ok(Self::new(resource, field(v, "fields")?))
     }

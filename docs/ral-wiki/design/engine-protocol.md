@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-generated_at_date: 2026-10-29
+generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
+generated_at_date: 2026-11-10
 ---
 
 # The engine protocol
@@ -43,10 +43,12 @@ and a binding is only the carriage around it.
   engine accepted. Every step of the attach (the runtime, the root recipe,
   the seal, `Shell::child_of` and the host's `GrantNarrower`) refuses with an
   `Error`, which crosses as a `WireError`, so a refusal's hints reach the
-  host on either carrier. A `WireError` is the message and the stored hints
-  alone: the far side rebuilds a `raised` error, code 1, and the record's
-  advice, which only a record has, is not sent
-  (`docs/SPEC.md` §13.1).
+  host on either carrier. `WireError` carries the typed `reason`, optional
+  report `context` and ordered stored `hints`. Reconstruction preserves that
+  reason, so its code and intrinsic advice remain derivable; no rendered
+  sentence becomes `Raised`. Host provenance, witnesses, compiler rejections
+  and unwind facts do not cross this envelope: the enquiring operation claims
+  engine-side provenance (`docs/SPEC.md` §13.1).
 - **No front-end holds a `Shell`.** Nothing public on `IdentityTransport`
   yields a `Shell` or accepts one. A front-end reaches its engine only through
   `Transport` — dispatch, probe, control — so a facility it needs must exist

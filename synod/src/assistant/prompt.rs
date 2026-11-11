@@ -37,8 +37,9 @@ pub(crate) fn assemble(workspace: &Path, folder_name: &str) -> Result<String, St
         include_str!("../../data/network.md").into(),
     ));
     sections.push((Some("Host"), host_section(workspace)));
-    let rules = UserFile::xdg(SYNOD.name(), XdgKind::Config, HOUSE_RULES)?;
-    if let Some(text) = rules.read()? {
+    let rules = UserFile::xdg(SYNOD.name(), XdgKind::Config, HOUSE_RULES)
+        .map_err(|error| error.to_string())?;
+    if let Some(text) = rules.read().map_err(|error| error.to_string())? {
         sections.push((Some("House rules"), text));
     }
     sections.push((

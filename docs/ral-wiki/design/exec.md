@@ -76,7 +76,7 @@ context: cwd, env overrides, stdin, stdout, stderr, grant stack,
 
 ⟨ exec p ws | κ ⟩ → ⟨ return () | κ ⟩                       exit status 0
                   → ⟨ ↯(process [program: p, failure: f], prov κ) | κ ⟩
-                  → ⟨ ↯(raised m, prov κ) | κ ⟩             launch refused (may have run)
+                  → ⟨ ↯(launch cause, prov κ) | κ ⟩             launch refused (may have run)
                   → ⟨ ⇑ stop(c) | κ ⟩                        cancelled by cause c
 ```
 
@@ -409,22 +409,29 @@ reason, or it is stopped by a cause.** A failure is data to `try`; a stop is
 an escape owned by a scope ([[design/endings|endings]],
 [[design/failure|failure]],
 [[decisions/261105_the-error-record|the error record]], `docs/SPEC.md`
-§8.5–§8.6, §8.10). A failure carries this record:
+§8.5–§8.6, §8.10). A failure carries a typed reason, a Rust-side fact
+that a program never reads, and is projected to the record it does read:
 
 ```text
 Reason     = `process [program: String, failure: Failure]
-           | `timed-out | `cancelled | `raised String
+           | `timed-out | `cancelled | `raised [message: String, status: Int]
+           | `denied Denial | `io IoFailure | `invalid InvalidFailure
+           | `evaluation EvalFailure | `state StateFailure | `compile CompileFailure
+           | `launch LaunchFailure | `protocol ProtocolFailure | `host HostFailure
+           | `invariant InvariantFailure
 Failure    = `exited Int | `signaled Int | `not-found
            | `not-runnable [found: String, why: Unrunnable]
 Unrunnable = `permission-denied | `directory | `not-executable
-           | `missing-interpreter (Option String) | `io String
-ErrorRecord = [reason, frame, site]
+           | `missing-interpreter (Option String) | `io IoCause
+ErrorFact   = [frame: String, reason: Reason, site: [script, line, col]]
+ErrorRecord = [frame: String, message: String, status: Int, site: [script, line, col]]
 ```
 
 `program` is the shown head. `frame` and `site` are provenance only: the
 innermost visible frame and its source position, never the subject of the
 wording (`core/src/fact/error.rs`; `core/src/shell/runtime/error.rs`). The
-exit code is a projection of the reason (`FailureCode`), never stored.
+`message` and `status` of the record are projections of the reason
+(`Reason::describe`, `FailureCode`), never stored beside it.
 
 ### The outcomes
 
@@ -438,10 +445,10 @@ exit code is a projection of the reason (`FailureCode`), never stored.
 | `not-runnable … directory` | a path head names a directory | failure | 126 |
 | `not-runnable … not-executable` | a file without an execute bit, or another non-program at a path head | failure | 126 |
 | `not-runnable … permission-denied` | the spawn reports `EACCES`; or a path head's or `PATH` candidate's walk is refused; or a confined script's interpreter is hidden by the launch's own projection (`ENOENT` or `EACCES`), with the interpreter hint | failure | 126 |
-| `not-runnable … io m` | any other spawn error, or any other failure of a path head's or `PATH` candidate's walk | failure | 126 |
-| grant refusal | the judgment denies the program | failure, `raised` | 1 |
-| argument refusal | an argument is not a word | failure, `raised` | 1 |
-| launch refused | startup is refused: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, the envelope dies before the program starts, or a terminal handoff is refused after exec | failure, `raised` | 1 |
+| `not-runnable … io cause` | any other spawn error, or any other failure of a path head's or `PATH` candidate's walk | failure | 126 |
+| grant refusal | the judgment denies the program | failure, `denied` | 1 |
+| argument refusal | an argument is not a word | failure, `invalid` | 1 |
+| launch refused | startup is refused: the envelope or launcher fails to exec, a step of ral's own before the `execve` fails, the trampoline refuses, the envelope dies before the program starts, or a terminal handoff is refused after exec | failure, `launch` | 1 |
 | stopped | a death by a signal of a cause in force, or a cause the start sees before the program runs | stop | 124, 130, 131, 141, 143 |
 | cut at the write | a non-final stage writes after its reader ended | stop, forgiven by its pipeline | none |
 
@@ -482,10 +489,10 @@ resolution of a path that the judgment also reads.
   start has failed, about the interpreter read with the image; with no projection (the guest jail) there is no hint and a hidden
   interpreter reads as missing.
 - **A start is the program's failure only if the program's `execve` failed**,
-  and every other failure to start is a `raised` refusal
+  and a refusal in ral's own launch steps retains a typed `launch` cause
   ([[invariants/ral-s-failure-is-never-the-programs|ral-s-failure-is-never-the-programs]],
   [[invariants/no-mark-ral-s-fault|no-mark-ral-s-fault]]).
-- **A grant refusal is `raised` text, not a process failure**, because the
+- **A grant refusal is a typed `denied` reason, not a process failure**, because the
   program was never looked at: `command 'curl' denied by active grant: …`
   (`Shell::exec_refused`, `authority/guard`). The refusal is recorded as an
   exec `check` in audit and reveals nothing about the file. A refusal precedes
@@ -551,11 +558,12 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   failed `let` threw away. The abandoned-tail note is omitted for `not-found`
   and `not-runnable`, and whenever any hint or advice is shown.
 - **Hints and advice.** A site attaches a *hint* to the error as it unwinds;
-  the record's *advice* is one renderer function of its reason: signal advice
-  for `signaled`, and for `exited` the session's exit-hints table, keyed on
-  the basename of `program` and the status (`advice`, `ExitHints`,
-  `core/src/shell/runtime/error.rs`, `exit_hints.rs`). Their composition is
-  `docs/SPEC.md` §13.1's: stored hints in attachment order, then the advice.
+  `Reason::advice` derives intrinsic advice, including denial remedies and
+  signal advice. For `exited`, the renderer adds the session's exit-hints entry,
+  keyed on program basename and status. SPEC §13.1 defines composition:
+  denial remedies precede stored hints; other reasons show stored hints,
+  report-context advice, then intrinsic and exit-table advice. Stored hints
+  retain attachment order; all notes are shown.
 - **A fix both enforcers suggest is worded once**, in `authority::remedy`
   (`remove_the_exclusion`, `add_to_fs`, `add_to_exec`). A guard refusal and a
   kernel-denial hint each word their own cause, then end in that text, so a
@@ -564,7 +572,7 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
   `dispatch_exec`** (`offer_path_as_text`). It is offered only to a path head
   given no arguments, which was most likely meant as text: to a refused
   admission, and to a run that named a directory or plain file. It is appended
-  after the grant's own hints, never before them.
+  after the denial's intrinsic remedy, never before it.
 - A handler's re-raise keeps the record, so its advice is recomputed, and
   drops the stored hints.
 
@@ -579,10 +587,10 @@ stored in it** ([[decisions/261105_the-error-record|the error record]]).
 | `poll` | `ready` with `` `ok `` | `ready` with `` `err `` record | as for `await` |
 | worker `done` | `returned` | `failed: …` | the cause |
 | top level, batch | status 0 | rendered, the reason's code | rendered, the cause's code |
-| the wire | `ok` | `err` with the record | `stopped` with the cause |
+| the wire | `ok` | `err` with the fact | `stopped` with the cause |
 
-On the wire the ending is `Ending<FOValue, ErrorRecord, CancelCause>`, the
-record in its strict data encoding ([[design/engine-protocol|engine-protocol]]).
+On the wire the ending is `Ending<FOValue, ErrorFact, CancelCause>`, the
+fact, typed reason included, in its strict data encoding ([[design/engine-protocol|engine-protocol]]).
 exarch adds an exit tip only when the reason is a process `exited`.
 
 ## See also

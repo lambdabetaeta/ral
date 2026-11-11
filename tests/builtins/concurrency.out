@@ -2,5 +2,5 @@ middle
 value=42
 beta
 alpha
-child ok=false reason= `process [failure: `exited 3, program: sh]
+child ok=false status= 3 sh: exited with status 3
 [1, 2, 3]

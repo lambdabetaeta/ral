@@ -8,6 +8,7 @@
 // so each diffs against the one it was taken from.
 
 use super::DaclError;
+use crate::fact::{DaclOperation, DaclWin32Cause};
 use crate::path::shown;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -63,10 +64,11 @@ impl PathMutexGuard {
         // attributes, not initially owned.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
         if handle.is_null() {
-            return Err(DaclError::Win32 {
-                path: path.to_path_buf(),
-                reason: format!("CreateMutexW: {}", io::Error::last_os_error()),
-            });
+            return Err(super::acl::win32_io(
+                path,
+                DaclOperation::CreateMutex,
+                &io::Error::last_os_error(),
+            ));
         }
         // SAFETY: CreateMutexW returned a fresh, non-null handle.
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
@@ -90,14 +92,12 @@ impl PathMutexGuard {
                 timeout_ms: PATH_MUTEX_WAIT_MS,
             }
         } else if wait == WAIT_FAILED {
-            DaclError::Win32 {
-                path: path.to_path_buf(),
-                reason: format!("WaitForSingleObject: {}", io::Error::last_os_error()),
-            }
+            super::acl::win32_io(path, DaclOperation::WaitMutex, &io::Error::last_os_error())
         } else {
             DaclError::Win32 {
                 path: path.to_path_buf(),
-                reason: format!("WaitForSingleObject: unexpected result {wait}"),
+                operation: DaclOperation::WaitMutex,
+                cause: DaclWin32Cause::UnexpectedWaitResult(wait),
             }
         };
         Err(err)

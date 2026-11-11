@@ -60,9 +60,9 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
 /// Panics if the embedded agent library fails to load.
 pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     let Some(scratch) = root.env.get(SCRATCH_VAR) else {
-        return Err(Error::new(format!(
-            "the root attach names no ${SCRATCH_VAR}: the host owns the scratch and names it in every root attach"
-        ))
+        return Err(Error::new(ral_core::fact::Reason::Protocol(Box::new(
+            ral_core::fact::ProtocolFailure::RootMissingScratch,
+        )))
         .with_context("exarch engine"));
     };
     shell.set_scratch(scratch.as_str());
@@ -415,7 +415,11 @@ mod tests {
             panic!("a directory is no program");
         };
         assert!(why.describe().contains("is a directory"), "{why}");
-        assert!(why.hints().iter().any(|h| h.contains("`dir")), "{why:?}");
+        assert!(
+            why.reason.advice().iter().any(|h| h.contains("`dir")),
+            "{why:?}"
+        );
+        assert_eq!(why.hints(), []);
     }
 
     #[test]

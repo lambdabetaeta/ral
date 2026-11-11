@@ -6,6 +6,12 @@ use std::io::{self, Write};
 
 use ral_core::error::Error;
 use ral_core::external_editor::{EditorCommand, admit_draft, after_cleanup, read_draft};
+use ral_core::fact::{
+    DraftOperation, EditorFailure, EditorFailureDraft, EditorFailureWorkspace,
+    EditorWorkspaceFailure, EditorWorkspaceFailureExpectedRegularFile, EditorWorkspaceStep,
+    HostFailure, InvalidCause, InvalidFailure, IoCause, IoLeaf, PathFailure, PathIoLeaf,
+    RalFailure, Reason, StateFailure,
+};
 use ral_core::path::{Dir, EntryName, Kind, LeafMode, Reading, ScopedDir, Visibility, Writing};
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
@@ -29,9 +35,11 @@ fn scheme(_: &mut ral_core::ty::Binders) -> ral_core::ty::Ty {
 }
 
 pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
-    let entry = shell
-        .lookup_builtin(NAME)
-        .ok_or_else(|| Error::new(format!("this shell's surface has no {NAME}")))?;
+    let entry = shell.lookup_builtin(NAME).ok_or_else(|| {
+        Error::new(Reason::State(Box::new(StateFailure::MissingBuiltin(
+            NAME.into(),
+        ))))
+    })?;
     shell
         .register_hook(
             HookName::session("external-editor"),
@@ -44,10 +52,26 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
         .map_err(RegisterError::into_error)
 }
 
-fn failure(context: &str, error: impl std::fmt::Display) -> Break {
-    Error::new(format!(
-        "external editor: {context}: {error}; the input buffer was not changed"
-    ))
+fn failure(cause: EditorFailure) -> Break {
+    Error::new(Reason::Host(Box::new(HostFailure::Ral(
+        RalFailure::Editor(cause),
+    ))))
+    .into()
+}
+
+fn workspace_io(step: EditorWorkspaceStep, path: Option<String>, source: &io::Error) -> Break {
+    failure(EditorFailure::Workspace(EditorFailureWorkspace {
+        step,
+        path,
+        cause: EditorWorkspaceFailure::Io(ral_core::io::failure(source)),
+    }))
+}
+
+fn path_failure(source: &ral_core::path::NotUtf8) -> Break {
+    Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
+        NAME.into(),
+        InvalidCause::Path(PathFailure::from(source)),
+    ))))
     .into()
 }
 
@@ -73,21 +97,32 @@ struct Workspace {
 
 impl Workspace {
     fn create(shell: &mut Shell, text: &str) -> Settled<Self> {
-        let bytes = admit_draft(text).map_err(|e| failure("write buffer", e))?;
+        let bytes = admit_draft(text).map_err(|e| {
+            failure(EditorFailure::Draft(EditorFailureDraft {
+                operation: DraftOperation::Write,
+                cause: e.failure(),
+            }))
+        })?;
         let temp = ral_core::host::temp_dir();
-        let temp = ral_core::path::utf8(&temp).map_err(|e| failure("temporary directory", e))?;
+        let temp = ral_core::path::utf8(&temp).map_err(|e| path_failure(&e))?;
         let parent = shell.locate_dir::<Writing>(&shell.resolve(temp))?;
         let cleanup = loop {
-            let name = EntryName::fresh(".ral-editor-")
-                .map_err(|e| failure("temporary directory name", e))?;
+            let name = EntryName::fresh(".ral-editor-").map_err(|e| {
+                workspace_io(
+                    EditorWorkspaceStep::TemporaryDirectory,
+                    Some(temp.into()),
+                    &io::Error::from(e),
+                )
+            })?;
             let target = shell.judge::<Writing>(parent.absent(name))?;
             match target.create_scoped_dir() {
                 Ok(directory) => break directory,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
-                    return Err(failure(
-                        &format!("create private directory under {temp}"),
-                        e,
+                    return Err(workspace_io(
+                        EditorWorkspaceStep::CreateDirectory,
+                        Some(temp.into()),
+                        &e,
                     ));
                 }
             }
@@ -95,8 +130,13 @@ impl Workspace {
         let workspace = Self {
             directory: cleanup.directory(),
             cleanup,
-            file: EntryName::parse(OsStr::new("buffer.ral"))
-                .map_err(|e| failure("buffer filename", e))?,
+            file: EntryName::parse(OsStr::new("buffer.ral")).map_err(|e| {
+                workspace_io(
+                    EditorWorkspaceStep::BufferPath,
+                    Some("buffer.ral".into()),
+                    &io::Error::from(e),
+                )
+            })?,
         };
         match workspace.write(shell, bytes) {
             Ok(()) => Ok(workspace),
@@ -109,9 +149,25 @@ impl Workspace {
         shell
             .judge::<Writing>(target)?
             .create_writable_file(Visibility::Secret)
-            .map_err(|e| failure("create private buffer", e))?
+            .map_err(|e| {
+                workspace_io(
+                    EditorWorkspaceStep::CreateBuffer,
+                    Some(ral_core::path::shown(
+                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    )),
+                    &e,
+                )
+            })?
             .write_all(bytes)
-            .map_err(|e| failure("write buffer", e))
+            .map_err(|e| {
+                workspace_io(
+                    EditorWorkspaceStep::WriteBuffer,
+                    Some(ral_core::path::shown(
+                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    )),
+                    &e,
+                )
+            })
     }
 
     /// Judge the held tree now, even when the editor or readback failed.
@@ -120,9 +176,13 @@ impl Workspace {
         let removed = shell
             .judge::<Writing>(self.cleanup.cleanup_target())
             .and_then(|target| {
-                target
-                    .remove()
-                    .map_err(|e| failure("remove private workspace", e))
+                target.remove().map_err(|e| {
+                    workspace_io(
+                        EditorWorkspaceStep::RemoveWorkspace,
+                        Some(ral_core::path::shown(self.directory.real().as_path())),
+                        &e,
+                    )
+                })
             });
         after_cleanup(edited, removed, |edit, removal| {
             joined(shell, edit, removal)
@@ -133,7 +193,7 @@ impl Workspace {
         let path = self.directory.real().as_path().join(self.file.as_os_str());
         ral_core::path::utf8(&path)
             .map(str::to_owned)
-            .map_err(|e| failure("buffer path", e))
+            .map_err(|e| path_failure(&e))
     }
 
     /// Run the editor on the buffer under `mooring`, then read it back.
@@ -158,21 +218,52 @@ impl Workspace {
         let directory = shell
             .judge::<Reading>(self.cleanup.cleanup_target())?
             .into_dir()
-            .map_err(|_| failure("read edited buffer", "workspace is not a directory"))?;
+            .map_err(|target| {
+                let path = ral_core::path::shown(target.real().as_path());
+                failure(EditorFailure::Workspace(EditorFailureWorkspace {
+                    step: EditorWorkspaceStep::InspectBuffer,
+                    path: Some(path.clone()),
+                    cause: EditorWorkspaceFailure::Io(IoCause::new(IoLeaf::Path(
+                        PathIoLeaf::NotDirectory(path),
+                    ))),
+                }))
+            })?;
         let target = directory
             .locate(&self.file, LeafMode::NoFollow)
-            .map_err(|e| failure("locate edited buffer", e))?;
+            .map_err(|e| {
+                workspace_io(
+                    EditorWorkspaceStep::LocateBuffer,
+                    Some(ral_core::path::shown(
+                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    )),
+                    &e,
+                )
+            })?;
         let target = shell.judge::<Reading>(target)?;
         if target.stat().is_none_or(|stat| stat.kind != Kind::File) {
-            return Err(failure(
-                "read edited buffer",
-                "the editor must leave a regular file, not a link or special file",
-            ));
+            return Err(failure(EditorFailure::Workspace(EditorFailureWorkspace {
+                step: EditorWorkspaceStep::InspectBuffer,
+                path: Some(ral_core::path::shown(target.real().as_path())),
+                cause: EditorWorkspaceFailure::ExpectedRegularFile(
+                    EditorWorkspaceFailureExpectedRegularFile {
+                        found: target.stat().map(|stat| stat.kind),
+                    },
+                ),
+            })));
         }
-        let file = target
-            .read()
-            .map_err(|e| failure("open edited buffer", e))?;
-        read_draft(file).map_err(|e| failure("read edited buffer", e))
+        let file = target.read().map_err(|e| {
+            workspace_io(
+                EditorWorkspaceStep::OpenBuffer,
+                Some(ral_core::path::shown(target.real().as_path())),
+                &e,
+            )
+        })?;
+        read_draft(file).map_err(|e| {
+            failure(EditorFailure::Draft(EditorFailureDraft {
+                operation: DraftOperation::Read,
+                cause: e.failure(),
+            }))
+        })
     }
 }
 
@@ -182,7 +273,7 @@ fn edit(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
         shell.env_var("VISUAL").as_deref(),
         shell.env_var("EDITOR").as_deref(),
     )
-    .map_err(|e| failure("choose editor", e))?;
+    .map_err(|e| failure(EditorFailure::Command(e.failure())))?;
     edit_with(text, command.program(), command.args(), mooring, shell)
 }
 
@@ -226,8 +317,26 @@ mod tests {
             &"λ".repeat(ral_core::external_editor::MAX_DRAFT_BYTES / 2 + 1),
         )
         .err()
-        .expect("an oversized UTF-8 draft must be refused");
-        assert!(error.to_string().contains("16 MiB"), "{error}");
+        .unwrap();
+        let Break::Error(error) = error else {
+            panic!("expected draft failure")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                EditorFailure::Draft(EditorFailureDraft {
+                    operation: DraftOperation::Write,
+                    cause: ral_core::fact::DraftFailure::TooLarge(
+                        ral_core::fact::DraftFailureTooLarge {
+                            limit: ral_core::external_editor::MAX_DRAFT_BYTES.into()
+                        }
+                    ),
+                })
+            ))))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        assert!(error.plain().contains("16 MiB"));
     }
 
     #[test]
@@ -313,7 +422,13 @@ mod tests {
                 shell.with_layer(layer.clone(), |shell| {
                     workspace.finish(
                         shell,
-                        Err::<Value, _>(Error::new("the editor failed").into()),
+                        Err::<Value, _>(
+                            Error::new(Reason::Process(Box::new(ral_core::fact::Process {
+                                program: "editor".into(),
+                                failure: ral_core::fact::Failure::Exited(7),
+                            })))
+                            .into(),
+                        ),
                     )
                 })
             })),
@@ -344,11 +459,21 @@ mod tests {
         else {
             panic!("the editor hook must run with captured streams")
         };
-        let error = ending.into_settled().unwrap_err().to_string();
-        assert_eq!(error, "failed-editor: the editor failed");
+        let Err(Break::Error(error)) = ending.into_settled() else {
+            panic!("expected editor failure")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Process(Box::new(ral_core::fact::Process {
+                program: "editor".into(),
+                failure: ral_core::fact::Failure::Exited(7)
+            }))
+        );
+        assert_eq!(error.hints(), []);
+        assert_eq!(error.context(), Some("failed-editor"));
         let cleanup = String::from_utf8(captured.stderr.bytes).unwrap();
         assert!(cleanup.contains("fs write denied by grant"), "{cleanup}");
-        assert!(!cleanup.contains("the editor failed"), "{cleanup}");
+        assert!(!cleanup.contains("editor exited"), "{cleanup}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -372,7 +497,21 @@ mod tests {
         std::fs::rename(&replacement, &path).unwrap();
         assert_eq!(workspace.readback(&mut shell).unwrap(), "new\n");
         std::fs::write(&path, [0xff]).unwrap();
-        assert!(workspace.readback(&mut shell).is_err());
+        let Err(Break::Error(error)) = workspace.readback(&mut shell) else {
+            panic!("expected UTF-8 refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                EditorFailure::Draft(EditorFailureDraft {
+                    operation: DraftOperation::Read,
+                    cause: ral_core::fact::DraftFailure::Utf8(ral_core::fact::Utf8Failure {
+                        valid_up_to: 0_usize.into(),
+                        error_len: Some(1_usize.into())
+                    }),
+                })
+            ))))
+        );
         workspace.finish(&mut shell, Ok(())).unwrap();
     }
 
@@ -494,11 +633,125 @@ mod tests {
         let path = workspace.path().unwrap();
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
-        assert!(workspace.readback(&mut shell).is_err());
+        let Err(Break::Error(error)) = workspace.readback(&mut shell) else {
+            panic!("expected non-regular-file refusal")
+        };
+        assert!(
+            matches!(&error.reason, Reason::Host(host) if matches!(host.as_ref(), HostFailure::Ral(RalFailure::Editor(EditorFailure::Workspace(EditorFailureWorkspace { step: EditorWorkspaceStep::InspectBuffer, cause: EditorWorkspaceFailure::ExpectedRegularFile(EditorWorkspaceFailureExpectedRegularFile { found: Some(Kind::Symlink) }), .. })))))
+        );
         workspace.finish(&mut shell, Ok(())).unwrap();
         assert_eq!(
             std::fs::read_to_string(outside.path()).unwrap(),
             "untouched"
         );
+    }
+    #[test]
+    fn editor_command_refusals_keep_variable_and_cause() {
+        use ral_core::fact::{EditorCommandCause, EditorFailureCommand, EditorVariable};
+        for (variable, spec, cause) in [
+            (
+                EditorVariable::Visual,
+                "bad\0editor",
+                EditorCommandCause::Nul,
+            ),
+            (
+                EditorVariable::Editor,
+                "\"\"",
+                EditorCommandCause::NoProgram,
+            ),
+            #[cfg(not(windows))]
+            (EditorVariable::Visual, "'", EditorCommandCause::Unbalanced),
+        ] {
+            let mut shell = shell();
+            shell.set_env_var("VISUAL", String::new()).unwrap();
+            shell.set_env_var("EDITOR", String::new()).unwrap();
+            shell
+                .set_env_var(
+                    match variable {
+                        EditorVariable::Visual => "VISUAL",
+                        EditorVariable::Editor => "EDITOR",
+                    },
+                    spec,
+                )
+                .unwrap();
+            let Err(Break::Error(error)) =
+                edit(&[Value::string("draft")], &Mooring::adrift(), &mut shell)
+            else {
+                panic!("expected command refusal")
+            };
+            assert_eq!(
+                error.reason,
+                Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                    EditorFailure::Command(EditorFailureCommand { variable, cause })
+                ))))
+            );
+            assert_eq!(error.hints(), []);
+            assert!(error.context().is_none());
+            assert!(
+                error
+                    .reason
+                    .advice()
+                    .iter()
+                    .any(|hint| hint.contains("input buffer was not changed"))
+            );
+        }
+    }
+
+    #[test]
+    fn readback_keeps_utf8_evidence_without_storing_the_draft() {
+        let mut shell = shell();
+        let workspace = Workspace::create(&mut shell, "draft").unwrap();
+        std::fs::write(workspace.path().unwrap(), [b'a', 0xff]).unwrap();
+        let Err(Break::Error(error)) = workspace.readback(&mut shell) else {
+            panic!("expected UTF-8 refusal")
+        };
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                EditorFailure::Draft(EditorFailureDraft {
+                    operation: DraftOperation::Read,
+                    cause: ral_core::fact::DraftFailure::Utf8(ral_core::fact::Utf8Failure {
+                        valid_up_to: 1_usize.into(),
+                        error_len: Some(1_usize.into())
+                    }),
+                })
+            ))))
+        );
+        workspace.finish(&mut shell, Ok(())).unwrap();
+    }
+
+    #[test]
+    fn cleanup_preserves_original_error_report_facts_and_escape_precedence() {
+        let mut shell = shell();
+        let origin = ral_core::source::SourceOrigin::named("editor-source");
+        let Err(Break::Error(original)) = ral_core::shell::load::evaluate_source(
+            &Mooring::adrift(),
+            &mut shell,
+            "let [",
+            &origin,
+            None,
+        ) else {
+            panic!("expected compile refusal")
+        };
+        let original = original
+            .with_context("editor launch")
+            .with_hints(["first", "second"]);
+        let removal = || failure(EditorFailure::NoPluginContext);
+        let Break::Error(error) = joined(&mut shell, original.clone().into(), removal()) else {
+            panic!("expected original error")
+        };
+        assert_eq!(error.reason, original.reason);
+        assert_eq!(error.context(), original.context());
+        assert_eq!(error.hints(), original.hints());
+        assert_eq!(error.witness(), original.witness());
+        assert!(error.rejection().is_some());
+        assert!(matches!(
+            joined(
+                &mut shell,
+                original.into(),
+                Break::Escape(ral_core::shell::runtime::Escape::Exit(9))
+            ),
+            Break::Escape(ral_core::shell::runtime::Escape::Exit(9))
+        ));
     }
 }

@@ -20,7 +20,7 @@ case $outcome [
         exit 1
     },
     `failed: { |e|
-        warn "tests failed: !{describe $e}"
+        warn "tests failed: $e[message]"
         exit 1
     },
 ]

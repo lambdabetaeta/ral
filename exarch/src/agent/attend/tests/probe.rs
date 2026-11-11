@@ -19,14 +19,11 @@ fn an_engine_lost_before_the_post_exchange_probe_fails_the_exchange_with_the_los
     };
     let prompt = session.admit(input).unwrap();
     assert!(session.mailbox.begin());
-    let cause = Severed::Closed("engine lost".into());
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
     session.engine().transport().sever(cause.clone());
     let outcome = session.exchange(&DurableRoot::default().child(), prompt, &emit);
     let AgentOutcome::Failed(reason) = outcome else {
         panic!("a severed engine fails the exchange");
     };
-    assert_eq!(
-        reason,
-        EngineLost::running(&cause, session.run_dir()).to_string()
-    );
+    assert_eq!(reason, crate::record::ChildFailure::severed(&cause));
 }

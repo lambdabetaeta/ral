@@ -92,7 +92,11 @@ impl Agent {
         // The worker probe is legal only at a run boundary, i.e. now.
         let lost = |cause| EngineLost::running(&cause, self.run_dir()).to_string();
         let (mut text, failed) = match report {
-            Ok(Report::Ran(ran)) => match self.engine().read(|transport| transport.workers()) {
+            Ok(Report::Ran(ran)) => match self
+                .engine()
+                .read(ral_core::fact::ProbeSubject::Workers, |transport| {
+                    transport.workers()
+                }) {
                 Ok(workers) => {
                     let result = shell_eval::report::tool_result(
                         ran,

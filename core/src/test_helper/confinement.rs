@@ -87,6 +87,10 @@ impl Output {
 /// # Panics
 /// If the host cannot boot or the probe cannot reach evaluation.
 pub fn run(grants: GrantStack, source: &str) -> Output {
+    Output::from_report(run_report(grants, source))
+}
+
+fn run_report(grants: GrantStack, source: &str) -> RunReport {
     let mut shell = crate::shell::boot::boot_shell(
         crate::io::terminal::TerminalState::default(),
         crate::shell::boot::BakedPrelude::runtime(),
@@ -97,10 +101,17 @@ pub fn run(grants: GrantStack, source: &str) -> Output {
     for layer in grants {
         shell.push_session_capabilities(layer);
     }
-    Output::from_report(shell.run(Run::captured(
+    shell.run(Run::captured(
         source,
         SourceOrigin::named("<enforcement probe>"),
-    )))
+    ))
+}
+
+fn already_confined(ending: &End) -> bool {
+    use crate::fact::{LaunchFailure, Reason, SeatbeltFailure};
+    matches!(ending, End::Err(error)
+        if matches!(&error.reason, Reason::Launch(cause)
+            if matches!(cause.as_ref(), LaunchFailure::Seatbelt(SeatbeltFailure::AlreadyConfined(_)))))
 }
 
 /// Called only by `require_confinement!`.
@@ -133,20 +144,14 @@ pub fn confinement() -> Result<Confining, Unconfined> {
                 "within [dir: '{}'] {{ {command} }}",
                 crate::path::shown(dir.path())
             );
-            let out = run(super::stack([super::layer(caps)]), &source);
+            let report = run_report(super::stack([super::layer(caps)]), &source);
+            let nested =
+                matches!(&report, RunReport::Ran { ending, .. } if already_confined(ending));
+            let out = Output::from_report(report);
             let newline = if cfg!(windows) { "\r\n" } else { "\n" };
             if out.status == 0 && out.stdout == format!("{MARKER}{newline}") {
                 Ok(Confining(()))
             } else {
-                #[cfg(target_os = "macos")]
-                let nested = out.stderr.lines().any(|line| {
-                    line.strip_prefix("ral: cannot enter the Seatbelt sandbox: ")
-                        .is_some_and(|reason| {
-                            reason.starts_with(crate::authority::sandbox::ALREADY_PROFILED)
-                        })
-                });
-                #[cfg(not(target_os = "macos"))]
-                let nested = false;
                 Err(Unconfined {
                     status: out.status,
                     stderr: out.stderr,
@@ -296,6 +301,32 @@ macro_rules! require_landlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn already_confined_is_a_seatbelt_fact_not_diagnostic_wording() {
+        use crate::error::Error;
+        use crate::fact::{
+            LaunchFailure, OsFailure, Reason, SeatbeltFailure, SeatbeltFailureAlreadyConfined,
+            SeatbeltFailureEntry,
+        };
+        for detail in [None, Some("an unrelated external diagnostic".into())] {
+            let reason = Reason::Launch(Box::new(LaunchFailure::Seatbelt(
+                SeatbeltFailure::AlreadyConfined(SeatbeltFailureAlreadyConfined { detail }),
+            )));
+            assert!(already_confined(&End::Err(Error::new(reason))));
+        }
+        let wording = "this process is already inside a macOS sandbox profile";
+        assert!(!already_confined(&End::Err(Error::new(Reason::raised(
+            wording
+        )))));
+        let reason = Reason::Launch(Box::new(LaunchFailure::Seatbelt(SeatbeltFailure::Entry(
+            SeatbeltFailureEntry {
+                cause: OsFailure::from(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                detail: Some(wording.into()),
+            },
+        ))));
+        assert!(!already_confined(&End::Err(Error::new(reason))));
+    }
 
     fn output(status: i32, stdout: &str) -> Output {
         Output {

@@ -287,6 +287,19 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keeps_chatgpts_permissive_empty_token_behavior() {
+        let current = token();
+        let response = ral_core::data::json::from_slice::<RefreshResponse>(
+            br#"{"access_token":"","refresh_token":"","id_token":""}"#,
+        )
+        .unwrap();
+        let fresh = renewed(&current, "previous-id", response);
+        assert_eq!(fresh.access_token, "");
+        assert_eq!(fresh.refresh_token, "");
+        assert_eq!(fresh.metadata, "");
+    }
+
+    #[test]
     fn a_refresh_updates_the_name_and_id_token() {
         let current = token();
         let id_token = fake_id_token(&json!({"sub": "other", "email": "new@work"}));

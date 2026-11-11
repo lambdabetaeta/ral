@@ -7,6 +7,10 @@ use ral_core::carrier::{Host, Severed, Transport, dispatch_to_report};
 use ral_core::data::FOValue;
 use ral_core::data::datum::{Datum as _, untag};
 use ral_core::error::Error;
+use ral_core::fact::{
+    EditorFailure, HostFailure, ProtocolData, ProtocolFailure, ProtocolFailureDecode, RalFailure,
+    Reason,
+};
 use ral_core::io::ansi::{DIM, RESET};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::{WorkerRow, WorkerState};
@@ -203,19 +207,28 @@ impl Host for ReplHost {
     }
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
-        match Enquiry::decode(&req).map_err(Error::new)? {
+        match Enquiry::decode(&req).map_err(|cause| {
+            Error::new(Reason::Protocol(Box::new(ProtocolFailure::Decode(
+                ProtocolFailureDecode {
+                    kind: ProtocolData::Request,
+                    operation: "repl".into(),
+                    cause,
+                },
+            ))))
+        })? {
             Enquiry::Editor(op) => self
                 .editor
                 .lock_ignore_poison()
                 .as_mut()
                 .map(|ctx| ctx.apply(op))
                 .ok_or_else(|| {
-                    Error::new("editor op: no plugin context (not inside a plugin handler)")
+                    Error::new(Reason::Host(Box::new(HostFailure::Ral(
+                        RalFailure::Editor(EditorFailure::NoPluginContext),
+                    ))))
                 }),
             Enquiry::Plugin(note) => super::plugin::lock(&self.runtime)
                 .note(note)
-                .map(|()| FOValue::Unit)
-                .map_err(Error::new),
+                .map(|()| FOValue::Unit),
             Enquiry::Clipboard(ClipboardReq { text, osc52 }) => {
                 let whole = matches!(
                     self.clipboard.lock_ignore_poison().copy(&text, osc52),
@@ -339,10 +352,108 @@ mod tests {
         let host = ReplHost::new(Arc::default());
         let req = Enquiry::Editor(super::super::enquiry::EditorOp::Get).encode();
         let err = host.enquire(req).expect_err("no context installed");
+        assert_eq!(
+            err.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
+                EditorFailure::NoPluginContext
+            ))))
+        );
+        assert_eq!(err.hints(), []);
+        assert!(err.context().is_none());
         assert!(
             err.describe().contains("no plugin context"),
             "{}",
             err.describe()
         );
+    }
+    #[test]
+    fn malformed_enquiries_keep_the_original_decode_path() {
+        let host = ReplHost::new(Arc::default());
+        let malformed = ral_core::data::datum::tag(
+            "repl-editor",
+            Some(ral_core::data::datum::tag(
+                "set",
+                Some(FOValue::Int { value: 1 }),
+            )),
+        );
+        let cause = Enquiry::decode(&malformed).unwrap_err();
+        assert_ne!(cause.path, Vec::<ral_core::fact::DataStep>::new());
+        let error = host.enquire(malformed).unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
+                kind: ProtocolData::Request,
+                operation: "repl".into(),
+                cause
+            })))
+        );
+        assert!(error.context().is_none());
+        assert_eq!(error.hints(), []);
+    }
+
+    #[test]
+    fn plugin_notifications_keep_lifecycle_and_keybinding_facts() {
+        use super::super::enquiry::PluginNote;
+        use super::super::plugin::manifest::{KeySpec, Manifest};
+        use ral_core::fact::{
+            KeyNotationFailure, KeybindingFailure, KeybindingFailureNotation, PluginFailure,
+            PluginFailureAlreadyLoaded, PluginFailureNotLoaded,
+        };
+        let host = ReplHost::new(Arc::default());
+        let manifest = Manifest {
+            name: "p".into(),
+            hooks: vec![],
+            keybindings: vec![],
+        };
+        assert_eq!(
+            host.enquire(Enquiry::Plugin(PluginNote::Loaded(manifest.clone())).encode())
+                .unwrap(),
+            FOValue::Unit
+        );
+        let error = host
+            .enquire(Enquiry::Plugin(PluginNote::Loaded(manifest)).encode())
+            .unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Plugin(
+                PluginFailure::AlreadyLoaded(PluginFailureAlreadyLoaded { name: "p".into() })
+            ))))
+        );
+        host.enquire(Enquiry::Plugin(PluginNote::Unloaded("p".into())).encode())
+            .unwrap();
+        let error = host
+            .enquire(Enquiry::Plugin(PluginNote::Unloaded("p".into())).encode())
+            .unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Plugin(
+                PluginFailure::NotLoaded(PluginFailureNotLoaded { name: "p".into() })
+            ))))
+        );
+        let error = host
+            .enquire(
+                Enquiry::Plugin(PluginNote::Loaded(Manifest {
+                    name: "bad".into(),
+                    hooks: vec![],
+                    keybindings: vec![KeySpec {
+                        key: String::new(),
+                        guard: None,
+                    }],
+                }))
+                .encode(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Keybinding(
+                KeybindingFailure::Notation(KeybindingFailureNotation {
+                    key: String::new(),
+                    cause: KeyNotationFailure::Empty
+                })
+            ))))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.context().is_none());
+        assert!(super::super::plugin::lock(&host.runtime).plugins.is_empty());
     }
 }

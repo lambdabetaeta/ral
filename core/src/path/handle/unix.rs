@@ -49,7 +49,7 @@ fn validate_scoped_ancestor(file: &File) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "private workspace requires ancestors owned by the current user or root, with no group/other write permission unless sticky",
+            crate::fact::PathIoLeaf::PrivateAncestorOwnerOrMode,
         ));
     }
     validate_scoped_acl(file)
@@ -61,7 +61,7 @@ pub(super) fn validate_scoped_directory(file: &File) -> io::Result<()> {
     if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "private workspace must be owned by the current user with no group/other permissions",
+            crate::fact::PathIoLeaf::PrivateDirectoryOwnerOrMode,
         ));
     }
     validate_scoped_acl(file)
@@ -110,7 +110,7 @@ fn validate_scoped_acl(file: &File) -> io::Result<()> {
         -1 => Err(error),
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "private workspace requires ancestors and workspace without extended ACL entries",
+            crate::fact::PathIoLeaf::ExtendedAcl,
         )),
     }
 }

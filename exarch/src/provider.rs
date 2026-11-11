@@ -33,8 +33,11 @@ pub mod via;
 mod wire;
 
 pub use bureau::{Bureau, Choice, Holdings, Pick};
-pub use error::{CancelSite, CutShort, Limit, ProviderError, Refusal};
-pub(crate) use error::{error_object, extract_url};
+pub(crate) use error::error_object;
+pub use error::{
+    CancelSite, CutShort, Limit, ProviderError, Refusal, provider_stop, reqwest_failure,
+    service_from_reqwest,
+};
 pub use identity::{Account, AccountId, Auth, Billing, Login, Meter, Service, ServiceName};
 pub use identity::{built_in, built_in_services, scripted_service};
 pub use rations::Rations;
@@ -218,7 +221,7 @@ impl Provider {
         &self,
         request: Request<'_>,
         on_delta: &mut F,
-        before_attempt: &mut dyn FnMut() -> Result<(), String>,
+        before_attempt: &mut dyn FnMut() -> Result<(), ral_core::fact::RecordingFailure>,
         cancel: &Scope,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {

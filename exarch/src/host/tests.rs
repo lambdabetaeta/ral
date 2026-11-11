@@ -250,7 +250,10 @@ fn until_settled(host: &Host) -> Vec<Record> {
 fn a_retained_port_does_not_retain_the_factory_after_end() {
     struct UnusedFactory;
     impl crate::agent::Factory for UnusedFactory {
-        fn engine(&self) -> Result<ral_core::protocol::channel::WireStream, String> {
+        fn engine(
+            &self,
+        ) -> Result<ral_core::protocol::channel::WireStream, ral_core::fact::EngineFactoryFailure>
+        {
             panic!("a parked identity root needs no helper engine")
         }
     }

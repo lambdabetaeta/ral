@@ -9,13 +9,17 @@ use super::landlock::Landlock;
 use crate::Role;
 use crate::authority::sandbox::reexec::Pinned;
 use crate::authority::sandbox::warrant::Handoff;
+use crate::fact::{
+    BwrapProbeFailure, BwrapProbeFailureExited, LaunchFailure, NativeStatus, OsFailure, ParcelRole,
+    PrepareCause, PrepareFailure, PrepareStep, PrepareSubject,
+};
 use crate::path::RealPath;
 use crate::site::{Silent, site};
 use std::os::fd::AsFd;
 use std::process::Stdio;
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent facts, each its own probe"
@@ -34,32 +38,34 @@ pub(crate) struct HostEnvelope {
 }
 
 /// What the pinned bwrap builds on this host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Builds {
     /// Envelopes mounting lent descriptors (`--ro-bind-fd`, bubblewrap
     /// 0.8.0), the only way the envelope mounts anything, and refusing a
     /// mount whose destination a symlink redirects (bubblewrap 0.10.0).
     ByFd,
     /// No envelope at all, for the reason bwrap gave.
-    Nothing(&'static str),
+    Nothing(BwrapProbeFailure),
 }
 
 impl HostEnvelope {
     /// 2–4 ms a spawn, and no answer changes under a running ral.
     pub(crate) fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
         static PROBED: OnceLock<HostEnvelope> = OnceLock::new();
-        *PROBED.get_or_init(|| {
-            let builds = |pieces: &[&str]| {
-                bwrap_builds(bwrap, trampoline, pieces, Handoff::default()).is_ok()
-            };
-            Self {
-                private_pids: builds(&["--unshare-pid", "--proc", "/proc"]),
-                virtual_dev: builds(&["--dev", "/dev"]),
-                private_cgroup: builds(&["--unshare-cgroup"]),
-                landlock: Landlock::probe(),
-                builds: Builds::probe(bwrap, trampoline),
-            }
-        })
+        PROBED
+            .get_or_init(|| {
+                let builds = |pieces: &[&str]| {
+                    bwrap_builds(bwrap, trampoline, pieces, Handoff::default()).is_ok()
+                };
+                Self {
+                    private_pids: builds(&["--unshare-pid", "--proc", "/proc"]),
+                    virtual_dev: builds(&["--dev", "/dev"]),
+                    private_cgroup: builds(&["--unshare-cgroup"]),
+                    landlock: Landlock::probe(),
+                    builds: Builds::probe(bwrap, trampoline),
+                }
+            })
+            .clone()
     }
 }
 
@@ -71,59 +77,57 @@ impl Builds {
     /// the mount against the descriptor refuses the second, whatever its words.
     fn probe(bwrap: &Pinned, trampoline: &Pinned) -> Self {
         if let Err(why) = bwrap_builds(bwrap, trampoline, &[], Handoff::default()) {
-            // Leaked once: the probe runs once a process, and keeps the fact `Copy`.
-            return Self::Nothing(why.leak());
+            return Self::Nothing(why);
         }
-        let Ok(Some(root)) = super::shown::open_dir_nofollow(&RealPath::universal()) else {
-            return Self::Nothing("ral cannot open / to lend bwrap a descriptor");
+        let root = match super::shown::open_dir_nofollow(&RealPath::universal()) {
+            Ok(Some(root)) => root,
+            Ok(None) => return Self::Nothing(BwrapProbeFailure::RootAbsent),
+            Err(e) => return Self::Nothing(BwrapProbeFailure::RootOpen(e.into())),
         };
         // Outer: whether ral lent `/`, which fails with `lift`'s `ulimit -n`
         // hint; inner: whether bwrap mounted it at `dest`, in a fresh `/tmp`
         // holding `real` and `link`, a symlink to it.
-        let mount_root_at = |dest: &str| -> Result<Result<(), String>, String> {
-            let mut handoff = Handoff::default();
-            let at = handoff.lend(root.as_fd())?.to_string();
-            let pieces = [
-                "--tmpfs",
-                "/tmp",
-                "--dir",
-                "/tmp/real",
-                "--symlink",
-                "real",
-                "/tmp/link",
-                "--ro-bind-fd",
-                &at,
-                dest,
-            ];
-            Ok(bwrap_builds(bwrap, trampoline, &pieces, handoff))
-        };
+        let mount_root_at =
+            |dest: &str| -> Result<Result<(), BwrapProbeFailure>, BwrapProbeFailure> {
+                let mut handoff = Handoff::default();
+                let at = handoff
+                    .lend(root.as_fd(), ParcelRole::Bind("/".into()))
+                    .map_err(BwrapProbeFailure::Lend)?
+                    .to_string();
+                let pieces = [
+                    "--tmpfs",
+                    "/tmp",
+                    "--dir",
+                    "/tmp/real",
+                    "--symlink",
+                    "real",
+                    "/tmp/link",
+                    "--ro-bind-fd",
+                    &at,
+                    dest,
+                ];
+                Ok(bwrap_builds(bwrap, trampoline, &pieces, handoff))
+            };
         match mount_root_at("/tmp/real") {
             Ok(Ok(())) => {}
-            Ok(Err(why)) => {
-                let unknown = why.contains("--ro-bind-fd")
-                    && (why.contains("Unknown option")
-                        || why.contains("unknown option")
-                        || why.contains("unrecognized option"));
-                let why = if unknown {
-                    format!("{why}; is bubblewrap older than 0.8.0?")
-                } else {
-                    why
-                };
-                return Self::Nothing(why.leak());
-            }
-            Err(why) => return Self::Nothing(why.leak()),
+            Ok(Err(why)) | Err(why) => return Self::Nothing(why),
         }
-        match mount_root_at("/tmp/link") {
+        Self::after_redirect_probe(mount_root_at("/tmp/link"))
+    }
+
+    fn after_redirect_probe(
+        result: Result<Result<(), BwrapProbeFailure>, BwrapProbeFailure>,
+    ) -> Self {
+        match result {
+            Ok(Err(why @ (BwrapProbeFailure::Prepare(_) | BwrapProbeFailure::Lend(_)))) => {
+                Self::Nothing(why)
+            }
             Ok(Err(_)) => Self::ByFd,
-            Ok(Ok(())) => Self::Nothing(REDIRECTED),
-            Err(why) => Self::Nothing(why.leak()),
+            Ok(Ok(())) => Self::Nothing(BwrapProbeFailure::RedirectedDestinationAccepted),
+            Err(why) => Self::Nothing(why),
         }
     }
 }
-
-/// Why a bwrap that mounts through a symlinked destination builds nothing.
-const REDIRECTED: &str = "it mounts a lent descriptor wherever a symlink at its destination \
-     points, rather than refusing it; is bubblewrap older than 0.10.0?";
 
 /// Whether the pinned bwrap builds an envelope carrying `pieces`, handed
 /// `handoff`, and execs `trampoline` in it by descriptor, as a launch does;
@@ -134,8 +138,10 @@ fn bwrap_builds(
     trampoline: &Pinned,
     pieces: &[&str],
     mut handoff: Handoff,
-) -> Result<(), String> {
-    let at = handoff.lend(trampoline.fd())?;
+) -> Result<(), BwrapProbeFailure> {
+    let at = handoff
+        .lend(trampoline.fd(), ParcelRole::Trampoline)
+        .map_err(BwrapProbeFailure::Lend)?;
     let mut cmd = bwrap.command();
     cmd.args(["--ro-bind", "/", "/"])
         .args(pieces)
@@ -145,16 +151,44 @@ fn bwrap_builds(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    handoff.install(&mut cmd);
+    let mut evidence = crate::process::launch::setup::Evidence::new()
+        .map_err(|error| probe_preparation(&error))?;
+    handoff.install(&mut cmd, &mut evidence);
     let out = site!(Silent::BwrapHostProbe, &mut cmd => output())
-        .map_err(|e| format!("it did not start: {e}"))?;
+        .map_err(|error| probe_spawn_error(&error, evidence))?;
     if out.status.success() {
         return Ok(());
     }
-    Err(match String::from_utf8_lossy(&out.stderr).trim() {
-        "" => format!("it exited with {}", out.status),
-        said => said.to_owned(),
+    use std::os::unix::process::ExitStatusExt;
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    Err(BwrapProbeFailure::Exited(BwrapProbeFailureExited {
+        status: match out.status.code() {
+            Some(code) => NativeStatus::Exited(code),
+            None => {
+                NativeStatus::Signaled(out.status.signal().expect("an exited child has a status"))
+            }
+        },
+        stderr: (!stderr.is_empty()).then_some(stderr),
+    }))
+}
+
+fn probe_preparation(error: &std::io::Error) -> BwrapProbeFailure {
+    BwrapProbeFailure::Prepare(PrepareFailure {
+        step: PrepareStep::ReadinessMark,
+        subject: PrepareSubject::Child,
+        cause: PrepareCause::Io(Box::new(crate::io::failure(error))),
     })
+}
+
+fn probe_spawn_error(
+    error: &std::io::Error,
+    evidence: crate::process::launch::setup::Evidence,
+) -> BwrapProbeFailure {
+    match evidence.reported_failure() {
+        Some(LaunchFailure::Parcel(failure)) => BwrapProbeFailure::Lend(failure),
+        None => BwrapProbeFailure::Spawn(OsFailure::from(error)),
+        Some(_) => unreachable!("the probe handoff registers only parcel checks"),
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +197,71 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn probe_preparation_is_not_spawn_or_capability_evidence() {
+        let failure = probe_preparation(&std::io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(matches!(
+            &failure,
+            BwrapProbeFailure::Prepare(PrepareFailure {
+                step: PrepareStep::ReadinessMark,
+                subject: PrepareSubject::Child,
+                ..
+            })
+        ));
+        let bytes = crate::data::json::to_datum_vec(&failure);
+        assert_eq!(
+            crate::data::json::from_datum_slice::<BwrapProbeFailure>(&bytes).unwrap(),
+            failure
+        );
+        assert_eq!(failure.advice(), [] as [String; 0]);
+        assert!(
+            failure
+                .describe()
+                .starts_with("ral could not prepare the bwrap probe:")
+        );
+        assert_eq!(
+            Builds::after_redirect_probe(Ok(Err(failure.clone()))),
+            Builds::Nothing(failure)
+        );
+    }
+
+    #[test]
+    fn probe_handoff_evidence_is_neither_spawn_nor_a_redirect_refusal() {
+        use crate::fact::{ParcelCause, ParcelFailure, ParcelStep};
+        use crate::process::launch::setup::{Context, Evidence};
+        let mut evidence = Evidence::new().unwrap();
+        let check = evidence.check(Context::Parcel(ParcelRole::Trampoline, ParcelStep::Lend));
+        check
+            .run::<()>(Err(std::io::Error::from_raw_os_error(libc::EBADF)))
+            .unwrap_err();
+        let failure = probe_spawn_error(&std::io::Error::from_raw_os_error(libc::EIO), evidence);
+        assert_eq!(
+            failure,
+            BwrapProbeFailure::Lend(ParcelFailure {
+                role: ParcelRole::Trampoline,
+                step: ParcelStep::Lend,
+                cause: ParcelCause::Io(Box::new(crate::io::failure(
+                    &std::io::Error::from_raw_os_error(libc::EBADF)
+                ))),
+            })
+        );
+        assert_eq!(
+            Builds::after_redirect_probe(Ok(Err(failure.clone()))),
+            Builds::Nothing(failure)
+        );
+        let native = probe_spawn_error(
+            &std::io::Error::from_raw_os_error(libc::ENOENT),
+            Evidence::new().unwrap(),
+        );
+        assert!(matches!(
+            native,
+            BwrapProbeFailure::Spawn(OsFailure {
+                raw: Some(libc::ENOENT),
+                ..
+            })
+        ));
+    }
 
     /// A pinned stand-in for bwrap: `script`, a `sh` body that sees bwrap's
     /// argv as `$*`.
@@ -205,11 +304,14 @@ mod tests {
             let Builds::Nothing(why) = Builds::probe(&bwrap, &trampoline()) else {
                 panic!("a failed descriptor mount must refuse the envelope");
             };
-            assert!(why.contains(reason), "{why}");
+            assert!(
+                matches!(&why, BwrapProbeFailure::Exited(exit) if exit.stderr.as_deref() == Some(reason))
+            );
             assert_eq!(
-                why.contains("is bubblewrap older than 0.8.0?"),
-                outdated,
-                "{why}"
+                why.advice()
+                    .iter()
+                    .any(|hint| hint.contains("bubblewrap older than 0.8.0")),
+                outdated
             );
         }
     }
@@ -221,7 +323,7 @@ mod tests {
         let follows = fake_bwrap(dir.path(), "follows", "exit 0\n");
         assert_eq!(
             Builds::probe(&follows, &trampoline()),
-            Builds::Nothing(REDIRECTED)
+            Builds::Nothing(BwrapProbeFailure::RedirectedDestinationAccepted)
         );
         let refuses = fake_bwrap(
             dir.path(),

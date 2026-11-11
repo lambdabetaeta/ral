@@ -18,13 +18,23 @@ fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
             let err = desk
                 .ask(request)
                 .expect_err("every schedule tag is refused without the grant");
-            assert!(
-                err.describe().starts_with(&format!("`{verb}` refused:")),
-                "the refusal must name the tag the model typed, got: {}",
-                err.describe()
+            assert_eq!(
+                err.reason,
+                ral_core::fact::Reason::Host(Box::new(ral_core::fact::HostFailure::Exarch(
+                    ral_core::fact::ExarchFailure::Schedule(
+                        ral_core::fact::ScheduleFailure::NoGrant(
+                            ral_core::fact::ScheduleFailureNoGrant { verb: verb.into() }
+                        )
+                    )
+                )))
+            );
+            assert_eq!(err.hints(), []);
+            assert_eq!(
+                err.describe(),
+                format!("exarch: schedule: {verb}: scheduling is not allowed in this session")
             );
             assert!(
-                err.describe().contains("--allow-schedule"),
+                err.plain().contains("--allow-schedule"),
                 "must name the grant flag, got: {}",
                 err.describe()
             );
@@ -144,4 +154,65 @@ fn schedules_list_reads_the_cell_even_when_the_timer_resource_is_empty() {
             Vec::<FOValue>::new()
         );
     });
+}
+
+#[test]
+fn schedule_logical_refusal_is_not_a_recording_transaction_failure() {
+    use ral_core::fact::{
+        ExarchFailure, HostFailure, Reason, ScheduleFailure, ScheduleFailureDuplicateLiveLabel,
+    };
+    with_granted_desk(|desk, _| {
+        desk.ask(add_req("1h", "same", "first")).unwrap();
+        let error = desk.ask(add_req("1h", "same", "second")).unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Schedule(
+                ScheduleFailure::DuplicateLiveLabel(ScheduleFailureDuplicateLiveLabel {
+                    label: "same".into()
+                })
+            ))))
+        );
+        assert!(desk.ask(remove_req("absent")).is_ok());
+    });
+}
+
+#[test]
+fn schedule_inner_append_and_outer_transaction_failures_keep_label_trigger_and_cause() {
+    use ral_core::fact::{ExarchFailure, HostFailure, Reason, ScheduleFailure};
+    for poison in [false, true] {
+        let actual = crate::agent::Agent::for_test_with(crate::agent::TestLaunch {
+            allow_schedule: true,
+            ..crate::agent::TestLaunch::new("system")
+        })
+        .unwrap();
+        with_granted_desk(|mut desk, _| {
+            desk.call.handle = actual.handle();
+            desk.call.fleet = actual.fleet.clone();
+            let recorder = actual.recorder();
+            if poison {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = actual
+                            .handle()
+                            .0
+                            .address
+                            .transact(|_| panic!("poison schedule transaction"));
+                    }))
+                    .is_err()
+                );
+            } else {
+                recorder.fail_after(0);
+            }
+            let Request::Schedules(Schedules::Add(add)) = add_req("1h", "never-armed", "wake")
+            else {
+                unreachable!()
+            };
+            let error = desk.schedule(add).unwrap_err();
+            let why = recorder.check_available().unwrap_err().failure();
+            assert!(matches!(&error.reason, Reason::Host(host)
+                if matches!(&**host, HostFailure::Exarch(ExarchFailure::Schedule(ScheduleFailure::Recording(failure)))
+                    if failure.label.as_deref() == Some("never-armed") && failure.trigger.as_deref() == Some("after 1h") && failure.cause == why)));
+            assert_eq!(error.hints(), []);
+        });
+    }
 }

@@ -3,6 +3,7 @@
 
 use super::Value;
 use crate::data::Finite;
+use crate::fact::{CompareFailure, EqualityOrOrder, EvalFailure, Reason};
 use crate::shell::runtime::{Error, Settled};
 use std::cmp::Ordering;
 
@@ -31,6 +32,17 @@ fn all(pairs: impl Iterator<Item = Settled<bool>>) -> Settled<bool> {
 }
 
 impl Value {
+    fn comparison_error(&self, other: &Self, operation: &str, relation: EqualityOrOrder) -> Error {
+        Error::new(Reason::Evaluation(Box::new(EvalFailure::Compare(
+            CompareFailure {
+                operation: operation.into(),
+                relation,
+                left: self.shape(),
+                right: other.shape(),
+            },
+        ))))
+    }
+
     /// Numbers by magnitude, `None` for a non-number.
     fn number_order(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
@@ -85,15 +97,9 @@ impl Value {
                     }
             }
             (a, b) if a.opacity().is_some() || b.opacity().is_some() => {
-                return Err(Error::new(format!(
-                    "equality: cannot compare {} with {}",
-                    a.type_name(),
-                    b.type_name()
-                ))
-                .with_hint(
-                    "equality is defined on scalars, strings, bytes, lists, maps, and variants",
-                )
-                .into());
+                return Err(a
+                    .comparison_error(b, "equality", EqualityOrOrder::Equality)
+                    .into());
             }
             _ => false,
         })
@@ -110,13 +116,9 @@ impl Value {
         }
         match (self, other) {
             (Self::String(a), Self::String(b)) => Ok(a.cmp(b)),
-            _ => Err(Error::new(format!(
-                "{op}: cannot compare {} with {}",
-                self.type_name(),
-                other.type_name()
-            ))
-            .with_hint("ordering is defined on numbers and strings")
-            .into()),
+            _ => Err(self
+                .comparison_error(other, op, EqualityOrOrder::Order)
+                .into()),
         }
     }
 }
@@ -169,5 +171,36 @@ mod tests {
         assert!(item(1).equals(&item(1)).is_err());
         assert!(!item(1).equals(&item(2)).unwrap());
         assert!(block.equals(&Value::Int(1)).is_err());
+    }
+    #[test]
+    fn comparison_refusals_keep_relation_operation_and_both_heads() {
+        let block = block_over(&Env::new());
+        for (result, relation, operation, right) in [
+            (
+                block.equals(&Value::Int(1)).map(|_| ()),
+                EqualityOrOrder::Equality,
+                "equality",
+                crate::fact::ValueShape::Int,
+            ),
+            (
+                block.compare(&Value::string("x"), "sort-list").map(|_| ()),
+                EqualityOrOrder::Order,
+                "sort-list",
+                crate::fact::ValueShape::String,
+            ),
+        ] {
+            let Err(crate::shell::runtime::Break::Error(error)) = result else {
+                panic!("comparison refusal")
+            };
+            assert_eq!(
+                error.reason,
+                Reason::Evaluation(Box::new(EvalFailure::Compare(CompareFailure {
+                    operation: operation.into(),
+                    relation,
+                    left: crate::fact::ValueShape::Block,
+                    right,
+                })))
+            );
+        }
     }
 }

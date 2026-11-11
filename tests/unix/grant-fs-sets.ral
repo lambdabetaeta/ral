@@ -10,7 +10,7 @@ to-string 'let answer = 42' > "$outside/lib.ral"
 to-string 'to-string ran > "$inside/witness.txt"' > "$inside/mod.ral"
 let root = !{absolute-path "$dir/.."}
 let denied = { |body|
-    try { !$body; echo 'ALLOWED' } { |e| echo "denied: !{re-match 'denied by grant' !{describe $e}}" }
+    try { !$body; echo 'ALLOWED' } { |e| echo "denied: !{re-match 'denied by grant' $e[message]}" }
 }
 
 # Redirects: write, append, stdin, stderr

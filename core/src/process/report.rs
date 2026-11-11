@@ -6,8 +6,10 @@
 //! pipe: no same-uid process can reopen it through `/proc/<pid>/fd` to forge
 //! a record.
 
-use super::launch::{Unstarted, unavailable};
+use super::launch::{Unstarted, refused};
+use crate::data::json::{from_datum_slice, to_datum_vec};
 use crate::error::Error;
+use crate::fact::{LaunchFailure, LauncherFailure, LauncherFailureReportEncodingTooLarge};
 use crate::process::Scope;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -19,7 +21,7 @@ use std::process::ExitStatus;
 #[derive(Debug, PartialEq, Eq)]
 enum Record {
     /// Nothing ran: the warrant could not be received or its confinement entered.
-    Refused(String),
+    Refused(LaunchFailure),
     /// The confinement was entered; the program's spawn or `execve` failed.
     Unstarted(i32),
     /// Linux: the program runs.
@@ -37,9 +39,20 @@ impl Record {
     fn bytes(&self) -> Vec<u8> {
         match self {
             Self::Refused(why) => {
-                let why = &why.as_bytes()[..why.len().min(usize::from(u16::MAX))];
-                let len = u16::try_from(why.len()).expect("cut to a u16 above");
-                [&[REFUSED][..], &len.to_ne_bytes(), why].concat()
+                let mut bytes = to_datum_vec(why);
+                if bytes.len() > usize::from(u16::MAX) {
+                    bytes = to_datum_vec(&LaunchFailure::Launcher(
+                        LauncherFailure::ReportEncodingTooLarge(
+                            LauncherFailureReportEncodingTooLarge {
+                                actual: bytes.len().into(),
+                                limit: usize::from(u16::MAX).into(),
+                            },
+                        ),
+                    ));
+                }
+                let len =
+                    u16::try_from(bytes.len()).expect("the overflow refusal fits the envelope");
+                [&[REFUSED][..], &len.to_ne_bytes(), &bytes].concat()
             }
             Self::Unstarted(errno) => [&[UNSTARTED][..], &errno.to_ne_bytes()].concat(),
             Self::Started => vec![STARTED],
@@ -48,36 +61,39 @@ impl Record {
     }
 
     /// The next record; `None` at EOF before one.
-    fn read(from: &mut impl Read) -> io::Result<Option<Self>> {
-        fn int(from: &mut impl Read) -> io::Result<i32> {
-            let mut bytes = [0; 4];
-            from.read_exact(&mut bytes)?;
-            Ok(i32::from_ne_bytes(bytes))
+    fn read(from: &mut impl Read) -> Result<Option<Self>, LauncherFailure> {
+        fn read<const N: usize>(from: &mut impl Read) -> Result<[u8; N], LauncherFailure> {
+            let mut bytes = [0; N];
+            from.read_exact(&mut bytes)
+                .map_err(|error| report_read(&error))?;
+            Ok(bytes)
+        }
+        fn int(from: &mut impl Read) -> Result<i32, LauncherFailure> {
+            read(from).map(i32::from_ne_bytes)
         }
         let mut tag = [0];
         match from.read_exact(&mut tag) {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            read => read?,
+            result => result.map_err(|error| report_read(&error))?,
         }
         Ok(Some(match tag[0] {
             REFUSED => {
-                let mut len = [0; 2];
-                from.read_exact(&mut len)?;
-                let mut why = vec![0; usize::from(u16::from_ne_bytes(len))];
-                from.read_exact(&mut why)?;
-                Self::Refused(String::from_utf8_lossy(&why).into_owned())
+                let len = u16::from_ne_bytes(read(from)?);
+                let mut why = vec![0; usize::from(len)];
+                from.read_exact(&mut why)
+                    .map_err(|error| report_read(&error))?;
+                Self::Refused(from_datum_slice(&why).map_err(LauncherFailure::ReportDecode)?)
             }
             UNSTARTED => Self::Unstarted(int(from)?),
             STARTED => Self::Started,
             ENDED => Self::Ended(ExitStatus::from_raw(int(from)?)),
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("a record of unknown kind {other}"),
-                ));
-            }
+            other => return Err(LauncherFailure::ReportUnknownTag(other)),
         }))
     }
+}
+
+fn report_read(error: &io::Error) -> LauncherFailure {
+    LauncherFailure::ReportRead(Box::new(crate::io::failure(error)))
 }
 
 /// The parent's ends of the report socket: the reader, and its copy of the
@@ -115,14 +131,18 @@ impl Testimony {
         vanished: impl FnOnce() -> Error,
     ) -> Result<(), Unstarted> {
         use rustix::event::PollFlags;
-        let refused = |why: String| Err(Unstarted::Refused(unavailable(why)));
+        let refuse = |why| Err(Unstarted::Refused(refused(why)));
         // A readable report holds its first record whole, or soon: only
         // `started`, one byte, is written once a program runs.
         let heard = loop {
             scope.poll().map_err(Unstarted::Stopped)?;
             match crate::io::poll_slice(&self.0, PollFlags::IN) {
                 Ok(None) => {}
-                ready => break ready.and_then(|_| Record::read(&mut self.0)),
+                ready => {
+                    break ready
+                        .map_err(|error| report_read(&error))
+                        .and_then(|_| Record::read(&mut self.0));
+                }
             }
         };
         match heard {
@@ -132,11 +152,11 @@ impl Testimony {
             Ok(Some(Record::Unstarted(errno))) => {
                 Err(Unstarted::Program(io::Error::from_raw_os_error(errno)))
             }
-            Ok(Some(Record::Refused(why))) => refused(why),
-            Ok(Some(Record::Ended(_))) => {
-                refused("the confined launch reported an end before a start".into())
-            }
-            Err(e) => refused(format!("cannot read the confined launch's report: {e}")),
+            Ok(Some(Record::Refused(why))) => refuse(why),
+            Ok(Some(Record::Ended(_))) => refuse(LaunchFailure::Launcher(
+                LauncherFailure::ReportEndedBeforeStarted,
+            )),
+            Err(e) => refuse(LaunchFailure::Launcher(e)),
         }
     }
 
@@ -185,14 +205,23 @@ impl Witness {
         let _ = self.0.write_all(&record.bytes());
     }
 
-    pub(crate) fn refused(mut self, why: &str) {
-        self.say(&Record::Refused(why.to_owned()));
+    pub(crate) fn refused(mut self, why: &LaunchFailure) {
+        self.say(&Record::Refused(why.clone()));
     }
 
     /// An `e` the OS did not raise is ral's own failure to build the exec.
-    pub(crate) fn unstarted(mut self, e: &io::Error) {
+    pub(crate) fn unstarted(mut self, e: &io::Error, subject: crate::fact::LaunchImageSubject) {
         self.say(&e.raw_os_error().map_or_else(
-            || Record::Refused(format!("cannot start the program: {e}")),
+            || {
+                Record::Refused(LaunchFailure::Launcher(
+                    LauncherFailure::NonNativeExecError(
+                        crate::fact::LauncherFailureNonNativeExecError {
+                            subject,
+                            cause: Box::new(crate::io::failure(e)),
+                        },
+                    ),
+                ))
+            },
             Record::Unstarted,
         ));
     }
@@ -227,7 +256,7 @@ mod tests {
     #[test]
     fn every_record_reads_back_as_written() {
         for record in [
-            Record::Refused("cannot enter the Seatbelt sandbox: \u{fffd}".into()),
+            Record::Refused(LaunchFailure::Warrant(crate::fact::WarrantFailure::Magic)),
             Record::Unstarted(libc::ENOENT),
             Record::Started,
             Record::Ended(ExitStatus::from_raw(139 << 8)),
@@ -299,11 +328,50 @@ mod tests {
     }
 
     #[test]
-    fn an_overlong_refusal_is_cut_not_refused() {
-        let long = "x".repeat(usize::from(u16::MAX) + 7);
-        let Some(Record::Refused(why)) = round_trip(&Record::Refused(long)) else {
-            panic!("a refusal reads back as one");
-        };
-        assert_eq!(why.len(), usize::from(u16::MAX));
+    fn an_overlong_refusal_is_replaced_whole() {
+        let failure = LaunchFailure::BatchImage("é".repeat(usize::from(u16::MAX)));
+        let actual = to_datum_vec(&failure).len();
+        assert_eq!(
+            round_trip(&Record::Refused(failure)),
+            Some(Record::Refused(LaunchFailure::Launcher(
+                LauncherFailure::ReportEncodingTooLarge(LauncherFailureReportEncodingTooLarge {
+                    actual: actual.into(),
+                    limit: usize::from(u16::MAX).into(),
+                })
+            )))
+        );
+    }
+
+    #[test]
+    fn a_near_limit_whole_refusal_crosses_a_socket_with_concurrent_reading() {
+        let mut failure = LaunchFailure::BatchImage(String::new());
+        let overhead = to_datum_vec(&failure).len();
+        let length = usize::from(u16::MAX) - overhead;
+        failure = LaunchFailure::BatchImage("x".repeat(length));
+        assert_eq!(to_datum_vec(&failure).len(), usize::from(u16::MAX));
+        let (mut reader, writer) = crate::process::cloexec_socketpair().unwrap();
+        let expected = failure.clone();
+        let sender = std::thread::spawn(move || {
+            Witness::new(writer.into()).unwrap().refused(&failure);
+        });
+        assert_eq!(
+            Record::read(&mut reader).unwrap(),
+            Some(Record::Refused(expected))
+        );
+        sender.join().unwrap();
+        assert_eq!(Record::read(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_refusals_keep_decode_evidence() {
+        let bytes = [REFUSED, 1, 0, b'{'];
+        assert!(matches!(
+            Record::read(&mut bytes.as_slice()),
+            Err(LauncherFailure::ReportDecode(_))
+        ));
+        assert_eq!(
+            Record::read(&mut [9].as_slice()),
+            Err(LauncherFailure::ReportUnknownTag(9))
+        );
     }
 }

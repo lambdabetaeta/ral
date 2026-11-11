@@ -1,7 +1,7 @@
-proj is not an absolute path
-`` `name `` takes a bare command name, not ./tool
-`` `absolute '/usr/bin' `` is a directory, so as an exec target it names a binary that cannot exist
-unknown key 'alow': `grant exec` takes allow, deny (did you mean 'allow'?)
-unknown key 'git': `grant exec` takes allow, deny
-unknown key 'only': `grant exec` takes allow, deny
+grant: field "fs": field "read": element 0: payload `absolute`: proj is not an absolute path
+grant: field "exec": field "allow": element 0: payload `name`: `` `name `` takes a bare command name, not ./tool
+grant: field "exec": field "allow": element 0: payload `absolute`: `` `absolute '/usr/bin' `` is a directory, so as an exec target it names a binary that cannot exist
+grant: field "exec": unknown field "alow"; offered: allow, deny (did you mean 'allow'?)
+grant: field "exec": unknown field "git"; offered: allow, deny
+grant: field "exec": unknown field "only"; offered: allow, deny
 grant decode tests done

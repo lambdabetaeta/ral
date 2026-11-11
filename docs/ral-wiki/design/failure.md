@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b0a4a4
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
 ---
 
 # Failure: status, not truth
@@ -23,7 +23,7 @@ share one return type.
 
 **`try` turns failure into data, and is ral's only `||`.** `try B H` runs `B`;
 on success it returns `B`'s value, on failure it calls the handler `H` with an
-closed error record `[reason, frame, site]` and returns *its* value,
+closed error record `[frame, message, status, site]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
 nothing else — `exit` and a stop, the two `Escape`s, bypass it. When a
 command encodes its result in its exit status rather than a value — an external
@@ -34,33 +34,42 @@ command-level `||`: it would force precedence against `?` and `|` for a case
 inside `$[…]` expression blocks (`docs/SPEC.md` §17.1), which takes strict `Bool`
 operands and never inspects command success.
 
-**A failure is its reason and one provenance.** The
+**A failure is its reason and one provenance; a program reads the projection.** The
 [[decisions/261105_the-error-record|error-record decision]] fixes the two rules:
 
-- `fail m` raises `raised m` at the innermost visible operation, including
-  `fail` itself. `raise e` re-raises the closed record unchanged and trusts
-  its claims. `describe e` derives the text from the reason alone.
+- `fail m` raises the claim `raised [m, 1]` at the innermost visible
+  operation, including `fail` itself. `raise e` re-raises a caught record's
+  exact reason (the record witnesses it); a hand-built or changed record is
+  validated and raised as the program's own claim. The record's `message` is
+  `Reason::describe`, derived from the reason alone; there is no `describe`
+  builtin.
 - `frame` names a failing frame, which may be `index`, not a command; it is
   provenance only. A process failure names its own subject: `process [program,
-  failure]`, with `program` the command head as dispatched.
+  failure]`, with `program` the command head as dispatched. The reason is a
+  Rust-side fact: a program never reads it.
 - `frame` is a provenance coordinate: shown with the site, never the subject of
   a process's wording. Visibility
   means a span in a session source; prelude frames defer to the user's call.
   Name and site come from that same frame. Every run supplies a base, so an
   otherwise unclaimed failure is sited at its start, `script:1:1`.
-- A re-raise keeps the record, so the record's advice is recomputed at the
-  next render; stored hints, context and unwind facts are report-only and are
+- A re-raise of a caught record keeps its reason, so the advice is recomputed
+  at the next render; stored hints, context and unwind facts are report-only and are
   dropped (`docs/SPEC.md` §13.1 composes hints and advice). A worker's live
   error carries its completed provenance to `done`, `poll` and `await` alike.
-- The exit code is derived from `reason`, never stored beside it. Raised
-  text exits 1; scripts choosing a code use top-level `exit n`.
+- Operational failures carry typed subjects and causes (`denied`, `io`,
+  `invalid`, `evaluation`, `state`, `compile`, `launch`, `protocol`, `host`);
+  `invariant` identifies a runtime defect. Only an explicitly authored failure
+  uses `raised` text.
+- The record's `status` is derived from the reason, never stored beside it.
+  Raised text exits 1 (a claim, its own status), operational families and
+  `invariant` exit 1; scripts choosing a code use top-level `exit n`.
 
 **An external's failures are raised one way per stage, and blame follows where
 the failure arose.** An external's life is `prepare`, `start` and `ending`
 ([[internals/an-external-end-to-end|an-external-end-to-end]]):
 
-- `prepare` raises ral's refusals as `raised` text, and its head probe finds
-  `not-found` and `not-runnable` before any process exists; `start` converts
+- `prepare` preserves typed authority, input and launch refusals, and its head
+  probe finds `not-found` and `not-runnable` before any process exists; `start` converts
   the one `Unstarted` there is, and `ending` the one wait status. These are
   the only builders of a process failure.
 - A start that failed in ral's own step, or in a launcher that is not the
@@ -107,7 +116,7 @@ Failure propagates predictably through the rest of the grammar:
 - a loose worker's failure is observed only by `await`, `race` or `poll`; it
   never fails the run or session. Its lifetime is independent of its ending
   ([[design/endings|endings]]);
-- an unhandled failure at top level exits with the code derived from its reason
+- an unhandled failure at top level exits with the status derived from its reason
   ([[design/endings|endings]]).
 
 See also [[design/exec|exec]] (failure is an operation's exceptional outcome),

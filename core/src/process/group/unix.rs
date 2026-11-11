@@ -37,8 +37,19 @@ impl Step {
 pub(in crate::process) enum SpawnError {
     /// One of ral's steps failed: the fork, the placement, a `pre_exec` hook.
     Prepare(std::io::Error),
+    Setup(crate::fact::LaunchFailure),
     /// The `execve` failed: the program's own.
     Exec(std::io::Error),
+}
+
+#[cfg(test)]
+fn spawn_with_pgid(
+    cmd: &mut std::process::Command,
+    step: Step,
+) -> Result<std::process::Child, SpawnError> {
+    let mut evidence =
+        crate::process::launch::setup::Evidence::new().map_err(SpawnError::Prepare)?;
+    spawn_with_evidence(cmd, step, &mut evidence)
 }
 
 /// Spawn `cmd` under the one canonical pre-exec discipline.
@@ -56,24 +67,26 @@ pub(in crate::process) enum SpawnError {
 /// # Errors
 /// [`SpawnError::Exec`] if the `execve` fails; [`SpawnError::Prepare`] if
 /// anything before it does: the fork, the placement, or any hook.
-pub(in crate::process) fn spawn_with_pgid(
+pub(in crate::process) fn spawn_with_evidence(
     cmd: &mut std::process::Command,
     step: Step,
+    evidence: &mut crate::process::launch::setup::Evidence,
 ) -> Result<std::process::Child, SpawnError> {
-    spawn_with_pgid_after(cmd, step, || Ok(()))
+    spawn_with_pgid_after(cmd, step, evidence, || Ok(()))
 }
 
-/// [`spawn_with_pgid`] plus one caller hook, run in the child after the
+/// [`spawn_with_evidence`] plus one caller hook, run in the child after the
 /// signal reset and before the mark.
 ///
 /// The hook must therefore keep to async-signal-safe work such as `read`,
 /// `close`, or `dup2` on already-open fds.
 ///
 /// # Errors
-/// As [`spawn_with_pgid`]; `after` failing is [`SpawnError::Prepare`].
+/// As [`spawn_with_evidence`]; `after` failing is [`SpawnError::Prepare`].
 fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
     step: Step,
+    evidence: &mut crate::process::launch::setup::Evidence,
     after: F,
 ) -> Result<std::process::Child, SpawnError>
 where
@@ -81,17 +94,40 @@ where
 {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
-    let (cleared, mark) = crate::process::cloexec_socketpair().map_err(SpawnError::Prepare)?;
+    let (cleared, mark) = crate::process::cloexec_socketpair().map_err(|e| {
+        SpawnError::Setup(crate::fact::LaunchFailure::Prepare(
+            crate::fact::PrepareFailure {
+                step: crate::fact::PrepareStep::ReadinessMark,
+                subject: crate::fact::PrepareSubject::Child,
+                cause: crate::fact::PrepareCause::Io(Box::new(crate::io::failure(&e))),
+            },
+        ))
+    })?;
+    use crate::fact::{PrepareStep, PrepareSubject};
+    use crate::process::launch::setup::Context;
+    let group = evidence.check(Context::Prepare(
+        PrepareStep::Group,
+        match step {
+            Step::Join(group) => {
+                PrepareSubject::Group(u64::from(group.as_raw().unsigned_abs()).into())
+            }
+            _ => PrepareSubject::Child,
+        },
+    ));
+    let ready = evidence.check(Context::Prepare(
+        PrepareStep::ReadinessMark,
+        PrepareSubject::Child,
+    ));
     // SAFETY: async-signal-safe throughout; the closure owns `mark`, so the
     // fd it writes is open for as long as `cmd` lives.
     unsafe {
         cmd.pre_exec(move || {
-            step.apply()?;
+            group.run(step.apply())?;
             reset_child_signals();
             after()?;
             let byte = 0u8;
             if libc::write(mark.as_raw_fd(), (&raw const byte).cast(), 1) == -1 {
-                return Err(std::io::Error::last_os_error());
+                return ready.run(Err(std::io::Error::last_os_error()));
             }
             Ok(())
         });
@@ -127,7 +163,14 @@ fn attributed(e: std::io::Error, cleared: &std::os::unix::net::UnixStream) -> Sp
 pub enum Survivor {
     Named(u32),
     /// Running, but its pid never came back.
-    Unnamed(std::io::Error),
+    Unnamed(crate::fact::DetachedPidCause),
+}
+
+#[cfg(test)]
+fn spawn_detached(cmd: &mut std::process::Command) -> Result<Survivor, SpawnError> {
+    let mut evidence =
+        crate::process::launch::setup::Evidence::new().map_err(SpawnError::Prepare)?;
+    spawn_detached_with_evidence(cmd, &mut evidence)
 }
 
 /// Spawn `cmd` so that the surviving process is this process's
@@ -155,17 +198,40 @@ pub enum Survivor {
 /// fails, [`SpawnError::Prepare`] if either fork, the `setsid`, or any step
 /// before them does.  Every later failure is [`Survivor::Unnamed`]: the
 /// survivor runs.
-pub(in crate::process) fn spawn_detached(
+pub(in crate::process) fn spawn_detached_with_evidence(
     cmd: &mut std::process::Command,
+    evidence: &mut crate::process::launch::setup::Evidence,
 ) -> Result<Survivor, SpawnError> {
     use std::os::fd::AsRawFd;
 
-    let (receipt, handshake) = crate::process::cloexec_pipe().map_err(SpawnError::Prepare)?;
+    let (receipt, handshake) = crate::process::cloexec_pipe().map_err(|e| {
+        SpawnError::Setup(crate::fact::LaunchFailure::Prepare(
+            crate::fact::PrepareFailure {
+                step: crate::fact::PrepareStep::DetachedHandshake,
+                subject: crate::fact::PrepareSubject::Child,
+                cause: crate::fact::PrepareCause::Io(Box::new(crate::io::failure(&e))),
+            },
+        ))
+    })?;
     let fd = handshake.as_raw_fd();
-    let intermediate = spawn_with_pgid_after(cmd, Step::NewSession, move || {
+    use crate::fact::{PrepareStep, PrepareSubject};
+    use crate::process::launch::setup::Context;
+    let fork = evidence.check(Context::Prepare(
+        PrepareStep::DetachedFork,
+        PrepareSubject::Child,
+    ));
+    let session = evidence.check(Context::Prepare(
+        PrepareStep::DetachedSession,
+        PrepareSubject::Child,
+    ));
+    let handshake_check = evidence.check(Context::Prepare(
+        PrepareStep::DetachedHandshake,
+        PrepareSubject::Child,
+    ));
+    let intermediate = spawn_with_pgid_after(cmd, Step::NewSession, evidence, move || {
         // SAFETY: a spawn's hook, async-signal-safe throughout: fork,
         // write, _exit, setsid, fcntl.
-        if let crate::process::Forked::Parent(pid) = unsafe { crate::process::fork() }? {
+        if let crate::process::Forked::Parent(pid) = fork.run(unsafe { crate::process::fork() })? {
             let bytes = pid.as_raw_pid().to_ne_bytes();
             unsafe {
                 let _ = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
@@ -173,16 +239,16 @@ pub(in crate::process) fn spawn_detached(
             }
         }
         if unsafe { libc::setsid() } == -1 {
-            return Err(std::io::Error::last_os_error());
+            return session.run(Err(std::io::Error::last_os_error()));
         }
         // `std` dup2'd the stdio fds before this hook ran and dup2 clears
         // FD_CLOEXEC on its target, so re-arm rather than trust `os_pipe`.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         if flags < 0 {
-            return Err(std::io::Error::last_os_error());
+            return handshake_check.run(Err(std::io::Error::last_os_error()));
         }
         if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-            return Err(std::io::Error::last_os_error());
+            return handshake_check.run(Err(std::io::Error::last_os_error()));
         }
         Ok(())
     })?;
@@ -197,25 +263,32 @@ pub(in crate::process) fn spawn_detached(
 fn survivor_pid(
     intermediate: std::process::Child,
     mut receipt: impl std::io::Read,
-) -> std::io::Result<u32> {
+) -> Result<u32, crate::fact::DetachedPidCause> {
+    use crate::fact::{DetachedPidCause, NativeStatus};
     let (tx, rx) = std::sync::mpsc::channel();
     let watch =
         crate::process::ChildHandle::from_std(intermediate).into_watch(tx, std::convert::identity);
-    let born = rx
-        .recv()
-        .map_err(|_| std::io::Error::other("the reaper never reported the intermediate's exit"))?;
-    watch.reap()?;
+    let born = rx.recv().map_err(|_| DetachedPidCause::ReaperSilent)?;
+    watch
+        .reap()
+        .map_err(|e| DetachedPidCause::Reap(Box::new(crate::io::failure(&e))))?;
     if born != crate::process::WaitOutcome::Exited(0) {
-        return Err(std::io::Error::other(format!(
-            "the intermediate process ended as {born:?} instead of exiting 0"
-        )));
+        return Err(DetachedPidCause::IntermediateEnded(match born {
+            crate::process::WaitOutcome::Exited(code) => NativeStatus::Exited(code),
+            crate::process::WaitOutcome::Signaled(signal) => {
+                NativeStatus::Signaled(signal.number())
+            }
+        }));
     }
     let mut pid = [0u8; size_of::<libc::pid_t>()];
     receipt
         .read_exact(&mut pid)
-        .map_err(|err| std::io::Error::other(format!("the pid never came back ({err})")))?;
-    u32::try_from(libc::pid_t::from_ne_bytes(pid))
-        .map_err(|_| std::io::Error::other("the pid handed back is not a process id"))
+        .map_err(|e| DetachedPidCause::ReceiptRead(Box::new(crate::io::failure(&e))))?;
+    let pid = libc::pid_t::from_ne_bytes(pid);
+    if pid <= 0 {
+        return Err(DetachedPidCause::InvalidPid(pid));
+    }
+    Ok(pid.unsigned_abs())
 }
 
 #[cfg(test)]
@@ -225,6 +298,30 @@ mod tests {
     use crate::process::Pgid;
 
     // ── Whose failure ──────────────────────────────────────────────────────
+
+    #[test]
+    fn detached_receipts_preserve_invalid_pids_and_intermediate_status() {
+        use crate::fact::{DetachedPidCause, NativeStatus};
+        let intermediate = |code| {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", &format!("exit {code}")]);
+            crate::process::spawn(&mut cmd).unwrap()
+        };
+        assert_eq!(
+            super::survivor_pid(intermediate(3), &[][..]),
+            Err(DetachedPidCause::IntermediateEnded(NativeStatus::Exited(3)))
+        );
+        for pid in [0i32, -1] {
+            assert_eq!(
+                super::survivor_pid(intermediate(0), pid.to_ne_bytes().as_slice()),
+                Err(DetachedPidCause::InvalidPid(pid))
+            );
+        }
+        assert!(matches!(
+            super::survivor_pid(intermediate(0), &[][..]),
+            Err(DetachedPidCause::ReceiptRead(_))
+        ));
+    }
 
     /// A step of ral's failing before the mark is ral's: no pid reaches
     /// `i32::MAX`, so no group answers to it.

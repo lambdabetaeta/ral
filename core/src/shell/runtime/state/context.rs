@@ -6,6 +6,7 @@
 
 use super::Context;
 use crate::environ::{EnvVars, Reserved};
+use crate::fact::{AmbientSetting, Reason, StateFailure};
 use crate::path::{CwdPath, Resolver};
 use std::path::PathBuf;
 
@@ -37,15 +38,16 @@ impl Context {
         self.env_overrides.home()
     }
 
-    /// [`Self::home`], or the one sentence that names an unset `HOME`: what
+    /// [`Self::home`], or a typed missing-ambient refusal: what
     /// `~` and `home` ask for, each showing it through [`crate::path`].
     ///
     /// # Errors
     /// `HOME` is unset.
     pub(crate) fn require_home(&self) -> Result<String, crate::shell::runtime::Error> {
         self.home().ok_or_else(|| {
-            crate::shell::runtime::Error::new("HOME is unset, so `~` and `home` name no directory")
-                .with_hint("set HOME, or spell out an explicit path")
+            crate::shell::runtime::Error::new(Reason::State(Box::new(
+                StateFailure::MissingAmbient(AmbientSetting::Home),
+            )))
         })
     }
 
@@ -147,5 +149,29 @@ impl<H> Context<H> {
             args,
             modules,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_home_is_a_missing_ambient_fact_without_stored_advice() {
+        let shell = crate::test_helper::core_shell();
+        let mut context = shell.context;
+        context.env_overrides = EnvVars::default();
+        for key in crate::host::HOME_VARS {
+            context.set_env_var(key, "").unwrap();
+        }
+        let error = context.require_home().unwrap_err();
+        assert_eq!(
+            error.reason,
+            Reason::State(Box::new(StateFailure::MissingAmbient(AmbientSetting::Home)))
+        );
+        assert_eq!(error.hints(), []);
+        assert!(error.reason.advice().join("\n").contains("set HOME"));
+        context.set_env_var("HOME", "/effective/home").unwrap();
+        assert_eq!(context.require_home().unwrap(), "/effective/home");
     }
 }

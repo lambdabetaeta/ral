@@ -87,7 +87,10 @@ pub(crate) fn name_rules<W: Keyed>(
     let found = path::locate(name, path, None)
         .map(|hit| {
             FrozenPath::freeze(&hit).map_err(|why| {
-                Error::new(why).with_context(format!(
+                super::freeze::invalid_error(crate::fact::InvalidCause::Path(
+                    crate::fact::PathFailure::from(&why),
+                ))
+                .with_context(format!(
                     "{} is found at '{}' on the PATH",
                     crate::text::code(&format!("`name {name}")),
                     path::shown(&hit),

@@ -6,15 +6,25 @@
 mod chatgpt;
 pub(super) mod codex;
 mod grok;
+mod json;
 mod loopback;
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
+mod refresh_tests;
 mod session;
 pub use session::CredentialHandle;
 
-use crate::provider::error::{body_detail, root_cause};
+use crate::provider::error::{body_detail, error_object, reqwest_failure, service_from_reqwest};
 use crate::provider::identity::{self, Account, AccountId, Login};
 use crate::site::{Silent, site};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ral_core::data::json::{self as typed_json, JsonDecode};
+use ral_core::fact::{
+    RefreshFailure, RefreshFailureResponse, RefreshResponseBody, RefreshResponseBodyDetail,
+    RefreshResponseDetail, RefreshResponseDetailText, RefreshServiceResponse, ServiceCause,
+    ServiceFailure, ServiceOperation,
+};
 use ral_core::own::{OwnDir, OwnError};
 use ral_core::path::{Visibility, XdgKind};
 use serde::de::DeserializeOwned;
@@ -266,7 +276,7 @@ pub fn login_flow(
     // HTTP exchange does not poll the flag. A late cancellation must not save.
     cancelled(cancel)?;
     check_renewal(sign_in, &token)?;
-    let state = state()?;
+    let state = state().map_err(|error| error.to_string())?;
     let cancel = Arc::clone(cancel);
     session::transaction(&state, move |lease| {
         cancelled(&cancel)?;
@@ -337,7 +347,12 @@ fn renewal_target(tokens: &[OAuthToken], login: Login, name: &str) -> Result<OAu
 /// # Errors
 /// Missing/ambiguous targets and local persistence failure have no remote side effects.
 pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
-    let message = logout_at(&state()?, account, all, revoke_all)?;
+    let message = logout_at(
+        &state().map_err(|error| error.to_string())?,
+        account,
+        all,
+        revoke_all,
+    )?;
     ral_core::errln!("{message}");
     Ok(())
 }
@@ -355,7 +370,7 @@ fn logout_at(
         on_removed(&tokens);
         return Ok("Logged out of every signed-in account.".to_string());
     }
-    let (_, tokens) = read_at(state)?;
+    let (_, tokens) = read_at(state).map_err(|error| error.to_string())?;
     let target = match (account, tokens.as_slice()) {
         (Some(name), _) => name,
         (None, []) => return Ok("No signed-in account to log out of.".to_string()),
@@ -383,7 +398,7 @@ fn logout_at(
 
 /// Remove a unique local account; remote revocation is a separate worker job.
 pub(crate) fn sign_out(account: &str) -> Result<Option<OAuthToken>, String> {
-    remove_at(&state()?, account)
+    remove_at(&state().map_err(|error| error.to_string())?, account)
 }
 
 /// What the issuer accepted, not a promise about already-issued access tokens.
@@ -445,7 +460,7 @@ pub fn accounts() -> Vec<Account> {
 /// Reading or replacing the store failed.
 #[cfg(any(test, feature = "test-util"))]
 pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
-    save_one_at(&state()?, token)
+    save_one_at(&state().map_err(|error| error.to_string())?, token)
 }
 
 /// Current persisted accounts, attached to their canonical live owners.
@@ -454,7 +469,10 @@ pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
 /// The state directory is unavailable, the store is unreadable, or another
 /// process held its lease past the deadline.
 pub fn credentials() -> Result<Vec<CredentialHandle>, String> {
-    session::transaction(&state()?, session::StoreLease::credentials)
+    session::transaction(
+        &state().map_err(|error| error.to_string())?,
+        session::StoreLease::credentials,
+    )
 }
 
 #[cfg(test)]
@@ -467,15 +485,15 @@ pub(crate) fn commit_for_test(state: &OwnDir, token: &OAuthToken) -> CredentialH
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct Store {
+struct RawStore {
     host: Option<String>,
-    accounts: BTreeMap<String, StoredToken>,
+    accounts: BTreeMap<String, RawStoredToken>,
 }
 
 /// Flat disk schema: semantic validation is deliberately separate from typed
 /// deserialization. A bad required field makes the entire store unreadable.
 #[derive(Serialize, Deserialize)]
-struct StoredToken {
+struct RawStoredToken {
     service: String,
     issued: String,
     email: Option<String>,
@@ -494,7 +512,7 @@ struct StoredToken {
     plan: Option<String>,
 }
 
-impl From<&OAuthToken> for StoredToken {
+impl From<&OAuthToken> for RawStoredToken {
     fn from(token: &OAuthToken) -> Self {
         let mut stored = Self {
             service: token.login().service().name.as_str().to_string(),
@@ -532,10 +550,10 @@ impl From<&OAuthToken> for StoredToken {
     }
 }
 
-impl TryFrom<StoredToken> for OAuthToken {
+impl TryFrom<RawStoredToken> for OAuthToken {
     type Error = String;
 
-    fn try_from(stored: StoredToken) -> Result<Self, Self::Error> {
+    fn try_from(stored: RawStoredToken) -> Result<Self, Self::Error> {
         let login =
             Login::named(&stored.service).map_err(|_| "unknown login service".to_string())?;
         for (name, value) in [
@@ -576,7 +594,7 @@ impl TryFrom<StoredToken> for OAuthToken {
 }
 
 fn read_at(state: &OwnDir) -> Result<(Option<String>, Vec<OAuthToken>), OwnError> {
-    let Some(store) = state.load::<Store>(TOKEN_FILE)? else {
+    let Some(store) = state.load_json::<RawStore>(TOKEN_FILE)? else {
         return Ok((None, Vec::new()));
     };
     let tokens = store
@@ -626,7 +644,7 @@ fn host_id_at(state: &OwnDir) -> Result<String, String> {
 /// # Errors
 /// Returns an error if the store cannot be read or the host cannot be persisted.
 pub fn host_id() -> Result<String, String> {
-    host_id_at(&state()?)
+    host_id_at(&state().map_err(|error| error.to_string())?)
 }
 
 /// Exact full ids win even when another account's handle spells that id.
@@ -672,15 +690,15 @@ fn account_id(token: &OAuthToken) -> AccountId {
     AccountId::of_login(&token.login().service().name, &token.issued)
 }
 
-fn write_all_at(state: &OwnDir, host: Option<&str>, all: &[OAuthToken]) -> Result<(), String> {
-    let store = Store {
+fn write_all_at(state: &OwnDir, host: Option<&str>, all: &[OAuthToken]) -> Result<(), OwnError> {
+    let store = RawStore {
         host: host.map(str::to_string),
         accounts: all
             .iter()
-            .map(|token| (account_id(token).to_string(), StoredToken::from(token)))
+            .map(|token| (account_id(token).to_string(), RawStoredToken::from(token)))
             .collect(),
     };
-    Ok(state.store(TOKEN_FILE, &store, Visibility::Secret)?)
+    state.store_json(TOKEN_FILE, &store, Visibility::Secret)
 }
 
 /// Read and successfully delete under the same lock before returning a
@@ -725,54 +743,80 @@ impl<M> RefreshUpdate<M> {
 }
 
 /// How a refresh exchange failed, by whether the issuer may have rotated the
-/// refresh token. Each case carries its human-readable reason.
+/// refresh token. Each case retains its cause before rendering.
 #[derive(Debug)]
 enum RefreshError {
     /// Provably never sent.
-    NotSubmitted(String),
-    /// The issuer answered a client error (4xx): it did not rotate.
-    Rejected(String),
+    NotSubmitted(RefreshFailure),
+    /// A non-success, non-server response: it did not rotate.
+    Rejected(RefreshFailure),
     /// Sent, outcome unknown: a 5xx may follow a committed rotation, and a
     /// success we cannot use is included.
-    Ambiguous(String),
+    Ambiguous(RefreshFailure),
 }
 
 /// Submit one refresh request and decode its success body.
-async fn submit_refresh<T: DeserializeOwned>(
+async fn submit_refresh<T: JsonDecode>(
     request: reqwest::RequestBuilder,
     current: &OAuthToken,
 ) -> Result<T, RefreshError> {
     let service = current.login().service().name;
     let response = request.send().await.map_err(|error| {
-        let reason = format!(
-            "{service} token refresh request failed: {}",
-            root_cause(&error).unwrap_or_else(|| error.to_string())
-        );
+        let cause = RefreshFailure::Service(service_from_reqwest(
+            &error,
+            service.as_str(),
+            ServiceOperation::RefreshRequest,
+        ));
         if error.is_builder() || error.is_connect() {
-            RefreshError::NotSubmitted(reason)
+            RefreshError::NotSubmitted(cause)
         } else {
-            RefreshError::Ambiguous(reason)
+            RefreshError::Ambiguous(cause)
         }
     })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let reason = refresh_failure(status, &body, current);
+        let response = match response.text().await {
+            Ok(body) => refresh_failure(status, &body, current),
+            Err(error) => RefreshServiceResponse {
+                status: u32::from(status.as_u16()),
+                body: RefreshResponseBody::ReadFailed(reqwest_failure(&error)),
+            },
+        };
+        let cause = RefreshFailure::Service(ServiceFailure {
+            service: service.as_str().to_owned(),
+            operation: ServiceOperation::RefreshResponse,
+            context: Vec::new(),
+            cause: Box::new(ServiceCause::RefreshResponse(response)),
+        });
         return Err(if status.is_server_error() {
-            RefreshError::Ambiguous(reason)
+            RefreshError::Ambiguous(cause)
         } else {
-            RefreshError::Rejected(reason)
+            RefreshError::Rejected(cause)
         });
     }
-    response.json().await.map_err(|error| {
-        RefreshError::Ambiguous(format!(
-            "could not parse the {service} token refresh response: {error}"
-        ))
+    let bytes = response.bytes().await.map_err(|error| {
+        RefreshError::Ambiguous(RefreshFailure::Service(service_from_reqwest(
+            &error,
+            service.as_str(),
+            ServiceOperation::RefreshResponse,
+        )))
+    })?;
+    typed_json::from_slice(&bytes).map_err(|cause| {
+        RefreshError::Ambiguous(RefreshFailure::Response(RefreshFailureResponse {
+            status: u32::from(status.as_u16()),
+            cause,
+        }))
     })
 }
 
 async fn refresh(current: &OAuthToken) -> Result<OAuthToken, RefreshError> {
-    let client = http_client().map_err(RefreshError::NotSubmitted)?;
+    let client = build_http_client().map_err(|error| {
+        RefreshError::NotSubmitted(RefreshFailure::Service(service_from_reqwest(
+            &error,
+            current.login().service().name.as_str(),
+            ServiceOperation::BuildRefreshClient,
+        )))
+    })?;
     match &current.grant {
         Grant::Chatgpt {
             client_id,
@@ -841,20 +885,11 @@ pub(super) async fn revoke_at(
     }
 }
 
-const DEAD_REFRESH_CODES: [&str; 6] = [
-    "invalid_grant",
-    "invalid_refresh_token",
-    "token_expired",
-    "refresh_token_expired",
-    "refresh_token_invalidated",
-    "refresh_token_reused",
-];
-
 pub(super) fn refresh_failure(
     status: reqwest::StatusCode,
     body: &str,
     current: &OAuthToken,
-) -> String {
+) -> RefreshServiceResponse {
     let mut redacted = serde_json::from_str::<serde_json::Value>(body)
         .map_or_else(|_| body.to_string(), |value| value.to_string());
     let id_token = match &current.grant {
@@ -886,38 +921,42 @@ pub(super) fn refresh_failure(
     .into_iter()
     .flatten()
     .find_map(|code| code.as_str());
-    let service = current.login().service().name;
-    let handle = format!("{:?}", current.handle());
-    if status == reqwest::StatusCode::UNAUTHORIZED
-        || code.is_some_and(|code| DEAD_REFRESH_CODES.contains(&code))
-    {
-        let code = code.unwrap_or("unauthorized");
-        format!(
-            "the {service} login for {handle} has expired or been revoked ({code}); {} to sign in again",
-            renewal_hint(current)
-        )
-    } else {
-        format!(
-            "the {service} token refresh for {handle} failed ({status}): {}",
-            body_detail(body)
-        )
+    let message = error_object(&json)
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str);
+    let detail = match message {
+        Some(message) => text_detail(message),
+        None if body.trim().starts_with('<') => RefreshResponseDetail::Html,
+        None => match body.lines().find(|line| !line.trim().is_empty()) {
+            Some(line) => text_detail(line.trim()),
+            None => RefreshResponseDetail::Empty,
+        },
+    };
+    RefreshServiceResponse {
+        status: u32::from(status.as_u16()),
+        body: RefreshResponseBody::Detail(RefreshResponseBodyDetail {
+            code: code.map(str::to_owned),
+            detail,
+        }),
     }
 }
 
-fn renewal_hint(token: &OAuthToken) -> String {
-    format!(
-        "use account {:?} on {}",
-        account_id(token).as_str(),
-        token.login().service().name
-    )
+fn text_detail(detail: &str) -> RefreshResponseDetail {
+    RefreshResponseDetail::Text(RefreshResponseDetailText {
+        preview: detail.chars().take(200).collect(),
+        truncated: detail.chars().count() > 200,
+    })
 }
 
 pub(super) fn http_client() -> Result<reqwest::Client, String> {
+    build_http_client().map_err(|error| format!("could not build HTTP client: {error}"))
+}
+
+fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     site!(Silent::OauthClient, reqwest::Client::builder())
         .use_preconfigured_tls(crate::provider::tls::config())
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("could not build HTTP client: {e}"))
 }
 
 pub(super) async fn json_or_error<T: DeserializeOwned>(
@@ -1227,12 +1266,16 @@ mod tests {
     fn semantic_rejections_drop_only_invalid_entries_and_queries_do_not_rewrite() {
         let state = store();
         let valid = token(Login::Grok, "valid", Some("same@work"));
-        let base = serde_json::to_value(StoredToken::from(&token(Login::Chatgpt, "subject", None)))
-            .unwrap();
+        let base = serde_json::to_value(RawStoredToken::from(&token(
+            Login::Chatgpt,
+            "subject",
+            None,
+        )))
+        .unwrap();
         let mut entries = serde_json::Map::new();
         entries.insert(
             account_id(&valid).to_string(),
-            serde_json::to_value(StoredToken::from(&valid)).unwrap(),
+            serde_json::to_value(RawStoredToken::from(&valid)).unwrap(),
         );
         let mut cases = Vec::new();
         for service in ["unknown", "chatgpt"] {
@@ -1257,7 +1300,8 @@ mod tests {
             cases.push(entry);
         }
         let codex =
-            serde_json::to_value(StoredToken::from(&token(Login::Codex, "subject", None))).unwrap();
+            serde_json::to_value(RawStoredToken::from(&token(Login::Codex, "subject", None)))
+                .unwrap();
         for value in [None, Some("")] {
             let mut entry = codex.clone();
             match value {
@@ -1291,7 +1335,7 @@ mod tests {
     fn canonical_serialization_omits_irrelevant_grant_fields() {
         for login in Login::ALL {
             let original = token(login, "same", None);
-            let mut wire = serde_json::to_value(StoredToken::from(&original)).unwrap();
+            let mut wire = serde_json::to_value(RawStoredToken::from(&original)).unwrap();
             let expected: &[&str] = match login {
                 Login::Chatgpt => &["id_token", "client_id"],
                 Login::Codex => &["account_id"],
@@ -1303,7 +1347,7 @@ mod tests {
                     wire[field] = json!("irrelevant");
                 }
             }
-            let stored: StoredToken = serde_json::from_value(wire).unwrap();
+            let stored: RawStoredToken = serde_json::from_value(wire).unwrap();
             let loaded = OAuthToken::try_from(stored).unwrap();
             // Codex workspace and plan are relevant metadata, unlike foreign grant fields.
             if login == Login::Codex {
@@ -1318,7 +1362,7 @@ mod tests {
             } else {
                 assert_eq!(loaded, original);
             }
-            let canonical = serde_json::to_value(StoredToken::from(&loaded)).unwrap();
+            let canonical = serde_json::to_value(RawStoredToken::from(&loaded)).unwrap();
             if login != Login::Chatgpt {
                 assert!(canonical.get("id_token").is_none());
                 assert!(canonical.get("client_id").is_none());
@@ -1397,7 +1441,8 @@ mod tests {
             r#"{"error":"access-secret refresh-secret id-secret"}"#,
             r#"{"error":"\u0061ccess-secret refresh-secret id-secret"}"#,
         ] {
-            let error = refresh_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, body, &current);
+            let error = refresh_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, body, &current)
+                .describe();
             for secret in ["access-secret", "refresh-secret", "id-secret"] {
                 assert!(!error.contains(secret));
             }

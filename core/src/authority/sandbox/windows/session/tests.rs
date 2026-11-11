@@ -203,11 +203,22 @@ fn a_redirected_allowance_refuses_the_launch_before_the_memo_is_consulted() {
     let Err(Unstarted::Refused(why)) = confine() else {
         panic!("a redirected allowance refuses the launch");
     };
-    let why = why.to_string();
     assert!(
-        why.contains("an allowance names what it named when granted"),
+        why.describe().contains("now a junction or symbolic link"),
         "{why}"
     );
+    assert!(
+        why.reason
+            .advice()
+            .iter()
+            .any(|advice| advice.contains("an allowance names what it named when granted")),
+        "{why}"
+    );
+    assert!(
+        why.plain()
+            .contains("an allowance names what it named when granted")
+    );
+    assert!(why.hints().is_empty(), "intrinsic advice is not stored");
 }
 
 /// A tree holding a junction and a symlink is carved by listing it without
@@ -313,11 +324,13 @@ fn confined_child_writes_inside_the_grant_and_not_outside() {
     let run_echo_to = |rel: &str| -> WaitOutcome {
         let mut launch = Launch::new(cmd);
         launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
-        launch.situate(ChildEnv {
-            cwd: &granted,
-            set: Vec::new(),
-            unset: Vec::new(),
-        });
+        launch
+            .situate(ChildEnv {
+                cwd: &granted,
+                set: Vec::new(),
+                unset: Vec::new(),
+            })
+            .unwrap();
         launch.stdin(StdioSpec::Null);
         launch.stdout(StdioSpec::Null);
         launch.stderr(StdioSpec::Null);
@@ -470,11 +483,13 @@ fn confined(
     use crate::process::{Launch, StdioSpec};
     let mut launch = Launch::new(cmd());
     launch.args(["/d", "/s", "/c", line]);
-    launch.situate(ChildEnv {
-        cwd,
-        set: Vec::new(),
-        unset: Vec::new(),
-    });
+    launch
+        .situate(ChildEnv {
+            cwd,
+            set: Vec::new(),
+            unset: Vec::new(),
+        })
+        .unwrap();
     launch.stdin(StdioSpec::Null);
     launch.stdout(StdioSpec::Piped);
     launch.stderr(StdioSpec::Piped);
@@ -581,6 +596,17 @@ fn unavailable(refused: Result<crate::process::Launch, Unstarted>) -> String {
                 .describe()
                 .starts_with("sandbox confinement unavailable: ") =>
         {
+            assert!(
+                why.reason
+                    .advice()
+                    .iter()
+                    .any(|advice| advice == "Remove that access from it, or drop the exclusion.")
+            );
+            assert!(
+                why.plain()
+                    .contains("Remove that access from it, or drop the exclusion.")
+            );
+            assert!(why.hints().is_empty(), "intrinsic advice is not stored");
             why.describe().into_owned()
         }
         Err(other) => panic!("expected an unavailable confinement, got {other:?}"),
@@ -774,11 +800,13 @@ fn an_image_is_granted_to_its_own_launch_alone() {
                 "--nocapture",
             ]);
             let key = tree.at(r"B\key.txt");
-            launch.situate(ChildEnv {
-                cwd: Path::new(&a),
-                set: vec![("RAL_TEST_IMAGE_READ".as_ref(), key.as_ref())],
-                unset: Vec::new(),
-            });
+            launch
+                .situate(ChildEnv {
+                    cwd: Path::new(&a),
+                    set: vec![("RAL_TEST_IMAGE_READ".as_ref(), key.as_ref())],
+                    unset: Vec::new(),
+                })
+                .unwrap();
             launch.stdin(StdioSpec::Null);
             launch.stdout(StdioSpec::Null);
             launch.stderr(StdioSpec::Piped);

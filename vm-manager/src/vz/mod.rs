@@ -20,6 +20,7 @@ use objc2_virtualization::{
     VZVirtioSocketDevice, VZVirtioSocketListener, VZVirtualMachine, VZVirtualMachineState,
 };
 
+use crate::dial::DialError;
 use crate::error::{Error, GuestConsole, Wire};
 use crate::lifecycle::{Leaf, Missed, SessionDisk, await_dials, stop_within, sweep, unix_seconds};
 use crate::machine::{self, Booted, Hypervisor, Machine, Socket};
@@ -140,7 +141,7 @@ enum Command {
     /// Dial on the worker thread, where the !Send machine lives.
     Connect {
         port: u32,
-        reply: SyncSender<std::io::Result<OwnedFd>>,
+        reply: SyncSender<Result<OwnedFd, DialError>>,
     },
 }
 
@@ -345,20 +346,17 @@ impl Guest {
 }
 
 impl Machine for Guest {
-    fn dial_engine(&self) -> std::io::Result<Socket> {
+    fn dial_engine(&self) -> Result<Socket, DialError> {
         self.connect_guest(ports::FACTORY)
     }
 
     /// # Errors
     /// Returns the channel, guest-dial, timeout or descriptor-duplication error.
-    fn connect_guest(&self, port: u32) -> std::io::Result<Socket> {
-        let gone = || {
-            std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "the machine thread stopped before it could dial the guest",
-            )
-        };
-        let control = self.control.as_ref().ok_or_else(gone)?;
+    fn connect_guest(&self, port: u32) -> Result<Socket, DialError> {
+        let control = self
+            .control
+            .as_ref()
+            .ok_or(DialError::MachineThreadStopped)?;
         let (reply_tx, reply_rx) = mpsc::sync_channel(0);
         control
             .cmd_tx
@@ -366,8 +364,10 @@ impl Machine for Guest {
                 port,
                 reply: reply_tx,
             })
-            .map_err(|_| gone())?;
-        reply_rx.recv().map_err(|_| gone())?
+            .map_err(|_| DialError::MachineThreadStopped)?;
+        reply_rx
+            .recv()
+            .map_err(|_| DialError::MachineThreadStopped)?
     }
 
     fn console(&self) -> GuestConsole {

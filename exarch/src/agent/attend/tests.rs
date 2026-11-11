@@ -106,7 +106,7 @@ fn an_ended_life_takes_nothing_and_announces_no_idle_state() {
 #[test]
 fn a_severed_engine_ends_the_life_and_records_its_cause() {
     let session = Agent::for_test("system").unwrap();
-    let cause = Severed::Closed("engine lost".into());
+    let cause = Severed::Closed(ral_core::fact::ConnectionClosed::TransportDropped);
     session.engine().transport().sever(cause.clone());
     let (emit, rx) = emitter(&session);
     let handle = session.handle();
@@ -205,7 +205,7 @@ fn ordinary_log_refusal_repairs_and_remains_usable() {
     let (emit, _rx) = emitter(&session);
     let outcome = human_exchange(&mut session, "refused while results owed", &emit);
     assert!(
-        matches!(&outcome, AgentOutcome::Failed(reason) if !reason.starts_with(WORKER_PANIC_PREFIX))
+        matches!(&outcome, AgentOutcome::Failed(reason) if matches!(reason, crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Context(_))))
     );
     assert!(session.is_ready());
     assert!(session.handle().is_live());
@@ -302,10 +302,12 @@ fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
     set_provider(&mut child, scripted("test-model", script));
     let (emit, rx) = emitter(&child);
     let outcome = task_exchange(&mut child, "do the thing", &emit);
-    assert!(matches!(&outcome, AgentOutcome::Failed(reason) if reason == NO_REPLY_REASON));
+    assert!(
+        matches!(&outcome, AgentOutcome::Failed(reason) if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::NoReply))
+    );
     settle(&mut child, outcome);
     assert!(
-        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(reason)) if reason == NO_REPLY_REASON)
+        matches!(child.handle().status().unwrap().report, Some(ChildStatus::Failed(reason)) if reason == crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::NoReply))
     );
     assert!(child.is_ready());
     assert_eq!(
@@ -330,7 +332,7 @@ fn provider_panic_is_recorded_and_the_next_prompt_still_deliberates() {
     let (emit, rx) = emitter(&session);
     let panicked = human_exchange(&mut session, "crash", &emit);
     assert!(
-        matches!(&panicked, AgentOutcome::Failed(reason) if reason.starts_with(WORKER_PANIC_PREFIX))
+        matches!(&panicked, AgentOutcome::Failed(reason) if matches!(&reason, crate::record::ChildFailure::Panicked(text) if text.starts_with(WORKER_PANIC_PREFIX)))
     );
     assert!(session.is_ready());
     settle(&mut session, panicked);
@@ -560,14 +562,18 @@ fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() 
     wait_until("worker did not become ready", || {
         session
             .engine()
-            .read(|transport| transport.workers())
+            .read(ral_core::fact::ProbeSubject::Workers, |transport| {
+                transport.workers()
+            })
             .unwrap()
             .iter()
             .any(|worker| matches!(worker.state, WorkerState::Ready(_)))
     });
     let worker = session
         .engine()
-        .read(|transport| transport.workers())
+        .read(ral_core::fact::ProbeSubject::Workers, |transport| {
+            transport.workers()
+        })
         .unwrap()
         .into_iter()
         .find(|worker| worker.title == "ready-job" && matches!(worker.state, WorkerState::Ready(_)))
@@ -600,10 +606,9 @@ fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() 
         })
         .unwrap();
     assert!(prompt.text.contains("errand finished."), "{}", prompt.text);
-    session
-        .engine()
-        .transport()
-        .sever(Severed::Closed("engine lost".into()));
+    session.engine().transport().sever(Severed::Closed(
+        ral_core::fact::ConnectionClosed::TransportDropped,
+    ));
     assert!(session.admit(batch()).is_none());
     assert!(!session.handle().is_live());
 }
@@ -796,7 +801,7 @@ fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
             assert!(
                 matches!(&notices[..], [crate::bus::Drained::Input(Input::Child {
                 id, status: ChildStatus::Failed(reason), ..
-            })] if *id == handle.id() && reason == &failure.to_string())
+            })] if *id == handle.id() && reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(failure.failure())))
             );
         }
         assert!(parent.handle().is_live());
@@ -834,7 +839,7 @@ fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
     assert!(
         matches!(&notices[..], [crate::bus::Drained::Input(Input::Child {
         id, status: ChildStatus::Failed(reason), ..
-    })] if *id == handle.id() && reason == &failure.to_string())
+    })] if *id == handle.id() && reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(failure.failure())))
     );
     assert!(matches!(
         parent.mailbox.next(parent.rest()),
@@ -851,12 +856,12 @@ fn cell_poison_does_not_replace_an_earlier_recording_failure() {
     take_task(&handle, &child.mailbox);
     let recorder = child.recorder();
     recorder.fail_after(0);
-    let first = recorder
+    let first_failure = recorder
         .emit(Display::Answer {
             text: "lost".into(),
         })
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+    let first = first_failure.to_string();
     assert!(first.starts_with("recording to "));
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -876,7 +881,7 @@ fn cell_poison_does_not_replace_an_earlier_recording_failure() {
     assert!(
         matches!(&parent.mailbox.drain()[..], [crate::bus::Drained::Input(Input::Child {
         status: ChildStatus::Failed(reason), ..
-    })] if reason == &first)
+    })] if reason == &crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(first_failure.failure())))
     );
     assert_eq!(recorder.check_available().unwrap_err().to_string(), first);
 }

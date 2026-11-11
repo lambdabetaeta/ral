@@ -28,6 +28,7 @@ use crate::agent::gauge::{Load, Reminder, Unit};
 use crate::agent::outcome::Outcome;
 use crate::provider::{CutShort, ProviderError};
 use crate::record::{AgentLog, Forensic, Spent};
+use ral_core::fact::ProviderStop;
 
 /// Consecutive model-visible repairs, distinct from the provider's transport
 /// retries.
@@ -225,7 +226,15 @@ impl Nudges {
             Ok(Outcome::Complete) => self.on_complete(facts, log),
             Ok(Outcome::Empty) => self.repair("empty turn".into(), EMPTY_MESSAGE, log),
             Ok(Outcome::Stopped { reason }) => {
-                self.repair(format!("stop={reason}"), EARLY_STOP_MESSAGE, log)
+                let raw = match reason {
+                    ProviderStop::Completed(raw)
+                    | ProviderStop::MaxTokens(raw)
+                    | ProviderStop::ToolCall(raw)
+                    | ProviderStop::ContentFilter(raw)
+                    | ProviderStop::StopSequence(raw)
+                    | ProviderStop::Unclassified(raw) => raw,
+                };
+                self.repair(format!("stop={raw}"), EARLY_STOP_MESSAGE, log)
             }
             Err(ProviderError::Truncated { cause }) => match cause.as_ref() {
                 CutShort::OutputCap { .. } => {

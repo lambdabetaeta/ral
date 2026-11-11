@@ -10,6 +10,7 @@
 
 mod common;
 
+use ral_core::fact::RefusedGrantKey;
 use ral_core::ir::{Comp, CompKind, GroupNode, Phrase, Toplevel, Unchecked, Val};
 use ral_core::ty::{CompTyNode, Grade, Ty, TyNode};
 use ral_core::typecheck::contract::declared;
@@ -564,8 +565,10 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
             reason: None,
         },
         ral_core::typecheck::contract::Key {
-            label: "banned",
-            holds: ral_core::typecheck::contract::Holds::Refused("write it somewhere else"),
+            label: "capabilities",
+            holds: ral_core::typecheck::contract::Holds::Refused(
+                RefusedGrantKey::ManifestCapabilitiesUnenforced,
+            ),
             reason: None,
         },
     ],
@@ -658,31 +661,43 @@ fn return_schema_catches_a_key_misspelled_behind_a_spread() {
     );
 }
 
-/// A key the table knows and refuses says so in its own words: folding it into
-/// "unknown key, here is the list" would lose the only advice it carries.
+/// A known refused key preserves its intrinsic advice rather than becoming
+/// an unknown key.
 #[test]
 fn return_schema_keeps_a_refused_keys_own_sentence() {
-    let errs = contract_errors(&REQUIRED_TABLE, "return [must: 'here', banned: 1]");
+    let errs = contract_errors(&REQUIRED_TABLE, "return [must: 'here', capabilities: 1]");
     let refusal = errs
         .iter()
         .find(|e| e.kind.code() == "T0026")
         .unwrap_or_else(|| panic!("expected T0026, got: {errs:?}"));
     assert_eq!(
         refusal.hint().as_deref(),
-        Some("write it somewhere else"),
-        "the table's own advice is the message"
+        Some(RefusedGrantKey::ManifestCapabilitiesUnenforced.advice()),
+        "the refusal preserves its intrinsic advice"
     );
     assert_eq!(errs.len(), 1, "and it is not also an unknown key: {errs:?}");
 }
 
-/// A key the table does not name is said in the table's own wording, the one
-/// the runtime checks use.
+/// An unknown key shares the table's facts with the runtime checks.
 #[test]
-fn return_schema_names_an_unknown_key_in_the_tables_words() {
+fn return_schema_shares_the_tables_unknown_key_facts() {
     let errs = schema_errors("return [nn: 1]");
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert_eq!(errs[0].kind.code(), "T0076");
-    assert_eq!(errs[0].kind.render_message(), TEST_TABLE.unknown_key("nn"),);
+    let TypeErrorKind::UnknownKey { form, key, offered } = &errs[0].kind else {
+        panic!("expected unknown-key facts: {errs:?}");
+    };
+    let expected = TEST_TABLE.unknown_key("nn");
+    assert_eq!(*form, TEST_TABLE.form);
+    assert_eq!(key, &expected.field);
+    assert_eq!(
+        offered
+            .iter()
+            .copied()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        expected.offered
+    );
 }
 
 /// A map has keys where the table has labels, so the spelling is refused.
@@ -1060,18 +1075,27 @@ fn grant_refuses_a_map_or_unit_as_a_nested_table() {
 }
 
 #[test]
-fn grant_names_an_unknown_nested_key_in_that_tables_words() {
+fn grant_shares_the_nested_tables_unknown_key_facts() {
     let errs = raw_errors("grant [exec: [allwo: []]] { return 1 }");
     assert_eq!(codes_of(&errs), ["T0076"], "{errs:?}");
+    let Some(ral_core::typecheck::contract::Holds::Table(table)) =
+        declared(Form::Grant).holds("exec")
+    else {
+        panic!("exec holds a nested table");
+    };
+    let TypeErrorKind::UnknownKey { form, key, offered } = &errs[0].kind else {
+        panic!("expected unknown-key facts: {errs:?}");
+    };
+    let expected = table.unknown_key("allwo");
+    assert_eq!(*form, table.form);
+    assert_eq!(key, &expected.field);
     assert_eq!(
-        errs[0].kind.render_message(),
-        declared(Form::Grant)
-            .holds("exec")
-            .and_then(|h| match h {
-                ral_core::typecheck::contract::Holds::Table(t) => Some(t.unknown_key("allwo")),
-                _ => None,
-            })
-            .unwrap()
+        offered
+            .iter()
+            .copied()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        expected.offered
     );
 }
 

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-verified_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-verified_at_date: 2026-11-06
+generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+verified_at_date: 2026-11-10
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
@@ -160,11 +160,12 @@ module's framed scaffold:
   `RunReport::into_report` calls `End::render` against the shell's sources,
   borrowing its actual session exit-hints table;
   errors, stops and panics share the `Diagnosis` renderer. The wire alias is
-  `Ending<FOValue, ErrorRecord, CancelCause>`: a value becomes first-order data,
-  an error its closed `[reason, frame, site]` record, and a `Stop` its cause.
+  `Ending<FOValue, ErrorFact, CancelCause>`: a value becomes first-order data,
+  an error its `ErrorFact` (`{frame, reason, site}`), and a `Stop` its cause.
   A non-data value becomes `Err`, code 1, completed with the retained base
   even after the caller's frame is restored. `Reason` is shared by runtime
-  error and record; code and description are projections
+  error and fact; a program reads the `ErrorRecord` projection, whose `message`
+  and `status` are derived from it
   ([[decisions/261105_the-error-record|the error record]]).
   `Report::Ran(Ran { ending, rendered, single_command, captured, trail })` keeps
   run context outside the cases; `Report::code()` is the host's `u8` status.
