@@ -24,7 +24,7 @@ the model never constructs a witness, only copies one from `view-hash` into
 `edit-hash`, and both derive identical witnesses from identical content. The `h`
 prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 `Val::Int` and silently fails to compare against the recomputed `String`
-([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).
+([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]]).
 
 ## Rust atoms — `shell_eval/builtins.rs`
 

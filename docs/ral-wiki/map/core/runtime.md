@@ -154,8 +154,7 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     refusal. There is no parking: the reaper answers any stop with `SIGCONT`
     ([[internals/pipeline-execution|pipeline-execution]],
     [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
-  - Redirects install on the handler arm
-    ([[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]). One interpreter, `shell::exec::redirect::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+  - Redirects install on the handler arm. One interpreter, `shell::exec::redirect::RedirectState`, installs them for an external and a block alike ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
     `io::child::Connection` binds child streams for standalone commands,
     direct pipeline stages, and externals inside stage threads
     ([[map/core/io-process|io-process]]). Pipeline topology stays in `ByteIn`

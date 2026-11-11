@@ -86,8 +86,7 @@ primary.
   `(args, param) → (result, param′)`: a stateful fold over the operation
   stream. ral's clauses are stateless between interceptions; this would add
   expressiveness (rate-limiting, replay-from-script mocks) without touching
-  the no-first-class-`resume` line. Proposed as
-  [[decisions/260603_stateful-handlers|stateful-handlers]].
+  the no-first-class-`resume` line.
 
 Cite: Plotkin & Pretnar, *Handlers of Algebraic Effects*, ESOP 2009,
 [doi:10.1007/978-3-642-00590-9_7](https://doi.org/10.1007/978-3-642-00590-9_7).

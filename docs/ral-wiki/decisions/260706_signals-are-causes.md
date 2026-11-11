@@ -108,7 +108,7 @@ the session instead of dealing an unusable prompt whose every turn says
 - **Session-lifetime root-slot publication.** Publishing the durable root at
   boot (instead of per-turn) would let an idle-time SIGTERM latch. But the
   slot guards' save/restore discipline is LIFO on one thread
-  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]);
+  ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]);
   construction-time publication would put every concurrently-constructed
   `Shell` (every test) into the slots and turn out-of-order drops into a
   dangling flag pointer. Per-turn publication stays.

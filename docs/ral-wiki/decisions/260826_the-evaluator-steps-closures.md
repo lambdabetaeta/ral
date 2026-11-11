@@ -105,9 +105,7 @@ stays open.
 
 Narrative:
 [[internals/evaluator-machine|evaluator-machine]]. Supersedes the trampoline
-account in
-[[decisions/260514_completion-escape-refactor|completion-escape-refactor]]
-and the body-shares-the-session bracket in
+account and the body-shares-the-session bracket in
 [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]
 as descriptions of the mechanism; their invariants hold by construction now.
 

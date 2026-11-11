@@ -9,7 +9,7 @@ ral cancels cooperatively — no signal preemption. `process::check(shell)`
 queued SIGINT (`SIGNAL_COUNT`) or the live `CancelScope` (`shell.local.cancel`,
 walked to its root) is set; a long computation stays responsive only where it is
 polled. exarch's per-call watchdog cancels exactly that scope
-([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] is the Esc/SIGINT
+([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]] is the Esc/SIGINT
 half), so whether a tool call honours its timeout is the same question as whether
 the running code polls.
 
@@ -69,6 +69,5 @@ reachable checkpoint) aborts at status 130; a long `range` trips past the chunk
 while a short one completes untouched. The negative was checked: removing the
 `map` and `range` polls fails exactly those two tests.
 
-See also [[map/core/evaluator|evaluator]], [[map/core/builtins|builtins]],
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] (the exarch-side
-token the watchdog and Esc raise), and [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]].
+See also [[map/core/evaluator|evaluator]], [[map/core/builtins|builtins]], and
+[[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]].

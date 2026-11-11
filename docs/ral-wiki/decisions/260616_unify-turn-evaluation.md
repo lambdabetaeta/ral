@@ -441,7 +441,7 @@ buffers — would close the leak, and remains future work.
   by `request_foreground_cancel` / `request_root_cancel`. The slots live in core,
   separate from the deadline trigger, which now rides the shared `process::reaper`
   (the per-call watchdog thread is gone). exarch's chained handler and per-turn `Token`
-  ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]) sit alongside:
+  sit alongside:
   the `Token` halts the turn loop and provider streaming, the foreground slot
   halts the in-flight ral eval.
 
@@ -456,8 +456,7 @@ re-adds a per-call timeout argument.
 
 See also [[internals/a-turn-end-to-end|a-turn-end-to-end]] (the shared spine
 this lifts), [[decisions/260504_hot-path-cancellation|hot-path-cancellation]]
-(where the evaluator polls the scope), [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]
-and [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]
+(where the evaluator polls the scope), [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]
 (exarch's Esc/SIGINT half), [[decisions/260610_host-embedding-api|host-embedding-api]]
 (the embedding seam this extends), [[map/repl/loop|repl/loop]],
 [[map/exarch/shell-eval|exarch/shell-eval]], and

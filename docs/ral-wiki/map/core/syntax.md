@@ -98,8 +98,7 @@ sees raw bytes and bare words.
   `let [same, same] = [1, 2]` is a parse error at the pattern's span, while a
   repeat across curried parameters stays ordinary shadowing.
 - `ast.rs` — the surface AST. `Ast` is the expression node and `Stmt` the
-  statement node; the enum is deliberately wide and flat
-  ([[decisions/260530_ast-stays-flat|ast-stays-flat]]). The operator forms
+  statement node; the enum is deliberately wide and flat. The operator forms
   `Binary`, `Negate`, `Not`, `And`, `Or` are ordinary variants with `Ast`
   operands; `$[…]` itself leaves no node
   ([[decisions/260909_expression-block-is-a-lexical-mode|expression-block-is-a-lexical-mode]]).

@@ -1,6 +1,6 @@
 ---
-status: 'active; its route-survival and WF-2 paragraphs are superseded by [[decisions/260930_capture-is-decided-by-syntax]] — pipes stay positional; a stage writes.'
-supersedes: decisions/260601_modes-equality-constrained-shared, decisions/260603_ir-pipespec-annotation, decisions/260603_unconditional-mode-pass, decisions/260606_alias-head-defines-its-modes, decisions/260609_pure-pipe-equation, decisions/260610_value-edge-locality, decisions/260628_non-final-bytes-are-effects, decisions/260809_byte-only-pipelines
+status: 'active; its route-survival and WF-2 paragraphs are superseded by [[design/capture]] — pipes stay positional; a stage writes.'
+supersedes: decisions/260609_pure-pipe-equation, decisions/260610_value-edge-locality, decisions/260628_non-final-bytes-are-effects, decisions/260809_byte-only-pipelines
 ---
 
 # Pipes are positional byte wires
@@ -14,7 +14,7 @@ supersedes: decisions/260601_modes-equality-constrained-shared, decisions/260603
 > unaffected; only the shape of that one route's runtime carrier changed.
 > Read `final_route` below as `PipeYield`.
 
-> Superseded in part by [[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]: the route-survival and WF-2 paragraphs, `PipeYield` and `final_route` are gone. Pipes stay positional; a stage writes, and the pipeline's value is its final stage's.
+> Superseded in part by [[design/capture|capture is decided by syntax]]: the route-survival and WF-2 paragraphs, `PipeYield` and `final_route` are gone. Pipes stay positional; a stage writes, and the pipeline's value is its final stage's.
 
 ## Decision
 
@@ -188,14 +188,13 @@ interior edge) and its refusal of implicit value serialisation onto one.
 
 Superseded with it, as consequences of the same collapse:
 
-- [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]
-  and [[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]],
+- The equality-constrained shared modes and the unconditional mode pass,
   which built and then made mandatory the two-mode (`input`/`output`) lattice
   and its dedicated solver — there is one route now, not a pair, and it needs
   no second engine to disagree with.
-- [[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]], whose
+- The IR pipespec annotation, whose
   per-stage `Wire` is the annotation this page's single `final_route` replaces.
-- [[decisions/260606_alias-head-defines-its-modes|alias-head-defines-its-modes]],
+- The alias-head-defines-its-modes rule,
   whose "fresh head defines its own modes, known head constrains the arm" rule
   is restated above as a route pin, not a mode pair pin — with the WF-2
   obligation it was missing.

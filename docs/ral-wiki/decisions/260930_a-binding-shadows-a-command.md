@@ -1,7 +1,6 @@
 ---
 status: accepted
 generated_at_commit: 8d868e18
-supersedes: decisions/260622_deny-binding-path-commands
 ---
 
 # A binding shadows a command

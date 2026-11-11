@@ -1,6 +1,5 @@
 ---
 status: active
-supersedes: decisions/260618_host-seam-turn-observer
 ---
 
 # A turn is a synchronous call; the host owns the loop, and completion is the call returning — not the channel closing
@@ -81,7 +80,7 @@ finishes in ~80 s, then exarch idles ~13.5 min until Harbor SIGKILLs it at the
 no-tool-call message with **no `session_ended`** — the work was done, exarch could
 not return.
 
-[[decisions/260618_host-seam-turn-observer|host-seam-turn-observer]] diagnosed the
+The earlier host-seam analysis diagnosed the
 mechanism exactly and that diagnosis stands: exarch's `Sink::drive`
 (`exarch/src/bus.rs`) loops `while let Ok(ev) = rx.recv()` and returns only on
 channel **disconnect** — when the last `Sender<Event>` drops. The structured
@@ -333,8 +332,7 @@ Walking the policy axes, each is a request field or orthogonal:
 - **Structured surface** → `SurfaceSink`: a turn-local
   `Arc<dyn EventSink + Send + Sync>`; the same trait the REPL no-ops and exarch
   routes to its rail.
-- **Cancellation** → one `select!` arm on the existing per-root-turn token
-  ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]); Esc / Ctrl-C /
+- **Cancellation** → one `select!` arm on the existing per-root-turn token; Esc / Ctrl-C /
   deadline all land there. No host names a `CancelScope`.
 - **Capabilities / limits / script name** → request fields.
 - **`watch`** → untouched (part 1): a REPL-only builtin over `Send` byte sinks
@@ -476,9 +474,7 @@ turn.
 
 ## Alternatives considered
 
-- **The `!Send` surface of
-  [[decisions/260618_host-seam-turn-observer|host-seam-turn-observer]]
-  (superseded).** Hardens the surface so it cannot move into a detached worker —
+- **The `!Send` surface of the earlier host-seam design (superseded).** Hardens the surface so it cannot move into a detached worker —
   but it makes `Shell` `!Send`, which fails to compile against exarch's
   `pump`/`Session` move (`session.rs:421`) and so drags in frame migration and the
   `Value`-non-leak spend; and it guards thread-confinement when the bug lives on
@@ -526,14 +522,12 @@ and `Shell` stays `Send`. Honest costs, none fatal:
   of growing forever.
 - **Cooperative cancellation must still reach the sync eval promptly** — it does,
   through the existing cancel scopes plus `EINTR` on blocking syscalls
-  ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]).
+  ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]).
 - **One ordered stream.** exarch captures bytes today (nothing echoes live), so
   byte/surface interleaving is moot now; a future TUI that streams bytes live
   should route both through one `Event` enum to keep on-screen order.
 
 See also
-[[decisions/260618_host-seam-turn-observer|host-seam-turn-observer]] (the analysis
-this supersedes),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the unification
 this completes),
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] (the API collapse
@@ -548,8 +542,6 @@ nothing waits on the channel),
 intact),
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]] (the select-over-inbox
 direction this turn loop matches),
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] (the cancel token
-the loop's cancel arm reads),
 [[internals/output-capture-and-detachment|output-capture-and-detachment]] (the
 data-pipe story this completes for the surface), [[map/exarch|map: exarch]],
 [[map/repl/loop|repl/loop]].

@@ -30,7 +30,7 @@ second session at all.
 
 ral is call-by-push-value ([[design/cbpv|cbpv]]). A `{ … }` block is a thunk of a
 value computation, `U(F α)`; a `λx. …` is a thunk of a function, `U(A → B)`; both
-are `Val::Thunk` ([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]).
+are `Val::Thunk` ([[decisions/261102_the-checked-ir-is-the-calculus|the-checked-ir-is-the-calculus]]).
 Their *eliminations* differ — `!` forces a block, application pops an argument and
 runs a lambda — but in the operational semantics each is a step over a single
 configuration ⟨M, ρ, σ⟩: it extends the environment ρ (the lambda binds its
@@ -143,7 +143,7 @@ parameter bound in the pushed frame and `cwd` added to the fold-back set.
   discipline applied to state flow rather than to a type.
 - **It matches the semantics.** ⟨M, ρ, σ⟩ threads one σ; the runtime now does
   too. The CBPV elimination forms keep their distinct typing
-  ([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]); only
+  ([[decisions/261102_the-checked-ir-is-the-calculus|the-checked-ir-is-the-calculus]]); only
   their *shared* store-threading is made literal.
 - **Copy stays where copy is real.** Threads and processes genuinely fork the
   store and keep `from_captured`; their default-`Denied` / no-lease posture is
@@ -252,8 +252,8 @@ next depends on it.
 way-station whose `inherit_from` move this retires),
 [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
 (why the blast radius is every alias and handler),
-[[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]] (the
-`Block` / `Lambda` elimination split this leaves intact),
+[[decisions/261102_the-checked-ir-is-the-calculus|the-checked-ir-is-the-calculus]] (force and
+application stay distinct forms, which this leaves intact),
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]]
 (unconstructable over guarded),
 [[decisions/260617_turn-local-state|turn-local-state]] (the lifetime partition of

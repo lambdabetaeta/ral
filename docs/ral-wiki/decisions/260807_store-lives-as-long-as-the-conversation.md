@@ -108,8 +108,8 @@ never swept out from under itself.
 
 [[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]
 (the same sweep-what-a-crash-left-behind shape, one layer down, for the
-session disk rather than the history store), [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
-(what `exchange` waits for once the baseline is settled), [[map/synod|synod]]
+session disk rather than the history store), [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]
+(the exchange that runs once the baseline is settled), [[map/synod|synod]]
 (where `workspace::manifest`, `workspace::history`, and `session::Conversation`
 sit in the crate).
 

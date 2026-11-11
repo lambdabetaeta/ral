@@ -121,4 +121,4 @@ An arm of `if` and `case` elaborates to a thunk the form forces
 one. Any other atom would be hoisted and run before the form chose, and is a
 parse error; the lone arm of an `else`-less `if` is wrapped as `{ body; () }`
 (`elab_arm_unit`)
-([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+([[design/capture|capture]]).

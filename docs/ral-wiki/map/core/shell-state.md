@@ -61,8 +61,7 @@ fact data are reached through their owning modules.
   `Escape` propagating), and `Escape` (`Exit`, `Stopped`).
   `From<process::Cancellation> for Break` preserves cause and owner as a
   non-catchable `Stopped`; the process domain knows no runtime control flow
-  ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
-  [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
+  ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — the *rendering* of a runtime `Error` and its minting as a
   record (`outcome_value`); the type itself is `core/src/error.rs`, described

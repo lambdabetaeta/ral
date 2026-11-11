@@ -99,8 +99,7 @@ divergence below traces to that cut.
   are always solvable (unlike *lacks*), so they never surface in types. Worth a
   look if record performance ever matters.
 
-Restriction and the shadow warning were rejected on review
-([[decisions/260603_related-borrowables-rejected|related-borrowables-rejected]]);
+Restriction and the shadow warning are not adopted;
 the implementation menu stands as reference.
 
 Cite: Leijen, *Extensible records with scoped labels*, Trends in Functional

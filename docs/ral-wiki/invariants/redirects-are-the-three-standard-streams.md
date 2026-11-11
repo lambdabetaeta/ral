@@ -64,7 +64,5 @@ and do not widen the sum without giving the new form plumbing that means
 something.
 
 See [[internals/surface-syntax|surface-syntax]] for where redirects are lexed
-and parsed, [[design/capture|capture]] for what a redirect does to a captured
-command (`let saved = echo hi > f` binds `""`), and
-[[decisions/260526_redirect-drop-on-handler-dispatch|redirect-drop-on-handler-dispatch]]
-for what a redirect does when the head turns out to be handled.
+and parsed and [[design/capture|capture]] for what a redirect does to a captured
+command (`let saved = echo hi > f` binds `""`).

@@ -106,7 +106,7 @@ See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 nodes beside their types; readback applies the solution's decisions,
 snapshots sites and settles schemes only after the unit succeeds. Site graphs
 may retain free weak variables and delayed obligations. Every evaluated
-`Toplevel` has passed this check ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
+`Toplevel` has passed this check.
 
 - `CompKind::Pipeline` is a struct variant `{ stages }`. The form's value is
   its final stage's. There is no per-stage type field, because every

@@ -37,8 +37,7 @@ installed host-side for that dispatch — and answers a `HookResult`. The
 engine applies the registered policy: `aside` runs the hook on a
 `Shell::join_session` sibling, which *shares* the session's cancel root, so a
 Ctrl-C struck while a hook runs reaches it, while one aimed at a command
-already in flight is older than every frame the aside mints
-([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]), and
+already in flight is older than every frame the aside mints, and
 nothing it does flows back. Plugins run under the session's grant stack: the
 root layer plus any `--capabilities` layer pushed at boot.
 

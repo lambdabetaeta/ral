@@ -129,7 +129,7 @@ integer elaborates to `Val::Int`, not `Val::String`, before the type checker
 runs; an all-digit digest at the hash position would then fail its equality check
 against the recomputed string hash. `line_hash` — and therefore every witness,
 which ends in a `line_hash` — always begins with `h`, keeping the token
-un-numeric at any call site ([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).
+un-numeric at any call site ([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]]).
 
 **The check is stateless.** Every witness is recomputed from the file's live
 content at the moment of edit; there is no map of anchors to keep in sync.

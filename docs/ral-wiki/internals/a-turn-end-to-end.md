@@ -37,7 +37,7 @@ transports use this form so cancellation can land before a frame exists. Code
 *already inside* a run — a builtin body — opens no second run: it applies a
 function under the `Mooring` it was given, so the outer run's interrupt and
 wall reach whatever it calls
-([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
+([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]).
 
 **The request carries the run policy.** A `RunRequest`
 is exactly the places hosts differ:

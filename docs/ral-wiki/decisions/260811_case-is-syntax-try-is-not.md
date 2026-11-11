@@ -118,10 +118,8 @@ CBPV reading, and each consequence is taken deliberately.
   restating a row mismatch as exhaustiveness. An *open* scrutinee row still
   absorbs a label it has not been seen to construct: that is principal row
   inference, preserved on purpose.
-- `infer_case` gains one companion, `infer_case_arm`. This is not the refactor
-  [[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]] forbids —
-  that decision holds "unless its *behaviour* needs to change", and typing one
-  arm is now a premise of the rule rather than a slice of one function.
+- `infer_case` gains one companion, `infer_case_arm`. Typing one arm is now a
+  premise of the rule rather than a slice of one function.
 - The diagnostics say *arm* everywhere, static and dynamic alike; the word
   *handler* is left to command handlers and `try`.
 

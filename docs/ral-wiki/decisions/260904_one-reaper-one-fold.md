@@ -230,7 +230,6 @@ stays where it was, in the owning arm.
 
 See [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]],
-[[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],
 [[internals/pipeline-execution|pipeline-execution]],
 [[internals/cancellation|cancellation]], [[map/core/io-process|io-process]],
 [[map/core/runtime|runtime]].

@@ -43,7 +43,7 @@ frame they push; `guard`, `try` and `?` take theirs the same way, as `if` and
 environment (`Machine::force_val`), closing nothing. An atom that would be
 hoisted, and so run before the form chose, is refused at elaboration: bind it
 first. The type of the form is the type of the body, so no arm rule is
-specific to scoping ([[decisions/260930_capture-is-decided-by-syntax|capture-is-decided-by-syntax]]).
+specific to scoping ([[design/capture|capture]]).
 
 ## Two layers: lexical scope vs fork inheritance
 

@@ -11,10 +11,8 @@ in turn *N* enters turn *N+1*'s check as a bare name with a fresh type variable
 turn's check by living on the runtime binding itself, next to the value.**
 
 This is the first of four decisions whose end state is a single mode-inference
-engine: session-scheme-continuity (here) →
-[[decisions/260603_handler-alias-mode-preservation|handler-alias-mode-preservation]]
-→ [[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]] →
-[[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]. The
+engine: session-scheme-continuity (here) → handler-alias mode preservation →
+IR pipespec annotation → unconditional mode pass. The
 through-line is **net code removal**.
 
 ## The discontinuity today
@@ -25,7 +23,7 @@ through-line is **net code removal**.
 - `compile_and_typecheck(source, bindings, prelude_schemes)` (`core/src/lib.rs`)
   takes `bindings` as a bare name set, used only by `elaborate`; the checker
   never sees a session binding's type.
-- **Consequence** (see [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]):
+- **Consequence:**
   the static mode verdict is vacuous on session-bound heads. The runtime engine
   `core/src/ty.rs::env_binding_type` compensates by re-inferring modes from the
   live binding at eval time. Cross-turn *value*-type errors are caught by no
@@ -37,7 +35,7 @@ The scheme travels from checker to evaluator on the IR, and lives on the
 binding in the scope. There is no separate session ledger.
 
 - **The checker writes each top-level bind's scheme onto its `Bind` node.**
-  This is the same move as [[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]
+  This is the same move as the IR pipespec annotation
   — the checker elaborates into an annotated IR — introduced here with one slot
   (`CompKind::Bind` gains `scheme: Option<Box<Scheme>>`, boxed so the optional
   scheme stays one pointer wide on the node); ADR 3 adds the mode wires to the
@@ -69,7 +67,7 @@ binding in the scope. There is no separate session ledger.
   current turn's does. All three install paths — the `alias` statement, rc
   `aliases:` maps, and plugin loads — go through it. Mode preservation for those
   arms is
-  [[decisions/260603_handler-alias-mode-preservation|handler-alias-mode-preservation]]'s rule.
+  the handler-alias mode-preservation rule.
 
 ## What this decision removes
 
@@ -101,6 +99,5 @@ binding in the scope. There is no separate session ledger.
 - The baked prelude schemes and the per-turn schemes come from the same
   `Bind`-node harvest.
 
-See also [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]],
-[[internals/type-inference|type-inference]], [[map/core/typecheck|typecheck]],
+See also [[internals/type-inference|type-inference]], [[map/core/typecheck|typecheck]],
 [[map/repl/loop|loop]], [[map/exarch/shell-eval|shell-eval]].

@@ -154,7 +154,7 @@ external head's redirects fuse into its `Exec` at elaboration; any other stage
 takes a `Redirect` frame.
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat
-enums ([[decisions/260530_ast-stays-flat|ast-stays-flat]]); no desugaring happens
+enums; no desugaring happens
 here. The surface forms are preserved verbatim for the
 [[map/core/elaboration|elaborator]], the one phase that lowers them.
 

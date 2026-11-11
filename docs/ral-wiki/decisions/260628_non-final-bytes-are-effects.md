@@ -33,7 +33,7 @@ computation's value, and a sequence has exactly one final computation.
   stripped), any other result binds directly
   ([`eval_bind_rhs`, `core/src/evaluator/comp.rs`](../../../core/src/evaluator/comp.rs)).
   `!{…}` no longer carries a special "capture everything" path — forcing a block
-  is just a byte-mode RHS like any other ([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]).
+  is just a byte-mode RHS like any other ([[decisions/261102_the-checked-ir-is-the-calculus|the-checked-ir-is-the-calculus]]).
 
 This restates, for the general sequence, the rule §4.3 already states for the
 line editor's `_ed-tui` capture and §4.2 for return types: *a non-`Unit` value

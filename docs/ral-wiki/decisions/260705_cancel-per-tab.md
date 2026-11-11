@@ -50,7 +50,7 @@ so the key layer needs no split:
   `eval_root` never touched* — unwinding one turn and nothing else.
 - **On the trunk** `raise_interrupt()` already *is* the trunk's single-turn
   interrupt (its published foreground slot plus the ral foreground child,
-  [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]), so the old
+  [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), so the old
   unconditional `cancel(focused)` cascade beside it was simply deleted.
 
 > **Superseded, in part.** Every registry entry now carries a reach, the trunk
@@ -86,7 +86,7 @@ terminators already cascade, so none of them orphans either. No reap moved.
 (the prior Esc semantics this generalises),
 [[decisions/260706_signals-are-causes|signals-are-causes]] (the cause vocabulary
 the token now carries),
-[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]] (the token +
-eval-root layering an interrupt trips),
+[[decisions/260726_cancel-is-a-join|cancel-is-a-join]] (the cancel
+scopes an interrupt trips),
 [[design/agents|agents]] (the no-orphans invariant and the surviving terminator
 cascade). Maps: [[map/exarch/frontend|frontend]], [[map/exarch/agent|agent]].

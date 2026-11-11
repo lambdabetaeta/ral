@@ -16,7 +16,7 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   context-dependent rules — there is one lexer, not the several a POSIX shell
   needs. ([[map/core/syntax|syntax]])
 - **Tokens → flat surface AST.** The parser builds a single flat `Ast` enum.
-  The flatness is deliberate ([[decisions/260530_ast-stays-flat|ast-stays-flat]]):
+  The flatness is deliberate:
   head classification (`^name`, `./x`, `~/x`, bare) happens here, but no
   desugaring does.
 - **Surface AST → CBPV IR.** The elaborator is the *one* phase that knows about

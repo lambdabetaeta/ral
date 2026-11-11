@@ -9,11 +9,10 @@ consumes it: each `(canonical path, kind)` with kind ∈ {rw, ro, ls} derives a
 deterministic capability SID whose ACE is stamped once, ever, and never
 reverted — so a spawn's kernel-enforced reach is the set of capability SIDs its
 token carries, and the tree walk is paid once per path rather than once per
-projection per session.** Supersedes
-[[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]] (which left
-the tier choice open) and the fs-authority half of
-[[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]];
-realised in `core/src/sandbox/windows/{session,appcontainer}.rs` and `dacl/`.
+projection per session.** Supersedes the ACE-free fs-confinement survey
+(which left the tier choice open) and the fs-authority half of the
+projection-keyed AppContainer design; realised in
+`core/src/sandbox/windows/{session,appcontainer}.rs` and `dacl/`.
 
 **2026-10-12 amendment:** The legacy pre-capability ACE restore path is retired.
 Recovery reclaims profile registrations only; its ledger requires the owner's
@@ -103,8 +102,7 @@ capability's allow admits. Hence:
 - **Future work: denies through a restricted token.** The restricted pass does
   honour a deny ACE, against the token's restricting SIDs — Codex's Windows
   sandbox stamps deny-write ACEs for its restricting capability SID in exactly
-  that pass
-  ([[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]]). A child
+  that pass. A child
   token restricted to the user's SID plus one restricting SID per exclusion,
   that exclusion's deny ACE stamped for it, and then made a `LowBox` token,
   could carry an exclusion inside a grant. Unverified, and to be measured on
@@ -135,9 +133,7 @@ the container, so every new container re-walks the tree:
   access checks consult only each file's own security descriptor, so the walk is
   load-bearing, not an optimisation.
 - On a build tree (100k+ files) that is tens of seconds to minutes — paid per new
-  projection, per session, and paid **again** at teardown to restore. The
-  measurements, the tier survey, and the rejected alternatives are recorded in
-  [[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]].
+  projection, per session, and paid **again** at teardown to restore.
 
 The container SID is the wrong key. A path's ACE says what that path admits; a
 container's identity says which authority a process holds. Fusing them makes the
@@ -251,8 +247,7 @@ Split the two: derive the SID from the path, and let the token select.
 - **The tier survey stays live as the destination.** This is the shipped
   *interim*: it removes the propagation cost while keeping default-deny reads,
   and forecloses nothing. The ACE-free tiers remain where the design is headed
-  ([[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]] options A
-  — BFS — and B — BaseContainer); what changes is that they are no longer urgent.
+  (options A — BFS — and B — BaseContainer); what changes is that they are no longer urgent.
 
 ## Authority is object-sticky; grants are path-based
 
@@ -359,9 +354,6 @@ profile, and recovery errors are silent in release builds.
 
 [[map/core/capabilities|capabilities]],
 [[internals/capability-enforcement|capability-enforcement]],
-[[decisions/260714_ace-free-fs-confinement|ace-free-fs-confinement]],
-[[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]],
-[[decisions/260712_session-scoped-appcontainer|session-scoped-appcontainer]],
 [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]],
 [[design/grant|grant]], [[design/two-enforcers|two-enforcers]].
 

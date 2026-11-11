@@ -86,8 +86,7 @@ type records and variants, never computations.
   building: one row unifier serving records, variants, and effects, smoothly
   inside HM inference. The cost is not implementation but signatures — and the
   natural ral flavour would be scoped-label effect rows à la Koka, mirroring
-  the handler stack, not Links' presence types. Rejected on review
-  ([[decisions/260603_related-borrowables-rejected|related-borrowables-rejected]]).
+  the handler stack, not Links' presence types. Not adopted.
 
 Cite: Hillerström & Lindley, *Liberating Effects with Rows and Handlers*, TyDe
 2016, [doi:10.1145/2976022.2976033](https://doi.org/10.1145/2976022.2976033).

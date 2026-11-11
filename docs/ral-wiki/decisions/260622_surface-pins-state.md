@@ -39,14 +39,13 @@ exarch's `AgentSink::emit` (`exarch/src/shell_eval.rs:71`) decides what each val
 - `surface-reads-writes-execs` put **core** on the channel and separated
   *operation* from *appearance*
   ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]);
-- `surface-carries-control` separated *render* (`` `card ``, `io`) from *control*
+- the control step separated *render* (`` `card ``, `io`) from *control*
   (`` `spawn-started ``), and named the channel for what it is — the single typed
-  `Value` channel from the language to the host, dispatched **by class**
-  ([[decisions/260622_surface-carries-control|surface-carries-control]]).
+  `Value` channel from the language to the host, dispatched **by class**.
 
 Each step refined the taxonomy by asking *what the host does with the value*.
 This step asks the question one level finer, *inside* the render class: a render
-is not always an **event**. `surface-carries-control`'s own table reads "render
+is not always an **event**. The control step's own table reads "render
 classes reach the rail **and the log**" — append-only scrollback, an
 `events.jsonl` row. That is the right home for *a thing that happened*. It is the
 wrong home for *what is currently true*.
@@ -70,7 +69,7 @@ There is a fourth cell, empty: **model-authored state**. A kit holds a datum tha
 changes over a session — a task rollup, a long job's status, the file currently
 under edit — and wants it shown the way the matrix shows cost: a fixed mark,
 updated in place. The transcript cannot host it. Scrollback is append-only *by
-construction* — `surface-carries-control` bends over backwards precisely to never
+construction* — the control step bends over backwards precisely to never
 splice a late card into "root's sealed scrollback." So a kit with evolving state
 has only two moves today: **stream it** (append a new card per change — what
 `tasks.ral` does, and the doctrine's counterexample) or **don't show it**. The
@@ -82,7 +81,7 @@ variables), authored by the kit instead of the host.
 
 ### `surface` render gains a *disposition*: append (event) or pin (state)
 
-The class dispatch of `surface-carries-control` is unchanged — render vs control.
+The class dispatch is unchanged — render vs control.
 This ADR splits the **render** class along a second, orthogonal axis, the
 **disposition**:
 
@@ -110,7 +109,7 @@ A pinned value is a `Variant` wrapping the existing render document:
 
 `body` is an ordinary `` `card `` (`Card(pub Vec<Mark>)`, `exarch/src/card.rs:122`),
 decoded by the **unchanged** `value_to_card` (`card.rs:541`) — exactly as
-`surface-carries-control` decodes a spawned body's buffered surfaces "as the live
+the control step decodes a spawned body's buffered surfaces "as the live
 surface would." The wrapper carries only *placement* (the key); the card
 vocabulary, its marks, and its decoder are all reused verbatim. `` `unpin ``
 drops a slot (a finished plan clears its gauge); an absent body is the same as
@@ -205,13 +204,12 @@ overwritten on every transition — one gauge that *fills in place* rather than 
 column of `tasks N/total` blocks. A task moving `open → done` is a state
 transition of a state variable, so it updates the gauge and appends nothing. The
 genuine *events* — a `spawn`/`agent` that actually finished work — already have
-their own transcript notices (`Turn::Spawn`/`Turn::Agent`,
-[[decisions/260622_surface-carries-control|surface-carries-control]]). The
+their own transcript notices (`Turn::Spawn`/`Turn::Agent`). The
 watchdog and the pure data layer are untouched.
 
 ## Safety — why this adds no lifetime hazard
 
-`surface-carries-control` needed a careful concurrency section because a `spawn`
+The control step needed a careful concurrency section because a `spawn`
 notification must cross the turn boundary, and the detached worker may hold no
 host channel. **A pin needs none of that.** It is a *render-class* disposition,
 emitted **in-turn** through the live foreground `AgentSink` — the exact place a
@@ -221,7 +219,7 @@ register on the `Viewport`, written in-turn and wiped by `reset`.
 
 Two compositions to state explicitly:
 
-- **A pin inside a spawned body** rides `surface-carries-control`'s deliver-once
+- **A pin inside a spawned body** rides the control step's deliver-once
   buffer: it is among the `surfaced` values on `SpawnResult`, decoded at the
   boundary "exactly as the live surface would," so it sets its register slot when
   the spawn's surfaces replay. State set slightly late is benign — it is the
@@ -291,7 +289,7 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
 - **A `key` field on the `` `card `` variant** rather than a `` `pin `` wrapper.
   Rejected (mild): it changes `value_to_card`'s shape and forces every card to
   carry an optional disposition; the wrapper keeps the card vocabulary and decoder
-  untouched and composes by decode-the-body, the pattern `surface-carries-control`
+  untouched and composes by decode-the-body, the pattern the control step
   already uses for spawned-body surfaces.
 - **Persist the register to `events.jsonl` as state snapshots.** Deferred (see
   open questions): the v1 register is ephemeral, the matrix's dual on the logging
@@ -342,11 +340,6 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
 
 ## See also
 
-[[decisions/260622_surface-carries-control|surface-carries-control]] (the
-dispatch-by-class this refines — it split render from control; this splits render
-into event vs state; note that ADR is still `proposed` and this depends only on
-its stable kernel: surface is the typed channel, render decodes via
-`value_to_card`, spawned-body surfaces are decoded "as the live surface would"),
 [[decisions/260619_surface-carries-documents|surface-carries-documents]] (the
 `` `card `` vocabulary the `body` reuses verbatim),
 [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]

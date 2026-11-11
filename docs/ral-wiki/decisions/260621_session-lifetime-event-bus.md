@@ -188,8 +188,6 @@ completes; its deferred "lift the bus" open question),
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] (completion as a
 control-flow fact; the bus as presentation, not liveness — the invariant this
 rests on),
-[[decisions/260618_host-seam-turn-observer|host-seam-turn-observer]] (the
-superseded attempt that motivated that invariant),
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]] (the inbox seam and the
 `{input, inbox}` idle select this extends with the bus),
 [[decisions/260616_tool-boundary-steering|tool-boundary-steering]] (why the

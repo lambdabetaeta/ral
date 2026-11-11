@@ -337,8 +337,7 @@ vocabulary this ADR re-founds on `Observed::Act`, and the schedule-label
 amendment in full),
 [[decisions/260719_agent-names-and-schedule-labels|agent-names-and-schedule-labels]]
 (the `sched-<n>` default retired by the rider),
-[[decisions/260726_cancel-is-a-join|cancel-is-a-join]] and
-[[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]] (the unwind
+[[decisions/260726_cancel-is-a-join|cancel-is-a-join]] (the unwind
 whose surviving prefix this ADR reports),
 [[design/engine-protocol|engine-protocol]] (the wire seat
 whose parked `enquire` fixes where the desk records),

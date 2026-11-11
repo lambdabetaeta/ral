@@ -17,7 +17,7 @@ anchors: [ChildStatus, Settlement, Control::Status, Mail::status, Txn::report, A
 
 **What a parent can know about a child is its latest state, so a child is a
 status, not a sum of owed answers.** This reverses the debt mechanism of
-[[261028_one-scope-tree-one-inbox]] and keeps its scope tree and fence.
+the one-scope-tree inbox and keeps its scope tree and fence.
 
 ## Diagnosis
 

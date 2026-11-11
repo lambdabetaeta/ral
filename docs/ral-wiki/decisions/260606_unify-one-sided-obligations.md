@@ -1,10 +1,10 @@
 ---
-status: 'active; its route fingerprint is superseded by [[decisions/260930_capture-is-decided-by-syntax]] — `Return` carries no route, so the key has no route field. The one-sided obligation guard stands.'
+status: 'active; its route fingerprint is superseded by [[design/capture]] — `Return` carries no route, so the key has no route field. The one-sided obligation guard stands.'
 ---
 
 # One-sided obligations complete the co-inductive unifier
 
-> The route fingerprint discussed below is gone with the payload route ([[decisions/260930_capture-is-decided-by-syntax|capture is decided by syntax]]); `Return` keys on its value type alone.
+> The route fingerprint discussed below is gone with the payload route ([[design/capture|capture]]); `Return` keys on its value type alone.
 
 The unifier admits cyclic value and computation types with no occurs check
 through data ([[decisions/260930_recursion-is-guarded-by-data|recursion-is-guarded-by-data]],

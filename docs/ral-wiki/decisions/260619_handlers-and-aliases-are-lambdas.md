@@ -65,5 +65,5 @@ form, never off the value.
 See also [[design/effects-handlers|effects-handlers]],
 [[internals/handler-dispatch|handler-dispatch]],
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]],
-[[decisions/260606_alias-head-defines-its-modes|alias-head-defines-its-modes]];
+[[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]];
 the surface forms are `docs/SPEC.md` §9.4 (handlers) and §15.3 (aliases).

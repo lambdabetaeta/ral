@@ -21,8 +21,7 @@ through `inherit_from`, so it could never carry the environment to a child —
 which is exactly why `apply_env` reads `env_overrides`, never `scope`. The
 startup seeding of `HOME`/`USER`/`PATH`/… into `Env` was therefore a read-side
 convenience for a bare `$HOME`, duplicating keys that `within [env: …]` only
-ever updates in `env_overrides`; the two views drifted
-([[decisions/260530_env-overrides-scope-overlap|env-overrides-scope-overlap]]).
+ever updates in `env_overrides`; the two views drifted.
 
 Resolution: seed the well-known variables into `env_overrides` only. A bare
 `$HOME` is now an undefined variable; the environment is reached through

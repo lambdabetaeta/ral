@@ -132,8 +132,7 @@ not compile — a parse or type error, a broken contract among the latter — is
 *reported and skipped*: `errfmt::report_failed_load` prints the caret report
 its `Error::uncompiled` carries ([[map/core/diagnostics|diagnostics]]), then
 names the file `skipped, since it does not compile`, as against `sourcing
-stopped at the error above` for one that failed partway; the boot always survives
-([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), the
+stopped at the error above` for one that failed partway; the boot always survives, the
 whole rc unapplied rather than only the offending key. A *computed* rc return
 (a bound variable, a call) is invisible to the contract and stays on
 `RcPlan::decode`, which meets the same keyset and field types, reading the

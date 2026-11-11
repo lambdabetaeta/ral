@@ -168,7 +168,7 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
   under the frame the run door displaces, not beside it under the root, so a
   nested run observes what encloses it — its outer run's interrupt, and its
   outer run's wall elapsing
-  ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
+  ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]).
   **A pipeline mints one node per thread stage**, under the current scope,
   which its collector alone writes; `CollectState::drop` writes `Terminated` on
   every live thread stage in one sweep, then kills whatever it still holds
@@ -208,9 +208,7 @@ signal context. The two are different kinds of proposition.
   `dispatch_to_report` aims its front-end's `ControlSender` at each dispatch it
   sends (`aim`), sampling `interrupt_epoch` under the lock `hear` reads it by,
   and `hear` sends `Strike(id, Interrupted)` only if the epoch has moved since. This is
-  the birth instant of
-  [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]], which the
-  move to `Control` had dropped, kept now per dispatch at the front-end rather
+  the birth instant the move to `Control` had dropped, kept now per dispatch at the front-end rather
   than per frame. A key-driven `interrupt()` names whatever is in flight now.
   The engine strikes only the id named and foretells one not yet arrived, as
   it does a `Cancel`, so a late `Interrupt` finds a stale id and strikes
@@ -758,10 +756,6 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 - [[decisions/260726_cancel-is-a-join|cancel-is-a-join]] — why the handler
   contributes an element instead of aliasing one; the folding it introduced has
   since given way to forwarding as `Control`.
-- [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]] — why the
-  interrupt is time-indexed and what the run door's nesting fixed; the
-  per-frame birth instants went with the folding, and a per-dispatch one
-  returned at the front-end (`ControlSender::aim`).
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.

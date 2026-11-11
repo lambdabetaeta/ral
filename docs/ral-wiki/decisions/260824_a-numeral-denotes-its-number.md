@@ -27,7 +27,7 @@ an argv's elements are
 a coercion is
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]). This is the
 same answer for the leaf, and it was left open at
-[[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]], which named the
+the `h`-prefixed witness-hash decision, which named the
 two type-directed candidates and took neither.
 
 The grammar answers.
@@ -95,7 +95,7 @@ rather than merely stating the rule, because it is the one case where intent and
 grammar disagree and the grammar wins quietly. exarch's line witness is built
 from the other side of the same fact: `h` plus six hex can never be a numeral, so
 it needs no quoting discipline at any call site
-([[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]).
+([[design/hash-addressed-editing|hash-addressed-editing]]).
 
 The second consequence is at the exec boundary: a whole `Float` reaches an
 external's argv with its point on (`3.0`, not `3`), since that argv is rendered
@@ -218,8 +218,6 @@ echoes, not about how a unit renders, and it stands.
 
 [[invariants/numerals-denote-numbers|numerals-denote-numbers]] (the rule as an
 invariant),
-[[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]] (its open
-language question, answered: declined in favour of literal syntax),
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] (the
 rendering that carries a number into an external's argv),
 [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]] (the same doctrine

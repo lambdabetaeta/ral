@@ -87,10 +87,9 @@ not the generation/solving/readback separation.
 
 ## Precedent and limits
 
-[[decisions/260807_modes-solved-by-deferred-joins|modes solved by deferred joins]]
-is the architectural precedent: emit constraints, defer undecided conclusions,
-and discharge them before their variables generalise. Its mode algebra is not
-adopted; arms and arguments here still unify without adaptation.
+The mechanism is to emit constraints, defer undecided conclusions, and
+discharge them before their variables generalise; arms and arguments here still
+unify without adaptation.
 
 The suspended-match mechanism follows
 [[related/omnidirectional-type-inference|O'Brien, Rémy and Scherer]]. Incremental

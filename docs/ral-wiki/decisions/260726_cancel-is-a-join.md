@@ -4,8 +4,7 @@ status: active
 
 # A signal contributes a cause to the join; it does not reach into a run frame
 
-> The **spend** half is superseded by
-> [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]: "a cause
+> The **spend** half is superseded: "a cause
 > raised for a settled run must not unwind the next one" is a claim about time,
 > so the interrupt becomes a per-cause watermark of instants read against a
 > frame's birth date, and nothing is reset. With no spend there is no spender —
@@ -32,7 +31,7 @@ complication descended from that one shape:
 - **A use-after-free reachable from a handler.** `request` loaded the slot at
   one instant and dereferenced it at another; a process-directed signal lands
   on an arbitrary unblocked thread, so those instants could straddle the
-  frame's death ([[decisions/260726_cancel-slot-leak|cancel-slot-leak]]).
+  frame's death.
 - **A LIFO requirement.** Blind save/restore reads back its intended
   predecessor only for publications that nest on one thread.
 - **An unenforced one-publisher rule.** *At most one session per process
@@ -177,12 +176,8 @@ same leak — and admits the same cure: an request cell the token folds.
 
 - [[internals/cancellation|cancellation]] — the updated map of the whole
   mechanism.
-- [[decisions/260726_cancel-slot-leak|cancel-slot-leak]] — the interim leak
-  this retires, and the measurements it recorded.
 - [[decisions/260706_signals-are-causes|signals-are-causes]] — the collapse of
   signal delivery onto the cause lattice, whose substrate this replaces.
-- [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]] — the
-  one-publishing-session rule, now dissolved into how a scope is minted.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] — the
   root/foreground split the newtypes carry.
 - [[map/core/io-process|io-process]], [[map/core/shell-state|shell-state]].

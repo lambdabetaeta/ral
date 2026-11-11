@@ -56,8 +56,7 @@ The request supplies:
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); the
   prelude's schemes ride scope[0], installed when the annotated prelude was
   evaluated at boot. The check is strict — any type error is fatal — over the
-  one inference pass every evaluated path shares
-  ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
+  one inference pass every evaluated path shares.
   Parse/type errors come back as `Report::Static { rendered, status }`, already
   the caret report the protocol drew, which the model reads clipped whole, then
   the rejection tip (`report::rejection`: no command ran and no `let` bound,

@@ -28,8 +28,7 @@ holds a `Shell`.
 - *Two frontends.* The interactive REPL presents one `Surface` —
   *minimal* (canonical-stdin fallback), *readline* (the default full editor),
   selected with `--surface` or the rc `surface:` key. The structural
-  surface (a ratatui projection) was retired in 261006
-  ([[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]]).
+  surface (a ratatui projection) was retired in 261006.
 
 The frontend is a layer *above* the engine. Editor state is host-side, in the
 REPL's `ReplHost` and `PluginRuntime`; the `_ed-*` builtins are thin

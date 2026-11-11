@@ -6,8 +6,7 @@ verified_at_commit: 64ecd691
 verified_at_date: 2026-10-30
 anchors: [Agent, AgentMailbox, AgentAddress, WeakAgentAddress, Admission, JobId, Loanable, Loan, Nursery, Joined, Host, Port, Registry, LaunchError, Body::retire_engine, AgentAddress::transact, Txn, Mail, Schedules, Model, Agent::born, AgentLog::create, Parent::terms, Host::children]
 amended_by: [261029_a-frontend-holds-a-port]
-supersedes: [261028_one-scope-tree-one-inbox, 260806_exchange-ends-at-fleet-quiescence, 260826_reply-parks]
-amends: [261027_a-host-holds-a-helm, 261029_a-child-is-a-status]
+amends: [261029_a-child-is-a-status]
 ---
 
 # An agent is a thread
@@ -127,15 +126,15 @@ without holding the parent's mailbox.
 
 ## Supersession
 
-- [[261028_one-scope-tree-one-inbox]] is superseded: its monotone tree
+- The one-scope-tree-one-inbox design is superseded: its monotone tree
   survives as life ⊃ exchange; work scopes, provenance vouching, receipts,
   shared status cells, census and reply lease do not.
-- [[260806_exchange-ends-at-fleet-quiescence]] is superseded: jobs are
+- Exchange-ends-at-fleet-quiescence is superseded: jobs are
   recorded busy periods for every agent, with helper debts paid before
   settlement. Synod gates the next job across its folder walk.
-- [[260826_reply-parks]] is superseded: a helper rests and times itself out;
+- Reply-parks is superseded: a helper rests and times itself out;
   reporting does not end its helpers.
-- [[261027_a-host-holds-a-helm]]'s product boundary is amended to
+- The host-holds-a-helm product boundary is amended to
   **Stop < end**, including Synod: Stop no longer ends helpers.
 - [[261029_a-child-is-a-status]] is amended: `ChildStatus` has no `Working`;
   reports are messages posted only while the helper mailbox owes its parent.

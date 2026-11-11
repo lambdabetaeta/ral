@@ -1,5 +1,5 @@
 ---
-status: "superseded in mechanism by [[261028_one-scope-tree-one-inbox]]"
+status: "superseded in mechanism by [[261029_an-agent-is-a-thread]]"
 ---
 
 # An agent is the `Arc`
@@ -11,12 +11,12 @@ doors, mailbox, provider, immutable config, and a small single-writer
 `Status` — behind an `Arc` the fleet shares. [`Avatar`] holds the private
 half — the log, the seat, the inbox, everything only the attend thread
 touches — plus the `Arc<Agent>` it embodies. The current public/private line is between the owner (`Agent`) and its
-address (`AgentHandle`); [[261028_one-scope-tree-one-inbox]] names its
+address (`AgentHandle`); [[261029_an-agent-is-a-thread]] names its
 scope-based liveness and teardown law.
 
 ## Lifetime and ownership amendment, 2026-10-28
 
-[[261028_one-scope-tree-one-inbox]] supersedes the lifetime mechanism:
+[[261029_an-agent-is-a-thread]] supersedes the lifetime mechanism:
 `Agent` is the single-thread owner, `AgentHandle` its shared address. Life
 cancellation determines liveness; owner drop ends the subtree, and the final
 `Membership` determines completed teardown. The diagnosis and original
@@ -206,7 +206,7 @@ and completed teardown have the distinct witnesses in the 2026-10-28 amendment.
 
 ## Supersession
 
-[[decisions/260826_reply-parks|reply-parks]] is **superseded only in the
+The reply-parks decision is **superseded only in the
 mechanism it named, not in the decision it made**: reply still deposits and
 parks rather than ending the agent, the parent still fetches with
 `` agents `read <name> ``, and the roster's `state`/`idle-s` derivation is

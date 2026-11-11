@@ -105,8 +105,7 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
   `unbox`, `detach` makes it safe by freezing the frame's projection into the
   survivor for life, unnameable by any later frame and so unwidenable
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]). A type would
-  add legibility there, not safety. Rejected as a language feature on review
-  ([[decisions/260603_related-borrowables-rejected|related-borrowables-rejected]]).
+  add legibility there, not safety. Not adopted as a language feature.
 
 Cite: Brachthäuser, Schuster, Lee, Boruch-Gruszecki, *Effects, capabilities, and
 boxes: from scope-based reasoning to type-based reasoning and back*, PACMPL 6

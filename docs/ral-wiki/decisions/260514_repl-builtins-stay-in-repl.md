@@ -17,5 +17,4 @@ particular interactive frontend.
 This keeps the boundary clean: `ral-core` knows nothing about the REPL, and the
 REPL adds its builtins on top.
 
-See also [[map/core|core]], the forthcoming [[map/repl|repl]], and the REPL design
-direction in [[decisions/260522_repl-architecture|repl-architecture]].
+See also [[map/core|core]] and the forthcoming [[map/repl|repl]].

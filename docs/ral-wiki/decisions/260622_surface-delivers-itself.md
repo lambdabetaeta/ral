@@ -96,9 +96,8 @@ a new scope makes a new channel ([[design/engine-protocol|engine-protocol]],
 ## Alternatives rejected
 
 - **A control class on the live channel**, carrying the live handle to an
-  exarch waiter thread
-  ([[decisions/260622_surface-carries-control|surface-carries-control]]): a
-  handle in the payload breaks first-order transport, and a second observer of
+  exarch waiter thread:
+  a handle in the payload breaks first-order transport, and a second observer of
   the handle needs a shared settle.
 - **Replay on `await`** into the awaiting run, arbitrated against the flush by a
   shared latch. The flush precedes the result, so the replay could never win,

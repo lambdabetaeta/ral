@@ -4,9 +4,8 @@ status: amended
 
 # `reply` terminates every returning agent — including the headless root
 
-> Amended by [[decisions/260826_reply-parks|reply-parks]]: a child's `reply`
-> no longer terminates it or lands as prose in the parent's context — it
-> deposits the value on the child's registry entry and parks the child. The
+> Amended by [[decisions/261029_an-agent-is-a-thread|an-agent-is-a-thread]]: a child's `reply`
+> no longer terminates it; the helper rests. The
 > gate on `reply`, its mandatoriness, and the headless sink rules below stand.
 
 **The gate on `reply` is not "sub-agent vs root" but "does this agent return."**

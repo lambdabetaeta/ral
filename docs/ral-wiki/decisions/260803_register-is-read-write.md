@@ -479,8 +479,6 @@ Beyond the per-stage tests above:
 [[decisions/260622_surface-pins-state|surface-pins-state]] (the register this
 completes — wire format and taxonomy kept, write-only-ness retired),
 [[design/pins.md|pins]] (the design page to rewrite against this),
-[[decisions/260622_surface-carries-control|surface-carries-control]] (dispatch
-by class — `pin-read` joins the enquiry desk the same way),
 [[decisions/260619_surface-carries-documents|surface-carries-documents]] (the
 card vocabulary that now doubles as the register's storage grammar),
 [[decisions/260618_tui-transcript-as-graphic|transcript-as-graphic]]

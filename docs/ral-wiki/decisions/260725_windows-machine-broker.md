@@ -304,7 +304,7 @@ audience makes an unprivileged installation a requirement rather than a
 courtesy),
 [[design/two-enforcers|two-enforcers]] (the machine is the outer ceiling, and
 this is how it is obtained without widening authority elsewhere),
-[[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]
+[[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]
 (the same "authority is exactly what was declared, checked by the kernel"
 discipline inside the guest's host),
 [[invariants/single-binary|single-binary]] (the runtime rule this service stands
