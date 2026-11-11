@@ -274,13 +274,12 @@ impl Shell {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
 
     /// A discard spelling that walks elsewhere is judged where it walks.
-    #[cfg(unix)]
     #[test]
     fn a_spelling_folding_to_the_discard_device_is_judged_where_it_walks() {
         use crate::authority::policy::{Capabilities, FsPolicy};

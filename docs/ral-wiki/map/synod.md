@@ -237,7 +237,7 @@ and composes the desktop application.
 
 - Tauri, its plugins, `url`, L4 and the desktop `main` compile only for
   macOS or Windows. L0–L3 compile on Linux; its `main` prints a refusal.
-  `just check` is the dead-code authority for the lower layers.
+  `just check-x86` and `just check-arm64` are the dead-code authority for the lower layers.
 - `build.rs` calls `tauri_build::build` only for a desktop target;
   `tauri-build` is an unconditional build dependency. Generated permission
   schemas in `synod/gen/` are ignored build products.

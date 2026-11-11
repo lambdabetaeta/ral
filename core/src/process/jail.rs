@@ -11,7 +11,7 @@
 //! submodule remains the only place a decision reaches the kernel.
 
 use crate::fact::{JailFailure, JailFailureSequence, LaunchFailure, SequenceFailure};
-#[cfg(any(test, seccomp))]
+#[cfg(seccomp)]
 use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(seccomp)]
@@ -61,7 +61,7 @@ pub(crate) fn install_guest(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(any(test, seccomp))]
+#[cfg(seccomp)]
 fn guest_root(args: &[OsString], euid: u32) -> Result<PathBuf, String> {
     let [arg] = args else {
         return Err("a guest engine takes one argument, the jail's cgroup root".into());

@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::{Edge, new_buffer};
+use crate::io::new_buffer;
 use crate::process::{DurableRoot, Placement};
 use std::io::Write;
 use std::sync::Arc;
@@ -117,6 +117,7 @@ fn a_drain_flushes_a_watch_tail_once() {
 #[cfg(unix)]
 #[test]
 fn a_drain_blocked_on_a_full_edge_still_drains_its_source_after_cancellation() {
+    use crate::io::Edge;
     use crate::process::CancelCause;
     use rustix::event::PollFlags;
     use std::time::{Duration, Instant};

@@ -49,7 +49,8 @@ pub(crate) fn file_to_open(review: &Review, index: usize, shown: &str) -> Result
     // The user's folder, without a grant: ask only what kind of object the handle holds.
     let missing =
         |e: &dyn std::fmt::Display| format!("Synod could not find {rel} in your folder ({e}).");
-    let held = walk_dir(&spelled(&folder)?).map_err(|e| missing(&e))?;
+    let held = walk_dir(&spelled(&folder).map_err(|e| missing(&e.describe()))?)
+        .map_err(|e| missing(&e))?;
     let dir = above
         .iter()
         .try_fold(held, |dir, name| {

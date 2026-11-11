@@ -210,7 +210,7 @@ fn a_volume_mount_refusal_asks_for_a_drive_letter() {
             crate::fact::LaunchFailure::Dacl(failure),
         )));
         assert!(error.plain().contains("drive letter"));
-        assert!(error.hints().is_empty());
+        assert_eq!(error.hints(), []);
     }
     for t in [r"\\?\D:\x", r"\\?\VolumeX", r"D:\Volume{1}"] {
         assert!(

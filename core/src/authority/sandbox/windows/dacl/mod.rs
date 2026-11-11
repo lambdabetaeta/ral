@@ -199,7 +199,7 @@ pub(crate) enum DaclError {
         error: io::Error,
     },
     Win32 {
-        path: PathBuf,
+        path: Option<PathBuf>,
         operation: DaclOperation,
         cause: DaclWin32Cause,
     },
@@ -261,7 +261,7 @@ impl DaclError {
                 operation,
                 cause,
             } => DaclFailure::Win32(DaclFailureWin32 {
-                path: (!path.as_os_str().is_empty()).then(|| shown(path)),
+                path: path.as_deref().map(shown),
                 operation: *operation,
                 cause: cause.clone(),
             }),

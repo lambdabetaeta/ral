@@ -95,7 +95,7 @@ impl PathMutexGuard {
             super::acl::win32_io(path, DaclOperation::WaitMutex, &io::Error::last_os_error())
         } else {
             DaclError::Win32 {
-                path: path.to_path_buf(),
+                path: Some(path.to_path_buf()),
                 operation: DaclOperation::WaitMutex,
                 cause: DaclWin32Cause::UnexpectedWaitResult(wait),
             }

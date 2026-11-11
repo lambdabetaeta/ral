@@ -46,13 +46,17 @@ lint:
     cargo doc --workspace --no-deps --document-private-items --features {{features}}
     cargo test -p ral-lint
 
-# Clippy, from this host, the platforms it does not build (needs clang, lld, cargo-xwin).
-check $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang' $CC_aarch64_apple_darwin='clang':
-    rustup -q target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc
-    cargo clippy -p ral-core -p ral --all-targets --features {{features}} --target aarch64-unknown-linux-musl
+# Clippy for the platforms an x86-64 host does not build: x86-64 musl and Windows (needs clang, lld, cargo-xwin).
+check-x86 $CC_x86_64_unknown_linux_musl='clang':
+    rustup -q target add x86_64-unknown-linux-musl x86_64-pc-windows-msvc
     cargo clippy -p ral-core -p ral --all-targets --features {{features}} --target x86_64-unknown-linux-musl
-    cargo clippy -p ral-core -p ral -p vm-manager --all-targets --features {{features}} --target aarch64-apple-darwin
     cargo xwin clippy --workspace --all-targets --features {{features}} --target x86_64-pc-windows-msvc --keep-going
+
+# Clippy for the platforms an arm64 host does not build: arm64 musl and macOS (needs clang, lld; macOS needs a Mac for its C sysroot).
+check-arm64 $CC_aarch64_unknown_linux_musl='clang' $CC_aarch64_apple_darwin='clang':
+    rustup -q target add aarch64-unknown-linux-musl aarch64-apple-darwin
+    cargo clippy -p ral-core -p ral --all-targets --features {{features}} --target aarch64-unknown-linux-musl
+    cargo clippy -p ral-core -p ral -p vm-manager --all-targets --features {{features}} --target aarch64-apple-darwin
 
 # Build the site and the wiki into site/.
 docs: site wiki

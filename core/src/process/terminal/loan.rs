@@ -94,7 +94,7 @@ enum Hold {
 }
 
 impl TerminalHold {
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(crate) fn hear(&mut self, signal: Signal) {
         match &mut self.0 {
             Hold::Lent(loan) => loan.hear(signal),

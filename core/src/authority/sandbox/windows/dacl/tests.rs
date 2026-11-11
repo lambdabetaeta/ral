@@ -402,7 +402,7 @@ fn carving_stamps_the_examined_object_after_its_name_is_replaced() {
 
 #[test]
 fn dacl_runtime_failures_project_without_rendered_sources_or_redirect_targets() {
-    use crate::data::Datum;
+    use crate::data::datum::Datum;
     use crate::fact::{DecodeCause, DecodeFailure, LaunchFailure, Reason};
     let path = PathBuf::from(r"C:\granted");
     let native = || io::Error::from_raw_os_error(5);
@@ -428,7 +428,7 @@ fn dacl_runtime_failures_project_without_rendered_sources_or_redirect_targets() 
             error: native(),
         },
         DaclError::Win32 {
-            path: path.clone(),
+            path: Some(path.clone()),
             operation: DaclOperation::GetAce,
             cause: DaclWin32Cause::Io(Box::new(crate::io::failure(&native()))),
         },

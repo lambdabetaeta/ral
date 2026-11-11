@@ -381,8 +381,7 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
         )
     };
     if ok == 0 {
-        return Err(super::acl::win32_io(
-            std::path::Path::new(""),
+        return Err(super::acl::win32_pathless(
             DaclOperation::GetProcessTimes,
             &io::Error::last_os_error(),
         ));

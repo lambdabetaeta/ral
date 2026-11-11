@@ -7,7 +7,6 @@ use exarch::provider::identity::{self, Account as ProviderAccount};
 use exarch::provider::keychain::Keychain;
 use exarch::provider::models::resolve_account;
 use exarch::wallet::Wallet;
-use ral_core::own::OwnError;
 use ral_core::sync::LockExt;
 use std::sync::Mutex;
 
@@ -17,13 +16,13 @@ const DECLARATIONS_FILE: &str = "providers.ral";
 
 const LABEL: &str = "provider settings";
 
-pub(crate) fn wallet() -> Result<Wallet, OwnError> {
-    Wallet::of(SYNOD, DECLARATIONS_FILE, LABEL)
+pub(crate) fn wallet() -> Result<Wallet, String> {
+    Wallet::of(SYNOD, DECLARATIONS_FILE, LABEL).map_err(|error| error.to_string())
 }
 
 /// Called before threads: preparing credentials scrubs the launch environment.
 pub(crate) fn prepare() -> Result<CredentialStore, String> {
-    wallet().map_err(|error| error.to_string())?.prepare()
+    wallet()?.prepare()
 }
 
 pub(crate) fn list(store: &Mutex<CredentialStore>) -> AccountList {

@@ -363,8 +363,17 @@ pub(super) fn win32_err(path: &Path, operation: DaclOperation, rc: u32) -> DaclE
 }
 
 pub(super) fn win32_io(path: &Path, operation: DaclOperation, error: &io::Error) -> DaclError {
+    win32(Some(path), operation, error)
+}
+
+/// A failure of a call that names no path.
+pub(super) fn win32_pathless(operation: DaclOperation, error: &io::Error) -> DaclError {
+    win32(None, operation, error)
+}
+
+fn win32(path: Option<&Path>, operation: DaclOperation, error: &io::Error) -> DaclError {
     DaclError::Win32 {
-        path: path.to_path_buf(),
+        path: path.map(Path::to_path_buf),
         operation,
         cause: DaclWin32Cause::Io(Box::new(crate::io::failure(error))),
     }

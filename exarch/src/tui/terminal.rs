@@ -512,7 +512,7 @@ impl Drop for StderrRedirect {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{DraftFile, editor_result};
+    use super::DraftFile;
     use ral_core::external_editor::MAX_DRAFT_BYTES;
     use ral_core::own::OwnDir;
 
@@ -606,6 +606,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unsuccessful_editor_does_not_return_its_partial_edit() {
+        use super::editor_result;
         use std::os::unix::process::ExitStatusExt as _;
         let dir = OwnDir::for_test("editor-cancel").unwrap();
         let draft = DraftFile::create((*dir).clone(), "partial edit").unwrap();

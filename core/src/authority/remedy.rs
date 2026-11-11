@@ -11,7 +11,9 @@ pub(crate) fn remove_the_exclusion() -> &'static str {
 /// The fs list a fix adds to.
 #[derive(Clone, Copy)]
 pub(crate) enum FsList {
+    #[cfg(unix)]
     Read,
+    #[cfg(unix)]
     Write,
     Either,
 }
@@ -19,7 +21,9 @@ pub(crate) enum FsList {
 /// Let the grant's fs `list` name `what`.
 pub(crate) fn add_to_fs(what: &str, list: FsList) -> String {
     let list = match list {
+        #[cfg(unix)]
         FsList::Read => "`read`",
+        #[cfg(unix)]
         FsList::Write => "`write`",
         FsList::Either => "`read` or `write`",
     };
@@ -27,6 +31,7 @@ pub(crate) fn add_to_fs(what: &str, list: FsList) -> String {
 }
 
 /// Let the grant's exec `allow` list name the program, in any key's form.
+#[cfg(unix)]
 pub(crate) fn add_to_exec() -> &'static str {
     "add it to the grant's exec `allow` list: `` `name git `` for a command name, \
      `` `absolute /path/to/it `` for a file, or `` `dir `absolute /path `` for its directory"
