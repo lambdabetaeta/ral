@@ -239,9 +239,14 @@ fn strip_scope(op: ScopeAst) -> ScopeAst {
             body: s(body),
             handler: s(handler),
         },
-        ScopeAst::Guard { body, cleanup } => ScopeAst::Guard {
+        ScopeAst::Guard {
+            acquire,
+            body,
+            release,
+        } => ScopeAst::Guard {
+            acquire: s(acquire),
             body: s(body),
-            cleanup: s(cleanup),
+            release: s(release),
         },
         ScopeAst::Within {
             opts,
@@ -1600,12 +1605,34 @@ fn parse_value_head_with_redirect_keeps_its_stage() {
 }
 
 #[test]
+fn a_guard_requires_all_three_operands() {
+    for source in [
+        "guard",
+        "guard { acquire }",
+        "guard { acquire } { |r| body }",
+    ] {
+        parse(source).expect_err("a guard needs acquire, body and release");
+    }
+}
+
+#[test]
 fn guard_grant_audit_and_gather_read_their_operands() {
     let scope = |src: &str| unwrap_single_scope(parse(src).unwrap());
-    let ScopeAst::Guard { body, cleanup } = scope("guard { body } { cleanup }") else {
+    let ScopeAst::Guard {
+        acquire,
+        body,
+        release,
+    } = scope("guard { acquire } { |r| body } { |r end| release }")
+    else {
         panic!("expected ScopeAst::Guard");
     };
-    assert!(matches!((*body, *cleanup), (Ast::Block(_), Ast::Block(_))));
+    for (operand, source) in [
+        (acquire, "{ acquire }"),
+        (body, "{ |r| body }"),
+        (release, "{ |r end| release }"),
+    ] {
+        assert_eq!(strip_one(*operand), strip_one(sole_stmt(source)));
+    }
     let ScopeAst::Grant { caps, body } = scope("grant [exec: [allow: []]] { body }") else {
         panic!("expected ScopeAst::Grant");
     };

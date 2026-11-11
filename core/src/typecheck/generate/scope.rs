@@ -152,16 +152,6 @@ impl Generator {
         (cty, CompKind::Grant { caps, body })
     }
 
-    pub(in crate::typecheck) fn guard(
-        &mut self,
-        body: &Val,
-        cleanup: &Val,
-    ) -> (CompTy, CompKind<Inferring>) {
-        let (cty, body) = self.scope_body(body);
-        let (_, cleanup) = self.scope_body(cleanup);
-        (cty, CompKind::Guard { body, cleanup })
-    }
-
     pub(in crate::typecheck) fn audit(&mut self, body: &Val) -> (CompTy, CompKind<Inferring>) {
         let (cty, body) = self.scope_body(body);
         let alpha = self.extract_return(&cty);
@@ -193,7 +183,7 @@ impl Generator {
         (cty, CompKind::Gather { body })
     }
 
-    fn scope_body(&mut self, body: &Val) -> (CompTy, Val<Inferring>) {
+    pub(super) fn scope_body(&mut self, body: &Val) -> (CompTy, Val<Inferring>) {
         let cty = self.solver.fresh_comp();
         let (ty, node) = self.val(body, None);
         self.solver
@@ -229,7 +219,7 @@ mod tests {
     use crate::ty::{CompTyNode, Grade, Scheme, UnitId};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::generate::tests::{assert_solved_comp, assert_solved_type, solved};
-    use crate::typecheck::readback::{Readback, exec_node};
+    use crate::typecheck::readback::{Readback, exec_node, lambda_comp};
     use crate::typecheck::solve::{Mode, Solver};
 
     fn generator() -> Generator {
@@ -260,21 +250,35 @@ mod tests {
         Val::thunk(Arc::new(comp))
     }
 
+    fn arm(params: &[&str], body: Comp) -> Val {
+        block(lambda_comp(
+            body.span,
+            params.iter().map(|name| (*name).into()).collect(),
+            body.item,
+        ))
+    }
+
     #[test]
     fn within_grant_guard_and_gather_preserve_the_body_producer() {
         for output in [false, true] {
             for form in 0..4 {
                 let mut generator = generator();
-                let body = block(if output {
+                let comp = if output {
                     command(1, "emit")
                 } else {
                     node(1, CompKind::Return(Val::Int(1)))
-                });
+                };
+                let guard_body = arm(&["resource"], comp.clone());
+                let body = block(comp);
                 let opts = FieldsNode::new(Vec::new().into());
                 let (cty, item) = match form {
                     0 => generator.within(&opts, None, &body),
                     1 => generator.grant(&opts, &body),
-                    2 => generator.guard(&body, &block(command(2, "cleanup"))),
+                    2 => generator.guard(
+                        &block(node(0, CompKind::Return(Val::Unit))),
+                        &guard_body,
+                        &arm(&["resource", "end"], command(2, "release")),
+                    ),
                     _ => generator.gather(&body),
                 };
                 let solution = solved(generator.solver);
@@ -292,23 +296,18 @@ mod tests {
     }
 
     #[test]
-    fn scope_bodies_require_ready_thunks_and_cleanup_is_checked_independently() {
+    fn scope_bodies_require_ready_thunks_and_guard_release_is_checked_independently() {
         let mut generator = generator();
         generator.gather(&Val::Int(1));
         generator.guard(
             &block(node(1, CompKind::Return(Val::Int(1)))),
-            &block(node(
-                2,
-                CompKind::Lam {
-                    param: "x".into(),
-                    body: Arc::new(node(3, CompKind::Return(Val::Unit))),
-                },
-            )),
+            &arm(&["resource"], node(2, CompKind::Return(Val::Int(1)))),
+            &arm(&["resource"], node(3, CompKind::Return(Val::Unit))),
         );
         let errors = generator.solver.refused().1;
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(matches!(errors[0].reason, Some(Reason::ScopeBody)));
-        assert!(matches!(errors[1].reason, Some(Reason::ReturnShape)));
+        assert!(matches!(errors[1].reason, Some(Reason::GuardRelease)));
     }
 
     #[test]

@@ -2,5 +2,5 @@
 # status: 1
 # at: 6:6
 # contains: undefined variable: $leak_guard
-guard { let leak_guard = 1 } { echo 'guard cleanup' }
+guard { () } { |_| let leak_guard = 1 } { |_ _| echo 'guard release' }
 echo $leak_guard

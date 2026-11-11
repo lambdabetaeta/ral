@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -90,6 +90,14 @@ Filesystem query schemas live below the shell: `fact/fs.rs` declares
 `DirEntry` (`list-dir`) and `FileInfo` (`file-info`) and constructs them purely
 from observed metadata. `shell/builtins/fs.rs` owns the queries; the checker
 reads the same records' `Typed` declarations.
+
+`fs.rs` also owns `builtin_temp_dir` and `builtin_temp_file`: `require_rm`
+calls `shell::exec::command::would_run("rm", …)` before `writable_temp_dir`
+or creation. It preserves lookup/admission's error and denial record, adding
+one hint explaining the need for `rm`; checking launches nothing. The parent
+and absent leaf retain the normal write judgments and exclusive creation.
+Prefer the prelude's `with-temp-dir` / `with-temp-file` for lexical lifetimes
+([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 
 The read and CSV schemes live in `typecheck/builtins.rs`:
 
@@ -222,7 +230,10 @@ Bodies are grouped by concern, one submodule each:
   A `spawn` or `watch` worker hangs under its shell's cradle, not the run's
   foreground scope: under the durable session root in a run outside any
   gather, so a foreground cancel never reaps it, and inside a gather — a
-  worker's body or a `gather { … }` — under the gather's entry scope, enrolled
+  worker's body or a `gather { … }` — under the gather's entry scope. A
+  `guard` shield does not change this cradle: a worker is masked only if its
+  owner is inside the shield, as with a `gather` opened during acquisition or
+  release, not merely because it was spawned there. It is enrolled
   in its `Brood` (`Cradle::owning` paired with a unique `BroodGuard`): when the
   gather exits it closes membership first (rejecting and cancelling any late
   birth from a stage thread still unwinding against that cradle), awaits each

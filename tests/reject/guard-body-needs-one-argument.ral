@@ -1,0 +1,4 @@
+# codes: T0011
+# status: 1
+# contains: a `guard` body is given the acquired resource
+guard { () } { () } { |_ _| () }

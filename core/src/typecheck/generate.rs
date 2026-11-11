@@ -136,7 +136,11 @@ impl Generator {
             } => self.within(opts, handlers.as_deref(), body),
             CompKind::Grant { caps, body } => self.grant(caps, body),
             CompKind::Try { body, handler } => self.try_(body, handler),
-            CompKind::Guard { body, cleanup } => self.guard(body, cleanup),
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
+            } => self.guard(acquire, body, release),
             CompKind::Audit { body } => self.audit(body),
             CompKind::Spawn { title, body } => self.spawn(title.as_ref(), body),
             CompKind::Gather { body } => self.gather(body),

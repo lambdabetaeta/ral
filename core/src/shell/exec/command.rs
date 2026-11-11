@@ -409,6 +409,16 @@ impl Command<Lookup> {
     }
 }
 
+/// `Ok` iff the bare command `name` would launch here: bundled or found on
+/// `PATH`, and admitted by the grants in force. The error is the one running
+/// it would raise.
+pub(crate) fn would_run(name: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
+    let command = Command::from_name(&CommandName::Bare(name.into()), &shell.context)
+        .lookup(&shell.context.grants, shell.baseline())
+        .admit(mooring, shell)?;
+    command.state.map(|_| ()).map_err(Break::from)
+}
+
 // ── Preparation ─────────────────────────────────────────────────────────
 
 impl Command<Result<Admitted, Error>> {

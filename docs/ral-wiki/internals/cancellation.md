@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-verified_at_date: 2026-11-10
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind]
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind, Frame::Acquire, Frame::Cleanup]
 ---
 
 # Cancellation
@@ -23,7 +23,7 @@ The two pieces answer different questions:
 
 - **The scope tree** (`Scope`, `ScopeNode`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
-  exactly the workers that inherited the cancelled scope. It is the only thing
+  exactly the workers owned under the cancelled scope. It is the only thing
   `Shell::poll` reads, and what it raises is a *stop*: an escape naming its
   owner, which no `try` catches
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
@@ -88,11 +88,12 @@ A scope node is `{ flag, cancelled_at, parent, shield }` in a tree of
   `Shell::construct` and shared by an aside); a
   worker's node, minted under its shell's *cradle* (`Cradle`) — the session
   root in a run outside any gather, else the gather's entry scope: the parent
-  worker's own node inside a worker, the run's scope at a `gather`; a
+  worker's own node inside a worker, the current scope when a `gather` opens; a
   host's dispatch scope (`run_cancel_handle`, the anchor's child); a run's
   node (`dispatch`, the base of a run); a stage's node (`launch_thread_stage`,
-  a child of the *current* scope, so a pipeline inside a cleanup is masked
-  with it); a cleanup's shield (`Frame::Cleanup`, `shielded(grace)`).
+  a child of the *current* scope, so a pipeline inside acquisition or release
+  is masked with it); a guard's shields (`Frame::Acquire`, `Frame::Cleanup`,
+  `shielded(grace)`).
 - **One writer per node.** The root by SIGTERM/SIGHUP/Ctrl-`\`; the dispatch
   scope by the host's interrupt or enclosing exarch exchange; a run's node by its wall and by the key its
   terminal tenant heard; a worker's by `cancel`, a `race` loss, its parent's
@@ -261,7 +262,7 @@ delivered, so nothing can be lost.
 in force, at:
 
 - the **machine's step arms** (`shell/evaluator/machine.rs`) — the β-step, `Bind`,
-  `App`, `Rec`, `Source`, and the exec step each poll, so any loop of `ral`
+  `App`, `Rec`, `Source`, guard entry and the exec step each poll, so any loop of `ral`
   calls is preemptible (the original
   [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] insight);
   a `?` chain's advance from one arm to the next is nested `try` applying a
@@ -339,7 +340,7 @@ stage's — and is run-invariant, so it lives on `Mooring::home`, a `ScopeNode`.
 and a `cancel`. The **current scope** is a descendant swapped by
 frames; it lives on `Shell::scope`, a `Scope`, which has no write, and is what *reads* consult: `poll`, every
 sliced wait, a child's attribution, the collector's loop. At a base the two
-coincide; inside a cleanup the scope is a shield under the node. A write never
+coincide; inside acquisition or release the scope is a shield under the node. A write never
 aims at the current scope. A shield is minted as a `Scope` alone, so no
 `ScopeNode` of it exists and nothing can write it.
 
@@ -357,21 +358,43 @@ top uninterpreted as `End::Stopped(Stop { cause, owner, at })`; the wire's
 
 ### The shield
 
-A `guard` cleanup runs under `Shell::shield(mooring.cleanup_grace)`: the
-current scope becomes `scope.shielded(grace)` for the cleanup's extent and is
-restored on pop and abandon, as `Frame::Capture` restores `io.stdout`.
-Everything launched inside — a pipeline's stages, an external child, a nested
-machine — reads the current scope and is masked with it. A shielded node's
-fold admits from its ancestors only `Aborted` and, once `since + grace` has
+**A `guard` shields acquisition and release within one budget from the
+strike.** Both use `Shell::shield(mooring.cleanup_grace)`: the current scope
+becomes `scope.shielded(grace)` for that phase's extent. `Frame::Acquire` and
+`Frame::Cleanup` restore it on return, halt and abandon, as `Frame::Capture`
+restores `io.stdout`.
+
+**The shield covers owned work, not every birth inside it.** Pipeline stages
+hang under the current scope; external children and nested machines read it.
+Workers hang under `cradle.under`, their owner's scope: an enclosing `gather`,
+a worker's body or the session is not moved under a shield merely because a
+worker is spawned during acquisition or release. A `gather` **opened inside**
+either phase captures the shield as its cradle and owns masked children.
+Delegate acquisition through that owner:
+`guard { gather { let h = spawn { … }; await $h } } { |r| … } { |r _| … }`.
+Awaiting an outside owner's worker can halt acquisition on that worker's stop
+and run no release; the awaiter's mask does not mask the worker.
+
+Entry polls before acquisition, so a pending stop holds nothing. If a stop
+lands during acquisition, it may finish within the grace; `Acquire` restores
+scope and installs `Guard` **without a poll**, so the body's first β-poll can
+stop it only after release is secured. A halting acquisition runs no release.
+One exceeding the grace can leak what it held; one finishing just inside it
+can leave release stopped at its first command. The release has only the
+remaining budget, not another grace
+([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+
+A shielded node's fold admits from its ancestors only `Aborted` and, once `since + grace` has
 passed, everything; `since` is the earliest `cancelled_at` on the chain above
 it, and the grace is capped by the nearest enclosing shield's. It exists
 only as a `Scope`, so its own flag is never written and a descendant's own
 cause stays visible. Every cleanup of
 one unwinding therefore ends by one instant, and a run ends within `wall +
 grace + TEARDOWN_GRACE`. The shield is cooperative: a signal the tty or the
-collector sends to the group still reaches a cleanup's children, and a child
-that dies of it is a process failure, since the current scope carries no cause
-to attribute it to
+collector sends to the group still reaches acquisition or release children,
+and a child that dies of it is a process failure, since the current scope
+carries no cause to attribute it to. In acquisition that failure can halt
+before any release is installed
 ([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]).
 
 The collector honours it in its teardown: `cancel_all` writes its cause on

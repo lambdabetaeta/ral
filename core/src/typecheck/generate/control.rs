@@ -1,7 +1,7 @@
 //! Joins, cases, pipelines, redirects and capture.
 
 use super::Generator;
-use crate::fact::ErrorRecord;
+use crate::fact::{ErrorRecord, ExitCase};
 use crate::ir::{
     CaseArm, CommandName, CommandWord, Comp, CompKind, Redirects, StdinSource, Val, is_synthetic,
 };
@@ -193,6 +193,37 @@ impl Generator {
             CompKind::Try {
                 body: nodes.next().expect("try body"),
                 handler: nodes.next().expect("try handler"),
+            },
+        )
+    }
+
+    pub(in crate::typecheck) fn guard(
+        &mut self,
+        acquire: &Val,
+        body: &Val,
+        release: &Val,
+    ) -> (CompTy, CompKind<Inferring>) {
+        let (acquired, acquire) = self.scope_body(acquire);
+        let resource = self.extract_return(&acquired);
+        let tail = self.solver.fresh_comp();
+        let body = JoinArm::in_hand(body, None, vec![resource.clone()], Reason::GuardBody);
+        let body = self.check_arm(&body, &body.shaped(tail.clone()));
+        self.force_return_shape(&tail, Reason::GuardBody);
+        let release_tail = self.solver.fresh_comp();
+        let release = JoinArm::in_hand(
+            release,
+            None,
+            vec![resource, ExitCase::<ErrorRecord>::ty()],
+            Reason::GuardRelease,
+        );
+        let release = self.check_arm(&release, &release.shaped(release_tail.clone()));
+        self.force_return_shape(&release_tail, Reason::GuardRelease);
+        (
+            tail,
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
             },
         )
     }

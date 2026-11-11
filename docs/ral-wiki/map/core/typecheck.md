@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -64,12 +64,17 @@ reads back checked CBPV IR.** The algorithm is
   `Key::{Label, Position, Data}` immediately requires a record slot, list or
   string-keyed map. There is no deferred read or index-made weakness
   ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
-- `generate/control.rs`: joins, `if`, `case`, `try`, pipelines, redirects and
-  capture. Arms meet fresh results, then equate with the join. Every pipeline
+- `generate/control.rs`: joins, `if`, `case`, `try`, `guard`, pipelines,
+  redirects and capture. Arms meet fresh results, then equate with the join.
+  `Generator::guard` gets the resource type through `scope_body`, checks
+  body against one resource argument and a producer tail, and release against
+  resource plus `ExitCase::<ErrorRecord>::ty()` and a discarded producer tail.
+  Only the body's producer type and grade are returned; `GuardBody` and
+  `GuardRelease` explain the operand-specific argument demands. Every pipeline
   stage demands ready-producer shape; non-final stages must write, and decoders
   are refused there. `stage_root_stdin_feed` rejects an overridden pipe edge.
   Stdout redirects retain the payload at a fresh result grade.
-- `generate/scope.rs`: `within`, `grant`, options, cleanup, audit, spawn,
+- `generate/scope.rs`: `within`, `grant`, options, audit, spawn,
   gather and protection. Written options are checked key by key; nested table
   obligations wait for closure.
 

@@ -10,7 +10,7 @@ mod error;
 mod fs;
 mod observation;
 
-pub use ending::{Done, Ending, ExitCode, FailureCode, PANIC_CODE, tag};
+pub use ending::{Done, Ending, ExitCase, ExitCode, FailureCode, PANIC_CODE, tag};
 pub use error::*;
 pub(crate) use fs::{DirEntry, FileInfo};
 pub use observation::{

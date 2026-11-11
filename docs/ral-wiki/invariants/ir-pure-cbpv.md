@@ -1,13 +1,12 @@
----
-generated_at_commit: d56977ff
----
-
 # The checked IR is pure CBPV
 
 **The checked IR has three layers: control, primitives on values, and shell.**
 The core is read against `dev/agda/Extrinsic/`;
 the evaluator is a CEK machine for [[design/cbpv|call-by-push-value]], and the
-Agda machine its substitution-based CK counterpart.
+Agda machine its substitution-based CK counterpart. **Owned divergence D4:**
+the acquiring `guard` and its ending-reading release await the strong-model
+Agda follow-up ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+The correspondence excludes that rule until the follow-up re-establishes it.
 
 - **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
   `Case`, `Try`, `Guard`, `Capture`. A lambda binds one name;

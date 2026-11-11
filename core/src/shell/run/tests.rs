@@ -1321,12 +1321,282 @@ fn a_run_ending_in_an_error_under_a_stop_ends_stopped() {
 }
 
 #[test]
+fn a_guard_delivers_the_resource_and_each_ending_without_consuming_it() {
+    for (body, expected) in [
+        ("return 42", "held ok\n"),
+        ("fail body", "held err body\n"),
+        ("exit 3", "held exited 3\n"),
+        ("stop-unstruck", "held stopped\n"),
+    ] {
+        let source = format!(
+            "guard {{ return held }} {{ |r| {body} }} {{ |r end|\n\
+             case $end [\n\
+             `ok: {{ |_| echo \"$r ok\" }},\n\
+             `err: {{ |e| echo \"$r err $e[message]\" }},\n\
+             `exited: {{ |n| echo \"$r exited $n\" }},\n\
+             `stopped: {{ |cause| case $cause [\n\
+                 `interrupted: {{ |_| echo \"$r stopped\" }},\n\
+                 `reader-gone: {{ |_| fail unexpected }},\n\
+                 `cancelled: {{ |_| fail unexpected }},\n\
+                 `timed-out: {{ |_| fail unexpected }},\n\
+                 `terminated: {{ |_| fail unexpected }},\n\
+                 `aborted: {{ |_| fail unexpected }}\n\
+             ] }}]\n\
+             return 99 }}"
+        );
+        let (ending, out) = ran(unstruck_runtime(), Run::captured(source, test_origin()));
+        assert_eq!(out, expected, "{body}: {ending:?}");
+        match body {
+            "return 42" => assert!(matches!(ending, End::Ok(Value::Int(42))), "{ending:?}"),
+            "fail body" => assert!(
+                matches!(&ending, End::Err(e) if e.reason == crate::fact::Reason::raised("body")),
+                "{ending:?}"
+            ),
+            "exit 3" => assert!(matches!(ending, End::Exited(3)), "{ending:?}"),
+            "stop-unstruck" => {
+                assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn a_guard_passes_its_resource_to_both_body_and_release() {
+    let (ending, out) = ran(
+        crate::test_helper::core_runtime(),
+        Run::captured(
+            "guard { return 41 } { |r| return $[$r + 1] } { |r _| echo $r; return 99 }",
+            test_origin(),
+        ),
+    );
+    assert!(matches!(ending, End::Ok(Value::Int(42))), "{ending:?}");
+    assert_eq!(out, "41\n");
+}
+
+#[test]
+fn a_guard_preserves_the_bodys_capture_grade() {
+    let (ending, out) = ran(
+        crate::test_helper::core_runtime(),
+        Run::captured(
+            "let x = guard { () } { |_| echo hi } { |_ _| () }; return $x",
+            test_origin(),
+        ),
+    );
+    assert!(
+        matches!(&ending, End::Ok(Value::String(s)) if s.as_ref() == "hi"),
+        "{ending:?}"
+    );
+    assert_eq!(out, "");
+}
+
+#[test]
+fn a_release_halt_pre_empts_the_bodys_ending() {
+    for body in ["return 42", "fail body", "exit 3", "stop-unstruck"] {
+        for release in ["fail release", "exit 7", "stop-unstruck"] {
+            let (ending, _) = ran(
+                unstruck_runtime(),
+                Run::captured(
+                    format!("guard {{ () }} {{ |_| {body} }} {{ |_ _| {release} }}"),
+                    test_origin(),
+                ),
+            );
+            match release {
+                "fail release" => assert!(
+                    matches!(&ending, End::Err(e) if e.reason == crate::fact::Reason::raised("release")),
+                    "{body}, {release}: {ending:?}"
+                ),
+                "exit 7" => assert!(matches!(ending, End::Exited(7)), "{body}: {ending:?}"),
+                "stop-unstruck" => {
+                    assert!(
+                        is_stopped(&ending, CancelCause::Interrupted),
+                        "{body}: {ending:?}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_release_reraises_the_exact_witnessed_error() {
+    let mut runtime = crate::test_helper::core_runtime();
+    let reason = crate::fact::Reason::process("false", crate::fact::Failure::Exited(1));
+    let mut error = crate::error::Error::new(reason);
+    error.prov = Some(crate::error::Prov::Resolved(Box::new((
+        "original-command".into(),
+        crate::test_helper::site(),
+    ))));
+    let expected = error.clone();
+    install_halting_act(&mut runtime, "body-fails", move |_| error.clone().into());
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
+    let ending = shell
+        .run(Run::captured(
+            "guard { () } { |_| body-fails } { |_ end| case $end [\n\
+             `err: { |e| raise $e }, `ok: { |_| () },\n\
+             `exited: { |_| () }, `stopped: { |_| () } ] }",
+            test_origin(),
+        ))
+        .expect_ran();
+    let End::Err(actual) = ending else {
+        panic!("the release must re-raise the body's error: {ending:?}");
+    };
+    assert_eq!(actual.fact(&shell), expected.fact(&shell));
+}
+
+#[test]
+fn a_halting_acquire_runs_neither_body_nor_release() {
+    for acquire in ["fail acquire", "exit 3", "stop-unstruck"] {
+        let (ending, out) = ran(
+            unstruck_runtime(),
+            Run::captured(
+                format!("guard {{ {acquire} }} {{ |_| echo body }} {{ |_ _| echo release }}"),
+                test_origin(),
+            ),
+        );
+        assert_eq!(out, "", "{acquire}: {ending:?}");
+        match acquire {
+            "fail acquire" => assert!(
+                matches!(&ending, End::Err(e) if e.reason == crate::fact::Reason::raised("acquire")),
+                "{ending:?}"
+            ),
+            "exit 3" => assert!(matches!(ending, End::Exited(3)), "{ending:?}"),
+            "stop-unstruck" => assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}"),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn a_stop_pending_at_guard_entry_runs_no_acquire() {
+    let (runtime, marked) = marking_runtime();
+    let (ending, out) = ran(
+        runtime,
+        Run::captured(
+            "strike; guard { mark } { |_| echo body } { |_ _| echo release }",
+            test_origin(),
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(!*marked.lock().unwrap(), "the acquire must not run");
+    assert_eq!(out, "");
+}
+
+#[test]
+fn an_acquire_struck_within_grace_installs_release_before_the_body_polls() {
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    install_act(&mut runtime, "finish-acquire", |_, shell| {
+        TestClock::advance(std::time::Duration::from_millis(900));
+        assert_eq!(shell.scope.poll(), Ok(()));
+    });
+    let (ending, out) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { strike; finish-acquire } { |_| echo body } { |_ end|\n\
+             case $end [`stopped: { |_| mark }, `ok: { |_| fail unexpected },\n\
+             `err: { |_| fail unexpected }, `exited: { |_| fail unexpected }] }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(*marked.lock().unwrap(), "release must already be installed");
+    assert_eq!(out, "", "the body must not run");
+}
+
+#[test]
+fn would_run_preserves_a_missing_names_not_found_error_and_status() {
+    use crate::fact::FailureCode as _;
+    let mut shell = crate::test_helper::core_shell();
+    shell.set_env_var("PATH", "").unwrap();
+    let missing = "__ral_guard_acquires_missing_command__";
+    let result = crate::shell::exec::command::would_run(missing, &Mooring::adrift(), &mut shell);
+    let Err(Break::Error(error)) = result else {
+        panic!("a name absent from both the bundle and PATH must fail: {result:?}");
+    };
+    assert_eq!(error.failure_code().get(), 127);
+    assert_eq!(
+        error.reason,
+        crate::fact::Reason::process(missing, crate::fact::Failure::NotFound)
+    );
+}
+
+#[test]
+fn temp_acquires_refuse_rm_denial_before_creation_or_body() {
+    crate::isolated!(
+        temp_acquires_refuse_rm_denial_before_creation_or_body,
+        || {
+            let temp = tempfile::tempdir().expect("an isolated temp parent");
+            let parent = crate::test_helper::real(temp.path());
+            let parent = parent.as_path();
+            let variable = if cfg!(windows) { "TMP" } else { "TMPDIR" };
+            crate::host::test_support::with_var(variable, parent.to_str(), || {
+                assert_eq!(crate::host::temp_dir(), parent);
+                for exec in ["allow: []", "allow: [`name rm], deny: [`name rm]"] {
+                    let under = |body: &str| {
+                        format!(
+                            "grant [exec: [{exec}], fs: [read: [`absolute {path}], \
+                         write: [`absolute {path}]]] {{ {body} }}",
+                            path = crate::syntax::quote_word(parent.to_str().unwrap()),
+                        )
+                    };
+                    let mut shell = crate::test_helper::fresh_shell();
+                    let rm = shell
+                        .run(Run::captured(under("rm"), test_origin()))
+                        .expect_ran();
+                    let End::Err(rm) = rm else {
+                        panic!("the grant must deny rm: {rm:?}");
+                    };
+                    assert!(
+                        matches!(rm.reason, crate::fact::Reason::Denied(_)),
+                        "{rm:?}"
+                    );
+                    for (source, acquire) in [
+                        ("temp-dir", "temp-dir"),
+                        ("temp-file", "temp-file"),
+                        ("with-temp-dir { |_| echo body }", "temp-dir"),
+                        ("with-temp-file { |_| echo body }", "temp-file"),
+                    ] {
+                        let report = shell.run(Run::captured(under(source), test_origin()));
+                        let RunReport::Ran {
+                            ending: End::Err(error),
+                            captured: Some(captured),
+                            ..
+                        } = report
+                        else {
+                            panic!("{source} must refuse at acquisition");
+                        };
+                        assert_eq!(error.reason, rm.reason, "{exec}: {source}");
+                        let hints = error.hints();
+                        assert_eq!(hints.len(), rm.hints().len() + 1, "{source}: {hints:?}");
+                        assert_eq!(&hints[..rm.hints().len()], rm.hints());
+                        let hint = hints.last().unwrap();
+                        assert!(hint.contains(&format!("`{acquire}`")), "{hint}");
+                        assert!(hint.contains("`rm`"), "{hint}");
+                        assert!(hint.contains("makes only what it can remove"), "{hint}");
+                        assert!(captured.stdout.bytes.is_empty(), "the body must not run");
+                        assert_eq!(
+                            std::fs::read_dir(parent)
+                                .expect("the temp parent still exists")
+                                .count(),
+                            0,
+                            "{exec}: {source} must make no path"
+                        );
+                    }
+                }
+            });
+        }
+    );
+}
+
+#[test]
 fn a_cleanup_runs_shielded_and_the_stop_follows() {
     let (runtime, marked) = marking_runtime();
     let (ending, _) = ran(
         runtime,
         Run::captured(
-            format!("guard {{ strike }} {{ {SLEEP} 0.2\nmark }}"),
+            format!("guard {{ () }} {{ |_| strike }} {{ |_ _| {SLEEP} 0.2\nmark }}"),
             test_origin(),
         ),
     );
@@ -1343,7 +1613,7 @@ fn a_cleanup_under_a_value_is_shielded_too() {
     let (ending, _) = ran(
         runtime,
         Run::captured(
-            format!("guard {{ return 1 }} {{ strike\n{SLEEP} 0.2\nmark }}"),
+            format!("guard {{ () }} {{ |_| return 1 }} {{ |_ _| strike\n{SLEEP} 0.2\nmark }}"),
             test_origin(),
         ),
     );
@@ -1366,7 +1636,7 @@ fn a_cleanup_struck_late_gets_the_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { return 1 } { advance-before\nstrike\nadvance-after\nmark }",
+            "guard { () } { |_| return 1 } { |_ _| advance-before\nstrike\nadvance-after\nmark }",
             std::time::Duration::from_secs(1),
         ),
     );
@@ -1381,7 +1651,7 @@ fn a_cleanup_that_outlives_its_grace_is_stopped() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            &format!("guard {{ strike }} {{ {SLEEP} 5\nmark }}"),
+            &format!("guard {{ () }} {{ |_| strike }} {{ |_ _| {SLEEP} 5\nmark }}"),
             std::time::Duration::from_millis(50),
         ),
     );
@@ -1397,7 +1667,7 @@ fn an_abort_passes_a_cleanup() {
     let (ending, _) = ran(
         runtime,
         Run::captured(
-            format!("guard {{ strike-aborted }} {{ {SLEEP} 5\nmark }}"),
+            format!("guard {{ () }} {{ |_| strike-aborted }} {{ |_ _| {SLEEP} 5\nmark }}"),
             test_origin(),
         ),
     );
@@ -1415,7 +1685,7 @@ fn a_signalled_child_under_a_shield_is_a_failure() {
     let (ending, _) = ran(
         runtime,
         Run::captured(
-            "guard { strike } { try { /bin/sh -c 'kill -INT $$' } { |e| mark } }",
+            "guard { () } { |_| strike } { |_ _| try { /bin/sh -c 'kill -INT $$' } { |e| mark } }",
             test_origin(),
         ),
     );
@@ -1429,8 +1699,8 @@ fn a_signalled_child_under_a_shield_is_a_failure() {
 #[test]
 fn the_scope_comes_back_after_a_cleanup() {
     for src in [
-        "guard { return 1 } { echo in }\nstrike\necho after",
-        "try { guard { fail 'x' } { echo in } } { |e|\nstrike\necho after }",
+        "guard { () } { |_| return 1 } { |_ _| echo in }\nstrike\necho after",
+        "try { guard { () } { |_| fail 'x' } { |_ _| echo in } } { |e|\nstrike\necho after }",
     ] {
         let (runtime, _) = marking_runtime();
         let (ending, out) = ran(runtime, Run::captured(src, test_origin()));
@@ -1474,7 +1744,7 @@ fn nested_cleanups_share_one_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { strike } { guard { consume-first } { cross-deadline\nmark } }",
+            "guard { () } { |_| strike } { |_ _| guard { () } { |_| consume-first } { |_ _| cross-deadline\nmark } }",
             std::time::Duration::from_secs(1),
         ),
     );
@@ -1491,13 +1761,144 @@ fn successive_cleanups_share_one_grace() {
     let (ending, _) = ran(
         runtime,
         captured_with_grace(
-            "guard { guard { strike } { consume-first } } { cross-deadline\nmark }",
+            "guard { () } { |_| guard { () } { |_| strike } { |_ _| consume-first } } { |_ _| cross-deadline\nmark }",
             std::time::Duration::from_secs(1),
         ),
     );
     assert_eq!(*callbacks.lock().unwrap(), [true, true]);
     assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
     assert!(!*marked.lock().unwrap());
+}
+
+#[test]
+fn an_acquire_that_outlives_grace_is_stopped_without_a_release() {
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    let callbacks = install_shared_grace_acts(&mut runtime);
+    let (ending, out) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { strike; consume-first; cross-deadline; echo acquired } \
+             { |_| echo body } { |_ _| mark }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert_eq!(*callbacks.lock().unwrap(), [true, true]);
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(
+        !*marked.lock().unwrap(),
+        "a halted acquire installs no release"
+    );
+    assert_eq!(out, "", "neither acquisition completion nor body ran");
+}
+
+#[test]
+fn an_acquire_leaves_only_the_unspent_grace_for_its_release() {
+    let _clock = TestClock::enter(std::time::Instant::now());
+    let (mut runtime, marked) = marking_runtime();
+    let callbacks = install_shared_grace_acts(&mut runtime);
+    install_act(&mut runtime, "nearly-expired", |_, _| {
+        TestClock::advance(std::time::Duration::from_millis(300));
+    });
+    let (ending, out) = ran(
+        runtime,
+        captured_with_grace(
+            "guard { strike; consume-first; nearly-expired } \
+             { |_| echo body } { |_ _| cross-deadline; mark }",
+            std::time::Duration::from_secs(1),
+        ),
+    );
+    assert_eq!(*callbacks.lock().unwrap(), [true, true]);
+    assert!(is_stopped(&ending, CancelCause::Interrupted), "{ending:?}");
+    assert!(
+        !*marked.lock().unwrap(),
+        "the first command after the shared deadline must stop"
+    );
+    assert_eq!(out, "", "the pending stop pre-empts the body");
+}
+
+#[test]
+fn an_acquire_shields_a_worker_only_when_its_gather_is_opened_inside() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    for owns_worker in [false, true] {
+        let started = Instant::now();
+        let _clock = TestClock::enter(started);
+        let (mut runtime, released) = marking_runtime();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let ready_rx = Mutex::new(ready_rx);
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let resume_rx = Mutex::new(resume_rx);
+        install_body(&mut runtime, "worker-window", move |_, shell| {
+            ready_tx.send(()).unwrap();
+            let now = resume_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the acquisition must resume its worker after the strike");
+            let _clock = TestClock::enter(now);
+            shell.poll()?;
+            Ok(Value::Unit)
+        });
+        install_act(&mut runtime, "wait-worker", move |_, _| {
+            ready_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker must enter before the strike");
+        });
+        install_act(&mut runtime, "resume-worker", move |_, shell| {
+            TestClock::advance(Duration::from_secs(59));
+            assert_eq!(shell.scope.poll(), Ok(()), "the acquisition is shielded");
+            resume_tx.send(started + Duration::from_secs(59)).unwrap();
+        });
+        let acquired = Arc::new(Mutex::new(false));
+        let flag = acquired.clone();
+        install_act(&mut runtime, "acquired", move |_, _| {
+            *flag.lock().unwrap() = true;
+        });
+
+        let acquire = "let h = spawn { worker-window; return 41 }; \
+                       wait-worker; strike; resume-worker; \
+                       let r = await $h; acquired; return $r";
+        let acquire = if owns_worker {
+            format!("gather {{ {acquire} }}")
+        } else {
+            acquire.to_owned()
+        };
+        let (ending, out) = ran(
+            runtime,
+            captured_with_grace(
+                &format!(
+                    "gather {{ guard {{ {acquire} }} {{ |_| echo body }} {{ |r end| \
+                     case $end [\n\
+                     `stopped: {{ |_| echo $r; mark }}, `ok: {{ |_| fail unexpected }},\n\
+                     `err: {{ |_| fail unexpected }}, `exited: {{ |_| fail unexpected }}] }} }}"
+                ),
+                Duration::from_secs(60),
+            ),
+        );
+        assert!(
+            is_stopped(&ending, CancelCause::Interrupted),
+            "owns_worker={owns_worker}: {ending:?}"
+        );
+        assert_eq!(
+            *acquired.lock().unwrap(),
+            owns_worker,
+            "only an owned worker can deliver the resource after the strike"
+        );
+        assert_eq!(
+            *released.lock().unwrap(),
+            owns_worker,
+            "a stopped acquisition must install no release"
+        );
+        assert_eq!(
+            out,
+            if owns_worker { "41\n" } else { "" },
+            "the body must be pre-empted; only an acquired resource is released"
+        );
+    }
 }
 
 #[test]

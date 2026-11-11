@@ -1,5 +1,13 @@
 [
   {
+    "name": "acquiring guard and lexical temp helpers",
+    "source": "guard { temp-dir } { |dir| echo $dir } { |dir end| rm -rf $dir }\nwith-temp-dir { |dir| echo $dir }\nwith-temp-file { |file| echo $file }\nguard-extra with-temp-directory with-temp-files\n",
+    "scopes": {
+      "keyword.control.ral": ["guard", "with-temp-dir", "with-temp-file"],
+      "variable.other.ral": ["dir", "dir", "dir", "file"]
+    }
+  },
+  {
     "name": "unit is punctuation, not a reserved word",
     "source": "return (); unit unitish\n",
     "scopes": {

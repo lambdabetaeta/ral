@@ -1,10 +1,7 @@
----
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
----
-
 # Endings
 
-**How a computation ended is one generic sum; every observer is a projection.**
+**`Ending` describes every ending; `ExitCase` describes what a frame can
+observe.** A panic runs no release, so the latter is not an `Ending` projection.
 Lifetime and failure are independent obligations. A loose worker's ending is
 its own, not an implicit failure of the run or session that started it.
 
@@ -15,7 +12,15 @@ Ending<V, F, S> = Ok(V) | Err(F) | Exited(u8) | Stopped(S) | Panic(String)
 End              = Ending<Value, Error, Stop>
 Done             = Ending<(), ErrorRecord, CancelCause>
 protocol::Ending = Ending<FOValue, ErrorFact, CancelCause>
+ExitCase<F>      = Ok | Err(F) | Exited(u8) | Stopped(CancelCause)
 ```
+
+`guard`'s release reads `ExitCase<ErrorRecord>`: no success value, no panic.
+It shares `Ending`'s tag table and four payload types; a unit test pins its
+closed type to `Done::ty()` without `panic`. The machine constructs it once
+from the borrowed body outcome, preserving `err`'s witness, and saves the
+outcome to restore after release. Observation cannot consume that outcome
+([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 
 - `Stop { cause, owner: Option<ScopeId>, at: Option<Prov> }` retains the
   scope that may consume a stop and the location it unwound through. Errors
@@ -48,6 +53,7 @@ protocol::Ending = Ending<FOValue, ErrorFact, CancelCause>
 | Wire ending | `FOValue` or boundary `err` | record | byte | cause | text |
 | `poll`'s `ready.outcome` | data | record, including a converted own stop | re-raise | foreign: re-raise | resume unwind |
 | `audit B` | data | record | pass, drop trail | pass, drop trail | unwind |
+| `guard` release (`ExitCase`) | Unit | witnessed record | byte | cause | no release |
 | `await`, `race` winner, brood join | return | raise | raise | raise | resume unwind |
 | `first-settled`, `is-done` | do not inspect ending | same | same | same | same |
 | Worker `done`, `workers` row (`Done`) | Unit | record | byte | cause | text |

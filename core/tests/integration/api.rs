@@ -8,6 +8,7 @@ mod detach;
 mod escapes;
 mod gitdir;
 mod grants;
+mod guards;
 mod modules;
 mod numerals;
 mod observations;

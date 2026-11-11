@@ -221,6 +221,11 @@ let attempt = { |body| try { !$body; return () } { |_| return () } }
 ## Run body; return true on POSIX exit 0, false on any error or non-zero status.
 let succeeds = { |body| try { !$body; return true } { |_| return false } }
 
+## Run `body` with a temporary directory whose path is removed when the body's extent ends, so a worker the body spawns to use it belongs inside a `gather`.
+let with-temp-dir = { |body| guard { temp-dir } $body { |t _| rm -rf $t } }
+## Run `body` with a temporary file whose path is removed when the body's extent ends, so a worker the body spawns to use it belongs inside a `gather`.
+let with-temp-file = { |body| guard { temp-file } $body { |f _| rm -f $f } }
+
 # Filesystem queries — `exists`, `is-file`, `is-dir`, `is-link`,
 # `is-readable`, `is-writable` are native builtins (see
 # `core/src/shell/builtins/predicates.rs`); they resolve their path

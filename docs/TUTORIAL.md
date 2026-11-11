@@ -539,17 +539,38 @@ refuses a `status` of 0 (use `return`) or above 255. Re-raising a caught record
 preserves its cause and the hints it determines, not situational advice or
 unwind notes from the first report.
 
-`guard` always runs cleanup, then lets the original failure continue — and a
-cleanup that fails in turn pre-empts it, since a cleanup that could not fail
-the run would have nowhere to report from:
+Use `with-temp-dir` for a temporary workspace. It acquires the directory
+under a cancellation shield and removes it when the body ends, including on
+failure, `exit`, or a stop:
 
-    let temporary = temp-file
-    guard {
+    with-temp-dir { |dir|
+        let temporary = "$dir/download"
         curl -fsS -o $temporary $url
         consume $temporary
-    } {
-        rm -f $temporary
     }
+
+`with-temp-file { |file| … }` does the same for one file. A worker using the
+path belongs inside a `gather` in the body, so removal waits for its work.
+Bare `temp-dir` and `temp-file` leave removal to you; all four helpers refuse
+before creating anything if `rm` is unavailable or denied by the active grant.
+
+For other resources, `guard ACQUIRE BODY RELEASE` is the underlying form:
+
+    guard { acquire-resource } { |resource|
+        use-resource $resource
+    } { |resource end|
+        release-resource $resource
+    }
+
+The release sees the resource and an ending: `` `ok ``, `` `err error ``,
+`` `exited status ``, or `` `stopped cause ``. Its value is ignored; the body's
+original outcome continues. A release that halts pre-empts that outcome. If
+acquisition halts, no release runs. Acquisition and release share the host's
+one cleanup-grace budget from the stop's arrival (SPEC §8.7). If acquisition
+or release delegates to a worker, open its `gather` inside that operand to
+shield it: workers of an already enclosing gather, worker body, or session
+do not gain the shield merely by being spawned there. The shield holds off
+ral's cooperative stops, not terminal signals to external children.
 
 The prelude contains common policies:
 
@@ -848,7 +869,7 @@ that turn data back into source text.
 | `$@` | `args`; forward with `...!{args}` |
 | `export KEY=value` | `within [env: [KEY: value]] { … }` |
 | `cd dir` in a script | `within [dir: dir] { … }` |
-| `trap cleanup EXIT` | `guard { body } { cleanup }` |
+| `trap cleanup EXIT` | `with-temp-dir { |dir| body }` for temporary work; `guard ACQUIRE BODY RELEASE` otherwise |
 | heredoc | `command << #'…'#` |
 | `$((x + 1))` | `$[$x + 1]` |
 | `[ -f "$path" ]` | `is-file $path` |

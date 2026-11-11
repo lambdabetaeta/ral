@@ -138,8 +138,9 @@ fn every_variant() -> Vec<Arc<Comp>> {
         handler: var("r_try_handler"),
     });
     let scope_guard = Spanned::synthetic(CompKind::Guard {
+        acquire: var("r_guard_acquire"),
         body: var("r_guard_body"),
-        cleanup: var("r_guard_cleanup"),
+        release: var("r_guard_release"),
     });
     let scope_within = Spanned::synthetic(CompKind::Within {
         opts: Node::new(vec![("dir".into(), svar("r_within_opts"))].into()),
@@ -320,8 +321,9 @@ fn referenced_names_walks_every_variant() {
         "r_case_arm_body",
         "r_try_body",
         "r_try_handler",
+        "r_guard_acquire",
         "r_guard_body",
-        "r_guard_cleanup",
+        "r_guard_release",
         "r_within_opts",
         "r_within_arm",
         "r_within_body",

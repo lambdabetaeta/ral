@@ -80,8 +80,8 @@ let d = temp-dir
 echo file > "$d/entry"
 let listed = within [dir: $d] { ls }
 assert_eq 'within body' entry $listed
-# a guard is one computation: its cleanup's output is part of its output
-let guarded = guard { echo body } { echo cleanup }
+# A guard is one computation: its release's output is part of its output.
+let guarded = guard { () } { |_| echo body } { |_ _| echo cleanup }
 assert_eq 'guard whole' "body\ncleanup" $guarded
 
 # `let _` captures and drops

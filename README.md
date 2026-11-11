@@ -23,6 +23,11 @@ curl $primary ? curl $fallback   # ? reacts to failure; | moves data
 glob '*.rs' | map { |f| wc -l $f }         # typed pipelines,
 let cfg = curl -s $url | from-json         # checked before anything runs
 
+with-temp-dir { |dir|                     # removed when the body ends
+    curl -fsS -o "$dir/archive" $url
+    tar -xf "$dir/archive" -C $dir
+}
+
 grant [exec: [allow: [`name git]], fs: [read: [`absolute /src]], net: `offline] {
     git log              # permitted
     curl $url            # denied
@@ -41,8 +46,9 @@ complete scripts against the bash they replace.
   redirection, instrumentation.
 - **Capabilities only shrink.** `grant` intersects; it never amplifies.
 - **Authority is dynamic, data is lexical.** No mutation, only shadowing.
-- **Control flow is a library.** `if`, `for`, `try`, `case` are functions over
-  blocks.
+- **Most control flow is a library.** `for`, `retry`, and `with-temp-dir` are
+  functions over blocks; named dynamic scopes such as `try` and `guard` need
+  machine frames.
 - **`if` takes a `Bool`**, never an exit status. There is no `||`.
 - **Inferred types**, row-typed records, errors before any process starts.
 - **Not POSIX**, on purpose: no word splitting, no `$IFS`, no unquoted globs.

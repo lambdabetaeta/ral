@@ -704,7 +704,7 @@ fn a_timed_out_cleanup_returns_within_wall_plus_grace() {
     let t0 = std::time::Instant::now();
     let r = run_shell_direct(
         &engine,
-        "guard { /bin/sh -c 'sleep 30' } { /bin/sleep 30 }",
+        "guard { () } { |_| /bin/sh -c 'sleep 30' } { |_ _| /bin/sleep 30 }",
         1,
         &crate::record::Emitter::none(),
     );

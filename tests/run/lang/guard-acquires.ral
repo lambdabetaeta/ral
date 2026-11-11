@@ -1,0 +1,38 @@
+# The release sees the resource and ending, but cannot consume the ending.
+let say = { |_ end| case $end [
+    `ok: { |_| echo ok },
+    `err: { |e| echo "err $e[message]" },
+    `exited: { |n| echo "exited $n" },
+    `stopped: { |_| echo stopped },
+] }
+
+let value = guard { return 7 } { |r| return $r } { |r end|
+    echo "release $r"
+    say $r $end
+    return 99
+}
+echo $value
+
+try { guard { () } { |_| fail x } $say } { |e| echo "caught $e[message]" }
+try { guard { fail a } { |_| echo BODYRAN } $say } { |e| echo "caught $e[message]" }
+try { guard { () } { |_| fail x } { |_ _| fail y } } { |e| echo "caught $e[message]" }
+
+# Only the body's grade determines capture; a release's value is discarded.
+let x = guard { () } { |_| echo hi } { |_ _| return 99 }
+echo "captured [$x]"
+
+let rethrow = { |_ end| case $end [
+    `err: { |e| raise $e },
+    `ok: { |_| () },
+    `exited: { |_| () },
+    `stopped: { |_| () },
+] }
+try { guard { () } { |_| ^false } $rethrow } { |e| echo "command status $e[status]" }
+
+# A release can re-raise the exact witnessed record, not a fresh claim.
+let original = try { ^false; fail 'false unexpectedly succeeded' } { |e| return $e }
+let reraised = try {
+    guard { () } { |_| raise $original } $rethrow
+    fail 'raise unexpectedly succeeded'
+} { |e| return $e }
+echo $[$original == $reraised]

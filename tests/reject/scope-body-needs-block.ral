@@ -1,5 +1,5 @@
 # codes: T0010
 # status: 1
 # at: 5:1
-# contains: `within`, `grant`, `try`, `guard`, `audit` and `spawn` each run a block
+# contains: `within`, `grant`, `try`, `audit`, `spawn` and `gather` run a body block
 within [dir: "x"] 5

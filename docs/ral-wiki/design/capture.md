@@ -39,7 +39,9 @@ A *grade* says how a computation produces its result, not whether it writes.
   `from-lines`) have fresh result grades too; their non-unit payload types
   hide those grades when printed as `Returns`.
 - Stdin/stderr redirects preserve their input grade. Scope forms such as
-  `within` and `gather` preserve their body's type.
+  `within` and `gather` preserve their body's type. `guard A K R` has `K`'s
+  producer type and grade; acquisition and release contribute neither.
+  `let x = guard { () } { |_| echo hi } { |_ _| () }` captures `hi`.
 
 A free unit producer can therefore stand as a command by unification, with no
 runtime conversion. A `let`-fixed `p` producer cannot. The rule reads types:
@@ -135,7 +137,8 @@ with `return ()` to supply a fresh unit producer.
 ## The whole computation is the buffer
 
 **Capture preserves exactly the bytes written by its body.** An inner `let`
-captures for itself; every other write, including a `guard` cleanup, goes to
+captures for itself; every other write, including a `guard` acquisition or
+release, goes to
 the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 `let x = !{ let y = echo a; echo b }` binds `"b"` and `y` is `"a"`.
 

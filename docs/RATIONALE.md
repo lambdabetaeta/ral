@@ -338,8 +338,9 @@ stand in for an exit status, or an exit status to stand in for a proposition.
 - `if` branches on a `Bool`;
 - `?` tries the next command only when the preceding command fails;
 - `try` turns a failure into an error record and chooses recovery;
-- `guard` runs cleanup and preserves the original failure, unless the cleanup
-  halts in turn and pre-empts it;
+- `guard` shields acquisition, passes the resource to the body, and releases
+  it with the body's ending; the release cannot consume that ending, but a
+  release that halts pre-empts it;
 - `audit` turns execution, including failure, into structured data: a report
   pairing an `outcome` — `` `ok `` of the value, or `` `err `` of the very
   record `try` would have handed a handler — with the `trail` of what
@@ -354,20 +355,24 @@ only Boolean disjunction.
 
 ## The grammar is the residue
 
-Most control flow is library: `for`, `while`, `map`, `each`, and `retry` are
-ordinary functions over values and thunks. A construct earns a grammar arm only
-when both of these are true:
-
-1. ordinary Hindley–Milner typing cannot express its rule;
-2. a function taking thunks cannot implement its runtime scope honestly.
+Most control flow is library: `for`, `while`, `map`, `each`, `retry`,
+`attempt`, and `with-temp-*` are ordinary functions over values and thunks. A
+construct is a control operator when it is a named form whose meaning needs a
+machine frame, or a worker, that intercepts or scopes something across an
+operand's whole dynamic extent. Typing plays no part: `try`, `guard`, and
+`gather` have ordinary Hindley–Milner types.
 
 Exactly seven control operators qualify: `within`, `grant`, `try`, `guard`,
-`audit`, `spawn`, and `gather`. Each manipulates a dynamic frame, failure
-continuation, audit ownership, or the ownership of concurrent work which no
-ordinary value can observe; `spawn` also carries the one operand, its title,
-that the syntax may leave out, since no value's signature may. `if`, `case`, and `?` remain
-syntax for their branching shape, but do not enlarge the primitive dynamic
-machinery.
+`audit`, `spawn`, and `gather`. They scope handlers and context (`within`),
+capabilities (`grant`), halts (`try`, `guard`), observations (`audit`), or
+ownership of work (`spawn`, `gather`). A native function could run such an
+operand only on a nested machine, losing tail position and meeting the nested
+machine limit.
+
+Capture `!{…}` and redirection also scope machine frames, but are not named
+forms: they are already syntax in block and command notation. `if`, `case`,
+and `?` remain syntax because their set of alternatives is syntax, not because
+their types demand it. They do not enlarge the primitive dynamic machinery.
 
 The small core is therefore not another foundation. It is what remains after
 the value language, effect boundary, and scoping discipline have done their

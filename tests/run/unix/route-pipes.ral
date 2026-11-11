@@ -5,10 +5,10 @@ let d = temp-dir
 echo note > "$d/notes.txt"
 echo line > "$d/input.txt"
 
-# guard: cleanup bytes are ambient (here, the pipe); either arm may read
-guard { return () } { echo cleanup } | cat
-echo one | guard { from-string } { return () }
-echo two | guard { return () } { from-string }
+# guard: release bytes are ambient (here, the pipe); either arm may read
+guard { () } { |_| return () } { |_ _| echo cleanup } | cat
+echo one | guard { () } { |_| from-string } { |_ _| return () }
+echo two | guard { () } { |_| return () } { |_ _| from-string }
 
 # A stage-root `<` answers the stage's reads; a `<` off the root does not
 within [dir: $d] {

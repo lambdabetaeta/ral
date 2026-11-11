@@ -50,7 +50,7 @@ counted < "$d/in2"
 # Expected: alpha / 4
 
 # guard and audit are channel-transparent
-let g = !{ guard { echo hi } { return () } | from-string }
+let g = !{ guard { () } { |_| echo hi } { |_ _| return () } | from-string }
 echo $g
 let a = !{ echo hi | audit { from-string } }
 case $a[outcome] [`ok: { |v| echo $v }, `err: { |_| return () }]

@@ -42,6 +42,9 @@ for tools that require that format.
   sigil separately from their operands; `!name` remains literal text.
 - Bare dereferences trim trailing hyphens (`$name-` scopes only `name`),
   while delimited dereferences retain them (`$(name-)` scopes `name-`).
+- `guard ACQUIRE BODY RELEASE` is highlighted as control flow, as are the
+  ordinary prelude helpers `with-temp-dir` and `with-temp-file`. Resource and
+  ending parameters use the usual lambda scopes; arity remains ral's check.
 
 These are lexical highlighters, not parsers or typecheckers. Numeric range
 and adjacent-atom validity remain runtime checks. Commas are treated as

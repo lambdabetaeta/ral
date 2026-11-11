@@ -1,0 +1,10 @@
+# status: 3
+# A returning release cannot consume an exit, even through try.
+let say = { |_ end| case $end [
+    `ok: { |_| echo ok },
+    `err: { |e| echo "err $e[message]" },
+    `exited: { |n| echo "exited $n" },
+    `stopped: { |_| echo stopped },
+] }
+try { guard { () } { |_| exit 3 } $say } { |_| echo CAUGHTEXIT }
+echo CONTINUED

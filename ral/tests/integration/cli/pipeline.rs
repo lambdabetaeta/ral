@@ -1051,7 +1051,7 @@ fn a_producers_try_cannot_change_its_reader_gone_stop() {
 fn a_reader_gone_stage_runs_its_cleanup_and_the_cleanups_halt_is_the_verdict() {
     let (o, ran) = run_marked(
         "ral_pipe_gone_cleanup_halt",
-        |f| format!("!{{ guard {{ yes }} {{ touch {f}; fail x }} }} | head -1"),
+        |f| format!("!{{ guard {{ () }} {{ |_| yes }} {{ |_ _| touch {f}; fail x }} }} | head -1"),
         Duration::from_secs(10),
     );
     assert_eq!(o.status, 1, "stderr: {}", o.stderr);
@@ -1062,7 +1062,11 @@ fn a_reader_gone_stage_runs_its_cleanup_and_the_cleanups_halt_is_the_verdict() {
 fn a_reader_gone_stages_cleanup_that_ends_on_it_is_forgiven() {
     let (o, ran) = run_marked(
         "ral_pipe_gone_cleanup_forgiven",
-        |f| format!("!{{ guard {{ yes }} {{ touch {f}; echo tail }} }} | head -1"),
+        |f| {
+            format!(
+                "!{{ guard {{ () }} {{ |_| yes }} {{ |_ _| touch {f}; echo tail }} }} | head -1"
+            )
+        },
         Duration::from_secs(10),
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -1075,7 +1079,7 @@ fn a_nested_reader_gone_stages_cleanup_halt_is_the_verdict() {
     // outer collector forgives nothing it was not handed.
     let o = run_with_timeout(
         &[],
-        "!{ !{ guard { yes } { fail x } } | cat } | head -1",
+        "!{ !{ guard { () } { |_| yes } { |_ _| fail x } } | cat } | head -1",
         Duration::from_secs(10),
     )
     .expect("nested pipeline hung");
@@ -1086,7 +1090,11 @@ fn a_nested_reader_gone_stages_cleanup_halt_is_the_verdict() {
 fn a_reader_gone_stages_cleanup_write_is_stopped_and_its_tail_discarded() {
     let (o, ran) = run_marked(
         "ral_pipe_gone_cleanup_write",
-        |f| format!("!{{ guard {{ yes }} {{ echo tail; touch {f} }} }} | head -1"),
+        |f| {
+            format!(
+                "!{{ guard {{ () }} {{ |_| yes }} {{ |_ _| echo tail; touch {f} }} }} | head -1"
+            )
+        },
         Duration::from_secs(10),
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -1111,7 +1119,7 @@ fn a_reader_gone_stages_cleanup_command_runs_to_completion_and_its_halt_is_the_v
     // The cut the shield masks once left it blocked until the 5 s grace.
     let (o, ran, took) = run_marked_timed("ral_pipe_gone_cleanup_command", |f| {
         format!(
-            "!{{ guard {{ /bin/sleep 0.2 }} {{ {PAST_ANY_PIPE}; touch {f}; fail x }} }} | !{{ return () }}"
+            "!{{ guard {{ () }} {{ |_| /bin/sleep 0.2 }} {{ |_ _| {PAST_ANY_PIPE}; touch {f}; fail x }} }} | !{{ return () }}"
         )
     });
     assert_eq!(o.status, 1, "stderr: {}", o.stderr);
@@ -1126,7 +1134,7 @@ fn a_reader_gone_stages_cleanup_command_runs_to_completion_and_its_halt_is_the_v
 fn a_torn_down_stages_cleanup_does_not_block_on_its_escaped_reader() {
     let (o, ran, took) = run_marked_timed("ral_pipe_teardown_cleanup_command", |f| {
         format!(
-            "!{{ guard {{ /bin/sleep 5 }} {{ {PAST_ANY_PIPE}; touch {f} }} }} | !{{ /bin/sleep 0.3; exit 3 }}"
+            "!{{ guard {{ () }} {{ |_| /bin/sleep 5 }} {{ |_ _| {PAST_ANY_PIPE}; touch {f} }} }} | !{{ /bin/sleep 0.3; exit 3 }}"
         )
     });
     assert_eq!(o.status, 3, "stderr: {}", o.stderr);
@@ -1143,7 +1151,7 @@ fn a_torn_down_stages_cleanup_write_is_not_cut_at_an_edge_the_teardown_left() {
     // teardown kills: read, not dead, so the cleanup goes on.
     let (o, ran, took) = run_marked_timed("ral_pipe_teardown_cleanup_write", |f| {
         format!(
-            "!{{ guard {{ /bin/sleep 5 }} {{ for !{{range 0 4000}} {{ |i| echo 0123456789012345678901234567890123456789 }}; touch {f} }} }} | /bin/sleep 5 | !{{ /bin/sleep 0.3; exit 3 }}"
+            "!{{ guard {{ () }} {{ |_| /bin/sleep 5 }} {{ |_ _| for !{{range 0 4000}} {{ |i| echo 0123456789012345678901234567890123456789 }}; touch {f} }} }} | /bin/sleep 5 | !{{ /bin/sleep 0.3; exit 3 }}"
         )
     });
     assert_eq!(o.status, 3, "stderr: {}", o.stderr);
@@ -1156,13 +1164,27 @@ fn a_torn_down_stages_cleanup_write_is_not_cut_at_an_edge_the_teardown_left() {
 
 #[test]
 fn a_rolled_back_stages_cleanup_does_not_block_on_the_edge_its_reader_never_took() {
-    let (o, ran, took) = run_marked_timed("ral_pipe_rollback_cleanup_command", |f| {
-        format!(
-            "!{{ guard {{ /bin/sleep 5 }} {{ {PAST_ANY_PIPE}; touch {f} }} }} | ral-no-such-command"
-        )
-    });
+    let markers = tempfile::tempdir().expect("create rollback markers directory");
+    let acquired = markers.path().join("acquired");
+    let released = markers.path().join("released");
+    let script = format!(
+        "!{{ guard {{ touch '{}' }} {{ |_| /bin/sleep 5 }} {{ |_ _| {PAST_ANY_PIPE}; touch '{}' }} }} | ral-no-such-command",
+        acquired.display(),
+        released.display(),
+    );
+    let started = std::time::Instant::now();
+    let o =
+        run_with_timeout(&[], &script, Duration::from_secs(15)).expect("rollback pipeline hung");
+    let took = started.elapsed();
+
     assert_eq!(o.status, 127, "stderr: {}", o.stderr);
-    assert!(ran, "the cleanup's command never finished");
+    // Lookup failure may stop the stage before acquisition; neither schedule is forced.
+    assert_eq!(
+        acquired.exists(),
+        released.exists(),
+        "release must finish iff acquisition ran; stderr: {}",
+        o.stderr
+    );
     assert!(
         took < Duration::from_secs(3),
         "it waited out the grace: {took:?}"
@@ -1191,7 +1213,7 @@ fn an_exit_in_a_stage_ends_the_pipeline_at_once() {
 fn a_reader_gone_stages_cleanup_exit_is_the_verdict() {
     let o = run_with_timeout(
         &[],
-        "!{ guard { yes } { exit 3 } } | head -1",
+        "!{ guard { () } { |_| yes } { |_ _| exit 3 } } | head -1",
         Duration::from_secs(10),
     )
     .expect("cleanup-exit pipeline hung");

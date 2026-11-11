@@ -1,50 +1,39 @@
 # Control flow is library; seven operators are syntax
 
-**ral's grammar reserves syntax for exactly seven control operators** —
-`within`, `grant`, `try`, `guard`, `audit`, `spawn`, `gather` — alongside the
-syntactic forms `if`, `case`, and `?`. Everything else a shell usually bakes in (`for`, `while`, `map`,
-`each`, `retry`) is an ordinary prelude function taking thunks.
+**A control operator is a named form whose meaning needs a machine frame or
+worker over its operand's whole dynamic extent.** ral reserves seven:
+`within`, `grant`, `try`, `guard`, `audit`, `spawn`, `gather`. Ordinary
+Hindley–Milner typing is no criterion: `try`, `guard` and `gather` have HM types.
 
-An operator earns grammar only when both conditions hold:
+- `try` intercepts errors and passes a witnessed record to its handler.
+- `guard ACQUIRE BODY RELEASE` shields acquisition, installs release before
+  the body's first poll, then releases with the resource and ending. Release
+  observes but cannot consume that ending; its own halt pre-empts it
+  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+- `within`, `grant` and `audit` scope handlers and context, capabilities and
+  observation ownership respectively, persisting across tail calls.
+- `spawn` runs a block on an owned worker. Its optional title is a syntactic
+  operand, not a function's optional argument
+  ([[invariants/fixed-arity|fixed-arity]]).
+- `gather` owns births over its body's extent: join on return, cancel and
+  drain on halt ([[decisions/261020_gather|gather]]).
 
-1. its typing rule is not derivable from ordinary Hindley–Milner;
-2. its semantics cannot be expressed as a function over thunks without lying
-   about the signature.
+**Functions over thunks remain functions.** `map`, `for`, `retry`, `attempt`
+and `with-temp-*` compose the existing operators without needing a frame of
+their own. A native attempting to implement an operator must instead enter
+`machine::apply`: a nested machine loses tail position and meets
+`NESTED_MACHINE_LIMIT`.
 
-The seven qualify because each manipulates dynamic frames, audit ownership, or
-the ownership of concurrent work that live in `Shell` state, not in any value
-the body can observe:
+Capture `!{…}` and redirection scope `Frame::Capture` and `Frame::Redirect`,
+but are not named forms: they belong to command and block notation. `if`,
+`case` and `?` are syntax for another reason: their alternatives are syntax,
+not a single ordinary value
+([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
-- `try` unifies body and handler output and threads an error record;
-- `guard` threads cleanup;
-- `within` / `grant` / `audit` scope handler frames, capability frames, and
-  audit ownership over the body's whole dynamic extent, persisting across tail
-  calls;
-- `spawn` runs its body on a worker owned by the enclosing gather or by the
-  session, and its title is optional — an operand only syntax may leave out,
-  since no value's signature spells an optional argument
-  ([[invariants/fixed-arity|fixed-arity]]);
-- `gather` scopes the ownership of concurrent work over its body's dynamic
-  extent, as `within` scopes handlers: every `spawn` and `watch` inside it is
-  its own, joined on return and cancelled and drained on a halt, its type the
-  body's ([[decisions/261020_gather|gather]]).
+Audit ownership is detailed in [[design/audit|audit]]: `audit` hands a trail
+back as data, paired with the body's outcome; the other operators are
+transparent to its collection.
 
-`if`, `case`, `?` are in the grammar for ergonomics — they take arbitrarily many
-arms — but their typing is ordinary. What `?` and `try` *do* — the failure model
-they serve — is on [[design/failure|failure]].
-
-Reserved status keeps these names stable and grep-safe and carries them in the
-IR as dedicated nodes rather than string-keyed builtins. An operator lacking
-both criteria stays in the prelude: a user-defined `retry` requires no parser
-growth.
-
-Audit ownership is one such mechanism: each scope node owns the trail its body
-produces, while process boundaries only *transport* fragments — the full
-account of lexical ownership lives in [[design/audit|audit]]. `audit` is the
-one of the seven that hands the ownership back as a value, a report pairing the
-body's outcome with that trail; the others own a trail without ever naming
-one.
-
-See also [[design/failure|failure]], [[design/scoping|scoping]], [[design/effects-handlers|effects-handlers]], [[design/grant|grant]].
-Cite: RATIONALE §"The grammar is the residue", §"Failure is not truth";
-`docs/SPEC.md` §3.6, §8.
+See [[design/failure|failure]], [[design/scoping|scoping]],
+[[design/effects-handlers|effects-handlers]], [[design/grant|grant]].
+Cite: RATIONALE §"The grammar is the residue"; `docs/SPEC.md` §3.6, §8.

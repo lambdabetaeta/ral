@@ -1,11 +1,23 @@
 ---
 status: active
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [guard_release, Frame::Cleanup]
 ---
 
 > Amended 2026-10-16 by
 > [[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]:
 > the precedence rule below stands, and the cleanup now runs shielded against
 > a stop, for the host's grace counted from the strike.
+>
+> Amended 2026-11-11 by
+> [[decisions/261111_a-guard-acquires|a-guard-acquires]]:
+> `guard ACQUIRE BODY RELEASE` applies the same precedence to its release.
+> A returning release discards its own value and restores the body's outcome;
+> a halting release pre-empts it. The release receives the resource and the
+> body's four-arm `ExitCase`, with a witnessed error record under `err`, but
+> cannot suppress that ending. A halting acquisition runs no release.
+> The examples and implementation names below record the original decision.
 
 # A failing cleanup pre-empts
 
@@ -74,6 +86,11 @@ give, owed to no other clause.
 - `a_cleanups_fail_pre_empts_an_exit` (`core/tests/guard_under_exit.rs`)
   carries the new meaning, beside the escape test it is now a second reading
   of.
+
+## Where
+
+`guard_release` and `Frame::Cleanup` in `core/src/shell/evaluator/machine.rs`
+implement release precedence.
 
 See [[design/failure|failure]], [[design/control-operators|control-operators]],
 [[design/capture|capture]] (a cleanup's bytes are chatter, unchanged by this)

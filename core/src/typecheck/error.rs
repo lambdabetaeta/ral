@@ -94,6 +94,10 @@ pub enum Reason {
     TryArms,
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,
+    /// A `guard` body takes the resource and produces the guard's result.
+    GuardBody,
+    /// A `guard` release takes the resource and ending, then produces a discarded value.
+    GuardRelease,
     /// A scope form's body against the thunk shape every control wrapper expects.
     ScopeBody,
     /// A `spawn`'s title against `String`.

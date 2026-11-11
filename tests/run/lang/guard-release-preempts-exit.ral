@@ -1,0 +1,4 @@
+# status: 1
+# contains: y
+guard { () } { |_| exit 3 } { |_ _| fail y }
+echo CONTINUED

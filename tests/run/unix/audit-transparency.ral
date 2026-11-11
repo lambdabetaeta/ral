@@ -66,8 +66,8 @@ let within_report = audit { within [dir: !{cwd}] { /bin/echo 'inside' } }
 echo !{length !{commands $within_report}}
 echo !{commands $within_report}[0][argv][0]
 
-# guard is transparent — both body and cleanup land directly in the trail
-let gr = audit { guard { /bin/echo 'body' } { /bin/echo 'cleanup' } }
+# guard is transparent — both body and release land directly in the trail
+let gr = audit { guard { () } { |_| /bin/echo 'body' } { |_ _| /bin/echo 'cleanup' } }
 echo !{length !{commands $gr}}
 echo !{commands $gr}[0][argv][0]
 echo !{commands $gr}[1][argv][0]

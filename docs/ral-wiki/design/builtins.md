@@ -34,6 +34,14 @@ Filesystem *effects* are deliberately none of these: there is no `copy-file` or
 spelling would be a second thing to keep capability-checked
 ([[design/name-resolution|name-resolution]]).
 
+**Temporary-path creation is a structured acquisition, not a second removal
+interface.** `temp-dir` and `temp-file` return a fresh path only after checking
+that `rm`, bundled or on `PATH`, is admitted by the active grants. The path is
+the caller's to remove; the check is at creation, not a lifetime promise.
+Prefer the prelude's `with-temp-dir` and `with-temp-file`: they use `guard`
+and ordinary `rm -rf` / `rm -f`, with workers using the path inside a `gather`
+in the body ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+
 ## The families
 
 `Extrinsic.Prims` gives the core operations a value-or-error semantics and

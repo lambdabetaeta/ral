@@ -1046,8 +1046,9 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         Reason::ScopeBody => Some(
-            "`within`, `grant`, `try`, `guard`, `audit` and `spawn` each run a block: the \
-             body has to be a block value (something built with `{ ... }`), not data"
+            "`within`, `grant`, `try`, `audit`, `spawn` and `gather` run a body block; \
+             `guard` runs an acquire block first: that operand must be a block value \
+             (something built with `{ ... }`), not data"
                 .to_string(),
         ),
         Reason::SpawnTitle => {
@@ -1056,6 +1057,17 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         Reason::TryHandler => Some(
             "a `try` handler is given the error the body raised, so it has to be a \
              block of one argument: `try { … } { |e| … }`"
+                .to_string(),
+        ),
+        Reason::GuardBody => Some(
+            "a `guard` body is given the acquired resource, so it is a block of one \
+             argument that produces a result: `guard { temp-dir } { |t| … } { |t end| … }`"
+                .to_string(),
+        ),
+        Reason::GuardRelease => Some(
+            "a `guard` release is given the resource and how the body ended, so it is a \
+             block of two arguments that produces a discarded value: \
+             `guard { temp-dir } { |t| … } { |t end| … }`"
                 .to_string(),
         ),
         Reason::ReturnShape => Some(

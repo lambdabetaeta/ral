@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-generated_at_date: 2026-11-10
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_date: 2026-11-11
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -81,9 +81,15 @@ Values, computations and shared nodes:
 constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 `Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, corresponding to
 `Extrinsic/Syntax/Term` constructors, and `Prim`, each of whose variants is an
-`Extrinsic.Prims.Op`.
+`Extrinsic.Prims.Op`. The acquiring `Guard` is owned Agda divergence D4
+([[decisions/261111_a-guard-acquires|a-guard-acquires]]), pending the
+strong-model correspondence follow-up.
 `Prim::operands` and `map_operands` are the common operand traversals.
 
+- `Guard { acquire, body, release }` holds three `Val` operands.
+  `first_native_in` and `Mentions` traverse all three; readback preserves them.
+  Acquisition is shielded, then body receives the resource, then release
+  receives resource and ending. The result type and grade are the body's.
 - `Lam` binds one `Name`; destructuring parameters use `Bind` after the
   lambda chain. `Pattern::{Wildcard, Name, List, Record}` and `FieldPattern`
   are defined in `ir/pattern.rs`.

@@ -1,0 +1,4 @@
+# codes: P0001
+# status: 2
+# contains: guard requires 3 arguments (acquire, body, release); got 2
+guard { () } { |_| () }

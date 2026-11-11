@@ -31,8 +31,8 @@ let broken = { |x| fail 'boom' }
 let fallback = { |y| broken $y ? return 7 }
 echo !{fallback 1}
 
-# A failing `guard` cleanup fails the computation with its own message.
-echo !{try { let _ = guard { return 7 } { fail 'release failed' }; return 'cleanup unexpectedly succeeded' } { |e| return $e[message] }}
+# A failing `guard` release fails the computation with its own message.
+echo !{try { let _ = guard { () } { |_| return 7 } { |_ _| fail 'release failed' }; return 'cleanup unexpectedly succeeded' } { |e| return $e[message] }}
 
 rm -rf $d
 echo 'failure propagation tests done'

@@ -5,10 +5,8 @@
 # in-language, one expression around the code. Baseline system reads for
 # runtime/name-resolution support remain unless explicitly excluded.
 
-let sandbox = temp-dir
-guard {
-    let outside = temp-dir
-    guard {
+with-temp-dir { |sandbox|
+    with-temp-dir { |outside|
         let try-op = { |label body|
             let outcome = try { !$body ; return 'allowed' } { |_| return 'blocked' }
             echo "  $outcome  $label"
@@ -28,5 +26,5 @@ guard {
             # Empty exec refuses curl before it can issue a request.
             try-op 'exec curl' { curl http://example.com 2> /dev/null }
         }
-    } { rm -rf $outside }
-} { rm -rf $sandbox }
+    }
+}

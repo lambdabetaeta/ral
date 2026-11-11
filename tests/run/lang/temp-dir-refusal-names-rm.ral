@@ -1,0 +1,6 @@
+# status: 1
+# contains: command "rm" denied by active grant
+# contains: `temp-dir` makes only what it can remove, so it needs `rm`
+# contains: admitted by the active grant
+# contains: `name rm
+grant [exec: [allow: [`name git]]] { temp-dir }

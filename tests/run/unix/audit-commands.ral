@@ -18,15 +18,15 @@ echo !{argv0s !{audit { echo seed | !$relay }}}
 echo !{map { |c| return "$c[argv][0] !{str $c[origin]} $c[status]" } !{commands !{audit { printf '' }}}}
 
 # An audit that follows a `guard` still records its own commands
-let _ = audit { guard { return () } { return () } }
+let _ = audit { guard { () } { |_| return () } { |_ _| return () } }
 echo !{argv0s !{audit { /bin/echo hi }}}
 
 # A spawn inside an audit leaves the foreground trail whole
 echo !{argv0s !{audit { /bin/echo one; spawn { sleep 0.02 }; /bin/echo two }}}
 
-# A guard's cleanup runs on the normal path, and its body's value survives
-echo !{argv0s !{audit { guard { return 7 } { /bin/echo cleaned } }}}
-echo !{guard { return 7 } { echo cleaned }}
+# A guard's release runs on the normal path, and its body's value survives
+echo !{argv0s !{audit { guard { () } { |_| return 7 } { |_ _| /bin/echo cleaned } }}}
+echo !{guard { () } { |_| return 7 } { |_ _| echo cleaned }}
 
 # A command inside a function body is recorded into the enclosing audit
 let emit = { |_| /bin/echo audited-from-fn }

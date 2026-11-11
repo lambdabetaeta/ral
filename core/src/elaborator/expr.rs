@@ -134,11 +134,16 @@ impl Elaborator {
                         handler: self.to_val(handler, binds),
                     }
                 ),
-                ScopeAst::Guard { body, cleanup } => comp!(
+                ScopeAst::Guard {
+                    acquire,
+                    body,
+                    release,
+                } => comp!(
                     self,
                     CompKind::Guard {
+                        acquire: self.to_val(acquire, binds),
                         body: self.to_val(body, binds),
-                        cleanup: self.to_val(cleanup, binds),
+                        release: self.to_val(release, binds),
                     }
                 ),
                 ScopeAst::Within {

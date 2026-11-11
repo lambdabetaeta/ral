@@ -580,7 +580,11 @@ impl<P: Phase> Comp<P> {
                 std::iter::once(&scrutinee.item).chain(arms.iter().map(|arm| &arm.body.item)),
             ),
             CompKind::Try { body, handler } => first_native_in([body, handler]),
-            CompKind::Guard { body, cleanup } => first_native_in([body, cleanup]),
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
+            } => first_native_in([acquire, body, release]),
             CompKind::Within {
                 opts,
                 handlers,
@@ -714,9 +718,14 @@ impl<P: Phase> Mentions for Comp<P> {
                 body.mentions(out);
                 handler.mentions(out);
             }
-            CompKind::Guard { body, cleanup } => {
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
+            } => {
+                acquire.mentions(out);
                 body.mentions(out);
-                cleanup.mentions(out);
+                release.mentions(out);
             }
             CompKind::Within {
                 opts,
@@ -855,11 +864,12 @@ pub enum CompKind<P: Phase = Checked> {
         body: Val<P>,
         handler: Val<P>,
     },
-    /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
-    /// it replaces the body's outcome.
+    /// Shield `acquire`, then install the release before calling `body resource`.
+    /// Shield `release resource exit_case`; preserve the body's outcome unless release halts.
     Guard {
+        acquire: Val<P>,
         body: Val<P>,
-        cleanup: Val<P>,
+        release: Val<P>,
     },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and

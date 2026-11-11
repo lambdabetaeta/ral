@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/prelude.ral]
 ---
 
@@ -32,6 +32,14 @@ over the `gather` and `spawn` control operators: `par` (a bounded parallel
 map that keeps input order in bytes and values), `both` and `first-of`
 ([[decisions/261020_gather|gather]]). These are ordinary
 [[design/cbpv|values]] of fixed arity ([[invariants/fixed-arity|fixed-arity]]).
+
+`with-temp-dir` and `with-temp-file` are lexical resource combinators over
+`guard { temp-dir }` / `guard { temp-file }`; release runs `rm -rf` / `rm -f`.
+The body receives the path; its value and grade are preserved. The path is
+removed when the body's extent ends, so workers using it belong inside a
+`gather` in that body. Bare `temp-*` remains available for caller-owned
+lifetimes ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+Their `##` summaries are served by `explain`, like every prelude binding's.
 
 Structural equality is the `==` / `!=` expression operator; callbacks use
 ordinary lambdas such as `{ |a b| $[$a == $b] }`.

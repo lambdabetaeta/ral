@@ -374,7 +374,7 @@
 
     "control-name": {
       "name": "keyword.control.ral",
-      "match": "\\b(if|for|try|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))"
+      "match": "\\b(if|for|try|guard|case|while|spawn|gather|await|race|use|source|grant|within|map|filter|fold|reduce|with-temp-dir|with-temp-file)(?=$|[\\s|{}\\[\\]$^!<>\"'`();,]|:(?=[\\s,\\]})]|$))"
     },
 
     "block": {

@@ -1,9 +1,27 @@
 ---
 status: active
-generated_at_commit: dad6a1b3
-verified_at_commit: dad6a1b3
-anchors: [Frame::Cleanup, Shell::shield, Scope::shielded, cleanup_grace, CollectState::cancel_all]
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_date: 2026-11-11
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [Frame::Acquire, Frame::Guard, Frame::Cleanup, Shell::shield, Scope::shielded, cleanup_grace, CollectState::cancel_all]
 ---
+
+> Amended 2026-11-11 by
+> [[decisions/261111_a-guard-acquires|a-guard-acquires]]:
+> acquisition and release both run under this shield and share **one budget
+> from the strike**. `Frame::Acquire` restores the scope before installing
+> `Guard`, with no poll in between; `Cleanup` restores it after release.
+> Acquisition beyond the grace stops without release; acquisition finishing
+> near its end can leave release stopped at its first command. Either may
+> leak what it held. Terminal signals still reach external children, and a
+> child failure halting acquisition runs no release. **Owned, not inherited:**
+> workers are masked only under an owner inside the shield, such as a `gather`
+> opened during acquisition or release. A worker born into an enclosing
+> `gather`, worker's body or session follows that outside owner, not its birth
+> site's shield. Worker lifetime and cancellation machinery are unchanged.
+> The bounds and cooperative limits below apply to both phases; the
+> two-operand laws record the original decision.
 
 # A cleanup is shielded within its grace
 
@@ -29,10 +47,9 @@ whose precedence rule stands unchanged.
   both `Frame::Guard` arms call `Shell::shield(mooring.cleanup_grace)`, which
   swaps `Shell::scope` for `scope.shielded(grace)` and hands back the previous
   scope; `Frame::Cleanup` restores it on pop and on abandon, as
-  `Frame::Capture` restores `io.stdout`. Everything launched inside the
-  cleanup — a pipeline's stages, an external child, a nested machine such as
-  `map` applying a function — reads the current scope and is masked with it,
-  with no code of its own.
+  `Frame::Capture` restores `io.stdout`. A pipeline's stages, an external
+  child and a nested machine such as `map` applying a function read the
+  current scope and are masked with it, with no code of their own.
 - **What it masks.** The shielded node's fold admits from its ancestors only
   `Aborted` and, once the mask has ended, everything. It is minted as a `Scope` alone, so its own flag is written
   by nobody, so a descendant's own cause (a reader-gone stop of a stage inside
@@ -106,7 +123,8 @@ whose precedence rule stands unchanged.
 
 ## Where
 
-`Frame::Guard` and `Frame::Cleanup` in `core/src/shell/evaluator/machine.rs`;
+`Frame::Acquire`, `Frame::Guard` and `Frame::Cleanup` in
+`core/src/shell/evaluator/machine.rs`;
 `Shell::shield` in `core/src/shell/runtime/state/mod.rs`; `Scope::shielded` and
 `resolve` in `core/src/process/cancel.rs`; `Mooring::cleanup_grace`;
 `Run::cleanup_grace` in `core/src/protocol.rs`; `CollectState::cancel_all` in

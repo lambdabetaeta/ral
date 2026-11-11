@@ -1,0 +1,31 @@
+# Scoped paths exist in the body and are gone when it returns.
+let d = with-temp-dir { |t|
+    if !{is-dir $t} {} else { fail 'missing scoped directory' }
+    return $t
+}
+echo "returned directory remains: !{exists $d}"
+let f = with-temp-file { |t|
+    if !{is-file $t} {} else { fail 'missing scoped file' }
+    return $t
+}
+echo "returned file remains: !{exists $f}"
+
+# Removing the path in the body does not make the release fail.
+let removed-dir = with-temp-dir { |t| rm -rf $t; return $t }
+echo "removed directory remains: !{exists $removed-dir}"
+let removed-file = with-temp-file { |t| rm -f $t; return $t }
+echo "removed file remains: !{exists $removed-file}"
+
+# A marker outside the failing scope lets its caller inspect the old path.
+with-temp-dir { |root|
+    try {
+        with-temp-dir { |t| to-string $t > "$root/dir"; fail 'directory body failed' }
+    } { |e| echo $e[message] }
+    let failed-dir = from-string < "$root/dir"
+    echo "failed directory remains: !{exists $failed-dir}"
+    try {
+        with-temp-file { |t| to-string $t > "$root/file"; fail 'file body failed' }
+    } { |e| echo $e[message] }
+    let failed-file = from-string < "$root/file"
+    echo "failed file remains: !{exists $failed-file}"
+}

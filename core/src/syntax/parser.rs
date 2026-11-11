@@ -647,11 +647,16 @@ impl Parser {
                 ScopeAst::Try { body, handler }
             }
             "guard" => {
-                let mut form = Form::new("guard", "body, cleanup", 2);
+                let mut form = Form::new("guard", "acquire, body, release", 3);
+                let acquire = Box::new(self.operand(&mut form)?);
                 let body = Box::new(self.operand(&mut form)?);
-                let cleanup = Box::new(self.operand(&mut form)?);
+                let release = Box::new(self.operand(&mut form)?);
                 self.no_more_operands(form)?;
-                ScopeAst::Guard { body, cleanup }
+                ScopeAst::Guard {
+                    acquire,
+                    body,
+                    release,
+                }
             }
             "within" => {
                 let mut form = Form::new("within", "options, body", 2);

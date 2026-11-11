@@ -1,0 +1,10 @@
+release 7
+ok
+7
+err x
+caught x
+caught a
+caught y
+captured [hi]
+command status 1
+true

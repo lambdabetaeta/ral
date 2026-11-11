@@ -1,0 +1,10 @@
+refused temp-dir
+refused temp-file
+refused with-temp-dir
+refused with-temp-file
+refused empty-dir
+refused empty-file
+refused vetoed-dir
+refused vetoed-file
+admitted directory remains: false
+admitted file remains: false

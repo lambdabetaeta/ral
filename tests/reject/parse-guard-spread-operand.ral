@@ -2,4 +2,4 @@
 # status: 2
 # at: 5:7
 # contains: a spread `...` has no meaning here
-guard ...$b { echo done }
+guard ...$b { |_| echo body } { |_ _| echo done }

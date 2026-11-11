@@ -8,6 +8,7 @@
 "elsif" @keyword.control.conditional
 "else"  @keyword.control.conditional
 "case"  @keyword.control
+(guard_stmt "guard" @keyword.control)
 
 ; ── Operators ────────────────────────────────────────────────────────────────
 
@@ -126,16 +127,13 @@
 ; ── Control flow (control-operator keywords, plus library functions treated
 ;    as keywords for the eye) ─────────────────────────────────────────────────
 ;
-; Overrides @function.call above for these specific heads: try/guard/within/
-; grant/audit/spawn/gather are real keywords (core::syntax::is_keyword) with no
-; dedicated grammar node — they parse as an ordinary `application` whose head
-; happens to be one of these names — and the rest are library functions
-; styled as keywords for the eye.
+; Overrides @function.call for control forms without dedicated grammar nodes
+; and library functions styled as keywords for the eye.
 
 (application
   . (identifier) @keyword.control
   (#match? @keyword.control
-    "^(try|guard|within|grant|audit|spawn|gather|for|await|race|watch|detach|par|map|filter|fold|reduce|each)$"))
+    "^(try|within|grant|audit|spawn|gather|for|await|race|watch|detach|par|map|filter|fold|reduce|each|with-temp-dir|with-temp-file)$"))
 
 ; Sandbox / scoping builtins read as keywords for the eye
 (application

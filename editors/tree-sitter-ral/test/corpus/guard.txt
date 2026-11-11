@@ -1,0 +1,181 @@
+================================================================================
+guard acquires a resource and releases it with the ending
+================================================================================
+guard { temp-dir } { |dir| echo $dir } { |dir end| rm -rf $dir }
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (guard_stmt
+            (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)))))))
+            (block
+              (lambda_params
+                (identifier))
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)
+                        (deref)))))))
+            (block
+              (lambda_params
+                (identifier)
+                (identifier))
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)
+                        (word)
+                        (deref)))))))))))))
+
+================================================================================
+guard accepts named operands in execution order
+================================================================================
+guard $acquire $body $release
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (guard_stmt
+            acquire: (deref)
+            body: (deref)
+            release: (deref)))))))
+
+================================================================================
+resource-less guard still takes three operands
+================================================================================
+guard { () } { |_| echo hi } { |_ _| () }
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (guard_stmt
+            (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (unit_literal)))))))
+            (block
+              (lambda_params
+                (wildcard))
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)
+                        (identifier)))))))
+            (block
+              (lambda_params
+                (wildcard)
+                (wildcard))
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (unit_literal)))))))))))))
+
+================================================================================
+lexical temp helpers remain ordinary applications
+================================================================================
+with-temp-dir $body
+with-temp-file $body
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (deref))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (deref)))))))
+
+================================================================================
+guard is reserved only at an ordinary command head
+================================================================================
+return guard
+^guard
+my-guard $body
+guard-extra $body
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (return_stmt
+            (identifier))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (bypass
+              (word)))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (deref))))))
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (identifier)
+            (deref)))))))
+
+================================================================================
+guard requires a release operand
+:error
+================================================================================
+guard $acquire $body
+--------------------------------------------------------------------------------
+
+
+================================================================================
+guard refuses a fourth operand
+:error
+================================================================================
+guard $acquire $body $release $extra
+--------------------------------------------------------------------------------
+
+
+================================================================================
+guard operands are not spreads
+:error
+================================================================================
+guard ...$acquire $body $release
+--------------------------------------------------------------------------------

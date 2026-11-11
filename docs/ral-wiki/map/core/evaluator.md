@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -57,6 +57,16 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 - `If` forces its selected arm; `step_case` first pushes one `Arg` holding
   the variant payload. Bare tags carry `Unit`. `Try` passes an error record
   to its handler by the same push-then-force rule.
+- `Guard` checks room for three frames and polls before shielded acquisition.
+  `Frame::Acquire` restores scope, installs `Frame::Guard { release, resource }`
+  and calls the body without an intervening poll. `guard_release` saves the
+  outcome in `Frame::Cleanup`, shields release and calls it with resource
+  plus `exit_case`. Release return restores the outcome; its halt overrides.
+  Later guard reservations assert the room reserved at entry. Both shield
+  frames restore scope on halt and abandon; a halting acquire runs no release.
+  Shields change `scope`, not the worker cradle: workers follow their owner.
+  A `gather` opened inside acquisition or release captures that shield
+  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 - `Capture` swaps stdout for a buffer. Success restores the sink and returns
   exact `Bytes`; overflow refuses a prefix. A halt restores the sink and
   drops the buffer, adding its actual byte count to `Error.unwound.discarded`
@@ -77,8 +87,9 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   operations use `at_site`; delayed eliminations locate their own refusals.
   See [[decisions/261105_the-error-record|the error record]].
 - Shell rules dispatch `Exec`, launch and join a `PipeNode` for `Pipeline`,
-  and birth workers for `Spawn`. `Frame::Gather` owns a `BroodGuard` and
-  restores its displaced cradle before the shared brood-exit machinery
+  and birth workers for `Spawn`. `Frame::Gather` owns a `BroodGuard`, captures
+  the current scope in its new cradle and restores the displaced cradle
+  before the shared brood-exit machinery
   joins or stops children. See [[internals/pipeline-execution|pipelines]]
   and [[invariants/a-worker-ends-with-its-children|worker scope]].
 
@@ -108,8 +119,8 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 
 - `scope.rs` installs dynamic frames. `WithinScope` forms the option record
   and handlers; `WithinUndo` restores cwd, env overrides and handlers.
-  Grants attenuate authority; cleanup restores the body's outcome unless
-  cleanup itself fails. Handler dispatch is
+  Grants attenuate authority; guard frames live in `machine.rs` and release
+  restores the body's outcome unless release itself halts. Handler dispatch is
   [[internals/handler-dispatch|deep and self-masking]].
 - `call.rs`: `run_native` runs each native body inside `BuiltinEntry::framed`.
   The builtin may re-enter the machine; it is not a value-only primitive.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3e3fbc84
-generated_at_date: 2026-11-05
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_date: 2026-11-11
 covers_paths: [core/src/syntax/, editors/]
 ---
 
@@ -175,6 +175,8 @@ governs both stages.
   record patterns recurse back through it per element).
 
 The seven reserved [[design/control-operators|control operators]] are recognised
-at this layer, `spawn`'s arity elastic (one operand, or a title and the body)
-and `gather`'s one body; everything else is a library binding. See `docs/SPEC.md` §3,
+at this layer: `guard` has exactly three operands (`acquire, body, release`),
+represented by `ScopeAst::Guard { acquire, body, release }`;
+`spawn` has one operand or a title and body, and `gather` has one body.
+`with-temp-dir` and `with-temp-file` are ordinary prelude bindings. See `docs/SPEC.md` §3,
 §17.1 for the grammar.

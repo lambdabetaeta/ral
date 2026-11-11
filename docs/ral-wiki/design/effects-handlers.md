@@ -87,9 +87,12 @@ stops are **top-level effects** no frame of the program interprets, read off
 the empty stack as an `Ending`.
 
 The shield is the fourth instance, `poll k ↦ k ()` while it masks:
-`Frame::Cleanup` swaps `Shell::scope` for a shielded child for a `guard`
-cleanup's extent and restores it on pop and abandon, exactly as
-`Frame::Capture` swaps `io.stdout`. So `Shell::scope` is a dynamically scoped
+`Frame::Acquire` and `Frame::Cleanup` swap `Shell::scope` for a shielded child
+for a `guard`'s acquisition and release, sharing one grace from the strike,
+and restore it on pop and abandon, exactly as
+`Frame::Capture` swaps `io.stdout`. A worker's scope follows its owner, not
+its spawn site's shield; a `gather` opened inside the shield owns masked
+children. So `Shell::scope` is a dynamically scoped
 cell beside `io.stdout`, *read* by every poll; the owner's name is
 `Mooring::home`, run-invariant and the target of every *write*; the types say so, `Scope` against `ScopeNode`. Owner-frame
 masking here is the same shape as self-masking above: a frame lifts what an

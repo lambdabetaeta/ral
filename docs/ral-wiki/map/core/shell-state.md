@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -154,10 +154,12 @@ checkpoint, since a run never writes it.
   stale register behind. The loan carries the current cancel scope too.
 - **`scope`** — the cancel scope the computation in focus polls
   (`Shell::poll`), which also genuinely changes within a run: a thread base
-  sets it to its mooring's node, and `Frame::Cleanup` swaps it for a shielded
-  child for a `guard` cleanup's extent and restores it, as a capture swaps
-  `io.stdout` (`Shell::shield`). It is a `Scope`, read, never written: writes aim at
-  `Mooring::home`, a `ScopeNode`
+  sets it to its mooring's node, and `Frame::Acquire` / `Frame::Cleanup`
+  restore it after a `guard`'s shielded acquisition / release. `Shell::shield`
+  swaps only this cell, not the worker cradle. A `gather` opened inside the
+  shield captures it as the cradle's entry scope; a birth into an outside
+  owner does not inherit the shield. It is a `Scope`, read, never written:
+  writes aim at `Mooring::home`, a `ScopeNode`
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
 - **`SessionState`** — what survives every run's teardown: the durable cancel
   `root` that a run's loose workers parent under (`Shell::join_session` *shares*
@@ -283,8 +285,8 @@ naming how a forked session reaches the desk that adopts it (`None` outside a
 host that installs one; like `desk`, never given to a deferred worker), the
 owner's node `home` (the base of the run's scope tree: what a heard key, a
 wall or a `cancel` strikes, never what is polled), the
-`cleanup_grace` a `guard` cleanup's shield gets from the strike (the host's
-policy, from `Run::cleanup_grace`), the
+`cleanup_grace` shared by a `guard`'s acquisition and release shields from
+the strike (the host's policy, from `Run::cleanup_grace`), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn while
 `cap` workers are `running`, `stopping`, or reserved; `None` admits freely), the
 `worker_title` `TitlePolicy` (`Required` refuses an untitled spawn), and the run's
@@ -473,11 +475,12 @@ an aside's writes where its parent does:
   (so the caller keeps the child's scope) and move it into the
   thread: a worker's `home` is a child of its cradle — the durable root in a
   run, so a run timeout or Esc does not reach it; inside a gather its entry
-  scope, the parent worker's node inside a worker or the run's scope at a
-  `gather`, which they do reach — and its `surface` is a fresh
+  scope, the parent worker's node inside a worker or the scope current when a
+  `gather` opened, which they do reach — and its `surface` is a fresh
   `DeferredSurface` for a session worker or the parent's live surface inside a
-  gather; a stage thread's `home` is a child of the *node's own* cancel scope,
-  so a pipeline-wide cancel reaches every stage transitively, and its `surface`
+  gather; a stage thread's `home` is a child of the *current* cancel scope,
+  so it shares an acquisition or release shield and a pipeline-wide cancel
+  reaches every stage transitively, and its `surface`
   is the pipeline's own. It shares the session's root, roster,
   and fixings; its lease ledger is unarmed.
 - `join_session` — an aside: an independent sibling that clones the parent's

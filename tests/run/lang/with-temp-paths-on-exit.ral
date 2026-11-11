@@ -1,0 +1,24 @@
+# status: 3
+# Each inner helper releases before the outer guard observes the exit.
+guard { temp-dir } { |root|
+    with-temp-dir { |d|
+        to-string $d > "$root/dir"
+        with-temp-file { |f|
+            to-string $f > "$root/file"
+            exit 3
+        }
+    }
+} { |root end|
+    case $end [
+        `ok: { |_| echo UNEXPECTEDOK },
+        `err: { |e| echo "UNEXPECTEDERROR $e[message]" },
+        `exited: { |n| echo "exited $n" },
+        `stopped: { |_| echo UNEXPECTEDSTOP },
+    ]
+    let d = from-string < "$root/dir"
+    let f = from-string < "$root/file"
+    echo "exited directory remains: !{exists $d}"
+    echo "exited file remains: !{exists $f}"
+    rm -rf $root
+}
+echo CONTINUED

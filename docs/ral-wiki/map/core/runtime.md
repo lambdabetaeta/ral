@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -54,6 +54,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   span, never evaluating shell source. The caller supplies its mooring;
   current grants, scope, audit and streams remain in force. The REPL
   external-editor hook uses this entry.
+- `command.rs::would_run(name, mooring, shell)` checks a bare external name
+  through `Command::from_name` → `lookup` → `admit`, then returns the retained
+  lookup error, if any. It launches nothing and records refusals through the
+  ordinary admission door. `temp-dir` / `temp-file` use it for `rm` before
+  creating a path ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 - `record.rs` — `CommandRecord`, an external's one `Observed::Command`, begun
   from an admitted `Command` and ended once; silent, holding nothing,
   when nobody listens at launch. `Command::with_record` is the shape that ends
@@ -268,8 +273,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     `Drop`: signalling and killing belong to the collector, which holds the
     live stages ([[invariants/a-process-group-is-its-owners-to-signal|a-process-group-is-its-owners-to-signal]]).
     On Windows an owned group also holds a `Job`.
-  - `thread.rs` — `launch_thread_stage` wires a `Thread` stage's `Io` from its
-    stdin route and resolved stdout; its closure, given its `Slot { ix, tx }`
+  - `thread.rs` — `launch_thread_stage` parents a stage node under the current
+    scope, including an acquisition or release shield; worker nodes instead
+    follow their cradle's owner ([[map/core/shell-state|shell state]]).
+    It wires a `Thread` stage's `Io` from its stdin route and resolved stdout;
+    its closure, given its `Slot { ix, tx }`
     and wrapped in a `SettleOnDrop`, builds its own `StageObservation` and
     sends `Event::Returned(ix, obs)` as its last act, the guard armed until
     then so an unwind reports in its place. A non-final stage's `stdout` is its

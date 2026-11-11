@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-verified_at_date: 2026-11-10
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, BroodGuard, exit_brood]
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
 ---
 
 # The evaluator: a CEK machine for CBPV
@@ -25,7 +25,8 @@ from reaching a lambda that awaits an argument.
   `dev/agda/Extrinsic/Semantics/Machine.agda` is the core correspondence
   boundary; environments here implement lexical binding rather than literal
   substitution. Host operations, dynamic shell state and resource limits need
-  their own account. See the
+  their own account. The acquiring `guard` is owned Agda divergence D4
+  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]). See the
   [[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]].
 
 ## Syntax and notation
@@ -45,7 +46,7 @@ Value terms       V, W ::= c | x | thunk M | [V₁,…,Vₙ]
 Computations      M, N ::= return V | force V | λx. M | M · (V₁,…,Vₙ)
                         | M to p. N | M ⨟ N | rec G i
                         | if V then Wₜ else W𝒻 | case V of {ℓᵢ ↦ Wᵢ}
-                        | prim q(V⃗) | try V W | guard V W | capture M
+                        | prim q(V⃗) | try V W | guard A V W | capture M
                         | Native(b,V⃗) | shell forms
 ```
 
@@ -304,43 +305,62 @@ v = ⟦V⟧ρ,Σ       h = ⟦W⟧ρ,Σ
   abandoned-tail accounting. `Try` passes a `Lambda` terminal
   through unchanged on success, just as it passes `Value`.
 
-**Guard preserves the body's outcome only if cleanup succeeds.** Let
-`o ::= Ok(v) | Err(b)` and `resume(Ok(v)) = R(Value(v))`,
-`resume(Err(b)) = H(b)`. Let `shield(σ,μ.grace) = (σs,s₀)` install the
-cleanup scope and return the displaced scope `s₀`.
+**Guard shields acquisition and installs release before a body poll.** Let
+`o ::= Ok(v) | Err(b)`, `resume(Ok(v)) = R(Value(v))`,
+`resume(Err(b)) = H(b)`. Let `shield(σ,μ.grace) = (σs,s₀)` install a
+shielded scope and return the displaced scope `s₀`. `call` is the
+push-arguments-then-force helper above.
 
 ```text
-v = ⟦V⟧ρ,Σ       c = ⟦W⟧ρ,Σ
-⟨E(guard V W,ρ), K; σ⟩ → enter(v,Guard(c) :: K,σ)
+room(3,K)       poll(σ) = ()
+a = ⟦A⟧ρ,Σ     k = ⟦V⟧ρ,Σ     r = ⟦W⟧ρ,Σ
+shield(σ,μ.grace) = (σs,s₀)
+⟨E(guard A V W,ρ), K; σ⟩ → enter(a,Acquire(k,r,s₀) :: K,σs)
+
+⟨R(Value(v)), Acquire(k,r,s₀) :: K; σ⟩
+  → call(k,[v],Guard(r,v) :: K,σ[scope := s₀])
+⟨H(b), Acquire(k,r,s₀) :: K; σ⟩ → ⟨H(b), K; σ[scope := s₀]⟩
 
 shield(σ,μ.grace) = (σs,s₀)
-⟨R(Value(v)), Guard(c) :: K; σ⟩
-  → enter(c,Cleanup(Ok(v),s₀) :: K,σs)
+⟨R(Value(v)), Guard(r,u) :: K; σ⟩
+  → call(r,[u,exit_case(Ok(v))],Cleanup(Ok(v),s₀) :: K,σs)
 
 shield(σ,μ.grace) = (σs,s₀)
-⟨H(b), Guard(c) :: K; σ⟩
-  → enter(c,Cleanup(Err(b),s₀) :: K,σs)
+⟨H(b), Guard(r,u) :: K; σ⟩
+  → call(r,[u,exit_case(Err(b))],Cleanup(Err(b),s₀) :: K,σs)
 
 ⟨R(t), Cleanup(o,s₀) :: K; σ⟩
   → ⟨resume(o), K; σ[scope := s₀]⟩
-
 ⟨H(b′), Cleanup(o,s₀) :: K; σ⟩
   → ⟨H(b′), K; σ[scope := s₀]⟩
 ```
 
-- The body's frame is popped before `Cleanup` is reserved and the shield
-  installed. A failure forcing cleanup therefore unwinds through `Cleanup`,
-  restoring the old scope. A cleanup error **or escape** overrides the saved
-  body outcome, including a saved escape.
-- The implementation ignores cleanup's returned terminal `t`, even a
-  `Lambda`; it does not call `as_value` there. In contrast, `Guard` rejects
-  a body `Lambda` **before starting cleanup**, a defensive fault outside the
-  checked body's value demand. These are not interchangeable frame rules.
-- Scope restoration occurs on cleanup success, halt and abandonment. The
-  shield masks ancestor stops except `Aborted` within the shared cleanup
-  grace; it does not promise cleanup cannot fail. See
-  [[decisions/261016_a-cleanup-is-shielded-within-its-grace|shielded cleanup]]
-  for timing and cooperative limits.
+- Entry reserves room for the deepest stack: `Cleanup` and two `Arg`s.
+  Popping `Acquire` or `Guard` returns to entry depth; provenance frames do
+  not count. Every later guard reservation asserts that room rather than
+  providing a fallible exit while holding the resource.
+- A pending stop runs no acquisition. A halting acquisition restores scope
+  and runs no release. On success, scope restoration and `Guard` installation
+  have **no poll between them**; `force` polls nothing and the body's β-step
+  polls after its `Arg` is popped, with `Guard` already below it.
+- `guard_release` is shared by return and halt. `exit_case` borrows the saved
+  outcome and constructs `ExitCase<ErrorFact>` once: `ok` has no body value,
+  `err` is witnessed, `exited` carries the byte and `stopped` the cause.
+  Release cannot consume the ending; any release error or escape overrides it.
+- `Cleanup` ignores its returned terminal, even `Lambda`. A defensive body
+  `Lambda` becomes an error **and runs release**; an acquisition `Lambda`
+  restores scope and fails before a resource is available. Checked operands
+  require producers, so neither is a well-typed execution.
+- `Acquire` and `Cleanup` restore scope on return, halt and abandonment.
+  Acquisition and release share one grace from the strike; a late acquisition
+  can leave release no time, and either phase can leak a held resource.
+  The shield is cooperative, not protection from terminal signals.
+- Shielding changes `scope`, not `cradle`: stages follow the current scope,
+  but a worker follows its owner's entry scope. A `gather` opened inside
+  acquisition or release captures the shield and owns masked workers;
+  births into an enclosing gather, worker's body or session do not acquire
+  this shield. See [[decisions/261111_a-guard-acquires|a-guard-acquires]] and
+  [[internals/cancellation|cancellation]].
 
 ## Capture
 
@@ -402,7 +422,8 @@ directly after installing nonempty redirects.
   writes can abort; streaming writes are already committed. Return-time
   settlement failure becomes a halt on the remaining stack.
 - `Gather` holds a `BroodGuard` and displaced cradle, not a different evaluator.
-  Its body runs on this machine; joining/stopping follows
+  It captures the current scope as the new cradle's `under`; its body runs on
+  this machine. Joining/stopping follows
   [[invariants/a-worker-ends-with-its-children|worker ownership]].
 - `Exec` dispatch, `Pipeline` launch/join, `Spawn`, ambient `Tilde` and native
   bodies are host operations rather than reductions of pure CBPV syntax.
@@ -438,22 +459,23 @@ Now let `ρ₁ = ρ₀[x ↦ 99, f ↦ f]`:
   persists just as in a lambda body, unless an enclosing dynamic scope owns
   an explicit restoration. Lexical closure is not an implicit subshell.
 
-### Cleanup overrides the body before a catch
+### Release overrides the body before a catch
 
-Suppose a body has failed with `e₁` inside `guard`, inside `try`. Let the
-cleanup thunk be `c = Thunk(N,ρc)` and let its host operation fail with `e₂`:
+Suppose a body has failed with `e₁` inside `guard`, inside `try`. Resource
+`u` is held; release `r` fails with `e₂` after receiving it and the ending:
 
 ```text
-⟨H(Error(e₁)), Guard(c) :: Try(h) :: K; σ⟩
-→ ⟨E(N,ρc), Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K; σs⟩
+⟨H(Error(e₁)), Guard(r,u) :: Try(h) :: K; σ⟩
+→ call(r,[u,exit_case(Err(Error(e₁)))],
+        Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K,σs)
 ⇒* ⟨H(Error(e₂)), Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K; σs′⟩
 → ⟨H(Error(e₂)), Try(h) :: K; σs′[scope := s₀]⟩
 → enter(h,Arg(record(e₂,σs′[scope := s₀])) :: K,σs′[scope := s₀])
 ```
 
-Successful cleanup would restore `Error(e₁)` instead. The handler sees the
+Successful release would restore `Error(e₁)` instead. The handler sees the
 winning error, with the old scope restored and `Try` absent. If an enclosing
-capture is still on `K`, cleanup and handler writes still go to that buffer;
+capture is still on `K`, release and handler writes still go to that buffer;
 its eventual return/halt decides whether the bytes become a value or vanish.
 
 ## Run boundaries and space
@@ -486,8 +508,8 @@ apply(f,v⃗) starts by pushing v⃗ and forcing f, even when v⃗ is empty
   configurable by `--recursion-limit`). Installation is checked before its
   effect; `push_args` reserves the whole argument vector. Cap failures enter
   ordinary error unwinding on the then-current stack.
-- Cancellation is cooperative: binds, sequences, application, β and recursion
-  poll at their designated points, as do host operations. The equations are
+- Cancellation is cooperative: binds, sequences, application, β, recursion
+  and guard entry poll at their designated points, as do host operations. The equations are
   not a promise of one poll or constant work per displayed arrow.
 - Higher-order natives can enter nested `evaluate`/`apply` machines on the
   **host** stack. `NESTED_MACHINE_LIMIT` bounds that independently of the
@@ -508,7 +530,7 @@ rules.** They cannot be inferred from the pure continuation equations alone.
 - The loop catches panics, abandons remaining frames top-down and resumes the
   panic. `Frame::abandon` restores sinks, scopes, handlers, grants and cradle,
   abandons redirect state and closes audit scopes. It does **not** evaluate
-  arbitrary `Guard` cleanup code during a panic. The framed run entry restores
+  arbitrary `Guard` release code during a panic. The framed run entry restores
   its checkpoint; panics remain defects, not catchable language errors.
 
 ## Source anchors

@@ -235,8 +235,12 @@ pub enum MapEntry {
 pub enum ScopeAst {
     /// `try BODY HANDLER` — run `body`; on error, dispatch to `handler`.
     Try { body: Box<Ast>, handler: Box<Ast> },
-    /// `guard BODY CLEANUP` — run `body`, then unconditionally `cleanup`.
-    Guard { body: Box<Ast>, cleanup: Box<Ast> },
+    /// `guard ACQUIRE BODY RELEASE` — acquire a resource, run the body, then release.
+    Guard {
+        acquire: Box<Ast>,
+        body: Box<Ast>,
+        release: Box<Ast>,
+    },
     /// `within OPTS BODY` — install option overrides for the duration of `body`.
     /// `handlers:` is not among `opts`: its labels are the names it binds in
     /// `body`, so it is an arm list the form reads, not data the options carry.

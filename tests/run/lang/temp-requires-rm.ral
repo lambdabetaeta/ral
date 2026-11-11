@@ -1,0 +1,30 @@
+# These grants intentionally refuse rm, so acquisition must refuse too.
+let refused = { |label body|
+    try { !$body; echo "UNEXPECTED $label" } { |e|
+        if !{re-match '^command "rm" denied by active grant:' $e[message]} {
+            echo "refused $label"
+        } else { raise $e }
+    }
+}
+grant [exec: [allow: [`name git]]] {
+    refused temp-dir { temp-dir }
+    refused temp-file { temp-file }
+    refused with-temp-dir { with-temp-dir { |_| echo BODYRAN } }
+    refused with-temp-file { with-temp-file { |_| echo BODYRAN } }
+}
+grant [exec: [allow: []]] {
+    refused empty-dir { temp-dir }
+    refused empty-file { temp-file }
+}
+grant [exec: [deny: [`name rm]]] {
+    refused vetoed-dir { temp-dir }
+    refused vetoed-file { temp-file }
+}
+
+# Name admission suffices for acquisition and its eventual release.
+grant [exec: [allow: [`name rm]]] {
+    let d = with-temp-dir { |t| return $t }
+    let f = with-temp-file { |t| return $t }
+    echo "admitted directory remains: !{exists $d}"
+    echo "admitted file remains: !{exists $f}"
+}

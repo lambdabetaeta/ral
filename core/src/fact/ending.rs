@@ -1,4 +1,5 @@
-//! How a computation ended: the one type; every observer is a projection.
+//! `Ending` describes every ending; its observers are projections.
+//! `ExitCase` is what a frame observes: a panic runs no frame.
 
 use super::{ErrorFact, ErrorRecord, Failure, Reason};
 use crate::data::FOValue;
@@ -32,6 +33,62 @@ pub enum Ending<V, F, S> {
     Stopped(S),
     /// A defect, not a signal: re-raising resumes the unwind.
     Panic(String),
+}
+
+/// How a `guard` body ended, as its release reads it. No `panic`: a panic runs no frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitCase<F> {
+    Ok,
+    Err(F),
+    Exited(u8),
+    Stopped(CancelCause),
+}
+
+impl<F: Datum> Datum for ExitCase<F> {
+    fn encode(self) -> FOValue {
+        let (label, payload) = match self {
+            Self::Ok => (tag::OK, ().encode()),
+            Self::Err(f) => (tag::ERR, f.encode()),
+            Self::Exited(n) => (tag::EXITED, n.encode()),
+            Self::Stopped(s) => (tag::STOPPED, s.encode()),
+        };
+        datum::tag(label, Some(payload))
+    }
+
+    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
+        let tags = [tag::OK, tag::ERR, tag::EXITED, tag::STOPPED];
+        let Some((label, payload)) = datum::untag(v) else {
+            return Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::Tags(tags.map(str::to_owned).to_vec()),
+                found: Found::of(v),
+            })));
+        };
+        let payload = payload.unwrap_or(&FOValue::Unit);
+        match label {
+            tag::OK => <()>::decode(payload).map(|()| Self::Ok),
+            tag::ERR => F::decode(payload).map(Self::Err),
+            tag::EXITED => u8::decode(payload).map(Self::Exited),
+            tag::STOPPED => CancelCause::decode(payload).map(Self::Stopped),
+            other => {
+                return Err(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
+                    tag: other.into(),
+                    offered: tags.map(str::to_owned).to_vec(),
+                })));
+            }
+        }
+        .map_err(|why| why.payload(label))
+    }
+}
+
+impl<F: Typed> Typed for ExitCase<F> {
+    fn ty() -> Ty {
+        closed_variant(&[
+            (tag::OK, Ty::unit()),
+            (tag::ERR, F::ty()),
+            (tag::EXITED, Ty::int()),
+            (tag::STOPPED, CancelCause::ty()),
+        ])
+    }
 }
 
 /// The process status of what can end in success. Enum matching allocates
@@ -322,6 +379,20 @@ mod tests {
             tag::ALL
         );
         assert!(!row.is_open());
+    }
+
+    #[test]
+    fn an_exit_case_is_done_without_panic() {
+        let done = Done::ty();
+        let TyNode::Variant(row) = done.node() else {
+            panic!("an ending has a variant type");
+        };
+        let arms: Vec<_> = row
+            .fields()
+            .filter(|(label, _)| label.name() != tag::PANIC)
+            .map(|(label, ty)| (label.name(), ty.clone()))
+            .collect();
+        assert_eq!(ExitCase::<ErrorRecord>::ty(), closed_variant(&arms));
     }
 
     #[test]

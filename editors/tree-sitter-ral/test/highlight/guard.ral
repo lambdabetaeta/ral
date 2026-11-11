@@ -1,0 +1,8 @@
+guard { temp-file } { |file| echo $file } { |file end| rm -f $file }
+# <- keyword.control
+
+with-temp-dir { |dir| echo $dir }
+# <- keyword.control
+
+with-temp-file { |file| echo $file }
+# <- keyword.control

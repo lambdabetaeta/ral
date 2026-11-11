@@ -69,9 +69,11 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
     ),
     (
         "guard",
-        "guard { body } { cleanup }  — run cleanup after body, whether body succeeds or fails.\n\n\
-         When cleanup succeeds, `guard` returns the body's value or continues its failure. A cleanup that fails or exits takes precedence over the body's result. Use `attempt { ... }` inside cleanup when cleanup failure should be ignored.\n\n\
-         Example:\n  guard { use-resource } { attempt { release-resource } }",
+        "guard { acquire } { |resource| body } { |resource end| release }  — acquire a resource, run body, then release it however body ends.\n\n\
+         Acquisition is shielded from ral's stops within the cleanup grace, and release is installed before cancellation can reach the body. If acquisition fails, exits or stops, no release runs. Acquisition and release share one grace budget from the stop; if it expires, the resource may leak. External children still receive terminal signals. To shield a delegated worker, open its `gather` inside acquisition or release: workers of an already enclosing gather, worker body, or session do not gain the shield merely by being spawned there.\n\n\
+         Release receives the resource and one of `ok, `err error, `exited status, or `stopped cause. The `ok arm receives `()`; `err carries the same error record as `try`. Release's value is discarded: the body's value, failure, exit or stop continues unchanged. A release that itself fails, exits or stops takes precedence. Use `attempt { ... }` inside release when its failure should be ignored.\n\n\
+         Prefer `with-temp-dir { |t| ... }` or `with-temp-file { |f| ... }` for temporary paths. Keep workers using the path inside a `gather` in the body, so they finish before release.\n\n\
+         Rollback: remove a staging file unless the body succeeded, including on a stop:\n  guard { temp-file } { |stage|\n    cat source >~ $stage\n    mv $stage artifact\n  } { |stage end|\n    case $end [\n      `ok: { |_| () },\n      `err: { |_| rm -f $stage },\n      `exited: { |_| rm -f $stage },\n      `stopped: { |_| rm -f $stage }\n    ]\n  }",
     ),
     (
         "if",

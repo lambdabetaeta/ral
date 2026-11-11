@@ -1,11 +1,19 @@
 ---
 status: active
-generated_at_commit: b1ba0713
-generated_at_date: 2026-11-03
-verified_at_commit: f2a121e8
-verified_at_date: 2026-11-05
-anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, captured_string, Inferencer::split, rhs_bound_ty, freeze_toplevel]
+generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_date: 2026-11-11
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
 ---
+
+> Amended 2026-11-11 by
+> [[decisions/261111_a-guard-acquires|a-guard-acquires]]: the acquiring `guard`
+> is **owned divergence D4** from `Extrinsic/`'s two-operand rule. The
+> strong-model Agda follow-up owns syntax, substitution, typing, machine
+> correspondence and affected examples; it must re-establish type safety
+> and retire the divergence. The core partition below stands, but its guard
+> correspondence claim is suspended until that work lands.
 
 # The checked IR is the calculus
 
@@ -81,11 +89,12 @@ and the application and sequencing rules of
 ## Where
 
 - `core/src/ir.rs`: `CompKind`, `Prim`, `Val`.
-- `core/src/typecheck/infer.rs`: `infer_let`, `captured_string` and
-  `Inferencer::split` construct binding coercions and returned-thunk splits;
-  `grade.rs::rhs_bound_ty` decides binding capture and Let-fun.
-- `core/src/typecheck/freeze.rs`: `freeze_toplevel` snapshots sites and settles
-  schemes after successful inference and ascription.
+- `core/src/typecheck/solve.rs`: `Solver::binding` and `Solver::argument`
+  suspend the matches that decide binding modes and returned-thunk splits.
+- `core/src/typecheck/readback.rs`: `Readback::toplevel` applies those decisions,
+  snapshots sites and settles schemes after live contract holds and unit closure;
+  `captured_string` builds capture/decode. See
+  [[internals/type-inference|type inference]].
 - `core/src/shell/evaluator/machine.rs`: `Focus`, `Terminal`, `Frame`.
 - `dev/agda/Extrinsic/{Syntax/Term,Prims,Semantics/Machine}.agda`:
   corresponding syntax, primitives and CK rules.

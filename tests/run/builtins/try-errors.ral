@@ -51,8 +51,8 @@ try { fail 'x' } { |e|
     echo $[$e[site][line] > 0]
 }
 
-# guard: the body's error propagates, not the cleanup's.
-try { guard { fail 'original failure' } { echo cleanup } } { |e|
+# guard: a returning release preserves the body's error.
+try { guard { () } { |_| fail 'original failure' } { |_ _| echo cleanup } } { |e|
     echo $e[message]
 }
 

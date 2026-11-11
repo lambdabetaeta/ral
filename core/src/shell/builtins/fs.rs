@@ -13,8 +13,9 @@ use crate::fact::{InvalidCause, IoOperation, IoSubject, PathFailure, PathFailure
 use crate::path::{
     Dir, EntryName, Judged, Kind, LeafMode, Located, Reading, Visibility, Writing, file_name, shown,
 };
+use crate::shell::exec::command::would_run;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Settled, Shell, Value};
+use crate::shell::runtime::{Mooring, Settled, Shell, Value};
 use crate::text::quote_native;
 use std::ffi::OsStr;
 use std::io;
@@ -90,12 +91,32 @@ fn made_in(
     }
 }
 
-pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+fn require_rm(ctx: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
+    would_run("rm", mooring, shell).map_err(|refusal| {
+        refusal.map_error(|error| {
+            error.with_hint(format!(
+                "`{ctx}` makes only what it can remove, so it needs `rm`, bundled or on `PATH`, and admitted by the active grant (`` `name rm `` in its exec allow-list)"
+            ))
+        })
+    })
+}
+
+pub(super) fn builtin_temp_dir(
+    _args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    require_rm("temp-dir", mooring, shell)?;
     let parent = writable_temp_dir("temp-dir", shell)?;
     temp_dir_in(shell, &parent)
 }
 
-pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_temp_file(
+    _args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    require_rm("temp-file", mooring, shell)?;
     let parent = writable_temp_dir("temp-file", shell)?;
     temp_file_in(shell, &parent)
 }

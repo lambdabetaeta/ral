@@ -199,9 +199,14 @@ impl<'a> Readback<'a> {
                 body: self.val(body),
                 handler: self.val(handler),
             },
-            CompKind::Guard { body, cleanup } => CompKind::Guard {
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
+            } => CompKind::Guard {
+                acquire: self.val(acquire),
                 body: self.val(body),
-                cleanup: self.val(cleanup),
+                release: self.val(release),
             },
             CompKind::Within {
                 opts,

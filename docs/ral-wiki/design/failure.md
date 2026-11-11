@@ -1,7 +1,3 @@
----
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
----
-
 # Failure: status, not truth
 
 ral keeps strictly apart two notions a shell conflates. *Failure* is a runtime
@@ -83,25 +79,29 @@ the failure arose.** An external's life is `prepare`, `start` and `ending`
 - A confined program's ending is its supervisor's exact word
   ([[invariants/the-ending-is-amended-where-it-is-reaped|the-ending-is-amended-where-it-is-reaped]]).
 
-The cleanup forms differ only in what they do with the original failure:
+**Recovery consumes an error; release only observes an ending.**
 
-- `try` suppresses it;
-- `guard B C` runs cleanup `C` whether or not `B` failed, and lets `B`'s failure
-  keep propagating — unless `C` halts as well, because **any halt of the cleanup
-  pre-empts the body's outcome**, an error exactly as an escape. So: `B` returns
-  and `C` halts, the halt is the outcome; both halt, `C`'s signal wins, whichever
-  kinds the two are; `B` halts and `C` returns, `B`'s signal survives.
-  Log-and-continue is one keystroke away — `guard B { try C { |e| … } }` — and
-  the primitive stays strict
-  ([[decisions/260819_a-failing-cleanup-pre-empts|a-failing-cleanup-pre-empts]]);
-  the cleanup runs shielded against a stop for the run's grace from the strike
-  ([[decisions/261016_a-cleanup-is-shielded-within-its-grace|a-cleanup-is-shielded-within-its-grace]]);
-- the prelude's `attempt` discards both result and failure.
+- `try` suppresses the body's error by returning its handler's result.
+- `guard A K R` acquires a resource, calls `K resource`, then
+  `R resource end`. `end` is `` `ok | `err ErrorRecord | `exited Int |
+  `stopped CancelCause ``; success carries no body value. Returning release
+  discards its own value and restores the body's outcome. **Any release halt
+  pre-empts that outcome**, error or escape alike
+  ([[decisions/260819_a-failing-cleanup-pre-empts|a-failing-cleanup-pre-empts]]).
+- An `err` record is witnessed just as `try`'s is: `raise $e` in release
+  re-raises the exact reason. No returned value can suppress an ending.
+  Log-and-continue belongs inside release, e.g.
+  `guard A K { |r end| try { release $r $end } { |e| warn $e[message] } }`.
+- Acquisition halting runs no release. Acquisition and release are shielded
+  within one grace from the strike; expiry can leak a resource
+  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+- The prelude's `attempt` discards both result and failure.
 
-The Agda core models both as frames on a stack a halt walks:
-`try` pops and forces its handler on the error (`err-try`); `guard` runs
-its cleanup in front of the body's outcome (`guard` / `restore` frames), so a cleanup that halts replaces that outcome, as above. It has no
-`exit`.
+Agda models error recovery and release precedence with stack frames, but its
+`guard` rule does not model acquisition or the ending argument. This is
+**owned divergence D4**, assigned to the strong-model follow-up in
+[[decisions/261111_a-guard-acquires|a-guard-acquires]], not a proof of the
+acquiring guard. Agda has no `exit`.
 
 Failure propagates predictably through the rest of the grammar:
 
@@ -126,4 +126,4 @@ See also [[design/exec|exec]] (failure is an operation's exceptional outcome),
 Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
 `docs/SPEC.md` §2.5, §8, §8.6–§8.7; `Break::stopped`; the `Try` / `Guard` arms and frames in
 `core/src/shell/evaluator/machine.rs` (`?` elaborates to nested `try`, no frame of
-its own), `try` / `guard` typing in `core/src/typecheck/scope.rs`.
+its own), `try` / `guard` typing in `core/src/typecheck/generate/control.rs`.

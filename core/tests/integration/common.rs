@@ -84,15 +84,17 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         CompKind::Capture(c) | CompKind::Redirect { body: c, .. } => {
             walk_comp(c, visit);
         }
-        CompKind::Try {
-            body: a,
-            handler: b,
+        CompKind::Try { body, handler } => {
+            for v in [body, handler] {
+                walk_val(v, visit);
+            }
         }
-        | CompKind::Guard {
-            body: a,
-            cleanup: b,
+        CompKind::Guard {
+            acquire,
+            body,
+            release,
         } => {
-            for v in [a, b] {
+            for v in [acquire, body, release] {
                 walk_val(v, visit);
             }
         }

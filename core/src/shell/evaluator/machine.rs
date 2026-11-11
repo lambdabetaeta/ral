@@ -9,8 +9,8 @@
 
 use crate::fact::{
     ApplyFailure, ArityFailure, CallOrForce, CaptureLimit, CaseArmFailure, CountRule, DepthFailure,
-    DepthKind, EvalFailure, Expected, InvalidCause, InvariantFailure, Reason, StateFailure,
-    ValueShape,
+    DepthKind, ErrorFact, EvalFailure, ExitCase, Expected, InvalidCause, InvariantFailure, Reason,
+    StateFailure, ValueShape, tag,
 };
 use crate::shell::runtime::invalid;
 use std::sync::Arc;
@@ -31,8 +31,8 @@ use crate::shell::exec::resolve::Resolution;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
     Binding, Break, BroodGuard, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle,
-    DisplacedSite, Env, Error, FrameHandle, FrameName, HandlerArity, HandlerFrame, HandlerLookup,
-    Mooring, Settled, Shell, Signature, TrailScope, Value, report_value,
+    DisplacedSite, Env, Error, Escape, FrameHandle, FrameName, HandlerArity, HandlerFrame,
+    HandlerLookup, Mooring, Settled, Shell, Signature, TrailScope, Value, report_value,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
@@ -102,8 +102,15 @@ enum Frame {
         handler: Value,
         span: Option<Span>,
     },
+    Acquire {
+        body: Value,
+        release: Value,
+        prev: Scope,
+        span: Option<Span>,
+    },
     Guard {
-        cleanup: Value,
+        release: Value,
+        resource: Value,
         span: Option<Span>,
     },
     /// Checks and wraps the returned value against the site (`Site::protect`).
@@ -227,6 +234,22 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
         Terminal::Value(v) => Ok(v),
         Terminal::Lambda { .. } => Err(bare_lambda_error().into()),
     }
+}
+
+fn exit_case(outcome: &Settled<Value>, shell: &Shell) -> Value {
+    let ending: ExitCase<ErrorFact> = match outcome {
+        Ok(_) => ExitCase::Ok,
+        Err(Break::Error(error)) => ExitCase::Err(error.fact(shell)),
+        Err(Break::Escape(Escape::Exit(code))) => ExitCase::Exited(*code),
+        Err(Break::Escape(Escape::Stopped(stop))) => ExitCase::Stopped(stop.cause),
+    };
+    let (label, payload) = match ending {
+        ExitCase::Ok => (tag::OK, Value::Unit),
+        ExitCase::Err(fact) => (tag::ERR, Value::failure(fact)),
+        ExitCase::Exited(code) => (tag::EXITED, Value::Int(code.into())),
+        ExitCase::Stopped(cause) => (tag::STOPPED, Value::from_datum(cause)),
+    };
+    Value::variant(label, Some(payload))
 }
 
 fn capture_overflowed() -> Error {
@@ -371,6 +394,20 @@ struct Slot<'a> {
 }
 
 impl Slot<'_> {
+    fn push_args(self, args: Vec<Value>, span: Option<Span>) {
+        self.extend(
+            args.into_iter()
+                .rev()
+                .map(|value| Frame::Arg { value, span }),
+        );
+    }
+
+    /// The one way anything is called: `args` pushed, then `f` forced.
+    fn call(self, f: Value, args: Vec<Value>, span: Option<Span>) -> Settled<Focus> {
+        self.push_args(args, span);
+        Machine::force(f, span)
+    }
+
     fn push(self, frame: Frame) {
         self.extend(std::iter::once(frame));
     }
@@ -427,11 +464,7 @@ impl Machine {
     /// One `Arg` frame per argument, the first on top, where the head's
     /// first λ meets it.
     fn push_args(&mut self, args: Vec<Value>, span: Option<Span>, shell: &Shell) -> Settled<()> {
-        self.reserve_n(args.len(), shell)?.extend(
-            args.into_iter()
-                .rev()
-                .map(|value| Frame::Arg { value, span }),
-        );
+        self.reserve_n(args.len(), shell)?.push_args(args, span);
         Ok(())
     }
 
@@ -466,7 +499,6 @@ impl Machine {
         }
     }
 
-    /// The one way anything is called: `args` pushed, then `f` forced.
     fn call(
         &mut self,
         f: Value,
@@ -474,8 +506,26 @@ impl Machine {
         span: Option<Span>,
         shell: &Shell,
     ) -> Settled<Focus> {
-        self.push_args(args, span, shell)?;
-        Self::force(f, span)
+        self.reserve_n(args.len(), shell)?.call(f, args, span)
+    }
+
+    fn guard_release(
+        &mut self,
+        release: Value,
+        resource: Value,
+        outcome: Settled<Value>,
+        span: Option<Span>,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Focus> {
+        let ending = exit_case(&outcome, shell);
+        let slot = self.reserve(shell).expect("room reserved at guard entry");
+        let prev = shell.shield(mooring.cleanup_grace);
+        slot.push(Frame::Cleanup { outcome, prev });
+        self.reserve_n(2, shell)
+            .expect("room reserved at guard entry")
+            .call(release, vec![resource, ending], span)
+            .map_err(|b| b.locate("guard", span, shell))
     }
 
     /// `force V` on a closed value: `force(thunk M) = M`, and a native's code
@@ -769,14 +819,26 @@ impl Machine {
                 Self::force(body, comp.span)?
             }
 
-            CompKind::Guard { body, cleanup } => {
+            CompKind::Guard {
+                acquire,
+                body,
+                release,
+            } => {
+                // Acquire and Guard pop back to this depth; Cleanup and two Args need three slots.
+                self.room(3, shell)?;
+                shell.poll()?;
+                let acquire = form(acquire, &env, &shell.sig)?;
                 let body = form(body, &env, &shell.sig)?;
-                let cleanup = form(cleanup, &env, &shell.sig)?;
-                self.reserve(shell)?.push(Frame::Guard {
-                    cleanup,
+                let release = form(release, &env, &shell.sig)?;
+                let slot = self.reserve(shell).expect("room reserved at guard entry");
+                let prev = shell.shield(mooring.cleanup_grace);
+                slot.push(Frame::Acquire {
+                    body,
+                    release,
+                    prev,
                     span: comp.span,
                 });
-                Self::force(body, comp.span)?
+                Self::force(acquire, comp.span)?
             }
 
             CompKind::Audit { body } => {
@@ -1003,17 +1065,34 @@ impl Machine {
 
             Frame::Try { .. } => Ok(Focus::Return(t)),
 
-            Frame::Guard { cleanup, span } => {
-                let v = as_value(t).map_err(|b| b.locate("guard", span, shell))?;
-                let slot = self
-                    .reserve(shell)
-                    .map_err(|b| b.locate("guard", span, shell))?;
-                let prev = shell.shield(mooring.cleanup_grace);
-                slot.push(Frame::Cleanup {
-                    outcome: Ok(v),
-                    prev,
-                });
-                Self::force(cleanup, span).map_err(|b| b.locate("guard", span, shell))
+            Frame::Acquire {
+                body,
+                release,
+                prev,
+                span,
+            } => {
+                shell.scope = prev;
+                let resource = as_value(t).map_err(|b| b.locate("guard", span, shell))?;
+                self.reserve(shell)
+                    .expect("room reserved at guard entry")
+                    .push(Frame::Guard {
+                        release,
+                        resource: resource.clone(),
+                        span,
+                    });
+                self.reserve_n(1, shell)
+                    .expect("room reserved at guard entry")
+                    .call(body, vec![resource], span)
+                    .map_err(|b| b.locate("guard", span, shell))
+            }
+
+            Frame::Guard {
+                release,
+                resource,
+                span,
+            } => {
+                let outcome = as_value(t).map_err(|b| b.locate("guard", span, shell));
+                self.guard_release(release, resource, outcome, span, mooring, shell)
             }
 
             Frame::Cleanup { outcome, prev } => {
@@ -1085,7 +1164,7 @@ impl Machine {
 
             Frame::Arg { .. } | Frame::Protect { .. } => Err(s),
 
-            Frame::Cleanup { prev, .. } => {
+            Frame::Acquire { prev, .. } | Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
                 Err(s)
             }
@@ -1109,17 +1188,11 @@ impl Machine {
                 escape @ Break::Escape(_) => Err(escape),
             },
 
-            Frame::Guard { cleanup, span } => {
-                let slot = self
-                    .reserve(shell)
-                    .map_err(|b| b.locate("guard", span, shell))?;
-                let prev = shell.shield(mooring.cleanup_grace);
-                slot.push(Frame::Cleanup {
-                    outcome: Err(s),
-                    prev,
-                });
-                Self::force(cleanup, span).map_err(|b| b.locate("guard", span, shell))
-            }
+            Frame::Guard {
+                release,
+                resource,
+                span,
+            } => self.guard_release(release, resource, Err(s), span, mooring, shell),
 
             Frame::Audit { scope, .. } => match s {
                 Break::Error(e) => {
@@ -1151,8 +1224,9 @@ impl Frame {
     /// that has nothing to read back.  `Capture` restores `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Audit` closes its scope,
     /// discarding the trail no one is left to read; `Within` applies its undo;
-    /// `Grant` removes its layer; `Gather` restores the cradle and drops its
-    /// owner to stop its brood without waiting.  The rest do nothing.
+    /// `Grant` removes its layer; `Acquire` and `Cleanup` restore the scope;
+    /// `Gather` restores the cradle and drops its owner to stop its brood
+    /// without waiting. The rest do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::CallSite(prev) => shell.local.audit.restore_site(*prev),
@@ -1162,7 +1236,7 @@ impl Frame {
             Self::Audit { scope, .. } => drop(shell.local.audit.close(scope)),
             Self::Within(undo) => undo.apply(shell),
             Self::Grant(at) => shell.context.grants.remove(at, 1),
-            Self::Cleanup { prev, .. } => shell.scope = prev,
+            Self::Acquire { prev, .. } | Self::Cleanup { prev, .. } => shell.scope = prev,
             Self::Gather { prev, .. } => shell.local.cradle = prev,
             Self::To { .. }
             | Self::Seq { .. }
@@ -1249,7 +1323,7 @@ pub(crate) fn evaluate(
     )
 }
 
-/// The same, from a closed value meeting arguments: [`Machine::call`] sets
+/// The same, from a closed value meeting arguments: [`Slot::call`] sets
 /// the first state, so a value meeting none is forced.
 pub(crate) fn apply(
     f: Value,

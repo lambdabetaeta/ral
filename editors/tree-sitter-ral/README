@@ -59,9 +59,12 @@ This is an editor parser, not the runtime validator:
   selects map_literal, which covers both records and maps. Classification-
   dependent record rules (one spread, first), a spliced pattern key,
   duplicate keys/binders/arms, and types are not checked.
-- Reserved control-operator heads other than let/return/if/case use application
-  nodes. Highlight queries classify those names; this grammar does not check
-  their form-specific option sets or arities.
+- guard has a guard_stmt node with acquire, body, and release fields, in
+  execution order. Body and release parameter shapes are checked by ral's type
+  system, not this grammar. with-temp-dir and with-temp-file are applications.
+- Other reserved control-operator heads besides let/return/if/case/guard use
+  application nodes. Highlight queries classify those names; this grammar does
+  not check their form-specific option sets or arities.
 
 () is unit; unit is text. Backslash is ordinary outside double quotes.
 Pipelines and failure chains continue across blank/comment lines on either

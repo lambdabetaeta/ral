@@ -1,5 +1,5 @@
-<!-- verified_at_commit: 058c114df79583f281c2d4c004dcc293dc4761db -->
-<!-- generated_at_commit: 058c114df79583f281c2d4c004dcc293dc4761db -->
+<!-- verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2 -->
+<!-- generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1119,8 +1119,10 @@ After this failed top-level run, `before` remains bound in the session and
 `after` does not exist.
 
 Forced plain blocks are local bodies. The bodies used by `within`, `grant`,
-`try`, `guard`, `audit`, `spawn`, and `gather` follow the same local rule. Their
-bindings do not become top-level session bindings.
+`try`, `guard`, `audit`, `spawn`, and `gather` follow the same local rule.
+`guard`'s acquisition and release are local too: the resource reaches the body
+and release only through their parameters. None of these bindings become
+top-level session bindings.
 
 ### 5.7. Recursion and forward references
 
@@ -1266,7 +1268,12 @@ For example, `^echo` is the operating system's `echo`, not ral's — a handler
 for `echo`, and ral's own base `echo` handler, are both skipped.
 
 The bare names `within`, `grant`, `try`, `guard`, `audit`, `spawn`, and
-`gather` are reserved control forms. A caret form such as `^try` uses caret lookup instead.
+`gather` are reserved control forms. Each named form needs a machine frame or
+worker that intercepts or scopes something across an operand's whole dynamic
+extent: halts, observations, handlers, context, capabilities, or ownership of
+work. This is a runtime criterion, not a restriction of Hindley–Milner typing.
+Capture and redirection also scope frames, but are already syntax, not named
+forms. A caret form such as `^try` uses caret lookup instead.
 
 ### 6.3. Bare-head lookup
 
@@ -1869,7 +1876,7 @@ large-producer | head
 
 An interior edge is dead once its reader stage has ended. A stage feels that death at exactly one place — its next write to that edge — and nowhere else. A ral-written stage's own write to a dead edge raises the break at that write; an external's write ral cannot see, so ral hears it instead: once the reader is gone, ral reads the edge itself, on the read-end duplicate it already holds, discards whatever bytes are pending at that moment (they were owed to a reader that left), treats the first byte written after them as the kill's cue — SIGKILL on Unix, a distinctive-code `TerminateProcess` on Windows — and discards whatever follows until the writer is reaped or joined, so no writer ever blocks on a reader that is gone. A write already blocked on a full pipe when the edge dies is completed into that same read and then judged dead: a write not complete when the edge dies does not complete.
 
-That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. In the final stage the same condition is the closed-stdout stop: the pipeline's own output crosses the outer boundary, and a caller that stops reading it stops the run, status 141, an escape no `try` catches (§8.10). A reader-gone stage's `guard` cleanup runs, shielded (§8.7): a cleanup that halts on anything but its reader-gone stop is the pipeline's verdict; one that ends on it is forgiven; a cleanup's own write to the dead edge is stopped, not masked, while a command the cleanup runs is shielded with it (§8.7) and what that command writes there is discarded. A teardown cuts no stage at an edge: an edge whose reader has gone is still read and discarded, but a write to it is no break, so a `guard` cleanup upstream runs to completion within its grace.
+That break — and only that break — is the pipeline's one forgiven death: a non-final stage ral cuts this way keeps no failure, because the rest of its output was owed to nobody. Everything a stage does before its first dead write is its own account and runs to completion: its stderr, its files, its children that never write the edge, its own exit status if it never writes again. Nothing after that write is promised. In the final stage the same condition is the closed-stdout stop: the pipeline's own output crosses the outer boundary, and a caller that stops reading it stops the run, status 141, an escape no `try` catches (§8.10). A reader-gone stage's `guard` release runs, shielded (§8.7): a release that halts on anything but its reader-gone stop is the pipeline's verdict; one that ends on it is forgiven; a release's own write to the dead edge is stopped, not masked, while a command the release runs is shielded with it (§8.7) and what that command writes there is discarded. A teardown cuts no stage at an edge: an edge whose reader has gone is still read and discarded, but a write to it is no break, so a `guard` release upstream runs within the remaining shared grace.
 
 A stage whose own redirect statically sends every byte of its stdout to a file, never to the interior edge, never performs the write the cut watches for: `cmd > file | next` therefore runs `cmd`'s redirect to completion regardless of when `next` settles, not because it is exempted but because it never reaches the operation the rule cuts.
 
@@ -2158,44 +2165,88 @@ the error `await` or `poll` reports for a worker a cancel inside the session
 stopped or a timeout on an enclosing scope reached, which is the awaiting run's
 own failure.
 
-### 8.7. Cleanup with `guard`
+### 8.7. Acquisition and release with `guard`
 
-`guard` pairs a body with a cleanup block:
+`guard ACQUIRE BODY RELEASE` runs in execution order. The acquisition returns
+a resource, the body receives it, and the release receives both the resource
+and how the body ended:
 
 ```ral
-guard {
-  use-resource
-} {
-  release-resource
+guard { temp-file } { |file|
+  echo 'staged contents' > $file
+  mv $file destination
+} { |file end|
+  case $end [
+    `ok: { |_| () },
+    `err: { |_| rm -f $file },
+    `exited: { |_| rm -f $file },
+    `stopped: { |_| rm -f $file }
+  ]
 }
 ```
 
-The cleanup runs after the body whether the body succeeds or fails. When the
-cleanup completes, the body's own outcome stands: `guard` returns the body's
-value, or its failure remains the result after cleanup.
+The ending is the closed variant
+`` `ok | `err Error | `exited Int | `stopped CancelCause ``. `Error` is the
+record of §8.6; `CancelCause` is the structured cause of §8.10, represented
+by the `Cause` variant in §11.4. The nullary `` `ok `` carries `()`, not the
+body's value. There is no `panic` arm: a panic runs no release frame. An `` `err ``
+carries the witnessed record, so `raise $e` in its arm re-raises the exact
+reason.
 
-A cleanup that does not complete pre-empts that outcome, an ordinary failure
-exactly as a control escape such as `exit`. If both the body
-and the cleanup halt, the cleanup's signal is the result.
+`guard` polls once before acquiring: a pending stop runs neither acquisition
+nor release. Acquisition is shielded, and its returned resource is placed in
+the release frame with no cancellation poll in between. If acquisition halts,
+no release runs. Otherwise the release runs after the body returns, fails,
+exits, or stops. Its value is discarded and the body's outcome is re-raised or
+returned unchanged: reading the ending cannot consume it. A release that
+itself fails, exits, or stops pre-empts that outcome.
 
-A cleanup is shielded: a stop (§8.10) already in force when it starts, or
-landing while it runs, does not end it until the grace is spent. The grace is
-a host-set budget (five seconds by default) counted from the instant the stop
-landed, whatever the cleanup was doing then, so every cleanup of one
-unwinding ends by one instant. A root abort (Ctrl-\\) passes the shield. The
-shield is ral's own restraint: a signal the terminal or the pipeline sends to
-the process group still reaches the cleanup's children, as under any shell,
-and a child that dies of it fails as a signalled command does. Within the
-grace a cleanup's commands and pipelines run to completion; past it, the stop
-ends the cleanup at its next poll, and the cleanup's halt is the result.
- A cleanup whose own
-failure is not to fail the computation says so: `guard { … } { attempt { … } }`
-suppresses it, and `guard { … } { try { … } { |err| … } }` reports it and
-carries on.
+Acquisition and release are shielded against ral's cooperative stops (§8.10)
+for the host's cleanup grace (five seconds by default). A root abort (Ctrl-\\)
+passes the shield. The grace is counted from the instant the stop lands:
+acquisition and release, and every release in the same unwinding, share one
+budget; release gets no fresh grace. A stop during acquisition lets it finish
+within that grace, then pre-empts the body at its first poll and runs the
+release. An acquisition that outlasts the grace is stopped and runs no
+release, so anything it held leaks. One finishing late leaves little time for
+release: once the grace is spent, even the release's first command is stopped
+at its poll and the resource may leak.
 
-`guard` takes its value type from the body alone; the cleanup
-contributes none. Output from cleanup is real output and is not silently
-captured. Bindings created in either block remain local to that block.
+The shield is cooperative, not an operating-system signal mask. A terminal's
+SIGINT still reaches an acquisition's or release's external children; a child
+that dies of it fails as a signalled command does (`` `signaled 2 ``). If that
+halts acquisition, no release runs.
+
+The shield follows ownership, not birthplace: it covers pipeline stages,
+external children, nested machines, and workers owned by a `gather` opened
+inside acquisition or release. A worker of an already enclosing `gather`,
+worker body, or session is not masked merely because it was spawned there.
+To delegate acquisition or release to a shielded worker, open its `gather`
+inside that operand, not around the `guard`:
+
+```ral
+guard {
+  gather { let h = spawn { acquire-resource }; await $h }
+} { |r| use-resource $r } { |r _| release-resource $r }
+```
+
+Past the remaining grace, even owned work is stopped at its next poll.
+
+To ignore a release's ordinary failure, write
+`guard $acquire $body { |r _| attempt { release-resource $r } }`; `try` inside
+the release can instead report that failure and carry on. With no resource,
+write `guard { () } { |_| … } { |_ end| … }`; there is no two-operand form.
+
+`guard` takes its value type and grade from the body alone; acquisition and
+release contribute neither. Output from all three operands goes to the
+current output, with no implicit capture by `guard`. Thus
+`let x = guard { () } { |_| echo hi } { |_ _| () }` captures `hi` by the normal
+binding rule. Bindings created in each block stay local to it.
+
+For temporary paths, prefer the prelude's `with-temp-dir` and `with-temp-file`
+(§14.4), which acquire and remove the path with `guard`. A worker the body
+spawns to use the path belongs inside a `gather`, so it finishes before the
+body's extent ends and the path is removed.
 
 ### 8.8. Exiting the session
 
@@ -4133,6 +4184,8 @@ adds nothing to the trail and a file edit lands once, as the write it made.
 
 User-function application is transparent. Control forms and scopes, including
 `if`, `case`, `within`, `grant`, `guard`, and `try`, are transparent too.
+A `guard` adds no observation for acquisition, body, or release; their
+operations remain visible directly.
 Collection iteration manufactures no wrapper observation, and the builtin that
 performs it records none of its own.
 
@@ -4477,6 +4530,31 @@ for display: it folds a leading home directory to `~`. Filesystem reads and
 creations are checked against the active filesystem grant. `temp-dir` and
 `temp-file` return the path they create as a string, so they refuse a temp
 directory whose real path is not valid UTF-8, before creating anything in it.
+
+The prelude's `with-temp-dir { |path| … }` and `with-temp-file { |path| … }`
+are the default for lexical lifetimes. They use `guard` to acquire the path
+and release it with `rm -rf` or `rm -f`, even when the body fails, exits, or
+stops (§8.7). The path is removed when the body's extent ends, so a worker the
+body spawns to use it belongs inside a `gather`. Bare `temp-dir` and
+`temp-file` leave the path yours to remove, and make it only if `rm` could
+remove it; prefer `with-temp-*`. Bare paths suit lifetimes beyond a block,
+such as a scratch directory across tool calls or a path handed to `detach`.
+
+Before creating anything, `temp-dir` and `temp-file` require that the bare
+command `rm` would launch there: bundled when available, otherwise found on
+`PATH`, and admitted by the grants in force. The check uses the same lookup
+and admission as that command, launches nothing, and records a refusal where
+a refused `rm` would be recorded. It raises the lookup's own error (including
+status 127 when `rm` is not found) or the grant's denial, with a hint saying
+why the temp operation needs `rm`. An exec allow-list can admit it with
+`` `name rm ``. The existing write check on the parent supplies filesystem
+authority; no separate removal check is added.
+
+For `with-temp-*`, acquisition and release have the same dynamic grants and
+`PATH`: scopes inside the body end before release. An enclosing `within`
+handler for `rm` receives the release's command as intended. For bare
+`temp-*`, this is a check at creation only; later context changes and removal
+are the caller's responsibility.
 
 A relative path is read against the working directory, which is always an
 absolute path, and on Windows one on a drive or a share: `cd` and
@@ -5193,8 +5271,9 @@ observations (§13.3). Function application, control forms such as `if`, `case`,
 `try`, `guard`, `within`, `grant`, `audit`, `spawn`, and `gather`, and loop
 iterations record nothing of their own either (a session `spawn`'s birth
 lands through the worker observation); the commands executed inside them land in the
-open trail directly. Each observation carries its evaluated arguments, status,
-source location, timing, and principal, plus the bytes it captured.
+open trail directly, including all three operands of `guard`. Each observation
+carries its evaluated arguments, status, source location, timing, and principal,
+plus the bytes it captured.
 
 Batch stdout and stderr remain ordinary byte streams. A program's final ral
 value is not an operating-system pipe protocol: interior pipeline stages
@@ -5360,7 +5439,7 @@ case-arm      ::= tag-key ":" atom
 tag-key       ::= "`" identifier
 
 scope-form    ::= "try" atom atom
-                | "guard" atom atom
+                | "guard" atom atom atom
                 | "within" options atom
                 | "grant" options atom
                 | "audit" atom
@@ -5532,7 +5611,7 @@ M ::= return v
     | capture M
     | prim o [v1, ..., vn]
 
-op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
+op ::= try v1 v2 | guard v1 v2 v3 | within v1 v2 | grant v1 v2 | audit v
      | spawn [v1] v2 | gather v
      | redirect M redirects
 ```
@@ -5543,6 +5622,8 @@ an effect before the body runs, `spawn` runs its own on a worker, and a value
 is what can be held unrun. `redirect`
 takes the computation itself: its body is an application or a nested scope,
 neither of which can fuse its own redirects the way `exec` does.
+`guard`'s three values are acquisition, body, and release, in that order; the
+last two are thunks accepting one and two arguments respectively.
 
 `capture` is a checker-written control form (§17.5).
 `decode v` abbreviates `prim decode [v]`, a primitive on a byte value.
@@ -6222,7 +6303,9 @@ the binding does not change the choice. Uses of y do not choose its branch:
 `{ |f| if true { !$f } else { return () }; let y = !$f; upper $y }` is
 refused, not made into a capture by `upper`'s demand for text.
 
-`guard`, `within` and `grant` preserve their body's type (§17.7). Additional
+`guard`, `within` and `grant` preserve their body's type and grade (§17.7).
+For `guard`, this is the computation obtained by applying the body to the
+acquired resource, not the acquisition's or release's result. Additional
 `elsif` arms nest, each `else` holding the next `if` as a thunk. A conditional
 without `else` wraps its arm as `{ body; () }`, returning unit at a fresh
 grade; the body's output goes to the current sink. `M ? N` is
@@ -6244,7 +6327,10 @@ Let `Error` be the closed error record
 `` {frame:String, message:String, status:Int, site:S} ``, where
 `` S = {script:String, line:Int, col:Int} `` — the one
 vocabulary `try`, `poll`, and `audit` all report failure in (§8.6). The scope forms
-take their bodies as thunks and are typed by them:
+take their bodies as thunks and are typed by them. Let
+`` ExitCase = <`ok Unit | `err Error | `exited Int | `stopped CancelCause> ``;
+`CancelCause` is §11.4's `Cause`. Unlike a worker's `Ending` there, `ExitCase`
+has no `panic` arm.
 
 ```text
 body : U (F_ε A)
@@ -6252,10 +6338,10 @@ body : U (F_ε A)
 within opts body : F_ε A
 grant  caps body : F_ε A
 
-body    : U (F_ε A)
-cleanup : U (F_ε' B)
------------------------------- Guard
-guard body cleanup : F_ε A
+acquire : U (F_ν R)    body : U (R -> F_ε A)
+release : U (R -> ExitCase -> F_μ B)
+------------------------------------------------ Guard
+guard acquire body release : F_ε A
 
 body : U (F_ε A)
 ------------------------------ Audit
@@ -6277,10 +6363,12 @@ is a run-time effect that changes no type (§11.3).
 
 `try` is §17.6's rule. `within`, `grant` and `guard` have their body's type,
 grade included.
-`guard`'s cleanup runs for its effects and failures alone: its value is
-discarded, what it writes goes to the current output, and its type is not
-joined with the body's. The scope-body, handler-shape, and arm-result
-constraints are equations against fresh shape unknowns and retain ordinary
+`guard`'s acquisition must produce the resource type `R`. Its body accepts
+`R`; its release accepts `R` and the closed `ExitCase`, and must produce a
+value of any type `B`. The release runs for its effects and halts alone: its
+value is discarded, what it writes goes to the current output, and its type
+and grade are not joined with the body's. The scope-body, handler-shape, and
+arm-result constraints are equations against fresh shape unknowns and retain ordinary
 diagnostic provenance and source spans. Scope bodies preserve types without
 reading a partial solution.
 
@@ -6424,9 +6512,22 @@ ordinary error from `M` runs `N`, and an escape from `M` propagates. A longer
 chain `M1 ? ... ? Mn` nests the same way, right-associated, so it reports the
 last error when every arm fails.
 
-For `guard body cleanup`, cleanup runs after every body value or ordinary body
-error. A cleanup value leaves the body outcome intact. A cleanup error and a
-cleanup escape alike take priority over that outcome and propagate.
+For `guard acquire body release`, entry reserves room for three frames before
+any effect, then polls once for a pending stop. It shields and forces
+`acquire` under an `Acquire` frame. An acquisition halt restores the previous
+scope and propagates without release. On a value `r`, it restores the scope,
+pushes `Guard` holding `release` and `r`, and applies `body` to `r`: no poll
+can occur before that frame is installed. The entry reservation makes every
+later guard-frame or argument-frame push infallible.
+
+A body value, error, exit, or stop pops `Guard`, raises the shield, and pushes
+`Cleanup` holding the body's outcome and previous scope. It applies `release`
+to `r` and the outcome's `ExitCase` (§17.7). A release value restores the
+scope and resumes the saved outcome unchanged; a release error or escape
+restores the scope and takes priority. `Acquire` and `Cleanup` also restore
+their scopes when abandoned during panic unwinding, but no release runs for
+a panic. Both shields share the same strike-based grace (§8.7), not fresh
+budgets.
 
 `audit body` opens a trail and evaluates `body` with it active, then returns
 the report: the body's outcome, `` `ok `` of its value or `` `err `` of `E`,

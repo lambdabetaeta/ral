@@ -37,7 +37,7 @@ function words(mode) {
 }
 
 const MODES = ['top', 'bracket', 'arith'];
-const KEYWORDS = ['if', 'elsif', 'else', 'let', 'return', 'case'];
+const KEYWORDS = ['if', 'elsif', 'else', 'let', 'return', 'case', 'guard'];
 const OPERATORS = [
   ['||'], ['&&'], ['==', '!=', '<', '>', '<=', '>='], ['+', '-'], ['*', '/', '%'],
 ];
@@ -178,7 +178,7 @@ module.exports = grammar({
     statement: $ => $.chain,
     chain: $ => seq($.pipeline, repeat(seq(continued('?'), $.pipeline))),
     pipeline: $ => seq($.cmd, repeat(seq(continued('|'), $.cmd))),
-    cmd: $ => choice($.let_stmt, $.return_stmt, $.if_stmt, $.case_stmt, $.application),
+    cmd: $ => choice($.let_stmt, $.return_stmt, $.if_stmt, $.case_stmt, $.guard_stmt, $.application),
     let_stmt: $ => seq('let', GAP, $._pattern, '=', optional(NL), $.chain),
     return_stmt: $ => prec.right(seq('return', optional(seq(GAP, value($, 'top'))), optional(GAP))),
     if_stmt: $ => prec.right(seq('if', SPACE, field('cond', value($, 'top')),
@@ -191,6 +191,9 @@ module.exports = grammar({
       SPACE, field('body', value($, 'top'))),
     case_stmt: $ => seq('case', SPACE, field('scrutinee', value($, 'top')),
       optional(NL), '[', separated(field('arm', $.case_arm)), ']'),
+    guard_stmt: $ => seq('guard', GAP, field('acquire', value($, 'top')),
+      GAP, field('body', value($, 'top')), GAP, field('release', value($, 'top')),
+      repeat($.redirect), optional(GAP)),
     case_arm: $ => seq(field('tag', $.tag_label), optional(NL), ':', optional(NL),
       field('body', choice($.case_arm_lambda, $._case_arm_value))),
     _case_arm_value: $ => choice(

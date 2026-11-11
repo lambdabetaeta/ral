@@ -165,7 +165,7 @@ fn exit_escapes_try_and_guard_cleanup_with_its_own_code() {
         o.stderr
     );
 
-    let o = run_c("guard { echo body } { exit 5 }");
+    let o = run_c("guard { () } { |_| echo body } { |_ _| exit 5 }");
     assert_eq!(
         o.status, 5,
         "a `guard` cleanup's `exit` must escape; stderr: {}",

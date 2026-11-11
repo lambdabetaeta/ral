@@ -1,8 +1,7 @@
 ---
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_commit: e82dee766c2806bded0f896bbb0f927cf3104d78
-verified_at_date: 2026-11-03
-anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk]
+verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_date: 2026-11-11
+anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -210,6 +209,14 @@ function of its layers.**
   Win32 setter does not preserve this relative-destination form.
 - **A name ral invents** (`temp-dir`, `temp-file`) is an absent child of a
   write-judged directory, judged as that leaf and created exclusively.
+  Before even choosing that parent, `would_run("rm", …)` checks bundled or
+  `PATH` lookup and exec admission through the ordinary command door,
+  launching nothing. A known refusal therefore creates nothing and records
+  the same denial as `rm`, with a hint naming the acquisition's need.
+  Parent write authority already covers the invented leaf. `with-temp-*`
+  acquires and releases in the same dynamic context; a bare `temp-*` caller
+  owns later context changes and removal
+  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 - **ral enumerates.** `path/tree.rs` lists with `Dir::read_dir`, judges every
   directory it enters and every file it reads for its own guidance against a
   `ReadRegion`, and uses `ignore` for its matcher alone. Its `Entries` yield
