@@ -1,0 +1,33 @@
+let add = { |a b| return $[$a + $b] }
+
+# A function-typed branch runs before its result is bound.
+let g = if true { echo effect-ran; add 1 } else { add 2 }
+echo 'bound g'
+echo !{g 3}
+
+# The try body runs, and fails, under its handler at the let.
+let g = try { echo body-ran; fail boom; add 1 } { |e| add 2 }
+echo 'bound g'
+echo !{g 3}
+
+# Effects before the residual lambda run once, not per application.
+let h = { |x| echo once; add $x }
+let g = h 1
+echo !{g 2}
+echo !{g 3}
+
+# A value head runs before its arguments' hoists.
+echo !{ !{ echo a; add 1 } !{ echo b; return 2 } }
+
+# A partial application holds the supplied arguments and exposes the rest.
+let add3 = { |x y z| return $[$x + $y + $z] }
+let add12 = add3 1 2
+echo $add12
+
+# A tail call consumes its caller's remaining arguments, including in fold.
+let blk = { |a| add $a }
+echo !{blk 1 2}
+echo !{fold { |acc| add $acc } 0 [1, 2]}
+
+# A try in tail position passes the residual lambda to the caller.
+echo !{{ |a| try { add $a } { |e| add 0 } } 1 2}

@@ -44,7 +44,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
     shell
         .register_hook(
             HookName::session("external-editor"),
-            Value::Native(entry.into()),
+            Value::Native(entry.into(), [].into()),
             HookSig::Hook {
                 kind: "external editor".into(),
             },
@@ -442,7 +442,7 @@ mod tests {
         shell
             .register_hook(
                 hook.clone(),
-                Value::Native(entry.into()),
+                Value::Native(entry.into(), [].into()),
                 HookSig::Block,
                 DefaultPolicy::denied(),
             )

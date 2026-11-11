@@ -24,7 +24,7 @@ impl Site {
     /// Install obligations without inspecting delayed results.
     pub(crate) fn wrap(&self, value: Value) -> Value {
         match (&self.nodes[self.root].shape, value) {
-            (Shape::Thunk(body), raw @ (Value::Thunk(_) | Value::Native(_))) => {
+            (Shape::Thunk(body), raw @ (Value::Thunk(_) | Value::Native(..))) => {
                 self.wrap_thunk(*body, raw)
             }
             // Internal projections suspend the remaining computation contract.

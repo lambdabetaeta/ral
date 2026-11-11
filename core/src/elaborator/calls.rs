@@ -26,8 +26,7 @@ impl Elaborator {
         redirects: &Redirects<Ast>,
         binds: &mut Vec<(Pattern, Comp)>,
     ) -> Comp {
-        // A head returning a function runs before argument hoists;
-        // a function-typed head is thunked and runs at App, after them.
+        // A value head runs before the arguments' hoists, whatever its type.
         let value_head = if let Head::Value(value) = &head.item {
             Some(self.with_span(head.span, |this| {
                 let value = this.to_val(value, binds);

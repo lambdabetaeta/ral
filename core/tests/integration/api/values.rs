@@ -9,7 +9,10 @@ use ral_core::shell::runtime::Value;
 fn return_deref_name_is_bound_value() {
     let v = must_succeed("return $upper");
     match v {
-        Value::Native(entry) => assert_eq!(entry.decl.name, "upper"),
+        Value::Native(entry, args) => {
+            assert_eq!(entry.decl.name, "upper");
+            assert!(args.is_empty());
+        }
         other => panic!("expected the native itself, got {other:?}"),
     }
 }

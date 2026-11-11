@@ -24,12 +24,11 @@ pub(super) enum ArgvBoundary {
     Exec { command: String, handled: bool },
 }
 
-/// How a binding receives its right-hand side: runs it for its value, keeps
-/// a function as a block, or captures a command's output.
+/// How a binding receives its right-hand side's result: the value it returns,
+/// or the output it writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     Run,
-    Thunk,
     Capture,
 }
 
@@ -444,7 +443,7 @@ impl Solver {
                 } => {
                     let head = self.unifier.resolve_comp_ty_graded(rhs);
                     let (mode, ty) = match head.node() {
-                        CompTyNode::Fun(..) => (Mode::Thunk, Ty::thunk(head.clone())),
+                        CompTyNode::Fun(..) => (Mode::Run, Ty::thunk(head.clone())),
                         CompTyNode::Return(Grade::Value, ty) => (Mode::Run, ty.clone()),
                         CompTyNode::Return(Grade::Output, _) => (Mode::Capture, Ty::string()),
                         // A payload excluding Unit has already improved the grade.
@@ -1732,7 +1731,7 @@ mod tests {
                 let solution = settled
                     .close()
                     .expect("inference can still choose elaboration");
-                assert_eq!(solution.mode(bound), Mode::Thunk);
+                assert_eq!(solution.mode(bound), Mode::Run);
                 assert_eq!(solution.splits(call), [0]);
             }
         }
@@ -1747,7 +1746,7 @@ mod tests {
         let holes = [
             (unknown, Mode::Run),
             (CompTy::ret(grade, Ty::unit()), Mode::Run),
-            (function(), Mode::Thunk),
+            (function(), Mode::Run),
             (command(), Mode::Capture),
         ]
         .map(|(rhs, mode)| (solver.binding(&rhs, None).1, mode));

@@ -718,19 +718,11 @@ pub struct JsonEncodeCauseNonUnicodePath {
 record!(JsonEncodeCauseNonUnicodePath { shown: "shown" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JsonEncodeCauseNativeComputation {
-    pub name: String,
-}
-record!(JsonEncodeCauseNativeComputation { name: "name" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonEncodeCause {
     NonUnicodePath(JsonEncodeCauseNonUnicodePath),
-    NativeComputation(JsonEncodeCauseNativeComputation),
 }
 variant!(JsonEncodeCause {
     NonUnicodePath(JsonEncodeCauseNonUnicodePath): "non-unicode-path",
-    NativeComputation(JsonEncodeCauseNativeComputation): "native-computation",
 });
 
 impl JsonEncodeCause {
@@ -741,9 +733,6 @@ impl JsonEncodeCause {
                 "path {} is not Unicode and cannot be encoded as JSON",
                 c.shown
             ),
-            Self::NativeComputation(c) => {
-                format!("native computation {:?} cannot be encoded as JSON", c.name)
-            }
         }
     }
 }
@@ -818,9 +807,9 @@ mod tests {
             .payload("inner")
             .index(Count::from_u64(3))
             .field("outer");
-        let encode = JsonEncodeFailure::new(JsonEncodeCause::NativeComputation(
-            JsonEncodeCauseNativeComputation {
-                name: "native".into(),
+        let encode = JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
+            JsonEncodeCauseNonUnicodePath {
+                shown: "\"path\"".into(),
             },
         ))
         .payload("inner")

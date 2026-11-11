@@ -1,18 +1,19 @@
 ---
 status: accepted
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 ---
 
 # The evaluator steps closures
 
-> **Amended 2026-11-02:**
+> **Amended 2026-11-11:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
-> makes application push one `Arg` per argument before force; only a lambda
-> terminal consumes an argument. Written sequences use `Seq`, and both
-> `To` and `Seq` carry continuation environments. Natives force to ordinary
-> lambda chains. The CEK architecture stands; the sequencing and application
-> mechanisms below are historical.
+> makes application push one `Arg` per argument before force. Lambda and
+> native terminals consume arguments; residual functions box when none remain.
+> Written sequences use `Seq`, and both `To` and `Seq` carry continuation
+> environments. Natives hold their entry and supplied arguments. The CEK
+> architecture stands; the sequencing and application mechanisms below are
+> historical.
 
 **The evaluator is a CEK machine.** What is in focus is a computation closure
 ⟨M, E⟩; the continuation is a stack of frames, each carrying the environment
@@ -49,12 +50,10 @@ a different prelude from its host and only the wire hid it.
   [handlers:]` are the scoped forms (S1, S10). Lambda-ness is read off the
   body's shape (`Comp::arrow`), guaranteed by the checker's η-expansion of
   every arrow-typed computation into a thunked λ (S3).
-  *Amended 2026-10-23*: the η-invariant is withdrawn. A `let` of function type
-  binds its right-hand side unrun, as its thunk, at any depth (Let-fun, SPEC
-  §17.5), so forcing it runs its effects up to the λ under the handlers in scope
-  at the force rather than at the application; nothing reads lambda-ness off a
-  body's shape but a description of a value (`Comp::lam`).
-- **Two terminal shapes are a type.** `Terminal::{Value, Lambda}`; a frame has
+  The η-invariant is withdrawn: every `let` runs its right-hand side.
+  A residual λ returns its occurrence-restricted closure as a thunk;
+  `Comp::lam` reads lambda-ness only to describe a value.
+- **Terminal shapes are a type.** `Terminal::{Value, Lambda, Native}`; a frame has
   a rule for each terminal its hole admits.
 - **Recursion is an n-ary `rec` with a projection**, not a record fixpoint —
   `Ty::Map` is homogeneous and would have forced one type on a group. Nothing

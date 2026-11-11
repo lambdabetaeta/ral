@@ -1,0 +1,4 @@
+# codes: T0011
+# status: 1
+let add = { |a b| return $[$a + $b] }
+let g = grant [net: `offline] { add 1 }

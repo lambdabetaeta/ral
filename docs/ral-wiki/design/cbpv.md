@@ -32,17 +32,21 @@ name-binding lambdas, followed by pattern binds for destructuring parameters,
 so partial and under-application are uniform. Later parameters shadow earlier
 ones, including names introduced by destructuring.
 
-**The checked core is control syntax plus primitives on values.** Each core
-constructor corresponds to `Extrinsic/` in Agda; shell forms are a separate
+**The checked core is control syntax plus primitives on values.** `Extrinsic/`
+in Agda models this partition, not the new residual-function boxing rule:
+its Let-fun still suspends the whole RHS. Native terminals are not mechanised,
+and acquiring `guard` is owned divergence D4. Shell forms are a separate
 layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application pushes one
-argument frame per argument, then forces the head. Only a lambda terminal
-consumes an argument. Returned-thunk application follows the
-[[invariants/ir-pure-cbpv|IR invariant]]. A value head is hoisted before its
-arguments, as a `let` right-hand side is. A head that returns a function runs
-first, so `!{ echo a; return $f } !{ echo b; return 1 }` prints `a` before `b`,
-and a failing head runs no argument. A head that is itself a function
-computation is bound unrun (Let-fun) and runs when applied, after the
-arguments' computations.
+argument frame per argument, then forces the head. A lambda terminal consumes
+an argument; a native terminal collects one until saturated. Returned-thunk
+application follows the [[invariants/ir-pure-cbpv|IR invariant]]. A value head
+is hoisted before its arguments, as a `let` right-hand side is. A head that
+returns a function runs first, so
+`!{ echo a; return $f } !{ echo b; return 1 }` prints `a` before `b`,
+and a failing head runs no argument. This holds for a function computation too:
+a `let` always runs its right-hand side. A λ that finds no argument returns
+itself as a block, restricted to the names it mentions and holding the
+arguments already supplied.
 
 **A mechanised core calculus models ral; it is not a refinement of Rust.**
 It is Agda (`--safe --without-K`, no postulates): extrinsically typed call-by-push-value over

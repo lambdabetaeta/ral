@@ -1,16 +1,16 @@
 //! The seed's serialization graph, with semantic validation outside serde.
 
-use super::table::{ScopeTable, SerialBinding, SerialClosure, SerialEnvSnapshot, SerialValue};
+use super::table::{
+    ScopeTable, SerialBinding, SerialClosure, SerialEnvSnapshot, SerialNative, SerialThunk,
+    SerialValue,
+};
 use super::{EngineSeed, Sealed, WireHandlerFrame};
 use crate::data::Bytes;
 use crate::data::json::{
-    JsonDecode, JsonEncode, JsonFormat, JsonRef, RawFOValue, decode_structural,
+    JsonDecode, JsonEncode, JsonFormat, JsonRef, RawFOValue, decode_structural, on_json_stack,
     serialize_structural,
 };
-use crate::fact::{
-    DecodeCause, DecodeFailure, JsonEncodeCause, JsonEncodeCauseNativeComputation,
-    JsonEncodeFailure,
-};
+use crate::fact::{DecodeCause, DecodeFailure, JsonEncodeFailure};
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::{FrameKind, RawContext, Terms};
 use crate::source::SourceDb;
@@ -30,7 +30,42 @@ pub(crate) struct RawEngineSeed {
 }
 
 type RawScopeTable = Vec<Vec<(String, RawSerialBinding)>>;
-type RawSerialValue = RawFOValue<SerialClosure>;
+type RawSerialValue = RawFOValue<RawSerialClosure>;
+
+#[derive(Debug, Serialize, Deserialize)]
+enum RawSerialClosure {
+    Thunk(SerialThunk),
+    Native(RawSerialNative),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RawSerialNative {
+    name: String,
+    args: Vec<RawSerialValue>,
+}
+
+impl Drop for RawSerialNative {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.args);
+        while let Some(mut value) = pending.pop() {
+            match &mut value {
+                RawFOValue::List { items } => pending.append(items),
+                RawFOValue::Map { entries } => {
+                    pending.extend(std::mem::take(entries).into_iter().map(|(_, value)| value));
+                }
+                RawFOValue::Variant { payload, .. } => {
+                    if let Some(value) = payload.take() {
+                        pending.push(*value);
+                    }
+                }
+                RawFOValue::Ext(RawSerialClosure::Native(native)) => {
+                    pending.append(&mut native.args);
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 /// A scheme is read structurally and closed by [`close`], so no serde
 /// validator runs inside the audited graph.
@@ -77,30 +112,51 @@ impl RawSpawnGrant {
 }
 
 fn validate_value(value: &RawSerialValue) -> Result<SerialValue, DecodeFailure> {
-    value.validate_with(|closure| Ok(closure.clone()))
+    on_json_stack(|| {
+        value.validate_with(|closure| match closure {
+            RawSerialClosure::Thunk(thunk) => Ok(SerialClosure::Thunk(thunk.clone())),
+            RawSerialClosure::Native(native) => {
+                let mut decoded = SerialNative {
+                    name: native.name.clone(),
+                    args: Vec::with_capacity(native.args.len()),
+                };
+                for (index, value) in native.args.iter().enumerate() {
+                    decoded.args.push(validate_value(value).map_err(|error| {
+                        error.index(index.into()).field("args").payload("Native")
+                    })?);
+                }
+                Ok(SerialClosure::Native(decoded))
+            }
+        })
+    })
 }
 
 fn encode_value(value: &SerialValue) -> Result<RawSerialValue, JsonEncodeFailure> {
-    RawFOValue::from_value_with(value.clone(), refuse_native)
+    encode_owned_value(value.clone())
 }
 
-/// A native's code is built at force and has no wire form, so a thunk holding
-/// one is refused before the total structural serializer sees it.
-fn refuse_native(closure: SerialClosure) -> Result<SerialClosure, JsonEncodeFailure> {
-    let native = match &closure {
-        SerialClosure::Thunk(thunk) => thunk.comp.first_native(),
-        SerialClosure::Native(_) => None,
-    };
-    match native {
-        None => Ok(closure),
-        Some(native) => Err(JsonEncodeFailure::new(JsonEncodeCause::NativeComputation(
-            JsonEncodeCauseNativeComputation {
-                name: native.0.decl.name.to_string(),
-            },
-        ))
-        .field("comp")
-        .payload("Thunk")),
-    }
+fn encode_owned_value(value: SerialValue) -> Result<RawSerialValue, JsonEncodeFailure> {
+    on_json_stack(|| {
+        RawFOValue::from_value_with(value, |closure| match closure {
+            SerialClosure::Thunk(thunk) => Ok(RawSerialClosure::Thunk(thunk)),
+            SerialClosure::Native(mut native) => {
+                let mut encoded = RawSerialNative {
+                    name: native.name.clone(),
+                    args: Vec::with_capacity(native.args.len()),
+                };
+                native.args.reverse();
+                while let Some(value) = native.args.pop() {
+                    let index = encoded.args.len();
+                    encoded
+                        .args
+                        .push(encode_owned_value(value).map_err(|error| {
+                            error.index(index.into()).field("args").payload("Native")
+                        })?);
+                }
+                Ok(RawSerialClosure::Native(encoded))
+            }
+        })
+    })
 }
 
 fn close(scheme: &Arc<Scheme>) -> Result<Closed, DecodeFailure> {

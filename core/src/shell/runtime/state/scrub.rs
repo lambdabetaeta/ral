@@ -178,13 +178,20 @@ impl Scrub {
                     env,
                 )))
             }
+            Value::Native(entry, args) => patched(
+                args,
+                args.iter()
+                    .enumerate()
+                    .filter_map(|(i, arg)| self.rebuild(arg).map(|new| (i, new))),
+                |args, i, new| Arc::make_mut(args)[i] = new,
+            )
+            .map(|args| Value::Native(Arc::clone(entry), args)),
             Value::Unit
             | Value::Bool(_)
             | Value::Int(_)
             | Value::Float(_)
             | Value::String(_)
-            | Value::Bytes(_)
-            | Value::Native(_) => None,
+            | Value::Bytes(_) => None,
         }
     }
 }
@@ -239,6 +246,36 @@ mod tests {
 
     fn is_placeholder(v: Option<&Value>) -> bool {
         matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::data::OPAQUE_TAG)
+    }
+
+    #[test]
+    fn native_arguments_scrub_handles_and_captured_scopes_without_copying_untouched_args() {
+        let mut parent = crate::test_helper::core_shell();
+        let entry = Arc::new(parent.lookup_builtin("has").expect("has builtin"));
+        let unchanged: Arc<[Value]> = Arc::from([Value::Int(7)]);
+        parent.set_var(
+            "unchanged".into(),
+            Value::Native(Arc::clone(&entry), Arc::clone(&unchanged)),
+        );
+        parent.set_var("live".into(), idle_handle());
+        let held = Value::list(vec![idle_handle(), block_over(&parent.env)]);
+        parent.set_var("partial".into(), Value::Native(entry, Arc::from([held])));
+
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
+        let Some(Value::Native(_, args)) = fork.env.get("partial") else {
+            panic!("the partial builtin must remain a native");
+        };
+        let [Value::List(items)] = args.as_ref() else {
+            panic!("the partial builtin must retain its held list");
+        };
+        assert!(is_placeholder(items.get(0).as_deref()));
+        assert!(is_placeholder(
+            captured(items.get(1).as_deref()).get("live")
+        ));
+        let Some(Value::Native(_, args)) = fork.env.get("unchanged") else {
+            panic!("the handle-free builtin must remain a native");
+        };
+        assert!(Arc::ptr_eq(args, &unchanged));
     }
 
     #[test]

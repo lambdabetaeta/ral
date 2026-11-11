@@ -162,16 +162,18 @@ for each of ral's two existing mechanisms**
 - **A table entry → a *native* value.** It declares its arguments, so it has a
   curried function type (arity 0: a thunk type) and is a first-class value bound
   in the base scope. `$upper` *is* the entry, not a lambda around a
-  name-dispatched command. `Value::Native(entry)` prints as `<native NAME>`
-  and crosses the scope envelope by name, re-linked against the receiving
-  shell's manifest. Its type is the η-equivalent lambda's, uncurried all
-  the way. Forcing the native builds
-  `λx₁…λxₙ. Native(entry, x₁…xₙ)` in the empty environment, with no stored
-  code or self-reference. Application consumes ordinary argument frames;
-  partial application is a lambda closure whose environment holds the
-  received arguments, rethunked by `let` when used as a value. A resolved
-  full-arity `Exec` runs the entry directly. Neither natives nor thunks have
-  language-level equality.
+  name-dispatched command. `Value::Native(entry, args)` holds the entry and
+  the arguments supplied so far, fewer than its arity for positive arity and
+  none for arity zero. Forcing it yields a native terminal that collects
+  ordinary argument frames; saturation runs the body, and arity zero runs
+  on force. No builtin application becomes IR.
+  It prints as `<native NAME>`, or `<native map, 1 of 2 arguments>` when
+  partial, and crosses by name with its arguments, re-linked against the
+  receiver's manifest. Its type is the η-equivalent lambda's, uncurried all
+  the way. A resolved `Exec` runs directly when held plus new arguments
+  saturate it. Boundary builtins are the exception: inference η-expands
+  them into blocks over `Exec` carrying the per-use checked site, which
+  crosses as IR. Neither natives nor thunks have language-level equality.
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,
   so there is no arity, nothing to curry, and no meaning for partial
   application: it is only interpretable as command syntax and lives at the

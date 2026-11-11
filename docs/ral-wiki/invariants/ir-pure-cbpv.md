@@ -7,6 +7,9 @@ Agda machine its substitution-based CK counterpart. **Owned divergence D4:**
 the acquiring `guard` and its ending-reading release await the strong-model
 Agda follow-up ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 The correspondence excludes that rule until the follow-up re-establishes it.
+Residual-function boxing also awaits an Agda follow-up: its Let-fun still
+suspends the whole RHS, without Box. Native terminals and partial-native
+transport are runtime mechanisms, not mechanised rules.
 
 - **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
   `Case`, `Try`, `Guard`, `Capture`. A lambda binds one name;
@@ -17,9 +20,9 @@ The correspondence excludes that rule until the follow-up re-establishes it.
   operand is a value. A primitive computes on those values and may fail;
   it neither resolves a shell name nor runs another computation.
 - **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
-  `Gather`, `Audit`, `Tilde`, `Protect`/`Val::Protected`, and runtime-only
-  `Native`. Resolved full-arity sample builtins correspond to Agda's
-  `prim (builtin b)`; the shell forms themselves are outside the core.
+  `Gather`, `Audit`, `Tilde`, `Protect`/`Val::Protected`. Resolved full-arity
+  sample builtins correspond to Agda's `prim (builtin b)`; the shell forms
+  themselves are outside the core.
 
 **Surface conveniences unfold before evaluation.**
 
@@ -34,11 +37,15 @@ The correspondence excludes that rule until the follow-up re-establishes it.
   beat spreads, and the first spread wins.
 - Interpolation hoists every part's computations first, then renders the
   nonliteral parts in written order and concatenates all parts once.
-- A value head is hoisted before its arguments, then forced; a head of
-  function type is bound unrun, so its own effects follow the arguments'.
-  Application has one `Arg` frame per argument; only a lambda terminal
-  consumes an argument. A spread belongs to argv, not value application:
-  elaboration refuses it for written value heads and lexically bound heads;
+- A value head is hoisted and run before its arguments, whatever its type:
+  every `let` runs its right-hand side. A λ with no argument returns its
+  occurrence-restricted closure as a thunk.
+  Application has one `Arg` frame per argument; a lambda terminal consumes
+  one, and a native terminal collects one until saturated. A partial builtin
+  is `Value::Native(entry, args)`, not code in the IR. Boundary builtins remain
+  η-expanded by inference, retaining their checked site in `Exec`.
+  A spread belongs to argv, not value application: elaboration refuses it
+  for written value heads and lexically bound heads;
   checking refuses it when a bare head resolves to a builtin or session binding.
 - The checker writes returned-thunk application as `M to h. force h · V`;
   binding capture as `Capture(M) to d. Prim::Decode(d)`.
@@ -47,9 +54,10 @@ The correspondence excludes that rule until the follow-up re-establishes it.
 - A form's options are spread-free record nodes; handler labels remain syntax.
 
 **A new IR form must be classified as control, primitive, or shell.** A core
-form is mirrored in Agda, including its typing and machine rule or primitive
-signature and interpretation. The correspondence and its standing gaps are
-recorded in [[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
+form requires an Agda counterpart, including its typing and machine rule or
+primitive signature and interpretation; the standing gaps above remain open.
+The correspondence and its standing gaps are recorded in
+[[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
 and `dev/agda/README.md`.
 
 See [[map/core/ir|IR]], [[internals/compilation-ladder|the compilation ladder]],

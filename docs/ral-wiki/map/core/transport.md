@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
@@ -47,10 +47,11 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 - `SerialValue = FOValue<SerialClosure>` (`seed/table.rs`) fills the slot with what this wire
   adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
   `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
-  a builtin's name (`SerialNative` holds only that name), re-linked against
-  the receiver's own table. A partial application used as a value crosses as
-  a Let-fun thunk capturing the variables the application mentions; its
-  received arguments belong to that thunk's environment, not the native.
+  a builtin's name and held arguments (`SerialNative { name, args }`),
+  re-linked against the receiver's own table. A partial user block crosses
+  as the box of its residual λ, closing over the arguments given. Boundary
+  builtins likewise cross as λ-closures over `Exec` with their checked site;
+  ordinary partial builtins cross by name with their arguments.
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
@@ -103,8 +104,8 @@ classifies it — a block, a function, a handle:
   [[map/core/shell-state|shell-state]]) replaces only `Handle`s, with the same
   placeholder, and keeps closures live, since this wire interns them. It
   reaches every handle the fork holds — in a binding's data, in every scope a
-  closure captured, including a partial native application's environment,
-  and in a handler frame's arms; it empties the fork's hooks.
+  closure captured, in a partial native's held arguments, and in a handler
+  frame's arms; it empties the fork's hooks.
 
 ## Scopes — `InternCtx` and `WireDecoder`
 
@@ -228,8 +229,11 @@ of inferring causes from serde's diagnostic text.
   has no mirror of the IR or of schemes: `Arc<Comp>` and `Arc<Scheme>` cross
   through their own serde impls, and the semantic step closes each scheme
   (`Closed::new`, refusing with `DecodeCause::OpenScheme` at its path; a
-  non-finite float is `DecodeCause::FiniteBits`). A thunk whose code holds a
-  native is refused on encode with `JsonEncodeCause::NativeComputation`.
+  non-finite float is `DecodeCause::FiniteBits`). Native arguments are
+  traversed too, so nested closures and native names are validated; every
+  sealed thunk carries IR, never builtin code. Raw seed values, including
+  native arguments, remain `RawFOValue` until validation, preserving typed
+  error paths. Seed-local cleanup drains nested native arguments iteratively.
 - `JsonEncode` returns `JsonEncodeFailure` before writing a frame. Audited raw
   representations serialize only after fallible leaves have been checked;
   `serialize_structural` is not a blanket encoding fallback.

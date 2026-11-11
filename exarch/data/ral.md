@@ -12,7 +12,7 @@ A string argument stays one argument: its contents are never implicitly split, g
 
 ## Values and computations
 
-`ral` separates values from computations. `let x = …` runs a value producer and binds its result, captures an output command, or packages an unapplied function as a block without running it. An argument or record field needs a value. The forms to remember are:
+`ral` separates values from computations. `let x = …` always runs its right-hand side: it binds the value returned, or captures an output command's stdout. A call that runs out of arguments returns the remaining block: `let inc = add 1` binds a block of one parameter. An argument or record field needs a value. The forms to remember are:
 
 - `$x` retrieves a bound value.
 - `{ … }` packages a computation as a block, without running it.

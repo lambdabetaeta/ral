@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 verified_at_date: 2026-11-11
 anchors: [Generator, Solver, Settled, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
@@ -53,7 +53,7 @@ verdict from a partially solved type.
 choice on the match's hole.** Readback reads those decisions; it never matches
 a head again.
 
-- The binding match `bound τ C`: an arrow binds its thunk (`Mode::Thunk`);
+- The binding match `bound τ C`: an arrow binds `U C` by running (`Mode::Run`);
   `F^p A` binds `A` by running (`Mode::Run`); `F^w Unit` captures output and
   binds `String` (`Mode::Capture`). A free computation or grade suspends. A
   payload whose head or kind excludes `Unit` entails grade `p`.
@@ -212,7 +212,7 @@ A table is consulted key by key, never unified as a record type.
 ## Readback fixes terms and sites
 
 **A successful closed solution supplies every elaboration choice.** Readback
-replaces each `BindHole` by its `Mode` — run, thunk, or capture/decode — and
+replaces each `BindHole` by its `Mode` — run or capture/decode — and
 each `CallHole` by explicit bind/force segments before its split indices
 (ascending, repeats allowed). A `BindingCall` becomes an `Exec`, its
 redirects fused when unsplit and wrapping the whole call when split. Capture

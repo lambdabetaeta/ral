@@ -42,7 +42,7 @@ pub(crate) enum BuiltinDiagnostic {
 pub enum Convention {
     /// Curried application at the arity the row's type declares, and
     /// first-class as `$name`: the row seeds the base env scope as a
-    /// `Value::Native`.
+    /// `Value::Native(entry, [])`; partial applications hold their arguments.
     Value,
     /// An argv base frame: intercepted, stacked, and never a value.
     /// `^name` bypasses it. The checker reads its scheme directly from Σ.

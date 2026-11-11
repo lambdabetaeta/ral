@@ -94,12 +94,19 @@ pub(crate) fn is_synthetic(name: &str) -> bool {
     name.starts_with('%')
 }
 
-/// Every name a node mentions, bound or free: sorted, distinct. Built only by
-/// [`Node::new`].
+/// Every name a shape mentions, bound or free: sorted, distinct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Occ(Arc<[Name]>);
 
 impl Occ {
+    pub(crate) fn of(shape: &impl Mentions) -> Self {
+        let mut refs = Vec::new();
+        shape.mentions(&mut refs);
+        refs.sort_unstable();
+        refs.dedup();
+        Self(refs.into_iter().cloned().collect())
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
@@ -143,11 +150,7 @@ impl<S> Node<S> {
     where
         S: Mentions,
     {
-        let mut refs = Vec::new();
-        shape.mentions(&mut refs);
-        refs.sort_unstable();
-        refs.dedup();
-        let occ = Occ(refs.into_iter().cloned().collect());
+        let occ = Occ::of(&shape);
         Self { shape, occ }
     }
 
@@ -541,108 +544,6 @@ impl<P: Phase> Comp<P> {
     }
 }
 
-impl<P: Phase> Comp<P> {
-    /// The first native computation in this tree: the one thing a wire cannot
-    /// carry, since a native's code is built at force and never serialised.
-    pub(crate) fn first_native(&self) -> Option<&NativeEntry> {
-        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
-            CompKind::Native { entry, .. } => Some(entry),
-            CompKind::Lam { body, .. }
-            | CompKind::Capture(body)
-            | CompKind::Protect { body, .. } => body.first_native(),
-            CompKind::Bind { comp, rest, .. }
-            | CompKind::Seq {
-                first: comp, rest, ..
-            } => comp.first_native().or_else(|| rest.first_native()),
-            CompKind::App { head, args, .. } => head
-                .first_native()
-                .or_else(|| first_native_in(args.iter().map(|arg| &arg.item))),
-            CompKind::BindingCall {
-                args, redirects, ..
-            } => first_native_in(args.iter().map(|arg| &arg.item).chain(redirects.operands())),
-            CompKind::Exec(exec) => first_native_in(
-                exec.argv
-                    .iter()
-                    .map(|elem| &elem.slot().item)
-                    .chain(exec.redirects.operands()),
-            ),
-            CompKind::Pipeline { stages } => stages.iter().find_map(|stage| stage.first_native()),
-            CompKind::Prim(prim) => first_native_in(prim.operands()),
-            CompKind::Force(value) | CompKind::Return(value) => value.first_native(),
-            CompKind::Rec { group, .. } => group
-                .shape()
-                .iter()
-                .find_map(|(_, member)| member.first_native()),
-            CompKind::If { cond, then, else_ } => {
-                first_native_in([&cond.item, &then.item, &else_.item])
-            }
-            CompKind::Case { scrutinee, arms } => first_native_in(
-                std::iter::once(&scrutinee.item).chain(arms.iter().map(|arm| &arm.body.item)),
-            ),
-            CompKind::Try { body, handler } => first_native_in([body, handler]),
-            CompKind::Guard {
-                acquire,
-                body,
-                release,
-            } => first_native_in([acquire, body, release]),
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            } => first_native_in(
-                opts.shape()
-                    .iter()
-                    .map(|(_, value)| &value.item)
-                    .chain(handlers.iter().flatten().map(|arm| &arm.value.item))
-                    .chain(std::iter::once(body)),
-            ),
-            CompKind::Grant { caps, body } => first_native_in(
-                caps.shape()
-                    .iter()
-                    .map(|(_, value)| &value.item)
-                    .chain(std::iter::once(body)),
-            ),
-            CompKind::Spawn { title, body } => first_native_in(
-                title
-                    .iter()
-                    .map(|title| &title.item)
-                    .chain(std::iter::once(body)),
-            ),
-            CompKind::Audit { body } | CompKind::Gather { body } => body.first_native(),
-            CompKind::Redirect { body, redirects } => body
-                .first_native()
-                .or_else(|| first_native_in(redirects.operands())),
-            CompKind::Tilde(_) => None,
-        })
-    }
-}
-
-impl<P: Phase> Val<P> {
-    fn first_native(&self) -> Option<&NativeEntry> {
-        stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
-            Self::Unit
-            | Self::String(_)
-            | Self::Int(_)
-            | Self::Float(_)
-            | Self::Bool(_)
-            | Self::Variable(_) => None,
-            Self::Thunk(node) => node.shape().first_native(),
-            Self::List(node) => first_native_in(node.shape().iter().map(|elem| &elem.item)),
-            Self::Record(node) | Self::Map(node) => {
-                first_native_in(node.shape().iter().map(|(_, value)| &value.item))
-            }
-            Self::Variant { payload, .. } => payload.first_native(),
-            Self::Protected { value, .. } => value.first_native(),
-        })
-    }
-}
-
-fn first_native_in<'a, P: Phase + 'a>(
-    values: impl IntoIterator<Item = &'a Val<P>>,
-) -> Option<&'a NativeEntry> {
-    values.into_iter().find_map(Val::first_native)
-}
-
 impl<P: Phase> Mentions for Comp<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
@@ -681,11 +582,6 @@ impl<P: Phase> Mentions for Comp<P> {
                 exec.head.mentions(out);
                 exec.argv.mentions(out);
                 exec.redirects.mentions(out);
-            }
-            CompKind::Native { entry: _, args } => {
-                for arg in args {
-                    arg.mentions(out);
-                }
             }
             CompKind::Pipeline { stages } => {
                 for stage in stages {
@@ -931,17 +827,9 @@ pub enum CompKind<P: Phase = Checked> {
         body: Arc<Comp<P>>,
         site: Arc<Site>,
     },
-    /// A builtin run on the values `args` name: the body of a native's code,
-    /// which forcing the native builds.  Never elaborated, so never serialised;
-    /// last with [`Self::BindingCall`], since a skipped variant shifts the wire
-    /// index of every one after.
-    #[serde(skip)]
-    Native {
-        entry: NativeEntry,
-        args: Box<[Val<P>]>,
-    },
     /// A bare head bound in scope, called with `args` while the checker
-    /// decides its splits; readback makes it an [`Exec`].
+    /// decides its splits; readback makes it an [`Exec`]. The only skipped
+    /// variant, kept last so it does not shift any wire index.
     #[serde(skip)]
     BindingCall {
         head: Name,
@@ -1084,17 +972,6 @@ pub struct HandlerArmV<P: Phase = Checked> {
 pub struct CaseArm<P: Phase = Checked> {
     pub tag: Spanned<String>,
     pub(crate) body: Spanned<Val<P>>,
-}
-
-/// A builtin as [`CompKind::Native`] holds it, equal by name:
-/// [`BuiltinEntry`](crate::shell::runtime::BuiltinEntry) has no `PartialEq`.
-#[derive(Debug, Clone)]
-pub struct NativeEntry(pub(crate) Arc<crate::shell::runtime::BuiltinEntry>);
-
-impl PartialEq for NativeEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.decl.name == other.0.decl.name
-    }
 }
 
 /// Body of a [`CompKind::Exec`].

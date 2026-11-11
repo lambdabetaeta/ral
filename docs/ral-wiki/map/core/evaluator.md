@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -35,23 +35,29 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 ## Machine: `machine.rs`
 
 - `Focus::{Eval, Return, Halt}` holds a computation closure, a terminal,
-  or a `Break`. `Terminal::{Value, Lambda}` distinguishes a returned value
-  from a lambda computation awaiting its argument.
+  or a `Break`. `Terminal::{Value, Lambda, Native}` distinguishes a returned
+  value from a lambda or builtin awaiting arguments. `Terminal::into_value`
+  boxes residual lambdas with `Closure::new` over `Occ::of`, and natives as
+  `Value::Native(entry, args)`, at value demands and run end.
 - `eval_rules` has one arm per `CompKind`; `step_return` and `step_halt`
   have one per `Frame`. Rules return `Settled<Focus>`; raising points use
   visibility-checked `Break::locate(name, span, shell)`; `step` folds failure
   into `Halt`. The operation-name table excludes `Exec`/`App`: dispatch and
   admission claim those failures at their own innermost frame.
 - `App` pushes one `Frame::Arg` per argument, right to left, then evaluates
-  the head. Only `Lambda` consumes `Arg`, binding its one name and entering
-  the body. Returned-thunk splits follow the [[invariants/ir-pure-cbpv|IR
-  invariant]]. A call with n arguments needs n free frames.
+  the head. `Lambda` consumes `Arg`, binding its one name and entering the
+  body; `Native` collects it and runs the builtin at saturation. A returned
+  value meeting `Arg` is an invariant failure, never implicitly forced.
+  Returned-thunk splits follow the [[invariants/ir-pure-cbpv|IR invariant]].
+  A call with n arguments needs n free frames.
 - `force_val` enters a literal thunk in the current environment without
-  closing it. `force` enters a stored thunk's closure. `native_code` builds
-  the lambda chain ending in `CompKind::Native` when a native is forced;
-  received arguments live in the partial closure's environment. Full-arity
-  resolved `Exec` calls run the builtin directly.
-- `Bind` pushes `Frame::To`; `Seq` pushes `Frame::Seq`. These alone carry
+  closing it. `force` enters a stored thunk's closure or yields a native
+  terminal holding the entry and supplied arguments; arity zero runs on force.
+  `dispatch_exec` runs a native directly when held plus new arguments saturate
+  it. Boundary builtins remain inference-built λ-closures over `Exec` with
+  their per-use checked site; no builtin application becomes IR.
+- Every `let` runs its RHS. `Bind` pushes `Frame::To`, which binds the result,
+  boxing a residual function; `Seq` pushes `Frame::Seq`. These alone carry
   saved environments for their continuations. A lambda binds a name;
   parameter destructuring runs through body binds at parameter spans.
 - `If` forces its selected arm; `step_case` first pushes one `Arg` holding

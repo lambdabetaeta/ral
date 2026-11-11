@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 verified_at_date: 2026-11-11
 anchors: [Solver, Settled, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
 ---
@@ -31,7 +31,7 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   the whole lambda chain, located at the parameters. Collection operands
   hoist in written order before their assembly primitive; interpolation
   hoists all parts, then renders and concatenates. A value head hoists before
-  its arguments; a function-typed head is bound unrun and runs when applied.
+  its arguments and runs before their hoists, whatever its type.
   Elaboration refuses a spread into a written value head or lexically bound
   head; checking refuses one into a builtin or session binding.
   What it emits carries no parser syntax
@@ -39,7 +39,7 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
 - **IR → checked IR.** Each Hindley–Milner inference rule returns its type
   beside the node it builds ([[design/types|types]]), in the `Inferring`
   phase: bindings and calls carry holes, boundaries their types. Boundary
-  η-expansion is built at its rule; binding capture, Let-fun and
+  η-expansion is built at its rule; binding capture and
   returned-thunk splits are decided by suspended matches and applied by
   readback once the unit succeeds
   ([[internals/type-inference|type-inference]]).
@@ -67,8 +67,8 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   binding point. A mutually recursive group is checked once, monomorphic
   within itself, and generalised as its region closes.
 
-  An arrow-typed right-hand side is bound unrun, as its thunk:
-  `Mode::Thunk` reads back as `return (thunk M)` (Let-fun, SPEC §17.5).
+  Every right-hand side runs. An arrow binds `U C` with `Mode::Run`;
+  the machine boxes the residual λ when it finds no argument (SPEC §17.8).
 
   Only a binding inserts a capture: its match reads the RHS's head, and
   readback applies `Mode::Capture` to the checked RHS; arguments and joins

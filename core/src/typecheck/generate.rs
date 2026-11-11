@@ -117,9 +117,6 @@ impl Generator {
             } => self.app(head, args),
             CompKind::Exec(exec) => self.exec(comp, exec),
             &CompKind::BindingCall { hole, .. } => match hole {},
-            CompKind::Native { .. } => {
-                unreachable!("a native's code is built by forcing it, never checked")
-            }
             CompKind::Pipeline { stages } => self.pipeline(stages),
             CompKind::Prim(prim) => {
                 let (ty, prim) = self.prim(prim);

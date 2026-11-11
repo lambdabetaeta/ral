@@ -1,18 +1,20 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the arity partition (native vs. base frame), no-install-time-admission, and every consequence for natives and base frames stand. What resolves otherwise: `^name` no longer reaches an installed base-frame arm at all — it joins the path-head class, skipping the handler stack entirely, so `^echo` is `/bin/echo` and `^detach` is not found.'
 ---
 
 # A name is a value or it is handled
 
-> **Amended 2026-11-02:**
+> **Amended 2026-11-11:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
-> replaces the native representation below. `Value::Native(entry)` crosses
-> by name; forcing builds its lambda chain. Runtime suspensions have no
-> structural equality.
-> A partial application is a closure with arguments in its environment,
-> not a native with an argument list. The value/base-frame partition stands.
+> gives the checked IR its CBPV application rules. A native is
+> `Value::Native(entry, args)`: forcing collects the remaining arguments in
+> a native terminal, and saturation runs its body without building IR.
+> Partial natives cross by name with their held arguments; boundary builtins
+> remain inference-built λ-closures over `Exec` carrying their checked site.
+> Runtime suspensions have no structural equality. The value/base-frame
+> partition stands.
 
 **The builtin is not a kind of name. A manifest entry with *fixed arity* has a
 function type, so it is a first-class *native* value seeded into the base env
@@ -62,7 +64,7 @@ a `Scheme`'s is the curry-spine depth of its value form
 (`core/src/types/builtin.rs:219`) is the one door both boot and wire hydration
 pass through, so nothing can classify an entry two ways.
 
-- **Fixed arity → a native.** `Value::Native { entry, applied }` — nearly the
+- **Fixed arity → a native.** `Value::Native(entry, args)` — nearly the
   whole manifest, the nullary entries included: the `from-*` decoders are
   arity-0 natives, so `$from-json` exists as a thunk whose forcing reads the
   ambient channel, dynamic state like the cwd.
@@ -86,15 +88,15 @@ A native curries by collecting arguments until `fixed_arity` is reached;
 application is the single arity gate, so no body checks its own count.
 Under-application yields the partial value, over-application is an arity error,
 and arity-0 natives force like blocks — exactly the lambda's behaviour. It
-prints as `<native NAME>`, is equal by name plus collected arguments, is
-refused by the first-order projection and by string coercion at the syscall
-boundary, and crosses the scope envelope by name, re-linked against the
-receiving shell's manifest.
+prints as `<native NAME>`, or `<native map, 1 of 2 arguments>` when partial,
+has no language-level equality, is refused by the first-order projection and
+at the syscall argument boundary, and crosses the scope envelope by name
+with its collected arguments, re-linked against the receiving shell's manifest.
 
 The derived value scheme is *uncurried all the way*, as a lambda's is: `map
 $round` is ill-typed because `round` is 2-ary, and the typed idiom for partial
-application is the Bind rethunk (`let p = $round 1.4`, then `map $p`) or an
-explicit lambda. Runtime currying serves unchecked sites only.
+application is a binding (`let p = $round 1.4`, then `map $p`) or an explicit
+lambda. The binding runs the call and receives its residual native value.
 
 ### 3. Base frames are the stack's floor, not a flag
 
@@ -205,7 +207,7 @@ scheme.
   base frames out of the run-frame index space makes removal unexpressible.
 - **A thunked deriver spine**, so `map $round` typechecks by partial
   application. Rejected: types would then depend on provenance, a native being
-  typed unlike the η-equivalent lambda. The Bind rethunk is the idiom.
+  typed unlike the η-equivalent lambda. Binding a partial call is the idiom.
 
 ## See also
 

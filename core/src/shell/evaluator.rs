@@ -164,7 +164,7 @@ pub fn apply(
     shell: &mut Shell,
 ) -> Settled<Value> {
     match val {
-        Value::Thunk(_) | Value::Native(_) => machine::apply(val.clone(), args, mooring, shell),
+        Value::Thunk(_) | Value::Native(..) => machine::apply(val.clone(), args, mooring, shell),
         _ => Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
             ApplyFailure {
                 operation: CallOrForce::Call,

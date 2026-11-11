@@ -506,7 +506,7 @@ fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Err
                             found: match arg {
                                 Value::Unit => crate::fact::Found::Unit,
                                 Value::Thunk(_) => crate::fact::Found::Block,
-                                Value::Native(_) => crate::fact::Found::Function,
+                                Value::Native(..) => crate::fact::Found::Function,
                                 Value::Handle(_) => crate::fact::Found::Handle,
                                 Value::List(_) => crate::fact::Found::List,
                                 Value::Map(_) => crate::fact::Found::Map,

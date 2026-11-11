@@ -10,7 +10,9 @@
 
 use crate::data::FOValue;
 use crate::data::json::{drop_value, on_json_stack};
-use crate::fact::{InvariantFailure, ProtocolFailure, Reason};
+use crate::fact::{
+    InvariantFailure, ProtocolFailure, ProtocolFailureInvalidNativeArguments, Reason,
+};
 use crate::ir::{Comp, Name};
 use crate::shell::runtime::{Binding, BuiltinTable, Closure, Env, Error, Runtime, Value};
 use crate::ty::Closed;
@@ -44,6 +46,28 @@ pub(crate) struct SerialThunk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialNative {
     pub name: std::string::String,
+    pub args: Vec<SerialValue>,
+}
+
+impl Drop for SerialNative {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.args);
+        while let Some(mut value) = pending.pop() {
+            match &mut value {
+                SerialValue::List { items } => pending.append(items),
+                SerialValue::Map { entries } => {
+                    pending.extend(std::mem::take(entries).into_iter().map(|(_, value)| value));
+                }
+                SerialValue::Variant { payload, .. } => {
+                    if let Some(value) = payload.take() {
+                        pending.push(*value);
+                    }
+                }
+                SerialValue::Ext(SerialClosure::Native(native)) => pending.append(&mut native.args),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
@@ -289,7 +313,12 @@ fn for_each_closure(value: &SerialValue, mut visit: impl FnMut(&SerialClosure)) 
                 pending.extend(entries.iter().rev().map(|(_, value)| value));
             }
             SerialValue::Variant { payload, .. } => pending.extend(payload.as_deref()),
-            SerialValue::Ext(closure) => visit(closure),
+            SerialValue::Ext(closure) => {
+                visit(closure);
+                if let SerialClosure::Native(native) = closure {
+                    pending.extend(native.args.iter().rev());
+                }
+            }
             SerialValue::Unit
             | SerialValue::Bool { .. }
             | SerialValue::Int { .. }
@@ -355,9 +384,16 @@ impl FOValue<SerialClosure> {
                 comp: Arc::clone(closure.comp()),
                 env: SerialEnvSnapshot::from_runtime(closure.env(), ctx),
             }))),
-            Value::Native(entry) => Ok(Self::Ext(SerialClosure::Native(SerialNative {
-                name: entry.decl.name.as_ref().to_string(),
-            }))),
+            Value::Native(entry, args) => {
+                let mut native = SerialNative {
+                    name: entry.decl.name.to_string(),
+                    args: Vec::with_capacity(args.len()),
+                };
+                for value in args.iter() {
+                    native.args.push(Self::from_runtime(value, ctx)?);
+                }
+                Ok(Self::Ext(SerialClosure::Native(native)))
+            }
             Value::Handle(_) => Err(Error::new(Reason::Invariant(Box::new(
                 InvariantFailure::HandleInSeed,
             )))),
@@ -373,12 +409,26 @@ impl FOValue<SerialClosure> {
             }
             result = match closure {
                 SerialClosure::Thunk(thunk) => thunk.env.clone().into_runtime(dec).map(|_| ()),
-                SerialClosure::Native(native) if dec.manifest.value(&native.name).is_none() => {
-                    Err(Error::new(Reason::Protocol(Box::new(
-                        ProtocolFailure::UnknownNative(native.name.clone()),
-                    ))))
+                SerialClosure::Native(native) => {
+                    let failure = match dec.manifest.value(&native.name) {
+                        None => Some(ProtocolFailure::UnknownNative(native.name.clone())),
+                        Some(entry) => {
+                            let arity = entry.decl.fixed_arity();
+                            (native.args.len() > arity.saturating_sub(1)).then(|| {
+                                ProtocolFailure::InvalidNativeArguments(
+                                    ProtocolFailureInvalidNativeArguments {
+                                        name: native.name.clone(),
+                                        arity: arity.into(),
+                                        actual: native.args.len().into(),
+                                    },
+                                )
+                            })
+                        }
+                    };
+                    failure.map_or(Ok(()), |failure| {
+                        Err(Error::new(Reason::Protocol(Box::new(failure))))
+                    })
                 }
-                SerialClosure::Native(_) => Ok(()),
             };
         });
         result
@@ -419,11 +469,14 @@ impl FOValue<SerialClosure> {
                     .expect("validated scope reference");
                 Value::Thunk(Closure::captured(Arc::clone(&thunk.comp), env))
             }
-            Self::Ext(SerialClosure::Native(native)) => Value::Native(Arc::new(
-                dec.manifest
-                    .value(&native.name)
-                    .expect("validated native name"),
-            )),
+            Self::Ext(SerialClosure::Native(native)) => Value::Native(
+                Arc::new(
+                    dec.manifest
+                        .value(&native.name)
+                        .expect("validated native name"),
+                ),
+                native.args.iter().map(|value| value.hydrate(dec)).collect(),
+            ),
         })
     }
 }

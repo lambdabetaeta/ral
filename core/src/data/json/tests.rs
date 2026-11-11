@@ -451,9 +451,9 @@ fn generic_extensions_use_owner_validation_and_encoding_paths() {
             items: vec![FOValue::Ext(())],
         },
         |()| {
-            Err(JsonEncodeFailure::new(JsonEncodeCause::NativeComputation(
-                JsonEncodeCauseNativeComputation {
-                    name: "fixture".into(),
+            Err(JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
+                JsonEncodeCauseNonUnicodePath {
+                    shown: "\"fixture\"".into(),
                 },
             )))
         },

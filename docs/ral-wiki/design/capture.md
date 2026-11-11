@@ -51,7 +51,8 @@ runtime conversion. A `let`-fixed `p` producer cannot. The rule reads types:
 
 The same rule governs local binds, top-level definitions and hoisted `!{…}`.
 
-- **Function:** bind unrun as `return (thunk M)` (Let-fun).
+- **Function:** run `M`; bind its residual block at `U C` when it finds no
+  argument. Every `let` runs its right-hand side.
 - **`F^w Unit`:** insert `capture M to d. decode d`; bind a `String`.
 - **`F^p A`:** bind `A`.
 - **Free grade or computation:** suspend. A payload excluding `Unit` entails
@@ -145,7 +146,7 @@ the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 - `CompKind::Capture` returns `Bytes`; `Prim::Decode` drops one trailing LF
   or CRLF and strictly decodes UTF-8. Invalid text fails; use `from-bytes`
   to keep binary data. Neither term has surface syntax.
-- The solver records a binding's `Mode::{Run, Capture, Thunk}` from the RHS
+- The solver records a binding's `Mode::{Run, Capture}` from the RHS
   head; readback applies it at the binding hole only after unit closure.
 - A stand-in runs whole under its caller's capture. A fresh unit-returning
   stub for an external is a command and captures `""`.

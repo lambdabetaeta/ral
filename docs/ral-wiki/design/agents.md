@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 ---
 
 # Agents: one thread, one life, one conversation
@@ -218,9 +218,11 @@ or itself when its parent is the human.
 
 - `Shell::bequeath` snapshots the **serialisable fragment** of lexical scope,
   dynamic context and builtin table. Every handle becomes an opaque
-  placeholder, including in captured closures and handler arms. A partial
-  native application used as a value is a Let-fun thunk capturing the
-  variables the application mentions; their values are scrubbed there.
+  placeholder, including in captured closures, partial native arguments and
+  handler arms. A partial user block crosses as the box of its residual λ,
+  closing over the arguments given; a partial builtin crosses by name with
+  its held arguments. Boundary builtins remain λ-closures over `Exec` with
+  their checked site. The scrub walks every such argument and capture.
   Hooks do not cross. No terminal authority crosses.
 - The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is

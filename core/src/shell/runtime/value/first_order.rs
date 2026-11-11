@@ -50,7 +50,7 @@ impl Value {
     fn leaf(&self) -> Option<Leaf<'_>> {
         match self {
             Self::Thunk(c) => Some(Leaf::Thunk(c)),
-            Self::Native(_) => Some(Leaf::Native),
+            Self::Native(..) => Some(Leaf::Native),
             Self::Handle(_) => Some(Leaf::Handle),
             _ => None,
         }
@@ -98,7 +98,7 @@ impl<X> FOValue<X> {
                     .transpose()?,
             },
             Value::Thunk(c) => leaf(Leaf::Thunk(c))?,
-            Value::Native(_) => leaf(Leaf::Native)?,
+            Value::Native(..) => leaf(Leaf::Native)?,
             Value::Handle(_) => leaf(Leaf::Handle)?,
         })
     }

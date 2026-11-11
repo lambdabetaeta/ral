@@ -105,7 +105,8 @@ even when handled. The handler stack supplies diagnostic names only.
 is capture then decode; arguments, joins and handler arms use unification,
 without wrappers ([[design/capture|grades and capture]]).
 
-- A function right-hand side binds unrun as `return (thunk M)` (Let-fun).
+- Every right-hand side runs. A function binds its residual block at `U C`
+  when it finds no argument.
 - `F^w Unit` is captured and binds `String`; `F^p A` binds `A`.
 - An unknown computation head or a grade not decided by producer improvement
   suspends `bound τ C`; the binder's demanded type never selects the branch.
@@ -115,8 +116,8 @@ without wrappers ([[design/capture|grades and capture]]).
   `F^ν A` fixes `ν := p`; a computation variable unifies with `F^p α`.
   No value type is defaulted. An unresolved application defaults to an arrow;
   conflicting defaults on one unknown are refused with both uses.
-- Only after successful unit closure does readback insert capture/decode or
-  Let-fun terms. Generation emits equations and pending holes, not adaptations
+- Only after successful unit closure does readback insert capture/decode.
+  Generation emits equations and pending holes, not adaptations
   ([[decisions/261110_elaboration-is-decided-by-suspended-matches|suspended matches]]).
 
 Commands introduce `w`; builtin parameters demanding values and boundary

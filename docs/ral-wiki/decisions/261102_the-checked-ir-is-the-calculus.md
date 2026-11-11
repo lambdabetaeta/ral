@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
-verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 verified_at_date: 2026-11-11
-anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
+anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, Terminal::into_value, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
 ---
 
 > Amended 2026-11-11 by
@@ -17,26 +17,30 @@ anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, native_code, Solver::bind
 
 # The checked IR is the calculus
 
-**The checked Rust IR and `Extrinsic/` describe one CBPV core.** Control is
+**The checked Rust IR and `Extrinsic/` share the CBPV partition.** Control is
 syntax, operations on values are primitives, and shell interpretation is a
-separate layer.
+separate layer. The standing gaps below delimit correspondence; Box and
+native terminals are not mechanised.
 
 ## Decision
 
 - **Control:** `return`, `force`, lambda, application, pattern bind, sequence,
   recursion, `if`, `case`, `try`, `guard`, `capture`. Rust's CEK
-  machine and Agda's substitution-based CK machine have corresponding rules;
+  machine and Agda's substitution-based CK machine have corresponding rules
+  apart from the standing gaps below;
   failure is a register in both. Application pushes one argument frame per
-  argument, then forces; only a lambda terminal consumes an argument.
+  argument, then forces. Lambda and native terminals consume arguments;
+  residual functions box when none remain. Every `let` runs its RHS.
 - **Primitives:** arithmetic, comparison, negation, rendering, concatenation,
   decoding, indexing, record update, list and map assembly. Operands are
   values; no primitive runs a computation or consults shell state. Each
   `ir::Prim` has an `Extrinsic.Prims.Op`, scheme and interpretation.
 - **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
-  `Gather`, `Audit`, `Tilde`, protection membranes, and runtime-only `Native`.
+  `Gather`, `Audit`, `Tilde` and protection membranes.
   Agda's sample `Builtin`s model resolved full-arity calls, not resolution.
-  Forcing a native builds its lambda chain from the entry in hand; partial
-  application is a closure, with received arguments in its environment.
+  A native holds its entry and supplied arguments; forcing collects the rest
+  in a native terminal. No builtin code enters IR. Boundary builtins remain
+  η-expanded by inference over `Exec` with their per-use checked site.
 
 **Every new IR form is classified into these layers.** A core control form
 must be mirrored in Agda's syntax, typing and machine; a primitive in its
@@ -74,7 +78,11 @@ and the application and sequencing rules of
 
 - **Substitution vs environments.** Agda's `Val` represents both `ir::Val`
   and runtime `Value`, hence `bytes`; a native is
-  `thunk (ƛⁿ prim (builtin b) x̄)`. Rust builds the lambda chain when forced.
+  `thunk (ƛⁿ prim (builtin b) x̄)`. Rust uses a native terminal and seals a
+  partial builtin by name with its arguments, not as lambda code.
+- **Boxing residual functions.** Rust boxes a λ that finds no argument,
+  including at a binding or run boundary; the Agda Let-fun elaboration still
+  suspends the whole RHS. This correspondence awaits its own follow-up.
 - **Higher-order natives** (`map`, `each`, …) run their function arguments
   through a nested machine (`machine::apply`), a host function rather than
   a machine rule. Not modelled.

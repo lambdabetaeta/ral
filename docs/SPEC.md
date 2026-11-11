@@ -1,5 +1,5 @@
-<!-- verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2 -->
-<!-- generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2 -->
+<!-- verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b -->
+<!-- generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1381,9 +1381,16 @@ let add-two = add 2
 let five = add-two 3
 ```
 
-Too few arguments return a partial application. The exact number runs the body.
-If arguments remain after the call returns, ral tries to apply them to the
-returned value. It reports an arity error when that value cannot be applied.
+A call to a parameterized block with too few arguments binds the parameters it
+was given and returns the block, holding them; nothing of its body has run.
+`add 2` returns a block of one parameter. A builtin instead holds its entry and
+the arguments supplied so far; its body runs only at saturation. Boundary
+builtins are the exception: inference η-expands them into blocks carrying the
+call's checked site (§17.9).
+
+If the callee's type returns a block before all arguments are used, the checker
+splits the call: the returned block is forced and given the rest. This is
+decided before the program runs; a value is never applied at run time.
 
 ral checks known arity and argument-type errors before execution. An
 application's arity is always known, so the arguments written at a call site are
@@ -1504,6 +1511,7 @@ still running when the stage reading it ended.
 
 A command can return a ral value and emit bytes independently.
 
+- A `let` always runs its right-hand side.
 - In statement position, bytes go to the current output unless redirected. The
   returned value is discarded.
 - A command's value is its output: a `let` whose right-hand side is a command,
@@ -1618,8 +1626,8 @@ What `let` binds is decided by type (§6.8), not by what the checker knows
 when it first visits the binding. A command — an external, a builtin declared
 to write, or a handler arm standing in for one — has type `Command`. Only
 when it is a `let`'s whole right-hand side does the checker wrap it in a
-**capture frame**. A function right-hand side is kept unrun as a block; a
-value producer is run for its value.
+**capture frame**. A right-hand side that runs out of arguments binds the
+block it returns; a value producer is run for its value.
 
 If the right-hand side's type is unresolved, that choice waits for constraints
 in the region that owns the unknown. Only when that region closes does an
@@ -2151,6 +2159,11 @@ The body and handler join as the arms of `if` do, without capture or coercion.
 In the example,
 the body's explicit `return !{read-config}` returns text, and the handler
 must return text too.
+
+`try` covers what runs inside it. A block that leaves it unrun, returned or
+left by a call that ran out of arguments, runs outside it: in
+`let g = try { add 1 } { |e| add 2 }`, a failure inside `g 3` is not this
+`try`'s.
 
 `try` is control flow, not output capture, and it observes nothing: it reads no
 audit trail, retains no bytes, and costs no more than its own frame. Bytes
@@ -6028,7 +6041,7 @@ unknown, ν a grade, and `≐` is an equation in the appropriate sort.
 
 ```text
 bound τ C = match C {
-    A -> D  => τ ≐ U (A -> D)                     -- thunk
+    A -> D  => τ ≐ U (A -> D)                     -- to-box: run
   | F_ν A   => match ν {
                    p => τ ≐ A                    -- run
                  | w => τ ≐ String               -- capture
@@ -6040,6 +6053,21 @@ apply C A D = match C {
   | F_ν B    => B ≐ U β; apply β A D              -- one split, β fresh
 }
 ```
+
+The value-producing binding rules are CBPV's `to` and its boxing case:
+
+```text
+Γ ⊢c M : F_p A    Γ, x : A ⊢c N : D
+------------------------------------- to
+Γ ⊢c M to x. N : D
+
+Γ ⊢c M : A -> C    Γ, x : U (A -> C) ⊢c N : D
+----------------------------------------------- to-box
+Γ ⊢c M to x. N : D
+```
+
+Both run `M`; `to-box` binds the residual function as a block. Output-producing
+bindings use capture below.
 
 `bound τ C` relates the type C of a right-hand side to the type τ of its
 bound value. It never reads τ to decide a branch. For `F_ν A` with ν free,
@@ -6184,11 +6212,12 @@ holds have solved their inputs. The declared table itself is never unified
 as a record type.
 
 **Readback makes the chosen branch explicit.** A match records its decision
-on its hole when it is discharged or defaulted: a binding its mode (thunk,
-run, capture), an argument each split it performs. Readback elaborates from
-these decisions alone; it never re-reads a head. The binding branches above
-elaborate M respectively to `return (thunk M)` (Let-fun), M (Let), or ⌈M⌉
-(Let-cap). The checker inserts these terms, which no program can name:
+on its hole when it is discharged or defaulted: a binding its mode (run,
+capture), an argument each split it performs. Readback elaborates from
+these decisions alone; it never re-reads a head. The binding modes elaborate
+M respectively to M (Let) or ⌈M⌉ (Let-cap). The arrow branch of `bound` is a
+typing case only; no hole chooses thunking. The checker inserts these terms,
+which no program can name:
 
 ```text
 Γ ⊢c M : F_w Unit                      Γ ⊢v v : Bytes
@@ -6220,12 +6249,13 @@ order does not change acceptance or a successful checked tree. Defaults are
 choices, so no principal-elaboration claim follows. This account is not a
 mechanized soundness or independence proof.
 
-A right-hand side of type `A -> C` is a function, and the binder receives it
-unrun, as `thunk M` (Let-fun), at any depth: forcing it runs `M`'s effects up to
-the λ, under the handlers in scope at the force rather than at the application.
-With `let g = if true { fail 'boom'; add 1 } else { add 2 }`,
-a bare `g` in `let h = try { g } { |e| add 2 }` forces `g` inside the `try`, so
-the handler catches `boom` and `h 3` is `5`.
+With `let add = { |a b| return $[$a + $b] }`, the binding
+`let g = try { echo body-ran; fail boom; add 1 } { |e| add 2 }` prints
+`body-ran` at the `let`; `g 3` later returns `5`, outside that `try`.
+The binding `let g = if true { fail boom; add 1 } else { add 2 }` fails
+at the `let` with `boom`; a following statement does not run.
+A right-hand side of type `A -> C` runs like any other; running stops at
+the first λ that finds no argument, which is bound as a block (§17.8, Box).
 
 A discarded statement is never captured on its own. The whole captured
 computation is one buffer, so `let x = !{ echo a; echo b }` prints nothing and
@@ -6440,13 +6470,14 @@ X / κ, Σ                          (climbs to the first frame whose rule catche
 - `Σ` is everything not lexical: current directory, environment overrides,
   handlers, capabilities, and audit state. Lexical bindings live in
   `Γ`, never in `Σ`.
-- `R` has two shapes, `value v` or `lambda ⟨M, Γ⟩` — a λ-closure standing for
-  an unapplied function, since `lambda x.M` is never a value (§17.2). Only an
-  `Arg` frame consumes a `lambda` by β, binding its one name. Scope frames
-  whose holes admit functions pass it through; value-demanding frames reject
-  it. Let-fun binds a function-typed right-hand side unrun (§17.5). No rule
-  applies a returned value or forces implicitly; the checker writes an
-  application through a returned thunk as `M to h. force h v`.
+- `R` has three shapes: `value v`, `lambda ⟨λx.M, Γ⟩`, and
+  `native b v⃗`. A lambda is a computation, not a value (§17.2). An `Arg`
+  consumes it by β; a native terminal collects the argument until saturated.
+  Pass-through frames preserve terminals; every value-demanding frame receives
+  a residual lambda as `thunk ⟨λx.M, Γ|occ(λx.M)⟩`, or a native as its entry
+  and held arguments. The empty stack boxes them likewise. No rule applies a
+  returned value or forces implicitly; the checker writes an application
+  through a returned thunk as `M to h. force h v`.
 - `X` has two shapes, `error e` and `escape q` (`q ::= exit n`).
   A break climbs `κ` past every frame whose rule does not catch it, each
   frame's own rule running once on the way up to close what it opened — a
@@ -6454,7 +6485,37 @@ X / κ, Σ                          (climbs to the first frame whose rule catche
   `?` are among the few frames an ordinary error does not climb past; nothing
   catches an escape but the run boundary itself.
 
-The central rules are:
+Box is the rule for a lambda that finds no argument:
+
+```text
+λx.M ; V :: K                 ⟶ M[V/x] ; K                       β
+λx.M ; ([·] to y. N) :: K     ⟶ N[thunk (λx.M) / y] ; K          Box
+λx.M ; ε                     final: thunk (λx.M)                 Box at run end
+```
+
+With environments, the box is `thunk ⟨λx.M, Γ|occ(λx.M)⟩`: it retains the
+arguments supplied so far and only the names its code mentions. A tail call
+still consumes its caller's remaining arguments.
+
+A builtin value is `native b v⃗`, with fewer held arguments than its arity n
+when n > 0, and none when n = 0. Forcing it produces a native terminal;
+forcing an arity-zero builtin runs it immediately. Its application never
+becomes IR:
+
+```text
+force (native b v⃗)           ⟶ native b v⃗                       |v⃗| < n
+force (native b [])           ⟶ run b []                         n = 0
+native b v⃗ ; V :: K          ⟶ native b (v⃗, V) ; K              |v⃗| + 1 < n
+native b v⃗ ; V :: K          ⟶ run b (v⃗, V) ; K                 |v⃗| + 1 = n
+native b v⃗ ; F :: K          ⟶ value (native b v⃗) ; F :: K      F demands a value
+native b v⃗ ; ε              final: native b v⃗
+```
+
+A partial builtin seals by name with its held arguments. Boundary builtins
+instead remain inference-built λ-closures over `Exec` with their per-use
+checked site; that site crosses as IR.
+
+The central continuation rules are:
 
 ```text
 ⟨return v, Γ⟩ / κ, Σ  ⟶  value v / κ, Σ
@@ -6571,9 +6632,9 @@ their solved type as a membrane.
 
 Once generation, settling, live return-contract ascription and closure
 (including gates and nested checks) succeed, one fold reads the tree back in
-the checked phase. A binding hole becomes Let-fun, Let
-or capture/decode (§17.5); a call hole becomes returned-thunk bind/force
-segments before the recorded arguments. Boundary types become site snapshots.
+the checked phase. A binding hole becomes Let or capture/decode (§17.5);
+a call hole becomes returned-thunk bind/force segments before the recorded
+arguments. Boundary types become site snapshots.
 A protected value's membrane is a checked tree's kept site, or an imported
 type, which remains only if its snapshot has delayed obligations. The
 membrane check `Protect` always holds a site: only runtime membranes build

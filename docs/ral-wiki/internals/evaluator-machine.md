@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 verified_at_date: 2026-11-11
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, native_code, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
+anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
 ---
 
 # The evaluator: a CEK machine for CBPV
@@ -18,14 +18,15 @@ from reaching a lambda that awaits an argument.
   ([[internals/compilation-ladder|compilation ladder]],
   [[invariants/ir-pure-cbpv|IR invariant]]).
 - `Machine { focus, stack }` steps against `&mut Shell` and `&Mooring`.
-  Its three modes are `Eval`, `Return` and `Halt`; `Return` has two terminals,
-  `Value` and `Lambda`.
+  Its three modes are `Eval`, `Return` and `Halt`; `Return` has three terminals:
+  `Value`, `Lambda` and `Native`.
 - Read the rules as an operational account of current Rust, not a proof that
   every Rust execution refines Agda. The substitution-based CK machine in
   `dev/agda/Extrinsic/Semantics/Machine.agda` is the core correspondence
   boundary; environments here implement lexical binding rather than literal
   substitution. Host operations, dynamic shell state and resource limits need
-  their own account. The acquiring `guard` is owned Agda divergence D4
+  their own account. Residual-function Box awaits an Agda follow-up, and native
+  terminals are not mechanised. The acquiring `guard` is owned Agda divergence D4
   ([[decisions/261111_a-guard-acquires|a-guard-acquires]]). See the
   [[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]].
 
@@ -47,7 +48,7 @@ Computations      M, N ::= return V | force V | λx. M | M · (V₁,…,Vₙ)
                         | M to p. N | M ⨟ N | rec G i
                         | if V then Wₜ else W𝒻 | case V of {ℓᵢ ↦ Wᵢ}
                         | prim q(V⃗) | try V W | guard A V W | capture M
-                        | Native(b,V⃗) | shell forms
+                        | shell forms
 ```
 
 - `U C` is the value type of a suspended computation; `Fᵍ A` is a computation
@@ -71,7 +72,7 @@ A configuration makes the three distinct stores of information visible:
 ⟨R(t),   K; σ⟩       Return: terminal t meeting its continuation
 ⟨H(b),   K; σ⟩       Halt: break b climbing its continuation
 
-t ::= Value(v) | Lambda(λx.M,ρ)
+t ::= Value(v) | Lambda(λx.M,ρ) | Native(b,v⃗)
 b ::= Error(e) | Escape(a)
 K ::= ε | F :: K                  leftmost frame is the TOP
 ```
@@ -116,8 +117,8 @@ an undefined name.
 ⟦tag ℓ V⟧ρ,Σ   = Variant(ℓ, ⟦V⟧ρ,Σ)
 ```
 
-- `Node::new` computes `occ` once: the names mentioned, including bound names,
-  an over-approximation rather than exact free variables. `Closure::new`
+- `Node::new` computes `occ` once through `Occ::of`: the names mentioned,
+  including bound names, an over-approximation rather than exact free variables. `Closure::new`
   restricts the captured environment to that set. The transient `E(M,ρ)`
   instead holds the whole environment in which `M` was reached.
 - Plain list, record and map literals are value closures too. Inspection
@@ -134,8 +135,8 @@ an undefined name.
 
 ## Application and force
 
-**Only a lambda terminal consumes an argument; no returned value is auto-forced.**
-The two terminal constructors make this distinction explicit.
+**Lambda and native terminals consume arguments; no returned value is auto-forced.**
+A residual function is boxed when it finds no argument.
 
 ```text
 ⟦V⟧ρ,Σ = v
@@ -145,10 +146,9 @@ The two terminal constructors make this distinction explicit.
 ⟨E(λx.M,ρ), K; σ⟩ → ⟨R(Lambda(λx.M,ρ)), K; σ⟩        lambda
 
 enter(Thunk(M,ρc), K,σ) = ⟨E(M,ρc), K; σ⟩
-enter(NativeValue(b),K,σ) = ⟨E(code(b),∅), K; σ⟩
+enter(NativeValue(b,v⃗),K,σ) = ⟨R(Native(b,v⃗)), K; σ⟩   |v⃗| < arity(b)
+enter(NativeValue(b,[]),K,σ) = invoke(b,[],K,σ)            arity(b) = 0
 enter(v,K,σ) = ⟨H(Error(cannot-force)), K; σ⟩             otherwise
-
-code(b) = λx₁.…λxₙ.Native(b,[x₁,…,xₙ])                  n = arity(b)
 
 enterᵥ(thunk M,ρ,K,σ) = ⟨E(M,ρ), K; σ⟩                 literal force
 enterᵥ(V,ρ,K,σ) = enter(⟦V⟧ρ,Σ,K,σ)                    otherwise
@@ -163,8 +163,19 @@ vᵢ = ⟦Vᵢ⟧ρ,Σ  (i = 1,…,n)
 ⟨R(Lambda(λx.M,ρc)), Arg(v) :: K; σ⟩
   → ⟨E(M,ρc[x ↦ v]), K; σ⟩                             β
 
+⟨R(Native(b,v⃗)), Arg(w) :: K; σ⟩
+  → ⟨R(Native(b,(v⃗,w))), K; σ⟩                         |v⃗| + 1 < arity(b)
+  → invoke(b,(v⃗,w),K,σ)                                |v⃗| + 1 = arity(b)
+
 ⟨R(Value(v)), Arg(w) :: K; σ⟩
   → ⟨H(Error(not-a-function)), K; σ⟩                    not β
+
+box(Value(v))         = v
+box(Lambda(λx.M,ρ))   = Thunk(λx.M,ρ↾occ(λx.M))
+box(Native(b,v⃗))     = NativeValue(b,v⃗)
+
+⟨R(Lambda(λx.M,ρc)), To(y,N,ρ) :: K; σ⟩
+  → ⟨E(N,ρ[y ↦ Thunk(λx.M,ρc↾occ(λx.M))]), K; σ⟩      Box
 ```
 
 - `force_val` recognises a **literal** `Val::Thunk` and enters its body in
@@ -175,29 +186,36 @@ vᵢ = ⟦Vᵢ⟧ρ,Σ  (i = 1,…,n)
   right-to-left, then evaluates its computation head. Operand effects have
   already been sequenced by the checker. A call with `n` arguments reserves
   all `n` frames together.
-- `native_code` builds the lambda chain afresh on force. At arity zero it
-  enters `Native` immediately; under-application reaches a lambda terminal
-  with received arguments in its environment. A checked value demand must
-  hold a function as a thunk, not ask the run boundary to return a lambda.
+- `Terminal::into_value` implements `box` for every value demand and the
+  end of a run. A residual λ holds the parameters already bound, restricted
+  by `Occ::of`; its body has not started. Pass-through frames preserve the
+  terminal. A tail call still consumes its caller's remaining arguments.
+- A native holds its entry and, for positive arity, fewer arguments than its
+  arity. Zero arity holds none and runs on force. Saturation invokes its body
+  without constructing IR. Boundary builtins instead stay
+  η-expanded by inference: a partial boundary is a λ-closure over an `Exec`
+  carrying its per-use checked site.
 - Calling a formed value is the helper `call(f,[v₁,…,vₙ])`: push arguments,
   then `enter(f,…)`. A force failure leaves those arguments to unwind.
   Bound command heads, handlers and host `apply` share this rule. A resolved
-  full-arity native `Exec` can dispatch directly instead of building lambdas.
+  native `Exec` can dispatch directly when held plus new arguments saturate it.
 - A returned thunk is a `Value`, not a lambda. The checked split is
   `M to h. (force h) · (V₁,…,Vₙ)`, never application through a returned
-  value. Let-fun similarly binds a function-typed computation **unrun** as
-  `return (thunk M)` ([[invariants/ir-pure-cbpv|IR invariant]]).
+  value. Every `let` runs its right-hand side; `To` receives the residual
+  function boxed ([[invariants/ir-pure-cbpv|IR invariant]]).
 
 Native invocation is deliberately not a value-only primitive:
 
 ```text
-v⃗ = ⟦V⃗⟧ρ,Σ       run_native(b,v⃗,μ,σ) = (Ok(v),σ′)
+run_native(b,v⃗,μ,σ) = (Ok(v),σ′)
 ──────────────────────────────────────────────────────── native
-⟨E(Native(b,V⃗),ρ), K; σ⟩ → ⟨R(Value(v)), K; σ′⟩
+invoke(b,v⃗,K,σ) = ⟨R(Value(v)), K; σ′⟩
 ```
 
 A native may write, fail, escape or apply a callback on a nested machine.
 A `Break` result gives `H(b)` with the state after that host operation.
+`invoke` locates failures at the saturating call, named by the builtin.
+A partial native seals by name with its arguments; no builtin code enters IR.
 
 ## Continuations
 
@@ -208,16 +226,16 @@ computation do not silently become the rest's environment.
 ```text
 ⟨E(M to p. N,ρ), K; σ⟩ → ⟨E(M,ρ), To(p,N,ρ) :: K; σ⟩
 
-match(p,v) = θ
+match(p,box(t)) = θ
 ──────────────────────────────────────────────────────── bind
-⟨R(Value(v)), To(p,N,ρ) :: K; σ⟩ → ⟨E(N,ρ ⊕ θ), K; σ⟩
+⟨R(t), To(p,N,ρ) :: K; σ⟩ → ⟨E(N,ρ ⊕ θ), K; σ⟩
 
-match(p,v) = Error(e)
+match(p,box(t)) = Error(e)
 ──────────────────────────────────────────────────────── mismatch
-⟨R(Value(v)), To(p,N,ρ) :: K; σ⟩ → ⟨H(Error(e)), K; σ⟩
+⟨R(t), To(p,N,ρ) :: K; σ⟩ → ⟨H(Error(e)), K; σ⟩
 
 ⟨E(M ⨟ N,ρ), K; σ⟩ → ⟨E(M,ρ), Seq(N,ρ) :: K; σ⟩
-⟨R(Value(v)), Seq(N,ρ) :: K; σ⟩ → ⟨E(N,ρ), K; σ⟩
+⟨R(t), Seq(N,ρ) :: K; σ⟩ → ⟨E(N,ρ), K; σ⟩
 ```
 
 - `match` means `pattern::destructure`: it collects **all** bindings before
@@ -227,8 +245,8 @@ match(p,v) = Error(e)
 - A mismatch occurs after `To` was popped: the tail is not run, no partial
   binding is installed, and no resurrected `To` adds an abandoned-tail fact.
   Destructuring lambda parameters is compiled as body binds at their own spans.
-- `To` and `Seq` reject `Lambda` with a bare-lambda error. A sequence discards
-  a **value**, not any possible terminal. A written `let _` remains `Bind`
+- `To` binds `box(t)`; `Seq` discards it. Checked sequences demand producers,
+  so they do not receive residual functions. A written `let _` remains `Bind`
   and therefore has the normal binding capture rule at checking time.
 - On an incoming halt, `Arg` and `Protect` simply propagate it; `To` and
   `Seq` abandon the rest. Only written lets and sequences mark the
@@ -303,7 +321,8 @@ v = ⟦V⟧ρ,Σ       h = ⟦W⟧ρ,Σ
 - `record(e,σ)` is the public `[frame, message, status, site]` value, a
   witnessed map from which `raise` recovers the fact, not discarded bytes or
   abandoned-tail accounting. `Try` passes a `Lambda` terminal
-  through unchanged on success, just as it passes `Value`.
+  through unchanged on success, as it does `Value` or `Native`. A block that
+  leaves `try` unrun runs outside it; its later failures are not caught there.
 
 **Guard shields acquisition and installs release before a body poll.** Let
 `o ::= Ok(v) | Err(b)`, `resume(Ok(v)) = R(Value(v))`,
@@ -317,12 +336,13 @@ a = ⟦A⟧ρ,Σ     k = ⟦V⟧ρ,Σ     r = ⟦W⟧ρ,Σ
 shield(σ,μ.grace) = (σs,s₀)
 ⟨E(guard A V W,ρ), K; σ⟩ → enter(a,Acquire(k,r,s₀) :: K,σs)
 
-⟨R(Value(v)), Acquire(k,r,s₀) :: K; σ⟩
+v = box(t)
+⟨R(t), Acquire(k,r,s₀) :: K; σ⟩
   → call(k,[v],Guard(r,v) :: K,σ[scope := s₀])
 ⟨H(b), Acquire(k,r,s₀) :: K; σ⟩ → ⟨H(b), K; σ[scope := s₀]⟩
 
-shield(σ,μ.grace) = (σs,s₀)
-⟨R(Value(v)), Guard(r,u) :: K; σ⟩
+shield(σ,μ.grace) = (σs,s₀)       v = box(t)
+⟨R(t), Guard(r,u) :: K; σ⟩
   → call(r,[u,exit_case(Ok(v))],Cleanup(Ok(v),s₀) :: K,σs)
 
 shield(σ,μ.grace) = (σs,s₀)
@@ -347,10 +367,9 @@ shield(σ,μ.grace) = (σs,s₀)
   outcome and constructs `ExitCase<ErrorFact>` once: `ok` has no body value,
   `err` is witnessed, `exited` carries the byte and `stopped` the cause.
   Release cannot consume the ending; any release error or escape overrides it.
-- `Cleanup` ignores its returned terminal, even `Lambda`. A defensive body
-  `Lambda` becomes an error **and runs release**; an acquisition `Lambda`
-  restores scope and fails before a resource is available. Checked operands
-  require producers, so neither is a well-typed execution.
+- `Acquire` and `Guard` receive `box(t)`; `Cleanup` ignores its returned
+  terminal. Checked acquisition, body and release operands require producers,
+  so none receives a residual function in a well-typed execution.
 - `Acquire` and `Cleanup` restore scope on return, halt and abandonment.
   Acquisition and release share one grace from the strike; a late acquisition
   can leave release no time, and either phase can leak a held resource.
@@ -409,15 +428,17 @@ directly after installing nonempty redirects.
 | --- | --- | --- |
 | `Redirect` | Settle with commit; pass `t` if settlement succeeds | Settle with abort; ignore settlement failure and preserve `b` |
 | `Within`, `Grant`, `Unmask` | Apply undo; pass `t` | Apply undo; preserve `b` |
-| `Protect` | Require `Value`, admit/wrap it at the site | Preserve `b` |
-| `Audit` | Close trail; require `Value`; return report | Close trail; turn error into report, propagate escape |
-| `Gather` | Restore cradle; require `Value`; join through `exit_brood` | Restore cradle; end brood; preserve `b` |
+| `Protect` | Admit/wrap `box(t)` at the site | Preserve `b` |
+| `Audit` | Close trail; return report of `box(t)` | Close trail; turn error into report, propagate escape |
+| `Gather` | Restore cradle; join `box(t)` through `exit_brood` | Restore cradle; end brood; preserve `b` |
 | `CallSite` | Restore provenance; pass `t` | Locate break if needed, restore provenance; preserve break |
 
 - `Within` restores environment overrides, cwd and handlers; `Grant` removes
   its own layer by position; `Unmask` restores the temporarily removed handler
   ([[internals/handler-dispatch|deep, self-masking dispatch]]). A lambda
-  passes through these frames and `Redirect`, but not value-demanding frames.
+  passes through these frames and `Redirect`; value-demanding frames box it.
+  Checked scope bodies require producers, so an under-applied call cannot
+  leave them unrun. An explicitly returned block runs later outside the scope.
 - Redirect settlement does not undo bytes already streamed to a file. Atomic
   writes can abort; streaming writes are already committed. Return-time
   settlement failure becomes a halt on the remaining stack.
@@ -491,7 +512,8 @@ evaluate(M,ρ) starts at ⟨E(M,ρ), ε; σ⟩
 apply(f,v⃗) starts by pushing v⃗ and forcing f, even when v⃗ is empty
 
 ⟨R(Value(v)), ε; σ⟩           finishes with Ok(v)
-⟨R(Lambda(λx.M,ρ)), ε; σ⟩     finishes with Error(bare-lambda)
+⟨R(Lambda(λx.M,ρ)), ε; σ⟩     finishes with Ok(Thunk(λx.M,ρ↾occ(λx.M)))
+⟨R(Native(b,v⃗)), ε; σ⟩       finishes with Ok(NativeValue(b,v⃗))
 ⟨H(b), ε; σ⟩                 finishes with Err(b)
 ```
 

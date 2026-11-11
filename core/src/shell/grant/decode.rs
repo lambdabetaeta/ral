@@ -49,7 +49,7 @@ fn found(value: &Value) -> Found {
         Value::Map(_) => Found::Map,
         Value::Variant { label, .. } => Found::Variant(label.to_string()),
         Value::Thunk(c) if c.comp().lam().is_none() => Found::Block,
-        Value::Thunk(_) | Value::Native(_) => Found::Function,
+        Value::Thunk(_) | Value::Native(..) => Found::Function,
         Value::Handle(_) => Found::Handle,
     }
 }

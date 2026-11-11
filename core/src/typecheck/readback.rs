@@ -74,9 +74,6 @@ impl<'a> Readback<'a> {
         let body = self.comp(rhs);
         match self.solution.mode(hole) {
             Mode::Run => body,
-            Mode::Thunk => {
-                Spanned::with_span(rhs.span, CompKind::Return(Val::thunk(Arc::new(body))))
-            }
             Mode::Capture => {
                 Spanned::with_span(rhs.span, captured_string(body, &mut self.synth_counter))
             }
@@ -171,9 +168,6 @@ impl<'a> Readback<'a> {
                 e.redirects.map(|v| self.val(v)),
                 e.site.as_ref().map(|ty| self.site(ty)),
             ),
-            CompKind::Native { .. } => {
-                unreachable!("a native's code is built by forcing it, never checked")
-            }
             CompKind::Prim(prim) => CompKind::Prim(prim.map_operands(|value, _| self.val(value))),
             CompKind::Rec { group, index } => CompKind::Rec {
                 group: self.rec_group(group),
@@ -512,12 +506,12 @@ mod tests {
     }
 
     #[test]
-    fn bound_holes_run_thunk_or_capture_with_supplied_names_and_spans() {
+    fn bound_holes_run_or_capture_with_supplied_names_and_spans() {
         let cases = [
             (CompTy::pure(Ty::int()), Mode::Run),
             (
                 CompTy::arrows([Ty::int()], CompTy::pure(Ty::int())),
-                Mode::Thunk,
+                Mode::Run,
             ),
             (command(), Mode::Capture),
         ];
@@ -531,7 +525,6 @@ mod tests {
             assert_eq!(result.span, Some(span()));
             let expected = match mode {
                 Mode::Run => force_f(),
-                Mode::Thunk => node(CompKind::Return(Val::thunk(Arc::new(force_f())))),
                 Mode::Capture => {
                     let name = synthetic("decode", 41);
                     node(CompKind::bind(

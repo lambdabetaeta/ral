@@ -609,7 +609,7 @@ mod typed_boundaries {
 
     #[test]
     fn first_order_keeps_the_opaque_leaf_and_root_or_nested_position() {
-        let native = Value::Native(Arc::new(HARNESS_BUILTINS[0].clone()));
+        let native = Value::Native(Arc::new(HARNESS_BUILTINS[0].clone()), Arc::from([]));
         for (value, nested) in [(native.clone(), false), (Value::list(vec![native]), true)] {
             let error = error(first_order("exarch-agents", &value));
             assert_eq!(

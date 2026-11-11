@@ -345,7 +345,9 @@ mod tests {
             Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
                 BootFailure::AlreadyBooted,
             )))),
-            Reason::Invariant(Box::new(crate::fact::InvariantFailure::BareLambda)),
+            Reason::Invariant(Box::new(
+                crate::fact::InvariantFailure::AppliedUnforcedValue(ValueShape::Int),
+            )),
             Reason::Cancelled,
             Reason::TimedOut,
         ] {

@@ -197,7 +197,7 @@ impl Hook {
                 }
                 scheme.arity()
             }
-            Value::Native(entry) => entry.decl.fixed_arity(),
+            Value::Native(entry, args) => entry.decl.fixed_arity() - args.len(),
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),
@@ -439,6 +439,31 @@ mod tests {
     fn register(shell: &mut Shell, name: HookName) -> Result<(), RegisterError> {
         let body = block_over(&shell.env);
         shell.register_hook(name, body, HookSig::Block, DefaultPolicy::denied())
+    }
+
+    #[test]
+    fn a_partial_native_hook_uses_its_residual_arity() {
+        let shell = crate::test_helper::core_shell();
+        let entry = shell.lookup_builtin("has").expect("has builtin");
+        let native = Value::Native(entry.into(), [Value::map(vec![])].into());
+        shell
+            .vet_hook(
+                &prompt(),
+                native.clone(),
+                HookSig::Hook {
+                    kind: "test".into(),
+                },
+                DefaultPolicy::denied(),
+            )
+            .expect("one held argument leaves a one-argument hook");
+        assert!(matches!(
+            shell.vet_hook(&prompt(), native, HookSig::Block, DefaultPolicy::denied()),
+            Err(RegisterError::ArityMismatch {
+                expected: 0,
+                actual: 1,
+                ..
+            })
+        ));
     }
 
     #[test]

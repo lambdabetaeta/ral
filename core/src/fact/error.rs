@@ -21,13 +21,12 @@ pub use decode::{
     Base64Failure, Base64FailureInvalidByte, Base64FailureInvalidLastSymbol,
     Base64FailureInvalidLength, CardFailure, CheckDecisionFailure, DecodeCause, DecodeFailure,
     DecodeIntegerRange, DecodeIntegerTarget, DecodeLength, DurationOverflow, FiniteBitsFailure,
-    JsonEncodeCause, JsonEncodeCauseNativeComputation, JsonEncodeCauseNonUnicodePath,
-    JsonEncodeFailure, JsonInputFailure, JsonMapKeyFailure, JsonNumberFailure, JsonNumberFault,
-    JsonNumberTarget, JsonShape, JsonShapeFailure, JsonStringFailure, LexicalPathFailure,
-    LexicalPathFailureNotWorkingDirectory, NoteFailure, NoteFailureTooLong, OpenScheme,
-    OsStringPlatform, OsStringPlatformFailure, PathDecodeFailure, ReservedEnvironmentFailure,
-    SealSpellingFailure, TimestampParseFailure, TraceDecodeFailure,
-    TraceDecodeFailurePositionMismatch, ViaFailure, ViaFailureDuplicateTag,
+    JsonEncodeCause, JsonEncodeCauseNonUnicodePath, JsonEncodeFailure, JsonInputFailure,
+    JsonMapKeyFailure, JsonNumberFailure, JsonNumberFault, JsonNumberTarget, JsonShape,
+    JsonShapeFailure, JsonStringFailure, LexicalPathFailure, LexicalPathFailureNotWorkingDirectory,
+    NoteFailure, NoteFailureTooLong, OpenScheme, OsStringPlatform, OsStringPlatformFailure,
+    PathDecodeFailure, ReservedEnvironmentFailure, SealSpellingFailure, TimestampParseFailure,
+    TraceDecodeFailure, TraceDecodeFailurePositionMismatch, ViaFailure, ViaFailureDuplicateTag,
 };
 pub use denial::{
     Denial, DenialDevice, DenialExecRead, DenialExecRun, DenialFlag, DenialFs, EditorFlag,
@@ -171,7 +170,8 @@ pub use protocol::{
     ConnectionFaultUnexpectedFrame, ConnectionOperation, ForkKind, FrameChannel,
     FrameEncodeFailure, FrameEncodeFailureTooLarge, FrameFailure, FrameFailurePartial,
     FrameFailureTooLarge, FrameKind, FramePart, ProbeFailure, ProbeSubject, ProtocolData,
-    ProtocolFailure, ProtocolFailureDecode, ProtocolFailureFrame, ProtocolFailureUnencodable,
+    ProtocolFailure, ProtocolFailureDecode, ProtocolFailureFrame,
+    ProtocolFailureInvalidNativeArguments, ProtocolFailureUnencodable,
     ProtocolFailureVersionMismatch, ProtocolFailureWrongForkKind, ProtocolOperation, ProtocolPeer,
     ProtocolPhase, ProtocolWork, SeedFrameFailure, SeedFrameFailureTrailing,
 };
@@ -586,7 +586,9 @@ mod tests {
             Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
                 BootFailure::AlreadyBooted,
             )))),
-            Reason::Invariant(Box::new(InvariantFailure::BareLambda)),
+            Reason::Invariant(Box::new(InvariantFailure::AppliedUnforcedValue(
+                ValueShape::Int,
+            ))),
         ]
     }
 

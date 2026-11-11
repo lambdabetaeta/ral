@@ -341,11 +341,10 @@ fn both_names_in_a_list_pattern_remain_polymorphic() {
     }
 }
 
-/// A right-hand side of function type is bound unrun, as its thunk (Let-fun),
-/// at any depth: `let g = f 1` is `Return(Thunk(App))`, generalised, and so is
-/// a `let` inside a lambda's body.
+/// A function-typed right-hand side stays a call at any depth; only its
+/// result is boxed, and the binding still generalises.
 #[test]
-fn a_function_typed_rhs_is_bound_as_its_thunk_at_any_depth() {
+fn a_function_typed_rhs_runs_at_any_depth() {
     let top = toplevel_ok(
         "let f = { |a b| return $a }\n\
          let g = f 1\n\
@@ -355,13 +354,10 @@ fn a_function_typed_rhs_is_bound_as_its_thunk_at_any_depth() {
     let Phrase::Define { comp, schemes, .. } = &top.phrases[1].item else {
         panic!("expected g's Define, got {:?}", top.phrases[1].item);
     };
-    let CompKind::Return(Val::Thunk(g)) = &comp.item else {
-        panic!("expected Return(Thunk(..)), got {:?}", comp.item);
-    };
     assert!(
-        matches!(g.shape().item, CompKind::App { .. }),
-        "g binds the call itself, unrun: {:?}",
-        g.shape().item
+        matches!(comp.item, CompKind::App { .. }),
+        "g runs the call itself: {:?}",
+        comp.item
     );
     let rendered = schemes[0].1.to_string();
     assert!(
@@ -381,8 +377,8 @@ fn a_function_typed_rhs_is_bound_as_its_thunk_at_any_depth() {
         panic!("expected k's Bind, got {:?}", body.item);
     };
     assert!(
-        matches!(k.item, CompKind::Return(Val::Thunk(_))),
-        "an inner let of function type is thunked too: {:?}",
+        matches!(k.item, CompKind::App { .. }),
+        "an inner let of function type runs the call too: {:?}",
         k.item
     );
 }
@@ -854,6 +850,14 @@ fn grant_accepts_the_typed_surface_inline_computed_and_as_a_profile() {
     assert_eq!(grant_messages(computed), Vec::<String>::new());
     let profile = contract_errors(declared(Form::Grant), &format!("return {GRANT_SURFACE}"));
     assert!(profile.is_empty(), "{profile:?}");
+}
+
+#[test]
+fn grant_rejects_an_under_applied_body() {
+    let src =
+        include_str!("../../../../tests/reject/grant-body-cannot-be-a-partial-application.ral");
+    let errs = raw_errors(src);
+    assert_eq!(codes_of(&errs), ["T0011"], "{errs:?}");
 }
 
 #[test]

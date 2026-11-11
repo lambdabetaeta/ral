@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -25,10 +25,14 @@ fact data are reached through their owning modules.
   each one instant on a monotonic and a wall clock — and one lock over its
   `HandleState` (`Running`, `Stopping`, `Ready`, `Consumed`), beside `CompletedHandle`,
   the worker's `CompletionPermit` and its `DeferredSurface`).
-  `Value::Native(Arc<BuiltinEntry>)` holds only the entry: forcing builds its
-  lambda code, and partial applications live as thunk closures over received
-  arguments. It displays as `<native NAME>`; lambda display recovers lowered
-  parameter patterns. `Value::variant` normalises a unit payload to absence.
+  `Value::Native(Arc<BuiltinEntry>, Arc<[Value]>)` holds the entry and arguments
+  supplied so far, fewer than its arity for positive arity. Zero arity holds
+  none and runs on force. Otherwise, forcing collects the rest in a native
+  terminal; saturation runs the body. It displays as `<native NAME>`, or
+  `<native map, 1 of 2 arguments>` when partial. Boundary builtins instead
+  remain inference-built λ-closures over `Exec` carrying their checked site.
+  Lambda display recovers lowered parameter patterns. `Value::variant`
+  normalises a unit payload to absence.
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* arm is a block whose type takes its slot's parameters:
@@ -511,10 +515,9 @@ an aside's writes where its parent does:
     `ptr_eq` root identity, dependencies first, on an explicit stack — so a
     chain of closures costs no host stack, and a scope many closures share
     is visited once.
-  - Within a scope it recurses through data only: lists, maps and variant
-    payloads. A closure is re-seated over its captured scope's scrubbed
-    replacement; a partial native application's received arguments live
-    in that scope, not in the native entry.
+  - Within a scope it recurses through lists, maps, variant payloads and a
+    partial native's held arguments. A closure is re-seated over its captured
+    scope's scrubbed replacement, including closures held by native arguments.
   - A rebuilt scope or container is its original with only the changed
     entries overwritten, and one that reaches no handle is kept whole: a
     shell reaching no handle forks as itself, its session map `ptr_eq` to

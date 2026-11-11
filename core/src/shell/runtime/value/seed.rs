@@ -2,6 +2,7 @@
 
 use super::Value;
 use crate::shell::runtime::{Binding, Env};
+use std::sync::Arc;
 
 pub(crate) fn drop_seed_value(value: Value) {
     drop_owned(Owned::Value(value));
@@ -44,13 +45,23 @@ fn drop_owned(root: Owned) {
                     pending.extend(payload.map(|value| Owned::Value(*value)));
                 }
                 Value::Thunk(closure) => pending.push(Owned::Env(closure.into_env())),
+                Value::Native(_, mut args) => {
+                    match Arc::get_mut(&mut args) {
+                        Some(args) => pending.extend(
+                            args.iter_mut()
+                                .map(|value| Owned::Value(std::mem::replace(value, Value::Unit))),
+                        ),
+                        // Retain children before releasing a shared slice: a concurrent
+                        // release may make this its last owner.
+                        None => pending.extend(args.iter().cloned().map(Owned::Value)),
+                    }
+                }
                 Value::Unit
                 | Value::Bool(_)
                 | Value::Int(_)
                 | Value::Float(_)
                 | Value::String(_)
                 | Value::Bytes(_)
-                | Value::Native(_)
                 | Value::Handle(_) => {}
             },
         }
@@ -61,7 +72,38 @@ fn drop_owned(root: Owned) {
 mod tests {
     use super::*;
     use crate::shell::runtime::{Closure, Map};
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
+
+    #[test]
+    fn seed_cleanup_releases_native_argument_owners_concurrently_on_small_stacks() {
+        let shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
+        let marker = Arc::new(entry.as_ref().clone());
+        let weak = Arc::downgrade(&marker);
+        let mut value = Value::Native(marker, Arc::from([]));
+        for _ in 0..30_000 {
+            value = Value::Native(Arc::clone(&entry), Arc::from([value]));
+        }
+        let aliases = [value.clone(), value.clone(), value.clone(), value];
+        let barrier = Arc::new(Barrier::new(aliases.len()));
+        let threads: Vec<_> = aliases
+            .into_iter()
+            .map(|value| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::Builder::new()
+                    .stack_size(256 * 1024)
+                    .spawn(move || {
+                        barrier.wait();
+                        value.drop_seed();
+                    })
+                    .unwrap()
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn seed_cleanup_releases_shared_runtime_owners_concurrently_on_small_stacks() {
@@ -84,6 +126,9 @@ mod tests {
             "closure".into(),
             Value::Thunk(Closure::captured(comp, env)),
         )]))]);
+        let shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
+        let value = Value::Native(entry, Arc::from([value]));
         let mut aliases: Vec<_> = (0..3).map(|_| value.clone()).collect();
         aliases.push(value);
         let barrier = Arc::new(Barrier::new(aliases.len()));

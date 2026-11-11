@@ -1,0 +1,5 @@
+# status: 1
+# contains: boom
+let add = { |a b| return $[$a + $b] }
+let g = if true { fail boom; add 1 } else { add 2 }
+echo bound

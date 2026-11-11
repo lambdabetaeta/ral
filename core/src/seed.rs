@@ -298,13 +298,10 @@ impl EngineSeed {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::ir::{CompKind, ThunkNode, Val};
     use crate::shell::boot::BakedPrelude;
     use crate::shell::runtime::{
-        Binding, Closure, DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over,
-        captured, idle_handle,
+        DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over, captured, idle_handle,
     };
-    use crate::source::Spanned;
     use crate::sync::LockExt as _;
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -363,7 +360,8 @@ mod tests {
         parent.set_var("live".to_string(), idle_handle());
         let blk = block_over(&parent.env);
         parent.set_var("blk".to_string(), blk.clone());
-        parent.set_var("nat".to_string(), partial_over(idle_handle()));
+        let native = partial_over(&parent, idle_handle());
+        parent.set_var("nat".to_string(), native);
         let catch_all = block_over(&parent.env);
         let handler = HandlerEntry::ral_per_name("handler".into(), blk.clone());
         let named = HandlerEntry::ral_per_name("named".into(), blk.clone());
@@ -388,25 +386,12 @@ mod tests {
         parent
     }
 
-    /// `has` applied to `held` alone, held as a value: a thunk of the call.
-    fn partial_over(held: Value) -> Value {
-        let mut env = Env::new();
-        env.bind(
-            "held".into(),
-            Binding {
-                value: held,
-                scheme: None,
-            },
-        );
-        let call = Arc::new(Spanned::synthetic(CompKind::App {
-            head: Arc::new(Spanned::synthetic(CompKind::Force(Val::Variable(
-                "has".into(),
-            )))),
-            args: Box::new([Spanned::synthetic(Val::Variable("held".into()))]),
-            hole: (),
-        }));
-        let node = ThunkNode::new(Arc::clone(&call));
-        Value::Thunk(Closure::new(call, node.occ(), &env))
+    /// `has` applied to `held` alone, holding its argument directly.
+    fn partial_over(shell: &Shell, held: Value) -> Value {
+        Value::Native(
+            Arc::new(shell.lookup_builtin("has").expect("has builtin")),
+            Arc::from([held]),
+        )
     }
 
     /// `bequest` through bytes, and decoded against `runtime`.
@@ -424,13 +409,17 @@ mod tests {
     }
 
     /// Values agree across the wire: data by `==`, a closure by its body and
-    /// its captured scope, a native by its name.
+    /// its captured scope, a native by its name and held arguments.
     fn agree(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Thunk(x), Value::Thunk(y)) => {
                 x.comp() == y.comp() && scopes_agree(x.env(), y.env())
             }
-            (Value::Native(x), Value::Native(y)) => x.decl.name == y.decl.name,
+            (Value::Native(x, xs), Value::Native(y, ys)) => {
+                x.decl.name == y.decl.name
+                    && xs.len() == ys.len()
+                    && xs.iter().zip(ys.iter()).all(|(x, y)| agree(x, y))
+            }
             _ => a == b,
         }
     }
@@ -477,9 +466,12 @@ mod tests {
                 opaque(captured(catch_all).get("live")),
                 "{arm} must scrub a handler frame's captured handle"
             );
+            let Some(Value::Native(_, args)) = env.get("nat") else {
+                panic!("{arm} must retain the partial builtin");
+            };
             assert!(
-                opaque(captured(env.get("nat")).get("held")),
-                "{arm} must scrub a partial application's captured handle"
+                opaque(args.first()),
+                "{arm} must scrub a partial builtin's held handle"
             );
         }
 

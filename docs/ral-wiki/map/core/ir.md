@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -48,7 +48,7 @@ Values, computations and shared nodes:
   constraint carries `Spanned<Val>`.
 - `Node<S> { shape: S, occ: Occ }` is IR that closes: a shape plus what it
   mentions, computed once, where the node is built. `Node::new(shape)` walks
-  `shape` through `Mentions`, sorts and dedups the names into `Occ`, and hands
+  `shape` through `Occ::of`, which sorts and dedups its `Mentions`, and hands
   back the `Arc<Self>` every holder shares; `shape()` lends the shape back,
   `occ()` (`pub(crate)`) the occ. `ThunkNode = Node<Arc<Comp>>`, `GroupNode =
   Node<Box<[(Name, Arc<Comp>)]>>`, `ListNode = Node<Box<[Spanned<Val>]>>`,
@@ -57,8 +57,9 @@ Values, computations and shared nodes:
   decoding a node off the wire recomputes its occ rather than trusting one
   that rode along — `Val`'s own tests (T4) check a node crosses as its shape.
 - `Occ(Arc<[Name]>)` is a node's mentioned names, sorted and distinct by
-  construction — built only inside `Node::new`. `len` and `contains` (binary
-  search) are its whole `pub(crate)` surface; a lookup by name never scans.
+  construction. `Occ::of(shape)` is the shared builder for nodes and boxed
+  residual lambdas. `len` and `contains` (binary search) support lookup
+  without scanning.
 - `Name = Arc<str>` is every identifier the IR binds or mentions:
   `Val::Variable`, a variant's label, the pattern's names (the syntax's own
   `Pattern`), a `Rec` group's members,
@@ -83,11 +84,13 @@ constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 `Extrinsic/Syntax/Term` constructors, and `Prim`, each of whose variants is an
 `Extrinsic.Prims.Op`. The acquiring `Guard` is owned Agda divergence D4
 ([[decisions/261111_a-guard-acquires|a-guard-acquires]]), pending the
-strong-model correspondence follow-up.
+strong-model correspondence follow-up. Residual-function Box also awaits an
+Agda follow-up; Agda's Let-fun still suspends the whole RHS. Native terminals
+are runtime mechanisms, not IR constructors or mechanised rules.
 `Prim::operands` and `map_operands` are the common operand traversals.
 
 - `Guard { acquire, body, release }` holds three `Val` operands.
-  `first_native_in` and `Mentions` traverse all three; readback preserves them.
+  `Mentions` traverses all three; readback preserves them.
   Acquisition is shielded, then body receives the resource, then release
   receives resource and ending. The result type and grade are the body's.
 - `Lam` binds one `Name`; destructuring parameters use `Bind` after the
@@ -97,11 +100,12 @@ strong-model correspondence follow-up.
   values, with no spread. `Bind` takes a pattern and a `hole`; `Seq` discards
   a computation's result without generalisation. Holes are skipped by serde.
 - `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`, `Gather`,
-  `Audit`, `Tilde`, `Protect`, `Native` and `BindingCall` form the shell layer.
-  `Native { entry: NativeEntry, args: Box<[Val]> }` is runtime-only and
-  skipped by serde; `NativeEntry` compares entries by name. `BindingCall` is a
-  bare head bound in scope while the checker decides its splits; readback
-  makes it an `Exec`, and it cannot occur in a checked tree.
+  `Audit`, `Tilde`, `Protect` and `BindingCall` form the shell layer.
+  `BindingCall` is the only skipped computation variant: a bare head bound in
+  scope while the checker decides its splits. Readback makes it an `Exec`,
+  and it cannot occur in a checked tree. Builtin application never becomes IR;
+  partial builtins are runtime `Value::Native(entry, args)`. Boundary builtins
+  remain η-expanded over `Exec`, retaining their per-use checked site.
 - `Within.opts` and `Grant.caps` are `Arc<FieldsNode>`, the same nodes as
   record literals. `Within.handlers` stays separate syntax; `None` and an
   explicitly empty handler list install different scopes.
@@ -200,8 +204,8 @@ slice of arguments.
 
 `Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
 node shapes implement: `fn mentions(&self, out: &mut Vec<&Name>)`, one
-exhaustive, wildcard-free arm per variant. `Node::new` runs it once, over the
-shape it is building, to compute that node's own `Occ`; a nested node's
+exhaustive, wildcard-free arm per variant. `Node::new` uses `Occ::of` over the
+shape it is building to compute that node's own `Occ`; a nested node's
 `mentions` contributes its already-computed occ rather than being walked
 again, so occ for a whole program is linear in program text. `Toplevel::
 referenced_names` (`pub(crate)`) is the same walk, run over a phrase's `Comp`

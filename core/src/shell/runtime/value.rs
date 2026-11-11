@@ -50,9 +50,10 @@ pub enum Value {
         payload: Option<Box<Self>>,
     },
     Thunk(Closure),
-    /// A builtin, `thunk (λx₁…λxₙ. Native(b, x₁…xₙ))`: forcing it builds that
-    /// code, so a partial application is a λ closure like any other.
-    Native(Arc<BuiltinEntry>),
+    /// A builtin and the arguments it has been given; forcing it collects
+    /// the rest. For positive arity, held arguments are fewer than its arity;
+    /// zero arity holds none and runs on force.
+    Native(Arc<BuiltinEntry>, Arc<[Self]>),
     /// A computation spawned onto a worker thread, not a subprocess.
     /// Boxed: `HandleInner`'s eight `Arc` fields would otherwise be the
     /// largest variant, inflating every `Value` move (`Focus`'s hot path
@@ -84,7 +85,7 @@ impl Value {
             Self::Map(_) => ValueShape::Map,
             Self::Variant { .. } => ValueShape::Variant,
             Self::Thunk(c) if c.comp().lam().is_none() => ValueShape::Block,
-            Self::Thunk(_) | Self::Native(_) => ValueShape::Function,
+            Self::Thunk(_) | Self::Native(..) => ValueShape::Function,
             Self::Handle(_) => ValueShape::Handle,
         }
     }
@@ -102,7 +103,7 @@ impl Value {
             Self::Map(_) => Found::Map,
             Self::Variant { label, .. } => Found::Variant(label.to_string()),
             Self::Thunk(c) if c.comp().lam().is_none() => Found::Block,
-            Self::Thunk(_) | Self::Native(_) => Found::Function,
+            Self::Thunk(_) | Self::Native(..) => Found::Function,
             Self::Handle(_) => Found::Handle,
         }
     }
@@ -168,7 +169,7 @@ impl Value {
             Self::List(_) => &[Head::List],
             Self::Map(_) => &[Head::Map, Head::Record],
             Self::Variant { .. } => &[Head::Variant],
-            Self::Thunk(_) | Self::Native(_) => &[Head::Thunk],
+            Self::Thunk(_) | Self::Native(..) => &[Head::Thunk],
             Self::Handle(_) => &[Head::Handle],
         }
     }
@@ -209,8 +210,8 @@ impl Value {
     }
 
     /// Visit each direct component of data: a list's elements, a record's
-    /// values, a variant's payload.  A closure has none: its capture is never
-    /// entered.
+    /// values, a variant's payload, a native's arguments. A closure has none:
+    /// its capture is never entered.
     pub(crate) fn try_for_each_child<B>(
         &self,
         f: &mut impl FnMut(&Self) -> ControlFlow<B>,
@@ -219,6 +220,7 @@ impl Value {
             Self::List(items) => items.iter().try_for_each(|v| f(&v)),
             Self::Map(pairs) => pairs.iter().try_for_each(|(_, v)| f(&v)),
             Self::Variant { payload, .. } => payload.iter().try_for_each(|p| f(p)),
+            Self::Native(_, args) => args.iter().try_for_each(f),
             Self::Unit
             | Self::Bool(_)
             | Self::Int(_)
@@ -226,7 +228,6 @@ impl Value {
             | Self::String(_)
             | Self::Bytes(_)
             | Self::Thunk(_)
-            | Self::Native(_)
             | Self::Handle(_) => ControlFlow::Continue(()),
         }
     }
@@ -245,7 +246,7 @@ impl Value {
             Self::Variant { .. } => "Variant",
             Self::Thunk(c) if c.comp().lam().is_some() => "Lambda",
             Self::Thunk(_) => "Block",
-            Self::Native(_) => "Native",
+            Self::Native(..) => "Native",
             Self::Handle(_) => "Handle",
         }
     }
@@ -275,7 +276,7 @@ impl Value {
             Self::Variant { label, payload } => {
                 label.len() + payload.as_deref().map_or(0, Self::shallow_size)
             }
-            Self::Thunk(_) | Self::Native(_) | Self::Handle(_) => OPAQUE_CONSTANT,
+            Self::Thunk(_) | Self::Native(..) | Self::Handle(_) => OPAQUE_CONSTANT,
         }
     }
 }
@@ -351,7 +352,18 @@ impl fmt::Display for Value {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },
-            Self::Native(entry) => write!(f, "<native {}>", entry.decl.name),
+            Self::Native(entry, args) => {
+                write!(f, "<native {}", entry.decl.name)?;
+                if !args.is_empty() {
+                    write!(
+                        f,
+                        ", {} of {} arguments",
+                        args.len(),
+                        entry.decl.fixed_arity()
+                    )?;
+                }
+                write!(f, ">")
+            }
             Self::Handle(h) => write!(f, "<handle:{}>", h.title),
         }
     }
@@ -502,6 +514,20 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_display_reports_held_arguments() {
+        let shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
+        assert_eq!(
+            Value::Native(Arc::clone(&entry), Arc::from([])).to_string(),
+            "<native has>"
+        );
+        assert_eq!(
+            Value::Native(entry, Arc::from([Value::map(vec![])])).to_string(),
+            "<native has, 1 of 2 arguments>"
+        );
+    }
 
     /// Captures are invisible by construction, not merely usually small.
     #[test]

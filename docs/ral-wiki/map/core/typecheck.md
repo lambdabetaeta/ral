@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
 generated_at_date: 2026-11-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -106,7 +106,7 @@ reads back checked CBPV IR.** The algorithm is
   exposes decisions, resolution, sites, settlement and scratch, never
   constraints.
 - `readback.rs`: `Readback` turns an `Inferring` tree into a `Checked` one. It
-  applies each `BindHole`'s `Mode` (Let-fun, run, capture/decode) and each
+  applies each `BindHole`'s `Mode` (run or capture/decode) and each
   `CallHole`'s splits, turns a `BindingCall` into an `Exec`, snapshots sites,
   settles definition schemes into `Closed`, builds `Toplevel.admits`, and
   memoises rebuilt recursive groups.
