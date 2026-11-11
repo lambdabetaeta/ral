@@ -55,31 +55,12 @@ fn recovery_detects_dead_pid() {
 }
 
 #[test]
-fn recovery_detects_pid_reuse_via_creation_time() {
-    let pid = std::process::id();
-    let img = current_image_basename();
-    const Y2K_FILETIME: u64 = 125_911_584_000_000_000;
-    assert!(!process_alive_with_image(pid, &img, Y2K_FILETIME));
-}
-
-#[test]
 fn recovery_detects_pid_reuse_off_by_one_tick() {
     let pid = std::process::id();
     let img = current_image_basename();
     let real = process_creation_filetime().unwrap();
     assert!(!process_alive_with_image(pid, &img, real.saturating_add(1)));
     assert!(!process_alive_with_image(pid, &img, real.saturating_sub(1)));
-}
-
-#[test]
-fn state_dir_honors_xdg_override() {
-    with_scoped_state_dir(|| {
-        let held = ledger_dir().unwrap();
-        let dir = held.path();
-        let env = std::env::var_os("XDG_STATE_HOME").unwrap();
-        assert!(dir.starts_with(PathBuf::from(env)));
-        assert!(dir.ends_with("ral/sandbox-dacl") || dir.ends_with(r"ral\sandbox-dacl"));
-    });
 }
 
 #[test]

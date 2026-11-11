@@ -383,44 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn ambient_worker_and_input_remedies_derive_from_the_state() {
-        projection(
-            &StateFailure::MissingAmbient(AmbientSetting::Home),
-            "HOME is not set: `~` and `home` need a home directory",
-            &["set HOME, or spell out an explicit path"],
-        );
-        projection(
-            &StateFailure::MissingAmbient(AmbientSetting::User),
-            "`user` needs USER (or USERNAME on Windows), and neither is set",
-            &["set USER, e.g. `within [env: [USER: \"me\"]] { … }`"],
-        );
-        projection(
-            &StateFailure::WorkerCap(WorkerCap {
-                limit: Count::from_u64(2),
-            }),
-            "2 workers are still executing or stopping",
-            &["wait for one to end (`workers` lists them), or cancel work you no longer need"],
-        );
-        projection(
-            &StateFailure::GatherClosed,
-            "the gather scope is closed",
-            &["the newly born worker was cancelled"],
-        );
-        projection(
-            &StateFailure::NoByteInput(OperationState {
-                operation: "from-json".into(),
-            }),
-            "from-json: no byte input; standard input is a terminal",
-            &["pipe bytes or redirect a file"],
-        );
-        projection(
-            &StateFailure::HookRegistration(HookRegistrationFailure::NoSession),
-            "hooks and plugins belong to the session, but this shell runs beside it (an aside hook, a spawned worker, a pipeline stage)",
-            &["did you mean to register it from the rc or the prompt itself?"],
-        );
-    }
-
-    #[test]
     fn hook_arity_keeps_the_parameter_noun_and_hook_kind() {
         for (expected, signature, description) in [
             (

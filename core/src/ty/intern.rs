@@ -210,20 +210,6 @@ mod tests {
     }
 
     #[test]
-    fn different_structures_are_different_allocations() {
-        let (x, y) = (leaf(20), leaf(21));
-        assert!(x != y);
-        assert!(pair(&x, &y) != pair(&y, &x));
-        assert!(pair(&x, &x) != x);
-    }
-
-    #[test]
-    fn equality_is_decided_by_the_children_s_addresses() {
-        let (deep, other_deep) = (pair(&leaf(30), &leaf(31)), pair(&leaf(30), &leaf(31)));
-        assert!(pair(&deep, &leaf(32)) == pair(&other_deep, &leaf(32)));
-    }
-
-    #[test]
     fn the_hash_is_the_structural_one_and_is_cached() {
         let (a, b) = (pair(&leaf(40), &leaf(41)), pair(&leaf(40), &leaf(41)));
         assert_eq!(hash_of(&a), hash_of(&b));

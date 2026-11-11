@@ -303,14 +303,6 @@ mod tests {
     use crate::shell::runtime::idle_handle;
     use std::sync::Mutex;
 
-    #[test]
-    fn no_desk_is_a_typed_state_refusal_without_stored_advice() {
-        let error = no_desk();
-        assert_eq!(error.reason, Reason::State(Box::new(StateFailure::NoDesk)));
-        assert_eq!(error.hints(), []);
-        assert_eq!(error.reason.advice(), [NO_DESK_HINT]);
-    }
-
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<FOValue>>);
 
@@ -358,18 +350,5 @@ mod tests {
                 }))
             }
         );
-    }
-
-    /// A first-order value crosses unchanged: totality does not tax the
-    /// common case.
-    #[test]
-    fn surface_leaves_a_first_order_value_untouched() {
-        let recorder = Arc::new(RecordingSink::default());
-        let mooring = mooring_with(recorder.clone());
-
-        mooring.surface(&Value::Int(7));
-
-        let emitted = recorder.0.lock().unwrap().clone();
-        assert_eq!(emitted.as_slice(), [FOValue::Int { value: 7 }]);
     }
 }

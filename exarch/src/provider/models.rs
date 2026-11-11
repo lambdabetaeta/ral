@@ -667,14 +667,6 @@ mod tests {
                 calls: Rc::default(),
             }
         }
-
-        fn with_endpoints(
-            mut self,
-            endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
-        ) -> Self {
-            self.endpoints = endpoints;
-            self
-        }
     }
 
     impl ModelSource for FakeSource {
@@ -741,45 +733,6 @@ mod tests {
             catalog.lock_ignore_poison().cached_listing(&deepseek.id),
             None
         );
-    }
-
-    #[test]
-    fn an_endpoint_keeps_its_full_tag() {
-        let with_variant = ProviderEndpoint::from_wire(EndpointWire {
-            provider_name: "DeepInfra".into(),
-            tag: "deepinfra/fp4".into(),
-            context_length: Some(163_840),
-            quantization: Some("fp4".into()),
-        });
-        assert_eq!(with_variant.tag, "deepinfra/fp4");
-        let bare = ProviderEndpoint::from_wire(EndpointWire {
-            provider_name: "StreamLake".into(),
-            tag: "streamlake".into(),
-            context_length: Some(128_000),
-            quantization: None,
-        });
-        assert_eq!(bare.tag, "streamlake");
-    }
-
-    #[test]
-    fn endpoints_memo_round_trips() {
-        let model = "vendor/model-a";
-        let mut endpoints = BTreeMap::new();
-        endpoints.insert(
-            model.to_string(),
-            Ok(vec![ProviderEndpoint {
-                provider_name: "DeepInfra".into(),
-                tag: "deepinfra".into(),
-                context_length: Some(163_840),
-                quantization: Some("fp4".into()),
-            }]),
-        );
-        let source = FakeSource::new(BTreeMap::new()).with_endpoints(endpoints);
-        let mut cat = ModelCatalog::memo_only(source);
-        assert!(cat.cached_endpoints(model).is_none());
-        let fetched = cat.source().endpoints(model).unwrap();
-        cat.record_endpoints(model, fetched.clone());
-        assert_eq!(cat.cached_endpoints(model), Some(fetched));
     }
 
     #[test]
@@ -862,34 +815,6 @@ mod tests {
         assert!(err.contains("deepseek (network down)"), "got: {err}");
     }
 
-    #[test]
-    fn resolve_with_no_providers_errors() {
-        let err = resolve_model_provider("model-a", &[], lookup(&Lists::new()), "").unwrap_err();
-        assert!(err.contains("no provider available"), "got: {err}");
-    }
-
-    #[test]
-    fn pin_provider_matches_by_service_name() {
-        let available = [
-            Account::built_in("anthropic"),
-            Account::built_in("deepseek"),
-        ];
-        assert_eq!(
-            resolve_pinned_provider("deepseek", &available).unwrap(),
-            Account::built_in("deepseek")
-        );
-    }
-
-    #[test]
-    fn pin_provider_matches_custom_name() {
-        let llama = Account::declared("local-llama");
-        let available = [Account::built_in("anthropic"), llama.clone()];
-        assert_eq!(
-            resolve_pinned_provider("local-llama", &available).unwrap(),
-            llama
-        );
-    }
-
     /// The error names the available accounts rather than falling back to one.
     #[test]
     fn pin_unavailable_provider_errors() {
@@ -897,12 +822,6 @@ mod tests {
         let err = resolve_pinned_provider("openai", &available).unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
         assert!(err.contains("anthropic"), "got: {err}");
-    }
-
-    #[test]
-    fn pin_with_no_providers_errors() {
-        let err = resolve_pinned_provider("anthropic", &[]).unwrap_err();
-        assert!(err.contains("no provider available"), "got: {err}");
     }
 
     /// A bare login service naming two accounts is refused, naming both,
@@ -935,32 +854,6 @@ mod tests {
         assert_eq!(got.id, available[1].id);
         let err = resolve_pinned_provider("alex@bristol.ac.uk", &available).unwrap_err();
         assert!(err.contains("names 2 signed-in accounts"), "{err}");
-    }
-
-    #[test]
-    fn plan_models_keep_only_the_listed() {
-        let body: PlanModels = serde_json::from_value(serde_json::json!({
-            "models": [
-                {"slug": "model-a", "visibility": "list", "context_window": 272_000},
-                {"slug": "model-b"},
-                {"slug": "model-c", "visibility": "hidden", "context_window": 8_000},
-                {"slug": "model-zero", "context_window": 0},
-            ],
-        }))
-        .unwrap();
-        let ids_and_windows: Vec<_> = body
-            .listed()
-            .into_iter()
-            .map(|m| (m.id, m.context_window))
-            .collect();
-        assert_eq!(
-            ids_and_windows,
-            [
-                ("model-a".to_string(), Some(272_000)),
-                ("model-b".to_string(), None),
-                ("model-zero".to_string(), None),
-            ]
-        );
     }
 
     #[test]

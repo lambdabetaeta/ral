@@ -1,0 +1,72 @@
+# A spawned block inherits the environment, the grant and the fds of
+# its spawner, and external processes inside it keep their own wiring
+
+# within [env:] reaches the worker
+within [env: [MY_DYN_VAR: hello-from-dyn]] {
+    let h1 = spawn { printenv MY_DYN_VAR }
+    await $h1
+}
+
+# A grant in force at spawn time binds inside the worker, and only within
+# the grant's extent
+grant [exec: [deny: [`name ls]]] {
+    let h2 = spawn { ls . }
+    try { await $h2; echo LEAKED } { |_| echo 'denied in worker' }
+}
+let ok = !{ls . | from-lines}
+echo 'parent still allowed'
+
+# A redirect inside the block sends bytes to the file, not to the awaiter
+let d = temp-dir
+let h3 = spawn { /bin/echo written-to-file > "$d/log" }
+await $h3
+cat "$d/log"
+rm -rf $d
+
+# 2>&1 dups before ral sees anything, so both streams surface as stdout
+let h4 = spawn { /bin/sh -c "echo both >&2" 2>&1 }
+await $h4
+
+# An external's own fd 2 is labelled `[label:err]` too
+let h5 = watch "job" { sh -c "echo err 1>&2" }
+await $h5
+
+# A handle made and awaited inside a grant with an fs policy just works
+grant [fs: [read: [`absolute /], write: [`absolute /]]] {
+    let hg = !{spawn { return 1 }}
+    echo !{await $hg}
+}
+
+# poll samples a handle without blocking; is-done reports whether execution ended
+let hp = !{spawn { sleep 30 }}
+echo !{case !{poll $hp} [
+    `running: { |_| return true },
+    `stopping: { |_| return false },
+    `ready: { |_| return false },
+    `consumed: { |_| return false }
+]}
+echo !{is-done $hp}
+cancel $hp
+# A ready poll claims nothing: the handle is still awaited after it, while a
+# handle cancel claimed polls as `stopping or `consumed without failing
+let hs = !{spawn { return 7 }}
+let settled = { |h| case !{poll $h} [
+    `ready: { |s| return $s },
+    `running: { |_| sleep 0.01; settled $h },
+    `stopping: { |_| fail "unexpected stopping" },
+    `consumed: { |_| fail "unexpected consumed" }
+] }
+let sampled = settled $hs
+echo !{case $sampled[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }]}
+echo !{is-done $hs}
+echo !{await $hs}
+let hc = !{spawn { sleep 30 }}
+cancel $hc
+echo !{case !{poll $hc} [
+    `stopping: { |_| return "claimed-by-cancel" },
+    `consumed: { |_| return "claimed-by-cancel" },
+    `running: { |_| return "running" },
+    `ready: { |_| return "ready" }
+]}
+
+echo 'spawn context tests done'

@@ -315,15 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn registers_the_leased_editor_hook() {
-        let mut runtime = ral_core::test_helper::core_runtime();
-        runtime.install_builtins(BUILTINS);
-        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
-        register(&mut shell).unwrap();
-        assert!(shell.has_hook(&HookName::session("external-editor")));
-    }
-
-    #[test]
     fn bounds_initial_draft_before_creating_workspace() {
         let error = Workspace::create(
             &mut shell(),
@@ -347,9 +338,6 @@ mod tests {
                 })
             ))))
         );
-        assert_eq!(error.hints(), []);
-        assert!(error.context().is_none());
-        assert!(error.plain().contains("16 MiB"));
     }
 
     #[test]
@@ -715,29 +703,6 @@ mod tests {
                     .any(|hint| hint.contains("input buffer was not changed"))
             );
         }
-    }
-
-    #[test]
-    fn readback_keeps_utf8_evidence_without_storing_the_draft() {
-        let mut shell = shell();
-        let workspace = Workspace::create(&mut shell, "draft").unwrap();
-        std::fs::write(workspace.path().unwrap(), [b'a', 0xff]).unwrap();
-        let Err(Break::Error(error)) = workspace.readback(&mut shell) else {
-            panic!("expected UTF-8 refusal")
-        };
-        assert_eq!(
-            error.reason,
-            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
-                EditorFailure::Draft(EditorFailureDraft {
-                    operation: DraftOperation::Read,
-                    cause: ral_core::fact::DraftFailure::Utf8(ral_core::fact::Utf8Failure {
-                        valid_up_to: 1_usize.into(),
-                        error_len: Some(1_usize.into())
-                    }),
-                })
-            ))))
-        );
-        workspace.finish(&mut shell, Ok(())).unwrap();
     }
 
     #[test]

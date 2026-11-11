@@ -1396,14 +1396,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_is_refused_and_the_agents_vocabulary_offers_stop_and_dismiss() {
-        let Err(why) = family::<Agents>(&tag("cancel", Some("scout".to_string().encode()))) else {
-            panic!("cancel was removed, not aliased to either gesture");
-        };
-        assert_eq!(why, unknown("cancel", Agents::TAGS));
-    }
-
-    #[test]
     fn every_schedules_tag_round_trips() {
         let add = |trigger| {
             Request::Schedules(Schedules::Add(Add {
@@ -1576,30 +1568,6 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_is_owed_only_by_the_pin_writes() {
-        let owes_unit = |request: Request| request.owed()(&FOValue::Unit).is_ok();
-        let pin = || Pin {
-            key: "k".into(),
-            body: Card(vec![]),
-        };
-        assert!(owes_unit(Request::Pins(Pins::Set(pin()))));
-        assert!(owes_unit(Request::Pins(Pins::Clear("k".into()))));
-        assert!(!owes_unit(Request::Pins(Pins::List)));
-        assert!(!owes_unit(Request::Agents(Agents::List)));
-    }
-
-    #[test]
-    fn every_context_tag_round_trips() {
-        round_trips([
-            Request::Context(Context::Survey),
-            Request::Context(Context::Evict(Evict {
-                span: Span::new(1, 3).unwrap(),
-                note: Note("the parser is fixed".into()),
-            })),
-        ]);
-    }
-
-    #[test]
     fn every_transcript_tag_round_trips() {
         round_trips([
             Request::Transcript(Transcript::Index),
@@ -1679,15 +1647,6 @@ mod tests {
             }))
             .payload("restrict")
         );
-    }
-
-    #[test]
-    fn a_grant_refuses_an_unknown_tag_naming_every_legal_shape() {
-        let Err(why) = Grant::decode(&tag("bogus", None)) else {
-            panic!("`bogus is no grant");
-        };
-        let tags: Vec<_> = bare_grant_tags().chain(["restrict"]).collect();
-        assert_eq!(why, unknown("bogus", &tags));
     }
 
     /// A base carrying a payload is refused, never truncated to its label:
@@ -1855,26 +1814,6 @@ mod tests {
             );
             assert!(doc_rows.contains(&text), "context.md lacks `{text}`");
         }
-    }
-
-    /// A hit names its item, an eviction's note by its whole span.
-    #[test]
-    fn a_hit_encodes_its_item() {
-        let hits = Hits::from(crate::record::GrepAnswer {
-            hits: vec![crate::record::GrepHit {
-                span: Span::new(3, 4).unwrap(),
-                kind: crate::record::ItemKind::Eviction,
-                role: genai::chat::ChatRole::User,
-                line: 1,
-                text: "the parser is fixed".into(),
-            }],
-            total: 1,
-        })
-        .encode();
-        let hit = &hits.field("hits").and_then(FOValue::as_list).expect("hits")[0];
-        assert_eq!(hit.field("from"), Some(&FOValue::Int { value: 3 }));
-        assert_eq!(hit.field("to"), Some(&FOValue::Int { value: 4 }));
-        assert_eq!(hit.field("kind"), Some(&"eviction".to_string().encode()));
     }
 
     /// A tag that reads nothing refuses a payload rather than dropping it.

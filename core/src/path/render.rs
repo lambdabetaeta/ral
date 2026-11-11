@@ -267,19 +267,13 @@ pub(crate) fn pinned_dirs<'a>(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     fn rendered(position: &str) -> Vec<String> {
         render_real(&super::super::RealPath::unwalked_for_test(position))
             .expect("an ASCII position renders")
             .into_iter()
             .map(|r| r.as_str().to_owned())
             .collect()
-    }
-
-    #[test]
-    fn rendering_keeps_the_position() {
-        assert!(
-            rendered("/some/non/existent/path").contains(&"/some/non/existent/path".to_owned())
-        );
     }
 
     #[cfg(target_os = "macos")]

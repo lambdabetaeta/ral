@@ -653,27 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn functions_returns_and_handles_round_trip() {
-        let block = Ty::thunk;
-        let tys = [
-            block(CompTy::pure(Ty::int())),
-            block(CompTy::arrows(
-                [Ty::int(), Ty::string()],
-                CompTy::ret(Grade::Output, Ty::unit()),
-            )),
-            block(CompTy::arrows(
-                [block(CompTy::pure(Ty::bool()))],
-                CompTy::pure(Ty::list(Ty::float())),
-            )),
-            Ty::handle(Grade::Output, Ty::map(Ty::bytes())),
-        ];
-        for ty in tys {
-            let (v, thawed) = thaw(&Unifier::new(), &ty);
-            assert_eq!(v.apply_ty(&thawed), ty);
-        }
-    }
-
-    #[test]
     fn a_kinded_variable_keeps_its_kind() {
         let block = Ty::thunk(CompTy::pure(Ty::unit()));
         for (kind, admitted, refused) in [

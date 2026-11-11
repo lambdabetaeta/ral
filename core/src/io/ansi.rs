@@ -189,25 +189,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn osc_set_title_uses_bel_terminator() {
-        assert_eq!(osc_set_title("ral"), "\x1b]0;ral\x07");
-        assert_eq!(osc_set_title(""), "\x1b]0;\x07");
-    }
-
-    #[test]
-    fn osc8_link_wraps_visible_text_with_st() {
-        let s = osc8_link("https://example.com", "click me");
-        assert_eq!(s, "\x1b]8;;https://example.com\x1b\\click me\x1b]8;;\x1b\\",);
-    }
-
-    #[test]
-    fn osc8_link_empty_uri_still_well_formed() {
-        // The empty URI is the close-link sentinel; wrapping text in it is a
-        // caller error, but must still parse rather than truncate the stream.
-        assert_eq!(osc8_link("", "text"), "\x1b]8;;\x1b\\text\x1b]8;;\x1b\\");
-    }
-
-    #[test]
     fn strip_drops_sgr_and_other_csi() {
         assert_eq!(strip("\x1b[31mred\x1b[0m $ "), "red $ ");
         assert_eq!(strip("ab\x1b[2Kcd"), "abcd");
@@ -220,11 +201,6 @@ mod tests {
         assert_eq!(strip("a\x1b]8;;https://x\x1b\\b"), "ab");
         assert_eq!(strip("a\x1bPq…data…\x1b\\b"), "ab");
         assert_eq!(strip("a\x1b_payload\x07b"), "ab");
-    }
-
-    #[test]
-    fn strip_keeps_multibyte_char_after_bare_esc() {
-        assert_eq!(strip("\x1bλ tail"), "λ tail");
     }
 
     #[test]

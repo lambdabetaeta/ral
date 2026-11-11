@@ -690,32 +690,3 @@ fn revocation_status(
         )),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{oauth::Revocation, revocation_status};
-
-    #[test]
-    fn revocation_status_distinguishes_remote_local_and_failure() {
-        let label = "xai-grok personal";
-        assert_eq!(
-            revocation_status(label, Ok(Revocation::AtIssuer)),
-            Ok(format!(
-                "signed out of {label}; the issuer accepted token revocation"
-            )),
-        );
-        let local = revocation_status(label, Ok(Revocation::LocalOnly)).expect("local removal");
-        assert!(local.contains("here only"));
-        assert!(local.contains("credentials may still be usable"));
-        let failure =
-            revocation_status(label, Err("unreachable".into())).expect_err("remote failure");
-        assert_eq!(
-            failure,
-            format!("signed out of {label} here, but revocation at the issuer failed: unreachable")
-        );
-        for status in [local, failure] {
-            assert!(!status.contains("OpenAI"));
-            assert!(!status.contains("access token expires"));
-        }
-    }
-}

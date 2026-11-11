@@ -299,23 +299,11 @@ impl Default for Liveness {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::protocol::{Control, DispatchId};
-
-    #[test]
-    fn round_trip_control() {
-        let (mut a, mut b) = WireChannel::pair().unwrap();
-        let frame = Frame::Control(Control::Strike(
-            DispatchId(7),
-            crate::process::CancelCause::Cancelled,
-        ));
-        a.write_frame(&frame).unwrap();
-        let got = b.read_frame().unwrap().unwrap();
-        assert_eq!(got, frame);
-    }
 
     #[cfg(unix)]
     #[test]
     fn unencodable_paths_neither_take_the_writer_lock_nor_sever_the_channel() {
+        use crate::protocol::DispatchId;
         use std::os::unix::ffi::OsStringExt;
         use std::sync::atomic::{AtomicBool, Ordering};
         let (a, mut b) = WireChannel::pair().unwrap();

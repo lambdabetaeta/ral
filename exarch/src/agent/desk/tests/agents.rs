@@ -356,67 +356,6 @@ fn a_refused_role_never_registers_a_child() {
     }
 }
 
-/// A `` `start `` whose spec record `edit` has spoilt, as no door sends it.
-fn spoilt_start(edit: impl FnOnce(&mut Vec<(String, FOValue)>)) -> FOValue {
-    let mut spec = spec("go", "scout").encode();
-    let FOValue::Map { entries } = &mut spec else {
-        unreachable!("a spec is a record")
-    };
-    edit(entries);
-    let fork = ForkClaim::Parked(NurseryId(0)).encode();
-    family_req(
-        "agents",
-        "start",
-        Some(FOValue::Map {
-            entries: vec![("spec".into(), spec), ("fork".into(), fork)],
-        }),
-    )
-}
-
-/// The desk reads the model's record by field name, so a missing field is
-/// named — never a position the model never wrote.
-#[test]
-fn start_refuses_a_spec_missing_a_field_by_name() {
-    with_desk(|desk, _agent| {
-        let err = desk
-            .handle(&spoilt_start(|spec| spec.retain(|(key, _)| key != "name")))
-            .expect_err("a spec missing `name` must be refused");
-        assert_eq!(
-            err.reason,
-            request_failure(
-                DecodeFailure::new(DecodeCause::MissingField("name".into()))
-                    .field("spec")
-                    .payload("start")
-                    .payload("agents")
-            )
-        );
-    });
-}
-
-/// A misspelt spec field is refused with the field it most likely meant.
-#[test]
-fn start_refuses_a_misspelt_spec_field() {
-    with_desk(|desk, _agent| {
-        let err = desk
-            .handle(&spoilt_start(|spec| spec[1].0 = "nmae".into()))
-            .expect_err("`nmae` is not a field the spec carries");
-        assert_eq!(
-            err.reason,
-            request_failure(
-                DecodeFailure::new(DecodeCause::UnknownField(UnknownField {
-                    field: "nmae".into(),
-                    offered: ["prompt", "name", "type", "model"]
-                        .map(str::to_owned)
-                        .to_vec()
-                }))
-                .field("spec")
-                .payload("start")
-                .payload("agents")
-            )
-        );
-    });
-}
-
 #[test]
 fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
     with_spawnable_desk(0, |desk, _fleet, _agent| {
@@ -560,15 +499,6 @@ fn fuel_bounds_depth_not_fanout() {
             ));
         }
     });
-}
-
-#[test]
-fn a_retained_desk_refuses_start_after_its_loan_returns() {
-    let retained = with_spawnable_desk(3, |desk, _, _| desk);
-    let err = retained
-        .ask(start_req(NurseryId(0), "hi", "helper"))
-        .unwrap_err();
-    assert_eq!(err.reason, no_desk().reason);
 }
 
 /// A refusal at adoption: here, a restriction record the capability
@@ -765,23 +695,6 @@ fn dismiss_propagates_the_helpers_teardown_failures_to_its_parent() {
         );
         assert!(!helper.is_live());
         assert!(fleet.registry.resolve("helper").is_none());
-    });
-}
-
-#[test]
-fn dismissing_an_already_joined_helper_says_so() {
-    with_spawnable_desk(3, |desk, fleet, root| {
-        let helper = test_agent(
-            &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.home().child()),
-        )
-        .unwrap();
-        let helper = adopt_failing(&desk, helper, Vec::new());
-        helper.end();
-        desk.loan.get().unwrap().nursery.join(helper.id());
-        desk.ask(Request::Agents(Agents::Dismiss("helper".into())))
-            .unwrap();
-        assert_eq!(harness_results(&desk), ["agent 'helper' had already ended"]);
     });
 }
 

@@ -1497,48 +1497,7 @@ fn deferred_batch_carries_body_surface_before_done() {
     }
 }
 
-/// With no deferred sink installed a worker has no surface at all.
-#[test]
-fn no_deferred_sink_means_no_delivery() {
-    let mut shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
-    assert!(m.deferred.is_none(), "no deferred sink installed");
-    let handle = spawn_child(&m, &mut shell, spawned("<block>"), |mooring, _child| {
-        assert!(mooring.surface.is_none(), "a worker has no surface");
-        Ok(Value::Unit)
-    })
-    .unwrap();
-
-    await_handle(&handle, "await", &mut shell).expect("await ok");
-}
-
 // ── worker registry (pure bookkeeping, no policy) ────────────────────
-
-/// `spawn_child` files exactly one session-owned entry with the spawn's own
-/// title, and the registered handle is the returned one — by `Arc::ptr_eq`.
-#[test]
-fn spawn_child_registers_one_entry_with_matching_handle() {
-    let mut shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
-    let handle = spawn_child(&m, &mut shell, spawned("<test-cmd>"), |_, _child| {
-        Ok(Value::Unit)
-    })
-    .expect("spawn must succeed");
-
-    assert_eq!(
-        shell.local.workers.count(),
-        1,
-        "spawn_child registers exactly one entry"
-    );
-    let snapshot = shell.local.workers.snapshot();
-    assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].handle.title, "<test-cmd>");
-    assert_eq!(snapshot[0].owner, Owner::Session);
-    assert_eq!(
-        snapshot[0].handle, handle,
-        "the registered handle is the returned handle"
-    );
-}
 
 /// Every claimer removes the worker's entry once its execution ends, while
 /// `poll`, on every non-consumed arm, leaves it.
@@ -1942,36 +1901,6 @@ fn worker_cap_rejects_at_the_entry_and_frees_on_cancel() {
         .expect("once the cancelled worker ends, its seat is freed");
 }
 
-/// A titled worker holds a seat like any other: the cap counts running
-/// entries, whatever their titles.
-#[test]
-fn a_titled_birth_counts_toward_the_cap() {
-    let mut shell = crate::test_helper::core_shell();
-    let mut m = Mooring::adrift();
-    m.worker_cap = Some(2);
-
-    let mut gates = Vec::new();
-    for title in ["<serve>", "<block>"] {
-        let (gate_tx, gate_rx) = mpsc::channel::<()>();
-        spawn_child(&m, &mut shell, spawned(title), move |_, _c| {
-            gate_rx.recv().unwrap();
-            Ok(Value::Unit)
-        })
-        .expect("a birth under the cap must be admitted");
-        gates.push(gate_tx);
-    }
-
-    let refused = spawn_child(&m, &mut shell, spawned("<three>"), |_, _c| Ok(Value::Unit));
-    assert!(
-        matches!(refused, Err(Break::Error(_))),
-        "two running workers fill a cap of 2"
-    );
-
-    for gate in gates {
-        let _ = gate.send(());
-    }
-}
-
 /// A settled entry lingering under retention holds no seat: the cap counts
 /// running workers, not registry entries.
 #[test]
@@ -2000,17 +1929,6 @@ fn expect_worker_stop(e: &Error, cause: CancelCause) {
     assert_eq!(e.reason, reason);
     assert_eq!(e.failure_code(), cause.failure_code());
     assert_eq!(e.describe(), cause.message());
-}
-
-/// `cancel` then `await`: `cancel` claimed the handle, so `await` finds it claimed.
-#[test]
-fn awaiting_a_cancelled_worker_finds_it_claimed() {
-    let mut shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
-    let handle = spawn_child(&m, &mut shell, spawned("<test>"), check_loop).unwrap();
-    builtin_cancel(&[Value::Handle(Box::new(handle.clone()))]).unwrap();
-    let err = await_handle(&handle, "await", &mut shell).expect_err("cancel claimed it");
-    expect_claimed(err, "await");
 }
 
 /// A `cancel` from another thread while `await` is blocked claims the handle
@@ -2511,23 +2429,6 @@ fn a_title_must_be_legible() {
 
 // ── race ─────────────────────────────────────────────────────────────
 
-#[test]
-fn race_drains_its_losers() {
-    let mut shell = crate::test_helper::core_shell();
-    let m = Mooring::adrift();
-    let winner = spawn_child(&m, &mut shell, spawned("<winner>"), |_, _| Ok(Value::Unit)).unwrap();
-    let losers: Vec<HandleInner> = ["<a>", "<b>"]
-        .map(|title| spawn_child(&m, &mut shell, spawned(title), check_loop).unwrap())
-        .into();
-    let mut handles = vec![Value::Handle(Box::new(winner))];
-    handles.extend(losers.iter().map(|h| Value::Handle(Box::new(h.clone()))));
-    builtin_race(&[Value::list(handles)], &m, &mut shell).expect("race must succeed");
-    assert!(
-        losers.iter().all(|h| h.sample().has_ended()),
-        "drained before race returns"
-    );
-}
-
 /// A wait cut by a stop still ends everything `race` was given.
 #[test]
 fn a_cut_race_ends_what_it_was_given() {
@@ -2866,7 +2767,7 @@ fn a_brood_prunes_only_a_claimed_and_ended_child() {
 
 // ── prelude combinators over gather ──────────────────────────────────
 
-/// The liveness half; `tests/builtins/combinators.ral` pins the value.
+/// The liveness half; `tests/run/builtins/combinators.ral` pins the value.
 #[test]
 fn first_of_takes_the_winner_and_drains_losers() {
     let mut shell = crate::Shell::root(

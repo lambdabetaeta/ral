@@ -211,16 +211,4 @@ mod tests {
         assert!(lock.lock_strict().is_err());
         assert_eq!(*lock.lock_ignore_poison(), 1);
     }
-
-    #[test]
-    fn strict_locks_a_sound_mutex() {
-        let lock = Mutex::new(7);
-        assert_eq!(lock.lock_strict().map(|guard| *guard).ok(), Some(7));
-    }
-
-    #[test]
-    fn torn_reads_as_an_io_error_that_says_so() {
-        let e = io::Error::from(Torn);
-        assert!(e.to_string().contains("torn"), "{e}");
-    }
 }

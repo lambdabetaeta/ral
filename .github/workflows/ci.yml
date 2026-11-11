@@ -1,6 +1,6 @@
 name: CI
 # Every platform runs the same `just lint test test-types`; one more job runs the
-# platform-independent `just docs ui` once.
+# platform-independent `just docs ui editors` once.
 on:
   push:
     branches: [main]
@@ -86,5 +86,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      - run: npm install --global tree-sitter-cli@0.27.1
 
-      - run: just docs ui
+      - run: just docs ui editors

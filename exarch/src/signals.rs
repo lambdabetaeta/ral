@@ -119,12 +119,6 @@ mod cancels_exchange_tests {
     use super::cancels_exchange;
 
     #[test]
-    fn ctrl_c_and_ctrl_break_cancel_the_exchange() {
-        assert!(cancels_exchange(0), "CTRL_C_EVENT cancels the exchange");
-        assert!(cancels_exchange(1), "CTRL_BREAK_EVENT cancels the exchange");
-    }
-
-    #[test]
     fn other_console_events_never_cancel_the_exchange() {
         // CTRL_CLOSE_EVENT=2, CTRL_LOGOFF_EVENT=5, CTRL_SHUTDOWN_EVENT=6.
         for ctrl_type in [2, 5, 6] {

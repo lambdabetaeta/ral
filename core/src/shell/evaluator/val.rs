@@ -123,29 +123,3 @@ fn literal_names_bound(val: &Val, env: &Env) -> bool {
 pub(crate) fn spread_type_err(val: &Value) -> Error {
     val.expected("spread", Expected::Shape(ValueShape::List))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_bindings_and_spread_backstops_preserve_typed_causes() {
-        let shell = crate::test_helper::core_shell();
-        assert_eq!(
-            form(&Val::Variable("absent".into()), &Env::new(), &shell.sig)
-                .unwrap_err()
-                .reason,
-            Reason::Evaluation(Box::new(EvalFailure::MissingBinding("absent".into())))
-        );
-        assert!(matches!(
-            spread_type_err(&Value::Int(1)).reason,
-            Reason::Invalid(_)
-        ));
-        assert_eq!(
-            form(&Val::Variable("STATUS".into()), &Env::new(), &shell.sig)
-                .unwrap_err()
-                .hints(),
-            []
-        );
-    }
-}

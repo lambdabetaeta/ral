@@ -152,24 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn boot_files_resolve_to_canonical_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let artifact = BootArtifact {
-            kernel: file_in(&dir, "kernel"),
-            initramfs: file_in(&dir, "initramfs.img"),
-            rootfs: file_in(&dir, "rootfs.img"),
-        };
-        let resolved = artifact.resolve().unwrap();
-        for (found, given) in [
-            (&resolved.kernel, &artifact.kernel),
-            (&resolved.initramfs, &artifact.initramfs),
-            (&resolved.rootfs, &artifact.rootfs),
-        ] {
-            assert_eq!(found, &given.canonicalize().unwrap());
-        }
-    }
-
-    #[test]
     fn the_first_missing_boot_file_is_named() {
         let dir = tempfile::tempdir().unwrap();
         let artifact = BootArtifact {

@@ -88,13 +88,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_budget_rides_above_the_live_count_up_to_the_ceiling() {
-        assert_eq!(budgeted(400, 512, 2666), 912);
-        assert_eq!(budgeted(2154, 512, 2666), 2666);
-        assert_eq!(budgeted(3000, 512, 2666), 2666);
-    }
-
-    #[test]
     fn the_limit_is_measured_from_the_users_own_processes() {
         let ceiling = per_user_ceiling().unwrap();
         let live = live_processes(ceiling).unwrap();

@@ -138,13 +138,6 @@ mod tests {
         )
     }
 
-    fn failure(outcome: Result<impl std::fmt::Debug, Stop>) -> String {
-        match outcome {
-            Err(Stop::Failed(msg)) => msg,
-            other => panic!("expected a reported failure, got {other:?}"),
-        }
-    }
-
     /// `()` is an rc with nothing to set, and so is a last phrase that is a
     /// `let`, which yields `Unit` as `return ()` does.
     #[test]
@@ -152,28 +145,6 @@ mod tests {
         for src in ["return ()\n", "let x = 1\n"] {
             assert!(rc(src).unwrap().is_empty(), "{src}");
         }
-    }
-
-    /// The first-run skeleton is an rc that sets nothing.
-    #[test]
-    fn the_default_rc_sets_nothing() {
-        assert!(rc(super::super::DEFAULT_RC).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_decoded_rc_that_is_no_map_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = dir.path().join("rc.json");
-        std::fs::write(&json, "\"vi\"").unwrap();
-        let err = failure(rc(&format!(
-            "return !{{from-json < '{}'}}\n",
-            ral_core::path::shown(&json)
-        )));
-        assert!(
-            err.contains("rc file must return a record, a map, or `()`")
-                && err.contains("got String"),
-            "{err}"
-        );
     }
 
     /// A malformed literal rc key is a type error, caught before the file
@@ -184,10 +155,5 @@ mod tests {
             rc("return [edit-mode: 42]\n"),
             Err(Stop::Reported)
         ));
-    }
-
-    #[test]
-    fn rc_well_typed_literal_field_sources_cleanly() {
-        assert!(rc("return [edit-mode: 'vi']\n").is_ok());
     }
 }

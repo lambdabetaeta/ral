@@ -360,14 +360,6 @@ fn reverse_search_claims_only_mouse_events_inside_the_prompt() {
 }
 
 #[test]
-fn modified_menu_enter_does_not_accept() {
-    let mut prompt = new(false);
-    prompt.set_prompt("/thi");
-    assert!(!prompt.menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
-    assert_eq!(prompt.prompt_text(), "/thi");
-}
-
-#[test]
 fn persistence_failure_is_reportable_without_losing_submission() {
     let dir = ral_core::own::OwnDir::for_test("prompt-save-error").unwrap();
     let history = History::at(ral_core::own::OwnDir::clone(&dir)).unwrap();

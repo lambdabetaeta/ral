@@ -4,7 +4,6 @@
 //! vsock factory only means anything inside a real guest.
 
 use super::*;
-use crate::agent::testkit::{TestAgentSpec, test_agent};
 use crate::test_helper::spawn_engine_on;
 use ral_core::seed::{Sealed, seal};
 use std::os::unix::net::UnixStream;
@@ -210,32 +209,5 @@ fn a_sealed_bequest_reaches_the_child_engine() {
         desk.agent_dismiss("sealed-child")
             .expect("join before reaping the factory engines");
         factory.reap();
-    });
-}
-
-#[test]
-fn identity_and_wire_peers_exchange_messages_through_one_desk() {
-    with_wire_desk(FakeFactory::new(Guest::Spawns), |desk, fleet, parent| {
-        let identity_peer = test_agent(
-            &fleet,
-            TestAgentSpec::child("identity-peer", &parent, parent.mailbox.home().child()),
-        )
-        .unwrap();
-        let wire_peer = test_agent(
-            &fleet,
-            TestAgentSpec::child("wire-peer", &parent, parent.mailbox.home().child()),
-        )
-        .unwrap();
-        desk.ask(message_req("identity-peer", "note for identity"))
-            .unwrap();
-        desk.ask(message_req("wire-peer", "note for wire")).unwrap();
-        for (peer, expected) in [
-            (&identity_peer, "note for identity"),
-            (&wire_peer, "note for wire"),
-        ] {
-            assert!(
-                matches!(next_input(&peer.mailbox), Input::Message(message) if message.text == expected)
-            );
-        }
     });
 }

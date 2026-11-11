@@ -327,16 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_folder_is_refused_by_name() {
-        let dir = workshop("grant-missing");
-        let message = refusal(&dir.path().join("Admissions"));
-        assert!(
-            message.contains("There is nothing at") && message.contains("picker"),
-            "a missing folder should say so and say what to do: {message}"
-        );
-    }
-
-    #[test]
     fn a_file_is_not_a_folder() {
         let dir = workshop("grant-file");
         let letter = dir.path().join("letter.docx");

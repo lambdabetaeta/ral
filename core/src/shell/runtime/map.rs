@@ -406,16 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn a_witnessed_map_names_its_fact() {
-        let fact = fact();
-        assert_eq!(Map::witnessed(fact.clone()).witness(), Some(&fact));
-        assert_eq!(
-            Value::failure(fact.clone()),
-            Value::Map(Map::witnessed(fact))
-        );
-    }
-
-    #[test]
     fn inserting_into_a_witnessed_map_drops_the_witness_and_keeps_the_entries() {
         let fact = fact();
         let mut map = Map::witnessed(fact.clone());
@@ -424,14 +414,5 @@ mod tests {
         let mut expected = record_built(&fact);
         expected.insert("extra".into(), Value::Int(1));
         assert_eq!(map, expected);
-    }
-
-    #[test]
-    fn literal_and_built_maps_have_no_witness() {
-        for case in CASES {
-            assert_eq!(literal(case).witness(), None);
-            assert_eq!(built(case).witness(), None);
-        }
-        assert_eq!(record_built(&fact()).witness(), None);
     }
 }

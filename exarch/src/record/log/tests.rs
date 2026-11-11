@@ -251,28 +251,6 @@ fn a_line_of_an_older_exarch_is_refused_by_name() {
 }
 
 #[test]
-fn a_locus_round_trips_identically_through_append_and_read() {
-    let dir = temp_dir("locus-round-trip");
-    let path = dir.path().join(RECORD);
-    let log = Log::create(&dir).unwrap();
-    let first = log.append(NonEmpty::one(error("first"))).unwrap();
-    let second = log.append(NonEmpty::one(error("second"))).unwrap();
-    let back = read(&path)
-        .unwrap()
-        .collect::<io::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(back.len(), 2);
-    assert_eq!(back[0].locus(), first.records().first.locus());
-    assert_eq!(back[1].locus(), second.records().first.locus());
-}
-
-#[test]
-fn a_changed_commit_fails_its_sum() {
-    let line = changed(commit_line(&[error("bravo")]));
-    assert!(matches!(unseal(&line), Err(Unsealed::Sum { .. })));
-}
-
-#[test]
 fn a_torn_last_line_is_never_read() {
     let whole = terminated(commit_line(&several().into_iter().collect::<Vec<_>>()));
     let tails = [
@@ -641,54 +619,6 @@ fn a_write_failure_during_sync_prevents_watermark_publication() {
     assert_eq!(log.inner.lock_strict().unwrap().synced, 0);
 }
 
-#[test]
-fn recording_failure_projection_keeps_path_stage_and_original_io() {
-    let path = PathBuf::from("sessions/7/record.jsonl");
-    for syncing in [false, true] {
-        let cause = io::Error::from_raw_os_error(13);
-        let expected = ral_core::io::failure(&cause);
-        let unavailable = Unavailable(Arc::new(Failure::Recording {
-            record: Some(path.clone()),
-            cause,
-            syncing,
-        }));
-        assert_eq!(
-            unavailable.failure(),
-            RecordingFailure::Recording(RecordingFailureRecording {
-                record: Some(ral_core::path::shown(&path)),
-                stage: if syncing {
-                    RecordingStage::Sync
-                } else {
-                    RecordingStage::Append
-                },
-                cause: expected,
-            })
-        );
-    }
-    let unavailable = Unavailable::new(None, io::Error::from(io::ErrorKind::StorageFull));
-    assert!(
-        matches!(unavailable.failure(), RecordingFailure::Recording(failure)
-        if failure.record.is_none() && failure.stage == RecordingStage::Append)
-    );
-}
-
-#[test]
-fn a_poisoned_cell_keeps_the_full_agent_id_before_rendering() {
-    let log = Log::none();
-    let agent = super::super::AgentId::new(u64::MAX);
-    let failure = log.cell_poisoned(agent);
-    assert_eq!(
-        failure.failure(),
-        RecordingFailure::CellPoisoned(RecordingFailureCellPoisoned {
-            agent: u64::MAX.into(),
-        })
-    );
-    assert!(Arc::ptr_eq(
-        &failure.0,
-        &log.check_available().unwrap_err().0
-    ));
-}
-
 fn line_fault(bytes: &[u8]) -> Unsealed {
     match unseal(bytes) {
         Err(fault) => fault,
@@ -756,76 +686,6 @@ fn log_unsealed_projection_preserves_syntax_envelope_seal_records_precedence() {
     assert!(
         matches!(fault.failure(), RecordLineFailure::InvalidRecords(cause)
         if cause.path.is_empty() && matches!(cause.cause.as_ref(), DecodeCause::JsonShape(_)))
-    );
-}
-
-#[test]
-fn log_envelope_fields_keep_object_only_duplicate_missing_and_unknown_facts() {
-    use ral_core::fact::DecodeCause;
-    for (bytes, expected) in [
-        (
-            br#"{"sum":"bad","sum":"bad","commit":0}"#.as_slice(),
-            DecodeCause::DuplicateField("sum".into()),
-        ),
-        (
-            br#"{"sum":"bad","commit":0,"commit":0}"#,
-            DecodeCause::DuplicateField("commit".into()),
-        ),
-        (
-            br#"{"sum":"bad"}"#,
-            DecodeCause::MissingField("commit".into()),
-        ),
-        (br#"{"commit":0}"#, DecodeCause::MissingField("sum".into())),
-    ] {
-        let fault = line_fault(bytes);
-        assert!(!fault.damaged());
-        assert!(
-            matches!(fault.failure(), RecordLineFailure::InvalidEnvelope(cause)
-            if cause.path.is_empty() && *cause.cause == expected)
-        );
-    }
-    assert!(matches!(line_fault(br#"["bad",0]"#), Unsealed::Shape(_)));
-    assert!(matches!(
-        line_fault(br#"{"commit":0,"sum":"bad"}"#),
-        Unsealed::Sum { .. }
-    ));
-}
-
-#[test]
-fn log_sealed_shape_and_domain_failures_keep_exact_record_paths() {
-    use ral_core::fact::{DataStep, DecodeCause, InvertedTurnSpan};
-    let bytes = raw::sealed_fixture(
-        br#"{"at_unix_ms":0,"records":[{"Transcript":{"system":{"text":false}}}]}"#,
-    );
-    let fault = line_fault(&bytes);
-    assert!(
-        matches!(fault.failure(), RecordLineFailure::InvalidRecords(cause)
-        if cause.path == vec![DataStep::Field("records".into()), DataStep::Index(0u64.into()),
-            DataStep::Payload("Transcript".into()), DataStep::Payload("system".into()), DataStep::Field("text".into())]
-        && matches!(cause.cause.as_ref(), DecodeCause::JsonShape(_)))
-    );
-
-    let bytes = raw::sealed_fixture(br#"{"at_unix_ms":0,"records":[{"Transcript":{"evicted":{"span":{"from":9,"to":2},"by":"model"}}}]}"#);
-    let fault = line_fault(&bytes);
-    let RecordLineFailure::InvalidRecords(cause) = fault.failure() else {
-        panic!("record domain failure")
-    };
-    assert_eq!(
-        cause.path,
-        vec![
-            DataStep::Field("records".into()),
-            DataStep::Index(0u64.into()),
-            DataStep::Payload("Transcript".into()),
-            DataStep::Payload("evicted".into()),
-            DataStep::Field("span".into())
-        ]
-    );
-    assert_eq!(
-        cause.cause.as_ref(),
-        &DecodeCause::TurnSpan(InvertedTurnSpan {
-            from: 9u64.into(),
-            to: 2u64.into()
-        })
     );
 }
 

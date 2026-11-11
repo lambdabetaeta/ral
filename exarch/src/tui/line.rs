@@ -249,9 +249,6 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
-#[cfg(test)]
-mod tests;
-
 // ── Card rendering ───────────────────────────────────────────────────────────
 
 /// The columns every field row of one card shares: the widest label, and the

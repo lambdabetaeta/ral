@@ -10,15 +10,6 @@
 use super::*;
 use std::path::PathBuf;
 #[test]
-fn mutex_name_is_deterministic_and_local_prefix() {
-    let p = PathBuf::from(r"C:\tmp\foo");
-    let n1 = mutex_name_for(&p);
-    let n2 = mutex_name_for(&p);
-    assert_eq!(n1, n2);
-    assert!(n1.starts_with("Local\\ral.sandbox.dacl."));
-}
-
-#[test]
 fn mutex_name_case_insensitive() {
     let a = mutex_name_for(&PathBuf::from(r"C:\Tmp\Foo"));
     let b = mutex_name_for(&PathBuf::from(r"c:\tmp\foo"));

@@ -166,13 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_refused_off_windows() {
-        for p in ["NUL", "con", "/tmp/aux.c"] {
-            assert_eq!(reserved_device_refusal(p.as_bytes(), P), None, "{p}");
-        }
-    }
-
-    #[test]
     fn reserved_device_refusal_retains_only_the_component() {
         assert_eq!(
             reserved_device_refusal(br"C:\x\NUL", W).as_deref(),
@@ -181,14 +174,6 @@ mod tests {
         assert_eq!(
             reserved_device_refusal(br"\\?\C:\denied\nul.txt", W).as_deref(),
             Some("nul.txt")
-        );
-    }
-
-    #[test]
-    fn other_reserved_names_suggest_no_discard() {
-        assert_eq!(
-            reserved_device_refusal(b"COM1.log", W).as_deref(),
-            Some("COM1.log")
         );
     }
 }

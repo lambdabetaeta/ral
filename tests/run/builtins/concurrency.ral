@@ -1,0 +1,26 @@
+# Spawn, await, and handle values
+#
+# `await h` behaves as the block run here: its bytes are written to the
+# awaiter's streams and its value returned.
+
+# Value-returning block: its bytes replay, its value is the int.
+let h = spawn { echo middle ; 42 }
+let v = await $h
+echo "value=$v"
+
+# Awaits replay in the order they are awaited, not the order they were spawned.
+let a = spawn { echo alpha }
+let beta_h = spawn { echo beta }
+await $beta_h
+await $a
+
+# A failing child: await re-raises its failure; `try` dispatches to the handler.
+let h = spawn { sh -c 'exit 3' }
+try { await $h; echo "child ok=true" } { |e|
+    echo 'child ok=false status=' $e[status] $e[message]
+}
+
+# Handles are values: store in a list, then await each.
+let handles = map { |x| spawn { $x } } [1, 2, 3]
+let values = map { |h| await $h } $handles
+echo $values

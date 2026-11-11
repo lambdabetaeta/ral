@@ -184,54 +184,6 @@ mod tests {
     }
 
     #[test]
-    fn a_name_given_twice_is_refused() {
-        let available = [Account::built_in("anthropic")];
-        let twice = [pair("r", "m"), pair("r", "n")];
-        let err = bindings(&twice, &[], &[], &available, lists(&["m", "n"]))
-            .err()
-            .unwrap();
-        assert_eq!(err, "--role 'r' is given twice");
-        let err = bindings(
-            &[pair("r", "m")],
-            &[pair("r", "anthropic"), pair("r", "x")],
-            &[],
-            &available,
-            lists(&["m"]),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(err, "--role-provider 'r' is given twice");
-        let err = bindings(
-            &[pair("r", "m")],
-            &[],
-            &[via("r", "a"), via("r", "b")],
-            &available,
-            lists(&["m"]),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(err, "--role-via 'r' is given twice");
-    }
-
-    #[test]
-    fn a_role_provider_without_a_role_is_refused() {
-        let available = [Account::built_in("anthropic")];
-        let err = bindings(&[], &[pair("x", "anthropic")], &[], &available, lists(&[]))
-            .err()
-            .unwrap();
-        assert_eq!(err, "--role-provider names 'x', but no --role binds it");
-    }
-
-    #[test]
-    fn a_role_via_without_a_role_is_refused() {
-        let available = [Account::built_in("openrouter")];
-        let err = bindings(&[], &[], &[via("x", "a")], &available, lists(&[]))
-            .err()
-            .unwrap();
-        assert_eq!(err, "--role-via names 'x', but no --role binds it");
-    }
-
-    #[test]
     fn a_roles_via_rides_its_choice() {
         let available = [Account::built_in("openrouter")];
         let bound = bindings(

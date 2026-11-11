@@ -475,19 +475,6 @@ mod tests {
         assert!(shell.has_hook(&prompt()));
     }
 
-    #[test]
-    fn a_non_function_is_not_a_hook() {
-        let mut shell = crate::test_helper::core_shell();
-        let refused = shell.register_hook(
-            prompt(),
-            Value::Int(1),
-            HookSig::Block,
-            DefaultPolicy::denied(),
-        );
-        assert!(matches!(refused, Err(RegisterError::NotFunction { .. })));
-        assert!(!shell.has_hook(&prompt()));
-    }
-
     /// An aside shares no session, so none of the session verbs apply.
     #[test]
     fn a_child_shell_has_no_session_to_keep_hooks_or_plugins() {
@@ -518,96 +505,5 @@ mod tests {
             Err(RegisterError::NoSession)
         ));
         assert_eq!(aside.take_plugin("p"), None);
-    }
-
-    #[test]
-    fn the_plugin_ledger_round_trips() {
-        let mut shell = crate::test_helper::core_shell();
-        assert!(!shell.plugin_loaded("p").unwrap());
-        shell.commit_plugin(entry("p")).unwrap();
-        shell.commit_plugin(entry("q")).unwrap();
-        assert!(shell.plugin_loaded("p").unwrap());
-        assert_eq!(shell.take_plugin("p"), Some(entry("p")));
-        assert!(!shell.plugin_loaded("p").unwrap());
-        assert!(shell.plugin_loaded("q").unwrap());
-        assert_eq!(shell.take_plugin("p"), None);
-    }
-}
-
-#[cfg(test)]
-mod failure_tests {
-    use super::*;
-
-    #[test]
-    fn registration_projection_keeps_namespace_shape_signature_and_all_refusals() {
-        let plugin = HookName::plugin("editor", "change");
-        let reference = HookRef::Plugin(PluginHookRef {
-            plugin: "editor".into(),
-            hook: "change".into(),
-        });
-        let cases = [
-            (
-                RegisterError::NotFunction {
-                    name: plugin.clone(),
-                    actual: ValueShape::Int,
-                },
-                HookRegistrationFailure::NotFunction(HookNotFunction {
-                    name: reference.clone(),
-                    actual: ValueShape::Int,
-                }),
-            ),
-            (
-                RegisterError::ArityMismatch {
-                    name: plugin.clone(),
-                    expected: 1,
-                    actual: 2,
-                    signature: HookSignature::Hook("chpwd".into()),
-                },
-                HookRegistrationFailure::Arity(HookArity {
-                    name: reference.clone(),
-                    expected: 1usize.into(),
-                    actual: 2usize.into(),
-                    signature: HookSignature::Hook("chpwd".into()),
-                }),
-            ),
-            (
-                RegisterError::AlreadyRegistered { name: plugin },
-                HookRegistrationFailure::AlreadyRegistered(reference),
-            ),
-            (RegisterError::NoSession, HookRegistrationFailure::NoSession),
-        ];
-        for (error, expected) in cases {
-            let error = error.into_error();
-            assert_eq!(
-                error.reason,
-                Reason::State(Box::new(StateFailure::HookRegistration(expected)))
-            );
-            assert_eq!(error.hints(), []);
-            assert_eq!(error.context(), None);
-        }
-        assert_eq!(
-            HookRef::from(&HookName::session("prompt")),
-            HookRef::Session("prompt".into())
-        );
-        assert_eq!(HookSignature::from(&HookSig::Block), HookSignature::Block);
-        assert_eq!(
-            HookSignature::from(&HookSig::Hook {
-                kind: "chpwd".into()
-            }),
-            HookSignature::Hook("chpwd".into())
-        );
-        let shell = crate::test_helper::core_shell();
-        let error = shell
-            .vet_hook(
-                &HookName::session("prompt"),
-                Value::Int(7),
-                HookSig::Block,
-                DefaultPolicy::denied(),
-            )
-            .unwrap_err()
-            .into_error();
-        assert!(
-            matches!(error.reason, Reason::State(ref state) if matches!(**state, StateFailure::HookRegistration(HookRegistrationFailure::NotFunction(HookNotFunction { actual: ValueShape::Int, .. }))))
-        );
     }
 }

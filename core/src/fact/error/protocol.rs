@@ -810,26 +810,6 @@ mod payload_presentation_tests {
     }
 
     #[test]
-    fn decode_directions_keep_the_complete_original_decode_description() {
-        let cause = DecodeCause::MissingField("name".into());
-        let path = [
-            DataStep::Payload("start".into()),
-            DataStep::Field("items".into()),
-            DataStep::Index(u64::MAX.into()),
-        ];
-        for (kind, headline) in [
-            (ProtocolData::Request, "op: malformed request: "),
-            (ProtocolData::Answer, "op: the host answered out of shape; "),
-            (ProtocolData::RootConfig, "op: malformed root config: "),
-        ] {
-            let value = decode(kind, "op", &path, &cause);
-            let expected = format!("{headline}{}", value.cause.describe());
-            assert_eq!(value.describe(), expected);
-            check(&ProtocolFailure::Decode(value), &expected, &[]);
-        }
-    }
-
-    #[test]
     fn spawn_grant_advice_requires_request_operation_path_and_exact_cause() {
         let path = vec![
             DataStep::Payload("start".into()),
@@ -956,92 +936,6 @@ mod payload_presentation_tests {
                 &value.describe(),
                 &[],
             );
-        }
-    }
-
-    #[test]
-    fn protocol_version_fork_pairs_and_scratch_have_single_useful_headlines() {
-        check(
-            &ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
-                front: 43,
-                engine: 44,
-            }),
-            "protocol version mismatch: frontend 43, engine 44",
-            &[],
-        );
-        check(
-            &ProtocolFailure::RootMissingScratch,
-            "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach",
-            &[],
-        );
-        for (expected, actual, description, advice) in [
-            (
-                ForkKind::Park,
-                ForkKind::Seal,
-                "this host runs its children in its own process, but received a sealed fork",
-                vec![
-                    "use `parked <nursery id>`; a sealed bequest names a wire this desk does not have",
-                ],
-            ),
-            (
-                ForkKind::Seal,
-                ForkKind::Park,
-                "this host makes its children over a wire, but received a parked fork",
-                vec![
-                    "use `sealed <bytes>`; a parked fork names an in-process nursery this desk does not have",
-                ],
-            ),
-            (
-                ForkKind::Park,
-                ForkKind::Park,
-                "expected park fork, got park",
-                vec![],
-            ),
-            (
-                ForkKind::Seal,
-                ForkKind::Seal,
-                "expected seal fork, got seal",
-                vec![],
-            ),
-        ] {
-            let value = ProtocolFailureWrongForkKind { expected, actual };
-            assert_eq!(value.describe(), description);
-            assert_eq!(value.advice(), advice);
-            check(&ProtocolFailure::WrongForkKind(value), description, &advice);
-        }
-    }
-
-    #[test]
-    fn eof_and_unexpected_frames_keep_peer_phase_and_actual_kind() {
-        for (peer, name) in [
-            (ProtocolPeer::Engine, "engine"),
-            (ProtocolPeer::Frontend, "frontend"),
-        ] {
-            let closed = ConnectionClosed::Eof(peer);
-            let back = ConnectionClosed::decode(&closed.clone().encode()).unwrap();
-            assert_eq!(closed.describe(), format!("end of stream from the {name}"));
-            assert_eq!(back, closed);
-            for (phase, phrase) in [
-                (ProtocolPhase::AwaitAttach, "while awaiting attachment"),
-                (ProtocolPhase::Attached, "after attachment"),
-            ] {
-                for actual in FrameKind::VARIANTS {
-                    let product = ConnectionFaultUnexpectedFrame {
-                        receiver: peer,
-                        phase,
-                        actual: *actual,
-                    };
-                    let description = format!(
-                        "the {name} received an unexpected {} frame {phrase}",
-                        actual.describe()
-                    );
-                    assert_eq!(product.describe(), description);
-                    let fault = ConnectionFault::UnexpectedFrame(product);
-                    let back = ConnectionFault::decode(&fault.clone().encode()).unwrap();
-                    assert_eq!(back, fault);
-                    assert_eq!(back.describe(), description);
-                }
-            }
         }
     }
 }

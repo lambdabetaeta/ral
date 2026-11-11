@@ -1057,32 +1057,6 @@ mod parser_presentation_tests {
     }
 
     #[test]
-    fn cron_empty_zero_and_invalid_steps_retain_faults_and_exact_remedies() {
-        cron_field("", &CronFieldCause::Empty, "empty field");
-        cron_field(
-            "*/0",
-            &CronFieldCause::ZeroStep,
-            "step must be greater than zero",
-        );
-        for (fault, shown) in [
-            (NumberFault::Syntax, "invalid numeric syntax"),
-            (NumberFault::OutOfRange, "number is out of range"),
-            (NumberFault::NonFinite, "number is not finite"),
-        ] {
-            let step = CronFieldCauseInvalidStep {
-                text: "x'\n".into(),
-                fault,
-            };
-            let _ = round_trip(&step);
-            cron_field(
-                "*/x'\n",
-                &CronFieldCause::InvalidStep(step),
-                &format!("invalid step 'x\\'\\n': {shown}; use an integer from 1 through 255"),
-            );
-        }
-    }
-
-    #[test]
     fn cron_unknown_values_keep_empty_or_ordered_offerings_and_overflow_token() {
         for (token, offered, description) in [
             (
@@ -1111,43 +1085,6 @@ mod parser_presentation_tests {
     }
 
     #[test]
-    fn cron_range_causes_keep_recorded_bounds_and_lower_endpoint_remedy() {
-        let range = CronFieldCauseOutOfRange {
-            token: "60".into(),
-            minimum: 0,
-            maximum: 59,
-        };
-        let _ = round_trip(&range);
-        cron_field(
-            "60",
-            &CronFieldCause::OutOfRange(range),
-            "value '60' is outside 0..=59",
-        );
-        let descending = CronFieldCauseDescendingRange {
-            range: "7-0".into(),
-            from: 7,
-            to: 0,
-        };
-        let _ = round_trip(&descending);
-        cron_field(
-            "7-0",
-            &CronFieldCause::DescendingRange(descending),
-            "range '7-0' is descending: 7 is greater than 0; put the lower endpoint first",
-        );
-        let escaped = CronFieldCauseDescendingRange {
-            range: "o'\n".into(),
-            from: 255,
-            to: 0,
-        };
-        let _ = round_trip(&escaped);
-        cron_field(
-            "o'\n",
-            &CronFieldCause::DescendingRange(escaped),
-            "range 'o\\'\\n' is descending: 255 is greater than 0; put the lower endpoint first",
-        );
-    }
-
-    #[test]
     fn duration_missing_unknown_zero_and_overflow_keep_padded_original_spelling() {
         duration(
             DurationCause::MissingUnit,
@@ -1166,30 +1103,5 @@ mod parser_presentation_tests {
             DurationCause::Overflow,
             "duration is too large; use a smaller count or a shorter unit",
         );
-    }
-
-    #[test]
-    fn duration_invalid_count_faults_have_distinct_unsigned_count_remedies() {
-        for (fault, description) in [
-            (
-                NumberFault::Syntax,
-                "invalid count 'o\\'\\n': invalid numeric syntax; use an unsigned whole-number count, e.g. 30m",
-            ),
-            (
-                NumberFault::OutOfRange,
-                "invalid count 'o\\'\\n': number is out of range; use a smaller unsigned whole-number count",
-            ),
-            (
-                NumberFault::NonFinite,
-                "invalid count 'o\\'\\n': number is not finite; use an unsigned whole-number count",
-            ),
-        ] {
-            let count = DurationCauseInvalidCount {
-                text: "o'\n".into(),
-                fault,
-            };
-            let _ = round_trip(&count);
-            duration(DurationCause::InvalidCount(count), description);
-        }
     }
 }

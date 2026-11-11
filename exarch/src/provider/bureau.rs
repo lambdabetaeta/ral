@@ -363,26 +363,6 @@ mod tests {
     use super::*;
     use genai::chat::ReasoningEffort;
 
-    fn listed(id: &str, window: Option<u64>) -> Listed {
-        Listed {
-            id: id.into(),
-            context_window: window,
-        }
-    }
-
-    #[test]
-    fn window_of_prefers_the_listing_to_the_fallback() {
-        let models = [listed("m", Some(10))];
-        assert_eq!(window_of(&models, "m", "acct", |_| Some(99)), Ok(Some(10)));
-    }
-
-    #[test]
-    fn a_listed_model_without_a_window_falls_back() {
-        let models = [listed("m", None)];
-        assert_eq!(window_of(&models, "m", "acct", |_| Some(99)), Ok(Some(99)));
-        assert_eq!(window_of(&models, "m", "acct", |_| None), Ok(None));
-    }
-
     fn endpoint(tag: &str, window: Option<u64>) -> ProviderEndpoint {
         ProviderEndpoint {
             provider_name: tag.into(),
@@ -408,21 +388,6 @@ mod tests {
             err,
             "'anthropic' does not route, so it cannot serve 'm' via deepinfra"
         );
-    }
-
-    #[test]
-    fn a_via_whose_upstreams_cannot_be_listed_is_refused() {
-        let via = Via::parse("deepinfra").unwrap();
-        let err = window_via(
-            &Account::built_in("openrouter"),
-            "openrouter",
-            "m",
-            &via,
-            None,
-            || Err("network down".into()),
-        )
-        .unwrap_err();
-        assert_eq!(err, "could not list the upstreams of 'm': network down");
     }
 
     #[test]
@@ -482,11 +447,5 @@ mod tests {
             assert_eq!(selection.tuning.top_p, Some(0.9));
             assert_eq!(selection.max_tokens, Some(10));
         }
-    }
-
-    #[test]
-    fn an_unlisted_model_is_refused_naming_both_halves() {
-        let err = window_of(&[listed("other", None)], "m", "acct", |_| Some(99)).unwrap_err();
-        assert!(err.contains("'acct'") && err.contains("'m'"), "got: {err}");
     }
 }

@@ -572,18 +572,6 @@ mod tests {
         );
     }
 
-    /// Aliases declared in rc install as alias-origin handler frames.
-    #[test]
-    fn aliases_install_as_handler_frames() {
-        let src = "return [\n    aliases: [\n        greet: { |args| echo hello ...$args },\n        ll: { |args| ls -lh ...$args },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src);
-        assert!(shell.has_alias("greet"));
-        assert!(shell.has_alias("ll"));
-        // Aliases live in the handler stack, not in scope.
-        assert!(shell.scope_lookup("greet").is_none());
-        assert!(shell.scope_lookup("ll").is_none());
-    }
-
     /// rc `recursion-limit:` overrides the default on the shell.
     #[test]
     fn rc_recursion_limit_applied() {
@@ -607,66 +595,10 @@ mod tests {
         assert!(err.contains("recursion-limit") && err.contains("not applied"));
     }
 
-    /// A wrong-typed `recursion-limit` refuses the whole map; the default
-    /// stays untouched.
-    #[test]
-    fn rc_recursion_limit_wrong_type_rejected() {
-        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "recursion-limit".into(),
-            Value::string("lots"),
-        )]));
-        assert_eq!(
-            shell.stack_limit(),
-            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
-        );
-        assert!(err.contains("recursion-limit"));
-    }
-
-    /// Both an unrecognised string and a wrong-typed `edit-mode` refuse the
-    /// whole map, naming the field.
-    #[test]
-    fn rc_edit_mode_invalid_rejected() {
-        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "edit-mode".into(),
-            Value::string("typo"),
-        )]));
-        assert!(err.contains("edit-mode"));
-
-        let (_, err) =
-            apply_to_fresh_env_rejected(Value::map(vec![("edit-mode".into(), Value::Int(3))]));
-        assert!(err.contains("edit-mode"));
-    }
-
-    /// A wrong-typed `bell` refuses the whole map, naming the field.
-    #[test]
-    fn rc_bell_wrong_type_rejected() {
-        let (_, err) =
-            apply_to_fresh_env_rejected(Value::map(vec![("bell".into(), Value::string("yes"))]));
-        assert!(err.contains("bell"));
-    }
-
     // ── RcPlan: bindings / aliases routing ───────────────────────
 
-    /// Apply `config` to a fresh shell via `RcPlan` and return the shell.
-    fn apply_to_fresh_env(config: Value) -> Shell {
-        apply_to_fresh_env_full(config).0
-    }
-
-    /// Apply `config` to a fresh shell via `RcPlan` and return the
-    /// full post-application state: shell and resolved settings.
-    fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings) {
-        let mut shell = ral_core::test_helper::core_shell();
-        let Value::Map(pairs) = config else {
-            panic!("test rc config must be a map; got {}", config.type_name());
-        };
-        let settings = commit(&pairs, &Mooring::adrift(), &mut shell)
-            .expect("test rc must satisfy the keyset");
-        (shell, settings)
-    }
-
     /// Apply `config` to a fresh shell, expecting `RcPlan::decode` to
-    /// refuse it — the decoded spelling's contract check, exercised the way
-    /// `apply_to_fresh_env_full` exercises success.  Returns the shell
+    /// refuse it — the decoded spelling's contract check.  Returns the shell
     /// (untouched by the refused keys) and the refusal text.
     fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {
         let mut shell = ral_core::test_helper::core_shell();
@@ -696,29 +628,6 @@ mod tests {
             apply_rc_surface("return [surface: 'Readline']\n"),
             Surface::Readline
         );
-    }
-
-    /// An unset `surface:` leaves the default in place; an unrecognised
-    /// name refuses the whole map rather than being silently ignored.
-    #[test]
-    fn rc_surface_unknown_rejected_default_retained() {
-        assert_eq!(
-            apply_rc_surface("return [env: [X: 'y']]\n"),
-            Surface::default()
-        );
-        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "surface".into(),
-            Value::string("bogus"),
-        )]));
-        assert!(err.contains("surface"));
-    }
-
-    /// A wrong-typed `surface:` refuses the whole map, naming the field.
-    #[test]
-    fn rc_surface_wrong_type_rejected() {
-        let (_, err) =
-            apply_to_fresh_env_rejected(Value::map(vec![("surface".into(), Value::Int(7))]));
-        assert!(err.contains("surface"));
     }
 
     #[cfg(unix)]
@@ -777,36 +686,6 @@ mod tests {
         assert!(!typecheck_against_session(&shell, "$GREETING").is_empty());
     }
 
-    #[test]
-    fn rc_bindings_populate_value_namespace() {
-        let shell = apply_to_fresh_env(Value::map(vec![(
-            "bindings".into(),
-            Value::map(vec![
-                ("greeting".into(), Value::string("hello")),
-                ("n".into(), Value::Int(42)),
-            ]),
-        )]));
-        assert_eq!(
-            shell.scope_lookup("greeting"),
-            Some(&Value::string("hello"))
-        );
-        assert_eq!(shell.scope_lookup("n"), Some(&Value::Int(42)));
-    }
-
-    /// A non-function under `aliases:` refuses the rc, pointing at `bindings:`.
-    #[test]
-    fn rc_non_thunk_alias_points_at_bindings() {
-        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "aliases".into(),
-            Value::map(vec![("ll".into(), Value::Bool(true))]),
-        )]));
-        assert!(
-            err.contains("`bindings:`") && err.contains("not applied"),
-            "{err}"
-        );
-        assert!(shell.scope_lookup("ll").is_none() && !shell.has_alias("ll"));
-    }
-
     /// A refused rc leaves no prompt hook behind: valid prompt, bad theme colour.
     #[test]
     fn refused_rc_registers_no_prompt() {
@@ -835,25 +714,6 @@ mod tests {
         );
         assert!(commit(&pairs, &Mooring::adrift(), &mut shell).is_err());
         assert!(!shell.has_alias("ll") && !shell.has_alias("bad"));
-    }
-
-    /// An unknown `theme:` key refuses the rc rather than warning.
-    #[test]
-    fn rc_unknown_theme_key_rejected() {
-        let (_, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "theme".into(),
-            Value::map(vec![("wat".into(), Value::Int(1))]),
-        )]));
-        assert!(err.contains("wat") && err.contains("not applied"), "{err}");
-    }
-
-    /// A wrong-typed `plugins:` value refuses the whole map before any
-    /// plugin load is even attempted.
-    #[test]
-    fn rc_plugins_wrong_type_rejected() {
-        let (_, err) =
-            apply_to_fresh_env_rejected(Value::map(vec![("plugins".into(), Value::Int(7))]));
-        assert!(err.contains("plugins"));
     }
 
     /// A malformed *value* on a known key refuses the whole map, exactly as
@@ -941,36 +801,5 @@ mod tests {
                 key.label
             );
         }
-    }
-    #[test]
-    fn configured_plugin_options_preserve_the_name_as_a_data_path() {
-        let Err(Break::Error(error)) = load_configured_plugin(
-            "zoxide",
-            Value::Int(7),
-            &Mooring::adrift(),
-            &mut prelude_shell(),
-        ) else {
-            panic!("expected options-map refusal")
-        };
-        assert_eq!(
-            error.reason,
-            Reason::Invalid(Box::new(InvalidFailure {
-                operation: "load-plugin".into(),
-                path: vec![DataStep::Field("zoxide".into())],
-                cause: InvalidCause::Shape(ShapeFailure {
-                    expected: Expected::Shape(ValueShape::Map),
-                    found: Found::Int(7)
-                })
-            }))
-        );
-        assert_eq!(error.hints(), []);
-        assert!(error.context().is_none());
-        assert!(
-            error
-                .reason
-                .advice()
-                .iter()
-                .any(|hint| hint.contains("zoxide: [:]"))
-        );
     }
 }

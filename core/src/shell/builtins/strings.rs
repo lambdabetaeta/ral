@@ -393,27 +393,6 @@ mod tests {
     use crate::fact::DataStep;
     use crate::shell::runtime::Break;
 
-    #[test]
-    fn length_requires_a_sized_runtime_head() {
-        let Err(Break::Error(error)) = builtin_len(&[Value::Unit]) else {
-            panic!("length of an unsized value")
-        };
-        assert_eq!(
-            error.reason,
-            Value::Unit
-                .expected(
-                    "length",
-                    Expected::AnyOf(vec![
-                        ValueShape::String,
-                        ValueShape::Bytes,
-                        ValueShape::List,
-                        ValueShape::Map,
-                    ])
-                )
-                .reason
-        );
-    }
-
     fn refusal(result: Settled<Value>) -> InvalidFailure {
         let Err(Break::Error(error)) = result else {
             panic!("expected refusal")

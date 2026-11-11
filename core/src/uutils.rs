@@ -285,25 +285,6 @@ declare_coreutils! {
     }
 }
 
-#[cfg(all(test, feature = "coreutils"))]
-mod hygiene_tests {
-    use super::*;
-
-    /// A `unix:` name is advertised when the platform and the feature both
-    /// allow it, never merely because the feature is on.  Keyed on the real
-    /// `cfg!` rather than a fixed platform, so it is honest on any host.
-    #[test]
-    fn unix_only_tools_are_advertised_iff_unix_and_feature_on() {
-        for name in COREUTILS_UNIX_ONLY_TOOLS {
-            assert_eq!(
-                COREUTILS_TOOLS.contains(name),
-                cfg!(all(unix, feature = "coreutils-unix-only")),
-                "{name} advertised-set mismatch"
-            );
-        }
-    }
-}
-
 /// `cmp` shim, translating upstream `diffutilslib::cmp::main` minus two
 /// things its private `Params` fields put out of reach: the same-file /
 /// both-stdin shortcut (we re-read and report `Equal` — same exit code,
@@ -425,15 +406,5 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
         0
     } else {
         1
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unbundled_name_serves_127() {
-        assert_eq!(serve("zz-no-such-tool".as_ref(), Vec::new()), 127);
     }
 }

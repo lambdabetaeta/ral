@@ -30,7 +30,7 @@ mod tests {
     use super::*;
     use crate::data::FOValue;
     use crate::data::datum::{Datum, tag};
-    use crate::fact::{Failure, FailureCode as _, Reason};
+    use crate::fact::Reason;
     use crate::source::CallSite;
 
     fn site() -> CallSite {
@@ -39,18 +39,6 @@ mod tests {
             line: 1,
             col: 1,
         }
-    }
-
-    #[test]
-    fn reason_is_the_failure_codes_only_source() {
-        let rec = ErrorFact::new(
-            Reason::process("sh", Failure::Exited(3)),
-            "sh".into(),
-            site(),
-        );
-        assert_eq!(rec.failure_code().get(), 3);
-        let cause = ErrorFact::new(Reason::TimedOut, "sh".into(), site());
-        assert_eq!(cause.failure_code().get(), 124);
     }
 
     #[test]

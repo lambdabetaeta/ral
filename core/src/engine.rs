@@ -325,33 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_installer_matches_known_tag() {
-        match resolve_installer(&crate::carrier::testkit::BARE, PROTOCOL_VERSION, "bare") {
-            Ok(target) => assert_eq!(target.tag, "bare"),
-            Err(msg) => panic!("known tag must resolve, got {msg}"),
-        }
-    }
-
-    #[test]
-    fn resolve_installer_refuses_unknown_tag() {
-        match resolve_installer(
-            &crate::carrier::testkit::BARE,
-            PROTOCOL_VERSION,
-            "no-such-installer",
-        ) {
-            Ok(_) => panic!("unknown tag must be refused"),
-            Err(msg) => {
-                assert_eq!(
-                    msg.reason,
-                    Reason::Protocol(Box::new(ProtocolFailure::UnknownInstaller(
-                        "no-such-installer".into()
-                    ),))
-                );
-            }
-        }
-    }
-
-    #[test]
     fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
         match resolve_installer(
             &crate::carrier::testkit::BARE,

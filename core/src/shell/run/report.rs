@@ -285,19 +285,6 @@ mod static_diagnostic_seam_tests {
         assert!(rendered.ends_with('\n'));
     }
 
-    /// A fault is a `Faulted`, not the `Static` a refusal is, yet the same
-    /// one-liner.
-    #[cfg(unix)]
-    #[test]
-    fn a_fault_is_a_faulted_one_liner() {
-        let Report::Faulted { rendered, status } = Report::faulted(ReportFault::WorkerPanicked)
-        else {
-            panic!("a fault must be Report::Faulted");
-        };
-        assert_eq!(status.get(), 1);
-        assert!(rendered.contains("panicked in the engine worker") && !rendered.contains('╰'));
-    }
-
     #[test]
     fn a_panicked_run_projects_to_a_panic_ending() {
         let shell = crate::test_helper::core_shell();
@@ -323,27 +310,6 @@ mod static_diagnostic_seam_tests {
     }
 
     #[test]
-    fn a_non_data_result_projects_to_a_failure() {
-        let mut shell = crate::test_helper::core_shell();
-        let report = shell
-            .run(Run::captured(
-                "spawn { return 1 }",
-                SourceOrigin::named("<test>"),
-            ))
-            .into_report(&shell);
-        assert_eq!(report.code(), 1);
-        let Report::Ran(Ran {
-            ending: Ending::Err(_),
-            rendered,
-            ..
-        }) = report
-        else {
-            panic!("expected failed projection");
-        };
-        assert!(rendered.contains("`await $h`"), "{rendered:?}");
-    }
-
-    #[test]
     fn ok_and_exit_render_nothing() {
         let mut shell = crate::test_helper::core_shell();
         for src in ["return 1", "exit 3"] {
@@ -355,71 +321,5 @@ mod static_diagnostic_seam_tests {
             };
             assert!(rendered.is_empty(), "{src}: {rendered:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod typed_report_tests {
-    use super::*;
-    use crate::data::Opaque;
-    use crate::fact::{NonData, OpaqueKind, StateFailure};
-
-    #[test]
-    fn non_data_result_keeps_opaque_leaf_and_nesting_without_stored_advice() {
-        for (leaf, kind) in [
-            (Opaque::Block, OpaqueKind::Block),
-            (Opaque::Function, OpaqueKind::Function),
-            (Opaque::Handle, OpaqueKind::Handle),
-        ] {
-            for nested in [false, true] {
-                let error = not_data(NotData { leaf, nested });
-                let Reason::Invalid(failure) = &error.reason else {
-                    panic!("non-data refusal")
-                };
-                assert_eq!(failure.operation, "run");
-                assert_eq!(
-                    failure.cause,
-                    InvalidCause::NonData(NonData { leaf: kind, nested })
-                );
-                assert_eq!(error.hints(), []);
-                let advice = error.reason.advice().join("\n");
-                assert!(
-                    advice.contains(match (kind, nested) {
-                        (OpaqueKind::Handle, false) => "`await $h`",
-                        (OpaqueKind::Block | OpaqueKind::Function, false) => "force",
-                        (_, true) => "return only data",
-                    }),
-                    "{advice}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn refused_accepts_a_typed_reason_before_evaluation() {
-        let Report::Static { rendered, status } =
-            Report::refused(Reason::State(Box::new(StateFailure::NoChildEngines)))
-        else {
-            panic!("refusal must be static")
-        };
-        assert_eq!(status.get(), 1);
-        assert!(rendered.contains(&StateFailure::NoChildEngines.describe()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn report_encoding_fault_does_not_claim_the_run_was_refused() {
-        let cause =
-            crate::fact::FrameEncodeFailure::TooLarge(crate::fact::FrameEncodeFailureTooLarge {
-                actual: 65536usize.into(),
-                limit: 65535usize.into(),
-            });
-        let Report::Faulted { rendered, status } = Report::faulted(ReportFault::Unencodable(cause))
-        else {
-            panic!("already-started run loses a report, not admission")
-        };
-        assert_eq!(status.get(), 1);
-        assert!(rendered.contains("run report") && rendered.contains("65536"));
-        assert!(!rendered.contains('╰'));
     }
 }

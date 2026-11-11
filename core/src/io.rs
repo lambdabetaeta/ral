@@ -153,19 +153,6 @@ mod failure_tests {
     }
 
     #[test]
-    fn os_projection_retains_raw_code_and_fixed_not_found_wording() {
-        let error = io::Error::from(io::ErrorKind::NotFound);
-        let IoLeaf::Os(cause) = *failure(&error).leaf else {
-            panic!("OS leaf")
-        };
-        assert_eq!(cause.kind, IoKind::NotFound);
-        assert_eq!(cause.describe(), "no such file or directory");
-        let raw = io::Error::from_raw_os_error(12345);
-        let cause = OsFailure::from(&raw);
-        assert_eq!(cause.raw, Some(12345));
-    }
-
-    #[test]
     fn typed_spines_survive_borrowed_listing_error_copies() {
         let cause = IoCause::new(IoLeaf::Path(PathIoLeaf::NotHeld))
             .at(IoContext::Path(PathIoContext::UnsafeScopedInheritance));

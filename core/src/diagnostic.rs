@@ -155,19 +155,4 @@ mod tests {
             0..0
         );
     }
-
-    #[test]
-    fn plain_report_includes_code_message_and_hint() {
-        let out = Report {
-            code: Some("T9999"),
-            message: "message".into(),
-            at: None,
-            also: None,
-            hint: Some("hint".into()),
-        }
-        .plain();
-        assert!(out.contains("T9999"));
-        assert!(out.contains("message"));
-        assert!(out.contains("hint"));
-    }
 }

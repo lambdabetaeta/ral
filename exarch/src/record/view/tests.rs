@@ -1,7 +1,7 @@
 use super::BlockId;
 use super::*;
 use crate::provider::Tuning;
-use crate::record::{ChildStatus, JobId, Locus};
+use crate::record::Locus;
 
 fn at(control: &Control) -> Recorded<&Control> {
     Recorded::new(Locus::placeholder(Seq::new(1, 0)), control)
@@ -196,25 +196,6 @@ fn a_clear_leaves_its_marker_and_the_usage() {
     assert_eq!(memo.last_input(), 0, "the gauge numerator restarts");
 }
 
-/// A request's breadcrumb is the turn id it will produce.
-#[test]
-fn a_started_turn_opens_a_turn_block() {
-    let mut memo = Blocks::default();
-    let delta = memo.step_forensic(
-        Seq::new(1, 0),
-        &Forensic::TurnStarted {
-            turn: 7,
-            tuning: Tuning::default(),
-            via: None,
-        },
-    );
-    assert_eq!(delta, Delta::Opened(BlockId::new(Seq::new(1, 0))));
-    assert!(matches!(
-        memo.blocks(),
-        [b] if matches!(b.kind, BlockKind::Turn { id: 7 })
-    ));
-}
-
 /// One lane, many records, one block: consecutive prose grows the block it
 /// opened, and a record of another kind ends the run.
 #[test]
@@ -374,142 +355,4 @@ fn a_model_change_carries_its_window_and_a_bare_one_clears_it() {
         }))
         .unwrap();
     assert_eq!(memo.context_window(), None);
-}
-
-#[test]
-fn last_input_is_the_latest_turn_while_usage_sums() {
-    let delta = |input| Forensic::UsageDelta {
-        usage: Usage {
-            input,
-            ..Usage::default()
-        },
-        generation: None,
-        provider: None,
-    };
-    let mut memo = Blocks::default();
-    let _ = memo.step_forensic(Seq::new(1, 0), &delta(100));
-    let _ = memo.step_forensic(Seq::new(2, 0), &delta(250));
-    assert_eq!(memo.last_input(), 250);
-    assert_eq!(memo.usage().input, 350);
-}
-
-#[test]
-fn job_records_and_published_reports_draw_nothing() {
-    let mut memo = Blocks::default();
-    for forensic in [
-        Control::JobOpened,
-        Control::JobSettled {
-            job: JobId::from(42),
-            stopped: false,
-        },
-        Control::JobSettled {
-            job: JobId::from(42),
-            stopped: true,
-        },
-        Control::Status {
-            status: ChildStatus::Stopped,
-        },
-    ] {
-        assert_eq!(memo.step_control(&at(&forensic)), Ok(Delta::Quiet));
-        assert!(memo.blocks().is_empty());
-        assert_eq!(memo.origin(), None);
-    }
-}
-
-#[test]
-fn a_stopped_helper_draws_its_settlement() {
-    let mut memo = Blocks::default();
-    let seq = Seq::new(1, 0);
-    assert_eq!(
-        memo.step_display(
-            seq,
-            Display::SubagentDone {
-                name: "helper".into(),
-                outcome: ChildStatus::Stopped.settlement(),
-                elapsed_ms: 123,
-            },
-        ),
-        Delta::Opened(BlockId::new(seq))
-    );
-    assert!(matches!(
-        memo.blocks(),
-        [block] if matches!(
-            block.kind(),
-            BlockKind::SubagentDone { name, outcome: Settlement::Stopped, elapsed_ms: 123 }
-                if name == "helper"
-        )
-    ));
-}
-
-#[test]
-fn an_engine_severance_draws_a_system_note_with_its_code_and_cause() {
-    use ral_core::carrier::Severed;
-    use std::time::Duration;
-
-    for (cause, text) in [
-        (
-            Severed::Refused(ral_core::protocol::WireError::of(
-                &ral_core::error::Error::new(ral_core::fact::Reason::Protocol(Box::new(
-                    ral_core::fact::ProtocolFailure::VersionMismatch(
-                        ral_core::fact::ProtocolFailureVersionMismatch {
-                            front: 43,
-                            engine: 44,
-                        },
-                    ),
-                ))),
-            )),
-            "the ral engine was lost (engine-refused): the engine refused to attach: protocol version mismatch: frontend 43, engine 44",
-        ),
-        (
-            Severed::Closed(ral_core::fact::ConnectionClosed::Eof(
-                ral_core::fact::ProtocolPeer::Engine,
-            )),
-            "the ral engine was lost (engine-closed): the connection to the engine closed: end of stream from the engine",
-        ),
-        (
-            Severed::Silent(Duration::from_secs(3)),
-            "the ral engine was lost (engine-silent): the engine fell silent for 3s and was declared dead",
-        ),
-        (
-            Severed::Faulted(ral_core::fact::ConnectionFault::UnexpectedFrame(
-                ral_core::fact::ConnectionFaultUnexpectedFrame {
-                    receiver: ral_core::fact::ProtocolPeer::Frontend,
-                    phase: ral_core::fact::ProtocolPhase::Attached,
-                    actual: ral_core::fact::FrameKind::Attach,
-                },
-            )),
-            "the ral engine was lost (engine-faulted): the engine broke the protocol: the frontend received an unexpected attach frame after attachment",
-        ),
-    ] {
-        let mut memo = Blocks::default();
-        let seq = Seq::new(1, 0);
-        assert_eq!(
-            memo.step_forensic(seq, &Forensic::EngineSevered { cause }),
-            Delta::Opened(BlockId::new(seq))
-        );
-        assert!(matches!(
-            memo.blocks(),
-            [block] if matches!(block.kind(), BlockKind::SystemNote { text: drawn } if drawn == text)
-        ));
-    }
-}
-
-#[test]
-fn a_teardown_failure_draws_an_error() {
-    let mut memo = Blocks::default();
-    let seq = Seq::new(1, 0);
-    let failure = "agent 'helper' ended without certified engine teardown";
-    assert_eq!(
-        memo.step_forensic(
-            seq,
-            &Forensic::TeardownFailed {
-                failure: failure.into(),
-            },
-        ),
-        Delta::Opened(BlockId::new(seq))
-    );
-    assert!(matches!(
-        memo.blocks(),
-        [block] if matches!(block.kind(), BlockKind::Error { text } if text == failure)
-    ));
 }

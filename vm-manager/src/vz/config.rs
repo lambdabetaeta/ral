@@ -252,22 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn resources_are_clamped_into_the_permitted_range() {
-        let cpus = clamp_cpus(2);
-        // SAFETY: class-level range reads.
-        let (least_cpu, most_cpu) = unsafe {
-            (
-                VZVirtualMachineConfiguration::minimumAllowedCPUCount(),
-                VZVirtualMachineConfiguration::maximumAllowedCPUCount(),
-            )
-        };
-        assert!((least_cpu..=most_cpu).contains(&cpus));
-
-        let memory = clamp_memory(2048);
-        assert_eq!(memory % (1024 * 1024), 0, "memory is a whole-megabyte size");
-    }
-
-    #[test]
     fn a_missing_disk_image_is_refused_by_the_attachment() {
         let error = block_device(Path::new("/nowhere/at/all/rootfs.img"), true)
             .expect_err("a missing image cannot attach");

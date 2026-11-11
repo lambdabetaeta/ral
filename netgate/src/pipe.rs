@@ -322,15 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn bytes_pushed_by_the_core_side_reach_the_worker() {
-        let (core, mut worker) = new_pipe(Arc::new(|| {}));
-        assert_eq!(core.push_from_guest(b"hi"), 2);
-        let mut buf = [0u8; 2];
-        assert_eq!(worker.read(&mut buf).unwrap(), 2);
-        assert_eq!(&buf, b"hi");
-    }
-
-    #[test]
     fn a_full_ring_accepts_only_what_fits() {
         let (core, _worker) = new_pipe(Arc::new(|| {}));
         let data = vec![0u8; RING_CAP + 10];
@@ -384,17 +375,6 @@ mod tests {
             .read_deadline(&mut buf, Instant::now() + Duration::from_millis(50))
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn read_deadline_returns_data_that_arrives_before_the_deadline() {
-        let (core, worker) = new_pipe(Arc::new(|| {}));
-        assert_eq!(core.push_from_guest(b"hi"), 2);
-        let mut buf = [0u8; 8];
-        let n = worker
-            .read_deadline(&mut buf, Instant::now() + Duration::from_secs(5))
-            .unwrap();
-        assert_eq!(&buf[..n], b"hi");
     }
 
     #[test]

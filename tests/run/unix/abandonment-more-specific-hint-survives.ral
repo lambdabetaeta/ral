@@ -1,0 +1,7 @@
+# status: 143
+# contains: terminated from
+# absent: did not run
+# A signal death already carries its own hint, which says more about the
+# failure than the sequence can say about its own shape.
+sh -c #'kill -TERM $$'#
+echo second

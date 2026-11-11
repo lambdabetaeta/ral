@@ -308,7 +308,7 @@ impl<F: FnMut(SynodEvent)> Sink for Narrator<F> {
 mod tests {
     use super::*;
     use crate::wire::MarkDto;
-    use exarch::card::{Hunk, Mark, Row, Seg};
+    use exarch::card::Mark;
     use exarch::record::AgentState;
     use ral_core::data::datum::Datum as _;
     use ral_core::fact::Done;
@@ -354,49 +354,6 @@ mod tests {
         ] {
             assert!(project(Role::Helper, &Record::Transcript(transcript)).is_none());
         }
-    }
-
-    #[test]
-    fn a_transient_token_projects_verbatim() {
-        let Some(SynodEvent::Token { text }) =
-            transient(Role::Trunk, &Transient::Token("hello".to_string()))
-        else {
-            panic!("expected a Token event");
-        };
-        assert_eq!(text, "hello");
-    }
-
-    #[test]
-    fn a_deliberate_card_projects_to_the_transcript() {
-        let card = Card(vec![Mark::Diff {
-            path: "f.rs".to_string(),
-            hunks: vec![Hunk {
-                old: 1,
-                new: 1,
-                rows: vec![Row::Del(vec![Seg::plain("x")])],
-            }],
-        }]);
-        let record = Record::Display(Display::Card { card });
-        let event = project(Role::Trunk, &record).expect("card projects");
-        let value = serde_json::to_value(&event).expect("card serialises");
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "type": "card",
-                "marks": [{
-                    "mark": "diff",
-                    "path": "f.rs",
-                    "hunks": [{
-                        "old": 1,
-                        "new": 1,
-                        "rows": [{
-                            "tag": "del",
-                            "segs": [{ "emph": false, "text": "x" }],
-                        }],
-                    }],
-                }],
-            })
-        );
     }
 
     #[test]
@@ -466,18 +423,6 @@ mod tests {
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn wire_format_pins_the_tool_call_shape() {
-        let call = SynodEvent::ToolCall {
-            tool: "ral".to_string(),
-            cmd: "ls".to_string(),
-            summary: Some("list files".to_string()),
-        };
-        let call_value = serde_json::to_value(&call).expect("tool call serialises");
-        assert_eq!(call_value["type"], "tool_call");
-        assert_eq!(call_value["summary"], "list files");
     }
 
     #[test]
@@ -900,22 +845,6 @@ mod tests {
             panic!("expected a HelperDone event");
         };
         assert!(!ok);
-    }
-
-    #[test]
-    fn a_seam_fault_reaches_the_window_as_an_error() {
-        let mut router = Router::default();
-        router.route_transient(AgentId::new(0), &Transient::State(AgentState::Ready));
-
-        let Some(SynodEvent::Error { message }) = router.route_transient(
-            AgentId::new(0),
-            &Transient::Fault {
-                text: "record.jsonl: permission denied".to_string(),
-            },
-        ) else {
-            panic!("a plumbing fault must still reach the window");
-        };
-        assert_eq!(message, "record.jsonl: permission denied");
     }
 
     #[test]

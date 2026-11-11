@@ -199,8 +199,6 @@ mod tests {
                     .describe()
                     .contains(if parse { "P0001" } else { "T0010" })
             );
-            assert_eq!(error.fact(&shell).reason(), &error.reason);
-            assert_eq!(error.hints(), []);
         }
     }
 

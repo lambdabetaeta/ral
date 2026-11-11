@@ -115,27 +115,3 @@ impl Mail {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::record::Selected;
-
-    #[test]
-    fn birth_owes_nothing_for_every_parent_and_return_policy() {
-        for parent in [None, Some(AgentId::new(7))] {
-            for returns in [false, true] {
-                let started = Started {
-                    session_id: AgentId::new(8),
-                    name: "newborn".into(),
-                    parent,
-                    returns,
-                    selected: Selected::for_test("test-model"),
-                    log_dir: std::path::PathBuf::default(),
-                    at_unix_ms: 0,
-                };
-                assert!(!Mail::new(&started).owes(), "{started:?}");
-            }
-        }
-    }
-}

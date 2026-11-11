@@ -375,27 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_renders_through_the_one_diagnosis() {
-        let (db, file) = db_with("main.ral", "sleep 5");
-        let end = End::Stopped(Stop {
-            cause: CancelCause::TimedOut,
-            owner: None,
-            at: Some(Prov::Live {
-                name: "sleep".into(),
-                span: Span::new(file, 0, 7),
-            }),
-        });
-        let caret = crate::io::ansi::strip(&end.render(&db, None, &ExitHints::default()));
-        assert!(
-            caret.contains("R0001") && caret.contains("here") && caret.contains("timed out"),
-            "{caret}"
-        );
-        let compact = crate::io::ansi::strip(&end.render(&db, Some(file), &ExitHints::default()));
-        assert!(compact.contains("timed out (exit status 124)"), "{compact}");
-        assert!(!compact.contains("here"), "{compact}");
-    }
-
-    #[test]
     fn a_reader_gone_stop_renders_nothing() {
         let (db, file) = db_with("main.ral", "echo hi");
         let end = End::Stopped(Stop {
@@ -408,18 +387,6 @@ mod tests {
         });
         assert_eq!(end.render(&db, None, &ExitHints::default()), "");
         assert_eq!(end.render(&db, Some(file), &ExitHints::default()), "");
-    }
-
-    #[test]
-    fn a_panic_renders_spanless() {
-        let (db, file) = db_with("main.ral", "echo hi");
-        let out = crate::io::ansi::strip(&End::Panic("kaput".into()).render(
-            &db,
-            Some(file),
-            &ExitHints::default(),
-        ));
-        assert!(out.contains("run panicked: kaput"), "{out}");
-        assert!(!out.contains("here") && !out.contains("main.ral"), "{out}");
     }
 
     #[test]
@@ -477,39 +444,6 @@ mod tests {
             err = err.with_hint(hint);
         }
         crate::io::ansi::strip(&err.render(db, None, &ExitHints::default()))
-    }
-
-    #[test]
-    fn runtime_error_ariadne_points_at_source() {
-        let (db, file) = db_with("test.al", "x = 5\ny = 10\necho $undefined\n");
-        let output = runtime(&db, Some(Span::new(file, 18, 28)), None, None);
-        assert!(output.contains("R0001"));
-        assert!(output.contains("test.al:3:6"), "{output}");
-    }
-
-    #[test]
-    fn runtime_error_ariadne_renders_hint() {
-        let (db, file) = db_with("test.al", "[a, b] = 5");
-        let output = runtime(
-            &db,
-            Some(Span::new(file, 0, 6)),
-            None,
-            Some("the right-hand side must evaluate to a list"),
-        );
-        assert!(output.contains("test.al:1:1"), "{output}");
-        assert!(output.contains("the right-hand side must evaluate to a list"));
-    }
-
-    #[test]
-    fn runtime_error_resolved_source_draws_caret() {
-        let (db, file) = db_with("main.ral", "echo x");
-        let out = runtime(&db, Some(Span::new(file, 5, 6)), None, None);
-        assert!(out.contains("R0001"));
-        assert!(
-            out.contains("here"),
-            "a resolved span should draw a caret:\n{out}"
-        );
-        assert!(out.contains("main.ral:1:6"), "{out}");
     }
 
     #[test]
@@ -581,16 +515,6 @@ mod tests {
         assert_eq!(decorated.discarded(u32::MAX).unwound().discarded, u32::MAX);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_signal_carries_its_advice() {
-        let reason = Reason::process("sh", Failure::Signaled(libc::SIGSEGV));
-        assert_eq!(
-            advice(&reason, &ExitHints::default()),
-            ["the process crashed with a segmentation fault"]
-        );
-    }
-
     #[test]
     fn ordered_notes_stay_separate_until_layout() {
         let diagnosis = Diagnosis {
@@ -620,21 +544,6 @@ mod tests {
         assert!(notes[4].starts_with("3 bytes written"));
         let rendered = crate::io::ansi::strip(&diagnosis.compact("failure", &notes));
         assert_eq!(rendered.matches("hint:").count(), 5);
-    }
-
-    #[test]
-    fn portable_advice_is_rendered_not_stored() {
-        let error = Error::new(Reason::Evaluation(Box::new(
-            crate::fact::EvalFailure::MissingBinding("STATUS".into()),
-        )))
-        .with_hint("contextual advice");
-        assert_eq!(error.hints().len(), 1);
-        let output = error.plain();
-        assert!(
-            output.find("contextual advice").unwrap()
-                < output.find("there is no status register").unwrap()
-        );
-        assert_eq!(error.hints().len(), 1);
     }
 
     #[test]

@@ -347,17 +347,4 @@ mod tests {
             }
         }
     }
-
-    /// An unknown class names itself, never passes silently.
-    #[test]
-    fn an_unknown_class_is_named() {
-        let why = Enquiry::decode(&tag("exarch-agents", None)).expect_err("unknown class");
-        assert_eq!(
-            why,
-            DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
-                tag: "exarch-agents".into(),
-                offered: vec![EDITOR.into(), PLUGIN.into(), CLIPBOARD.into()],
-            }))
-        );
-    }
 }

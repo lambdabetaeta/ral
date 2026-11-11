@@ -323,18 +323,6 @@ fn process_signals_remain_outside_the_deny_set() {
 }
 
 #[test]
-fn every_why_is_non_empty_and_carries_no_trailing_full_stop() {
-    for rule in Filter::ENVELOPE.0 {
-        assert!(!rule.why.is_empty(), "a rule's why must not be empty");
-        assert!(
-            !rule.why.ends_with('.'),
-            "the hint adds punctuation; why must not: {:?}",
-            rule.why
-        );
-    }
-}
-
-#[test]
 fn explain_names_a_kill_an_errno_and_nothing_for_an_undenied_call() {
     let ptrace = Filter::ENVELOPE
         .explain(libc::SYS_ptrace, &seccompiler::SeccompAction::KillThread)

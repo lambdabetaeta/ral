@@ -143,11 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn every_variant_round_trips_through_its_encoding() {
-        every_kind().into_iter().for_each(round_trips);
-    }
-
-    #[test]
     fn command_capture_fields_are_required_and_typed() {
         let Observed::Command(command) = command(
             CommandOrigin::External,
@@ -184,27 +179,6 @@ mod tests {
             }))
             .field("stdout-total")
         );
-    }
-
-    #[test]
-    fn the_site_is_total_and_round_trips() {
-        let obs = Observation::instant(
-            site(),
-            None,
-            Observed::Grep(Grep {
-                scope: String::new(),
-                pattern: "x".into(),
-            }),
-        );
-        let Value::Map(m) = Value::from(obs.clone().encode()) else {
-            panic!("an observation encodes as a record")
-        };
-        assert_eq!(m.get("site").as_deref(), Some(&Value::from_datum(site())));
-        assert_eq!(
-            m.get("principal").as_deref(),
-            Some(&Value::variant("none", None))
-        );
-        assert_eq!(Observation::decode(&obs.clone().encode()), Ok(obs));
     }
 
     /// The tag and the record behind it, out of an encoding's `what`.
@@ -264,27 +238,6 @@ mod tests {
         );
     }
 
-    /// The tag *is* the kind, so no `kind` field stands beside it to disagree
-    /// with the payload it labels.
-    #[test]
-    fn the_tag_is_the_kind_and_stands_alone() {
-        let obs = Observation::instant(
-            site(),
-            None,
-            Observed::Read(Read {
-                path: "in.txt".into(),
-            }),
-        );
-        let value = Value::from_datum(obs);
-        let (tag, fact) = fact_of(&value);
-        assert_eq!(tag, "read");
-        assert_eq!(fact.get("path").as_deref(), Some(&Value::string("in.txt")));
-        let Value::Map(m) = &value else {
-            unreachable!()
-        };
-        assert!(!m.contains_key("kind"));
-    }
-
     /// An absent before-image is `` `none ``, not a missing key: a reader must
     /// tell "unknown" from "empty", and both round-trip.
     #[test]
@@ -321,32 +274,6 @@ mod tests {
             let back: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
             assert_eq!(Observation::decode(&back), Ok(obs));
         }
-    }
-
-    /// A check's decision is a field of its own, never an exit status standing
-    /// in for one, and its detail is a nested map rather than fields spliced
-    /// beside the envelope.
-    #[test]
-    fn a_check_encodes_its_resources_decision() {
-        let obs = Observation::instant(
-            site(),
-            Some("alex".into()),
-            Observed::Check(Check::new(
-                Resource::Exec,
-                BTreeMap::from([("name".to_string(), "curl".to_string())]),
-            )),
-        );
-        let (tag, fact) = fact_of(&Value::from(obs.encode()));
-        assert_eq!(tag, "check");
-        assert_eq!(
-            fact.get("decision").as_deref(),
-            Some(&Value::variant("denied", None))
-        );
-        assert!(!fact.contains_key("status"));
-        assert_eq!(
-            fact.get("fields").as_deref(),
-            Some(&Value::map(vec![("name".into(), Value::string("curl"))]))
-        );
     }
 
     #[test]

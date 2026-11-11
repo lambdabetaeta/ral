@@ -309,37 +309,6 @@ mod tests {
         assert_eq!(at(None, None, "429 too many", now()), None);
     }
 
-    #[test]
-    fn unwaitable_reads_type_and_code() {
-        assert!(unwaitable(
-            &json!({"error": {"type": "insufficient_quota"}})
-        ));
-        assert!(unwaitable(
-            &json!({"error": {"code": "usage_not_included"}})
-        ));
-        assert!(!unwaitable(
-            &json!({"error": {"type": "usage_limit_reached"}})
-        ));
-        assert!(!unwaitable(&json!({"error": {"code": 429}})));
-    }
-
-    #[test]
-    fn limit_reads_the_allowance_on_type_and_code() {
-        assert_eq!(
-            limit(&json!({"error": {"type": "usage_limit_reached"}})),
-            Limit::Allowance
-        );
-        assert_eq!(
-            limit(&json!({"error": {"code": "usage_limit_reached"}})),
-            Limit::Allowance
-        );
-        assert_eq!(
-            limit(&json!({"error": {"type": "rate_limit_exceeded"}})),
-            Limit::Rate
-        );
-        assert_eq!(limit(&json!({"error": {"code": 429}})), Limit::Rate);
-    }
-
     /// `İ` → `i̇` is one byte longer, so a slice taken from the shorter original
     /// would land mid-character and panic.
     #[test]

@@ -1,0 +1,6 @@
+# status: 1
+# contains: later steps in this block did not run
+# The tail after the failing step is named, once, on the innermost block.
+echo outer
+!{ echo inner; fail boom; echo a; echo b }
+echo last

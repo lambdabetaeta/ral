@@ -1,8 +1,7 @@
 //! Helpers shared by core's tests and by hosts' tests under `test-util`.
 
 pub mod confinement;
-#[cfg(test)]
-pub(crate) mod subprocess;
+pub mod subprocess;
 #[cfg(all(test, unix))]
 pub(crate) mod terminal;
 
@@ -203,8 +202,7 @@ pub fn core_shell() -> crate::Shell {
 ///
 /// # Panics
 /// If the host's baseline does not resolve, which no test can run without.
-#[cfg(test)]
-pub(crate) fn fresh_shell() -> crate::Shell {
+pub fn fresh_shell() -> crate::Shell {
     crate::shell::boot::boot_shell(
         crate::io::terminal::TerminalState::default(),
         crate::shell::boot::BakedPrelude::runtime(),

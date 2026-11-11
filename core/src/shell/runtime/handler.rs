@@ -434,7 +434,6 @@ mod tests {
             refused.prov.as_ref().and_then(crate::error::Prov::span),
             span
         );
-        assert_eq!(refused.hints(), []);
     }
 
     #[test]

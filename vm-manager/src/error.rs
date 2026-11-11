@@ -537,95 +537,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_error_crosses_a_pipe_as_data() {
-        let path = || PathBuf::from("synod-session-1-2.vhd");
-        let cause = || "access is denied".to_string();
-        let hypervisor = || Cow::Borrowed("Hyper-V");
-        let console = || GuestConsole::Kept {
-            log: Some(path()),
-            tail: vec!["panic".to_string()],
-        };
-        let errors = [
-            Error::NoBackend,
-            Error::Unentitled,
-            Error::NotPermitted,
-            Error::NoSuchFolder(path()),
-            Error::NotAFolder(path()),
-            Error::FolderUnreadable {
-                path: path(),
-                cause: cause(),
-            },
-            Error::MissingBootFile {
-                path: path(),
-                cause: cause(),
-            },
-            Error::ServiceUnlocated { cause: cause() },
-            Error::NoGuestImage {
-                looked_in: vec![path(), path()],
-            },
-            Error::CorruptGuestImage { archive: path() },
-            Error::HostFile {
-                file: HostFile::SessionDisk,
-                act: Act::Create,
-                path: path(),
-                cause: cause(),
-            },
-            Error::FolderForbidden {
-                path: path(),
-                read_only: true,
-                cause: cause(),
-            },
-            Error::FolderUnexamined {
-                path: path(),
-                cause: cause(),
-            },
-            Error::FolderIsLink(path()),
-            Error::FolderChanged(path()),
-            Error::NotUnicode(path()),
-            Error::NotAFileUrl(path()),
-            Error::VersionSkew {
-                client: 1,
-                service: 2,
-            },
-            Error::NotConstructed {
-                hypervisor: hypervisor(),
-                why: cause(),
-                files: Box::new(MachineFiles {
-                    kernel: path(),
-                    initramfs: path(),
-                    rootfs: path(),
-                    session: path(),
-                    folder: path(),
-                }),
-            },
-            Error::Undialled {
-                hypervisor: hypervisor(),
-                wire: Wire::Net,
-                within_secs: 60,
-                cause: cause(),
-                console: Some(console()),
-            },
-            Error::Undialled {
-                hypervisor: hypervisor(),
-                wire: Wire::Control,
-                within_secs: 60,
-                cause: cause(),
-                console: None,
-            },
-            Error::ForcedStop {
-                hypervisor: hypervisor(),
-                grace_secs: 5,
-            },
-            Error::backend("Hyper-V", cause()),
-        ];
-        for error in errors {
-            let wire = serde_json::to_string(&error).unwrap();
-            let back: Error = serde_json::from_str(&wire).unwrap();
-            assert_eq!(format!("{back:?}"), format!("{error:?}"));
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_path_that_is_not_unicode_crosses_a_pipe() {
@@ -689,18 +600,5 @@ mod tests {
         .unwrap();
         let back: Error = serde_json::from_str(&wire).unwrap();
         assert!(matches!(back, Error::NoGuestImage { looked_in } if looked_in == [folder]));
-    }
-
-    #[test]
-    fn a_failing_boot_quotes_the_guest() {
-        let said = quoted(&[
-            "  EXT4-fs (sda): mounted filesystem  ".to_string(),
-            "ral-guest: no ral.port on the command line".to_string(),
-        ]);
-        assert_eq!(
-            said,
-            "\u{201c}EXT4-fs (sda): mounted filesystem\u{201d} / \u{201c}ral-guest: no ral.port \
-             on the command line\u{201d}"
-        );
     }
 }

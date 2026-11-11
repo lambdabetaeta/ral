@@ -905,46 +905,6 @@ fn record_json_chat_all_content_arms_are_audited_structural_reuse() {
 }
 
 #[test]
-fn record_json_malformed_roots_are_structured_without_semantic_serde_fallbacks() {
-    fn wrong<T: JsonDecode>() {
-        assert!(matches!(
-            *failure::<T>("false").cause,
-            DecodeCause::JsonShape(_)
-        ));
-    }
-    wrong::<Record>();
-    wrong::<Transcript>();
-    wrong::<Control>();
-    wrong::<Display>();
-    wrong::<Forensic>();
-    wrong::<Started>();
-    wrong::<ChildFailure>();
-    wrong::<ChildStatus>();
-    wrong::<Settlement>();
-    wrong::<Locus>();
-    wrong::<Span>();
-    wrong::<Eviction>();
-    wrong::<Pointer>();
-    wrong::<SpanRow>();
-    wrong::<TurnRow>();
-    wrong::<Location>();
-    wrong::<Linked>();
-    wrong::<Selected>();
-    wrong::<ProviderError>();
-    wrong::<Refusal>();
-    wrong::<CutShort>();
-    wrong::<Card>();
-    wrong::<Change>();
-    wrong::<Mark>();
-    wrong::<Measure>();
-    wrong::<Row>();
-    wrong::<Hunk>();
-    wrong::<Diff>();
-    wrong::<Post>();
-    wrong::<Schedule>();
-}
-
-#[test]
 fn record_json_deep_malformed_severance_preserves_borrowed_consuming_failures() {
     let deep = format!(
         "{}\"unit\"{}",

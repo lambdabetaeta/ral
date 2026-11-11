@@ -1,0 +1,54 @@
+# `raise` re-raises a caught record as it stands and takes a hand-built
+# one as the program's own claim; `fail` raises only text.
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+let caught = { |body|
+    let result = try { !$body; return `ok } { |e| return `err $e }
+    case $result [
+        `ok: { |_| fail 'expected failure' },
+        `err: { |e| return $e },
+    ]
+}
+
+# A caught record re-raises equal: frame, message, status and site
+let failed = caught { fail 'boom' }
+assert_eq 're-raised fail' $failed !{caught { raise $failed }}
+let refused = caught { let _ = slice 'abc' -1 2 }
+assert_eq 're-raised refusal' $refused !{caught { raise $refused }}
+
+# A hand-built record is raised with exactly its frame, message, status and site
+let site = [script: 'manual', line: 2, col: 3]
+let claimed = [frame: tool, message: 'tool gave up', status: 3, site: $site]
+let raised = caught { raise $claimed }
+assert_eq 'claimed frame' tool $raised[frame]
+assert_eq 'claimed message' 'tool gave up' $raised[message]
+assert_eq 'claimed status' 3 $raised[status]
+assert_eq 'claimed site' $site $raised[site]
+
+# A modified caught record is hand-built: the edit is what is raised
+let reworded = caught { raise [...$failed, message: 'edited'] }
+assert_eq 'reworded message' edited $reworded[message]
+assert_eq 'reworded frame' $failed[frame] $reworded[frame]
+assert_eq 'reworded site' $failed[site] $reworded[site]
+let restated = caught { raise [...$failed, status: 7] }
+assert_eq 'restated status' 7 $restated[status]
+assert_eq 'restated message' $failed[message] $restated[message]
+
+# Success is no failure: status 0 is refused, and `return` is the way to succeed
+let zero = caught { raise [...$claimed, status: 0] }
+assert_eq 'zero refusal operation' raise $zero[frame]
+assert_eq 'zero refusal message' "raise: a failure's status is 1 to 255; 0 is success" $zero[message]
+assert_eq 'zero refusal status' 1 $zero[status]
+
+# A status is one byte
+let wide = caught { raise [...$claimed, status: 256] }
+assert_eq 'wide refusal operation' raise $wide[frame]
+assert_eq 'wide refusal names the status' true !{re-match 'status' $wide[message]}
+assert_eq 'wide refusal status' 1 $wide[status]
+
+echo 'raise keeps its record tests done'

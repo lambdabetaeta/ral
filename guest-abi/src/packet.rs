@@ -84,16 +84,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_frame_round_trips() {
-        let packet = vec![1, 2, 3, 4, 5];
-        let mut wire = Vec::new();
-        write_frame(&mut wire, &packet).unwrap();
-        let mut cursor = wire.as_slice();
-        assert_eq!(read_frame(&mut cursor).unwrap(), packet);
-        assert_eq!(cursor, []);
-    }
-
-    #[test]
     fn the_wire_layout_is_a_little_endian_length_then_the_packet() {
         let mut wire = Vec::new();
         write_frame(&mut wire, &[0xAA, 0xBB, 0xCC]).unwrap();

@@ -1,0 +1,7 @@
+# status: 127
+# absent: attempt
+# `attempt` cannot make a command run, so a step that never became a process
+# is not told to wrap itself in one.
+echo a
+nosuchcmd-xyz
+echo b

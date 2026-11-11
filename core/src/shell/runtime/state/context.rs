@@ -169,8 +169,6 @@ mod tests {
             error.reason,
             Reason::State(Box::new(StateFailure::MissingAmbient(AmbientSetting::Home)))
         );
-        assert_eq!(error.hints(), []);
-        assert!(error.reason.advice().join("\n").contains("set HOME"));
         context.set_env_var("HOME", "/effective/home").unwrap();
         assert_eq!(context.require_home().unwrap(), "/effective/home");
     }

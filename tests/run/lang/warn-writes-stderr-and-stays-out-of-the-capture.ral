@@ -1,0 +1,5 @@
+# contains: note
+# `warn` is the whole diagnostic surface, and its route is Value: the line
+# reaches standard error while the capture binds the byte channel alone.
+let payload = !{ warn 'note'; echo carried }
+echo "[$payload]"

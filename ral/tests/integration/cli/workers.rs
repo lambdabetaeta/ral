@@ -1,0 +1,323 @@
+//! A halting batch script takes its workers' external commands down with it,
+//! and a returning one waits for its loose workers.
+//!
+//! A batch script that halts while a worker's external command is still running
+//! must take that command down with it — grandchildren included — rather than
+//! leaving it reparented to PID 1 to run to completion.
+//!
+//! The child must be *established* before the host exits: a host that exits
+//! while the spawn is still in flight looks clean whatever the teardown does.
+//! So establishment is a handshake and not an interval — the fixture opens the
+//! gate only once its tree is up and its pids are published, and the host
+//! blocks on the gate until then.  Nothing here may wait a fixed span instead:
+//! under CPU contention a freshly `exec`ed `/bin/sh` can sit a whole second
+//! before its first instruction, which is long enough for any wall-clock guard
+//! to expire while the tree it was guarding does not yet exist.
+
+#![cfg(unix)]
+
+use crate::common::{
+    Output, diagnostics, fresh_tmp_path, ral_command, run_with_timeout, wait_with_timeout,
+};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+/// Generous: it bounds a hang, and only a fixture that never reaches the gate
+/// at all can reach it.
+const GATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Is `pid` still a live process?  Signal 0 is the existence probe; the orphan
+/// we are looking for is init's child by then, never ours, so no zombie can
+/// answer in its place.
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Create the rendezvous the host blocks on.  A named pipe and not a file the
+/// host polls: opening one end waits for the other, so neither side can miss
+/// the moment the other arrives.
+fn mkfifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert!(
+        unsafe { libc::mkfifo(raw.as_ptr(), 0o600) } == 0,
+        "mkfifo {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+}
+
+/// External work whose tree — a shell and a background `sleep` under it —
+/// outlasts any test.  The fixture publishes both pids, then opens the gate.
+struct Tree {
+    pidfile: PathBuf,
+    gate: PathBuf,
+    fixture: PathBuf,
+}
+
+impl Tree {
+    fn new() -> Self {
+        let tree = Self {
+            pidfile: fresh_tmp_path("ral_worker_teardown", "pids"),
+            gate: fresh_tmp_path("ral_worker_teardown", "gate"),
+            fixture: fresh_tmp_path("ral_worker_teardown", "sh"),
+        };
+        mkfifo(&tree.gate);
+        std::fs::write(
+            &tree.fixture,
+            format!(
+                "#!/bin/sh\nsleep 300 &\necho \"$$ $!\" > {}\n: > {}\nwait\n",
+                tree.pidfile.display(),
+                tree.gate.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &tree.fixture,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        tree
+    }
+
+    /// Assert `ral` exited cleanly with `out` and left nothing of the tree.
+    fn assert_gone(self, out: Option<Output>) -> Output {
+        // Read before removing, and remove whatever the run reached, so a
+        // failure below leaves no fixture, gate, or pid file behind for the
+        // next run.
+        let recorded = std::fs::read_to_string(&self.pidfile);
+        let _ = std::fs::remove_file(&self.fixture);
+        let _ = std::fs::remove_file(&self.gate);
+        let _ = std::fs::remove_file(&self.pidfile);
+        let pids: Vec<i32> = recorded
+            .iter()
+            .flat_map(|text| text.split_whitespace())
+            .map(|p| p.parse().expect("a pid"))
+            .collect();
+        // Nothing below can leave the tree running, whichever assertion fires.
+        let sweep = || {
+            for pid in &pids {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        };
+
+        let Some(out) = out else {
+            sweep();
+            panic!("ral never exited: the worker's child never opened the gate");
+        };
+        if out.status != 0 {
+            sweep();
+            panic!("ral exited {}, stderr: {}", out.status, out.stderr);
+        }
+        // The gate opened, so the fixture had already published both pids.
+        assert!(
+            recorded.is_ok(),
+            "the gate opened without the pids being published"
+        );
+
+        // The drain runs before the host exits, so the tree is already gone;
+        // the margin is for a loaded machine's scheduling, not for a second
+        // teardown.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && pids.iter().copied().any(alive) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survivors: Vec<i32> = pids.iter().copied().filter(|p| alive(*p)).collect();
+        sweep();
+        assert!(
+            survivors.is_empty(),
+            "the host exited and left {survivors:?} running"
+        );
+        out
+    }
+}
+
+/// Run `watch`ed external work, then `tail` (the rest of the script), and
+/// assert nothing of its tree is left once `ral` has exited.
+fn nothing_survives(tail: &str) {
+    let tree = Tree::new();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "let job = watch \"tests\" {{ {} ; return `done }}\ncat {}\n{tail}\n",
+            tree.fixture.display(),
+            tree.gate.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    tree.assert_gone(out);
+}
+
+/// A returning script now waits; an explicit halt takes the worker down.
+#[test]
+fn a_workers_external_child_dies_when_the_batch_script_halts() {
+    nothing_survives("echo hi\nexit 0");
+}
+
+/// `cancel` is the sharper one: it takes the entry out of the registry the
+/// instant it signals, so the roster is empty by the time the host tears down
+/// and only the worker thread itself still attests to a child being killed.
+#[test]
+fn a_cancel_the_host_immediately_outruns_still_reaps_the_child() {
+    nothing_survives("cancel $job");
+}
+
+/// `cancel` claims the handle, so an `await` after it fails at once, an
+/// ordinary error rather than a stop.
+#[test]
+fn a_cancelled_workers_await_finds_it_claimed() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { /bin/sleep 30 }; cancel $h; await $h",
+        GATE_TIMEOUT,
+    )
+    .expect("await of a cancelled worker hung");
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("await: worker was already claimed"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+/// A worker's `exit` is the host's: it reaches the run that observes the
+/// worker and ends it.
+#[test]
+fn an_exit_in_a_worker_ends_the_awaiting_run() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { exit 3 }; await $h; echo after",
+        GATE_TIMEOUT,
+    )
+    .expect("await of an exited worker hung");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
+    assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
+}
+
+/// Wait for the worker's end with `is-done`, which never raises; only `poll`
+/// then observes it.
+#[test]
+fn a_poll_of_an_exited_worker_ends_the_run() {
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        "let h = spawn { exit 3 }\n\
+         let settled = { |_| if !{is-done $h} { return () } else { /bin/sleep 0.01; settled 0 } }\n\
+         settled 0; poll $h; echo after",
+        GATE_TIMEOUT,
+    )
+    .expect("poll of an exited worker hung");
+    assert_eq!(out.status, 3, "stderr: {}", out.stderr);
+    assert!(!out.stdout.contains("after"), "stdout: {}", out.stdout);
+}
+
+/// A `par` whose first item fails ends its sibling before the failure
+/// reaches the `try`: the sibling's external tree dies with the call.  Item 0
+/// fails only once item 1's tree is up, so the sibling is established.
+#[test]
+fn a_par_childs_external_dies_with_the_call() {
+    let tree = Tree::new();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "try {{ par {{ |x| if $[$x == 0] {{ cat {}; fail x }} \
+             else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
+            tree.gate.display(),
+            tree.fixture.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let out = tree.assert_gone(out);
+    assert_eq!(out.stdout, "caught\n");
+}
+
+/// The cleanup grace a batch run's gather drains within.
+const GRACE: Duration = Duration::from_secs(5);
+
+/// I4′: a gather whose body cancels its child returns within the grace, and
+/// the child's external tree is gone.  The body cancels only once the tree
+/// is up.
+#[test]
+fn a_cancelled_child_is_drained_at_the_gathers_exit() {
+    let tree = Tree::new();
+    let started = Instant::now();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "gather {{ let h = spawn \"slow\" {{ {} }}; cat {}; cancel $h; return () }}\n",
+            tree.fixture.display(),
+            tree.gate.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+    tree.assert_gone(out);
+    assert!(elapsed < GRACE + Duration::from_secs(1), "took {elapsed:?}");
+}
+
+/// `par` raises the first failure in time, not in input order: item 1 fails
+/// while item 0's tree runs, and the call raises within the grace with the
+/// sibling's tree gone.  Item 1 fails only once item 0's tree is up.
+#[test]
+fn par_raises_the_first_failure_at_once() {
+    let tree = Tree::new();
+    let started = Instant::now();
+    let out = run_with_timeout(
+        "ral_worker_teardown",
+        &[],
+        &format!(
+            "try {{ par {{ |x| if $[$x == 1] {{ cat {}; fail x }} \
+             else {{ {} }} }} [0, 1] 2 }} {{ |_| echo caught; return [] }}\n",
+            tree.gate.display(),
+            tree.fixture.display()
+        ),
+        GATE_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+    let out = tree.assert_gone(out);
+    assert_eq!(out.stdout, "caught\n");
+    assert!(elapsed < GRACE + Duration::from_secs(1), "took {elapsed:?}");
+}
+
+fn run(code: &str) -> Output {
+    let child = ral_command()
+        .args(["-c", code])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ral");
+    wait_with_timeout(child, Duration::from_secs(20)).expect("script hung")
+}
+
+#[test]
+fn a_returning_script_waits_for_its_loose_worker() {
+    let out = run("let h = spawn \"late\" { ^sleep 1; echo late }; echo end");
+    assert_eq!(out.status, 0, "{out:?}");
+    assert_eq!(out.stdout, "end\nlate\n");
+    assert_eq!(diagnostics(&out.stderr), "", "{out:?}");
+}
+
+#[test]
+fn a_failing_loose_worker_leaves_no_trace() {
+    let out = run("let h = spawn \"fails\" { ^false }; echo end");
+    assert_eq!(out.status, 0, "{out:?}");
+    assert_eq!(out.stdout, "end\n");
+    assert_eq!(diagnostics(&out.stderr), "", "{out:?}");
+}
+
+#[test]
+fn an_exit_takes_a_running_loose_worker_down() {
+    let start = Instant::now();
+    let out = run("let h = spawn \"t\" { ^sleep 30; echo never }; exit 3");
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(out.status, 3, "{out:?}");
+    assert_eq!(out.stdout, "");
+    assert_eq!(diagnostics(&out.stderr), "", "{out:?}");
+}

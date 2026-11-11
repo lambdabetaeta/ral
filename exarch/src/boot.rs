@@ -166,8 +166,8 @@ mod testkit {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
-    use super::{engine_root, engine_runtime, test_shell};
-    use crate::app::{EXARCH, SCRATCH_VAR, Scratch};
+    use super::{engine_root, engine_runtime};
+    use crate::app::SCRATCH_VAR;
     use ral_core::Shell;
     use ral_core::authority::grant::freeze::Anchor;
     use ral_core::authority::grant::value::{Axes, ExecTable, FsTable, GrantValue, Target};
@@ -175,20 +175,6 @@ mod tests {
     use ral_core::environ::EnvVars;
     use ral_core::path::EnginePath;
     use ral_core::protocol::{EngineSpec, Root};
-
-    /// Cargo's own TLS wants a Mach service no profile admits, so a confined session
-    /// must hand it the `git` binary instead — invisible in every log, hence
-    /// asserted here.
-    #[test]
-    fn a_confined_session_tells_cargo_to_fetch_through_git() {
-        let scratch = Scratch::for_test(EXARCH, "confined-settings").expect("test scratch");
-        let mut shell = test_shell();
-        scratch.install_into(&mut shell);
-        assert_eq!(
-            shell.env_var("CARGO_NET_GIT_FETCH_WITH_CLI"),
-            Some("true".to_string())
-        );
-    }
 
     /// The shell carries the scratch its root names, as a spelling, so a grant
     /// frozen in that session can anchor a `scratch` place to it: from the

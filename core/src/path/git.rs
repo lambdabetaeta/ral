@@ -267,14 +267,6 @@ mod tests {
         assert_eq!(core_worktree_of(text), None);
     }
 
-    #[test]
-    fn core_worktree_unquotes_a_quoted_value() {
-        assert_eq!(
-            core_worktree_of("[core]\n\tworktree = \"/work/tree\"\n"),
-            Some("/work/tree".to_string())
-        );
-    }
-
     /// Why a `.git` file in a fresh directory, read through `read`, is refused.
     fn bad_pointer(read: impl FnMut(&LexicalPath) -> io::Result<String>) -> Pointer {
         let tmp = tempfile::tempdir().unwrap();

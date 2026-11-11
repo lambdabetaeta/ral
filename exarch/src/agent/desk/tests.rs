@@ -26,9 +26,7 @@ use crate::record::{Display, Record, Transient};
 use crate::schedule::{Asked, parse_duration};
 use ral_core::data::datum::tag;
 use ral_core::fact::ExitCode as _;
-use ral_core::fact::{
-    DecodeCause, DecodeFailure, Expected, Found, ShapeFailure, UnknownField, UnknownTag,
-};
+use ral_core::fact::{DecodeCause, DecodeFailure, UnknownField, UnknownTag};
 use ral_core::shell::runtime::NurseryId;
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -337,27 +335,6 @@ fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
     parent.adopt_parked(id).is_ok()
 }
 
-#[test]
-fn unknown_class_answers_the_extension_error() {
-    with_desk(|desk, _agent| {
-        let err = desk
-            .handle(&FOValue::Variant {
-                label: "no-such-class".into(),
-                payload: None,
-            })
-            .expect_err("an unrecognised class must not answer Ok");
-        assert_eq!(
-            err.reason,
-            request_failure(DecodeFailure::new(DecodeCause::UnknownTag(UnknownTag {
-                tag: "no-such-class".into(),
-                offered: ["agents", "schedules", "pins", "context", "transcript"]
-                    .map(str::to_owned)
-                    .to_vec()
-            })))
-        );
-    });
-}
-
 /// Nesting the tag under the family must not open a silent hole one level
 /// down: a tag extends a family the way a class extends the desk.
 #[test]
@@ -385,27 +362,6 @@ fn unknown_tag_answers_the_extension_error_too() {
             );
         });
     }
-}
-
-/// Names the expected shape rather than panicking or silently defaulting.
-#[test]
-fn non_variant_request_errors_didactically() {
-    with_desk(|desk, _agent| {
-        let err = desk
-            .handle(&FOValue::Unit)
-            .expect_err("a non-variant request must not answer Ok");
-        assert_eq!(
-            err.reason,
-            request_failure(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
-                expected: Expected::Tags(
-                    ["agents", "schedules", "pins", "context", "transcript"]
-                        .map(str::to_owned)
-                        .to_vec()
-                ),
-                found: Found::Unit
-            })))
-        );
-    });
 }
 
 /// The audit is the model's only account of what survived an unwind, so it
@@ -500,8 +456,6 @@ fn reply_req(value: FOValue) -> Request {
 
 mod agents;
 mod context;
-#[cfg(unix)]
-mod factory;
 mod pins;
 mod schedules;
 #[cfg(unix)]

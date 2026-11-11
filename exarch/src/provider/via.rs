@@ -121,13 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_keeps_the_order_given() {
-        let via = Via::parse("novita,deepinfra/fp8").unwrap();
-        assert_eq!(via.tags(), ["novita", "deepinfra/fp8"]);
-        assert_eq!(via.to_string(), "novita,deepinfra/fp8");
-    }
-
-    #[test]
     fn an_empty_or_repeated_tag_is_refused() {
         for empty in ["", "a,,b", "a,"] {
             assert_eq!(

@@ -1,0 +1,35 @@
+# §4.5 all conditional mechanisms
+
+# if with Bool
+if true { echo 'if true' }
+
+if false { echo 'wrong' } else { echo 'if false' }
+
+# if with comparison
+if $[5 > 3] { echo 'comparison' }
+
+# ? chain on status: any arm that returns rather than fails stops the chain
+return true ? return false
+
+return false ? return true
+
+# Value-equality dispatch via if/elsif chains.
+let action = 'help'
+if $[$action == 'quit'] { echo quitting }
+    elsif $[$action == 'help'] { echo 'showing help' }
+    else { echo unknown }
+
+# Fallback: unmatched value.
+let other = 'bogus'
+if $[$other == 'help'] { echo help } else { echo fallback }
+
+# Branches may yield functions
+let pick = if true { |x| return $x } else { |x| return nope }
+echo !{pick hello}
+let pick2 = if false { |x| return nope } else { |x| return $x }
+echo !{pick2 world}
+
+# A `?` arm that is not taken hoists nothing
+echo !{return 1 ? return !{fail "untaken arm's hoist ran"}}
+
+echo 'conditional tests done'

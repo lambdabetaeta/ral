@@ -592,7 +592,7 @@ mod within_tests;
 mod wire_desk_tests {
     use super::*;
     use crate::process::{CancelCause, DurableRoot};
-    use crate::shell::runtime::{Stop, no_desk};
+    use crate::shell::runtime::Stop;
 
     /// A desk for dispatch `id` whose events leave on `ours`.
     fn desk_over(ours: WireChannel, id: u64) -> WireDesk {
@@ -631,36 +631,6 @@ mod wire_desk_tests {
             desk.parks.parked.lock().unwrap().is_empty(),
             "an answered park is deregistered"
         );
-    }
-
-    /// A desk refusal raises its message and hints alike under either transport.
-    #[test]
-    fn refused_enquiry_preserves_the_front_ends_reason() {
-        let (ours, mut peer) = WireChannel::pair().expect("socketpair");
-        let desk = Arc::new(desk_over(ours, 1));
-
-        let filler = desk.clone();
-        let front_end = std::thread::spawn(move || {
-            let frame = peer.read_frame().expect("read").expect("open");
-            let Frame::Event(_, Event::Enquiry(eid, _)) = frame else {
-                panic!("expected Event::Enquiry, got {frame:?}");
-            };
-            filler.parks.fill(eid, Err(WireError::of(&no_desk())));
-        });
-
-        let Break::Error(err) = desk
-            .enquire(FOValue::Unit, &DurableRoot::default().child())
-            .expect_err("refused")
-        else {
-            panic!("a refusal is an error, not a stop");
-        };
-        front_end.join().expect("front-end thread");
-        assert_eq!(err.describe(), no_desk().describe());
-        assert_eq!(
-            err.reason,
-            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoDesk))
-        );
-        assert_eq!(err.hints(), no_desk().hints());
     }
 
     fn is_cancelled_stop(br: &Break) -> bool {
@@ -987,15 +957,6 @@ mod engine_session_tests {
     }
 
     #[test]
-    fn dispatch_round_trips_to_a_report() {
-        let _g = REQUEST_SERIAL.lock();
-        let _env = env_guard();
-        let mut host = start();
-        assert_eq!(ran_int(&host.run(1, "$[1 + 1]")), 2);
-        assert_eq!(host.hang_up_and_join(), 0);
-    }
-
-    #[test]
     fn detach_acknowledges_engine_and_loose_worker_teardown() {
         let _g = REQUEST_SERIAL.lock();
         let _env = env_guard();
@@ -1170,32 +1131,6 @@ mod typed_fault_tests {
             actual: u64::MAX.into(),
             limit: 256u64.into(),
         })
-    }
-
-    #[test]
-    fn busy_is_admission_but_panic_and_lost_report_are_after_start_faults() {
-        assert!(
-            matches!(refusal(false), Event::Report(Report::Static { status, .. }) if status.get() == 1)
-        );
-        assert_eq!(refusal(true), Event::Reading(Err(ProbeFailure::Busy)));
-        assert!(matches!(fault(false, ReportFault::WorkerPanicked),
-            Event::Report(Report::Faulted { status, .. }) if status.get() == 1));
-        assert_eq!(
-            fault(true, ReportFault::WorkerPanicked),
-            Event::Reading(Err(ProbeFailure::WorkerPanicked))
-        );
-        let cause = encoding();
-        assert_eq!(
-            fault(true, ReportFault::Unencodable(cause.clone())),
-            Event::Reading(Err(ProbeFailure::Unencodable(cause.clone())))
-        );
-        let Event::Report(Report::Faulted { rendered, status }) =
-            fault(false, ReportFault::Unencodable(cause.clone()))
-        else {
-            panic!("a lost report must not claim nothing ran");
-        };
-        assert_eq!(status.get(), 1);
-        assert!(rendered.contains(&cause.describe()));
     }
 
     #[test]

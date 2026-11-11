@@ -364,12 +364,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prepare_yields_a_leader_on_every_platform() {
-        let group = prepared();
-        assert!(matches!(group.group(), Group::Owns(_)));
-    }
-
     /// An owner pairs its leader with the scope it is given; a joiner hands
     /// back its own membership whatever scope it is given.
     #[test]

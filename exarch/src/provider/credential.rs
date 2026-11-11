@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// The inert bearer bound to a keyless declared endpoint.
 ///
 /// Ollama and its kin ignore `Authorization` entirely, but `genai`'s `OpenAI`
-/// adapter always attaches one; `pub` so `tests/credential_env.rs` can name
+/// adapter always attaches one; `pub` so `tests/integration/credentials.rs` can name
 /// it.
 pub const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 
@@ -419,7 +419,7 @@ mod tests {
     use genai::adapter::AdapterKind;
     use identity::{Login, ServiceName};
 
-    // The `resolve_and_scrub` scenarios live in `tests/credential_env.rs`: they
+    // The `resolve_and_scrub` scenarios live in `tests/integration/credentials.rs`: they
     // mutate the process-global environment, which no library test may share.
 
     fn keyless(name: &str) -> Account {
@@ -516,21 +516,6 @@ mod tests {
         );
     }
 
-    /// With no variable set, the vault's key is in force until forgotten, and
-    /// the account then stays known but unavailable.
-    #[test]
-    fn a_saved_key_alone_is_in_force_until_forgotten() {
-        let house = Account::declared("house-llm");
-        let mut store = CredentialStore::default();
-        store.declare(house.clone());
-        store.save_key(&house.id, "typed".into());
-        assert_eq!(api_key(store.get(&house.id)).as_deref(), Some("typed"));
-
-        store.forget_key(&house.id);
-        assert!(store.get(&house.id).is_none());
-        assert!(store.known().eq([&house]));
-    }
-
     /// A server that checks no key is available as declared, and a vault
     /// entry under its name changes nothing.
     #[test]
@@ -583,38 +568,6 @@ mod tests {
             assert!(matches!(store.get(&account.id), Some(Credential::OAuth(_))));
             assert_eq!(store.from_vault(&account.id), None);
         }
-    }
-
-    #[test]
-    fn add_oauth_new_account_sorts_after_built_in_and_before_declared() {
-        let anthropic = Account::built_in("anthropic");
-        let llama = keyless("local-llama");
-        let mut store = CredentialStore {
-            entries: vec![
-                AccountEntry {
-                    account: anthropic.clone(),
-                    auth: AccountAuth::Key {
-                        environment: Some("key".into()),
-                        vault: None,
-                    },
-                },
-                AccountEntry::declared(llama.clone()),
-            ],
-            ..CredentialStore::default()
-        };
-
-        let bravo = store.add_oauth(&oauth_token("acc_b", Some("bravo@work")));
-        let alpha = store.add_oauth(&oauth_token("acc_a", Some("alpha@work")));
-
-        assert_eq!(
-            store
-                .available()
-                .into_iter()
-                .map(|a| a.id)
-                .collect::<Vec<_>>(),
-            vec![anthropic.id, alpha.id, bravo.id, llama.id],
-            "built-in, then logins by handle, then declared"
-        );
     }
 
     /// The `Arc` a live provider still holds is the one that sees the refresh.

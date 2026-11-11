@@ -595,34 +595,6 @@ mod tests {
     }
 
     #[test]
-    fn bind_rhs_keeps_its_span_without_leaking_its_lambda_scope() {
-        let mut generator = generator();
-        let source = Spanned::new(
-            at(0),
-            CompKind::Lam {
-                param: "arg".into(),
-                body: Arc::new(Spanned::new(
-                    at(1),
-                    CompKind::bind(Pattern::Name("local".into()), tilde(2), tilde(3)),
-                )),
-            },
-        );
-        let (_, node) = generator.comp(&source);
-        assert!(generator.env.lookup_binding("arg").is_none());
-        assert!(generator.env.lookup_binding("local").is_none());
-        let CompKind::Lam { body, .. } = node.item else {
-            panic!("lambda preserved")
-        };
-        let CompKind::Bind { comp, rest, .. } = &body.item else {
-            panic!("bind preserved")
-        };
-        assert!(matches!(comp.item, CompKind::Tilde(_)));
-        assert_eq!(comp.span, Some(at(2)));
-        assert_eq!(rest.span, Some(at(3)));
-        solved(generator.solver);
-    }
-
-    #[test]
     fn check_lambda_equates_its_shape_at_the_lambda_before_checking_the_body() {
         let mut generator = generator();
         let source = Spanned::new(

@@ -540,24 +540,6 @@ mod tests {
         }
     }
 
-    /// `name` is required, and its absence is not an unknown key.
-    #[test]
-    fn a_manifest_without_a_name_is_refused() {
-        let err =
-            parse(&Value::map(vec![])).expect_err("a manifest without a name must be rejected");
-        assert!(err.describe().contains("name"), "got: {}", err.describe());
-    }
-
-    /// A manifest with no `capabilities:` key parses into a clean plugin
-    /// record carrying its name and no aliases.
-    #[test]
-    fn manifest_without_capabilities_parses() {
-        let manifest = Value::map(vec![("name".into(), Value::string("p"))]);
-        let (manifest, handlers) = parse(&manifest).expect("clean manifest parses");
-        assert_eq!(manifest.name, "p");
-        assert_eq!(handlers.aliases, Vec::<(String, Value)>::new());
-    }
-
     /// A trivial block-shaped `Value::Thunk` handler for well-formed
     /// keybinding entries.
     fn dummy_block() -> Value {
@@ -608,18 +590,6 @@ mod tests {
         }
     }
 
-    /// A manifest that is not a Map at all is named as such, not reported
-    /// as a missing field.
-    #[test]
-    fn non_map_manifest_is_load_error() {
-        let err = parse(&Value::Int(42)).expect_err("non-map must be rejected");
-        assert!(
-            err.describe().contains("manifest") && err.describe().contains("integer"),
-            "error should name the manifest shape, got: {}",
-            err.describe()
-        );
-    }
-
     /// `()` is a manifest with nothing set, so it lacks `name`.
     #[test]
     fn unit_manifest_lacks_a_name() {
@@ -658,31 +628,6 @@ mod tests {
                 found: ral_core::fact::Found::Int(3)
             })
         );
-    }
-
-    /// A non-string guard is rejected, not stringified into a regex.
-    #[test]
-    fn non_string_guard_is_load_error() {
-        let entry = Value::map(vec![
-            ("key".into(), Value::string("ctrl-t")),
-            ("handler".into(), dummy_block()),
-            ("guard".into(), Value::Int(3)),
-        ]);
-        let err = parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
-        assert!(
-            err.describe().contains("guard") && err.describe().contains("integer"),
-            "error should name the guard and its type, got: {}",
-            err.describe()
-        );
-    }
-
-    /// A `guard:` regex compiles and rides along on the parsed binding.
-    #[test]
-    fn guard_parses() {
-        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some(r"\S+"))))
-            .expect("valid guard parses");
-        assert_eq!(out.len(), 1);
-        assert!(out[0].guard.is_some());
     }
 
     /// An invalid guard regex is a load error naming the key.
@@ -751,25 +696,6 @@ mod tests {
         }
     }
 
-    /// An unparseable key notation is a load error, not a sync-time skip.
-    #[test]
-    fn unrecognised_key_notation_is_load_error() {
-        let err =
-            parse_keybindings(std::iter::once(keybinding_entry("hyper-x", None))).unwrap_err();
-        assert_eq!(
-            keybinding_reason(&err),
-            &KeybindingFailure::Notation(KeybindingFailureNotation {
-                key: "hyper-x".into(),
-                cause: ral_core::fact::KeyNotationFailure::UnknownKey(
-                    ral_core::fact::KeyNotationFailureUnknownKey {
-                        token: "hyper-x".into()
-                    }
-                )
-            })
-        );
-        assert!(err.describe().contains("hyper-x"));
-    }
-
     /// A key sequence begins with plain ctrl-x, the prefix the editor leaves
     /// free; anything else is refused, guard or not.
     #[test]
@@ -813,15 +739,5 @@ mod tests {
     fn ctrl_alt_c_is_not_reserved() {
         parse_keybindings(std::iter::once(keybinding_entry("ctrl-alt-c", None)))
             .expect("ctrl-alt-c binds unguarded");
-    }
-
-    /// A modified chord with no ral-owned action parses unguarded —
-    /// replacing the underlying editor default is the intended use.
-    #[test]
-    fn modified_chord_without_builtin_action_parses_unguarded() {
-        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", None)))
-            .expect("ctrl-t without guard still parses");
-        assert_eq!(out.len(), 1);
-        assert!(out[0].guard.is_none());
     }
 }

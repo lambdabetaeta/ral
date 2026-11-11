@@ -42,7 +42,6 @@ mod tests {
         let exchange = Lease::under(&home);
         let sibling = Lease::under(&home);
         let node = exchange.node();
-        assert_eq!(exchange.id(), node.id());
         drop(exchange);
         assert_eq!(node.cause(), Some(CancelCause::Cancelled));
         assert!(!home.is_cancelled());

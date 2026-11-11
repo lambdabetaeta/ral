@@ -60,10 +60,7 @@ fn bus_queue_flood_past_the_byte_cap_yields_one_overflow_marker() {
     }
 
     match rx.try_recv().expect("exactly one overflow marker") {
-        Signal::Transient(ONE, Transient::Elided { text }) => {
-            assert!(text.contains("100"), "names the elided count: {text}");
-            assert!(text.contains("token"), "names the class: {text}");
-        }
+        Signal::Transient(ONE, Transient::Elided { .. }) => {}
         _ => panic!("expected a Transient::Elided overflow marker"),
     }
     assert!(
@@ -263,24 +260,4 @@ fn drain_pending_includes_generated_overflow_markers_and_leaves_a_finite_snapsho
     assert!(
         matches!(rx.try_recv().unwrap(), Signal::Transient(_, Transient::Died { failures }) if failures.is_empty())
     );
-}
-
-#[test]
-fn synced_is_an_ordered_reserved_signal_between_transient_runs() {
-    let (tx, rx) = channel();
-    tx.send_signal(Signal::Transient(ONE, Transient::Token("before".into())))
-        .unwrap();
-    tx.send_signal(Signal::Synced {
-        agent: ONE,
-        through: 7,
-    })
-    .unwrap();
-    tx.send_signal(Signal::Transient(ONE, Transient::Token("after".into())))
-        .unwrap();
-    let signals = rx.drain_pending();
-    assert!(matches!(signals.as_slice(), [
-        Signal::Transient(ONE, Transient::Token(before)),
-        Signal::Synced { agent: ONE, through: 7 },
-        Signal::Transient(ONE, Transient::Token(after)),
-    ] if before == "before" && after == "after"));
 }

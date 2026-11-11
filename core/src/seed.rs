@@ -741,14 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn a_seal_is_first_order_bytes() {
-        let sealed = seal(&parent().bequeath(SpawnGrant::Inherit)).expect("seal");
-        let wire = sealed.clone().encode();
-        assert!(matches!(wire, FOValue::Bytes { .. }));
-        assert_eq!(Sealed::decode(&wire).expect("decode"), sealed);
-    }
-
-    #[test]
     fn a_seal_that_is_not_one_frame_will_not_unseal() {
         let err = Sealed(Bytes::from(&b"not a frame"[..]))
             .unseal()

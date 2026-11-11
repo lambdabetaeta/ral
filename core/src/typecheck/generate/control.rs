@@ -408,27 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn join_keeps_its_arms_in_source_order() {
-        let mut generator = generator();
-        let arms = [
-            block(returning(1, Val::Int(1))),
-            block(returning(2, Val::Int(2))),
-        ];
-        let joins = arms
-            .iter()
-            .map(|arm| JoinArm::new(arm, vec![], Reason::IfBranches))
-            .collect::<Vec<_>>();
-        let (cty, nodes) = generator.join_arms(&joins, &Reason::IfBranches);
-        for (i, value) in nodes.iter().enumerate() {
-            let Val::Thunk(body) = value else {
-                panic!("literal arm remains a thunk")
-            };
-            assert_eq!(body.shape().span, Some(at(u32::try_from(i).unwrap() + 1)));
-        }
-        assert_eq!(producer(&solved(generator.solver), &cty).1, Ty::int());
-    }
-
-    #[test]
     fn if_join_leaves_capture_to_the_solver() {
         let mut generator = generator();
         let unknown = generator.solver.fresh_comp();

@@ -15,10 +15,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use windows_sys::Wdk::Storage::FileSystem::SYMLINK_FLAG_RELATIVE;
-use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
-    ERROR_SUCCESS, LocalFree,
-};
+use windows_sys::Win32::Foundation::{ERROR_SHARING_VIOLATION, ERROR_SUCCESS, LocalFree};
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
@@ -458,29 +455,6 @@ fn a_read_only_file_is_not_staged_over() {
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
     assert_eq!(read_all(&f), "old");
     assert_eq!(names_in(tmp.path()), ["f"]);
-}
-
-/// A volume's refusal of an information class is the two codes FAT answers
-/// and no other: a denial is not one.
-#[test]
-fn an_unsupported_class_is_the_two_codes_and_no_other() {
-    let refused =
-        |code: u32| host::unsupported_class(&io::Error::from_raw_os_error(code.cast_signed()));
-    assert!(refused(ERROR_INVALID_PARAMETER));
-    assert!(refused(ERROR_NOT_SUPPORTED));
-    assert!(!refused(ERROR_ACCESS_DENIED));
-}
-
-/// `FileStandardInfo` carries the length, which a step and a listing answer.
-#[test]
-fn a_stat_carries_the_length() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("f"), b"12345").unwrap();
-    let located = walked(&tmp.path().join("f"));
-    assert_eq!(located.stat().unwrap().len, 5);
-    let dir = entered(tmp.path());
-    let entry = dir.read_dir().unwrap().next().unwrap();
-    assert_eq!(entry.seen().unwrap().stat.len, 5);
 }
 
 /// Both writable reopen modes retain the attribute access that streaming

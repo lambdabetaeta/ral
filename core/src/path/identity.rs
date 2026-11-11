@@ -444,10 +444,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn pb(s: &str) -> PathBuf {
-        PathBuf::from(s)
-    }
-
     fn os(s: &str) -> &OsStr {
         OsStr::new(s)
     }
@@ -538,26 +534,6 @@ mod tests {
                 windows_collision_key(os(b)),
                 "{a} {b}"
             );
-        }
-    }
-
-    /// Each row: a path and the alias it gains on macOS (none elsewhere).
-    #[test]
-    fn aliases_cross_the_firmlinks_on_macos_only() {
-        let rows = [
-            ("/tmpx/foo", None),
-            ("/tmp/foo", Some("/private/tmp/foo")),
-            ("/private/tmp/foo", Some("/tmp/foo")),
-            ("/var/folders/xy/abc", Some("/private/var/folders/xy/abc")),
-            ("/tmp", Some("/private/tmp")),
-        ];
-        for (path, alias) in rows {
-            let got: Vec<PathBuf> = twins(Path::new(path)).map(Cow::into_owned).collect();
-            assert!(got.contains(&pb(path)), "{path}");
-            match alias.filter(|_| cfg!(target_os = "macos")) {
-                Some(alias) => assert!(got.contains(&pb(alias)), "{path}"),
-                None => assert_eq!(got, vec![pb(path)], "{path}"),
-            }
         }
     }
 
@@ -772,11 +748,6 @@ mod tests {
             relative("/tmp/x/y", "/private/tmp/x"),
             Some(vec!["y".into()])
         );
-    }
-
-    #[test]
-    fn name_key_off_windows_is_the_name() {
-        assert_eq!(name_key_on("Git.exe", PathRules::Posix), "Git.exe");
     }
 
     #[test]

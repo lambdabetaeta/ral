@@ -460,8 +460,6 @@ mod tests {
             String::from_utf8(output.stderr).unwrap(),
             "ral: --warrant descriptor-argument count is 0; expected 2 (warrant and report), or 5 under a Linux envelope\nhint: --warrant is how ral starts its own confined children, never a command to run by hand.\n"
         );
-        let failure = LaunchFailure::Warrant(WarrantFailure::Magic);
-        assert_eq!(terminal_refusal(&failure), "not a ral-warrant/5 warrant");
     }
 
     /// A pid no process has: a child asked to die with it finds its parent

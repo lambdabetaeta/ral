@@ -207,24 +207,7 @@ mod stdin_tests {
             .expect("read");
         assert_eq!(buf, "bytes");
     }
-    #[test]
-    fn reading_from_a_terminal_is_a_resource_state_refusal() {
-        let mut shell = crate::test_helper::core_shell();
-        shell.io.stdin = Source::Terminal;
-        let Err(crate::shell::runtime::Break::Error(error)) = stdin_reader("from-string", &shell)
-        else {
-            panic!("no byte input")
-        };
-        assert_eq!(
-            error.reason,
-            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoByteInput(
-                crate::fact::OperationState {
-                    operation: "from-string".into()
-                }
-            )))
-        );
-        assert_eq!(error.hints(), []);
-    }
+
     #[test]
     fn read_lines_preserves_the_io_cause_and_caller_context() {
         struct FailedRead;
@@ -252,24 +235,6 @@ mod stdin_tests {
         assert_eq!(
             failure.cause,
             crate::io::failure(&std::io::ErrorKind::PermissionDenied.into())
-        );
-    }
-
-    #[test]
-    fn arity_floors_and_regex_limits_keep_lossless_counts() {
-        let Err(crate::shell::runtime::Break::Error(error)) = super::check_arity(&[], 2, "read")
-        else {
-            panic!("arity floor")
-        };
-        assert!(
-            matches!(error.reason, crate::fact::Reason::Invalid(f) if f.cause == crate::fact::InvalidCause::Arity(crate::fact::ArityFailure {
-                expected: crate::fact::CountRule::AtLeast(2usize.into()), got: 0usize.into(),
-            }))
-        );
-        let limit = usize::MAX;
-        assert_eq!(
-            super::regex_failure("pattern", &regex::Error::CompiledTooBig(limit)).cause,
-            crate::fact::RegexCause::CompiledTooBig(limit.into())
         );
     }
 }

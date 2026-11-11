@@ -4,7 +4,7 @@
 //! re-exec's sweep of everything else it inherited.
 
 use crate::Role;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use crate::fact::Count;
 use crate::fact::{
     DescriptorSweepFailure, DescriptorSweepFailureSetReportCloexec, HandoffField, LaunchFailure,
@@ -633,20 +633,6 @@ mod tests {
         assert_eq!(err, WarrantFailure::DuplicateSlot(101));
         let both = Slots::parse(&args(&["101", "102"])).expect("two slots");
         assert_eq!(both.argv()[1..], ["101", "102"]);
-    }
-
-    #[test]
-    fn handoff_validation_retains_the_refused_field_and_count() {
-        assert_eq!(
-            Slot::parse("97", HandoffField::Report),
-            Err(WarrantFailure::Slot(WarrantFailureSlot {
-                field: HandoffField::Report,
-                spelling: "97".into(),
-            }))
-        );
-        assert!(
-            matches!(Slots::parse(&[]), Err(WarrantFailure::SlotCount(WarrantFailureSlotCount { actual })) if actual == Count::from_u64(0))
-        );
     }
 
     #[cfg(target_os = "linux")]

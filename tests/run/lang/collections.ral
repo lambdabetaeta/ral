@@ -1,0 +1,74 @@
+# Lists, maps, indexing, spread, empty collections
+
+# List basics
+let items = [a, b, c]
+echo $items[0]
+echo $items[2]
+
+# Record basics
+let opts = [host: localhost, port: 8080]
+echo $opts[host]
+echo $opts[port]
+
+# Nested record with chained indexing
+let config = [db: [host: localhost, port: 5432], app: [workers: 4]]
+echo $config[db][host]
+echo $config[app][workers]
+
+# A spread, then an override
+let base_opts = [host: localhost, port: 8080, workers: 4]
+let custom = [...$base_opts, port: 9090]
+echo $custom[port]
+echo $custom[host]
+
+# Spread in lists
+let xs = [1, 2]
+let ys = [3, 4]
+let spread = [...$xs, ...$ys, 5]
+echo !{length $spread}
+
+# Empty collections
+let empty_list = []
+let empty_map = [:]
+echo !{length $empty_list}
+
+# Trailing commas
+let trailing = [
+    a,
+    b,
+    c,
+]
+echo !{length $trailing}
+
+# `has` tests for a key
+echo !{has [:, a: 1, b: 2] a}
+echo !{has [:, a: 1, b: 2] c}
+
+# A key given twice is an error, not a silent overwrite, whether both are
+# computed or one is written out
+let k = 'a'
+let j = 'a'
+try { let _ = [$k: 1, $j: 2]; return () } { |e| echo $e[message] }
+try { let _ = [a: 1, $k: 2]; return () } { |e| echo $e[message] }
+
+# An explicit entry replaces a spread's, so that is not a repeat
+let replaced = [...[:, a: 1], $k: 2]
+echo $replaced[$k]
+
+# Functions are values in lists and maps
+let fns = [{ |x| return $[$x + 1] }, { |x| return $[$x * 2] }]
+echo !{$fns[0] 5}
+let ops = [inc: { |x| return $[$x + 1] }, dbl: { |x| return $[$x * 2] }]
+echo !{$ops[dbl] 5}
+
+# A bare name in list or map position is a literal; `$name` is the value
+let upper = { |x| return $x }
+echo ...[upper, hello]
+echo !{[label: upper, fn: $upper][label]}
+
+# keys, values, entries
+echo ...!{keys [:, a: 1, b: 2, c: 3]}
+echo ...!{values [:, a: 1, b: 2]}
+echo !{length !{keys [:]}}
+let pairs = entries [:, x: hello]
+echo $pairs[0][0] $pairs[0][1]

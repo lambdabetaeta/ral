@@ -1,0 +1,5 @@
+# status: 1
+# absent: did not run
+# Nothing followed the failure, so nothing was abandoned.
+echo first
+fail boom

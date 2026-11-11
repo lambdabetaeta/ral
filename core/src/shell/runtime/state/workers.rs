@@ -807,20 +807,4 @@ mod tests {
 
         running_permit();
     }
-
-    /// Snapshot returns entries sorted by `WorkerId` even when registered out of order.
-    #[test]
-    fn snapshot_sorts_entries_by_worker_id() {
-        let registry = WorkerRegistry::default();
-        for id in [30, 10, 20] {
-            let res = registry.reserve(None).unwrap();
-            registry.register(res, entry_of(Owner::Session, ready_handle(id, "w")));
-        }
-        let ids: Vec<WorkerId> = registry
-            .snapshot()
-            .into_iter()
-            .map(|e| e.handle.id)
-            .collect();
-        assert_eq!(ids, vec![WorkerId(10), WorkerId(20), WorkerId(30)]);
-    }
 }

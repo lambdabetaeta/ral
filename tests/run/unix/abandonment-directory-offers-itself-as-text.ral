@@ -1,0 +1,7 @@
+# status: 126
+# contains: /usr is a directory, not a command
+# contains: to use the path as text, write `#'/usr'#`
+# absent: attempt
+# A path naming no program offers itself as text instead of a wrapper.
+let d = /usr
+echo b

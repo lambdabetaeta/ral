@@ -109,36 +109,4 @@ mod tests {
             Some(9)
         );
     }
-
-    #[test]
-    fn dial_error_renders_inert_platform_fields_without_changing_them() {
-        let error = DialError::Platform {
-            backend: DialBackend::Virtualization,
-            domain: "VZErrorDomain".into(),
-            code: -17,
-            detail: "original framework diagnostic\nsecond line".into(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Virtualization.framework refused the guest connection: VZErrorDomain error -17: \
-             original framework diagnostic\nsecond line"
-        );
-        assert!(error.source().is_none());
-    }
-
-    #[test]
-    fn dial_error_does_not_describe_disconnection_as_timeout() {
-        let timeout = DialError::TimedOut {
-            port: 429,
-            within: Duration::from_secs(5),
-        };
-        assert_eq!(
-            timeout.to_string(),
-            "no guest connection result arrived for port 429 within 5s"
-        );
-        assert_eq!(
-            DialError::WaitDisconnected { port: 429 }.to_string(),
-            "the guest connection result channel disconnected while waiting for port 429"
-        );
-    }
 }

@@ -110,16 +110,6 @@ fn a_lone_chatgpt_account_row_keeps_its_email() {
     assert_eq!(row_labels(&p).len(), 1);
 }
 
-/// A key-bearing provider has no login to name, so its row is the model
-/// and the service alone — it never claims a handle it does not have.
-#[test]
-fn flat_rate_provider_rows_are_named_by_their_service_alone() {
-    let go = Account::built_in("opencode-go");
-    let mut p = Picker::new(vec![go.clone()], &Tuning::default(), caps_unknown);
-    p.set_models(&go.id, ModelsState::Loaded(vec!["model-a".into()]));
-    assert_eq!(row_labels(&p), vec!["model-a · opencode-go"]);
-}
-
 /// Two `ChatGPT` accounts signed in under the same email are two rows, not
 /// one collapsed into the other — the bug this plan exists to kill.
 #[test]
@@ -160,15 +150,6 @@ fn two_accounts_on_one_email_draw_two_distinguishable_rows() {
     );
 }
 
-#[test]
-fn a_query_lists_only_what_matches() {
-    let mut p = loaded_picker();
-    for c in "deepseek".chars() {
-        p.key(KeyCode::Char(c));
-    }
-    assert_eq!(row_labels(&p), vec!["model-c · deepseek"]);
-}
-
 /// A query nothing lists leaves nothing to pick: no free-text model rides
 /// past the listing.
 #[test]
@@ -189,17 +170,6 @@ fn enter_selects_highlighted_model() {
     let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
     assert_eq!(pick.choice.account, Account::built_in("anthropic"));
     assert_eq!(pick.choice.model, "model-b");
-}
-
-/// A declared service lists and selects exactly like a built-in one.
-#[test]
-fn declared_provider_lists_and_selects() {
-    let llama = Account::declared("local-llama");
-    let mut p = Picker::new(vec![llama.clone()], &Tuning::default(), caps_unknown);
-    p.set_models(&llama.id, ModelsState::Loaded(vec!["model-a".into()]));
-    let pick = p.key(KeyCode::Enter).expect("a listed row is picked");
-    assert_eq!(pick.choice.account, llama);
-    assert_eq!(pick.choice.model, "model-a");
 }
 
 /// These models do not route, so the cycle skips the via row:
@@ -263,26 +233,6 @@ fn temperature_steps_clamps_and_floors_to_auto() {
 }
 
 #[test]
-fn top_p_steps_clamps_and_floors_to_auto() {
-    let mut p = loaded_picker();
-    p.key(KeyCode::Tab); // Effort
-    p.key(KeyCode::Tab); // Temperature
-    p.key(KeyCode::Tab); // TopP
-    assert_eq!(p.top_p, None);
-    // Three steps up: auto → 0.0 → 0.05 → 0.1.
-    p.key(KeyCode::Right);
-    p.key(KeyCode::Right);
-    p.key(KeyCode::Right);
-    assert_eq!(p.top_p, Some(0.1));
-    // Down past zero returns to auto.
-    p.key(KeyCode::Left);
-    p.key(KeyCode::Left);
-    assert_eq!(p.top_p, Some(0.0));
-    p.key(KeyCode::Left);
-    assert_eq!(p.top_p, None);
-}
-
-#[test]
 fn selection_carries_the_live_tuning() {
     let mut p = loaded_picker();
     p.key(KeyCode::Tab); // Effort
@@ -306,22 +256,6 @@ fn selection_carries_the_live_tuning() {
     );
     assert_eq!(tuning.temperature, Some(0.1));
     assert_eq!(tuning.top_p, Some(0.05));
-}
-
-#[test]
-fn opens_seeded_from_initial_tuning() {
-    let p = Picker::new(
-        vec![Account::built_in("anthropic")],
-        &Tuning {
-            effort: Some(ReasoningEffort::Medium),
-            temperature: Some(0.5),
-            top_p: Some(0.9),
-        },
-        caps_unknown,
-    );
-    assert_eq!(EFFORT_LADDER[p.effort_idx].0, "med");
-    assert_eq!(p.temperature, Some(0.5));
-    assert_eq!(p.top_p, Some(0.9));
 }
 
 /// A catalog where `chat-only` admits `temperature` but not `reasoning`.

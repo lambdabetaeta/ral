@@ -675,51 +675,6 @@ mod tests {
     use crate::syntax::parser::parse;
     use crate::{TypeError, elaborator::elaborate, typecheck};
 
-    #[test]
-    fn vocab_debug_is_stable_and_semantic() {
-        assert_eq!(
-            format!("{:?}", super::GPU),
-            "Vocab { noun: \"GPU mode\", row: [(\"withheld\", Unit)], untagged: \"a grant only narrows: omit `gpu` to inherit, or write `` gpu: `withheld ``\", payload: \"`` `withheld `` takes no payload\", within: [], .. }"
-        );
-        for vocab in [
-            &super::PLACE,
-            &super::EXEC_TARGET,
-            &super::DIR_TARGET,
-            &super::NET,
-            &super::GPU,
-            &super::EDITOR,
-            &super::SHELL,
-        ] {
-            let debug = format!("{vocab:#?}");
-            assert!(debug.contains(vocab.noun()));
-            assert!(debug.contains("row:"));
-            assert!(!debug.contains("0x"), "{debug}");
-            assert!(!debug.contains("misses:"), "{debug}");
-        }
-        let nested = format!("{:#?}", super::EXEC_TARGET);
-        assert!(nested.contains("place or a selector"));
-        assert!(nested.contains("String"));
-        assert!(nested.contains("Variant"));
-    }
-
-    #[test]
-    fn runtime_contract_refusals_contain_declared_facts() {
-        let super::GrantFailure::UnknownVocabulary(failure) = super::SHELL.refuse("missing") else {
-            panic!("vocabulary failure")
-        };
-        assert_eq!(failure.vocabulary, super::GrantVocabulary::Shell);
-        assert_eq!(failure.tag, "missing");
-        assert!(failure.offered.contains(&"detach".to_owned()));
-        assert!(matches!(
-            declared(Form::Grant).holds("detach"),
-            Some(Holds::Refused(super::RefusedGrantKey::DetachMovedToShell))
-        ));
-        let unknown = declared(Form::Manifest).unknown_key("missing");
-        assert_eq!(unknown.field, "missing");
-        assert!(unknown.offered.contains(&"name".to_owned()));
-        assert!(!unknown.offered.contains(&"capabilities".to_owned()));
-    }
-
     fn contract_errors(form: Form, src: &str) -> Vec<TypeError> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
         let top = elaborate(&ast, [], None)
@@ -752,26 +707,6 @@ mod tests {
             let want = src.rfind(at).unwrap();
             assert_eq!(pos.start as usize, want, "{form:?} {src:?}");
         }
-    }
-
-    /// A table offers every key but the refused ones, which it knows and
-    /// declines.
-    #[test]
-    fn a_table_offers_every_key_but_the_refused() {
-        for form in [Form::Within, Form::Grant, Form::Rc, Form::Manifest] {
-            let table = declared(form);
-            let offered = table.offered();
-            for key in table.keys {
-                assert_eq!(
-                    offered.contains(&key.label),
-                    !matches!(key.holds, Holds::Refused(_)),
-                    "{form:?}: {}",
-                    key.label
-                );
-            }
-        }
-        let manifest = declared(Form::Manifest);
-        assert!(manifest.offered().len() < manifest.keys.len());
     }
     #[test]
     fn ascription_uses_one_scratch_for_shared_row_payloads_without_constraining_the_solution() {

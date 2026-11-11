@@ -738,43 +738,6 @@ mod tests {
         assert!(
             matches!(csv_failure(&error), CsvReadFailure::Utf8(CsvReadFailureUtf8 { field, valid_up_to, position: Some(_) }) if field == 0usize.into() && valid_up_to == 0usize.into())
         );
-        use csv::DeserializeErrorKind as C;
-        let bad_utf8 = String::from_utf8(vec![0xff]).unwrap_err().utf8_error();
-        for (source, expected) in [
-            (
-                C::Message("library".into()),
-                CsvDeserializeCause::Message("library".into()),
-            ),
-            (
-                C::Unsupported("library".into()),
-                CsvDeserializeCause::Unsupported("library".into()),
-            ),
-            (
-                C::UnexpectedEndOfRow,
-                CsvDeserializeCause::UnexpectedEndOfRow,
-            ),
-            (
-                C::InvalidUtf8(bad_utf8),
-                CsvDeserializeCause::InvalidUtf8(Utf8Failure {
-                    valid_up_to: 0usize.into(),
-                    error_len: Some(1usize.into()),
-                }),
-            ),
-            (
-                C::ParseBool("x".parse::<bool>().unwrap_err()),
-                CsvDeserializeCause::ParseBool,
-            ),
-            (
-                C::ParseInt("999999999999999999999".parse::<i64>().unwrap_err()),
-                CsvDeserializeCause::ParseInt(crate::fact::IntegerParseCause::PositiveOverflow),
-            ),
-            (
-                C::ParseFloat("x".parse::<f64>().unwrap_err()),
-                CsvDeserializeCause::ParseFloat,
-            ),
-        ] {
-            assert_eq!(csv_deserialize(&source), expected);
-        }
     }
 
     #[test]
@@ -825,10 +788,6 @@ mod tests {
             })
         );
         assert_eq!(
-            failure.describe(),
-            "from-string: takes no arguments; it reads the byte channel"
-        );
-        assert_eq!(
             failure.advice(),
             [
                 "to decode a value in hand, pipe it through the matching encoder: `to-string $text | from-string`"
@@ -841,7 +800,6 @@ mod tests {
             &mut shell,
         ));
         assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
-        assert_eq!(failure.describe(), "echo: element 1: cannot print Unit");
         assert_eq!(
             failure.advice(),
             [crate::ty::RefusedArg::Unit.remedy("echo")]

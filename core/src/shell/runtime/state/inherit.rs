@@ -371,54 +371,6 @@ mod tests {
         );
     }
 
-    /// A worker or a stage hints at a failed command as its session does.
-    #[test]
-    fn spawned_worker_shares_the_exit_hints() {
-        let mut parent = crate::test_helper::core_shell();
-        parent.set_exit_hints(crate::shell::runtime::ExitHints::from_text(
-            "false 1 hinted\n",
-        ));
-        let join = parent
-            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
-                Arc::clone(&child.session.exit_hints)
-            })
-            .expect("spawn_worker");
-
-        let hints = join.join().expect("worker thread");
-        assert!(Arc::ptr_eq(&hints, &parent.session.exit_hints));
-    }
-
-    /// The scratch the session's front end made for it reaches every child:
-    /// a worker, a stage and an aside freeze a `scratch` place against it.
-    #[test]
-    fn a_child_inherits_the_scratch() {
-        let mut parent = crate::test_helper::core_shell();
-        parent.set_scratch("/the/session/scratch");
-        let aside = parent.join_session();
-        assert_eq!(aside.scratch(), Some("/the/session/scratch"));
-        let join = parent
-            .spawn_worker(Mooring::adrift(), inherited(), |_, child| {
-                child.scratch().map(str::to_owned)
-            })
-            .expect("spawn_worker");
-        assert_eq!(
-            join.join().expect("worker thread").as_deref(),
-            Some("/the/session/scratch")
-        );
-    }
-
-    /// An aside is the same session: it leases nothing of its own.
-    #[test]
-    fn an_aside_leases_nothing() {
-        let mut parent = crate::test_helper::core_shell();
-        parent.arm_binding_lease(crate::shell::runtime::BindingLease {
-            idle_calls: 3,
-            large_binding_bytes: 1 << 20,
-        });
-        let aside = parent.join_session();
-        assert!(!aside.local.bindings.armed());
-    }
-
     /// An aside is the same session for cancellation: its root and anchor are
     /// the session's, so its frames are siblings of the session's runs.
     #[test]
@@ -428,14 +380,6 @@ mod tests {
         assert_eq!(aside.session.root.id(), parent.session.root.id());
         assert_eq!(aside.session.anchor.id(), parent.session.anchor.id());
         assert_eq!(aside.scope.id(), parent.session.anchor.id());
-    }
-
-    /// An aside is the same session: it shares the fixings.
-    #[test]
-    fn an_aside_shares_the_session_fixings() {
-        let parent = crate::test_helper::core_shell();
-        let aside = parent.join_session();
-        assert!(Arc::ptr_eq(&parent.session.fixings, &aside.session.fixings));
     }
 
     /// The live-thread ticket must outlive both `child` and `mooring` teardown

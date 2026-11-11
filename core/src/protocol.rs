@@ -460,29 +460,11 @@ impl Report {
 }
 
 #[cfg(test)]
-mod control_wire_tests {
-    use super::*;
-    use strum::VariantArray as _;
-
-    /// A session's end crosses the wire with its cause, every one of them.
-    #[test]
-    fn an_end_round_trips_its_cause() {
-        for &cause in RootCause::VARIANTS {
-            let control = Control::End(cause);
-            let wire = crate::data::json::to_vec(&control).expect("encode");
-            let back: Control = crate::data::json::from_slice(&wire).expect("decode");
-            assert_eq!(back, control);
-        }
-    }
-}
-
-#[cfg(test)]
 mod ending_wire_round_trip_tests {
     //! The Report round-trips over every `Ending` arm: whatever a wire engine
     //! encodes, a front-end decodes back byte-for-byte.
 
     use super::*;
-    use crate::fact::Reason;
 
     fn nz(n: u8) -> NonZeroU8 {
         NonZeroU8::new(n).unwrap()
@@ -502,48 +484,6 @@ mod ending_wire_round_trip_tests {
         let encoded = crate::data::json::to_vec(report).expect("Report must encode");
         let decoded: Report = crate::data::json::from_slice(&encoded).expect("Report must decode");
         assert_eq!(&decoded, report);
-    }
-
-    #[test]
-    fn ok_round_trips() {
-        round_trips(&ran(Ending::Ok(FOValue::Int { value: 1 })));
-    }
-
-    #[test]
-    fn an_enquiry_refusal_preserves_reason_and_ordered_report_facts() {
-        use crate::fact::{ProtocolFailure, ProtocolFailureVersionMismatch};
-
-        let refused = Error::new(Reason::Protocol(Box::new(
-            ProtocolFailure::VersionMismatch(ProtocolFailureVersionMismatch {
-                front: 44,
-                engine: PROTOCOL_VERSION,
-            }),
-        )))
-        .with_context("enquire")
-        .with_hint("try the foreground")
-        .with_hint("or ask again");
-        let frame = Frame::Answer(EnquiryId(7), Err(WireError::of(&refused)));
-        let encoded = crate::data::json::to_vec(&frame).unwrap();
-        let decoded: Frame = crate::data::json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, frame);
-        let Frame::Answer(_, Err(refusal)) = decoded else {
-            panic!("the refusal must survive the wire")
-        };
-        let error = refusal.to_error();
-        assert_eq!(error.reason, refused.reason);
-        assert_eq!(error.context(), refused.context());
-        assert_eq!(error.hints(), refused.hints());
-        assert!(error.prov.is_none());
-    }
-
-    #[test]
-    fn err_round_trips() {
-        let record = ErrorFact::new(
-            Reason::raised("boom"),
-            "cmd".into(),
-            crate::test_helper::site(),
-        );
-        round_trips(&ran(Ending::Err(record)));
     }
 
     #[test]

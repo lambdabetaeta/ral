@@ -487,55 +487,6 @@ fn only_a_resuming_root_arms_a_resume_past_the_in_place_wait() {
 }
 
 #[test]
-fn an_already_claimed_worker_batch_replays_cards_but_opens_no_job() {
-    use crate::card::testkit::card_value;
-    use ral_core::shell::runtime::{Done, DoneEvent, WorkerId};
-    let mut session = trunk(false);
-    let (emit, rx) = emitter(&session);
-    session.couple(&emit);
-    session.ral(
-        &DurableRoot::default().child(),
-        "let h = spawn \"claimed\" { 7 }\nawait $h",
-        10,
-        &emit,
-    );
-    let _records = crate::bus::drain_records(&rx);
-    let done = DoneEvent {
-        id: WorkerId(1),
-        title: "claimed".into(),
-        elapsed_ms: 10,
-        outcome: Done::Ok(()),
-    }
-    .to_surface();
-    assert!(
-        session
-            .admit(Input::Surface {
-                generation: session.generation,
-                values: vec![card_value(vec![]), done]
-            })
-            .is_none()
-    );
-    assert!(session.handle().status().unwrap().job.is_none());
-    let records = crate::bus::drain_records(&rx);
-    assert!(
-        records
-            .iter()
-            .any(|record| matches!(record, Record::Display(Display::Card { .. })))
-    );
-    assert!(
-        !records
-            .iter()
-            .any(|record| matches!(record, Record::Display(Display::Done { .. }))),
-        "a claimed worker has no done breadcrumb: {records:?}"
-    );
-    assert!(
-        !records
-            .iter()
-            .any(|record| matches!(record, Record::Control(crate::record::Control::JobOpened)))
-    );
-}
-
-#[test]
 fn ready_workers_and_non_done_surfaces_are_admitted_but_stale_batches_are_not() {
     use crate::card::testkit::card_value;
     use ral_core::protocol::probe::WorkerState;

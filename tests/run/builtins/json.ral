@@ -1,0 +1,66 @@
+# From-json / to-json codecs (§16.5)
+
+# Parse simple object
+let m = !{to-string '{"name": "alice", "age": 30}' | from-json}
+echo $m[name]
+echo $m[age]
+
+# Parse array
+let a = !{to-string '[1, 2, 3]' | from-json}
+echo !{length $a}
+
+# Parse nested
+let n = !{to-string '{"a": {"b": [1, 2]}}' | from-json}
+echo !{length $n[a][b]}
+
+# Write and re-read
+let tmpdir = temp-dir
+let data = [host: localhost, port: 8080]
+to-json $data > "$tmpdir/test.json"
+let back = !{cat "$tmpdir/test.json" | from-json}
+echo $back[host]
+echo $back[port]
+
+rm -rf $tmpdir
+
+# Parse booleans and null
+let m2 = !{to-string '{"ok": true, "val": null}' | from-json}
+echo $m2[ok]
+
+# JSON Lines: `to-jsonl` writes one compact record per line
+to-jsonl [[a: 1, b: [2, 3]], [a: 2, b: []]]
+
+# and `from-jsonl` reads it back as a list
+let records = !{to-jsonl [[a: 1], [a: 2]] | from-jsonl}
+echo !{length $records}
+echo $records[1][a]
+
+# A blank line holds no record, wherever it falls
+let spaced = !{to-string "\n{\"a\": 1}\n \t\n{\"a\": 2}\r\n\r\r\n" | from-jsonl}
+echo !{length $spaced}
+
+# A nullary native forced with `!$` reads the redirected channel
+let jdir = temp-dir
+to-string '{"y": 7}' > "$jdir/doc.json"
+let jdoc = !$from-json < "$jdir/doc.json"
+echo $jdoc[y]
+rm -rf $jdir
+
+# A decoder takes no argument: it is a first-class nullary thunk
+let decode = $from-json
+let decoded = !{to-json [1, 2] | !$decode}
+echo $decoded[1]
+
+# Every encoder takes its value as its one argument
+echo !{ints-to-bytes [104, 105]}
+let raw = !{echo hi | from-bytes}
+echo !{to-bytes $raw}
+echo !{to-string 'hi'}
+echo !{to-line 1}
+echo !{to-lines ['a', 'b']}
+echo !{to-json [a: 1]}
+echo !{to-jsonl [[a: 1]]}
+echo !{to-csv [[:, a: '1']]}
+to-lines [1, 2] | grep .
+
+echo 'json tests done'

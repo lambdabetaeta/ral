@@ -19,7 +19,7 @@
 //! its arguments is what a generated inhabitant can be applied to.  The argv
 //! half, `CORE_BASE_FRAMES`, is not swept here — each frame writes to a byte
 //! channel no pure call supplies, which is the same reason `RESOURCE_BACKED`
-//! exists — and is covered by `core/tests/argv_convention.rs`.
+//! exists — and is covered by `core/tests/integration/api/argv.rs`.
 
 use super::{BOUNDARY_BUILTINS, CORE_BUILTINS};
 use crate::Break;

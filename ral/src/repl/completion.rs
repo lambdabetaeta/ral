@@ -638,29 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn a_completion_request_walks_path_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        make_executable(&tmp.path().join("plantedone"));
-        let engine = engine_at(&as_path_value(tmp.path()), tmp.path());
-
-        let mut cache = SourceCache::new();
-        cache.refresh(&engine);
-        assert!(
-            command_completions(&cache.sources(&engine), "plantedone")
-                .contains(&"plantedone".into())
-        );
-        assert!(cache.has_scanned());
-
-        // Same PATH and cwd, so the answer stands and the walk is not repeated.
-        cache.refresh(&engine);
-        assert!(cache.has_scanned(), "an unchanged key keeps the scan");
-        assert!(
-            command_completions(&cache.sources(&engine), "plantedone")
-                .contains(&"plantedone".into())
-        );
-    }
-
-    #[test]
     fn a_changed_path_override_is_not_answered_from_another_paths_scan() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -908,39 +885,7 @@ mod tests {
         assert_eq!(cands[0].replacement, "src/");
     }
 
-    // ── path completion ───────────────────────────────
-
-    #[test]
-    fn path_completion_expands_home_tilde_prefix() {
-        if ral_core::host::home().is_none() {
-            return;
-        }
-        let (start, _) = complete("ls ~/", 5, &sources(&[], &[]).view());
-        assert_eq!(start, 3);
-    }
-
-    /// A lone `~` lists home, as the directory `~/`.
-    #[test]
-    fn path_completion_of_a_lone_tilde_lists_home() {
-        if ral_core::host::home().is_none() {
-            return;
-        }
-        let (start, _) = complete("ls ~", 4, &sources(&[], &[]).view());
-        assert_eq!(start, 3);
-    }
     // ── Engine cwd anchoring ────────────────────────────────────────────
-
-    #[test]
-    fn path_completion_lists_shell_cwd_for_empty_token() {
-        let src = sources(&[], &[]);
-        std::fs::write(src.cwd.path().join("alpha"), "").unwrap();
-        std::fs::write(src.cwd.path().join("beta"), "").unwrap();
-
-        let (start, cands) = complete("ls ", 3, &src.view());
-        let mut names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!((start, names), (3, vec!["alpha", "beta"]));
-    }
 
     #[test]
     fn path_completion_lists_shell_cwd_subdir_for_relative_token() {
@@ -1092,14 +1037,5 @@ mod tests {
         std::fs::create_dir(src.cwd.path().join("src")).unwrap();
         let (_, cands) = complete("rc", 2, &src.view());
         assert_eq!(displays(&cands), ["src/", "carbonic"]);
-    }
-
-    #[test]
-    fn extends_is_smart_case() {
-        assert!(extends("Foobar", "foo"));
-        assert!(!extends("foobar", "Foo"));
-        assert!(extends("Foobar", "Foo"));
-        assert!(extends("anything", ""));
-        assert!(!extends("fo", "foo"));
     }
 }

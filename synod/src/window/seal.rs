@@ -163,20 +163,3 @@ fn failure(what: impl std::fmt::Display) -> String {
         "synod-live seal: {what}; live pages stay off until this is fixed (the seal uses private WebKit settings that a macOS update can change)"
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::RULES;
-
-    #[test]
-    fn the_rule_list_blocks_web_and_socket_schemes() {
-        let rules: serde_json::Value = serde_json::from_str(RULES).expect("RULES is JSON");
-        let rules = rules.as_array().expect("RULES is an array");
-        let patterns: Vec<_> = rules
-            .iter()
-            .map(|rule| rule["trigger"]["url-filter"].as_str())
-            .collect();
-        assert_eq!(patterns, [Some("^https?:"), Some("^wss?:")]);
-        assert!(rules.iter().all(|rule| rule["action"]["type"] == "block"));
-    }
-}

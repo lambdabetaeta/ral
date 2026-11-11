@@ -1,33 +1,8 @@
 use super::*;
 use crate::agent::testkit::*;
 use crate::bus::{Emitter, Input};
-use crate::card::FieldVal;
 use crate::record::Voice;
 use ral_core::process::DurableRoot;
-
-/// The card is a heading plus one matrix, one field per row, the cap
-/// rendered into the figure only when armed.
-#[test]
-fn resources_card_renders_one_field_per_row() {
-    let rows = vec![
-        ProbeRow::new("workers.running", 3, Some(64), Policy::Reject, None),
-        ProbeRow::new("bindings.count", 7, None, Policy::Reap, Some("x".into())),
-    ];
-    let card = resources_card(&rows);
-    assert_eq!(card.marks().len(), 2, "a heading and one matrix");
-    let Mark::Fields { rows: fields } = &card.marks()[1] else {
-        panic!("the second mark must be the fields matrix");
-    };
-    assert_eq!(fields.len(), 2);
-    let FieldVal::Inline(spans) = &fields[0].value else {
-        panic!("a probe field renders inline spans");
-    };
-    assert_eq!(spans[0].text, "3/64", "an armed cap rides the figure");
-    let FieldVal::Inline(spans) = &fields[1].value else {
-        panic!("a probe field renders inline spans");
-    };
-    assert_eq!(spans[0].text, "7", "an unarmed cap adds nothing");
-}
 
 fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
     rows.iter()

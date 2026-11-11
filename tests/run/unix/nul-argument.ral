@@ -1,0 +1,8 @@
+# A NUL in an external's argument is refused before any process starts
+
+# Strings may hold NUL; a process argument cannot. The refusal is ral's own
+# (status 1), not a launcher failure, and names the argument.
+try { /bin/true "a\x00b"; fail 'ran' } { |e| echo $e[status] $e[message] }
+try { /bin/true ok "a\x00b"; fail 'ran' } { |e| echo $e[status] $e[message] }
+
+echo 'nul argument tests done'

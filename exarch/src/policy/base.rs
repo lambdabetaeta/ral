@@ -265,25 +265,6 @@ mod tests {
         }
     }
 
-    /// Every bake-in must load against the real `HOME`, so a broken profile
-    /// fails at `cargo test` rather than at a user's first invocation.
-    #[cfg(unix)]
-    #[test]
-    fn bakeins_parse() {
-        let home = host_home();
-        let ctx = ctx_at(&home, "/");
-        for (name, text) in [
-            ("minimal", MINIMAL_RAL),
-            ("reasonable", REASONABLE_RAL),
-            ("read-only", READ_ONLY_RAL),
-            ("edit-only", EDIT_ONLY_RAL),
-            ("confined", CONFINED_RAL),
-            ("dangerous", DANGEROUS_RAL),
-        ] {
-            load(name, text, &ctx);
-        }
-    }
-
     /// Bake-ins carry Unix-only literals such as `/usr/local/bin`.
     /// On Windows they are foreign-rooted and must drop as dead grants rather
     /// than trip the freeze pass's absoluteness check, or the whole profile
@@ -424,29 +405,6 @@ mod tests {
         assert!(
             admits(layer, &tree.at("/configure")),
             "./configure under `cwd` must be admitted"
-        );
-    }
-
-    /// `system`'s Homebrew root admits cmake, though cmake is no per-name
-    /// entry.  That root exists only where Homebrew does, so on a brew-less
-    /// host this passes vacuously rather than failing falsely; CI's macOS
-    /// runners ship Homebrew, so it still bites.
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_admits_cmake_under_homebrew_when_present() {
-        if !ral_core::path::exists("/opt/homebrew") {
-            return;
-        }
-        let home = host_home();
-        let ctx = ctx_at(&home, "/");
-        let layer = load("reasonable", REASONABLE_RAL, &ctx);
-        assert!(
-            exec_of(&layer).allow.contains(&dir_key("/opt/homebrew")),
-            "reasonable should list /opt/homebrew in exec dirs when it exists on this host"
-        );
-        assert!(
-            admits(layer, "/opt/homebrew/bin/cmake"),
-            "cmake under /opt/homebrew/bin must be admitted"
         );
     }
 

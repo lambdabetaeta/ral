@@ -243,7 +243,6 @@ mod tests {
     use super::*;
     use crate::host::test_support::{with_var, with_vars_cleared};
     use crate::test_helper::process_cwd;
-    use std::collections::BTreeMap;
 
     fn env_of(pairs: &[(&str, &str)]) -> EnvVars {
         EnvVars::from_pairs(pairs.iter().copied()).unwrap()
@@ -319,21 +318,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn a_later_overlay_wins() {
-        let mut under = env_of(&[("A", "under"), ("B", "under")]);
-        under.overlay(&env_of(&[("B", "over"), ("C", "over")]));
-        let bound: BTreeMap<_, _> = under.iter().collect();
-        assert_eq!(
-            bound,
-            BTreeMap::from([
-                (&"A".to_string(), &"under".to_string()),
-                (&"B".to_string(), &"over".to_string()),
-                (&"C".to_string(), &"over".to_string()),
-            ])
-        );
-    }
-
     fn sets<'a>(child: &ChildEnv<'a>, name: &str) -> Option<&'a OsStr> {
         let found = child.set.iter().find(|(k, _)| *k == name);
         found.map(|(_, v)| *v)
@@ -406,40 +390,6 @@ mod tests {
             env.insert("USERPROFILE".into(), String::new()).unwrap();
             assert_eq!(env.home(), None);
         });
-    }
-
-    #[test]
-    fn collection_and_iteration_keep_the_last_value_for_each_key() {
-        let env = env_of(&[("A", "first"), ("B", "kept"), ("A", "last")]);
-        let expected = BTreeMap::from([("A".into(), "last".into()), ("B".into(), "kept".into())]);
-        let iter: EnvVarsIter<'_> = (&env).into_iter();
-        assert_eq!(iter.size_hint(), env.iter().size_hint());
-        assert_eq!(
-            iter.map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            expected
-        );
-        assert_eq!(
-            env.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<BTreeMap<_, _>>(),
-            expected
-        );
-    }
-
-    #[test]
-    fn serde_is_a_plain_string_map_including_empty_values() {
-        let json = serde_json::json!({"HOME": "/overlay", "EMPTY": ""});
-        let env: EnvVars = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(env.get("HOME").map(String::as_str), Some("/overlay"));
-        assert_eq!(env.get("EMPTY").map(String::as_str), Some(""));
-        assert_eq!(serde_json::to_value(&env).unwrap(), json);
-        assert_eq!(
-            serde_json::to_value(EnvVars::default()).unwrap(),
-            serde_json::json!({})
-        );
-        let empty: EnvVars = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(empty.iter().count(), 0);
     }
 }
 

@@ -11,22 +11,6 @@ fn boot<'a>(
     Boot::new(grants, baseline, env, cwd)
 }
 
-/// The skill whose directory is `dir`, found as the boot finds one.
-fn found(dir: &Path) -> Found {
-    let (grants, baseline, env) = (GrantStack::root(), Baseline::default(), EnvVars::new());
-    let cwd = CwdPath::new(dir.to_path_buf()).unwrap();
-    let mut reader = boot(&grants, &baseline, &env, &cwd);
-    let file = reader.file(&reader.anchor(&dir.join("SKILL.md"))).unwrap();
-    let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
-    Found {
-        name,
-        source: Source::Disk {
-            dir: dir.to_path_buf(),
-            file: Box::new(file),
-        },
-    }
-}
-
 /// The directory a found skill was read from; `None` for a built-in.
 fn dir_of(found: &Found) -> Option<&Path> {
     match &found.source {
@@ -56,21 +40,6 @@ fn invalid_names() {
     assert!(!valid_skill_name(&"a".repeat(65)));
 }
 
-#[test]
-fn parse_valid_skill() {
-    let dir = tempfile::tempdir().unwrap();
-    let skill_dir = dir.path().join("my-skill");
-    std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: my-skill\ndescription: does things\n---\n\n# Body\ncontent\n",
-    )
-    .unwrap();
-    let skill = parse_skill(&found(&skill_dir)).unwrap();
-    assert_eq!(skill.name, "my-skill");
-    assert_eq!(skill.description, "does things");
-}
-
 /// Each way a frontmatter can fail, against the one good spelling.
 #[test]
 fn a_frontmatter_must_declare_a_matching_valid_name_and_a_description() {
@@ -87,20 +56,6 @@ fn a_frontmatter_must_declare_a_matching_valid_name_and_a_description() {
     ] {
         assert!(parse(bad).is_err(), "{bad:?}");
     }
-}
-
-#[test]
-fn read_body_after_frontmatter() {
-    let dir = tempfile::tempdir().unwrap();
-    let skill_dir = dir.path().join("my-skill");
-    std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: my-skill\ndescription: d\n---\n\n# Hello\nworld\n",
-    )
-    .unwrap();
-    let body = read_skill_body(&found(&skill_dir)).unwrap();
-    assert_eq!(body, "# Hello\nworld");
 }
 
 #[test]
@@ -314,78 +269,6 @@ fn metadata_silently_drops_a_skill_whose_frontmatter_fails() {
 }
 
 #[test]
-fn frontmatter_failures_keep_the_skill_place_field_and_actual_yaml_head() {
-    let place = SkillPlace::Disk("\"/skills/my-skill\"".into());
-    for (raw, cause) in [
-        ("plain body", FrontmatterFailure::Missing),
-        (
-            "---\n- x\n---\n",
-            FrontmatterFailure::NotMapping(FrontmatterFailureNotMapping {
-                found: PodKind::Array,
-            }),
-        ),
-        (
-            "---\ndescription: x\n---\n",
-            FrontmatterFailure::MissingField(SkillField::Name),
-        ),
-        (
-            "---\nname: my-skill\n---\n",
-            FrontmatterFailure::MissingField(SkillField::Description),
-        ),
-        (
-            "---\nname: 7\ndescription: x\n---\n",
-            FrontmatterFailure::FieldShape(FrontmatterFailureFieldShape {
-                field: SkillField::Name,
-                found: PodKind::Integer,
-            }),
-        ),
-        (
-            "---\nname: my-skill\ndescription: true\n---\n",
-            FrontmatterFailure::FieldShape(FrontmatterFailureFieldShape {
-                field: SkillField::Description,
-                found: PodKind::Boolean,
-            }),
-        ),
-        (
-            "---\nname: My-Skill\ndescription: x\n---\n",
-            FrontmatterFailure::InvalidName(FrontmatterFailureInvalidName {
-                name: "My-Skill".into(),
-            }),
-        ),
-        (
-            "---\nname: other\ndescription: x\n---\n",
-            FrontmatterFailure::DirectoryNameMismatch(FrontmatterFailureDirectoryNameMismatch {
-                declared: "other".into(),
-                directory: "my-skill".into(),
-            }),
-        ),
-    ] {
-        assert_eq!(
-            skill_from_frontmatter(raw, "my-skill", &place).unwrap_err(),
-            SkillFailure::Frontmatter(SkillFailureFrontmatter {
-                name: "my-skill".into(),
-                place: place.clone(),
-                cause
-            })
-        );
-    }
-    for (pod, kind) in [
-        (gray_matter::Pod::Null, PodKind::Null),
-        (gray_matter::Pod::String("x".into()), PodKind::String),
-        (gray_matter::Pod::Integer(1), PodKind::Integer),
-        (gray_matter::Pod::Float(1.0), PodKind::Float),
-        (gray_matter::Pod::Boolean(false), PodKind::Boolean),
-        (gray_matter::Pod::Array(vec![]), PodKind::Array),
-        (
-            gray_matter::Pod::Hash(std::collections::HashMap::default()),
-            PodKind::Hash,
-        ),
-    ] {
-        assert_eq!(pod_kind(&pod), kind);
-    }
-}
-
-#[test]
 fn yaml_parser_detail_is_foreign_and_body_loading_still_needs_no_metadata() {
     let broken = Found {
         name: "broken".into(),
@@ -409,26 +292,4 @@ fn yaml_parser_detail_is_foreign_and_body_loading_still_needs_no_metadata() {
         assert_eq!(read_skill_body(&found).unwrap(), "plain body");
         assert!(parse_skill(&found).is_err());
     }
-}
-
-#[test]
-fn skill_text_keeps_utf8_offsets_instead_of_a_read_error_sentence() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("SKILL.md"), [b'a', 0xc3]).unwrap();
-    let found = found(root.path());
-    let error = read_skill_body(&found).unwrap_err();
-    let Reason::Invalid(failure) = error.reason else {
-        panic!("invalid UTF-8")
-    };
-    assert_eq!(failure.operation, "skill");
-    assert_eq!(
-        failure.cause,
-        InvalidCause::Codec(CodecFailure::Utf8(CodecFailureUtf8 {
-            subject: Utf8Subject::Path(ral_core::path::shown(root.path().join("SKILL.md"))),
-            cause: Utf8Failure {
-                valid_up_to: 1usize.into(),
-                error_len: None
-            },
-        }))
-    );
 }

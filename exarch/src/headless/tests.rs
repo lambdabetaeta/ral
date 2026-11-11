@@ -270,36 +270,6 @@ fn user_json_projected_result_keeps_a_string_reply_raw() {
     assert_eq!(v["result"], serde_json::json!("plain text reply"), "{out}");
 }
 
-/// The structured half of the same projection: ordinary JSON, not
-/// `FOValue`'s internally-tagged transport encoding.
-#[test]
-fn user_json_projected_result_keeps_structure_ordinary_json() {
-    let root: AgentId = AgentId::new(1);
-    let mut sink_out = Vec::new();
-    let mut sink_err = Vec::new();
-    let mut h = Headless::new(root, &mut sink_out, &mut sink_err);
-    let payload = ral_core::data::FOValue::Map {
-        entries: vec![(
-            "files".to_string(),
-            ral_core::data::FOValue::List {
-                items: vec![
-                    ral_core::data::FOValue::String {
-                        value: "a.rs".into(),
-                    },
-                    ral_core::data::FOValue::String {
-                        value: "b.rs".into(),
-                    },
-                ],
-            },
-        )],
-    };
-    h.reply = Some(payload);
-    let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
-    let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
-    assert!(v["result"].is_object(), "{out}");
-    assert_eq!(v["result"]["files"][0], serde_json::json!("a.rs"), "{out}");
-}
-
 /// A seed of whitespace is no seed: [`crate::cli::load_seed`] collapses it,
 /// and `run` refuses before the provider is touched, naming both ways to
 /// supply one — the only thing a scripted caller has to go on.

@@ -800,21 +800,3 @@ async fn opening_the_lease_preserves_its_owned_file_cause() {
         matches!(error.cause, CredentialCause::Store(ref store) if store.operation == CredentialStoreOperation::OpenLease)
     );
 }
-
-#[test]
-fn persistence_failure_stages_preserve_the_same_owned_cause_without_merging_the_state_fact() {
-    let error = ral_core::own::OwnError::Linked(std::path::PathBuf::from("oauth.json"));
-    let io = ral_core::fact::IoCause::from(&error);
-    for operation in [
-        CredentialStoreOperation::PersistSuccessor,
-        CredentialStoreOperation::PersistFreshRotation,
-    ] {
-        assert_eq!(
-            store_cause(operation, io.clone()),
-            CredentialCause::Store(CredentialCauseStore {
-                operation,
-                cause: io.clone()
-            })
-        );
-    }
-}

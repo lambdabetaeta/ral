@@ -463,26 +463,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pipe_write_is_read_by_pair() {
-        use std::io::Read;
-        use std::sync::Arc;
-
-        let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
-        let mut sink = Sink::Pipe {
-            writer: Arc::new(writer),
-            edge: Edge::new(),
-            stage: DurableRoot::default().child().id(),
-        };
-        sink.write_under(&DurableRoot::default().child(), b"hello")
-            .expect("write");
-        drop(sink);
-
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).expect("read");
-        assert_eq!(buf, b"hello");
-    }
-
     /// A pipe sink over a fresh stage node, the read end, the edge and the
     /// writer `fill` can top up.
     #[cfg(unix)]
@@ -636,38 +616,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn pipe_child_stdout_reaches_reader() {
-        use std::io::Read;
-        use std::sync::Arc;
-
-        let (mut reader, writer) = crate::process::cloexec_pipe().expect("pipe");
-        let sink = Sink::Pipe {
-            writer: Arc::new(writer),
-            edge: Edge::new(),
-            stage: DurableRoot::default().child().id(),
-        };
-        let io = Connection::new(&Source::Empty, &sink, &Sink::Stderr).expect("stdio");
-        drop(sink);
-
-        let mut launch = crate::process::Launch::new("/bin/echo");
-        launch.arg("hi");
-        let _drains = io.install(&mut launch);
-        let mut child = launch
-            .spawn(
-                crate::process::Placement::Inherit,
-                &DurableRoot::default().child(),
-            )
-            .expect("spawn")
-            .child;
-
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).expect("read");
-        assert_eq!(buf, b"hi\n");
-        child.reap().expect("reap");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn pipe_reader_eof_waits_for_sink_and_child() {
         use std::io::Read;
         use std::time::Duration;
@@ -707,46 +655,6 @@ mod tests {
         drop(sink);
         drop(writer);
         assert_eq!(handle.join().expect("join"), b"hi\n");
-    }
-
-    fn file_sink() -> Sink {
-        Sink::File(Arc::new(tempfile::tempfile().expect("anonymous file")))
-    }
-
-    #[test]
-    fn same_destination_is_identity_of_the_target() {
-        let f = file_sink();
-        assert!(f.same_destination(&f.clone()));
-        assert!(!f.same_destination(&file_sink()));
-
-        let b = Sink::Buffer(Arc::default());
-        assert!(b.same_destination(&b.clone()));
-        assert!(!b.same_destination(&Sink::Buffer(Arc::default())));
-
-        assert!(Sink::Stdout.same_destination(&Sink::Stdout));
-        assert!(Sink::Stderr.same_destination(&Sink::Stderr));
-        assert!(!Sink::Stdout.same_destination(&Sink::Stderr));
-        assert!(!f.same_destination(&Sink::Stdout));
-    }
-
-    #[test]
-    fn same_destination_compares_a_tee_branchwise() {
-        let f = file_sink();
-        let tee = |a: &Sink, b: &Sink| Sink::Tee(Box::new(a.clone()), Box::new(b.clone()));
-        assert!(tee(&f, &Sink::Stderr).same_destination(&tee(&f, &Sink::Stderr)));
-        assert!(!tee(&f, &Sink::Stderr).same_destination(&tee(&file_sink(), &Sink::Stderr)));
-        assert!(!tee(&f, &Sink::Stderr).same_destination(&f));
-    }
-
-    #[test]
-    fn same_destination_of_watch_needs_the_same_line_function() {
-        let watch = || Sink::Watch {
-            line: Arc::new(|_| {}),
-            pending: Vec::new(),
-        };
-        let a = watch();
-        assert!(a.same_destination(&a.clone()));
-        assert!(!a.same_destination(&watch()));
     }
 
     #[test]

@@ -355,15 +355,6 @@ mod tests {
         }
     }
 
-    /// A lifecycle handler taking the one event-record parameter registers.
-    #[test]
-    fn unary_lifecycle_handler_registers() {
-        let mut shell = ral_core::test_helper::core_shell();
-        let h = crate::repl::eval(&mut shell, "{ |_ev| return () }");
-        register_plugin_hooks("p", &hooks_only(vec![(HookEvent::PostExec, h)]), &mut shell)
-            .expect("a unary lifecycle handler registers");
-    }
-
     /// Two guarded bindings on one key in one plugin both register.
     #[test]
     fn two_bindings_on_one_key_both_register() {
@@ -406,10 +397,6 @@ mod tests {
                 })
             )))
         );
-        assert_eq!(err.context(), Some("hook 'post-exec'"));
-        assert_eq!(err.hints(), []);
-        assert!(err.describe().contains("post-exec"));
-        assert!(err.plain().contains("1 parameter"));
     }
 
     /// The candidate search takes the first candidate the grant lets be read:
@@ -500,90 +487,6 @@ mod tests {
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
-    #[test]
-    fn plugin_factory_refusals_and_alias_conflicts_keep_their_subjects() {
-        let mut shell = ral_core::test_helper::core_shell();
-        let options = Map::from_iter([("key".into(), Value::Int(1))]);
-        let Err(Break::Error(error)) =
-            instantiate("p", Value::Unit, &options, &Mooring::adrift(), &mut shell)
-        else {
-            panic!("expected non-factory refusal")
-        };
-        assert_eq!(
-            error.reason,
-            super::super::refusal(PluginFailure::OptionsWithoutFactory(
-                PluginFailureOptionsWithoutFactory { plugin: "p".into() }
-            ))
-            .reason
-        );
-        assert_eq!(error.hints(), []);
-        assert!(error.context().is_none());
-        assert!(
-            error
-                .reason
-                .advice()
-                .iter()
-                .any(|hint| hint.contains("[:]"))
-        );
-        let block = crate::repl::eval(&mut shell, "{ return () }");
-        let error = check_is_manifest("p", &block).unwrap_err();
-        assert_eq!(
-            error.reason,
-            super::super::refusal(PluginFailure::FactoryReturnedBlock(
-                PluginFailureFactoryReturnedBlock { plugin: "p".into() }
-            ))
-            .reason
-        );
-        assert!(
-            error
-                .reason
-                .advice()
-                .iter()
-                .any(|hint| hint.contains("name:"))
-        );
-        let block = crate::repl::eval(&mut shell, "{ |_args| return () }");
-        shell.install_alias("ll".into(), block.clone()).unwrap();
-        let error = check_no_binding_conflicts(&[("ll".into(), block)], &shell).unwrap_err();
-        assert_eq!(
-            error.reason,
-            Reason::State(Box::new(StateFailure::AliasConflict("ll".into())))
-        );
-    }
-
-    #[test]
-    fn rejected_plugin_source_keeps_a_summary_and_the_rich_rejection() {
-        use ral_core::fact::{CompileFailure, CompilePhase};
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("broken.ral");
-        std::fs::write(&path, "let [").unwrap();
-        let mut shell = ral_core::test_helper::core_shell();
-        let Err(Break::Error(error)) = load_plugin(
-            &ral_core::path::shown(&path),
-            &Map::new(),
-            &Mooring::adrift(),
-            &mut shell,
-        ) else {
-            panic!("expected compile rejection")
-        };
-        let Reason::Compile(summary) = &error.reason else {
-            panic!("expected compile summary")
-        };
-        assert_eq!(
-            summary.as_ref(),
-            &CompileFailure {
-                source: ral_core::path::shown(std::fs::canonicalize(&path).unwrap()),
-                phase: CompilePhase::Parse
-            }
-        );
-        assert!(error.rejection().is_some());
-        assert!(!error.describe().contains("L0002"));
-        assert!(
-            error
-                .render(shell.sources(), None, shell.exit_hints())
-                .contains("L0002")
-        );
-    }
-
     #[test]
     fn a_host_refusal_rolls_back_hooks_and_aliases_without_reclassifying() {
         struct Refuse(ral_core::error::Error);

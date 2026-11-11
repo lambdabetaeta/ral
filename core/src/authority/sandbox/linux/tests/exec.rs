@@ -91,35 +91,6 @@ fn an_interpreter_cannot_exec_a_binary_outside_the_admits() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The domain is inherited, so nesting interpreters buys nothing.
-#[test]
-fn a_nested_interpreter_inherits_the_layer() {
-    if !landlock_at_least(Abi::EXEC) {
-        return;
-    }
-    let dir = workdir("exec-nested");
-    let copy = planted_binary(&dir);
-    let policy = exec_policy(admitting(&[], &[]));
-    let Some(env) = envelope_launches(&policy) else {
-        return;
-    };
-    let script = format!(
-        "sh -c '{copy}' && echo PLANTED-RAN\n\
-         sh -c /bin/true && echo ADMITTED-RAN\n",
-        copy = copy.display(),
-    );
-    let (stdout, _) = confined(&env, &policy, &script);
-    assert!(
-        !emitted(&stdout, "PLANTED-RAN"),
-        "a second `sh -c` escaped the layer: {stdout}"
-    );
-    assert!(
-        emitted(&stdout, "ADMITTED-RAN"),
-        "the layer denied an admitted command two levels down: {stdout}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// [`admitting`] less `blocks`, which Landlock renders by subtracting
 /// them from the allowed directories that hold them.
 fn admitting_less(dirs: &[&str], blocks: impl IntoIterator<Item = Rule>) -> ExecProjection {

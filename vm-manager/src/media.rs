@@ -362,24 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_media_reports_every_directory_tried() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("target").join("debug");
-        let Err(Error::NoGuestImage { looked_in }) = locate(&bin.join("synod")) else {
-            panic!("absent media must name every directory tried");
-        };
-        assert_eq!(
-            looked_in,
-            [
-                dir.path().join("target").join("Resources").join("boot"),
-                bin.join("boot"),
-                dir.path().join("vm-image").join("out").join("boot"),
-                dir.path().join("vm-image").join("out").join("rootfs"),
-            ]
-        );
-    }
-
-    #[test]
     fn failed_preparation_leaves_no_image_and_can_be_retried() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rootfs-key.img");

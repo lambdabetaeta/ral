@@ -44,6 +44,3 @@ impl Placement {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

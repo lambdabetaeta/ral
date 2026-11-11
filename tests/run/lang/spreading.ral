@@ -1,0 +1,43 @@
+# §4.6 argument spreading and §6 collection spreading
+
+# Spread list into args
+let args = [hello, world]
+echo ...$args
+
+# Spread empty list
+let empty = []
+echo ...$empty
+
+# Spread in list literal
+let combined = [...[1, 2], ...[3, 4]]
+echo $combined
+
+# Cons-spread shape: [x, ...xs]
+let xs = [2, 3]
+let ys = [1, ...$xs]
+echo $ys
+
+# Snoc-spread shape: [...xs, x]
+let zs = [...$xs, 4]
+echo $zs
+
+# Aliasing: $xs must be unchanged after [0, ...$xs] / [...$xs, 99]
+echo $xs
+
+# A spread first, then entries that replace its fields
+let base_opts = [host: localhost, port: 8080]
+let config = [...$base_opts, port: 9090]
+echo $config[port]
+echo $config[host]
+
+# An update leaves the base's other fields alone
+let front = [...$base_opts, port: 1]
+echo $front[port]
+echo $front[host]
+
+# The colon marker makes a map, including its spread.
+let subject = [:, host: 'local', port: 'x']
+let copy = [:, ...$subject, port: 'y']
+echo !{get $copy host ''}
+
+echo 'spreading tests done'

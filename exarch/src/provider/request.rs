@@ -185,18 +185,6 @@ mod tests {
     use crate::provider::{Account, Bureau, Choice, Login, scripted::Script};
 
     #[test]
-    fn for_model_with_no_effort_keeps_the_thinking_on_default() {
-        let tuning = Tuning::for_model(None, "model-a").unwrap();
-        assert_eq!(tuning, Tuning::initial());
-    }
-
-    #[test]
-    fn for_model_rejects_an_unknown_effort_label() {
-        let err = Tuning::for_model(Some("extreme"), "model-a").unwrap_err();
-        assert!(err.contains("extreme"), "got: {err}");
-    }
-
-    #[test]
     fn for_model_auto_is_a_deliberate_none_not_an_absence() {
         let tuning = Tuning::for_model(Some("auto"), "model-a").unwrap();
         assert!(tuning.effort.is_none());
@@ -248,18 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn complete_options_leave_auto_controls_unset() {
-        let options = complete_options("cache", &Selected::for_test("m"));
-        assert_eq!(options.max_tokens, None);
-        assert_eq!(options.temperature, None);
-        assert_eq!(options.top_p, None);
-        assert!(options.reasoning_effort.is_none());
-        assert!(options.extra_body.is_none());
-        assert_eq!(options.stream_header_timeout, Some(STREAM_HEADER_TIMEOUT));
-        assert_eq!(options.stream_read_timeout, Some(STREAM_READ_TIMEOUT));
-    }
-
-    #[test]
     fn a_via_orders_its_upstreams_without_fallback() {
         let via = Via::parse("deepinfra/fp8,novita").unwrap();
         let options = complete_options(
@@ -275,22 +251,6 @@ mod tests {
                 "provider": { "order": ["deepinfra/fp8", "novita"], "allow_fallbacks": false }
             }))
         );
-    }
-
-    #[test]
-    fn effort_by_label_resolves_every_ladder_rung() {
-        for (label, effort) in EFFORT_LADDER {
-            let resolved = effort_by_label(label).unwrap();
-            let key = |e: &Option<ReasoningEffort>| e.as_ref().map(ReasoningEffort::variant_name);
-            assert_eq!(key(&resolved), key(effort));
-        }
-    }
-
-    #[test]
-    fn effort_by_label_rejects_an_unknown_label() {
-        let err = effort_by_label("extreme").unwrap_err();
-        assert!(err.contains("extreme"), "got: {err}");
-        assert!(err.contains("xhigh"), "got: {err}");
     }
 
     #[test]

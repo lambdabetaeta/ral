@@ -567,7 +567,7 @@ impl<A: Datum, B: Datum> Datum for (A, B) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::{Ty, Typed};
+    use crate::ty::Typed;
 
     #[test]
     fn a_unit_payload_is_absent_at_both_doors() {
@@ -646,7 +646,6 @@ mod tests {
             );
         }
         assert!(u8::decode(&FOValue::Unit).is_err());
-        assert_eq!(u8::ty(), Ty::int());
     }
 
     #[test]

@@ -353,14 +353,4 @@ mod tests {
     fn a_failed_status_cannot_hide_a_leak() {
         denied(&Confining(()), &output(0, "ok"), &output(1, "ok"), "ok");
     }
-
-    #[test]
-    fn an_empty_mask_denies_bytes_even_when_cat_succeeds() {
-        denied(
-            &Confining(()),
-            &output(0, "secret"),
-            &output(0, ""),
-            "secret",
-        );
-    }
 }

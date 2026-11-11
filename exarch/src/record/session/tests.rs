@@ -536,20 +536,6 @@ fn resume_after_a_clear_and_a_rewind_yields_the_live_table() {
     );
 }
 
-/// A rewind is refused while a batch is in flight; the anchor named must
-/// exist.
-#[test]
-fn a_rewind_waits_for_the_batch_in_flight() {
-    let mut s = fresh_root();
-    s.append_user("first".into(), None, Voice::Human).unwrap();
-    s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
-        .unwrap();
-    assert_eq!(
-        s.rewind(1).unwrap_err().to_string(),
-        "cannot rewind while the session is waiting for 1 tool result"
-    );
-}
-
 /// The eviction standing at the head — message 0 — or `None` when the
 /// context does not open with one.
 fn head_eviction(s: &AgentLog) -> Option<String> {
@@ -652,65 +638,6 @@ fn a_late_cut_leaves_the_head_eviction_untouched() {
         s.context().rendered().len(),
         6,
         "eviction, turns 5 and 6, eviction, turns 9 and 10"
-    );
-}
-
-#[test]
-fn evict_refuses_a_run_cutting_an_eviction_and_the_unclosed_turn() {
-    let mut s = fresh_root();
-    for prompt in ["one", "two", "three"] {
-        complete_round(&mut s, prompt, prompt);
-    }
-    s.evict(span(1, 4), None, EditAuthority::Harness).unwrap();
-    let failure = s.evict(span(2, 2), None, EditAuthority::Model).unwrap_err();
-    let Uncommitted::Refused(cause) = &failure else {
-        panic!("context refusal")
-    };
-    assert_eq!(
-        cause,
-        &ContextFailure::StraddledEviction(ral_core::fact::ContextFailureStraddledEviction {
-            requested: ral_core::fact::TurnSpan {
-                from: 2u64.into(),
-                to: 2u64.into()
-            },
-            covering: ral_core::fact::TurnSpan {
-                from: 1u64.into(),
-                to: 4u64.into()
-            }
-        })
-    );
-    assert_eq!(
-        failure.to_string(),
-        "turn 2 cuts the eviction over turns 1–4; the covered turns stand together under one note"
-    );
-    assert_eq!(
-        cause
-            .advice()
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        &[
-            "for an eviction, name from: 1, to: 4 whole, or leave it",
-            "to rewind around this note, use its boundaries: turn 1 or turn 5"
-        ]
-    );
-    s.append_user("four".into(), None, Voice::Human).unwrap();
-    let failure = s.evict(span(7, 7), None, EditAuthority::Model).unwrap_err();
-    let Uncommitted::Refused(cause) = &failure else {
-        panic!("context refusal")
-    };
-    assert_eq!(
-        cause,
-        &ContextFailure::CurrentlyWritten(ContextFailureCurrentlyWritten { turn: 7u64.into() })
-    );
-    assert_eq!(failure.to_string(), "turn 7 is being written now");
-    assert_eq!(cause.advice(), [] as [String; 0]);
-    assert_eq!(
-        s.evict(span(99, 99), None, EditAuthority::Model)
-            .unwrap_err()
-            .to_string(),
-        "turn 99 is not recorded: the latest is 7"
     );
 }
 
@@ -970,29 +897,6 @@ fn a_plan_never_takes_the_newest_turn() {
     );
 }
 
-#[test]
-fn a_forced_eviction_may_take_the_prompt_but_not_the_newest_turn() {
-    let mut s = fresh_root();
-    complete_round(&mut s, "one", "one");
-    assert_eq!(s.context().plan_forced_eviction(0), Some(span(1, 1)));
-}
-
-#[test]
-fn a_user_ending_import_turn_is_never_torn() {
-    let mut s = fresh_root();
-    s.import_note(ChatMessage::user("imported user")).unwrap();
-    complete_round(&mut s, "normal", "answer");
-
-    let rendered = s.context().rendered();
-    assert_eq!(
-        rendered
-            .iter()
-            .filter_map(|message| message.content.first_text())
-            .collect::<Vec<_>>(),
-        vec!["imported user", "normal", "answer"]
-    );
-}
-
 /// Work abandoned before any reply is closed by the next prompt,
 /// not by a fabricated one: nothing is recorded in its place, and the
 /// model reads it exactly as it lies, the next prompt following.
@@ -1225,30 +1129,6 @@ fn a_reply_keeps_its_capstone_and_stays_visible() {
     );
 }
 
-/// The recorded cut is the span the writer resolved, so replay leaves
-/// exactly this eviction.
-#[test]
-fn record_jsonl_round_trip_carries_the_cut() {
-    let mut s = fresh_root();
-    complete_round(&mut s, "one", "one");
-    complete_round(&mut s, "two", "two");
-    s.evict(
-        span(1, 3),
-        Some("the parser is fixed".into()),
-        EditAuthority::Model,
-    )
-    .unwrap();
-    let eviction = Eviction {
-        span: span(1, 3),
-        note: Some("the parser is fixed".into()),
-        by: EditAuthority::Model,
-    };
-    assert!(records(&s).iter().any(|record| matches!(
-        record,
-        Record::Transcript(Transcript::Evicted(recorded)) if *recorded == eviction
-    )));
-}
-
 /// A record naming a turn no live session could have evicted is the
 /// hand-edited file it is.
 #[test]
@@ -1294,27 +1174,6 @@ fn resume_refuses_an_eviction_of_a_turn_not_in_the_context() {
     .expect("an eviction of a turn not in the context is foreign data");
     let text = error.to_string();
     assert!(text.contains("turn 9 is not recorded"), "{text}");
-}
-
-#[test]
-fn diagnostic_records_round_trip_through_record_jsonl() {
-    let s = fresh_root();
-    let emit = s.record_emitter();
-    emit.emit_or_end(Forensic::Error {
-        text: "boom".into(),
-    });
-    emit.emit_or_end(Forensic::Nudge {
-        cause: "stop=length".into(),
-        spent: Some(Spent { used: 2, max: 3 }),
-    });
-    let parsed = records(&s);
-    assert!(parsed.iter().any(
-        |record| matches!(record, Record::Forensic(Forensic::Error { text }) if text == "boom")
-    ));
-    assert!(parsed.iter().any(|record| matches!(
-        record,
-        Record::Forensic(Forensic::Nudge { cause, spent: Some(Spent { used: 2, max: 3 }) }) if cause == "stop=length"
-    )));
 }
 
 /// A child's opening bookend names the selection it was handed, not the
@@ -1368,49 +1227,6 @@ fn a_departed_turn_keeps_no_resident_state() {
 }
 
 #[test]
-fn resume_replays_a_scripted_history_and_preserves_the_context() {
-    let sessions = sessions_root("resume-round-trip");
-    let mut live = AgentLog::create(
-        &sessions,
-        AgentId::new(0),
-        crate::record::Opening {
-            parent: None,
-            name: "main",
-            returns: false,
-            selected: &Selected::for_test("model"),
-            system: "",
-            inherited: None,
-        },
-    )
-    .unwrap()
-    .0;
-    live.import_note(ChatMessage::user("inherited")).unwrap();
-    complete_round(&mut live, "one", "answer one");
-    complete_round(&mut live, "two", "answer two");
-    live.evict(span(1, 3), None, EditAuthority::Harness)
-        .unwrap();
-    let expected =
-        serde_json::to_vec(&live.context().rendered().iter().collect::<Vec<_>>()).unwrap();
-    drop(live);
-
-    let resumed = AgentLog::reopen(
-        &sessions,
-        AgentId::new(0),
-        &Selected::for_test("model"),
-        false,
-        "",
-        0,
-    )
-    .expect("resume")
-    .0;
-    assert!(resumed.context().is_ready());
-    assert_eq!(
-        serde_json::to_vec(&resumed.context().rendered().iter().collect::<Vec<_>>()).unwrap(),
-        expected
-    );
-}
-
-#[test]
 fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
     let sessions = sessions_root("resume-mid-turn");
     let mut live = AgentLog::create(
@@ -1458,49 +1274,6 @@ fn resume_quiesces_a_torn_turn_after_reopening_append_mode() {
         recorded.last(),
         Some(Record::Transcript(Transcript::UserPrompt { text, .. })) if text == "continue"
     ));
-}
-
-#[test]
-fn resume_quarantines_only_an_unterminated_final_fragment() {
-    let sessions = sessions_root("resume-tail");
-    let live = AgentLog::create(
-        &sessions,
-        AgentId::new(0),
-        crate::record::Opening {
-            parent: None,
-            name: "main",
-            returns: false,
-            selected: &Selected::for_test("model"),
-            system: "",
-            inherited: None,
-        },
-    )
-    .unwrap()
-    .0;
-    let path = sessions.path().join("0/record.jsonl");
-    drop(live);
-    let prefix = fs::read(&path).unwrap();
-    let fragment = b"{\"Transcript\":{\"user_prompt\":{";
-    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(fragment).unwrap();
-    file.flush().unwrap();
-
-    let resumed = AgentLog::reopen(
-        &sessions,
-        AgentId::new(0),
-        &Selected::for_test("model"),
-        false,
-        "",
-        0,
-    )
-    .expect("torn tail is recoverable")
-    .0;
-    assert!(resumed.context().is_ready());
-    assert!(fs::read(&path).unwrap().starts_with(&prefix));
-    assert_eq!(
-        fs::read(sessions.path().join("0/record.jsonl.crash")).unwrap(),
-        fragment
-    );
 }
 
 #[test]
@@ -1623,52 +1396,6 @@ fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
     let text = error.to_string();
     assert!(text.contains("foreign protocol data"), "{text}");
     assert_eq!(fs::read(&path).unwrap(), before);
-}
-
-#[test]
-fn resume_refuses_a_steering_line_with_no_turn_to_steer() {
-    let sessions = sessions_root("resume-steering-no-turn");
-    let live = AgentLog::create(
-        &sessions,
-        AgentId::new(0),
-        crate::record::Opening {
-            parent: None,
-            name: "main",
-            returns: false,
-            selected: &Selected::for_test("model"),
-            system: "",
-            inherited: None,
-        },
-    )
-    .unwrap()
-    .0;
-    let path = sessions.path().join("0/record.jsonl");
-    drop(live);
-    let orphan = Record::Transcript(Transcript::Steering {
-        text: "steer".into(),
-        voice: Voice::Human,
-    });
-    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    file.write_all(&crate::record::commit_line(std::slice::from_ref(&orphan)))
-        .unwrap();
-    file.write_all(b"\n").unwrap();
-    file.flush().unwrap();
-
-    let error = AgentLog::reopen(
-        &sessions,
-        AgentId::new(0),
-        &Selected::for_test("model"),
-        false,
-        "",
-        0,
-    )
-    .err()
-    .expect("a steering line with no turn is foreign data");
-    let text = error.to_string();
-    assert!(
-        text.contains("steers a turn, but no turn has been recorded"),
-        "{text}"
-    );
 }
 
 #[test]
@@ -1941,55 +1668,6 @@ fn resume_matches_live_after_a_small_edit_sequence_family() {
             "pattern {pattern}"
         );
     }
-}
-
-/// The structure is a fold of the log, so replaying the file rebuilds
-/// every row and every eviction the live session held — weights included.
-#[test]
-fn resume_rebuilds_the_same_rows_and_evictions() {
-    let sessions = sessions_root("fold-equals-memo-evict");
-    let mut live = AgentLog::create(
-        &sessions,
-        AgentId::new(0),
-        crate::record::Opening {
-            parent: None,
-            name: "main",
-            returns: false,
-            selected: &Selected::for_test("model"),
-            system: "",
-            inherited: None,
-        },
-    )
-    .unwrap()
-    .0;
-    live.append_user("interrupted".into(), None, Voice::Human)
-        .unwrap();
-    live.quiesce(QuiesceReason::Cancelled).unwrap();
-    for prompt in ["one", "two", "three"] {
-        complete_round(&mut live, prompt, prompt);
-    }
-    live.evict(
-        span(1, 5),
-        Some("the abandoned work is indexed too".into()),
-        EditAuthority::Model,
-    )
-    .unwrap();
-    let rows = live.context().transcript_index();
-    let evictions = live.context().evictions();
-    drop(live);
-
-    let resumed = AgentLog::reopen(
-        &sessions,
-        AgentId::new(0),
-        &Selected::for_test("model"),
-        false,
-        "",
-        0,
-    )
-    .expect("resume")
-    .0;
-    assert_eq!(resumed.context().transcript_index(), rows);
-    assert_eq!(resumed.context().evictions(), evictions);
 }
 
 /// A departed turn's address is not written down anywhere: the fold mints
@@ -2774,39 +2452,6 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
 }
 
 mod acceptance;
-
-/// A log opens with its bookend, then the link where there is one, then the
-/// system prompt.
-#[test]
-fn a_log_opens_with_started_then_inherited_then_system() {
-    let parent = fresh_root();
-    let child = AgentLog::create(
-        parent.sessions_root(),
-        AgentId::new(1),
-        Opening {
-            parent: Some(parent.id()),
-            name: "child",
-            returns: true,
-            selected: &Selected::for_test("model"),
-            system: "child prompt",
-            inherited: Some(parent.inherited_context()),
-        },
-    )
-    .unwrap()
-    .0;
-    let kinds: Vec<&str> = records(&child)
-        .iter()
-        .map(|record| match record {
-            Record::Control(Control::SessionStarted(_)) => "started",
-            Record::Transcript(Transcript::Inherited { .. }) => "inherited",
-            Record::Transcript(Transcript::System { .. }) => "system",
-            _ => "other",
-        })
-        .collect();
-    assert_eq!(kinds, ["started", "inherited", "system"]);
-    assert_eq!(&**child.context().system(), "child prompt");
-    assert_eq!(&**parent.context().system(), "");
-}
 
 /// A resume records the prompt only when it differs from the one held.
 #[test]

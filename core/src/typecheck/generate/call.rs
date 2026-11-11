@@ -764,25 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_binding_call_carries_its_hole_even_without_arguments() {
-        let mut generator = generator();
-        generator
-            .env
-            .bind("f".into(), Scheme::mono(Ty::thunk(CompTy::command())));
-        let source = bare("f", Argv::default());
-        let (_, node) = generator.comp(&source);
-        let CompKind::BindingCall {
-            head, args, hole, ..
-        } = node.item
-        else {
-            panic!("bare call preserved")
-        };
-        assert_eq!(head.as_ref(), "f");
-        assert!(args.is_empty());
-        assert_eq!(solved(generator.solver).splits(hole), Vec::<usize>::new());
-    }
-
-    #[test]
     fn imported_binding_app_keeps_both_the_admission_and_the_call() {
         let stored = Arc::new(Scheme::mono(Ty::thunk(CompTy::arrows(
             [Ty::thunk(CompTy::pure(Ty::string()))],

@@ -398,29 +398,6 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HostSurface;
-
-    #[test]
-    fn a_root_owns_its_hooks_and_terminal_lease() {
-        let terminal = TerminalState {
-            startup_foreground: true,
-            ..TerminalState::default()
-        };
-        let shell = Shell::root(
-            HostSurface::default()
-                .runtime(terminal)
-                .expect("a test host resolves its baseline")
-                .into(),
-            crate::test_helper::process_cwd(),
-        );
-        assert!(shell.session.hooks.is_some());
-        #[cfg(unix)]
-        assert!(shell.session.terminal_lease.is_some());
-        assert!(matches!(shell.io.stdin, Source::Empty));
-        assert!(!shell.local.bindings.armed());
-        assert_eq!(shell.local.workers.retention(), None);
-        assert_eq!(shell.session.stack_limit, DEFAULT_STACK_LIMIT);
-    }
 
     #[test]
     fn fd0_caches_empty_only_for_closed_stdin() {

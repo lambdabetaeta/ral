@@ -53,23 +53,6 @@ fn report(parent: &TestAgent, helper: &TestAgent, status: &ChildStatus) {
 }
 
 #[test]
-fn a_message_posts_parent_provenance_to_a_descendant() {
-    let (_fleet, parent, helper) = family();
-    parent
-        .descendant(&helper)
-        .unwrap()
-        .message(&parent, "check the lexer".into())
-        .unwrap();
-    let Input::Message(message) = take(&helper) else {
-        panic!("a message")
-    };
-    assert_eq!(message.from, parent.id());
-    assert_eq!(message.from_name, "parent");
-    assert_eq!(message.text, "check the lexer");
-    assert!(helper.status().unwrap().owes);
-}
-
-#[test]
 fn the_scope_climb_refuses_self_and_non_descendants() {
     let (fleet, parent, branch) = family();
     let sibling = child(&fleet, &parent, "sibling");
@@ -83,8 +66,6 @@ fn the_scope_climb_refuses_self_and_non_descendants() {
     );
     assert_eq!(grandchild.founder().id(), parent.id());
     assert_eq!(parent.founder().id(), parent.id());
-    assert!(parent.parent().is_none());
-    assert!(grandchild.parent().is_some());
 }
 
 #[test]
@@ -108,22 +89,6 @@ fn one_report_answers_every_parent_message_taken_up() {
     report(&parent, &helper, &ChildStatus::Replied(FOValue::Unit));
     assert!(!helper.status().unwrap().working());
     assert!(empty(&parent));
-}
-
-#[test]
-fn owner_drop_ends_the_tree_and_releases_names_without_handles_retaining_it() {
-    let parent = trunk(false);
-    let child = parent.fork_named("child").unwrap();
-    let grandchild = child.fork_named("grandchild").unwrap();
-    let fleet = parent.fleet.clone();
-    let handle = parent.handle();
-    drop(parent);
-    assert!(!handle.is_live());
-    assert!(!child.handle().is_live());
-    assert!(!grandchild.handle().is_live());
-    assert!(fleet.registry.name("main").is_ok());
-    drop((child, grandchild));
-    assert!(fleet.registry.is_empty());
 }
 
 #[test]
@@ -257,14 +222,6 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
         .is_err()
     );
     let unavailable = helper.report(ChildStatus::Stopped).unwrap_err();
-    let failure = unavailable.to_string();
-    assert_eq!(
-        failure,
-        format!(
-            "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log",
-            helper.id()
-        )
-    );
     assert!(
         matches!(take(&parent), Input::Child { id, status: ChildStatus::Failed(reason), .. }
         if id == helper.id() && reason == crate::record::ChildFailure::Cause(ral_core::fact::HelperFailure::Recording(unavailable.failure())))

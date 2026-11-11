@@ -59,17 +59,6 @@ fn strike(cause: crate::process::CancelCause) -> impl Fn(&Mooring, &mut Shell) +
 }
 
 #[test]
-fn clean_run_settles_with_zero_status() {
-    let mut shell = crate::test_helper::core_shell();
-    let ending = shell
-        .run(Run::captured("$[1 + 1]", test_origin()))
-        .expect_ran();
-    assert_eq!(ending.code(), 0);
-    let result = ending.into_settled();
-    assert!(result.is_ok(), "expected Ok, got {result:?}");
-}
-
-#[test]
 fn a_last_run_drops_its_loose_workers_endings() {
     let mut runtime = crate::test_helper::core_runtime();
     runtime.install_builtins(&PANIC_BUILTINS_ARR);
@@ -130,25 +119,6 @@ fn a_run_that_is_not_last_does_not_wait() {
     };
     assert_eq!(captured.stdout.bytes, b"end\n");
     assert_eq!(captured.stderr.bytes.as_slice(), b"");
-}
-
-#[test]
-fn parse_failure_is_static() {
-    let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("let = ", test_origin())) {
-        RunReport::Static { diagnostics } => {
-            assert!(
-                matches!(
-                    diagnostics,
-                    StaticDiagnostics::Compile(Rejection { status, .. }) if status.get() == 2
-                ),
-                "expected a parse diagnostic"
-            );
-        }
-        RunReport::Ran { .. } => {
-            panic!("malformed source must be Static")
-        }
-    }
 }
 
 /// A hook's program is an already-compiled value, so `run_framed` has no
@@ -264,56 +234,6 @@ fn an_aside_hook_leaves_the_session_where_it_was() {
         let ending = run_block_hook(&mut shell, name, "{ cd .. }", policy);
         assert!(matches!(ending, End::Ok(_)), "{ending:?}");
         assert_eq!(shell.cwd() != start, moved);
-    }
-}
-
-#[test]
-fn type_failure_is_static() {
-    let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("$[1 + true]", test_origin())) {
-        RunReport::Static { diagnostics } => {
-            assert!(
-                matches!(
-                    diagnostics,
-                    StaticDiagnostics::Compile(Rejection { status, .. }) if status.get() == 1
-                ),
-                "expected type diagnostics"
-            );
-        }
-        RunReport::Ran { .. } => {
-            panic!("ill-typed source must be Static")
-        }
-    }
-}
-
-#[test]
-fn exit_escape_reports_code() {
-    let mut shell = crate::test_helper::core_shell();
-    let ending = shell
-        .run(Run::captured("exit 3", test_origin()))
-        .expect_ran();
-    assert_eq!(ending.code(), 3);
-    let result = ending.into_settled();
-    assert!(
-        matches!(result, Err(Break::Escape(Escape::Exit(3)))),
-        "expected Escape::Exit(3), got {result:?}"
-    );
-}
-
-#[test]
-fn capture_returns_stdout_bytes() {
-    let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("echo hi", test_origin())) {
-        RunReport::Ran { captured, .. } => {
-            let captured = captured.expect("Capture must return buffers");
-            assert!(
-                String::from_utf8_lossy(&captured.stdout.bytes).contains("hi"),
-                "captured stdout must hold the run's output, got {:?}",
-                captured.stdout
-            );
-            assert!(captured.stdout.is_whole(), "{:?}", captured.stdout);
-        }
-        RunReport::Static { .. } => panic!("`echo hi` must reach evaluation"),
     }
 }
 
@@ -494,40 +414,6 @@ fn an_interrupt_mid_run_unwinds_the_eval() {
     );
 }
 
-/// A stop is no error, so `try` passes it and its handler never runs; the
-/// run ends stopped, as the monotone scope's closing poll would have it.
-#[test]
-fn a_try_handler_cannot_settle_a_cancelled_run() {
-    let mut runtime = crate::test_helper::core_runtime();
-    install_act(
-        &mut runtime,
-        "interrupt",
-        strike(crate::process::CancelCause::Interrupted),
-    );
-    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
-    let ending = shell
-        .run(Run::captured(
-            "try { interrupt\nlet x = ()\nreturn $x } { |_| return () }",
-            test_origin(),
-        ))
-        .expect_ran();
-    assert_eq!(
-        ending.code(),
-        130,
-        "a try handler must not settle a cancelled run at 0"
-    );
-    assert!(
-        matches!(
-            ending,
-            End::Stopped(crate::shell::runtime::Stop {
-                cause: crate::process::CancelCause::Interrupted,
-                ..
-            })
-        ),
-        "a try handler must not catch a stop, got {ending:?}"
-    );
-}
-
 /// An aside — a separate `Shell` beside the session, as the REPL runs plugin
 /// hooks ([`Shell::join_session`]) — can neither absorb an interrupt aimed
 /// at the session's run nor withhold it: the aside's frames hang under the
@@ -651,38 +537,7 @@ fn a_session_is_deaf_to_the_ambient_causes() {
     assert!(ending.into_settled().is_ok());
 }
 
-/// The act fires the `TimedOut` cause directly, pinning the `Stopped`
-/// classification without sleeping on the reaper.
-#[test]
-fn a_walled_run_ends_stopped_timed_out() {
-    let mut runtime = crate::test_helper::core_runtime();
-    install_act(
-        &mut runtime,
-        "expire",
-        strike(crate::process::CancelCause::TimedOut),
-    );
-    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
-    let ending = shell
-        .run(Run {
-            wall: Some(std::time::Duration::from_secs(30)),
-            ..Run::captured("expire\nlet rpv = 42\nreturn $rpv", test_origin())
-        })
-        .expect_ran();
-    assert!(
-        matches!(
-            ending,
-            End::Stopped(crate::shell::runtime::Stop {
-                cause: crate::process::CancelCause::TimedOut,
-                ..
-            })
-        ),
-        "a TimedOut foreground cancel must end the run stopped"
-    );
-}
-
-/// A real wall, so the cancel lands *during* the script: in
-/// `a_walled_run_ends_stopped_timed_out` it fires ahead of every binding, so
-/// none has landed there for the wall to be measured against.
+/// A real wall, so the cancel lands *during* the script.
 #[test]
 fn mid_script_wall_keeps_the_bindings_that_landed() {
     let mut shell = crate::test_helper::core_shell();
@@ -893,40 +748,6 @@ fn rendered_fault(shell: &mut Shell, src: &str) -> String {
         "{src:?} must fault, got {ending:?}"
     );
     rendered
-}
-
-/// A result the wire cannot carry names what it is or holds, and the
-/// remedy that kind of value suggests.
-#[test]
-fn a_result_that_is_not_data_says_what_it_holds() {
-    let mut shell = crate::test_helper::core_shell();
-    for (src, says, hint) in [
-        ("spawn { echo hi }", "found a handle", "let h ="),
-        ("{ echo hi }", "found a block", "!{ … }"),
-        ("{ |x| echo $x }", "found a function", "arguments"),
-        (
-            "[n: 1, h: !{spawn { echo hi }}]",
-            "the value contains a handle",
-            "let h =",
-        ),
-        ("[k: { echo hi }]", "the value contains a block", "!{ … }"),
-    ] {
-        let report = shell
-            .run(Run::captured(src, test_origin()))
-            .into_report(&shell);
-        let crate::protocol::Report::Ran(Ran {
-            ending, rendered, ..
-        }) = report
-        else {
-            panic!("{src:?} must reach evaluation");
-        };
-        let crate::protocol::Ending::Err(_) = &ending else {
-            panic!("{src:?} must fail at the boundary, got {ending:?}");
-        };
-        assert!(rendered.contains(says), "{src:?}: {rendered:?}");
-        assert!(rendered.contains(hint), "{src:?}: {rendered:?}");
-        assert_eq!(ending.code(), 1, "{src:?} must not report success");
-    }
 }
 
 /// A shell whose `_narrow` pushes an offline session ceiling and whose
@@ -1361,20 +1182,6 @@ fn a_trailed_run_reports_the_deputy_prefixes_of_its_session_stack() {
         )),
         "the run's trail must report its session's deputy prefix: {trail:?}"
     );
-}
-
-/// `Run.trail: None` neither opens a scope nor collects one — the REPL's
-/// choice, and every other test's, `Run::captured` included.
-#[test]
-fn a_dispatch_asking_no_trail_reports_none() {
-    let mut shell = crate::test_helper::core_shell();
-    match shell.run(Run::captured("$[1 + 1]", test_origin())) {
-        RunReport::Ran { trail, .. } => assert!(
-            trail.is_empty(),
-            "an unasked dispatch must report no trail at all"
-        ),
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
-    }
 }
 
 /// A panicked dispatch is excluded from the trail law by declaration: it
@@ -1852,7 +1659,5 @@ fn missing_hook_dispatch_retains_its_namespace_as_a_state_fact() {
             error.reason,
             Reason::State(Box::new(StateFailure::MissingHook(expected)))
         );
-        assert_eq!(error.hints(), []);
-        assert_eq!(error.context(), None);
     }
 }

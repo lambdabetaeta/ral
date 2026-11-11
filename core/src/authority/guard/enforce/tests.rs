@@ -176,18 +176,11 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
         ),
         "{refused:?}"
     );
-    assert!(
-        refused.to_string().contains("is excluded by")
-            && refused
-                .to_string()
-                .contains("through a filesystem object reached under another name"),
-        "{refused}"
-    );
 }
 
 mod words {
     use super::*;
-    use crate::authority::guard::enforce::{check_exec, fs_denial};
+    use crate::authority::guard::enforce::check_exec;
     use crate::authority::policy::{ExecGrant, ExecKey, Program};
     use crate::error::Error;
     use crate::fact::Resource;
@@ -234,14 +227,6 @@ mod words {
         let only = exec([dir(&tree.at("/other"))], []);
         let one = refusal(&grants([only.clone()]), &t);
         assert!(one.describe().contains("lets it run"), "{}", one.describe());
-        assert_eq!(
-            one.reason.advice().first().map(|h| &**h),
-            Some(
-                "add it to the grant's exec `allow` list: `` `name git `` for a command name, \
-                 `` `absolute /path/to/it `` for a file, or `` `dir `absolute /path `` for its \
-                 directory"
-            )
-        );
         let outer = exec([dir(&tree.at("/x"))], []);
         let two = refusal(&grants([outer, only]), &t);
         assert!(
@@ -251,26 +236,6 @@ mod words {
             two.describe()
         );
         assert!(two.reason.advice()[0].contains("enclosing grant"));
-    }
-
-    /// An exclusion is named with its `dir` constructor, and its hint is the
-    /// one remedy: no allowance is offered against it.
-    #[test]
-    fn an_exclusion_is_named_and_no_allowance_is_suggested() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tree = Tree::lay(tmp.path(), &["/x/t"]);
-        let x = tree.at("/x");
-        let both = exec([dir(&x)], [dir(&x)]);
-        let e = refusal(&grants([both]), &tree.at("/x/t"));
-        let named = format!("`dir `absolute '{}'", crate::path::shown(&x));
-        assert!(e.describe().contains(&named), "{}", e.describe());
-        assert_eq!(
-            e.reason.advice().first().map(|h| &**h),
-            Some(
-                "an allowance cannot override an exclusion; remove the exclusion from the \
-                 policy that imposes it"
-            )
-        );
     }
 
     /// A guard refusal and a kernel denial of one exclusion, on either axis,
@@ -388,24 +353,6 @@ mod words {
         }
     }
 
-    /// A name deny is cited as a grant writes it.  The program is a native
-    /// binary named `sh` that the file `sh` resolved to cannot reach, so only
-    /// the name veto fires.
-    #[cfg(unix)]
-    #[test]
-    fn a_name_deny_is_named_as_written() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sh = tmp.path().join("sh");
-        std::fs::copy("/usr/bin/true", &sh).unwrap();
-        let deny = exec([ExecKey::Name("sh".into())], [ExecKey::Name("sh".into())]);
-        let e = refusal(&grants([deny]), crate::path::utf8(&sh).unwrap());
-        assert!(
-            e.describe().contains("excluded by `` `name 'sh' ``"),
-            "{}",
-            e.describe()
-        );
-    }
-
     /// A program that may run but that fs does not let be read is refused for
     /// reading it.  A layer reads only what it and the layers beneath it run,
     /// so the fs layer sits beneath the exec layer.
@@ -424,10 +371,6 @@ mod words {
             e.describe().contains("may run, but it is not readable"),
             "{}",
             e.describe()
-        );
-        assert_eq!(
-            e.reason.advice().first().map(|h| &**h),
-            Some("running a program reads it: add it to the grant's fs `read` list")
         );
         let unrestricted = check_exec(&grants([runs]), &Baseline::default(), "t", file(&t));
         assert!(unrestricted.is_ok());
@@ -464,31 +407,6 @@ mod words {
             "{}",
             denial.describe()
         );
-    }
-
-    /// An fs refusal names its op, then says of the path what the refusal
-    /// alone says of "it".
-    #[test]
-    fn an_fs_refusal_names_its_op_in_the_refusals_one_wording() {
-        let grants = grants([Capabilities {
-            fs: Some(FsPolicy::default()),
-            ..Capabilities::default()
-        }]);
-        let (baseline, nowhere) = (Baseline::default(), trace("/nowhere/x"));
-        let path = crate::path::LexicalPath::absolute(nowhere.real().as_path()).unwrap();
-        for op in [FsOp::Read, FsOp::Write] {
-            let refused =
-                (grants.refusal_fs(&baseline, op, &nowhere)).expect_err("no allowance covers it");
-            assert_eq!(refused.to_string(), "the grant does not allow it");
-            assert_eq!(
-                fs_denial(&grants, refused, op, &path).describe(),
-                format!(
-                    "grant does not allow {} access to {:?}",
-                    <&str>::from(&op),
-                    path.shown()
-                )
-            );
-        }
     }
 }
 

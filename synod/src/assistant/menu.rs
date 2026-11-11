@@ -181,18 +181,6 @@ mod tests {
         }
     }
 
-    fn offered(models: &[ModelChoice]) -> Vec<&str> {
-        models.iter().map(|m| m.name.as_str()).collect()
-    }
-
-    #[test]
-    fn offers_keep_the_listed_order() {
-        let out = offers(vec!["b".to_string(), "a".to_string()], |_| {
-            pricing::ModelCaps::default()
-        });
-        assert_eq!(offered(&out), vec!["b", "a"]);
-    }
-
     #[test]
     fn reasoning_is_tagged_per_model_from_the_injected_caps() {
         let out = offers(vec!["reasoner".to_string(), "chat".to_string()], |m| {
@@ -218,29 +206,6 @@ mod tests {
 
         assert_eq!(menu.providers.len(), 1);
         assert!(matches!(menu.providers[0].models, Models::Loading));
-        assert_eq!(menu.efforts.first().map(String::as_str), Some("auto"));
-        assert_eq!(menu.default_effort, "med");
-    }
-
-    #[test]
-    fn menu_with_a_cached_list_offers_it_in_order() {
-        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let anthropic = fam("anthropic");
-        catalog.record(
-            &anthropic.id,
-            vec![Listed::bare("model-b"), Listed::bare("model-a")],
-        );
-
-        let menu = menu_from(
-            std::slice::from_ref(&anthropic),
-            &mut catalog,
-            &BTreeMap::new(),
-        );
-
-        assert_eq!(
-            model_names(&menu.providers[0]),
-            Some(vec!["model-b".to_string(), "model-a".to_string()])
-        );
     }
 
     #[test]

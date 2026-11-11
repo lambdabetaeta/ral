@@ -1,0 +1,42 @@
+# The 16 MiB buffer cap — a capture refuses, a spawned worker truncates
+
+# 20 MB down a capture sink. The bytes captured *are* the value, so a prefix
+# is not a smaller answer but a wrong one, and the truncation marker would be
+# bytes the program could not tell from the command's own: the capture fails
+# instead of binding either, and `try` catches that like any other failure.
+# Nothing it held is kept, so none of it reaches this file.
+let refusal = try {
+    let big = yes ral | head -c 20000000
+    return "bound"
+} { |e|
+    return $e[message]
+}
+echo $refusal
+
+# The control below the cap: nothing is dropped and nothing is refused, so the
+# length is just the bytes produced, less the trailing newline every capture
+# strips.
+let small = yes ral | head -c 1000
+echo !{length $small}
+
+# A spawned worker is the other side of the same cap: its bytes arrive with
+# nobody to refuse them, so the buffer stays bounded: exactly the first 16 MiB
+# and no marker, the rest counted and discarded.  `poll` reads that prefix as
+# data once the worker has settled; a replay (`await`) would add a stderr note.
+let h = spawn { yes ral | head -c 20000000 }
+let settle = { |h|
+    case !{poll $h} [
+        `ready: { |s| return $s },
+        `running: { |_| sleep 0.05; settle $h },
+        `stopping: { |_| fail "unexpected stopping" },
+        `consumed: { |_| fail "unexpected consumed" }
+    ]
+}
+let res = settle $h
+echo !{length $res[stdout]}
+# poll leaves the result unclaimed; discard its bytes before the script returns.
+cancel $h
+
+# Audit retains this smaller stderr stream in full
+let noisy = audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' } 2> /dev/null
+echo !{length !{commands $noisy}[0][stderr]}

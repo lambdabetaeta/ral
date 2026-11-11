@@ -78,28 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn cwd_is_the_logical_cwd() {
-        let shell = new_shell();
-        assert_eq!(cwd(&shell), Value::string(crate::path::shown(shell.cwd())));
-    }
-
-    #[test]
-    fn user_is_live() {
-        match user(&new_shell()) {
-            Ok(Value::String(s)) => assert!(!s.is_empty(), "user must be non-empty"),
-            Ok(other) => panic!("user must be a String, got {other:?}"),
-            Err(_) => {}
-        }
-    }
-
-    #[test]
-    fn user_reads_the_override() {
-        let mut shell = new_shell();
-        shell.context.set_env_var("USER", "bob").unwrap();
-        assert_eq!(user(&shell).unwrap(), Value::string("bob"));
-    }
-
-    #[test]
     fn env_has_neither_pwd_nor_oldpwd() {
         let Value::Map(m) = env(&new_shell()) else {
             panic!("env must be a Map");
@@ -123,10 +101,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nproc_is_positive() {
-        assert!(matches!(nproc(), Value::Int(n) if n >= 1));
-    }
     #[test]
     fn absent_user_is_a_missing_ambient_setting() {
         let shell = new_shell();

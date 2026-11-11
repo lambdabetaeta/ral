@@ -10,7 +10,7 @@
 # Test, example and build code is not what the bans protect, and carries one
 # blanket `#[allow]` per unit (an integration-test crate root, a `#[cfg(test)]`
 # module, an example, a build script), never one inside it.
-# `core/tests/sites.rs` checks that no other exemption exists.
+# `lint/tests/arch/sites.rs` checks that no other exemption exists.
 #
 # Syscall sites: every filesystem and process constructor is banned, so each
 # call that turns an outside name into a handle is a typed site.  The handle is

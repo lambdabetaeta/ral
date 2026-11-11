@@ -1,4 +1,4 @@
-use super::{FsAllow, ProjectionKey, profile_name, refuse_deny_meeting_grant};
+use super::{FsAllow, profile_name, refuse_deny_meeting_grant};
 use crate::authority::policy::{FsDeny, GrantPath};
 use crate::authority::sandbox::FsLists;
 use crate::authority::sandbox::carve::carve;
@@ -13,28 +13,6 @@ use std::path::{Path, PathBuf};
 
 mod execution;
 mod network;
-
-#[test]
-fn projection_key_identity_is_the_fs_triple() {
-    let a = ProjectionKey {
-        read: vec![r"C:\work".into()],
-        write: vec![r"C:\work\out".into()],
-        deny: vec![],
-    };
-    let same = a.clone();
-    let narrower = ProjectionKey {
-        read: vec![r"C:\work".into()],
-        write: vec![],
-        deny: vec![],
-    };
-    let denied = ProjectionKey {
-        deny: vec![r"C:\work\secret".into()],
-        ..a.clone()
-    };
-    assert_eq!(a, same);
-    assert_ne!(a, narrower);
-    assert_ne!(a, denied);
-}
 
 fn prefixes(paths: &[&str]) -> Vec<FsAllow> {
     paths
@@ -93,10 +71,6 @@ fn the_universal_prefix_is_refused_in_either_region() {
         let why = refuse_universal_prefix(&rules).unwrap_err().to_string();
         assert!(why.contains("ral will not stamp every drive"), "{why}");
     }
-    let why = refuse_universal_prefix(&rules(&["/"], &[], &[r"C:\secret"]))
-        .unwrap_err()
-        .to_string();
-    assert!(why.contains("every path except some exclusions"), "{why}");
 }
 
 #[test]

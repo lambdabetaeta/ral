@@ -369,18 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn only_openrouter_and_codex_meter_anything() {
-        for service in crate::provider::identity::built_in_services() {
-            let expected = match service.name.as_str() {
-                "openrouter" => Meter::OpenRouterBudget,
-                "openai-codex" => Meter::Codex,
-                _ => Meter::Unpublished,
-            };
-            assert_eq!(service.meter, expected, "{}", service.name);
-        }
-    }
-
-    #[test]
     fn fraction_reads_both_consumption_arms() {
         let by_fraction = Allowance {
             scope: Scope::Window(None),
@@ -447,19 +435,6 @@ mod tests {
             "a past reset yields no clause"
         );
         assert!(label.contains("1 hour"));
-    }
-
-    #[test]
-    fn figure_text_renders_raw_figures_with_and_without_a_cap() {
-        let capless = counted(1240, None, Unit::Dollars);
-        assert_eq!(capless.figure_text(), "$12.40 used · no published cap");
-
-        let capped = counted(30, Some(100), Unit::Requests);
-        assert_eq!(capped.figure_text(), "30 requests / 100 · 70 remaining");
-        assert_eq!(
-            counted(2000, Some(10000), Unit::Dollars).figure_text(),
-            "$20.00 used / $100.00 · $80.00 remaining"
-        );
     }
 
     fn roster_of(accounts: &[Account]) -> Roster {

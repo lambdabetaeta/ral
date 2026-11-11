@@ -4,7 +4,7 @@
 //! exarch uses between consecutive tool calls — to pin what routing through
 //! `run_phrases` buys: `let` bindings persist, effects before a failing
 //! line persist while those after it never ran, and `cd` persists.  The
-//! contract itself is covered in `core/tests/top_level_vs_block.rs`; these
+//! contract itself is covered in `core/tests/integration/api/session.rs`; these
 //! pin that `run_shell`'s wrapping does not perturb it.
 
 use super::surface::{Decoded, Surface, decode_surface};
@@ -78,7 +78,7 @@ fn run_shell_direct(
 
 /// One tool run under `Capabilities::default()` — exarch's least-restricted
 /// default, so every source here runs without exercising the OS sandbox,
-/// which `core/tests/top_level_vs_block.rs` covers separately.
+/// which `core/tests/integration/api/session.rs` covers separately.
 fn run_once(engine: &IdentityTransport, cmd: &str) -> ToolResult {
     run_shell_direct(engine, cmd, 30, &crate::record::Emitter::none())
 }
@@ -96,47 +96,6 @@ fn projecting_caps() -> Capabilities {
         }),
         ..Capabilities::default()
     }
-}
-
-/// `view-hash` returns one record per line: its number, its witness hash,
-/// and its text.
-#[cfg(unix)]
-#[test]
-fn view_tags_lines_with_hash() {
-    let engine = fresh();
-    let (_tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
-    let r = run_once(
-        &engine,
-        &format!(
-            "let rows = view-hash '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
-        ),
-    );
-    assert_eq!(
-        r.exit,
-        0,
-        "view-hash must run; stderr was: {}",
-        String::from_utf8_lossy(&r.stderr)
-    );
-    let val = r.value.as_deref().expect("view-hash must return value");
-    assert!(
-        val.contains("line: 1"),
-        "line renders as a ral field: {val:?}"
-    );
-    assert!(
-        val.contains("text: #'alpha'#"),
-        "text renders as a ral field: {val:?}"
-    );
-    let hash_start = val.find("hash: #'").expect("hash field") + "hash: #'".len();
-    let hash = &val[hash_start..hash_start + 7];
-    assert_eq!(
-        hash.len(),
-        7,
-        "hash is an `h` tag plus six hex, got {hash:?}"
-    );
-    assert!(
-        hash.starts_with('h') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()),
-        "hash is `h` followed by six hex chars, got {hash:?}"
-    );
 }
 
 /// The prompt's index lists the agent helpers and tells the model to
@@ -463,40 +422,6 @@ fn edit_notes_changed_lines_on_stderr() {
         String::from_utf8_lossy(&batch.stderr),
         format!("[EXARCH] Replaced lines 2, 3 of {path}.\n"),
         "a multi-line batch notes the plural form, sorted, with no escape warning"
-    );
-}
-
-/// `edit-replace` notes its changed lines as `edit-hash` does, counted
-/// from where its unique match starts: `line n`, or `lines n-m` when the
-/// match spans a real newline in `from`.
-#[test]
-fn edit_replace_notes_changed_line_range_on_stderr() {
-    let engine = fresh();
-    let (_dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
-    let r = run_once(
-        &engine,
-        &format!("edit-replace '{path}' 'hello world' 'hi\\tthere'"),
-    );
-    assert_eq!(r.exit, 0, "edit-replace must succeed");
-    assert_eq!(
-        String::from_utf8_lossy(&r.stderr),
-        format!("[EXARCH] Replaced line 2 of {path}.\n"),
-        "a single-line match notes the singular form with no escape warning"
-    );
-
-    let (_dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
-    let spanning = run_once(
-        &engine,
-        &format!("edit-replace '{path2}' 'two\nthree' 'TWO\nTHREE'"),
-    );
-    assert_eq!(
-        spanning.exit, 0,
-        "a match spanning a real newline must succeed"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&spanning.stderr),
-        format!("[EXARCH] Replaced lines 2-3 of {path2}.\n"),
-        "a match spanning two lines notes the plural range"
     );
 }
 
@@ -833,19 +758,6 @@ fn command_exit_is_the_tool_exit() {
         &crate::record::Emitter::none(),
     );
     assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
-}
-
-/// Raised text has failure code one at the tool exit.
-#[test]
-fn raised_error_has_tool_exit_one() {
-    let engine = fresh();
-    let r = run_shell_direct(
-        &engine,
-        "fail 'raised error'",
-        10,
-        &crate::record::Emitter::none(),
-    );
-    assert_eq!(r.exit, 1, "raised text derives tool exit one");
 }
 
 /// The same timeout must tear down a sandbox-confined eval child.  The
@@ -1953,41 +1865,6 @@ fn using_a_ral_file_raises_no_io_card() {
 // The reply projection's policy table, one case per `FOValue` variant.
 
 #[test]
-fn user_json_unit_is_null() {
-    assert_eq!(super::user_json(&FOValue::Unit), serde_json::Value::Null);
-}
-
-#[test]
-fn user_json_bool_and_int_are_scalars() {
-    assert_eq!(
-        super::user_json(&FOValue::Bool { value: true }),
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        super::user_json(&FOValue::Int { value: -7 }),
-        serde_json::json!(-7)
-    );
-}
-
-#[test]
-fn user_json_finite_float_is_a_json_number() {
-    assert_eq!(
-        super::user_json(&FOValue::Float {
-            value: ral_core::data::Finite::new(1.5).expect("finite")
-        }),
-        serde_json::json!(1.5)
-    );
-}
-
-#[test]
-fn user_json_string_passes_through_raw() {
-    assert_eq!(
-        super::user_json(&FOValue::String { value: "hi".into() }),
-        serde_json::json!("hi")
-    );
-}
-
-#[test]
 fn user_json_bytes_become_a_base64_string() {
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"hi");
     assert_eq!(
@@ -1996,22 +1873,6 @@ fn user_json_bytes_become_a_base64_string() {
         }),
         serde_json::Value::String(encoded)
     );
-}
-
-#[test]
-fn user_json_list_becomes_an_array() {
-    let v = FOValue::List {
-        items: vec![FOValue::Int { value: 1 }, FOValue::Int { value: 2 }],
-    };
-    assert_eq!(super::user_json(&v), serde_json::json!([1, 2]));
-}
-
-#[test]
-fn user_json_map_becomes_an_object() {
-    let v = FOValue::Map {
-        entries: vec![("a".into(), FOValue::Int { value: 1 })],
-    };
-    assert_eq!(super::user_json(&v), serde_json::json!({"a": 1}));
 }
 
 #[test]

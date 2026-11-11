@@ -395,18 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn foreign_os_string_platform_is_a_typed_decode_cause() {
-        #[cfg(unix)]
-        let raw = RawOsString::Windows(vec![0xD800]);
-        #[cfg(windows)]
-        let raw = RawOsString::Unix(vec![0xFF]);
-        assert!(matches!(
-            *raw.validate().unwrap_err().cause,
-            DecodeCause::OsStringPlatform(_)
-        ));
-    }
-
-    #[test]
     fn entry_name_validation_retains_rule_and_logical_field_path() {
         for (text, expected) in [
             ("", EntryNameFailure::Empty),

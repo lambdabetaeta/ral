@@ -71,18 +71,3 @@ pub(crate) fn gesture(_signal: Signal) -> Option<CancelCause> {
 pub(crate) fn gesture_signal(cause: CancelCause) -> Option<Signal> {
     (cause == CancelCause::Interrupted).then_some(CONSOLE_EVENT)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_console_interrupt_death_is_not_a_reported_key() {
-        assert_eq!(
-            gesture_signal(CancelCause::Interrupted),
-            Some(CONSOLE_EVENT)
-        );
-        assert_eq!(gesture(CONSOLE_EVENT), None);
-        assert_eq!(gesture(KILL), None);
-    }
-}

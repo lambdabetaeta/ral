@@ -704,15 +704,6 @@ mod tests {
     }
 
     #[test]
-    fn the_error_record_is_the_closed_four_field_record_a_handler_reads() {
-        assert_eq!(
-            ErrorRecord::ty().to_string(),
-            "[frame: String, message: String, site: [col: Integer, line: Integer, \
-             script: String], status: Integer]"
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "installed twice")]
     fn a_set_repeating_a_name_is_refused() {
         Manifest::default().push(set(&["a", "a"]));

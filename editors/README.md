@@ -17,12 +17,7 @@ supports bumped single-string fences through depth 3; the regex bundles support
 arbitrary matching fences. Neither validates numeric ranges or
 classification-dependent record/map spread restrictions.
 
-Verification:
-
-```sh
-(cd editors/tree-sitter-ral && tree-sitter generate && tree-sitter test)
-bash editors/ral-syntax/tests/run.sh
-```
+Verification: `just editors` (needs `tree-sitter` and node).
 
 The scope fixtures execute TextMate/Oniguruma and Sublime YAML through
 syntect/Oniguruma; they do not stand in for a live Sublime Text test.

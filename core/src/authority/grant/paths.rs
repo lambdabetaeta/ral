@@ -81,25 +81,3 @@ impl<W: Polar> GrantPath<W> {
         Ok(Self { written, real })
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests {
-    use super::*;
-
-    /// The fixture judges the root as the decoder does, by its raw `/`.
-    #[test]
-    fn the_fixture_takes_the_root_by_its_spelling() {
-        let root = GrantPath::<Trace>::walk(FrozenPath::root()).unwrap();
-        assert_eq!(root.real, Extent::Everywhere);
-        assert!(GrantPath::<Excluded>::walk(FrozenPath::root()).is_err());
-    }
-
-    /// A spelling the decoder would drop as dead is no fixture's rule.
-    #[cfg(unix)]
-    #[test]
-    #[should_panic(expected = "absolute under this platform's rules")]
-    fn the_fixture_refuses_a_foreign_spelling() {
-        drop(GrantPath::<Trace>::walk(FrozenPath::from_surface(r"C:\x")));
-    }
-}

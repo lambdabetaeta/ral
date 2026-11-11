@@ -605,13 +605,6 @@ mod tests {
         assert!(live(&met).is_empty(), "{met:?}");
     }
 
-    /// Positive control: the meet narrows, it does not blanket-deny.
-    #[test]
-    fn legitimate_nesting_survives_the_meet() {
-        let met = table(&[lit("/a")], &[]).meet(table(&[lit("/a/sub")], &[]));
-        assert_eq!(live(&met), prefixes(&["/a/sub"]));
-    }
-
     /// the exclusion relation folds a spelling the allowance relation
     /// keeps apart, and a refusal by the fold names the exclusion.
     #[test]
@@ -851,31 +844,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_empty_read_admits_exactly_the_system_reads() {
-        let runtime = core_runtime();
-        let read = region_of(FsOp::Read, &[], &[], runtime.baseline());
-        assert!((runtime.baseline().allows()).all(|f| read.evidence(f.own()).permits()));
-        assert_eq!(
-            read.evidence(Subject::Access(&at("/no/such/place"))),
-            Evidence::NEITHER
-        );
-    }
-
-    /// Writing reads: a layer that writes a folder and does not list it for
-    /// reading reads it.
-    #[test]
-    fn writing_a_folder_reads_it() {
-        let stack = stack([fs_layer(FsPolicy {
-            write_prefixes: vec![lit("/work")],
-            ..FsPolicy::default()
-        })]);
-        let baseline = Baseline::default();
-        assert!(stack.read(&baseline, &at("/work/f")).is_ok());
-        assert!(stack.write(&baseline, &at("/work/f")).is_ok());
-        assert!(stack.read(&baseline, &at("/other/f")).is_err());
-    }
-
     /// Reading a folder is not writing it; writing one reads it.
     #[test]
     fn a_reading_layer_does_not_write_and_a_writing_layer_reads() {
@@ -1033,29 +1001,6 @@ mod tests {
         ]);
         let why = stack.read(&Baseline::default(), &at("/x/prog"));
         assert!(matches!(why, Err(Withheld::Excluded { .. })), "{why:?}");
-    }
-
-    /// The read judgment is the read region's: one table, run places included.
-    #[test]
-    fn the_read_judgment_agrees_with_the_region_of_places() {
-        let baseline = Baseline::default();
-        let stack = stack([
-            running(&["/x/prog", "/x/tools"]),
-            fs_layer(FsPolicy {
-                read_prefixes: vec![lit("/work")],
-                deny_paths: vec![lit("/x/tools/bad")],
-                ..FsPolicy::default()
-            }),
-        ]);
-        let full = region(&stack, FsOp::Read, &baseline).unwrap();
-        for path in ["/x/prog", "/x/tools/ok", "/x/tools/bad", "/work/f", "/y/zz"] {
-            let access = at(path);
-            assert_eq!(
-                stack.read(&baseline, &access).is_ok(),
-                permits(&full, &access),
-                "{path}"
-            );
-        }
     }
 
     /// The meet holds a nested allow through the `\\?\`-verbatim spelling

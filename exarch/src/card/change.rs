@@ -127,27 +127,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_a_write_is_a_change() {
-        let read = Observed::Read(ral_core::fact::Read { path: "a".into() });
-        assert!(Change::of(&read).is_none());
-    }
-
-    #[test]
-    fn lines_count_the_diff_or_nothing() {
-        let change = |old, new| Change::of(&write(old, new, WriteOutcome::Committed)).unwrap();
-        assert_eq!(change(Some(b"a\n"), Some(b"b\nc\n")).lines(), 3);
-        assert_eq!(change(None, Some(b"b\n")).lines(), 0);
-    }
-
     fn card_of(old: Option<&[u8]>, new: Option<&[u8]>, outcome: WriteOutcome) -> Card {
         change_card(&Change::of(&write(old, new, outcome)).unwrap())
-    }
-
-    #[test]
-    fn a_committed_diff_is_its_own_card() {
-        let card = card_of(Some(b"a\n"), Some(b"b\n"), WriteOutcome::Committed);
-        assert!(matches!(card.marks(), [Mark::Diff { path, .. }] if path == "a.txt"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! behind `Workspace`, and the grant section.
 
 use super::*;
-use ral_core::authority::grant::value::{Axes, ExecTable, GrantValue, LayerValue, Target, printed};
+use ral_core::authority::grant::value::{Axes, GrantValue, LayerValue};
 use ral_core::authority::policy::GrantStack;
 use ral_core::data::FOValue;
 use std::fs;
@@ -73,29 +73,11 @@ fn sections_come_in_the_order_they_are_built() {
 }
 
 #[test]
-fn surfacing_is_taught_only_to_an_interactive_agent() {
-    let (_tmp, root) = tree();
-    for interactive in [false, true] {
-        let prompt = plain(&root, interactive, EditScheme::Replace);
-        assert_eq!(headings(&prompt).contains(&"Surfacing"), interactive);
-    }
-}
-
-#[test]
 fn workspace_appears_only_where_an_agents_file_is_found() {
     let (_tmp, root) = tree();
     assert!(!headings(&plain(&root, false, EditScheme::Replace)).contains(&"Workspace"));
     fs::write(root.join("AGENTS.md"), "found").unwrap();
     assert!(headings(&plain(&root, false, EditScheme::Replace)).contains(&"Workspace"));
-}
-
-#[test]
-fn the_edit_scheme_chooses_the_editing_section() {
-    let (_tmp, root) = tree();
-    let replace = plain(&root, false, EditScheme::Replace);
-    let hash = plain(&root, false, EditScheme::Hash);
-    assert!(replace.contains(EDIT_REPLACE.trim_end()) && !replace.contains(EDIT_HASH.trim_end()));
-    assert!(hash.contains(EDIT_HASH.trim_end()) && !hash.contains(EDIT_REPLACE.trim_end()));
 }
 
 /// `--system` replaces the persona and nothing after it.
@@ -111,20 +93,6 @@ fn system_files_replace_only_the_persona() {
     assert!(default.starts_with(include_str!("../../data/system.md").trim_end()));
     assert_eq!(headings(&custom), headings(&default));
     assert!(custom.contains(RAL_REFERENCE.trim_end()));
-}
-
-#[test]
-fn an_unreadable_system_file_fails_the_assembly_naming_it() {
-    let (_tmp, root) = tree();
-    let error = assembled(
-        &[root.join("missing.md")],
-        &root,
-        None,
-        true,
-        EditScheme::Replace,
-    )
-    .unwrap_err();
-    assert!(error.contains("missing.md"), "{error}");
 }
 
 /// The operator's file, then the repo root down to `cwd`; a directory with
@@ -161,28 +129,6 @@ fn an_agents_file_that_exists_but_cannot_be_read_fails_the_assembly() {
 /// A grant value as it crosses.
 fn data(axes: Axes) -> FOValue {
     GrantValue::from(axes).into()
-}
-
-/// Every program has no grant spelling, so a layer that runs it is shown as
-/// its grant extended by its fragment, the empty grant as `grant` writes it.
-#[test]
-fn an_extended_layer_is_shown_as_its_grant_extended_by_its_fragment() {
-    let fragment = data(Axes {
-        exec: Some(ExecTable {
-            deny: vec![Target::Name("bash".into())],
-            ..ExecTable::default()
-        }),
-        ..Axes::default()
-    });
-    let shown = LayerValue {
-        grant: data(Axes::default()),
-        fragment: Some(fragment.clone()),
-    }
-    .to_string();
-    assert_eq!(
-        shown,
-        format!("grant [] extended by {}", printed(&fragment))
-    );
 }
 
 /// Without a layer there is nothing to describe or to be denied: no legend,

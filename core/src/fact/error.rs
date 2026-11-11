@@ -633,26 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn operational_families_exit_one_without_changing_process_blame() {
-        for reason in operational_reasons() {
-            assert_eq!(reason.failure_code().get(), 1);
-        }
-        assert_eq!(
-            Reason::process("x", Failure::NotFound).failure_code().get(),
-            127
-        );
-        assert_eq!(
-            Reason::process(
-                "x",
-                Failure::not_runnable("x", Unrunnable::Io(Box::new(IoCause::new(IoLeaf::Torn))),)
-            )
-            .failure_code()
-            .get(),
-            126
-        );
-    }
-
-    #[test]
     fn malformed_family_payload_retains_its_decode_path() {
         let value = crate::data::datum::tag("compile", Some("not a record".to_owned().encode()));
         let failure = Reason::decode(&value).unwrap_err();

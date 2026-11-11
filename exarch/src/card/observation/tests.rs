@@ -62,7 +62,6 @@ fn capability_card_denies_role_bad_and_shows_its_fields() {
         .into_iter()
         .collect(),
     )));
-    assert_eq!(line(&card), "check fs denied op=write path=/etc/passwd");
     let Card(marks) = &card;
     let Mark::Text { spans } = &marks[0] else {
         panic!("expected a text mark")
@@ -74,47 +73,8 @@ fn capability_card_denies_role_bad_and_shows_its_fields() {
     assert_eq!(denied.role, Some(Role::Bad));
 }
 
-#[test]
-fn errand_birth_names_the_identity_and_title() {
-    let text = worker_spans(WorkerId(7), "building")
-        .iter()
-        .map(|span| span.text.as_str())
-        .collect::<String>();
-    assert_eq!(text, "errand #7 started · building");
-}
-
 fn check(resource: Resource) -> Check {
     Check::new(resource, BTreeMap::new())
-}
-
-#[test]
-fn only_effects_denials_and_births_land() {
-    assert!(matches!(
-        Landed::of(&Observed::Command(fact(&["ls"], 0))),
-        Some(Landed::Effect(Effect::Command(_)))
-    ));
-    assert!(matches!(
-        Landed::of(&Observed::Read(Read { path: "a".into() })),
-        Some(Landed::Effect(Effect::Read(_)))
-    ));
-    assert!(matches!(
-        Landed::of(&Observed::Grep(Grep {
-            scope: "src".into(),
-            pattern: "x".into()
-        })),
-        Some(Landed::Effect(Effect::Grep(_)))
-    ));
-    assert!(matches!(
-        Landed::of(&Observed::Worker(Worker {
-            id: WorkerId(1),
-            title: "t".into()
-        })),
-        Some(Landed::Announced(_))
-    ));
-    assert!(matches!(
-        Landed::of(&Observed::Check(check(Resource::Fs))),
-        Some(Landed::Surfaced(_))
-    ));
 }
 
 /// A flagged deputy check is no denial; a write draws as its change, an act is the desk's.

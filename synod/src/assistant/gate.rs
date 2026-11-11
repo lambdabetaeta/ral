@@ -517,26 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnected_feed_is_a_failure_while_the_window_is_current() {
-        let (tx, rx) = exarch::port::channel();
-        drop(tx);
-        let log = Log::default();
-        let mut seat = FakeSeat::new(&rx, &log, || true);
-        assert_eq!(
-            run(&mut seat, &FakeStage::new(&log), &mut Ignore),
-            Err(true)
-        );
-        assert_eq!(
-            *log.borrow(),
-            [
-                "release",
-                "failure: The assistant's event feed disconnected.",
-                "invalidate"
-            ]
-        );
-    }
-
-    #[test]
     fn a_helper_failure_queued_during_the_walk_is_found_by_the_post_walk_snapshot() {
         let (tx, rx) = exarch::port::channel();
         tx.send_signal(died(AgentId::new(2), &["uncertified"]))

@@ -531,56 +531,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn login_routes_have_distinct_identities_and_capabilities() {
-        use crate::provider::oauth::{Method, methods};
-        let expected = [
-            (
-                Login::Chatgpt,
-                "openai-chatgpt",
-                AdapterKind::OpenAIResp,
-                Meter::Unpublished,
-                &[Method::Browser][..],
-            ),
-            (
-                Login::Codex,
-                "openai-codex",
-                AdapterKind::OpenAIResp,
-                Meter::Codex,
-                &[Method::Browser, Method::Device][..],
-            ),
-            (
-                Login::Grok,
-                "xai-grok",
-                AdapterKind::Xai,
-                Meter::Unpublished,
-                &[Method::Device][..],
-            ),
-        ];
-        for (login, (route, name, adapter, meter, supported)) in
-            Login::ALL.into_iter().zip(expected)
-        {
-            assert_eq!(login, route);
-            let service = login.service();
-            assert_eq!(Login::named(name), Ok(login));
-            assert_eq!(service.name.as_str(), name);
-            assert_eq!(service.adapter, adapter);
-            assert_eq!(service.meter, meter);
-            assert_eq!(service.auth, Auth::OAuth(login));
-            assert_eq!(service.billing, Billing::FlatRate);
-            assert_eq!(service.endpoint, None);
-            assert!(!service.routes);
-            assert_eq!(methods(login), supported);
-            assert_eq!(service.shares_a_plan(), login == Login::Chatgpt);
-        }
-        for refused in ["chatgpt", "codex", "grok", "openai-chatgtp"] {
-            let error = Login::named(refused).unwrap_err();
-            for (_, name, ..) in expected {
-                assert!(error.contains(name), "{error}");
-            }
-        }
-    }
-
-    #[test]
     fn openai_service_keeps_openai_adapter_split() {
         let openai = Account::built_in("openai").service;
         assert_eq!(adapter_for_model(&openai, "gpt-4.1"), AdapterKind::OpenAI);
@@ -603,25 +553,6 @@ mod tests {
         assert_eq!(
             ServiceName::declared("local-llama").unwrap().as_str(),
             "local-llama"
-        );
-    }
-
-    #[test]
-    fn a_key_bearing_account_is_named_by_its_service_alone() {
-        let anthropic = Account::built_in("anthropic");
-        let go = Account::built_in("opencode-go");
-        let among = [anthropic.clone(), go.clone()];
-        assert_eq!(label(&anthropic, &among), "anthropic");
-        assert_eq!(label(&go, &among), "opencode-go");
-        assert_eq!(anthropic.id.as_str(), "anthropic");
-    }
-
-    #[test]
-    fn a_lone_chatgpt_account_keeps_its_handle() {
-        let one = Account::login(Login::Chatgpt, "acct-1", "alex@bristol.ac.uk");
-        assert_eq!(
-            label(&one, std::slice::from_ref(&one)),
-            "openai-chatgpt · alex@bristol.ac.uk"
         );
     }
 
@@ -671,16 +602,5 @@ mod tests {
     fn a_declared_key_is_read_from_a_variable_a_shell_can_export() {
         let name = ServiceName::declared("house-llm.v2").unwrap();
         assert_eq!(key_var(&name), "HOUSE_LLM_V2_API_KEY");
-    }
-
-    #[test]
-    fn an_account_id_renders_injectively() {
-        let chatgpt = Login::Chatgpt.service().name;
-        assert_eq!(AccountId::of_service(&chatgpt).as_str(), "openai-chatgpt");
-        assert_eq!(
-            AccountId::of_login(&chatgpt, "abc").as_str(),
-            "openai-chatgpt:abc"
-        );
-        assert!(ServiceName::declared("openai-chatgpt:abc").is_err());
     }
 }

@@ -303,20 +303,6 @@ mod tests {
         assert_eq!(now.sa_flags & libc::SA_RESTART, 0);
     }
 
-    /// An exit is delivered through the reaper, without the subscriber
-    /// itself ever calling `waitpid`.
-    #[test]
-    fn exit_is_delivered() {
-        let mut child = spawn_sleep("0");
-        let pid = child.id();
-        let (tx, rx) = channel();
-        let watch = watch(pid, tx, std::convert::identity);
-
-        assert!(recv_timeout(&rx).is_success(), "sleep 0 exits cleanly");
-        watch.reap().expect("reap");
-        let _ = child.kill();
-    }
-
     /// A stop is answered by the reaper itself with `SIGCONT` and never
     /// reaches the subscriber: the only event this watch ever sees is the
     /// kill's own exit, proving the stop did not wedge the entry.

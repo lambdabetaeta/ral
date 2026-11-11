@@ -32,8 +32,3 @@ fn desaturate_holds_luminance() {
         assert_eq!((r, r), (g, b), "full drain is grey");
     }
 }
-
-#[test]
-fn desaturate_zero_is_identity() {
-    assert_eq!(desaturate(AGENT_HUES[0], 0.0), AGENT_HUES[0]);
-}

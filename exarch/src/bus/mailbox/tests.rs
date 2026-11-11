@@ -1,5 +1,5 @@
 use super::*;
-use crate::record::{Control, Forensic, Memory, RECORD, Record, Started, read_records};
+use crate::record::{Control, Forensic, RECORD, Record, Started, read_records};
 use ral_core::own::OwnDir;
 use ral_core::process::DurableRoot;
 use ral_core::test_helper::eventually;

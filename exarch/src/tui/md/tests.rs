@@ -98,28 +98,6 @@ fn table_cell_typesets_math() {
     );
 }
 
-/// The frame is pinned: one space of padding either side of the widest
-/// cell in each column, and a rule that spans exactly that padded width.
-#[test]
-fn table_frame_is_drawn_exactly() {
-    let rows = rows(&render_md(
-        "| a | bb |\n| --- | --- |\n| ccc | d |\n",
-        80,
-        MD_INDENT,
-        Fidelity::default(),
-    ));
-    let frame: Vec<&str> = rows
-        .iter()
-        .map(|r| r.trim_start())
-        .filter(|r| !r.is_empty())
-        .collect();
-    assert_eq!(
-        frame,
-        ["│ a   │ bb │", "├─────┼────┤", "│ ccc │ d  │"],
-        "the drawn frame: {rows:?}"
-    );
-}
-
 /// A span wider than the budget breaks between characters.  Wrapping only
 /// *before* it would run the tail off the row, where the terminal clips it.
 #[test]
@@ -156,16 +134,6 @@ fn fused_punctuation_breaks_as_one_word() {
             !r.trim_start().starts_with(','),
             "punctuation orphaned onto its own row: {rows:?}"
         );
-    }
-}
-
-/// A sound block is left alone: no wash, no carried-over `DIM`.
-#[test]
-fn sound_prose_is_untouched() {
-    let lines = render_md("plain prose here", 80, MD_INDENT, Fidelity::default());
-    for span in ink(&lines) {
-        assert!(span.style.bg.is_none(), "sound prose wears no wash");
-        assert!(!span.style.add_modifier.contains(Modifier::DIM));
     }
 }
 

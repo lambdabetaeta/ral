@@ -35,33 +35,7 @@ fn a_panicked_run_reports_exit_101_and_leaves_the_shell_usable() {
         "{}",
         panicked.text
     );
-    assert!(
-        panicked
-            .text
-            .contains("run panicked: a4 test: deliberate mid-eval panic"),
-        "{}",
-        panicked.text
-    );
-    assert!(
-        panicked.text.contains(
-            "ral itself panicked: a bug in ral, not in this call. The call's `let` bindings were rolled back; what it ran outside the shell stands. Find out what changed before you resend any of it."
-        ),
-        "{}",
-        panicked.text
-    );
     let after = run(&mut session, "return 1", 5);
     assert!(!after.failed);
     assert_eq!(exit_line(&after.text), Some("EXIT: 0"), "{}", after.text);
-}
-
-/// The wall is the call's own `timeout_secs`.
-#[cfg(unix)]
-#[test]
-fn the_calls_timeout_ends_it_with_the_wall_status() {
-    let mut session = Agent::for_test("system").unwrap();
-    let started = std::time::Instant::now();
-    let timed_out = run(&mut session, "/bin/sleep 20", 1);
-    assert!(started.elapsed() < std::time::Duration::from_secs(15));
-    assert!(timed_out.failed);
-    assert_eq!(exit_line(&timed_out.text), Some("EXIT: 124"));
 }

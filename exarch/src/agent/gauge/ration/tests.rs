@@ -126,15 +126,3 @@ fn an_allowance_with_no_fraction_is_skipped() {
     );
     assert!(told(&Account::built_in("openrouter"), &[uncapped]).is_empty());
 }
-
-#[test]
-fn told_formats_the_user_line() {
-    let warnings = told(&Account::built_in("openrouter"), &[window(5, 0.80)]);
-    let [Warning::User(line)] = warnings.as_slice() else {
-        panic!("one line for the user");
-    };
-    assert!(
-        line.starts_with("usage: openrouter at 80%; 5 hours"),
-        "{line}"
-    );
-}

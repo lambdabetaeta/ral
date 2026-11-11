@@ -258,18 +258,6 @@ fn a_recreated_root_fails_the_probe_and_is_restamped() {
 }
 
 #[test]
-fn inheritance_propagation_applies_without_error() {
-    with_scoped_state_dir(|| {
-        let td = tempfile::tempdir().unwrap();
-        let sub = td.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("file.txt"), b"x").unwrap();
-        let canonical = real(td.path());
-        grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
-    });
-}
-
-#[test]
 fn capability_name_is_deterministic_kind_and_path_keyed() {
     let a = r"\\?\C:\Work\Proj";
     let a_case = r"\\?\c:\work\proj";

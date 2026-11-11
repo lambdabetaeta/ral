@@ -23,19 +23,28 @@ default:
 build:
     cargo build --workspace --all-targets --features {{features}} --keep-going
 
-# Run runtime tests; ral/tests/ runs the `ral` binary `build` refreshes.
-test: build
-    cargo test --workspace --features {{features}},ral-core/test-util,exarch/test-util --no-fail-fast
+# Run runtime tests, optionally only those whose path matches, e.g. `just test corpus::`.
+test *filter: build
+    cargo test --workspace --features {{features}},ral-core/test-util,exarch/test-util --no-fail-fast -- {{filter}}
+
+# Run unit tests alone: the fast inner loop.
+test-unit:
+    cargo test --workspace --lib --bins --features {{features}},ral-core/test-util,exarch/test-util
+
+# Rewrite the run corpus's goldens (tests/run/**/*.out) from current output.
+bless $RAL_BLESS='1':
+    cargo test -p ral --features {{features}} --test integration -- corpus::run
 
 # Check the authority API's compile-time guarantees (separate compiler invocations).
 test-types:
     cargo test --workspace --test markers --features {{features}},ral-core/test-util,exarch/test-util -- --ignored
 
-# Rustfmt, clippy and rustdoc's link checks, for this host's platform.
+# Rustfmt, clippy, rustdoc's link checks, and the source's structural laws.
 lint:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --features {{features}} --keep-going
     cargo doc --workspace --no-deps --document-private-items --features {{features}}
+    cargo test -p ral-lint
 
 # Clippy, from this host, the platforms it does not build (needs clang, lld, cargo-xwin).
 check $CC_aarch64_unknown_linux_musl='clang' $CC_x86_64_unknown_linux_musl='clang' $CC_aarch64_apple_darwin='clang':
@@ -56,6 +65,12 @@ ui: _bindings
     deno check --unstable-sloppy-imports js/*.js
     deno test --unstable-sloppy-imports tests/
 
+# Test the editor grammars against their fixtures (needs tree-sitter and node).
+[unix]
+editors:
+    cd editors/tree-sitter-ral && tree-sitter generate && tree-sitter test
+    bash editors/ral-syntax/tests/run.sh
+
 _bindings:
     cargo test -p synod --quiet export_bindings
 
@@ -70,7 +85,7 @@ wiki *args:
     bash scripts/wiki/build.sh {{args}}
 
 # Everything GitHub CI runs that this host can.
-ci: lint test test-types docs ui
+ci: lint test test-types docs ui editors
 
 # Run recipes in the Linux container, e.g. `just box lint test`.
 [unix]

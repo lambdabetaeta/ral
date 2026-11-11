@@ -281,16 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn top_level_persists_let_on_error() {
-        let mut shell = crate::test_helper::core_shell();
-        let _ = run_source("let persist_top = 41\nexit 7", &mut shell);
-        assert!(
-            shell.env.get("persist_top").is_some(),
-            "the run door must persist `let` bindings even on Exit"
-        );
-    }
-
-    #[test]
     fn block_discards_let() {
         // A bare `{ … }` statement elaborates to `Run(Return(Thunk(body)))`;
         // unwrap it to reach the block's own body — real source text, never

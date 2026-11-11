@@ -1,0 +1,33 @@
+# Spawn and await carry values, closures, and deep recursion
+
+# A worker's value comes back through await as itself
+let h1 = !{spawn { return 99 }}
+let v1 = await $h1
+echo $[$v1 + $v1]
+# Expected: 198
+
+# A closure returned from a worker keeps its captured bindings
+let secret = 42
+let h2 = !{spawn { return { |x| return $[$x + $secret] } }}
+let add-secret = await $h2
+echo !{add-secret 8}
+# Expected: 50
+
+# Cancelling an awaited worker changes nothing: its result was claimed
+let h3 = !{spawn { return 7 }}
+let r3 = await $h3
+cancel $h3
+echo $r3
+# Expected: 7
+
+# A tail-recursive body runs in constant stack inside a worker
+let h4 = !{spawn {
+    let count = { |n acc|
+        if $[$n <= 0] { return $acc } else { count $[$n - 1] $[$acc + $n] }
+    }
+    let total = count 10000 0; return $total
+}}
+echo !{await $h4}
+# Expected: 50005000
+
+echo 'spawn value tests done'

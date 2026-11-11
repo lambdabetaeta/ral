@@ -132,8 +132,6 @@ uu_whoami    = { version = "0.12", optional = true }
 
 [dev-dependencies]
 ctor = "1"
-# Lexes the workspace for tests/no_em_dash_in_literals.rs.
-proc-macro2 = { version = "1", features = ["span-locations"] }
 tempfile = "3.27"
 # The authority markers' compile-fail cases: `tests/markers.rs`.
 trybuild = "1.0.122"

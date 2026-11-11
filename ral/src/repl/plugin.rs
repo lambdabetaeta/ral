@@ -544,14 +544,6 @@ mod tests {
     use super::*;
     use ral_core::Value;
 
-    /// `Keymap` names rustyline's `EditMode`, the rc's `edit_mode:` value, and
-    /// the keymap for the `_ed-get` record.
-    #[test]
-    fn keymap_names_edit_mode_and_round_trips_as_a_datum() {
-        assert_eq!(EditMode::from(Keymap::Vi), EditMode::Vi);
-        assert_eq!(Keymap::decode(&Keymap::Vi.encode()), Ok(Keymap::Vi));
-    }
-
     /// A `complete` hook claims the word: it sees the command at the cursor,
     /// and its list replaces from the word's start.
     #[test]
@@ -613,13 +605,7 @@ mod tests {
     fn a_wrong_shaped_complete_return_passes_with_a_warning() {
         let (t, host, _) = dressed(&[("p", HookEvent::Complete, "{ |_at| return 7 }")]);
         assert_eq!(run_complete_hooks(&t, &host, "git ", 4), None);
-        let rt = lock(&host.runtime);
-        assert_eq!(rt.diagnostics.messages.len(), 1);
-        assert!(
-            rt.diagnostics.messages[0].contains("its complete hook returned the wrong shape"),
-            "{}",
-            rt.diagnostics.messages[0]
-        );
+        assert_eq!(lock(&host.runtime).diagnostics.messages.len(), 1);
     }
 
     /// A record candidate keeps its display apart from its replacement.

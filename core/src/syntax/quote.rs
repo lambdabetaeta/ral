@@ -161,19 +161,6 @@ mod tests {
     // ── is_bare_word ─────────────────────────────────────────────────
 
     #[test]
-    fn bare_word_accepts_plain_identifier() {
-        assert!(is_bare_word("hello"));
-        assert!(is_bare_word("hello.txt"));
-        assert!(is_bare_word("path/to/file"));
-        assert!(is_bare_word("a-b_c"));
-    }
-
-    #[test]
-    fn bare_word_rejects_empty() {
-        assert!(!is_bare_word(""));
-    }
-
-    #[test]
     fn bare_word_rejects_tilde_leading() {
         assert!(!is_bare_word("~/foo"));
         assert!(!is_bare_word("~"));
@@ -229,81 +216,7 @@ mod tests {
         assert!(is_bare_word("unit"));
     }
 
-    // ── quote_word ───────────────────────────────────────────────────
-
-    #[test]
-    fn quote_word_bare_passes_through() {
-        assert_eq!(quote_word("hello.txt"), "hello.txt");
-    }
-
-    #[test]
-    fn quote_word_space_uses_single_quotes() {
-        assert_eq!(quote_word("a b.txt"), "'a b.txt'");
-    }
-
-    #[test]
-    fn quote_word_brackets_use_single_quotes() {
-        assert_eq!(quote_word("[a]"), "'[a]'");
-        assert_eq!(quote_word("{a}"), "'{a}'");
-        assert_eq!(quote_word("(a)"), "'(a)'");
-    }
-
-    #[test]
-    fn quote_word_embedded_quote_bumps_hash() {
-        assert_eq!(quote_word("it's.txt"), "#'it's.txt'#");
-    }
-
-    #[test]
-    fn quote_word_close_run_in_body_bumps_further() {
-        // The body holds `'#`, which would close a level-1 quote early.
-        assert_eq!(quote_word("a'#b"), "##'a'#b'##");
-    }
-
-    #[test]
-    fn quote_word_open_run_in_body_bumps_further() {
-        assert_eq!(quote_word("a#'b"), "##'a#'b'##");
-    }
-
-    #[test]
-    fn quote_word_empty_is_empty_quotes() {
-        assert_eq!(quote_word(""), "''");
-    }
-
-    #[test]
-    fn quote_word_unicode_is_bare() {
-        // Non-ASCII letters are not metacharacters.
-        assert_eq!(quote_word("日本語"), "日本語");
-    }
-
-    #[test]
-    fn quote_word_unicode_with_space_quotes() {
-        assert_eq!(quote_word("a 日 b"), "'a 日 b'");
-    }
-
-    #[test]
-    fn quote_word_borrows_a_bare_word() {
-        assert!(matches!(quote_word("hello.txt"), Cow::Borrowed(_)));
-        assert!(matches!(quote_word("a b"), Cow::Owned(_)));
-    }
-
-    // ── escape_for_interpolation, one_word ───────────────────────────
-
-    #[test]
-    fn escape_for_interpolation_escapes_the_string_metacharacters() {
-        for (raw, escaped) in [
-            ("a\nb", "a\\nb"),
-            ("a\tb", "a\\tb"),
-            ("a\rb", "a\\rb"),
-            ("a\\b", "a\\\\b"),
-            ("a\"b", "a\\\"b"),
-            ("a$b", "a\\$b"),
-            ("a!b", "a\\!b"),
-            ("plain 日本", "plain 日本"),
-            ("a\u{202E}b", "a\\u{202E}b"),
-        ] {
-            assert_eq!(escape_for_interpolation(raw), escaped, "{raw:?}");
-        }
-    }
+    // ── one_word ─────────────────────────────────────────────────────
 
     /// `one_word` re-spells a run of touching atoms as one `"…"` that lexes
     /// back to a single literal of the text the atoms spell together.

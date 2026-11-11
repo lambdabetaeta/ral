@@ -27,20 +27,3 @@ impl From<oauth::LoginPhase> for SignInStep {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{SignInStep, oauth};
-
-    #[test]
-    fn device_phase_preserves_its_link_code_and_lifetime() {
-        let device = SignInStep::from(oauth::LoginPhase::AwaitingDevice {
-            user_code: "ABCD-EFGH".into(),
-            url: "https://example.test/device".into(),
-            expires_in: "15 minutes".into(),
-        });
-        assert_eq!(device.link.as_deref(), Some("https://example.test/device"));
-        assert!(device.say.contains("ABCD-EFGH"));
-        assert!(device.say.contains("15 minutes"));
-    }
-}

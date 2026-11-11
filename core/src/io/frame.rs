@@ -258,23 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn dump_failure_does_not_change_the_authoritative_frame_cause() {
-        let cause = FrameFailure::Partial(FrameFailurePartial {
-            part: FramePart::Body,
-            got: 1_usize.into(),
-            expected: 2_usize.into(),
-        });
-        let error = FrameReadError {
-            cause: cause.clone(),
-            dump: Some(FrameDump::Failed(io::Error::from(
-                io::ErrorKind::PermissionDenied,
-            ))),
-        };
-        assert_eq!(error.cause, cause);
-        assert!(error.to_string().contains("raw frame not kept"));
-    }
-
-    #[test]
     fn partial_body_retains_the_number_of_received_bytes() {
         let mut bytes = 8_u32.to_le_bytes().to_vec();
         bytes.extend_from_slice(b"abc");

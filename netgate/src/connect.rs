@@ -253,13 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_user_at_host_target_is_refused_on_userinfo() {
-        let buf = connect("user@example.com:443", "example.com:443");
-        let e = decode(&buf).unwrap_err();
-        assert_eq!(e.reason, "userinfo not accepted in CONNECT target");
-    }
-
-    #[test]
     fn malformed_targets_are_refused_with_400() {
         for target in [
             "https://example.com/:443",

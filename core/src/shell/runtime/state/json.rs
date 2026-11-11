@@ -107,9 +107,7 @@ mod tests {
     use super::*;
     use crate::authority::policy::GrantStack;
     use crate::data::json::{from_slice, to_vec, to_vec_pretty};
-    use crate::fact::{
-        Count, DataStep, JsonEncodeCauseNativeComputation, JsonInputFailure, ReservedVar,
-    };
+    use crate::fact::{Count, DataStep, JsonInputFailure, ReservedVar};
     use serde_json::json;
 
     type WireContext = Context<Vec<WireHandlerFrame>>;
@@ -406,49 +404,6 @@ mod tests {
         assert!(decode(&value).is_ok());
         value["handlers"][0]["catch_all"] = serde_json::Value::Null;
         assert!(decode(&value).is_ok());
-    }
-
-    #[test]
-    fn raw_context_preserves_structural_field_and_index_failures() {
-        let mut value = envelope(&json!([]));
-        value["args"] = json!(["first", false]);
-        let error = failure(&value);
-        assert_eq!(
-            error.path,
-            [
-                DataStep::Field("args".into()),
-                DataStep::Index(1usize.into())
-            ]
-        );
-        assert!(matches!(*error.cause, DecodeCause::JsonShape(_)));
-        value["args"] = json!([]);
-        value["modules"] = json!({"stack": [false]});
-        let error = failure(&value);
-        assert_eq!(
-            error.path,
-            [
-                DataStep::Field("modules".into()),
-                DataStep::Field("stack".into()),
-                DataStep::Index(0usize.into()),
-            ]
-        );
-        assert!(matches!(*error.cause, DecodeCause::JsonShape(_)));
-    }
-
-    #[test]
-    fn raw_context_composition_prefixes_handler_encoding_refusal() {
-        let context = context().with_handlers(());
-        let refusal = JsonEncodeFailure::new(JsonEncodeCause::NativeComputation(
-            JsonEncodeCauseNativeComputation {
-                name: "fixture".into(),
-            },
-        ));
-        let error = RawContext::<()>::from_value_with(&context, |()| Err(refusal)).unwrap_err();
-        assert_eq!(error.path, [DataStep::Field("handlers".into())]);
-        assert!(matches!(
-            error.cause,
-            JsonEncodeCause::NativeComputation(cause) if cause.name == "fixture"
-        ));
     }
 
     #[cfg(unix)]

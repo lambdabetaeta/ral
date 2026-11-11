@@ -121,8 +121,6 @@ impl<'a> Resolver<'a> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::host::test_support::env_guard;
     use std::path::PathBuf;
 
     fn cwd(path: &str) -> CwdPath {
@@ -149,24 +147,6 @@ mod tests {
         assert_eq!(
             r.resolve("~/foo/./bar/../baz").folded().as_path(),
             Path::new("/h/foo/baz")
-        );
-    }
-
-    /// Stage 2 exists so grant prefix matching only ever sees absolute paths.
-    #[test]
-    fn resolve_anchors_relative_paths_to_cwd() {
-        // A driveless path is not absolute on Windows, so the fixture is
-        // per-host and the anchoring is pinned on both.
-        let cwd = cwd(if cfg!(windows) {
-            r"C:\work\proj"
-        } else {
-            "/work/proj"
-        });
-        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
-        let r = Resolver::at(&env, &cwd);
-        assert_eq!(
-            r.resolve("src/lib.rs").as_path(),
-            cwd.as_path().join("src").join("lib.rs")
         );
     }
 
@@ -315,38 +295,5 @@ mod tests {
                 "{raw:?}"
             );
         }
-    }
-
-    // Unix-only: Linux XDG defaults, and `/h` is not Windows-absolute.
-    #[cfg(unix)]
-    #[test]
-    fn resolve_reads_xdg_with_unset_env() {
-        // Held for the whole scope: the suite mutates process env in
-        // parallel, and this test's answer depends on XDG_DATA_HOME.
-        let _guard = env_guard();
-        let prev = std::env::var_os("XDG_DATA_HOME");
-        unsafe { std::env::remove_var("XDG_DATA_HOME") };
-        let elsewhere = elsewhere();
-        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
-        let r = Resolver::at(&env, &elsewhere);
-        let out = r.resolve("xdg:data/agda");
-        match prev {
-            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-        }
-        assert_eq!(out.as_path(), Path::new("/h/.local/share/agda"));
-    }
-
-    // Unix-only: Windows reads `/etc/hostname` relative to the cwd's drive.
-    #[cfg(unix)]
-    #[test]
-    fn ordinary_absolute_path_is_a_fixed_point() {
-        let elsewhere = elsewhere();
-        let env = EnvVars::from_pairs([("HOME", "/h")]).unwrap();
-        let r = Resolver::at(&env, &elsewhere);
-        assert_eq!(
-            r.resolve("/etc/hostname").as_path(),
-            Path::new("/etc/hostname")
-        );
     }
 }

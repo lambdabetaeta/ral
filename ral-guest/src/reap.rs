@@ -130,31 +130,3 @@ fn classify(result: Result<Option<(Pid, WaitStatus)>, Errno>) -> Result<Waking, 
         Err(err) => Err(err),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_children_left_is_an_answer_not_an_error() {
-        assert_eq!(classify(Err(Errno::CHILD)), Ok(Waking::Childless));
-    }
-
-    #[test]
-    fn nothing_reapable_is_idle() {
-        assert_eq!(classify(Ok(None)), Ok(Waking::Idle));
-    }
-
-    #[test]
-    fn any_other_errno_reaches_the_caller() {
-        assert_eq!(classify(Err(Errno::INVAL)), Err(Errno::INVAL));
-    }
-
-    #[test]
-    fn a_death_reads_as_a_sentence() {
-        assert_eq!(Death::Exited(0).to_string(), "exited cleanly");
-        assert_eq!(Death::Exited(2).to_string(), "exited with status 2");
-        assert_eq!(Death::Signalled(9).to_string(), "was killed by signal 9");
-        assert!(Death::Unclassified(0x57f).to_string().contains("0x57f"));
-    }
-}

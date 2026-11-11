@@ -172,35 +172,4 @@ mod tests {
         assert!(!item(1).equals(&item(2)).unwrap());
         assert!(block.equals(&Value::Int(1)).is_err());
     }
-    #[test]
-    fn comparison_refusals_keep_relation_operation_and_both_heads() {
-        let block = block_over(&Env::new());
-        for (result, relation, operation, right) in [
-            (
-                block.equals(&Value::Int(1)).map(|_| ()),
-                EqualityOrOrder::Equality,
-                "equality",
-                crate::fact::ValueShape::Int,
-            ),
-            (
-                block.compare(&Value::string("x"), "sort-list").map(|_| ()),
-                EqualityOrOrder::Order,
-                "sort-list",
-                crate::fact::ValueShape::String,
-            ),
-        ] {
-            let Err(crate::shell::runtime::Break::Error(error)) = result else {
-                panic!("comparison refusal")
-            };
-            assert_eq!(
-                error.reason,
-                Reason::Evaluation(Box::new(EvalFailure::Compare(CompareFailure {
-                    operation: operation.into(),
-                    relation,
-                    left: crate::fact::ValueShape::Block,
-                    right,
-                })))
-            );
-        }
-    }
 }

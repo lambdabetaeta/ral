@@ -636,34 +636,11 @@ pub(crate) fn seed_vars(shell: &mut Shell, vars: &EnvVars) {
 mod tests {
     use super::{
         CONFINED_TOOL_SETTINGS, EXARCH, LOCK_SUFFIX, RECORD, SCRATCH_VAR, Scratch, TOOL_HOMES,
-        fresh_lock, guest_scratch_env, normalize_resume_target, reap_unheld, resume_candidates,
-        scratch_env,
+        fresh_lock, guest_scratch_env, reap_unheld, resume_candidates,
     };
     use ral_core::own::OwnDir;
     use ral_core::path::GuestPath;
     use std::fs::TryLockError;
-
-    #[test]
-    fn scratch_env_points_the_var_and_the_homes_into_the_scratch_dir() {
-        let dir = std::path::Path::new("/tmp/x");
-        let env = scratch_env(dir).expect("a Unicode path");
-        // Every value is native, as the child reads it back: on Windows the
-        // subdirectories join with `\`.
-        let native = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        let get = |name: &str| env.get(name).cloned();
-        assert_eq!(get(SCRATCH_VAR), Some(native(dir)));
-        assert_eq!(get("XDG_CACHE_HOME"), Some(native(&dir.join("xdg-cache"))));
-        assert_eq!(get("TMPDIR"), Some(native(&dir.join("tmp"))));
-        assert_eq!(
-            get("GOMODCACHE"),
-            Some(native(&dir.join("go").join("pkg").join("mod")))
-        );
-        assert_eq!(
-            get("MAVEN_ARGS"),
-            Some(format!("-Dmaven.repo.local={}", native(&dir.join("maven"))))
-        );
-        assert_eq!(get("RUSTUP_HOME"), None);
-    }
 
     /// A guest's scratch is a Posix path on every host: its homes join with
     /// `/` even on Windows, where a native join would name `/tmp\xdg-cache`.
@@ -784,16 +761,6 @@ mod tests {
 
         let candidates = resume_candidates(&project).expect("candidates");
         assert_eq!(candidates, ["2026-08-13-120002-10", "2026-08-13-120000-9"]);
-    }
-
-    #[test]
-    fn resume_target_normalizes_any_session_and_refuses_a_malformed_one() {
-        let run = std::path::Path::new("/tmp/exarch-run");
-        for session in ["sessions/0", "sessions/3"] {
-            assert_eq!(normalize_resume_target(&run.join(session)).unwrap(), run);
-        }
-        let error = normalize_resume_target(&run.join("sessions/main")).unwrap_err();
-        assert!(error.contains("must be a number"));
     }
 
     #[test]

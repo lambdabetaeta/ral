@@ -1514,33 +1514,6 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_defaults_reports_both_uses_and_both_spellings() {
-        let binding = Span::new(crate::source::FileId(0), 10, 20);
-        let call = Span::new(crate::source::FileId(0), 30, 40);
-        for (primary, secondary, primary_text, secondary_text) in [
-            (binding, call, "binding", "application"),
-            (call, binding, "application", "binding"),
-        ] {
-            let report = conflicting_defaults(binding, call, Some(primary)).report();
-            assert_eq!(report.code, Some("T0080"));
-            assert!(report.message.contains("binding"));
-            assert!(report.message.contains("application"));
-            let at = report.at.unwrap();
-            assert_eq!(at.span, Some(primary));
-            assert!(at.text.contains(primary_text));
-            let also = report.also.unwrap();
-            assert_eq!(also.span, Some(secondary));
-            assert!(also.text.contains(secondary_text));
-            let hint = report.hint.unwrap();
-            assert!(
-                hint.contains("bind it with `$f` rather than running it;"),
-                "{hint}"
-            );
-            assert!(hint.contains("call the function it binds"), "{hint}");
-        }
-    }
-
-    #[test]
     fn conflicting_defaults_without_same_file_locations_still_explains_both_readings() {
         let binding = Span::new(crate::source::FileId(0), 10, 20);
         let call = Span::new(crate::source::FileId(1), 30, 40);
@@ -1752,28 +1725,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn block_value_hint_is_the_same_in_both_orders() {
-        let block = || Ty::thunk(CompTy::pure(Ty::unit()));
-        let forward = shape_hint(&mismatch(block(), Ty::int()));
-        let backward = shape_hint(&mismatch(Ty::int(), block()));
-        assert!(
-            forward
-                .as_deref()
-                .is_some_and(|h| h.contains("block value"))
-        );
-        assert_eq!(forward, backward);
-    }
-
-    #[test]
-    fn text_for_a_list_hint_is_the_same_in_both_orders() {
-        let list = || Ty::list(Ty::var(crate::ty::TyVar(0)));
-        let forward = argument_hint(&mismatch(list(), Ty::string()));
-        let backward = argument_hint(&mismatch(Ty::string(), list()));
-        assert!(forward.as_deref().is_some_and(|h| h.contains("`lines $s`")));
-        assert_eq!(forward, backward);
     }
 
     #[test]

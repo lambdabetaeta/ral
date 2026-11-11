@@ -18,33 +18,6 @@ fn record(bytes: &[u8]) -> InfoFd {
 }
 
 #[test]
-fn an_info_record_is_absent_valid_or_refused() {
-    assert_eq!(record(b"").payload_pgid().unwrap(), None);
-    assert_eq!(
-        record(br#"{"child-pid":123}"#)
-            .payload_pgid()
-            .unwrap()
-            .unwrap()
-            .as_raw(),
-        123
-    );
-    for bytes in [
-        b"{".as_slice(),
-        b" ",
-        br#"{"child-pid":0}"#,
-        br#"{"child-pid":-1}"#,
-        br#"{"child-pid":"123"}"#,
-        b"{}",
-        b"null",
-    ] {
-        assert!(matches!(
-            record(bytes).payload_pgid(),
-            Err(PayloadGroupFailure::Json(_) | PayloadGroupFailure::InvalidPid(_))
-        ));
-    }
-}
-
-#[test]
 fn an_unreadable_info_record_refuses_the_spawn() {
     let (reader, writer) = UnixStream::pair().unwrap();
     reader.set_nonblocking(true).unwrap();

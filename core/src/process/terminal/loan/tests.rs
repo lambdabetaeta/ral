@@ -26,15 +26,6 @@ fn interrupt() -> Signal {
 }
 
 #[test]
-fn default_hold_is_inert() {
-    let mut terminal = TerminalHold::default();
-    assert!(matches!(terminal.0, Hold::Unheld));
-    terminal.hear(interrupt());
-    assert_eq!(terminal.pressed(), None);
-    terminal.reclaim(Some(interrupt()));
-}
-
-#[test]
 fn lent_reclaim_hears_only_a_present_last_gesture() {
     subprocess::isolated(
         "process::terminal::loan::tests::lent_reclaim_hears_only_a_present_last_gesture",

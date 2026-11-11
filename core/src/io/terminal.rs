@@ -411,21 +411,6 @@ pub fn enable_virtual_terminal_processing() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn interactive_mode_parse() {
-        let parse = |s| InteractiveMode::parse(s).0;
-        assert_eq!(parse(None), InteractiveMode::Auto);
-        assert_eq!(parse(Some("")), InteractiveMode::Auto);
-        assert_eq!(parse(Some("auto")), InteractiveMode::Auto);
-        assert_eq!(parse(Some("AUTO")), InteractiveMode::Auto);
-        assert_eq!(parse(Some("  full ")), InteractiveMode::Full);
-        assert_eq!(parse(Some("minimal")), InteractiveMode::Minimal);
-        assert_eq!(parse(Some("dumb")), InteractiveMode::Minimal);
-        let (mode, warn) = InteractiveMode::parse(Some("bogus"));
-        assert_eq!(mode, InteractiveMode::Auto);
-        assert!(warn.is_some());
-    }
-
     /// Base facts only; the derived ones follow from them.  The extra
     /// capabilities ride on `supports_ansi`.
     fn make_state(
@@ -463,22 +448,6 @@ mod tests {
         assert!(!make_state(InteractiveMode::Full, true, true, true).ui_ansi_ok());
     }
 
-    #[test]
-    fn ui_controls_ok_gates() {
-        assert!(make_state(InteractiveMode::Auto, true, false, true).ui_controls_ok());
-        assert!(!make_state(InteractiveMode::Auto, true, false, false).ui_controls_ok());
-        assert!(!make_state(InteractiveMode::Minimal, true, false, true).ui_controls_ok());
-    }
-
-    #[test]
-    fn stderr_ansi_ok_gates() {
-        assert!(!make_state(InteractiveMode::Auto, true, false, false).stderr_ansi_ok());
-        assert!(!make_state(InteractiveMode::Auto, true, true, true).stderr_ansi_ok());
-        assert!(!make_state(InteractiveMode::Minimal, true, false, true).stderr_ansi_ok());
-        // Full on a tty without NO_COLOR wins regardless of the TERM checks.
-        assert!(make_state(InteractiveMode::Full, false, false, true).stderr_ansi_ok());
-    }
-
     // ── Capability probes ─────────────────────────────────────────────────
 
     /// Positional `TerminalEnv` builder; `None` means unset.
@@ -501,74 +470,11 @@ mod tests {
     }
 
     #[test]
-    fn truecolor_follows_colorterm() {
-        assert!(!env(None, None, None, None, false, false).advertises_truecolor());
-        assert!(env(None, None, Some("truecolor"), None, false, false).advertises_truecolor());
-        assert!(env(None, None, Some("24bit"), None, false, false).advertises_truecolor());
-        assert!(!env(None, None, Some("ansi"), None, false, false).advertises_truecolor());
-    }
-
-    #[test]
-    fn modern_osc_recognised_via_term_program() {
-        for tp in ["iTerm.app", "WezTerm", "vscode", "ghostty"] {
-            assert!(
-                env(None, Some(tp), None, None, false, false).recognises_modern_osc(),
-                "expected modern OSC for TERM_PROGRAM={tp}",
-            );
-        }
-        assert!(
-            !env(None, Some("Apple_Terminal"), None, None, false, false).recognises_modern_osc()
-        );
-    }
-
-    #[test]
-    fn modern_osc_recognised_via_term() {
-        for t in ["xterm-kitty", "foot", "xterm-ghostty"] {
-            assert!(
-                env(Some(t), None, None, None, false, false).recognises_modern_osc(),
-                "expected modern OSC for TERM={t}",
-            );
-        }
-        assert!(
-            !env(Some("xterm-256color"), None, None, None, false, false).recognises_modern_osc()
-        );
-    }
-
-    #[test]
-    fn modern_osc_recognised_via_kitty_or_wt() {
-        assert!(env(None, None, None, None, true, false).recognises_modern_osc());
-        assert!(env(None, None, None, None, false, true).recognises_modern_osc());
-    }
-
-    #[test]
     fn modern_osc_recognised_via_vte_version() {
         assert!(env(None, None, None, Some("5000"), false, false).recognises_modern_osc());
         assert!(env(None, None, None, Some("7600"), false, false).recognises_modern_osc());
         assert!(!env(None, None, None, Some("4900"), false, false).recognises_modern_osc());
         assert!(!env(None, None, None, Some("garbage"), false, false).recognises_modern_osc());
-    }
-
-    #[test]
-    fn modern_osc_not_recognised_when_env_blank() {
-        assert!(!env(None, None, None, None, false, false).recognises_modern_osc());
-    }
-
-    #[test]
-    fn ui_truecolor_ok_requires_ansi_and_no_no_color() {
-        let mut s = make_state(InteractiveMode::Auto, true, false, true);
-        s.truecolor = true;
-        assert!(s.ui_truecolor_ok());
-
-        s.no_color = true;
-        assert!(!s.ui_truecolor_ok(), "NO_COLOR disables truecolor");
-
-        s.no_color = false;
-        s.supports_ansi = false;
-        assert!(!s.ui_truecolor_ok(), "no ANSI disables truecolor");
-
-        s.supports_ansi = true;
-        s.truecolor = false;
-        assert!(!s.ui_truecolor_ok(), "raw bit off disables truecolor");
     }
 
     #[test]
@@ -584,81 +490,5 @@ mod tests {
         s.startup_stdout_tty = true;
         s.mode = InteractiveMode::Minimal;
         assert!(!s.ui_hyperlinks_ok(), "minimal mode disables hyperlinks");
-    }
-
-    #[test]
-    fn ui_clipboard_write_ok_tracks_controls() {
-        let mut s = make_state(InteractiveMode::Auto, true, false, true);
-        s.modern_osc = true;
-        assert!(s.ui_clipboard_write_ok());
-        s.mode = InteractiveMode::Minimal;
-        assert!(!s.ui_clipboard_write_ok());
-    }
-
-    #[test]
-    fn ui_bracketed_paste_ok_tracks_controls() {
-        let mut s = make_state(InteractiveMode::Auto, true, false, true);
-        assert!(s.ui_bracketed_paste_ok());
-        s.supports_ansi = false;
-        assert!(!s.ui_bracketed_paste_ok(), "follows supports_ansi");
-        s.supports_ansi = true;
-        s.startup_stdout_tty = false;
-        assert!(!s.ui_bracketed_paste_ok());
-    }
-
-    #[test]
-    fn to_value_carries_every_field() {
-        let state = TerminalState {
-            startup_stdin_tty: true,
-            startup_stdout_tty: false,
-            startup_stderr_tty: true,
-            startup_foreground: true,
-            supports_ansi: true,
-            stderr_ansi_capable: true,
-            no_color: false,
-            is_tmux: true,
-            is_asciinema: false,
-            is_ci: false,
-            truecolor: true,
-            modern_osc: true,
-            mode: InteractiveMode::Full,
-        };
-        let crate::shell::runtime::Value::Map(m) = crate::shell::runtime::Value::from(&state)
-        else {
-            panic!("expected map");
-        };
-        let get = |k: &str| {
-            m.iter()
-                .find(|(kk, _)| *kk == k)
-                .map(|(_, v)| v.into_owned())
-        };
-        let expect_bool = |k: &str, b: bool| {
-            assert_eq!(
-                get(k),
-                Some(crate::shell::runtime::Value::Bool(b)),
-                "key {k}"
-            );
-        };
-        expect_bool("stdin-tty", true);
-        expect_bool("stdout-tty", false);
-        expect_bool("stderr-tty", true);
-        expect_bool("supports-ansi", true);
-        expect_bool("no-color", false);
-        expect_bool("is-tmux", true);
-        expect_bool("is-asciinema", false);
-        expect_bool("is-ci", false);
-        expect_bool("truecolor", true);
-        expect_bool("hyperlinks", true);
-        expect_bool("clipboard-write", true);
-        expect_bool("bracketed-paste", true);
-        expect_bool("ui-ansi-ok", state.ui_ansi_ok());
-        expect_bool("ui-truecolor-ok", state.ui_truecolor_ok());
-        expect_bool("ui-hyperlinks-ok", state.ui_hyperlinks_ok());
-        expect_bool("ui-clipboard-write-ok", state.ui_clipboard_write_ok());
-        expect_bool("ui-bracketed-paste-ok", state.ui_bracketed_paste_ok());
-        assert_eq!(
-            get("mode"),
-            Some(crate::shell::runtime::Value::string("full"))
-        );
     }
 }

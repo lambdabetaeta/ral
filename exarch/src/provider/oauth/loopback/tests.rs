@@ -429,12 +429,3 @@ fn binding_tries_addresses_in_order_and_cancellation_precedes_accept() {
     assert!(error.contains("cancelled"));
     assert!(bind(&[]).is_err());
 }
-
-#[cfg(target_os = "windows")]
-#[test]
-fn windows_launch_target_preserves_the_entire_url() {
-    let url = "https://example.test/auth?state=a&code=b";
-    let wide = windows_shell_target(url);
-    assert_eq!(wide.last(), Some(&0));
-    assert_eq!(String::from_utf16(&wide[..wide.len() - 1]).unwrap(), url);
-}

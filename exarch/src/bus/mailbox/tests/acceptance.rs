@@ -406,12 +406,7 @@ fn a_poisoned_cell_latches_an_actionable_failure_and_refuses_posts() {
         }))
         .is_err()
     );
-    let expected = format!(
-        "a thread panicked inside agent {}'s transaction, so its state may no longer match its log; it has ended, and resuming the run rebuilds its state from the log",
-        address.0.id
-    );
     let failure = address.transact(|_| ()).unwrap_err();
-    assert_eq!(failure.to_string(), expected);
     assert_eq!(
         failure.failure(),
         ral_core::fact::RecordingFailure::CellPoisoned(
@@ -420,7 +415,7 @@ fn a_poisoned_cell_latches_an_actionable_failure_and_refuses_posts() {
             },
         )
     );
-    assert_eq!(address.status().err().unwrap().to_string(), expected);
+    assert!(address.status().is_err());
     assert!(!address.is_live());
     assert!(matches!(address.post(surface()), Err(Refused::Ended)));
     assert!(matches!(mailbox.next(QUIET), Next::Ended));

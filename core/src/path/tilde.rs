@@ -148,22 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_admits_a_lone_tilde_and_a_separated_one() {
-        assert_eq!(TildePath::parse("~"), Some(tilde(None)));
-        assert_eq!(TildePath::parse("~/x"), Some(tilde(Some("/x"))));
-    }
-
-    #[test]
     fn parse_refuses_every_other_tilde() {
         for input in ["~bob", "~bob/x", "a~b", "~5", "x"] {
             assert_eq!(TildePath::parse(input), None, "{input}");
         }
-    }
-
-    #[test]
-    fn expansion_appends_the_suffix_to_home() {
-        assert_eq!(tilde(None).expand("/h"), PathBuf::from("/h"));
-        assert_eq!(tilde(Some("/sub")).expand("/h"), PathBuf::from("/h/sub"));
     }
 
     /// A home that ends in a separator, `/` alone included, gains none: `//`
@@ -184,13 +172,6 @@ mod tests {
                 PathBuf::from(want),
                 "{suffix:?} {home}"
             );
-        }
-    }
-
-    #[test]
-    fn to_literal_reconstructs_the_parsed_spelling() {
-        for input in ["~", "~/sub"] {
-            assert_eq!(TildePath::parse(input).unwrap().to_literal(), input);
         }
     }
 

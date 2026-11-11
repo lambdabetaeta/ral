@@ -1,0 +1,28 @@
+# Codecs refuse what they cannot represent, and name the refuser
+
+# A refusal names its codec as the frame, and fails with status 1
+let refusal = { |body| try $body { |e| echo $e[frame] $e[status]; return () } }
+# The refusal's message mentions `where`: the failing position, not the stream's
+let refusal-at = { |where body|
+    try $body { |e| echo $e[frame] !{re-match $where $e[message]}; return () }
+}
+
+# Decoders are strict about UTF-8 ... except the line reader, which is lossy
+refusal { printf '\377\376A' | from-string; return () }
+refusal { printf '\377\376A' | from-json; return () }
+refusal { printf 'a\377b\n' | fold-lines { |acc _| return $[$acc + 1] } 0; return () }
+let lossy = printf 'a\377b\nc\n' | from-lines
+echo $lossy[0]
+echo $lossy[1]
+
+# JSON Lines names the failing line and column
+refusal-at 'input line 3.*column 5' { printf '{"a": 1}\n\n{"a":\n' | from-jsonl; return () }
+
+# An integer beyond i64 is refused, not rounded through a float
+refusal-at '18446744073709551615' { to-string '18446744073709551615' | from-json; return () }
+refusal-at 'input line 2' { to-string "1\n18446744073709551615\n" | from-jsonl; return () }
+
+# Bytes are integers in 0..255
+refusal { ints-to-bytes [256]; return () }
+
+echo 'codec error tests done'

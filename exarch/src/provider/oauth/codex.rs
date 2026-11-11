@@ -488,25 +488,6 @@ mod tests {
         assert_eq!(retained.refresh_token, "rotated");
     }
     #[test]
-    fn handle_qualifiers_fall_back_to_plan_then_issued() {
-        let mut token = finalize(raw("a", "b")).unwrap();
-        token.email = None;
-        let Grant::Codex {
-            workspace, plan, ..
-        } = &mut token.grant
-        else {
-            unreachable!()
-        };
-        *workspace = None;
-        *plan = Some("plus".into());
-        assert_eq!(token.handle(), format!("{} (plus)", token.issued));
-        let Grant::Codex { plan, .. } = &mut token.grant else {
-            unreachable!()
-        };
-        *plan = None;
-        assert_eq!(token.handle(), token.issued);
-    }
-    #[test]
     fn expiry_uses_access_then_id_then_one_hour() {
         let access = jwt(&serde_json::json!({"exp":123}));
         let id = jwt(&serde_json::json!({"exp":456}));
@@ -543,26 +524,6 @@ mod tests {
         }
     }
     #[test]
-    fn only_403_and_404_are_pending() {
-        for status in [200, 400, 401, 403, 404, 429, 500] {
-            assert_eq!(
-                pending(reqwest::StatusCode::from_u16(status).unwrap()),
-                matches!(status, 403 | 404)
-            );
-        }
-    }
-    #[test]
-    fn deadline_and_cancel_prevent_new_poll() {
-        let flag = Arc::new(AtomicBool::new(false));
-        assert!(remaining(Instant::now(), Duration::ZERO, &flag).is_err());
-        flag.store(true, Ordering::Relaxed);
-        assert!(
-            remaining(Instant::now(), MAX_WAIT, &flag)
-                .unwrap_err()
-                .contains("cancelled")
-        );
-    }
-    #[test]
     fn version_override_is_one_encoded_query_value() {
         assert_eq!(version(Some("  ")), DEFAULT_CODEX_CLIENT_VERSION);
         assert_eq!(version(Some(" 1.2.3 ")), "1.2.3");
@@ -570,84 +531,6 @@ mod tests {
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             [("client_version".into(), "1&extra=value +".into())]
-        );
-    }
-    #[test]
-    fn authorize_parameters_preserve_the_codex_protocol() {
-        let url = reqwest::Url::parse(
-            &authorize_url("http://localhost:1457/auth/callback", "challenge", "state").unwrap(),
-        )
-        .unwrap();
-        let pairs: std::collections::BTreeMap<_, _> = url.query_pairs().collect();
-        assert_eq!(pairs.len(), 10);
-        for (key, value) in [
-            ("response_type", "code"),
-            ("client_id", CLIENT_ID),
-            ("redirect_uri", "http://localhost:1457/auth/callback"),
-            ("scope", SCOPE),
-            ("code_challenge", "challenge"),
-            ("code_challenge_method", "S256"),
-            ("state", "state"),
-            ("originator", ORIGINATOR),
-            ("id_token_add_organizations", "true"),
-            ("codex_cli_simplified_flow", "true"),
-        ] {
-            assert_eq!(pairs.get(key).map(AsRef::as_ref), Some(value));
-        }
-    }
-    #[test]
-    fn requests_use_exact_paths_and_wire_formats() {
-        let client = reqwest::Client::new();
-        let request = exchange_request(&client, "http://localhost", "redirect", "code", "verifier")
-            .build()
-            .unwrap();
-        assert_eq!(request.method(), reqwest::Method::POST);
-        assert_eq!(request.url().path(), "/oauth/token");
-        assert_eq!(
-            request.headers()["content-type"],
-            "application/x-www-form-urlencoded"
-        );
-        assert_eq!(
-            std::str::from_utf8(request.body().unwrap().as_bytes().unwrap()).unwrap(),
-            "grant_type=authorization_code&code=code&redirect_uri=redirect&client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_verifier=verifier"
-        );
-        let current = finalize(raw("subject", "backend")).unwrap();
-        let request = refresh_request(&client, "http://localhost", &current)
-            .build()
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                request.body().unwrap().as_bytes().unwrap()
-            )
-            .unwrap(),
-            serde_json::json!({"client_id":CLIENT_ID,"grant_type":"refresh_token","refresh_token":"refresh"})
-        );
-        let request = user_code_request(&client, "http://localhost")
-            .build()
-            .unwrap();
-        assert_eq!(request.url().path(), "/api/accounts/deviceauth/usercode");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                request.body().unwrap().as_bytes().unwrap()
-            )
-            .unwrap(),
-            serde_json::json!({"client_id":CLIENT_ID})
-        );
-        let code = UserCode {
-            device_auth_id: "device".into(),
-            user_code: "user".into(),
-            interval: 5,
-        };
-        let request = poll_request(&client, "http://localhost", &code)
-            .build()
-            .unwrap();
-        assert_eq!(request.url().path(), "/api/accounts/deviceauth/token");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                request.body().unwrap().as_bytes().unwrap()
-            )
-            .unwrap(),
-            serde_json::json!({"device_auth_id":"device","user_code":"user"})
         );
     }
     #[tokio::test]

@@ -5591,7 +5591,6 @@ dependencies = [
  "nucleo-matcher",
  "os_pipe",
  "postcard",
- "proc-macro2",
  "ral-core",
  "ral-ripgrep-core",
  "regex",
@@ -5673,6 +5672,13 @@ dependencies = [
  "guest-abi",
  "libc",
  "rustix 1.1.6",
+]
+
+[[package]]
+name = "ral-lint"
+version = "0.10.0"
+dependencies = [
+ "regex",
 ]
 
 [[package]]

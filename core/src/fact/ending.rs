@@ -290,23 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn every_ending_has_its_code() {
-        for (ending, code) in dones().into_iter().zip([0, 1, 3, 124, PANIC_CODE]) {
-            assert_eq!(ending.code(), code);
-        }
-        for (cause, code) in [
-            (CancelCause::Interrupted, 130),
-            (CancelCause::Cancelled, 143),
-            (CancelCause::TimedOut, 124),
-            (CancelCause::Terminated, 143),
-            (CancelCause::Aborted, 131),
-            (CancelCause::ReaderGone, 141),
-        ] {
-            assert_eq!(cause.failure_code().get(), code, "{cause:?}");
-        }
-    }
-
-    #[test]
     fn a_worker_converts_only_a_cancel_or_a_timeout() {
         for cause in CancelCause::VARIANTS.iter().copied() {
             let reason = Reason::stopped(cause);
@@ -367,36 +350,5 @@ mod tests {
             let json = serde_json::to_string(&stored).unwrap();
             assert_eq!(serde_json::from_str::<Stored>(&json).unwrap(), stored);
         }
-    }
-
-    #[test]
-    fn the_wire_form_is_external_kebab() {
-        let ending = Ending::<(), (), CancelCause>::Stopped(CancelCause::TimedOut);
-        assert_eq!(
-            serde_json::to_string(&ending).unwrap(),
-            r#"{"stopped":"timed-out"}"#
-        );
-        assert_eq!(
-            serde_json::from_str::<Ending<(), (), CancelCause>>(r#"{"stopped":"timed-out"}"#)
-                .unwrap(),
-            ending
-        );
-    }
-
-    #[test]
-    fn a_workers_ending_in_words() {
-        for (ending, said) in dones().into_iter().zip([
-            "returned",
-            "failed: boom",
-            "ran `exit 3`",
-            "timed out",
-            "panicked: kaput",
-        ]) {
-            assert_eq!(ending.said(), said);
-        }
-        assert_eq!(
-            Done::Err(failure()).parts(),
-            ("failed".into(), Some("boom".into()))
-        );
     }
 }

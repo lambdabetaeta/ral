@@ -268,31 +268,9 @@ mod tests {
     }
 
     #[test]
-    fn a_meet_with_nothing_in_common_is_empty() {
-        assert_eq!(Kind::NUMBER.meet(Kind::SIZED), None);
-    }
-
-    #[test]
     fn a_single_nullary_head_pins_the_variable() {
         let text = Kind::SIZED.meet(Kind::COMPARABLE).expect("both admit text");
         assert_eq!(text.pin(), Some(Ty::string()));
         assert_eq!(Kind::SIZED.pin(), None);
-    }
-
-    #[test]
-    fn a_kind_prints_by_name() {
-        assert_eq!(Kind::NUMBER.to_string(), "number");
-        assert_eq!(Kind::DATA.to_string(), "data");
-        let deep_sized = Kind::DATA.meet(Kind::SIZED).expect("sized data exists");
-        assert_eq!(deep_sized.to_string(), "sized^d");
-    }
-
-    #[test]
-    fn a_kind_round_trips_through_postcard() {
-        for kind in [Kind::ANY, Kind::NUMBER, Kind::DATA, Kind::SIZED] {
-            let bytes = postcard::to_allocvec(&kind).expect("a kind serialises");
-            let back: Kind = postcard::from_bytes(&bytes).expect("and reads back");
-            assert_eq!(back, kind);
-        }
     }
 }

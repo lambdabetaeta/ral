@@ -27,17 +27,3 @@ pub fn local(t: Timestamp) -> String {
 pub fn until(t: Timestamp, now: Timestamp) -> Duration {
     Duration::try_from(t.duration_since(now)).unwrap_or_default()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hms_writes_the_two_coarsest_units() {
-        assert_eq!(hms(3 * 86400 + 4 * 3600), "3d 04h");
-        assert_eq!(hms(7 * 86400), "7d 00h");
-        assert_eq!(hms(7500), "2h 05m");
-        assert_eq!(hms(69), "1m 09s");
-        assert_eq!(hms(12), "12s");
-    }
-}

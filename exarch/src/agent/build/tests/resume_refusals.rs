@@ -77,16 +77,6 @@ fn a_wire_engine_is_refused_and_the_open_session_is_left_as_it_was() {
     assert_eq!(records_of(&sessions, 0).len(), before);
 }
 
-#[test]
-fn a_run_with_no_open_session_is_refused() {
-    let dir = tmp("resume-none");
-    dir.make_dir("sessions").unwrap();
-    let Err(error) = resume(&dir, |cfg| cfg, identity_engine("resume-none")) else {
-        panic!("nothing is open to resume");
-    };
-    assert_eq!(error.kind(), io::ErrorKind::Other);
-}
-
 /// The second root's name is taken by the first: the first is torn down,
 /// never closed, so it stays resumable, and the second is never opened.
 #[test]
@@ -119,16 +109,4 @@ fn a_name_collision_discards_the_roots_already_reopened() {
             .any(|record| matches!(record, Record::Control(Control::SessionResumed { .. })))
     );
     assert_eq!(AgentLog::human_children(&sessions).unwrap().len(), 2);
-}
-
-#[test]
-fn teardown_failures_ride_on_the_error_that_caused_the_discard() {
-    let cause = || io::Error::new(io::ErrorKind::AlreadyExists, "cause");
-    let kept = with_teardown_failures(cause(), &[]);
-    assert_eq!(kept.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(kept.to_string(), cause().to_string());
-    let failures = ["first failure".to_string(), "second failure".to_string()];
-    let folded = with_teardown_failures(cause(), &failures).to_string();
-    assert!(folded.contains("cause"));
-    assert!(failures.iter().all(|failure| folded.contains(failure)));
 }

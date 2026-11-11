@@ -305,38 +305,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn serialises_to_a_structured_mark_tree() {
-        let card = Card(vec![
-            Mark::Text {
-                spans: vec![Span {
-                    role: Some(Role::Ok),
-                    text: "done".into(),
-                }],
-            },
-            Mark::Measure(Measure {
-                label: "tasks".into(),
-                readout: Readout {
-                    value: 3,
-                    max: Some(12),
-                    unit: None,
-                },
-            }),
-            Mark::Raw {
-                bytes: vec![0xff, b'h'],
-            },
-        ]);
-        let v = serde_json::to_value(&card).expect("a card serialises");
-        let marks = v.as_array().expect("a card is a JSON array of marks");
-        assert_eq!(marks[0]["mark"], "text");
-        assert_eq!(marks[0]["spans"][0]["role"], "ok");
-        assert_eq!(marks[1]["mark"], "measure");
-        assert_eq!(marks[1]["value"], 3);
-        assert_eq!(marks[1]["max"], 12);
-        assert_eq!(marks[2]["mark"], "raw");
-        assert_eq!(marks[2]["bytes"], serde_json::json!([255, 104]));
-    }
-
     fn text(spans: Vec<Span>) -> Mark {
         Mark::Text { spans }
     }

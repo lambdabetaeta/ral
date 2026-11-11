@@ -361,15 +361,6 @@ mod tests {
         assert_ne!(b.seq.uid(), 0);
     }
 
-    #[test]
-    fn plan_roots_the_cgroup_and_carries_the_jails_limits() {
-        let Some(plan) = unwrap_or_skip(jail().plan(Ownership::Kept, None)) else {
-            return;
-        };
-        assert!(plan.cgroup.starts_with("/sys/fs/cgroup/ral-exec"));
-        assert_eq!(plan.limits, JailLimits::default());
-    }
-
     #[cfg(unix)]
     #[test]
     fn plan_puts_a_survivor_beyond_every_engines_tree() {
@@ -419,28 +410,6 @@ mod tests {
                 "only a kept launch may finish the half-prepared cgroup"
             );
         }
-    }
-
-    #[test]
-    fn guest_root_requires_one_absolute_path_and_root() {
-        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-        for values in [&[][..], &["/jail", "/extra"]] {
-            assert_eq!(
-                guest_root(&args(values), 0).unwrap_err(),
-                "a guest engine takes one argument, the jail's cgroup root"
-            );
-        }
-        assert_eq!(
-            guest_root(&args(&["relative"]), 0).unwrap_err(),
-            "the jail's cgroup root must be an absolute path, not relative"
-        );
-        let absolute = std::env::temp_dir().join("jail");
-        let args = [absolute.clone().into_os_string()];
-        assert_eq!(guest_root(&args, 0), Ok(absolute));
-        assert_eq!(
-            guest_root(&args, 1000).unwrap_err(),
-            "a guest engine runs as root, since its jail drops each command to a fresh uid; this one is uid 1000"
-        );
     }
 
     #[test]

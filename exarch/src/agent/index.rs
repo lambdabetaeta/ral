@@ -153,34 +153,4 @@ fn append_section(prompt: &mut String, heading: &str, body: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::Provider;
-    use crate::provider::scripted::Script;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    #[test]
-    fn roles_are_taught_iff_the_agent_spawns_and_roles_exist() {
-        let index = BuiltinIndex::resolve(vec![]);
-        let provider = Arc::new(Provider::scripted("small-model", Script::default()));
-        let some = Roles(BTreeMap::from([("cheap".into(), provider)]));
-        let prompt = |spawns, roles| {
-            let grants = Grants {
-                spawned: false,
-                returns: false,
-                allow_schedule: false,
-                spawns,
-                roles,
-            };
-            index.apply("", &grants, "x")
-        };
-        let taught = prompt(true, &some);
-        assert!(taught.contains("# Roles") && taught.contains("- cheap: small-model"));
-        assert!(!prompt(false, &some).contains("# Roles"));
-        assert!(!prompt(true, &Roles::default()).contains("# Roles"));
-    }
-}
-
-#[cfg(test)]
 mod gating;

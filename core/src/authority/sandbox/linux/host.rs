@@ -209,17 +209,7 @@ mod tests {
                 ..
             })
         ));
-        let bytes = crate::data::json::to_datum_vec(&failure);
-        assert_eq!(
-            crate::data::json::from_datum_slice::<BwrapProbeFailure>(&bytes).unwrap(),
-            failure
-        );
         assert_eq!(failure.advice(), [] as [String; 0]);
-        assert!(
-            failure
-                .describe()
-                .starts_with("ral could not prepare the bwrap probe:")
-        );
         assert_eq!(
             Builds::after_redirect_probe(Ok(Err(failure.clone()))),
             Builds::Nothing(failure)

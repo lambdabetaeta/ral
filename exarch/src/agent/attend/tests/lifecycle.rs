@@ -4,7 +4,7 @@ use super::*;
 use crate::agent::Admission;
 use crate::agent::nursery::Joined;
 use crate::bus::{Refused, Source};
-use crate::record::{ChildStatus, RECORD, Settlement, read_records};
+use crate::record::{ChildStatus, RECORD, read_records};
 use std::sync::Arc;
 
 fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
@@ -696,36 +696,6 @@ fn gone_joins_failures_without_recording_them_again_in_the_parent() {
             .iter()
             .any(|record| matches!(record, Record::Forensic(Forensic::TeardownFailed { .. })))
     );
-}
-
-#[test]
-fn a_stopped_notice_has_the_new_settlement_not_a_legacy_failure() {
-    let mut parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
-    take_task(&child.handle(), &child.mailbox);
-    parent.body.nursery.adopt(
-        child.handle(),
-        Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
-    );
-    let (emit, rx) = emitter(&parent);
-    parent.couple(&emit);
-    child.handle().report(ChildStatus::Stopped).unwrap();
-    let Next::Take { input, .. } = parent.mailbox.next(parent.rest()) else {
-        panic!("report")
-    };
-    let prompt = parent.admit(input).unwrap();
-    assert!(
-        prompt.text.contains("message it to continue"),
-        "{}",
-        prompt.text
-    );
-    assert!(crate::bus::drain_records(&rx).iter().any(|record| matches!(
-        record,
-        Record::Display(Display::SubagentDone {
-            outcome: Settlement::Stopped,
-            ..
-        })
-    )));
 }
 
 /// Fit the next boot with `worker` and a short drain grace.

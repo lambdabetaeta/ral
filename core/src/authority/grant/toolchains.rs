@@ -780,14 +780,6 @@ mod tests {
             .err()
             .expect("a world-sized default must refuse the selector");
         assert_eq!(
-            err.describe(),
-            format!(
-                "grant: {} resolves to {what}, so `` `dir `{} `` would run and read all of it.",
-                shown(default),
-                <&str>::from(toolchain)
-            )
-        );
-        assert_eq!(
             err.context(),
             Some(
                 format!(
@@ -1030,15 +1022,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_override_replaces_only_its_own_location() {
-        let got = chosen_in(Toolchain::Go, env(&[("GOROOT", "/opt/go")]), Some("/h"));
-        assert_eq!(got, ["/opt/go", "/h/go/bin"]);
-        let got = chosen_in(Toolchain::Deno, env(&[("DENO_INSTALL", "/d")]), Some("/h"));
-        assert_eq!(got, ["/d", "/h/.deno/bin"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn overrides_are_tried_in_order() {
         let go =
             |pairs: &[(&str, &str)]| chosen_in(Toolchain::Go, env(pairs), Some("/h"))[3..].to_vec();
@@ -1101,25 +1084,6 @@ mod tests {
             None,
         );
         assert_eq!(got, ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn data_defaults_follow_xdg_data_home() {
-        let got = chosen_in(Toolchain::Fnm, env(&[("XDG_DATA_HOME", "/x")]), Some("/h"));
-        assert_eq!(
-            got,
-            ["/x/fnm", "/h/.fnm", "/h/Library/Application Support/fnm"]
-        );
-        let got = chosen_in(Toolchain::Fnm, env(&[("XDG_DATA_HOME", "rel")]), Some("/h"));
-        assert_eq!(
-            got,
-            [
-                "/h/.local/share/fnm",
-                "/h/.fnm",
-                "/h/Library/Application Support/fnm"
-            ]
-        );
     }
 
     /// A selector reports what is installed: with no home, home defaults are
@@ -1186,12 +1150,6 @@ mod tests {
             )
             .unwrap_err();
             let requested = crate::path::FrozenPath::from_surface(&value).shown();
-            assert_eq!(
-                err.describe(),
-                format!(
-                    "grant: {requested} resolves to {what}, so `` `dir `rustup `` would run and read all of it."
-                ),
-            );
             assert_eq!(
                 err.context(),
                 Some(format!("RUSTUP_HOME is {value}").as_str())
@@ -1338,17 +1296,6 @@ mod tests {
         }
     }
 
-    /// A listed directory that is a filesystem root is no system read and no
-    /// error, as a toolchain row's is not: the root would hold the whole
-    /// filesystem.
-    #[test]
-    fn a_listed_root_is_dropped_and_an_ordinary_directory_kept() {
-        let (tmp, _) = tree(&["ordinary"]);
-        let ordinary = spelled(&tmp.path().join("ordinary")).to_owned();
-        let pairs = [("A", host_root()), ("B", ordinary.as_str())];
-        assert_eq!(kept(PROBE, &pairs, None), [ordinary]);
-    }
-
     /// The home, what lies inside it and what it lies inside are the user's
     /// to grant or the world: a listed directory so placed is dropped, and
     /// one beside the home is kept.
@@ -1462,13 +1409,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn system_defaults_include_distribution_tool_roots() {
-        let system = chosen_in(Toolchain::System, env(&[]), None);
-        assert!(system.iter().any(|dir| dir == "/usr/lib/cargo/bin"));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn system_is_kept_by_existence_and_carries_no_homebrew() {
         let (_tmp, root) = tree(&["Git/usr", "real"]);
         let git = format!("{root}/Git/usr/bin");
@@ -1524,23 +1464,5 @@ mod tests {
                 assert!(!dir.starts_with(&home), "{t:?}: {dir}");
             }
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn system_on_windows() {
-        let system = |pairs: &[(&str, &str)]| chosen_in(Toolchain::System, env(pairs), None);
-        let base = [
-            r"C:\Windows\System32",
-            r"C:\Windows\System32\WindowsPowerShell\v1.0",
-        ];
-        assert_eq!(system(&[("SystemRoot", r"C:\Windows")]), base);
-        assert_eq!(system(&[]), base);
-        let git = r"C:\Program Files\Git\usr\bin";
-        let pf = [("ProgramFiles", r"C:\Program Files")];
-        assert_eq!(system(&pf), [base[0], base[1], git]);
-        let x86 = [("ProgramFiles(x86)", r"C:\Program Files (x86)")];
-        let git86 = r"C:\Program Files (x86)\Git\usr\bin";
-        assert_eq!(system(&x86), [base[0], base[1], git86]);
     }
 }

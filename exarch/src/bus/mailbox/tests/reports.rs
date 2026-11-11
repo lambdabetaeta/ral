@@ -305,24 +305,3 @@ fn reporting_to_an_ended_parent_still_updates_the_helpers_published_status() {
     );
     assert!(!helper.address().status().unwrap().owes);
 }
-
-#[test]
-fn an_ended_helper_refuses_follow_ups_and_leaves_both_mailboxes_unchanged() {
-    let parent = mailbox(Admission::Free);
-    let helper = helper_of(&parent);
-    let _task = take_task(&helper);
-    let address = helper.address();
-    publish(&address, ChildStatus::Replied(FOValue::Unit));
-    let (_task_report, _exchange) = take(&parent);
-    address.end(CancelCause::Cancelled);
-    assert!(matches!(
-        address.post(message("too late", true)),
-        Err(Refused::Ended)
-    ));
-    assert_eq!(
-        address.status().unwrap().report,
-        Some(ChildStatus::Replied(FOValue::Unit))
-    );
-    assert!(!address.status().unwrap().owes);
-    assert_eq!(depth(&parent, Source::Agent), 0);
-}

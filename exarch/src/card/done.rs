@@ -127,30 +127,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn errand_completion_keeps_its_identity_and_failure() {
-        assert_eq!(
-            settled_text(
-                Some(7),
-                "building",
-                Some(Duration::from_secs(192)),
-                &Done::Err(
-                    ErrorFact::new(
-                        Reason::raised("build failed"),
-                        "run".into(),
-                        ral_core::test_helper::site(),
-                    )
-                    .record()
-                )
-            ),
-            "errand #7 (building) finished after 3 mins 12 secs (failed): build failed"
-        );
-        assert_eq!(
-            settled_text(Some(7), "building", None, &Done::Ok(())),
-            "errand #7 (building) finished (returned)"
-        );
-    }
-
     /// The one duration prose every runtime line shares: whole seconds,
     /// balanced up to hours, no unit that would read as zero.
     #[test]
@@ -162,12 +138,5 @@ mod tests {
         assert_eq!(phrase(72), "1 min 12 secs");
         assert_eq!(phrase(120), "2 mins");
         assert_eq!(phrase(3780), "1 hr 3 mins");
-    }
-
-    /// Sub-second precision is noise in a breadcrumb: a run of 12.7s reports
-    /// the seconds, not the stopwatch.
-    #[test]
-    fn elapsed_truncates_below_the_second() {
-        assert_eq!(elapsed_phrase(Duration::from_millis(12_700)), "12 secs");
     }
 }

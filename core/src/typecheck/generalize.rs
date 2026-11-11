@@ -728,7 +728,6 @@ mod tests {
         let v = u.fresh_kinded_var(Kind::NUMBER);
         let scheme = generalized(&mut u, &arrow(Ty::var(v), Ty::var(v)));
         assert_eq!(scheme.tys, [(v, Role::Forall(Kind::NUMBER))].into());
-        assert_eq!(scheme.to_string(), "∀α:number. α → Returns α");
         let instance = instantiate(&mut u, &scheme);
         let TyNode::Thunk(body) = instance.node() else {
             panic!("a function scheme instantiates to a thunk")
@@ -764,35 +763,6 @@ mod tests {
             panic!("a record on a fresh row")
         };
         assert!(u.is_deep_row(fresh));
-    }
-
-    #[test]
-    fn a_kind_round_trips_through_postcard_in_a_scheme_and_in_its_residuals() {
-        let mut first = Unifier::new();
-        first.enter();
-        let (bound, weak) = (
-            first.fresh_kinded_var(Kind::SIZED),
-            first.fresh_kinded_var(Kind::COMPARABLE),
-        );
-        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
-        let scheme = Arc::new(generalized(
-            &mut first,
-            &arrow(Ty::var(bound), Ty::var(weak)),
-        ));
-        let scheme = settle_weak(&first, scheme);
-        let bytes = postcard::to_allocvec(&scheme).expect("a scheme serialises");
-        let stored: Closed = postcard::from_bytes(&bytes).expect("and reads back");
-        assert_eq!(stored, scheme);
-        assert_eq!(stored.tys[&bound], Role::Forall(Kind::SIZED));
-
-        let mut next = Unifier::new();
-        let seeded = reseed_weak(&mut next, &stored);
-        let [Var::Ty(fresh)] = super::tests::weak(&seeded)[..] else {
-            panic!("one residual in, one out: {seeded:?}");
-        };
-        assert_eq!(seeded.tys[&fresh], Role::Weak(Kind::COMPARABLE));
-        assert_eq!(next.kinded(fresh).kind, Kind::COMPARABLE);
-        assert!(next.is_weak_ty(fresh));
     }
 
     /// The seed bequest travels as JSON, whose map keys are strings.

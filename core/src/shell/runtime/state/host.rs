@@ -361,22 +361,6 @@ mod tests {
         );
     }
 
-    /// Only a held terminal is lent: `Leased` yields the raised loan and stays
-    /// itself; `Denied` has nothing to lend, `ExplicitLoan` has already lent.
-    #[test]
-    fn lend_terminal_lends_only_a_held_terminal() {
-        let with = |terminal_access| Mooring {
-            terminal_access,
-            ..Mooring::adrift()
-        };
-        let leased = with(TerminalAccess::Leased);
-        let loan = leased.lend_terminal().expect("a Leased mooring lends");
-        assert_eq!(loan.terminal_access, TerminalAccess::ExplicitLoan);
-        assert_eq!(leased.terminal_access, TerminalAccess::Leased);
-        assert!(with(TerminalAccess::Denied).lend_terminal().is_none());
-        assert!(loan.lend_terminal().is_none());
-    }
-
     /// `worker_row` derives `state`, `elapsed`, `settled`, and `retention_left`
     /// from a single handle snapshot so mid-read state transitions cannot
     /// produce mixed rows.

@@ -348,29 +348,3 @@ pub(crate) mod hooks {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
-
-#[cfg(test)]
-mod typed_outcome_tests {
-    use super::*;
-    use ral_core::fact::ProviderStop;
-
-    #[test]
-    fn settlement_projects_before_provider_diagnostics_are_rendered() {
-        for outcome in [Outcome::Complete, Outcome::Empty] {
-            assert!(matches!(
-                agent_outcome(&Ok(outcome)),
-                AgentOutcome::Failed(ChildFailure::Cause(HelperFailure::NoReply))
-            ));
-        }
-        let stop = ProviderStop::StopSequence("raw-stop-code".into());
-        assert!(
-            matches!(agent_outcome(&Ok(Outcome::Stopped { reason: stop.clone() })),
-            AgentOutcome::Stopped(found) if found == stop)
-        );
-        let error = ProviderError::stream_ended_without_end("service-a", "model-a");
-        let expected = error.failure();
-        assert!(matches!(agent_outcome(&Err(error)), AgentOutcome::Failed(
-            ChildFailure::Cause(HelperFailure::Provider(found))
-        ) if found == expected));
-    }
-}

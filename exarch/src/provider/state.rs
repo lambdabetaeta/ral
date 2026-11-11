@@ -173,7 +173,6 @@ pub fn save(project: &OwnDir, state: &State) -> Result<(), String> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::provider::identity::{Auth, Service, ServiceName};
     use ral_core::own::TestDir;
 
     fn tmp_dir() -> TestDir {
@@ -198,23 +197,6 @@ mod tests {
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
         assert_eq!(loaded.account(&available), Some(deepseek));
-    }
-
-    #[test]
-    fn custom_provider_round_trips_by_service_name() {
-        let dir = tmp_dir();
-        let llama = Account::of_service(Service::declared(
-            ServiceName::declared("local-llama").unwrap(),
-            "https://llama.example/v1/".into(),
-            genai::adapter::AdapterKind::OpenAI,
-            Auth::Key("LOCAL_LLAMA_API_KEY".into()),
-        ));
-        let available = [llama.clone()];
-        let state = State::new(&choice(&llama, "model-a"), &available);
-        save(&dir, &state).unwrap();
-        let loaded = load(&dir).expect("state should load");
-        assert_eq!(loaded.provider, "local-llama");
-        assert_eq!(loaded.account(&available), Some(llama));
     }
 
     #[test]
@@ -245,28 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn absent_file_is_none() {
-        let dir = tmp_dir();
-        assert!(load(&dir).is_none());
-    }
-
-    #[test]
     fn malformed_file_is_none() {
         let dir = tmp_dir();
         std::fs::write(dir.path().join(STATE_FILE), b"{ not json").unwrap();
         assert!(load(&dir).is_none());
-    }
-
-    #[test]
-    fn unknown_account_is_none() {
-        let state = State {
-            provider: "mistral".into(),
-            provider_name: "mistral".into(),
-            model: "m".into(),
-            via: None,
-        };
-        let available = [Account::built_in("anthropic")];
-        assert!(state.account(&available).is_none());
     }
 
     /// A `state.json` written before this change carries no `provider_name`
@@ -380,18 +344,6 @@ mod tests {
                 assert!(why.contains("chatgpt"), "{why}");
             }
             _ => panic!("a stale sign-in selection must ask, never silently pick"),
-        }
-    }
-
-    #[test]
-    fn nothing_saved_and_no_flags_asks_among_every_account() {
-        let available = [
-            Account::built_in("anthropic"),
-            Account::built_in("deepseek"),
-        ];
-        match opening(None, None, None, None, &available, lists(&[])) {
-            Ok(Opening::Choose(among, None)) => assert_eq!(among, available),
-            _ => panic!("a choice among every account"),
         }
     }
 

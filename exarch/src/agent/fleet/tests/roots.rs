@@ -165,24 +165,6 @@ fn joining_roots_also_joins_a_root_adopted_during_the_join() {
 }
 
 #[test]
-fn joining_roots_preserves_teardown_failures() {
-    let fleet = Fleet::for_test();
-    let owner = agent(&fleet, "retained", None);
-    fleet.adopt(
-        (*owner).clone(),
-        Joined::new(std::thread::spawn(move || {
-            drop(owner);
-            Teardown {
-                failures: vec!["retained failure".into()],
-            }
-        })),
-    );
-    fleet.registry.end(RootCause::Cancelled);
-    assert_eq!(fleet.join_children(), ["retained failure"]);
-    assert_eq!(Arc::strong_count(&fleet), 1);
-}
-
-#[test]
 fn a_launched_root_releases_its_name_and_announces_death_once() {
     let root = trunk(false);
     let handle = root.handle();

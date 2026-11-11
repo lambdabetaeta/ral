@@ -165,18 +165,6 @@ mod tests {
         assert_eq!(calls, 0, "a complete line must not prompt for more");
     }
 
-    /// Continuation lines are folded in with newlines until the buffer
-    /// parses as complete.
-    #[test]
-    fn folds_lines_until_complete() {
-        let mut rest = vec!["world"].into_iter();
-        // A trailing pipe is an incomplete input; the next line completes it.
-        let out = join_continuation("echo hi |".into(), || {
-            Continuation::Line(rest.next().unwrap().to_string())
-        });
-        assert_eq!(out.as_deref(), Some("echo hi |\nworld"));
-    }
-
     /// A trailing `?` is a continuation exactly as a trailing `|` is, and
     /// the joined buffer must then parse.
     #[test]

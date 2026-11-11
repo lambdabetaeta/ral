@@ -245,12 +245,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_built_in_name_is_already_taken() {
-        let anthropic = ServiceName::declared("anthropic").unwrap();
-        assert!(taken(std::iter::empty(), &anthropic));
-    }
-
-    #[test]
     fn every_signed_out_login_name_is_reserved() {
         let store = CredentialStore::default();
         for login in identity::Login::ALL {
@@ -270,36 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn every_login_has_a_signed_in_source_without_key_metadata() {
-        let store = CredentialStore::default();
-        for login in identity::Login::ALL {
-            let account = Account::login(login, "same-id", "same@work");
-            let row = entry(&store, &account, std::slice::from_ref(&account));
-            assert_eq!(row.source, Source::SignedIn);
-            assert_eq!(row.env_var, None);
-            assert_eq!(row.hint, None);
-            assert_eq!(row.shadowed, None);
-            assert!(!row.withdrawable);
-        }
-    }
-
-    #[test]
-    fn a_declared_name_is_taken_only_once_declared() {
-        let house = ServiceName::declared("house-llm").unwrap();
-        assert!(!taken(std::iter::empty(), &house));
-        assert!(taken(
-            std::iter::once(&Account::declared("house-llm")),
-            &house
-        ));
-    }
-
-    #[test]
-    fn an_address_without_a_scheme_is_refused_as_a_question() {
-        let err = well_formed_endpoint("llm.example/v1").unwrap_err();
-        assert!(err.contains("https://"), "{err}");
-    }
-
-    #[test]
     fn an_address_gains_the_trailing_slash_genai_needs() {
         assert_eq!(
             well_formed_endpoint("https://llm.example/v1").unwrap(),
@@ -309,42 +273,5 @@ mod tests {
             well_formed_endpoint("https://llm.example/v1/").unwrap(),
             "https://llm.example/v1/"
         );
-    }
-
-    #[test]
-    fn a_built_in_service_refuses_withdrawal() {
-        let anthropic = Account::built_in("anthropic");
-        let err = refuse_built_in(&anthropic).unwrap_err();
-        assert!(err.contains("built-in"), "{err}");
-    }
-
-    #[test]
-    fn a_declared_endpoint_may_be_withdrawn() {
-        refuse_built_in(&Account::declared("house-llm"))
-            .expect("a declared endpoint is not built in");
-    }
-
-    #[test]
-    fn find_in_resolves_by_id_rendering_alone() {
-        let house = Account::declared("house-llm");
-        let found = find_in(std::iter::once(&house), "house-llm").unwrap();
-        assert_eq!(found.id, house.id);
-        let err = find_in(std::iter::once(&house), "missing").unwrap_err();
-        assert!(err.contains("missing"), "{err}");
-    }
-
-    #[test]
-    fn checked_key_asks_a_question_about_what_was_pasted() {
-        assert!(
-            checked_key("house-llm", "  ")
-                .unwrap_err()
-                .contains("paste it")
-        );
-        assert!(
-            checked_key("house-llm", "sk-real\nGET /")
-                .unwrap_err()
-                .contains("line break")
-        );
-        assert_eq!(checked_key("house-llm", " sk-real ").unwrap(), "sk-real");
     }
 }

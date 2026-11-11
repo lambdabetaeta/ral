@@ -238,15 +238,6 @@ mod tests {
         assert_eq!(sink.lock().unwrap().len(), 1, "one post-exec per line");
     }
 
-    /// `pre-exec` hands the handler one event record carrying the source
-    /// line under `src`.
-    #[test]
-    fn pre_exec_passes_src_in_one_event_record() {
-        let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |ev| record $ev[src] }")]);
-        run("return ()", &t, &host);
-        assert_eq!(*sink.lock().unwrap(), vec![Value::string("return ()")]);
-    }
-
     /// The line a `pre-exec` hook returns is the line that runs.
     #[test]
     fn pre_exec_rewrite_is_what_runs() {

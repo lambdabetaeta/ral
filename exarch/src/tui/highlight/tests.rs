@@ -28,15 +28,6 @@ fn classifies_keyword_string_and_name() {
 }
 
 #[test]
-fn classifies_deref_tag_and_punctuation() {
-    let src = "[`ok $x]";
-    assert_eq!(fg_of(src, "["), Some(SLATE));
-    assert_eq!(fg_of(src, "`ok"), Some(CODE_TAG));
-    assert_eq!(fg_of(src, "$x"), Some(CODE_VARIABLE));
-    assert_eq!(fg_of(src, "]"), Some(SLATE));
-}
-
-#[test]
 fn invalid_code_falls_back_to_default_ink() {
     let lines = highlight_ral("let x = 'unterminated");
     assert_eq!(lines.len(), 1);

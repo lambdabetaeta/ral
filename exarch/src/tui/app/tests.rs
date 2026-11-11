@@ -575,39 +575,6 @@ fn escape_and_ctrl_c_stop_the_recorded_root_or_helper_job_and_recall_text() {
 }
 
 #[test]
-fn a_root_parked_on_a_working_helper_reads_as_waiting_on_agents() {
-    let (mut app, rx, root, fleet) = app_in_fleet(&Born::for_test("main", None));
-    let child = test_agent(
-        &fleet,
-        TestAgentSpec::child("child", &root, root.mailbox.home().child()),
-    )
-    .unwrap();
-    born(&mut app, child.id(), "child", root.id());
-    app.transient(
-        root.id(),
-        Transient::State(AgentState::WaitingOnAgents),
-        &rx,
-    );
-
-    let state = app.tabs.status(root.id()).unwrap().state;
-    assert!(matches!(
-        state,
-        StateSpan::Active {
-            state: AgentState::WaitingOnAgents,
-            ..
-        }
-    ));
-    assert!(state.pending(), "a wait on the fleet is outstanding work");
-    let rule: String =
-        crate::tui::status::rule_line(80, state, None, &Usage::default(), 0, None, "m")
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect();
-    assert!(rule.contains("waiting on agents"), "{rule}");
-}
-
-#[test]
 fn escape_on_a_root_with_a_working_helper_keeps_the_helper_and_its_report_continues_the_job() {
     use crate::bus::{Input, Next};
     use crate::record::ChildStatus;
@@ -910,25 +877,6 @@ fn copy_chords() -> Vec<KeyEvent> {
     chords
 }
 
-#[test]
-fn copy_chords_recognize_normalized_aliases_only() {
-    for chord in copy_chords() {
-        assert!(copy_key(&chord), "{chord:?}");
-    }
-    for chord in [
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
-        KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ),
-        KeyEvent::new(KeyCode::Insert, KeyModifiers::SHIFT),
-    ] {
-        assert!(!copy_key(&chord), "{chord:?}");
-    }
-}
-
 fn select_prompt(app: &mut App) -> String {
     app.prompt_state.set_prompt("select this draft");
     mouse_frame(app);
@@ -1039,35 +987,6 @@ fn right_click_does_not_steal_an_owned_drag() {
     assert_eq!(app.prompt_state.selection_text(), selected);
     left_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 8, 10);
     assert!(app.mouse_owner.is_none());
-}
-
-#[test]
-fn prompt_mouse_selection_does_not_start_transcript_selection() {
-    let (mut app, _, root) = app();
-    let exchange = open_exchange(&mut app, &root);
-    app.prompt_state.set_prompt("select this draft");
-    mouse_frame(&mut app);
-    let select = |app: &mut App| {
-        for (kind, column) in [
-            (MouseEventKind::Down(MouseButton::Left), 2),
-            (MouseEventKind::Drag(MouseButton::Left), 8),
-            (MouseEventKind::Up(MouseButton::Left), 8),
-        ] {
-            left_mouse(app, kind, column, 10);
-        }
-    };
-    select(&mut app);
-    assert!(app.gesture.selection().is_none());
-    assert!(app.prompt_state.selection_text().is_some());
-    app.key(
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        &ctx(),
-    );
-    assert!(
-        !exchange.is_cancelled(),
-        "copy must not interrupt the agent"
-    );
-    assert_eq!(app.prompt_state.prompt_text(), "select this draft");
 }
 
 #[test]

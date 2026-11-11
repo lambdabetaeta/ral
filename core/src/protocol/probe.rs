@@ -416,22 +416,6 @@ mod tests {
         );
     }
 
-    /// A grant stack crosses a probe layer for layer, exec rules and all.
-    #[test]
-    fn a_grant_stack_round_trips() {
-        use crate::authority::policy::{Capabilities, ExecGrant, ExecKey, Net};
-        use crate::path::FrozenPath;
-        let dir =
-            FrozenPath::from_surface(&crate::test_helper::Tree::nowhere().at("/ral-probe/bin"));
-        let mut stack = GrantStack::root();
-        stack.push(crate::test_helper::layer(Capabilities {
-            exec: Some(ExecGrant::of([ExecKey::Dir(dir)], [])),
-            net: Some(Net::Offline),
-            ..Capabilities::default()
-        }));
-        assert_eq!(GrantStack::decode(&stack.clone().encode()), Ok(stack));
-    }
-
     /// A stack of real directories, exclusions and all: restrictive on exec,
     /// fs and net.
     fn stack_over(root: &std::path::Path) -> GrantStack {

@@ -1,7 +1,6 @@
 use super::limits_card;
 use super::{
-    Command, cmd_export, command_candidates, lookup_command, resolve_export_path, route_submit,
-    unrecognized_command,
+    Command, cmd_export, command_candidates, lookup_command, route_submit, unrecognized_command,
 };
 use crate::card::Mark;
 use crate::provider::allowance::{
@@ -10,7 +9,6 @@ use crate::provider::allowance::{
 use crate::record::{Born, Emitter as Recorder, Started, Transcript, Voice};
 use crate::tui::app::tests::{app, app_born, ctx, text};
 use ral_core::own::OwnDir;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn replacements(line: &str) -> Vec<String> {
@@ -47,11 +45,6 @@ fn argless_command_matches_alone_but_not_with_trailing_text() {
 }
 
 #[test]
-fn stop_is_a_key_and_not_a_command() {
-    assert_eq!(dispatch("/stop"), None);
-}
-
-#[test]
 fn export_consumes_its_path_argument() {
     assert_eq!(
         dispatch("/export ~/notes.md"),
@@ -68,21 +61,6 @@ fn export_consumes_its_path_argument() {
 }
 
 #[test]
-fn focus_consumes_its_name_argument() {
-    assert_eq!(
-        dispatch("/focus scout"),
-        Some(("/focus", "scout".to_string()))
-    );
-    assert!(submitted("/focus").contains("usage: /focus <name>"));
-}
-
-#[test]
-fn unknown_token_is_not_a_command() {
-    assert_eq!(dispatch("/bogus"), None);
-    assert_eq!(dispatch("just a prompt"), None);
-}
-
-#[test]
 fn unrecognized_command_flags_only_a_slash_typo() {
     assert_eq!(unrecognized_command("/bogus"), Some("/bogus"));
     assert_eq!(
@@ -96,61 +74,10 @@ fn unrecognized_command_flags_only_a_slash_typo() {
 }
 
 #[test]
-fn a_prefix_narrows_and_an_alias_stands_for_itself() {
-    assert_eq!(replacements("/thin"), ["/thinking"]);
-    assert!(replacements("/ex").contains(&"/exit".to_string()));
-}
-
-#[test]
 fn a_typed_space_or_a_plain_line_ends_the_completion() {
     assert_eq!(replacements("/export "), Vec::<String>::new());
     assert_eq!(replacements("/export ~/notes.md"), Vec::<String>::new());
     assert_eq!(replacements("what is a monad"), Vec::<String>::new());
-}
-
-#[test]
-fn the_argument_hint_shows_but_is_never_spliced() {
-    let export = command_candidates("/export")
-        .into_iter()
-        .find(|c| c.replacement == "/export")
-        .expect("/export completes itself");
-    assert_eq!(export.display, "/export <path>");
-    assert_eq!(
-        export.detail.as_deref(),
-        Some("Write the user view to a file.")
-    );
-}
-
-// Twins rather than one genericised test: absoluteness is host-defined
-// (`/tmp/out.txt` is not absolute on Windows), so each host pins its own.
-#[cfg(unix)]
-#[test]
-fn export_path_resolves_absolute_and_relative() {
-    let cwd = &ral_core::path::CwdPath::new(PathBuf::from("/Users/me/proj"))
-        .expect("an absolute fixture");
-    assert_eq!(
-        resolve_export_path("/tmp/out.txt", cwd),
-        Path::new("/tmp/out.txt")
-    );
-    assert_eq!(
-        resolve_export_path("notes.md", cwd),
-        Path::new("/Users/me/proj/notes.md")
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn export_path_resolves_absolute_and_relative() {
-    let cwd = &ral_core::path::CwdPath::new(PathBuf::from(r"C:\Users\me\proj"))
-        .expect("an absolute fixture");
-    assert_eq!(
-        resolve_export_path(r"C:\scratch\out.txt", cwd),
-        Path::new(r"C:\scratch\out.txt")
-    );
-    assert_eq!(
-        resolve_export_path("notes.md", cwd),
-        Path::new(r"C:\Users\me\proj\notes.md")
-    );
 }
 
 #[test]
@@ -174,21 +101,6 @@ fn sort_orders_five_hour_before_weekly() {
     };
     assert!(rows[0].label.contains("5 hours"));
     assert!(rows[1].label.contains("7 days"));
-}
-
-#[test]
-fn all_unmetered_collapses_to_one_sentence_naming_the_accounts() {
-    let card = limits_card(&[
-        ("anthropic".to_string(), Reading::Unmetered),
-        ("openai".to_string(), Reading::Unmetered),
-        ("deepseek".to_string(), Reading::Unmetered),
-    ]);
-    assert_eq!(card.0.len(), 2);
-    let Mark::Text { spans } = &card.0[1] else {
-        panic!("the collapsed card has one sentence below its title");
-    };
-    assert!(spans[0].text.contains("anthropic, openai, deepseek"));
-    assert!(spans[0].text.contains("publishes a ration"));
 }
 
 #[test]

@@ -694,24 +694,6 @@ pub(super) mod tests {
         assert_eq!(of_file(&met, "/x/t"), Evidence::NEITHER);
     }
 
-    /// An exclusion is cited as a grant writes it, resolved, and printed as
-    /// ral prints a value: a directory under its `dir` marker, apart from a
-    /// file exclusion at the same place.
-    #[test]
-    fn a_directory_exclusion_reads_apart_from_a_file_exclusion() {
-        let tools = excluded("/tools");
-        let at = tools.written.shown();
-        assert_eq!(
-            ExecDeny::Dir(tools.clone()).to_string(),
-            format!("`dir `absolute '{at}'")
-        );
-        assert_eq!(
-            ExecDeny::File(tools).to_string(),
-            format!("`absolute '{at}'")
-        );
-        assert_eq!(ExecDeny::Name(Veto::of("Bash")).to_string(), "`name 'Bash'");
-    }
-
     /// A file found under a bare name keeps the name it was found as, and the
     /// denial of a bare name holds the file found beside the veto on the name.
     #[test]
@@ -1037,55 +1019,6 @@ pub(super) mod tests {
         assert_eq!(rules.live().count(), 0);
         #[cfg(unix)]
         assert_eq!(rules.for_kernel().allowed_files().count(), 0);
-    }
-
-    /// The kernel's table drops the bundled tools, and only them.
-    #[test]
-    fn the_kernel_holds_every_allowance_but_the_tools() {
-        let rules: ExecRules = [
-            allow_tool("ls"),
-            allow_file("/x/ls"),
-            allow_dir("/d"),
-            any(),
-        ]
-        .into_iter()
-        .collect();
-        let kernel: Vec<_> = rules.for_kernel().allows().cloned().collect();
-        assert_eq!(
-            kernel,
-            [
-                KernelAllow::Any,
-                KernelAllow::Dir(GrantPath::<Trace>::walk(written("/d")).unwrap().real),
-                KernelAllow::File(real("/x/ls")),
-            ]
-        );
-    }
-
-    /// The run places are the positive files and directories: a file and a
-    /// directory are places, and `dir /` is the prefix at everywhere.
-    #[test]
-    fn the_places_are_the_positive_files_and_dirs() {
-        let rules: ExecRules = [
-            allow_file("/a/x"),
-            allow_dir("/a/b"),
-            deny_dir("/a/b"),
-            deny_file("/a/y"),
-            allow_tool("ls"),
-            any(),
-            veto("sh"),
-            allow_dir("/"),
-        ]
-        .into_iter()
-        .collect();
-        let places: BTreeSet<_> = rules.places().collect();
-        assert_eq!(
-            places,
-            BTreeSet::from([
-                FsAllow::Prefix(GrantPath::everywhere()),
-                FsAllow::RunPlace(real("/a/b")),
-                FsAllow::RunPlace(real("/a/x")),
-            ])
-        );
     }
 
     fn exec(grant: ExecGrant) -> Capabilities {

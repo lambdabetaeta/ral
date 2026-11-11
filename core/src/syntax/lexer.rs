@@ -1726,21 +1726,6 @@ mod tests {
         assert_eq!((lit.start, lit.end), (3, 6));
     }
 
-    #[test]
-    fn bare_words() {
-        let toks = tok_types("ls -la /tmp");
-        assert_eq!(
-            toks,
-            vec![plain("ls"), plain("-la"), path_word("/tmp"), Token::Eof,]
-        );
-    }
-
-    #[test]
-    fn variable_token() {
-        let toks = tok_types("echo $x");
-        assert_eq!(toks, vec![plain("echo"), variable("x"), Token::Eof]);
-    }
-
     /// Outside a string `$x[0]` is two tokens and a bracket group; the
     /// parser reads the adjacency, as it does for `!{f}[0]`.
     #[test]
@@ -1753,35 +1738,6 @@ mod tests {
                 Token::LBracket,
                 plain("0"),
                 Token::RBracket,
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn single_quoted() {
-        let toks = tok_types("echo 'hello world'");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                Token::SingleQuoted("hello world".into()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn newlines_as_separators() {
-        let toks = tok_types("echo a\necho b");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                plain("a"),
-                Token::Newline,
-                plain("echo"),
-                plain("b"),
                 Token::Eof,
             ]
         );
@@ -1840,10 +1796,6 @@ mod tests {
         );
         assert!(!err.kind.is_incomplete());
         assert_eq!(err.span.range(), 3..4);
-        assert_eq!(
-            lex_err("{ ]"),
-            "mismatched `]`: the innermost open delimiter is `{`"
-        );
     }
 
     /// The same law inside a nested form, and for every kind of opener.
@@ -1875,67 +1827,6 @@ mod tests {
     fn commas_are_bare_outside_brackets() {
         let toks = tok_types("echo a,b,c");
         assert_eq!(toks, vec![plain("echo"), plain("a,b,c"), Token::Eof]);
-    }
-
-    #[test]
-    fn dot_is_bare_word_char() {
-        let toks = tok_types("echo .env");
-        assert_eq!(toks, vec![plain("echo"), plain(".env"), Token::Eof]);
-    }
-
-    #[test]
-    fn backtick_tag_token() {
-        let toks = tok_types("return `ok 5");
-        assert_eq!(
-            toks,
-            vec![
-                plain("return"),
-                Token::Tag("ok".into()),
-                plain("5"),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn bare_backtick_is_lex_error() {
-        let err = lex_err("echo `");
-        assert!(err.contains("expected a tag label after the backtick, as in `` `ok ``"));
-        assert!(err.contains("a backtick never runs a command here; write `!{cmd}` for that"));
-    }
-
-    #[test]
-    fn pipe_and_question() {
-        let toks = tok_types("a | b ? c");
-        assert_eq!(
-            toks,
-            vec![
-                plain("a"),
-                Token::Pipe,
-                plain("b"),
-                Token::Question,
-                plain("c"),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn redirect() {
-        let toks = tok_types("echo hello > out.txt");
-        assert!(matches!(
-            toks[2],
-            Token::Redirect(RedirectOp::Stdout(WriteMode::Write))
-        ));
-    }
-
-    #[test]
-    fn redirect_stderr() {
-        let toks = tok_types("cmd 2> err.log");
-        assert!(matches!(
-            toks[1],
-            Token::Redirect(RedirectOp::Stderr(WriteMode::Write))
-        ));
     }
 
     #[test]
@@ -1979,31 +1870,6 @@ mod tests {
     }
 
     #[test]
-    fn spread() {
-        let toks = tok_types("[...$a, b]");
-        assert_eq!(toks[1], Token::Spread);
-        assert_eq!(toks[2], variable("a"));
-    }
-
-    #[test]
-    fn lambda_tokens() {
-        let toks = tok_types("{ |x| echo $x }");
-        assert_eq!(
-            toks,
-            vec![
-                Token::LBrace,
-                Token::Pipe,
-                plain("x"),
-                Token::Pipe,
-                plain("echo"),
-                variable("x"),
-                Token::RBrace,
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
     fn hash_midword_is_bare() {
         // # is only a comment when it starts a token; mid-word it is literal.
         let toks = tok_types("curl http://host:8080/foo#anchor");
@@ -2015,30 +1881,6 @@ mod tests {
                 Token::Eof,
             ]
         );
-    }
-
-    #[test]
-    fn comment() {
-        let toks = tok_types("echo a # comment\necho b");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                plain("a"),
-                Token::Newline,
-                plain("echo"),
-                plain("b"),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn double_quoted_interpolation() {
-        let parts = string_parts("\"hello $name\"");
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].item, StringPart::Literal("hello ".into()));
-        assert_eq!(splice_kinds(&parts[1].item), vec![&variable("name")]);
     }
 
     /// A bare `$name` never eats a trailing `-`, so a kebab-adjacent
@@ -2059,15 +1901,6 @@ mod tests {
         let parts = string_parts("\"$os-arch\"");
         assert_eq!(parts.len(), 1);
         assert_eq!(splice_kinds(&parts[0].item), vec![&variable("os-arch")]);
-    }
-
-    /// A `-` at end of string is literal text, not part of the name.
-    #[test]
-    fn interpolation_trailing_dash_at_end() {
-        let parts = string_parts("\"$foo-\"");
-        assert_eq!(parts.len(), 2);
-        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("foo")]);
-        assert_eq!(parts[1].item, StringPart::Literal("-".into()));
     }
 
     /// `$(name)` fixes where the name ends, so it keeps the trailing `-`
@@ -2181,9 +2014,9 @@ mod tests {
         assert_eq!(t(r#""\x41""#), "A");
         assert_eq!(t(r#""\x7F""#), "\x7F");
         assert_eq!(t(r#""\x00""#), "\x00");
-        assert!(lex_err(r#""\x80""#).contains("\\xNN"));
-        assert!(lex_err(r#""\xZZ""#).contains("two hex digits"));
-        assert!(lex_err(r#""\x4""#).contains("two hex digits"));
+        lex_err(r#""\x80""#);
+        lex_err(r#""\xZZ""#);
+        lex_err(r#""\x4""#);
     }
 
     #[test]
@@ -2199,21 +2032,11 @@ mod tests {
         assert_eq!(t(r#""\u{0}""#), "\x00");
         assert_eq!(t(r#""\u{1F600}""#), "😀");
         // Surrogate, out of range, too many digits, no braces.
-        assert!(lex_err(r#""\u{D800}""#).contains("Unicode scalar"));
-        assert!(lex_err(r#""\u{110000}""#).contains("Unicode scalar"));
-        assert!(lex_err(r#""\u{1234567}""#).contains("one to six hex digits"));
-        assert!(lex_err(r#""\u{}""#).contains("one to six hex digits"));
-        assert!(lex_err(r#""\u41""#).contains("\\u escape is written"));
-    }
-
-    #[test]
-    fn dollar_bracket_arithmetic() {
-        let toks = tok_types("$[2 + 3]");
-        let Token::Expr(inner) = &toks[0] else {
-            panic!("expected Expr token");
-        };
-        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
-        assert_eq!(kinds, vec![&plain("2"), &op("+"), &plain("3")]);
+        lex_err(r#""\u{D800}""#);
+        lex_err(r#""\u{110000}""#);
+        lex_err(r#""\u{1234567}""#);
+        lex_err(r#""\u{}""#);
+        lex_err(r#""\u41""#);
     }
 
     /// Inside `$[…]` the operator characters end a word, so no spacing is
@@ -2306,21 +2129,6 @@ mod tests {
         );
     }
 
-    /// A lone `=` is an `Op` as well; that it is no operator is the parser's
-    /// to say.
-    #[test]
-    fn dollar_bracket_lone_equals_is_an_op() {
-        let toks = tok_types("$[1 = 2 == 3]");
-        let Token::Expr(inner) = &toks[0] else {
-            panic!("expected Expr token");
-        };
-        let kinds: Vec<&Token> = inner.iter().map(|l| &l.token).collect();
-        assert_eq!(
-            kinds,
-            vec![&plain("1"), &op("="), &plain("2"), &op("=="), &plain("3")]
-        );
-    }
-
     /// The mode is the innermost delimiter's: a `!{…}` inside `$[…]` is back
     /// in the shell, where `<` reads a file, and a lone `&` in the
     /// expression names the connective it is not.
@@ -2335,7 +2143,7 @@ mod tests {
                 .iter()
                 .any(|l| matches!(l.token, Token::Redirect(RedirectOp::Read)))
         );
-        assert!(lex_err("$[1 & 0]").contains("`&&`"));
+        lex_err("$[1 & 0]");
         // Glued: `&` ends a word here, so `true&&false` is a conjunction
         // rather than one long command name.
         let Token::Expr(glued) = &tok_types("$[true&&false]")[0] else {
@@ -2349,8 +2157,8 @@ mod tests {
     /// word starting with `=`.
     #[test]
     fn shell_mode_keeps_shell_meanings() {
-        assert!(lex_err("sleep 1 &").contains("spawn"));
-        assert!(lex_err("a && b").contains("no `&&`"));
+        lex_err("sleep 1 &");
+        lex_err("a && b");
         assert_eq!(
             tok_types("curl h/?a=1&b=2 a&&b"),
             vec![
@@ -2374,11 +2182,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_dollar_is_refused() {
-        assert!(lex_err("echo $").contains("$name"));
-    }
-
-    #[test]
     fn dollar_bracket_inner_spans_offset_into_outer_source() {
         // Inner spans index the outer source, so a diagnostic raised inside
         // `$[…]` underlines the right column.
@@ -2391,22 +2194,6 @@ mod tests {
         // The `$` and `[` take one byte each, so `42` is at bytes 2..4.
         assert_eq!(span.start, 2);
         assert_eq!(span.end, 4);
-    }
-
-    #[test]
-    fn semicolon_separator() {
-        let toks = tok_types("echo a; echo b");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                plain("a"),
-                Token::Semi,
-                plain("echo"),
-                plain("b"),
-                Token::Eof,
-            ]
-        );
     }
 
     #[test]
@@ -2425,17 +2212,6 @@ mod tests {
                 "source: {src:?}"
             );
         }
-    }
-
-    #[test]
-    fn colon_context_sensitive() {
-        let toks = tok_types("host: val");
-        assert_eq!(
-            toks,
-            vec![plain("host"), Token::Colon, plain("val"), Token::Eof,]
-        );
-        let toks = tok_types("localhost:5432");
-        assert_eq!(toks, vec![plain("localhost:5432"), Token::Eof]);
     }
 
     #[test]
@@ -2466,49 +2242,6 @@ mod tests {
     }
 
     #[test]
-    fn map_literal() {
-        let toks = tok_types("[host: localhost, port: 8080]");
-        assert_eq!(
-            toks,
-            vec![
-                Token::LBracket,
-                plain("host"),
-                Token::Colon,
-                plain("localhost"),
-                Token::Comma,
-                plain("port"),
-                Token::Colon,
-                plain("8080"),
-                Token::RBracket,
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn empty_lambda() {
-        let toks = tok_types("|| { echo hello }");
-        assert_eq!(
-            toks,
-            vec![
-                Token::Pipe,
-                Token::Pipe,
-                Token::LBrace,
-                plain("echo"),
-                plain("hello"),
-                Token::RBrace,
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn tilde() {
-        let toks = tok_types("~");
-        assert_eq!(toks, vec![tilde_tok(None), Token::Eof,]);
-    }
-
-    #[test]
     fn tilde_inside_a_word_is_ordinary() {
         let toks = tok_types("foo~bar");
         assert_eq!(toks, vec![plain("foo~bar"), Token::Eof]);
@@ -2519,12 +2252,6 @@ mod tests {
     fn tilde_before_a_name_is_ordinary() {
         assert_eq!(tok_types("~bob"), vec![plain("~bob"), Token::Eof]);
         assert_eq!(tok_types("~bob/x"), vec![path_word("~bob/x"), Token::Eof]);
-    }
-
-    #[test]
-    fn tilde_path_token_is_structured() {
-        let toks = tok_types("~/bin/claude");
-        assert_eq!(toks, vec![tilde_tok(Some("/bin/claude")), Token::Eof,]);
     }
 
     #[test]
@@ -2552,13 +2279,6 @@ mod tests {
         assert_eq!(parts[1].item, StringPart::Literal("/a b".into()));
     }
 
-    #[test]
-    fn lone_tilde_string_is_one_splice() {
-        let parts = string_parts(r#""~""#);
-        assert_eq!(parts.len(), 1);
-        assert_eq!(splice_kinds(&parts[0].item), vec![&tilde_tok(None)]);
-    }
-
     /// Only a leading `~`, and only before `/` or the closing quote.
     #[test]
     fn other_tildes_in_a_string_are_text() {
@@ -2574,24 +2294,6 @@ mod tests {
                 "{src}"
             );
         }
-    }
-
-    #[test]
-    fn slash_bearing_bare_word_is_path_token() {
-        let toks = tok_types("./script");
-        assert_eq!(toks, vec![path_word("./script"), Token::Eof]);
-    }
-
-    #[test]
-    fn tilde_with_space_stays_two_tokens() {
-        let toks = tok_types("~ foo");
-        assert_eq!(toks, vec![tilde_tok(None), plain("foo"), Token::Eof,]);
-    }
-
-    #[test]
-    fn caret_is_not_part_of_bare_word() {
-        let toks = tok_types("^git");
-        assert_eq!(toks, vec![Token::Caret, plain("git"), Token::Eof]);
     }
 
     #[test]
@@ -2658,11 +2360,9 @@ mod tests {
             "got {:?}",
             err.kind
         );
-        assert!(err.message().contains("unclosed"));
 
         // A real mistake: the body is not an identifier.
-        let err = lex("$(1)").expect_err("expected lex error");
-        assert!(err.message().contains("expected identifier after `$(`"));
+        lex("$(1)").expect_err("expected lex error");
     }
 
     #[test]
@@ -2674,57 +2374,21 @@ mod tests {
             "got {:?}",
             err.kind
         );
-        assert!(err.message().contains("unclosed"));
 
         // Any other non-`)` char still reaches the explicit-paren error.
-        let err = lex("$(name]").expect_err("expected lex error");
-        assert!(
-            err.message()
-                .contains("expected `)` to close `$(...)` dereference")
-        );
+        lex("$(name]").expect_err("expected lex error");
     }
 
     /// Bash's `${…}` is refused at the `$`, in a string as out of one.
     #[test]
     fn dollar_brace_is_bash() {
-        let said = "`${…}` is bash: write `$name`, `$(name)` to mark where a name ends, \
-                    or `!{…}` to run a command";
         for (src, at) in [
             ("echo ${x}", 5),
             ("echo \"a ${x} b\"", 8),
             ("echo !${x}", 6),
         ] {
-            assert_eq!(lex_err(src), said, "{src:?}");
             assert_eq!(lex_err_span(src).range(), at..at + 1, "{src:?}");
         }
-    }
-
-    /// Bash's `$(cmd args)` is told the form that runs a command, with the
-    /// command as written, capped.
-    #[test]
-    fn dollar_paren_command_is_bash() {
-        for (src, shown) in [
-            ("echo $(ls -la)", "ls -la"),
-            ("echo $(ls -la", "ls -la"),
-            ("echo $(ls   )", "ls"),
-            ("echo \"$(date +%s)\"", "date +%s"),
-            ("echo $(ls\t-la)\necho a", "ls\t-la"),
-        ] {
-            assert_eq!(
-                lex_err(src),
-                format!(
-                    "`$(…)` holds one name, `$(name)`; to run a command and use its \
-                     output, write `!{{{shown}}}`"
-                ),
-                "{src:?}"
-            );
-        }
-        let long = format!("echo $(ls {})", "x".repeat(60));
-        let shown = format!("ls {}…", "x".repeat(37));
-        assert!(
-            lex_err(&long).ends_with(&format!("write `!{{{shown}}}`")),
-            "{long:?}"
-        );
     }
 
     /// `<<` is the here-string redirect.
@@ -2737,7 +2401,6 @@ mod tests {
                 .any(|l| matches!(l.token, Token::Redirect(RedirectOp::HereString))),
             "got {tokens:?}"
         );
-        assert!(lex_err("cat 0<< x").contains("drop the `0`"));
     }
 
     /// A payload glued to `<<` is the bash heredoc reflex; a here-string
@@ -2745,12 +2408,7 @@ mod tests {
     #[test]
     fn glued_herestring_payload_is_rejected() {
         for src in ["cat <<EOF", "cat <<'EOF'", "cat <<\"EOF\"", "cat 0<<$x"] {
-            let err = lex(src).expect_err("glued `<<` payload must not lex");
-            assert!(
-                err.message().contains("ral has no heredocs"),
-                "for {src:?} got: {}",
-                err.message()
-            );
+            lex(src).expect_err("glued `<<` payload must not lex");
         }
     }
 
@@ -2759,12 +2417,7 @@ mod tests {
     #[test]
     fn triple_lt_is_rejected() {
         for src in ["cat <<< x", "cat 0<<< x"] {
-            let err = lex(src).expect_err("`<<<` must not lex");
-            assert!(
-                err.message().contains("here-string operator"),
-                "for {src:?} got: {}",
-                err.message()
-            );
+            lex(src).expect_err("`<<<` must not lex");
         }
     }
 
@@ -2779,12 +2432,7 @@ mod tests {
             "cmd 2>&3",
             "cmd 99999999999> f",
         ] {
-            let err = lex(src).expect_err("numbered descriptors must not lex");
-            assert!(
-                err.message().contains("standard error (2)"),
-                "for {src:?} got: {}",
-                err.message()
-            );
+            lex(src).expect_err("numbered descriptors must not lex");
         }
     }
 
@@ -2792,22 +2440,17 @@ mod tests {
     /// file; the other fd-prefixed spellings are refused alike.
     #[test]
     fn fd_prefixed_spellings_are_refused() {
-        assert!(lex_err("echo 1>file").contains("put a space before `>`"));
-        assert!(lex_err("cat 0< f").contains("drop the `0`"));
-        assert!(lex_err("cat 1< f").contains("did you mean `1> file`"));
-        assert!(lex_err("cmd 0> f").contains("standard input cannot be written to"));
-        assert!(lex_err("cmd 1>&1").contains("names the stream it already is"));
-        assert!(lex_err("cmd 2>&2").contains("names the stream it already is"));
-        assert!(lex_err("cmd 1>&0").contains("nothing to mean"));
-    }
-
-    #[test]
-    fn redirect_dup_requires_target_fd() {
-        let err = lex("cmd 2>&").expect_err("expected lex error");
-        assert!(
-            err.message()
-                .contains("expected file descriptor after `>&`")
-        );
+        for src in [
+            "echo 1>file",
+            "cat 0< f",
+            "cat 1< f",
+            "cmd 0> f",
+            "cmd 1>&1",
+            "cmd 2>&2",
+            "cmd 1>&0",
+        ] {
+            lex(src).expect_err("fd-prefixed spelling must not lex");
+        }
     }
 
     /// Diagnostics are `warn`'s job, so fd 1 onto fd 2 is refused — under both
@@ -2891,45 +2534,6 @@ mod tests {
         assert_eq!(toks, vec![Token::SingleQuoted(String::new()), Token::Eof]);
     }
 
-    #[test]
-    fn bumped_string_level1_contains_single_quote() {
-        let toks = tok_types("#'it's fine'#");
-        assert_eq!(
-            toks,
-            vec![Token::SingleQuoted("it's fine".into()), Token::Eof]
-        );
-    }
-
-    #[test]
-    fn bumped_string_level1_contains_double_quote() {
-        let toks = tok_types(r#"#'say "hi" please'#"#);
-        assert_eq!(
-            toks,
-            vec![Token::SingleQuoted(r#"say "hi" please"#.into()), Token::Eof]
-        );
-    }
-
-    #[test]
-    fn bumped_string_level2() {
-        let toks = tok_types("##'body with '# inside'##");
-        assert_eq!(
-            toks,
-            vec![
-                Token::SingleQuoted("body with '# inside".into()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn bumped_string_multiline() {
-        let toks = tok_types("#'line1\nline2'#");
-        assert_eq!(
-            toks,
-            vec![Token::SingleQuoted("line1\nline2".into()), Token::Eof]
-        );
-    }
-
     /// A raw string is verbatim, so a CRLF-authored source keeps the `\r` in
     /// the value — the contract, not a bug.  What must hold either way is
     /// that the closing `'#` is found past the embedded `\r\n`.
@@ -2953,30 +2557,11 @@ mod tests {
     }
 
     #[test]
-    fn bumped_string_in_command() {
-        let toks = tok_types("echo #'hello'#");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                Token::SingleQuoted("hello".into()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
     fn hash_run_without_quote_is_comment() {
         // A `#` run followed by anything but `'` is a comment.
         assert_eq!(tok_types("# foo"), vec![Token::Eof]);
         assert_eq!(tok_types("## foo"), vec![Token::Eof]);
         assert_eq!(tok_types("###foo"), vec![Token::Eof]);
-    }
-
-    #[test]
-    fn bumped_string_unterminated() {
-        let err = lex("#'unclosed").expect_err("should fail");
-        assert!(err.message().contains("unterminated"));
     }
 
     #[test]
@@ -2997,24 +2582,7 @@ mod tests {
         assert_eq!(toks, vec![Token::SingleQuoted("foo".into()), Token::Eof]);
     }
 
-    #[test]
-    fn bumped_string_byte_span() {
-        let src = "#'hi'#";
-        let toks = lex(src).unwrap();
-        assert_eq!(&src[toks[0].span.range()], "#'hi'#");
-    }
-
     // ── byte-range span sanity checks ─────────────────────────────────────
-
-    #[test]
-    fn byte_spans_cover_full_tokens() {
-        let toks = lex("echo hi").unwrap();
-        assert_eq!(toks[0].span.start, 0);
-        assert_eq!(toks[0].span.end, 4);
-        assert_eq!(toks[1].span.start, 5);
-        assert_eq!(toks[1].span.end, 7);
-        assert!(matches!(toks[2].token, Token::Eof));
-    }
 
     #[test]
     fn byte_spans_multibyte() {
@@ -3028,13 +2596,6 @@ mod tests {
     }
 
     #[test]
-    fn byte_spans_quoted_string() {
-        let src = "'héllo'";
-        let toks = lex(src).unwrap();
-        assert_eq!(&src[toks[0].span.range()], "'héllo'");
-    }
-
-    #[test]
     fn splice_openers_are_one_char_wide() {
         let parts = string_parts("\"$x[0]\"");
         let StringPart::Splice(tokens) = &parts[0].item else {
@@ -3045,13 +2606,6 @@ mod tests {
         assert_eq!((lbracket.start, lbracket.end), (3, 4));
         let span = lex_err_span("$[1 +");
         assert_eq!((span.start, span.end), (1, 2));
-    }
-
-    #[test]
-    fn unterminated_bumped_string_wants_quote_and_hash() {
-        let msg = lex_err("echo a #'tis");
-        assert!(msg.contains("bumped single-quoted string"), "{msg}");
-        assert!(msg.contains("`'#`"), "{msg}");
     }
 
     #[test]

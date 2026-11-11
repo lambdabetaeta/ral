@@ -1,0 +1,38 @@
+# `~` reads the home directory at the head of a word or a "…" string
+
+let t = temp-dir
+mkdir -p "$t/sub"
+
+# Under a scoped HOME, so nothing names the host's
+within [env: [HOME: $t]] {
+    echo $["~/a b" == "!{home}/a b"]
+    echo $["~" == !{home}]
+    let h = ~
+    echo $[$h == !{home}]
+    let expanded = return ~/sub
+    echo $[$expanded == "$t/sub"]
+
+    # cwd is absolute; abbreviation is for display alone
+    cd ~/sub
+    let c = cwd
+    echo $[$c == !{cwd}]
+    echo $[$c == "$t/sub"]
+    echo !{abbreviate-home $c}
+    echo !{abbreviate-home !{home}}
+}
+
+# Anywhere else `~` is an ordinary character
+echo '~/x'
+echo "\~/x"
+echo "~5 min"
+echo "a~/b"
+echo foo~bar
+echo ~bob/x
+
+# `$[…]` is a value wherever it stands
+let x = $[foo]
+echo $x
+
+cd /
+rm -rf $t
+echo 'tilde tests done'

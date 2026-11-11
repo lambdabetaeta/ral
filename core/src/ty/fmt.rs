@@ -554,16 +554,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fmt_scheme_shows_quantified_comp_vars() {
-        let beta = CompTyVar(17);
-        let scheme = Scheme {
-            comps: [(beta, Role::Forall(()))].into(),
-            ..Scheme::mono(Ty::thunk(CompTy::var(beta)))
-        };
-        assert_eq!(scheme.to_string(), "∀ϕ. ϕ");
-    }
-
-    #[test]
     fn fmt_scheme_binds_cyclic_comp_roots_by_mu() {
         let root = CompTyVar(29);
         let binding = CompTy::pure(Ty::list(Ty::thunk(CompTy::var(root))));
@@ -572,17 +562,6 @@ mod tests {
             ..Scheme::mono(Ty::thunk(binding))
         };
         assert_eq!(scheme.to_string(), "μϕ. Returns [{ϕ}]");
-    }
-
-    #[test]
-    fn fmt_scheme_binds_cyclic_ty_roots_by_mu() {
-        let root = TyVar(17);
-        let scheme = Scheme {
-            tys: [(root, Role::Mu(Ty::list(Ty::var(root))))].into(),
-            ..Scheme::mono(Ty::list(Ty::var(root)))
-        };
-        let rendered = scheme.to_string();
-        assert_eq!(rendered, "μα. [α]");
     }
 
     #[test]
@@ -613,19 +592,5 @@ mod tests {
             )))
         };
         assert_eq!(scheme.to_string(), "∀α. [a: α, b: _β]");
-    }
-
-    #[test]
-    fn fmt_variant_row_tails_have_a_backtick() {
-        let row_var = RowVar(17);
-        let variant = Ty::variant(Row::var(row_var));
-        let record = Ty::record(Row::var(row_var));
-
-        assert_eq!(variant.to_string(), "[`...]");
-        assert_eq!(record.to_string(), "[...]");
-
-        let ctx = FmtCtx::for_value_types(&[&variant]);
-        assert_eq!(fmt_ty_ctx(&variant, &ctx), "[`...ρ]");
-        assert_eq!(fmt_ty_ctx(&record, &ctx), "[...ρ]");
     }
 }

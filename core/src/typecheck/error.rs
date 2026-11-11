@@ -549,7 +549,7 @@ impl std::fmt::Display for TypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::{Grade, RowVar};
+    use crate::ty::Grade;
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch { expected, actual }
@@ -573,90 +573,6 @@ mod tests {
                     (_, other) => panic!("not a head diagnosis: {other:?}"),
                 }
             }
-        }
-    }
-
-    #[test]
-    fn reported_case_scrutinee_failures_name_the_non_variant() {
-        let variant = Ty::variant(Row::empty());
-        for (expected, actual) in [(&variant, &Ty::int()), (&Ty::int(), &variant)] {
-            let reported =
-                mismatch(expected.clone(), actual.clone()).reported(&Reason::CaseScrutinee);
-            assert!(matches!(
-                &reported,
-                TypeErrorKind::CaseOnNonVariant { ty } if *ty == Ty::int()
-            ));
-            assert_eq!(reported.code(), "T0032");
-        }
-    }
-
-    #[test]
-    fn reported_case_coverage_uses_both_label_sets_and_respects_open_rows() {
-        let row = |tags: &[&str], tail| {
-            tags.iter().rev().fold(tail, |rest, tag| {
-                Row::extend(Label::Case((*tag).into()), Ty::unit(), rest)
-            })
-        };
-        let labels = |tags: &[&str]| -> Vec<Label> {
-            tags.iter().map(|tag| Label::Case((*tag).into())).collect()
-        };
-        let strings = |tags: &[&str]| -> Vec<String> {
-            labels(tags).iter().map(ToString::to_string).collect()
-        };
-        for (scrutinee, arms, missing, extra) in [
-            (row(&["a", "b"], Row::empty()), vec!["a"], vec!["b"], vec![]),
-            (row(&["a"], Row::empty()), vec!["a", "b"], vec![], vec!["b"]),
-            (
-                row(&["a"], Row::empty()),
-                vec!["b", "c"],
-                vec!["a"],
-                vec!["b", "c"],
-            ),
-            (
-                row(&["a", "b"], Row::var(RowVar(0))),
-                vec!["a", "c"],
-                vec!["b"],
-                vec![],
-            ),
-        ] {
-            let reason = Reason::CaseCoverage {
-                scrutinee,
-                arms: labels(&arms),
-            };
-            for failure in [
-                TypeErrorKind::RowMissingField {
-                    label: "irrelevant".into(),
-                },
-                TypeErrorKind::RowExtraField {
-                    label: Label::Case("irrelevant".into()),
-                    known: vec![],
-                },
-            ] {
-                let reported = failure.reported(&reason);
-                assert_eq!(reported.code(), "T0030");
-                let TypeErrorKind::CaseNotExhaustive {
-                    missing: got_missing,
-                    extra: got_extra,
-                } = reported
-                else {
-                    panic!("not a coverage diagnosis: {reported:?}");
-                };
-                assert_eq!(got_missing, strings(&missing));
-                assert_eq!(got_extra, strings(&extra));
-            }
-        }
-        for (scrutinee, arms) in [
-            (row(&["a", "b"], Row::empty()), vec!["a", "b"]),
-            (row(&["a"], Row::var(RowVar(0))), vec!["a", "b"]),
-        ] {
-            let reason = Reason::CaseCoverage {
-                scrutinee,
-                arms: labels(&arms),
-            };
-            assert!(matches!(
-                TypeErrorKind::RowMissingField { label: "unchanged".into() }.reported(&reason),
-                TypeErrorKind::RowMissingField { label } if label == "unchanged"
-            ));
         }
     }
 

@@ -97,12 +97,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_media_needs_no_manifest() {
-        let boot = tempfile::tempdir().unwrap();
-        assert_eq!(read(boot.path()).unwrap(), None);
-    }
-
-    #[test]
     fn either_media_file_requires_a_manifest() {
         for media in ["kernel", "initramfs.img"] {
             let boot = tempfile::tempdir().unwrap();

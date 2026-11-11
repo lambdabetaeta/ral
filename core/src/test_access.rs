@@ -200,7 +200,7 @@ pub fn val_from_word(word: &str) -> Val {
     crate::elaborator::word_val(word)
 }
 
-/// The peer end of a wire, driven directly: `core/tests/wire_write_stall.rs`
+/// The peer end of a wire, driven directly: `core/tests/integration/api/transport.rs`
 /// plays the far side of a transport the host would own.
 pub fn wire_from_stream(stream: impl Into<WireStream>) -> WireChannel {
     WireChannel::from_stream(stream)

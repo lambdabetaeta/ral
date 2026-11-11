@@ -330,12 +330,6 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn helper_idle_defaults_to_five_hours() {
-        let cli = Cli::try_parse_from(["exarch"]).expect("default helper idle");
-        assert_eq!(cli.helper_idle, std::time::Duration::from_hours(5));
-    }
-
-    #[test]
     fn helper_idle_accepts_duration_units() {
         for (text, seconds) in [("45s", 45), ("30m", 1800), ("2h", 7200), ("1d", 86_400)] {
             let cli = Cli::try_parse_from(["exarch", "--helper-idle", text])

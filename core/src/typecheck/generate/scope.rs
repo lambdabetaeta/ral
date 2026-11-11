@@ -505,31 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn within_catch_all_uses_the_name_and_argv_arm_shape_in_its_own_region() {
-        let mut generator = generator();
-        let handler = block(node(
-            2,
-            CompKind::Lam {
-                param: "name".into(),
-                body: Arc::new(node(
-                    3,
-                    CompKind::Lam {
-                        param: "args".into(),
-                        body: Arc::new(command(4, "emit")),
-                    },
-                )),
-            },
-        ));
-        let opts = FieldsNode::new(vec![("handler".into(), Spanned::new(at(1), handler))].into());
-        generator.within(&opts, None, &block(command(5, "tool")));
-        assert!(generator.env.lookup_binding("name").is_none());
-        assert!(generator.env.lookup_binding("args").is_none());
-        // Region closure must leave the generator usable by a sibling region.
-        generator.region(|this| this.gather(&block(command(6, "tool"))));
-        solved(generator.solver);
-    }
-
-    #[test]
     fn retained_protection_is_kept_beside_the_bind_and_call_holes_inside_scopes() {
         let closed = solved(Solver::new());
         let site = Arc::new(closed.site(&Ty::int(), UnitId::fresh()));

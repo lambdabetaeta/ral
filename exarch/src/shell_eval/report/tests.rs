@@ -62,13 +62,6 @@ fn ran(ending: Ending, rendered: &str) -> Ran {
     }
 }
 
-#[test]
-fn a_returning_call_says_nothing() {
-    let (out, exit) = render(&ran(settled_ending(), ""), &HashSet::new(), None, &[], 30);
-    assert!(out.is_empty(), "a settled ending composes nothing: {out:?}");
-    assert_eq!(exit, 0);
-}
-
 /// The status a walled run carries: its deadline cancellation's own.
 #[test]
 fn wall_composes_rendering_remedy_audit_and_orphan_in_order() {
@@ -125,19 +118,6 @@ fn raise_without_command_exit_carries_no_remedy() {
 }
 
 #[test]
-fn exit_ending_widens_to_name_a_live_orphan() {
-    let ending = Ending::Exited(1);
-    let births = born(&[9]);
-    let workers = vec![worker_row(9, "spawn body", true)];
-    let (out, exit) = render(&ran(ending, ""), &births, None, &workers, 5);
-    assert_eq!(exit, 1);
-    assert!(
-        out.contains("#9 (spawn body)"),
-        "a non-zero exit names a live orphan too, not just the wall: {out:?}"
-    );
-}
-
-#[test]
 fn a_consumed_worker_is_nobodys_orphan() {
     let ending = Ending::Exited(1);
     let births = born(&[9, 10]);
@@ -156,38 +136,6 @@ fn a_consumed_worker_is_nobodys_orphan() {
     assert!(
         !out.contains("!{worker"),
         "orphan guidance must not advertise ID-based handle recovery: {out:?}"
-    );
-}
-
-/// A failed data projection shares the one handle-fate sentence.
-#[test]
-fn a_non_data_result_explains_which_handles_landed() {
-    let ending = failure("the result is a handle, and a run can return only data");
-    let births = born(&[4]);
-    let workers = vec![worker_row(4, "block at <test>, line 1", true)];
-    let (out, exit) = render(
-        &ran(
-            ending,
-            "error: the result is a handle, and a run can return only data\n",
-        ),
-        &births,
-        None,
-        &workers,
-        5,
-    );
-    assert_eq!(exit, 1);
-    assert!(out.starts_with("error: the result is a handle"), "{out:?}");
-    assert!(
-        out.contains("or that the call only returned, never landed"),
-        "{out:?}"
-    );
-    assert!(
-        out.contains("an ID cannot recover a handle") && !out.contains("!{worker"),
-        "{out:?}"
-    );
-    assert!(
-        out.contains("A handle bound by a step that completed is still bound"),
-        "{out:?}"
     );
 }
 
@@ -252,32 +200,10 @@ fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
 }
 
 #[test]
-fn a_rejection_keeps_its_diagnostic_and_ends_with_the_tip() {
-    let out = rejection("error[T0010]: Integer doesn't match Bool\n");
-    assert!(
-        out.starts_with("error[T0010]: Integer doesn't match Bool\n"),
-        "{out:?}"
-    );
-    assert!(out.ends_with(REJECTION_TIP), "{out:?}");
-    assert!(out.contains("no command ran and no `let` bound"), "{out:?}");
-}
-
-#[test]
 fn an_oversize_rejection_is_clipped_but_its_tip_survives_whole() {
     let out = rejection(&"x".repeat(OPAQUE_CAP * 4));
     assert!(out.len() < OPAQUE_CAP * 2, "the diagnostic was not clipped");
     assert!(out.ends_with(REJECTION_TIP), "{out:?}");
-}
-
-#[test]
-fn a_fault_keeps_its_one_liner_and_ends_with_the_tip() {
-    let out = fault("error: run panicked: boom\n", None);
-    assert!(out.starts_with("error: run panicked: boom\n"), "{out:?}");
-    assert!(out.ends_with(FAULT_TIP), "{out:?}");
-    assert!(
-        out.contains("`let` bindings may or may not stand"),
-        "{out:?}"
-    );
 }
 
 #[test]

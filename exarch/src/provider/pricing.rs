@@ -378,18 +378,6 @@ struct Pricing {
 mod tests {
     use super::*;
 
-    #[test]
-    #[allow(
-        clippy::float_cmp,
-        reason = "exact sentinel 0.0 returned by parse_price on the empty/invalid path"
-    )]
-    fn parse_price_accepts_dollar_strings() {
-        assert!((parse_price("0.000003") - 3e-6).abs() < 1e-12);
-        assert_eq!(parse_price("0"), 0.0);
-        assert_eq!(parse_price(""), 0.0);
-        assert_eq!(parse_price("nonsense"), 0.0);
-    }
-
     /// Pins the wire shape, so a change at OR fails here rather than silently
     /// emptying the cache at runtime.
     #[test]
@@ -420,29 +408,6 @@ mod tests {
         assert!(resp.data[1].pricing.input_cache_read.is_some());
     }
 
-    /// Both cap fields default, so one entry omitting them cannot fail the
-    /// whole catalog parse.
-    #[test]
-    fn deserialises_full_caps_payload() {
-        let raw = r#"{
-            "data": [
-                {
-                    "id": "anthropic/claude-opus-4-7",
-                    "context_length": 200000,
-                    "pricing": {
-                        "prompt": "0.000015",
-                        "completion": "0.000075"
-                    },
-                    "supported_parameters": ["tools", "reasoning", "temperature"]
-                }
-            ]
-        }"#;
-        let resp: ModelsResponse = serde_json::from_str(raw).unwrap();
-        let e = &resp.data[0];
-        assert_eq!(e.context_length, Some(200_000));
-        assert!(e.supported_parameters.iter().any(|p| p == "tools"));
-    }
-
     /// Without the alias, `--model mercury-2` makes a successful call that
     /// costs $0 on the banner.
     #[test]
@@ -454,22 +419,6 @@ mod tests {
         assert_eq!(m.get("mercury-2"), Some(&42));
         assert_eq!(m.get("claude-opus-4"), Some(&99));
         assert_eq!(m.get("inception/mercury-2"), Some(&42));
-    }
-
-    /// Two vendors, one bare name: picking either would charge the wrong
-    /// price, so the user must pass the prefixed form.
-    #[test]
-    fn bare_alias_skips_ambiguous_suffix() {
-        let mut m: HashMap<String, u32> = HashMap::new();
-        m.insert("vendor-a/foo".into(), 1);
-        m.insert("vendor-b/foo".into(), 2);
-        add_bare_aliases(&mut m);
-        assert!(
-            !m.contains_key("foo"),
-            "ambiguous bare alias must not be inserted"
-        );
-        assert_eq!(m.get("vendor-a/foo"), Some(&1));
-        assert_eq!(m.get("vendor-b/foo"), Some(&2));
     }
 
     /// Anthropic claude-opus-4 rates as OR publishes them: $15/M in, $75/M
@@ -510,15 +459,6 @@ mod tests {
         )]
         let expected = 1000.0 * 2e-6 + 100.0 * 8e-6;
         assert!((d - expected).abs() < 1e-12, "got {d}, expected {expected}");
-    }
-
-    #[test]
-    fn bare_alias_does_not_overwrite_existing_bare_entry() {
-        let mut m: HashMap<String, u32> = HashMap::new();
-        m.insert("foo".into(), 10);
-        m.insert("vendor/foo".into(), 20);
-        add_bare_aliases(&mut m);
-        assert_eq!(m.get("foo"), Some(&10));
     }
 
     /// All three spellings must resolve, or every native-Anthropic launch

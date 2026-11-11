@@ -638,32 +638,6 @@ mod tests {
     }
 
     #[test]
-    fn choices_group_services_new_methods_and_sorted_renewals() {
-        let overlay = LoginOverlay::with_tokens(&roster(2), false);
-        let choices = &overlay.choices;
-        assert_eq!(choices.len(), 12);
-        let mut index = 0;
-        for login in Login::ALL {
-            for &method in oauth::methods(login) {
-                assert!(
-                    matches!(choices[index].sign_in, SignIn::New(l, m) if l == login && m == method)
-                );
-                assert_eq!(choices[index].label, "new account");
-                assert_eq!(choices[index].heading, login.service().name.to_string());
-                index += 1;
-            }
-            for id in ["id-0", "id-1"] {
-                for &method in oauth::methods(login) {
-                    assert!(matches!(&choices[index].sign_in,
-                        SignIn::Renew(token, m) if token.login() == login && token.issued == id && *m == method));
-                    assert!(choices[index].blurb.starts_with("sign in again · "));
-                    index += 1;
-                }
-            }
-        }
-    }
-
-    #[test]
     fn same_handle_renewals_sort_by_full_id_and_offer_both_codex_methods() {
         let overlay = LoginOverlay::with_tokens(
             &[

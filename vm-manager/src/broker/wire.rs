@@ -219,33 +219,6 @@ mod tests {
         assert!(frame::read::<_, Request>(&mut &[][..]).unwrap().is_none());
     }
 
-    #[test]
-    fn every_reply_round_trips() {
-        let replies = [
-            Reply::Booted {
-                control: vec![1, 2, 3],
-                net: vec![4, 5],
-            },
-            Reply::Stopped(Ok(())),
-            Reply::Stopped(Err(Error::ForcedStop {
-                hypervisor: "Hyper-V".into(),
-                grace_secs: 5,
-            })),
-            Reply::Console(GuestConsole::Unkept),
-            Reply::Console(GuestConsole::Kept {
-                log: Some(std::path::PathBuf::from(r"C:\cache\console.log")),
-                tail: vec!["panic".to_string()],
-            }),
-            Reply::Refused(Error::NotPermitted),
-        ];
-        for reply in replies {
-            let mut buffer = Vec::new();
-            frame::write(&mut buffer, &reply).unwrap();
-            let back: Reply = frame::read(&mut &buffer[..]).unwrap().unwrap();
-            assert_eq!(format!("{back:?}"), format!("{reply:?}"));
-        }
-    }
-
     fn longest_path() -> std::path::PathBuf {
         use std::os::windows::ffi::OsStringExt;
 

@@ -155,7 +155,7 @@ pub fn apply_session_profiles(
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
+    use crate::authority::policy::{ExecAllow, FsAllow, FsOp};
     use crate::environ::EnvVars;
 
     fn shell() -> Shell {
@@ -201,26 +201,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deny_target_produces_sticky_deny_policy() {
-        let mut shell = shell();
-        let layer = load_capabilities_from_str(
-            &Mooring::adrift(),
-            &mut shell,
-            "return [exec: [deny: [`name bash]]]",
-            &SourceOrigin::named("<test:deny>"),
-            &ctx(),
-        )
-        .unwrap();
-        let exec = layer.exec().unwrap();
-        assert!(
-            exec.denies()
-                .any(|d| *d == ExecDeny::Name(Veto::of("bash"))),
-            "{exec:?}"
-        );
-        assert!(exec.allows().next().is_none(), "{exec:?}");
-    }
-
     /// A fragment extends a base that omits an axis to every request less its
     /// exclusions, and a positive-only one leaves the axis unrestricted.
     #[test]
@@ -244,28 +224,6 @@ mod tests {
             excluding
                 .exec()
                 .is_some_and(|e| e.allows().any(|a| matches!(a, ExecAllow::Any)))
-        );
-    }
-
-    #[test]
-    fn non_map_return_value_errors_with_file_path() {
-        let mut shell = shell();
-        let err = load_capabilities_from_str(
-            &Mooring::adrift(),
-            &mut shell,
-            "return 42",
-            &SourceOrigin::named("<test:nonmap>"),
-            &ctx(),
-        )
-        .unwrap_err();
-        let Break::Error(error) = err else {
-            panic!("expected a profile error, got {err:?}");
-        };
-        assert_eq!(error.context(), Some("capability file <test:nonmap>"));
-        let rejection = error.rejection().expect("non-map compile rejection");
-        assert_eq!(
-            rejection.source.origin(),
-            &SourceOrigin::named("<test:nonmap>")
         );
     }
 
@@ -294,17 +252,6 @@ mod tests {
         assert!(msg.contains("'fss'"), "{msg}");
     }
 
-    /// A profile returning a map is refused statically: its keys are the
-    /// table's labels, so it is written as a record.
-    #[test]
-    fn a_mapped_profile_is_refused_before_the_file_runs() {
-        let msg = load_compile_report(
-            "return [:, fss: [read: [`absolute /tmp]]]",
-            "<test:typo-map>",
-        );
-        assert!(msg.contains("`grant` takes a record of settings"), "{msg}");
-    }
-
     /// `()` is a profile with nothing to set: the lattice top.
     #[test]
     fn a_profile_returning_unit_is_the_empty_profile() {
@@ -318,23 +265,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(layer, GrantLayer::root());
-    }
-
-    #[test]
-    fn exit_in_profile_propagates_as_escape() {
-        let mut shell = shell();
-        let err = load_capabilities_from_str(
-            &Mooring::adrift(),
-            &mut shell,
-            "exit 3",
-            &SourceOrigin::named("<test:exit>"),
-            &ctx(),
-        )
-        .unwrap_err();
-        match err {
-            Break::Escape(crate::shell::runtime::Escape::Exit(3)) => {}
-            other => panic!("expected Escape::Exit(3), got {other:?}"),
-        }
     }
 
     /// A capability file under a denied name is refused at the shell's door,

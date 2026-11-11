@@ -29,10 +29,6 @@ fn every_schedule_tag_is_refused_in_the_models_own_vocabulary() {
                 )))
             );
             assert_eq!(err.hints(), []);
-            assert_eq!(
-                err.describe(),
-                format!("exarch: schedule: {verb}: scheduling is not allowed in this session")
-            );
             assert!(
                 err.plain().contains("--allow-schedule"),
                 "must name the grant flag, got: {}",

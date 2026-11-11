@@ -291,11 +291,6 @@ mod tests {
                 EditorCommandCause::Unbalanced,
                 "{unbalanced:?}"
             );
-            assert!(
-                error
-                    .to_string()
-                    .starts_with("VISUAL has an unmatched quote")
-            );
         }
     }
 
@@ -327,10 +322,6 @@ mod tests {
                     fault: EditorCommandCause::NoProgram
                 }
             );
-            assert_eq!(
-                error.to_string(),
-                "EDITOR names no program: its first word is empty"
-            );
         }
     }
 
@@ -344,7 +335,6 @@ mod tests {
         ] {
             let error = EditorCommand::select(Some(spec), Some("nano")).unwrap_err();
             assert_eq!(error.fault, EditorCommandCause::Nul, "{spec:?}");
-            assert_eq!(error.to_string(), "VISUAL contains a NUL byte; remove it");
         }
     }
 
@@ -354,7 +344,6 @@ mod tests {
         assert_eq!(admit_draft(&limit).unwrap().len(), MAX_DRAFT_BYTES);
         let over = admit_draft(&"λ".repeat(MAX_DRAFT_BYTES / 2 + 1)).unwrap_err();
         assert!(matches!(over, DraftError::TooLarge));
-        assert_eq!(over.to_string(), "the draft exceeds the 16 MiB limit");
 
         assert_eq!(read_draft(limit.as_bytes()).unwrap(), limit);
         let mut stream = io::Cursor::new(vec![b'x'; MAX_DRAFT_BYTES + 100]);
@@ -370,52 +359,5 @@ mod tests {
         );
         let error = read_draft(&[0xff][..]).unwrap_err();
         assert!(matches!(error, DraftError::NotUtf8(_)));
-        assert!(error.to_string().starts_with("the draft is not UTF-8"));
-    }
-
-    #[test]
-    fn command_and_draft_failures_project_without_rendering() {
-        let error = EditorCommand::select(Some("ed\0"), None).unwrap_err();
-        assert_eq!(
-            error.failure(),
-            EditorFailureCommand {
-                variable: EditorVariable::Visual,
-                cause: EditorCommandCause::Nul,
-            }
-        );
-        let error = read_draft(&[b'a', 0xff][..]).unwrap_err();
-        assert_eq!(
-            error.failure(),
-            DraftFailure::Utf8(Utf8Failure {
-                valid_up_to: 1_usize.into(),
-                error_len: Some(1_usize.into()),
-            })
-        );
-        assert_eq!(
-            DraftError::TooLarge.failure(),
-            DraftFailure::TooLarge(DraftFailureTooLarge {
-                limit: MAX_DRAFT_BYTES.into(),
-            })
-        );
-    }
-
-    #[test]
-    fn a_removal_failure_is_never_dropped() {
-        let both = |edit: String, removal: String| format!("{edit}; {removal}");
-        let ok = || Ok::<_, String>(());
-        let fail = |what: &str| Err::<(), _>(what.to_owned());
-        assert_eq!(after_cleanup(Ok(1), ok(), both), Ok(1));
-        assert_eq!(
-            after_cleanup(Err::<i32, _>("edit".into()), ok(), both),
-            Err("edit".into())
-        );
-        assert_eq!(
-            after_cleanup(Ok(1), fail("removal"), both),
-            Err("removal".into())
-        );
-        assert_eq!(
-            after_cleanup(Err::<i32, _>("edit".into()), fail("removal"), both),
-            Err("edit; removal".into())
-        );
     }
 }

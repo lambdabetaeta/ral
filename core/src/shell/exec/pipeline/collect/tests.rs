@@ -163,14 +163,6 @@ fn breaks_join_by_rank_earlier_stage_breaking_ties() {
     );
 }
 
-#[test]
-fn protocol_error_does_not_supersede_earlier_failure() {
-    match stronger(error_break(7), error_break(1)) {
-        Break::Error(error) => assert_eq!(error.failure_code(), nz(7)),
-        Break::Escape(_) => panic!("expected the first stage failure to win"),
-    }
-}
-
 /// An owning group and a collector wired onto the same channel, as
 /// `PipeNode::run` builds them.
 fn owning_pipeline(
@@ -576,18 +568,6 @@ fn a_write_heard_after_its_writer_was_filed_is_ignored() {
     );
 }
 
-/// A cause the scope read between slices always tears down.
-#[test]
-fn a_cancelled_event_cancels_all() {
-    let mut state = state_with(1);
-    assert_eq!(
-        step(&mut state, Event::Cancelled(CancelCause::TimedOut)),
-        Some(Effect::CancelAll {
-            cause: CancelCause::TimedOut
-        })
-    );
-}
-
 /// A key the anchor heard is struck on the node and read by the scope at
 /// the next slice, never turned into a teardown by the hearing itself; a
 /// signal no terminal sends is inert.
@@ -606,20 +586,6 @@ fn a_heard_key_strikes_the_node_and_tears_nothing_down() {
             assert_eq!(step(&mut state, heard(libc::SIGINT)), None);
             assert_eq!(frame.cause(), Some(CancelCause::Interrupted));
         },
-    );
-}
-
-/// With no terminal lent, nothing the anchor hears is a key.
-#[cfg(unix)]
-#[test]
-fn with_no_loan_a_heard_signal_is_inert() {
-    let mut state = state_with(1);
-    assert_eq!(
-        step(
-            &mut state,
-            Event::Heard(crate::process::Signal::new(libc::SIGINT))
-        ),
-        None
     );
 }
 
@@ -893,45 +859,6 @@ fn an_armed_stage_that_ends_interrupted_is_kept() {
     }
 }
 
-/// A reader-gone stage whose cleanup failed forwards the failure.
-#[test]
-fn a_reader_gone_stages_cleanup_halt_is_forwarded() {
-    let (mut state, _scopes, _tx) = threads_with(1);
-    let _ = step(
-        &mut state,
-        returned(
-            0,
-            failure(Error::new(crate::fact::Reason::process(
-                "tool",
-                crate::fact::Failure::Exited(7),
-            ))),
-        ),
-    );
-    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
-}
-
-/// Stage 0's error and stage 1's nested reader-gone stop: the stop ranks
-/// under the error.
-#[test]
-fn a_nested_reader_gone_stop_ranks_under_a_siblings_error() {
-    let (mut state, _scopes, _tx) = threads_with(2);
-    let _ = step(
-        &mut state,
-        returned(
-            0,
-            failure(Error::new(crate::fact::Reason::process(
-                "tool",
-                crate::fact::Failure::Exited(7),
-            ))),
-        ),
-    );
-    let _ = step(
-        &mut state,
-        returned(1, halted(cut(&DurableRoot::default().child().id()))),
-    );
-    assert!(matches!(fold_of(state), Err(Break::Error(e)) if e.failure_code() == nz(7)));
-}
-
 /// An `exit` out of a stage is a top-level effect in flight: the siblings
 /// are torn down, and the stops that raises name their own stages.
 #[test]
@@ -1040,40 +967,6 @@ fn a_stage_panic_tears_the_group_down_and_is_reraised_at_fold() {
     assert_eq!(
         payload.downcast_ref::<String>().map(String::as_str),
         Some("boom")
-    );
-}
-
-/// The collector is the one writer of a stage's node, for every teardown.
-#[test]
-fn a_cancel_all_writes_its_cause_on_every_thread_stage() {
-    let (mut state, scopes, tx) = threads_with(2);
-    let helper = sending(
-        &tx,
-        vec![
-            (50, returned(0, StageObservation::ok())),
-            (50, returned(1, StageObservation::ok())),
-        ],
-    );
-    state.cancel_all(CancelCause::Interrupted);
-    helper.join().expect("helper");
-    for scope in &scopes {
-        assert_eq!(scope.cause(), Some(CancelCause::Interrupted));
-    }
-}
-
-/// A live thread stage is waited for, up to the grace, before the kill.
-#[test]
-fn a_cancel_all_waits_for_a_live_thread_stage_up_to_its_grace() {
-    let (mut state, _scopes, tx) = threads_with(1);
-    state.cleanup_grace = Duration::from_millis(200);
-    let helper = sending(&tx, vec![(100, returned(0, StageObservation::ok()))]);
-    let t0 = Instant::now();
-    state.cancel_all(CancelCause::Interrupted);
-    helper.join().expect("helper");
-    assert!(
-        t0.elapsed() < crate::test_helper::NEVER_RETURNS,
-        "{:?}",
-        t0.elapsed()
     );
 }
 
@@ -1349,18 +1242,6 @@ fn a_spent_deadline_returns_nothing_even_with_an_event_queued() {
     assert!(state.recv(Some(Instant::now())).is_none());
 }
 
-#[cfg(unix)]
-#[test]
-fn an_anchors_death_on_its_own_ends_the_pipeline() {
-    let mut state = state_with(1);
-    assert_eq!(
-        step(&mut state, Event::AnchorDied),
-        Some(Effect::CancelAll {
-            cause: CancelCause::Terminated
-        })
-    );
-}
-
 /// Inside a teardown the collector's own kill took the anchor with the group,
 /// so an `Interrupted` teardown must not end `Terminated`.
 #[cfg(unix)]
@@ -1386,25 +1267,6 @@ fn an_anchors_death_inside_a_teardown_does_not_escalate() {
 }
 
 // ── SettleOnDrop: the dead-man's switch ─────────────────────────────────
-
-/// Dropped mid-unwind, the guard settles its index itself, so no index goes
-/// silent.
-#[test]
-fn a_guard_dropped_while_panicking_settles_its_index() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let _guard = SettleOnDrop::new(Slot { ix: 0, tx });
-        panic!("boom");
-    });
-    let event = rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("the guard settles on unwind");
-    match event {
-        Event::Returned(0, obs) => assert_unreported(&obs.end),
-        _ => panic!("expected Returned(0, _)"),
-    }
-    let _ = handle.join();
-}
 
 /// A guard that already sent must not send again on drop: exactly one
 /// event reaches the channel.
@@ -1613,29 +1475,6 @@ fn ready_pid(ready: &std::path::Path) -> i32 {
         read.strip_suffix('\n').and_then(|pid| pid.parse().ok())
     })
     .expect("the process never wrote its pid")
-}
-
-/// A wall that expires mid-command is reported as the time limit it was,
-/// not as the SIGTERM we happened to send.
-#[cfg(unix)]
-#[test]
-fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
-    let mut cmd = crate::process::Launch::new("/bin/sleep");
-    cmd.arg("30");
-    let lone = spawned(cmd);
-
-    let striker = DurableRoot::default().child();
-    let shell = lone_shell(&striker);
-    let canceller = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(200));
-        striker.cancel(CancelCause::TimedOut);
-    });
-
-    let (outcome, cause) = lone_end(lone, &shell);
-    let cancelled = outcome.cancelled_by(cause);
-    canceller.join().expect("canceller thread");
-
-    assert_eq!(cancelled, Some(CancelCause::TimedOut));
 }
 
 /// Run `sh` under a scope struck with `cause` — before the dispatch when

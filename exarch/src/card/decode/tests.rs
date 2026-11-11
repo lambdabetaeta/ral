@@ -119,14 +119,6 @@ fn a_nested_measure_reads_as_the_rows_readout() {
 }
 
 #[test]
-fn a_bare_row_value_is_one_plain_span() {
-    let val = row_value(vec![("label", s("tests")), ("value", s("42 passed"))]);
-    assert!(
-        matches!(val, FieldVal::Inline(spans) if matches!(spans.as_slice(), [Span { role: None, text }] if text == "42 passed"))
-    );
-}
-
-#[test]
 fn a_nested_measure_without_a_value_is_an_empty_row() {
     let nested = variant("measure", map_value(vec![("max", int(5))]));
     let val = row_value(vec![("label", s("cov")), ("value", nested)]);

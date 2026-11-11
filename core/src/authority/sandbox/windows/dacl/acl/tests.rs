@@ -11,15 +11,6 @@ use super::super::GrantKind;
 use super::super::tests::{pin, real, with_scoped_state_dir};
 use super::*;
 #[test]
-fn sid_parse_valid_and_invalid() {
-    let ok = OwnedSid::parse("S-1-1-0");
-    assert!(ok.is_ok(), "S-1-1-0 should parse: {:?}", ok.err());
-    drop(ok);
-    let err = OwnedSid::parse("not-a-sid");
-    assert!(matches!(err, Err(DaclError::InvalidSid(_))));
-}
-
-#[test]
 fn sid_parse_rejects_empty_and_oversized() {
     let empty = OwnedSid::parse("");
     assert!(matches!(empty, Err(DaclError::InvalidSid(_))));

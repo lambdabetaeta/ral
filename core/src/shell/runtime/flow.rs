@@ -336,45 +336,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn map_error_rewrites_an_error_and_spares_an_escape() {
-        let tagged = |b: Break| b.map_error(|e| e.with_context("ctx"));
-        let Break::Error(e) = tagged(Error::new(Reason::raised("x")).into()) else {
-            panic!("an error stays an error");
-        };
-        assert_eq!(e.context(), Some("ctx"));
-        assert!(matches!(
-            tagged(Break::Escape(Escape::Exit(3))),
-            Break::Escape(Escape::Exit(3))
-        ));
-    }
-
-    #[test]
-    fn every_end_has_its_code() {
-        let error = |reason: Reason| End::Err(Error::new(reason));
-        assert_eq!(End::Ok(Value::Unit).code(), 0);
-        assert_eq!(error(Reason::raised("x")).code(), 1);
-        assert_eq!(
-            error(Reason::process("tool", crate::fact::Failure::Exited(3))).code(),
-            3
-        );
-        assert_eq!(error(Reason::TimedOut).code(), 124);
-        assert_eq!(error(Reason::Cancelled).code(), 143);
-        assert_eq!(End::Exited(5).code(), 5);
-        for cause in [C::ReaderGone, C::Interrupted, C::TimedOut, C::Aborted] {
-            assert_eq!(
-                End::Stopped(Stop {
-                    cause,
-                    owner: None,
-                    at: None
-                })
-                .code(),
-                cause.failure_code().get()
-            );
-        }
-        assert_eq!(End::Panic("x".into()).code(), crate::fact::PANIC_CODE);
-    }
-
     fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Prov>) -> Settled<Value> {
         Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at })))
     }

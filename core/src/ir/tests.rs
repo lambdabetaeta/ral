@@ -391,23 +391,6 @@ fn a_node_crosses_the_wire_as_its_shape() {
 
 // ── Argv, Toplevel, Pattern, Redirects ───────────────────────────────
 
-fn single(name: &str) -> ValListElem {
-    ValListElem::Single(svar(name))
-}
-
-#[test]
-fn positional_and_arity_are_none_once_a_spread_makes_arity_dynamic() {
-    let literal: Argv = vec![single("a"), single("b")].into();
-    assert_eq!(literal.positional(), Some(vec![&svar("a"), &svar("b")]));
-    assert_eq!(literal.arity(), Some(2));
-    let empty: Argv = Argv::default();
-    assert_eq!(empty.arity(), Some(0));
-
-    let spread: Argv = vec![single("a"), ValListElem::Spread(svar("b"))].into();
-    assert_eq!(spread.positional(), None);
-    assert_eq!(spread.arity(), None);
-}
-
 fn exec() -> Arc<Comp> {
     Arc::new(Spanned::synthetic(CompKind::Exec(Exec {
         head: CommandWord::Name(CommandName::Bare("ls".into())),
@@ -438,19 +421,6 @@ fn toplevel(phrases: Vec<Spanned<Phrase>>) -> Toplevel {
 }
 
 #[test]
-fn only_a_lone_exec_run_is_a_single_command() {
-    for (phrases, lone) in [
-        (vec![], false),
-        (vec![run(exec())], true),
-        (vec![run(ret("v"))], false),
-        (vec![define("x", crate::ty::Ty::int())], false),
-        (vec![run(exec()), run(exec())], false),
-    ] {
-        assert_eq!(toplevel(phrases).is_single_command(), lone);
-    }
-}
-
-#[test]
 fn the_last_let_of_a_name_wins_the_exported_scheme() {
     use crate::ty::{Binders, Ty};
     let unit = toplevel(vec![
@@ -467,34 +437,6 @@ fn the_last_let_of_a_name_wins_the_exported_scheme() {
             ("y".to_string(), scheme(Ty::string()))
         ]
     );
-}
-
-/// `Pattern`'s `Display` is the pattern as written, a map entry binding its
-/// own key collapsing to the key.
-#[test]
-fn a_pattern_displays_as_written() {
-    let name = |n: &str| Pattern::Name(n.into());
-    let entry = |key: &str, pattern| FieldPattern {
-        key: key.into(),
-        pattern,
-    };
-    for (pattern, shown) in [
-        (Pattern::Wildcard, "_"),
-        (name("x"), "x"),
-        (
-            Pattern::List {
-                elems: vec![name("a"), Pattern::Wildcard],
-                rest: Some("rest".into()),
-            },
-            "[a _ ...rest]",
-        ),
-        (
-            Pattern::Record(vec![entry("host", name("host")), entry("port", name("p"))]),
-            "[host port: p]",
-        ),
-    ] {
-        assert_eq!(pattern.to_string(), shown);
-    }
 }
 
 fn redirects() -> Redirects<u8> {

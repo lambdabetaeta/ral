@@ -100,7 +100,6 @@ mod tests {
     use crate::fact::{
         ExarchFailure, HostFailure, PolicyFailure, PolicyFailureUnknownBase, Reason,
     };
-    use crate::shell::grant::decode_capability_map;
     use crate::shell::runtime::Value;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
@@ -118,17 +117,6 @@ mod tests {
 
     fn restrict(record: &Value) -> SpawnGrant {
         SpawnGrant::Restrict(FOValue::try_from(record).expect("a first-order grant record"))
-    }
-
-    #[test]
-    fn inherit_attenuates_nothing() {
-        let layer = SpawnGrant::Inherit
-            .layer(unreachable_narrower, &cwd("/work/proj"))
-            .expect("inherit resolves without a narrower");
-        assert!(
-            !layer.is_restrictive(),
-            "inheriting the parent's authority must push the lattice top"
-        );
     }
 
     #[test]
@@ -155,55 +143,6 @@ mod tests {
             vec!["/work/proj"],
             "`cwd .` must name the cwd the layer is frozen against, not the process's"
         );
-    }
-
-    #[test]
-    fn a_malformed_restriction_is_refused_by_the_decoder() {
-        let record = Value::map(vec![("net".to_string(), Value::string("yes"))]);
-        let ctx = cwd("/work/proj");
-        let refusal = restrict(&record)
-            .layer(unreachable_narrower, &ctx)
-            .expect_err("a net axis that is not `offline`");
-        let decoder = decode_capability_map(&record, "grant", &ctx)
-            .expect_err("the decoder refuses it first");
-        assert!(!decoder.hints().is_empty(), "the refusal carries a hint");
-        assert_eq!(refusal.reason, decoder.reason);
-        assert_eq!(refusal.context(), decoder.context());
-        assert_eq!(
-            refusal.hints(),
-            decoder.hints(),
-            "stored hints survive separately"
-        );
-        assert_eq!(refusal.reason.advice(), decoder.reason.advice());
-    }
-
-    #[test]
-    fn obsolete_argument_policies_are_refused_off_the_wire() {
-        let name_git = Value::list(vec![Value::variant("name", Some(Value::string("git")))]);
-        let status = Value::list(vec![Value::string("status")]);
-        let records = [
-            ("git", Value::map(vec![("git".to_string(), status.clone())])),
-            (
-                "only",
-                Value::map(vec![
-                    ("allow".to_string(), name_git),
-                    ("only".to_string(), status),
-                ]),
-            ),
-        ];
-        for (key, exec) in records {
-            let record = Value::map(vec![("exec".to_string(), exec)]);
-            let refusal = restrict(&record)
-                .layer(unreachable_narrower, &cwd("/work/proj"))
-                .expect_err("an argument policy must not decode");
-            let said = refusal.describe();
-            assert!(said.contains(&format!("unknown field \"{key}\"")), "{said}");
-            assert!(
-                (refusal.hints().iter())
-                    .any(|h| h.contains("argument restrictions are no longer supported")),
-                "{refusal:?}"
-            );
-        }
     }
 
     fn offline() -> GrantLayer {

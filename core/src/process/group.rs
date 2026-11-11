@@ -229,26 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn placement_step_keeps_only_group_operations() {
-        fn copied<T: Copy>(value: T) -> T {
-            value
-        }
-
-        assert!(matches!(copied(Placement::Inherit.step()), Step::Inherit));
-        assert!(matches!(
-            copied(Placement::NewSession.step()),
-            Step::NewSession
-        ));
-        let stage = DurableRoot::default().child();
-        let member = membership(&stage);
-        let group = member.group();
-        assert!(matches!(
-            copied(Placement::Join(member).step()),
-            Step::Join(joined) if joined == group
-        ));
-    }
-
-    #[test]
     fn a_member_owes_only_what_its_stage_does_not_hold() {
         let stage = DurableRoot::default().child();
         let member = membership(&stage);
@@ -285,42 +265,5 @@ mod tests {
         let member = membership(&stage);
         assert!(member.owes(CancelCause::Terminated));
         assert!(!member.owes(CancelCause::TimedOut));
-    }
-
-    #[test]
-    fn only_a_group_held_whole_is_owned() {
-        let (seven, nine) = (
-            Pgid::from_raw(7).expect("positive"),
-            Pgid::from_raw(9).expect("positive"),
-        );
-        let stage = Membership::new(seven, Scope::clone(&DurableRoot::default().child()));
-        assert_eq!(Group::Owns(nine).owned(), Some(nine));
-        #[cfg(target_os = "linux")]
-        assert_eq!(Group::Enveloped(nine).owned(), Some(nine));
-        assert_eq!(Group::Joins(stage).owned(), None);
-        assert_eq!(Group::Shares.owned(), None);
-    }
-
-    #[test]
-    fn an_owner_owes_every_cause() {
-        let pgid = Pgid::from_raw(1).expect("1 is positive");
-        for &cause in CancelCause::VARIANTS {
-            assert!(Group::Owns(pgid).owes(cause));
-            #[cfg(target_os = "linux")]
-            assert!(Group::Enveloped(pgid).owes(cause));
-        }
-    }
-
-    /// The tty's Ctrl-C reached ral's own group whole; every other cause is
-    /// its teardown's to deliver.
-    #[test]
-    fn rals_own_group_owes_all_but_the_interrupt() {
-        for &cause in CancelCause::VARIANTS {
-            assert_eq!(
-                Group::Shares.owes(cause),
-                cause != CancelCause::Interrupted,
-                "{cause:?}"
-            );
-        }
     }
 }

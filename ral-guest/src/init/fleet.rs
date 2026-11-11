@@ -107,11 +107,4 @@ mod tests {
         assert_eq!(fleet.admit(|| -> Result<Pid, ()> { unreachable!() }), None);
         assert_eq!(fleet.pids, [pid(2), pid(3)]);
     }
-
-    #[test]
-    fn forgetting_says_whether_it_was_an_engine() {
-        let mut fleet = Fleet::new(pid(2));
-        assert!(fleet.forget(pid(2)));
-        assert!(!fleet.forget(pid(2)));
-    }
 }

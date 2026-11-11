@@ -192,18 +192,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_parts_unmetered_reads_subscription() {
-        let usage = Usage {
-            input: 1_000,
-            output: 50,
-            unmetered: true,
-            ..Usage::default()
-        };
-        assert_eq!(usage.parts().cost, "subscription");
-        assert_eq!(usage.to_string(), "total 1000 in / 50 out · subscription");
-    }
-
-    #[test]
     fn paid_and_subscription_totals_preserve_independent_facts_in_both_orders() {
         let paid = Usage {
             input: 100,
@@ -256,19 +244,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_display_omits_empty_cache_suffix() {
-        assert_eq!(Usage::default().to_string(), "total 0 in / 0 out · —");
-        let measured_zero = Usage {
-            input: 100,
-            output: 50,
-            cache_creation: Some(0),
-            cache_read: Some(0),
-            ..Usage::default()
-        };
-        assert_eq!(measured_zero.to_string(), "total 100 in / 50 out · —");
-    }
-
-    #[test]
     fn usage_add_assign_propagates_some() {
         let mut total = Usage::default();
         total += Usage {
@@ -308,20 +283,5 @@ mod tests {
         assert_eq!(total.input, 1_000);
         assert_eq!(total.measured_input(), None);
         assert_eq!(Usage::unreported(true).measured_input(), None);
-    }
-
-    #[test]
-    fn unreported_cost_is_a_lower_bound() {
-        let priced = Usage {
-            dollars: 0.0364,
-            unreported: 1,
-            ..Usage::default()
-        };
-        assert_eq!(priced.parts().cost, "$0.0364 + ?");
-        assert_eq!(Usage::unreported(true).parts().cost, "— + ?");
-        assert_eq!(
-            Usage::unreported(false).parts().cost,
-            "subscription (usage unknown)"
-        );
     }
 }

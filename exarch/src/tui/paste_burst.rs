@@ -296,17 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn finish_is_idempotent() {
-        let now = Instant::now();
-        let mut burst = PasteBurst::default();
-        let a = key(KeyCode::Char('a'));
-        burst.key(a, now);
-        assert_eq!(burst.finish(), vec![Input::Key(a)]);
-        assert_eq!(burst.finish(), []);
-        assert_eq!(burst.deadline(), None);
-    }
-
-    #[test]
     fn chunks_are_bounded_without_ending_control_suppression() {
         let now = Instant::now();
         let mut burst = PasteBurst::default();

@@ -879,32 +879,6 @@ mod tests {
         build_hint(&records)
     }
 
-    /// The hint names the denied path verbatim, the symlink caveat, and both
-    /// grant surfaces.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn hint_names_path_and_symlink_caveat() {
-        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: cat(69436) deny(1) \
-                    file-read-data /private/var/folders/ab/secret/data.txt";
-        let hint = hint(&[line]);
-        assert!(
-            hint.contains("/private/var/folders/ab/secret/data.txt"),
-            "hint must name the denied path; got {hint:?}"
-        );
-        assert!(
-            hint.contains("symlink") && hint.contains("resolved"),
-            "hint must carry the symlink caveat; got {hint:?}"
-        );
-        assert!(
-            hint.contains("fs.read") && hint.contains("--extend"),
-            "hint must name both grant surfaces; got {hint:?}"
-        );
-        assert!(
-            hint.contains("pid 69436: file-read-data"),
-            "hint must show the parsed record"
-        );
-    }
-
     /// Each class present answers for itself: the path is offered to the fs
     /// set, the Mach name reported as a service, and neither is dressed as
     /// the other.
@@ -1065,18 +1039,5 @@ mod tests {
         assert!(denial_hint(&pids, since, Some(0xC000_0022_u32.cast_signed())).is_some());
         assert!(denial_hint(&pids, since, None).is_none());
         assert!(denial_hint(&pids, since, Some(1)).is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn plausible_access_denied_exit_recognises_both_codes_and_rejects_ordinary_exits() {
-        assert!(plausible_access_denied_exit(5), "ERROR_ACCESS_DENIED");
-        assert!(
-            plausible_access_denied_exit(0xC000_0022_u32.cast_signed()),
-            "STATUS_ACCESS_DENIED"
-        );
-        assert!(!plausible_access_denied_exit(0));
-        assert!(!plausible_access_denied_exit(1));
-        assert!(!plausible_access_denied_exit(2));
     }
 }

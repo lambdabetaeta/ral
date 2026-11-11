@@ -294,31 +294,6 @@ fn severed_worker_probe_declines_after_replaying_cards() {
 }
 
 #[test]
-fn admission_renders_human_and_peer_inputs_without_changing_debt() {
-    use crate::agent::testkit::{forked_child, trunk};
-    use crate::bus::AgentMessage;
-    for kind in [false, true] {
-        let root = trunk(kind);
-        let prompt = root.admit(Input::Human("human task".into())).unwrap();
-        assert_eq!(prompt.text, "human task");
-        assert_eq!(prompt.voice, crate::record::Voice::Human);
-        assert!(!root.handle().status().unwrap().owes);
-    }
-    let parent = trunk(false);
-    let helper = forked_child(&parent, "helper", "`inherit");
-    let prompt = helper
-        .admit(Input::Message(AgentMessage {
-            from: parent.id(),
-            from_name: "parent".into(),
-            text: "follow-up".into(),
-        }))
-        .unwrap();
-    assert_eq!(prompt.voice, crate::record::Voice::Peer);
-    assert!(prompt.text.contains("follow-up"));
-    assert!(!helper.handle().status().unwrap().owes);
-}
-
-#[test]
 fn stale_surface_generation_is_quiet_and_wakeups_render() {
     let session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);

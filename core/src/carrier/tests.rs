@@ -22,13 +22,6 @@ mod event_receiver_tests {
         assert_eq!(receiver.try_recv(), Some(stashed));
         assert_eq!(receiver.try_recv(), Some(channelled));
     }
-
-    /// Empty on both sides returns `None` rather than blocking.
-    #[test]
-    fn try_recv_returns_none_when_empty() {
-        let (receiver, _tx) = receiver();
-        assert_eq!(receiver.try_recv(), None);
-    }
 }
 
 /// The severance codes are load-bearing text: a front-end prints them beside

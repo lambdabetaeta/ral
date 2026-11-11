@@ -1,0 +1,7 @@
+# codes: T0056
+# status: 1
+# An encoder takes its one argument by application: it has no argv, so `...`
+# has nothing to spread into and the checker refuses the call outright.
+let nothing = []
+to-json ...$nothing
+return ()

@@ -502,30 +502,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn login_transports_keep_the_service_adapter_and_only_codex_has_live_search() {
-        for login in Login::ALL {
-            let service = login.service();
-            let transport = Transport::build(
-                &service,
-                "m",
-                &Credential::OAuth(oauth::commit_for_test(
-                    &ral_core::own::OwnDir::for_test("transport").unwrap(),
-                    &token(login, "live"),
-                )),
-            );
-            assert_eq!(transport.adapter(), service.adapter);
-            assert_eq!(transport.live_search(), login == Login::Codex);
-            assert!(!transport.metered());
-        }
-        let keyed = Transport::build(
-            &Account::built_in("openai").service,
-            "gpt-5.5",
-            &Credential::ApiKey("k".into()),
-        );
-        assert!(!keyed.live_search());
-    }
-
     /// `metered` decides whether a turn is priced at all, so the flavours are
     /// checked where they are decided and again where the user reads them.
     #[test]

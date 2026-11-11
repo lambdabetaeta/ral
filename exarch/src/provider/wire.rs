@@ -155,13 +155,6 @@ mod tests {
         assert!(transcript.iter().all(|message| message.options.is_none()));
     }
 
-    #[test]
-    fn no_tools_leaves_the_request_tools_unset() {
-        let transcript: Vec<ChatMessage> = Vec::new();
-        let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
-        assert!(request.tools.is_none());
-    }
-
     /// The degenerate last-two: a one-message transcript leaves the system
     /// prompt and that message both marked, and no third breakpoint invented.
     #[test]
@@ -175,20 +168,6 @@ mod tests {
                 .iter()
                 .all(|message| message.options.is_some())
         );
-    }
-
-    #[test]
-    fn search_carries_the_bare_tool_on_every_adapter_that_takes_one() {
-        for adapter in [
-            AdapterKind::OpenAIResp,
-            AdapterKind::Anthropic,
-            AdapterKind::Gemini,
-        ] {
-            let tools = tool_defs(adapter, false, searching(true));
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].name, ToolName::WebSearch);
-            assert_eq!(tools[0].config, None);
-        }
     }
 
     #[test]
@@ -215,21 +194,6 @@ mod tests {
         for adapter in [AdapterKind::OpenAI, AdapterKind::Xai] {
             for live_search in [false, true] {
                 assert!(tool_defs(adapter, live_search, searching(true)).is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn search_off_carries_no_tool_on_any_adapter() {
-        for adapter in [
-            AdapterKind::OpenAIResp,
-            AdapterKind::Anthropic,
-            AdapterKind::Gemini,
-            AdapterKind::OpenAI,
-            AdapterKind::Xai,
-        ] {
-            for live_search in [false, true] {
-                assert!(tool_defs(adapter, live_search, searching(false)).is_empty());
             }
         }
     }

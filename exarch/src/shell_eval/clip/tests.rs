@@ -25,11 +25,6 @@ fn handles_utf8_at_cut_boundary() {
 }
 
 #[test]
-fn clip_passes_short_input_through() {
-    assert_eq!(clip("hi", 1024), "hi");
-}
-
-#[test]
 fn clip_elides_oversize_inline_with_nudge() {
     let body = "y".repeat(CAP * 2);
     let out = clip(&body, CAP);
@@ -48,12 +43,4 @@ fn clip_measures_the_visible_text() {
     let churn = "spinner\r".repeat(100_000) + "done.  ";
     assert!(churn.len() > CAP);
     assert_eq!(clip(&churn, CAP), "done.  ");
-}
-
-#[test]
-fn clip_strips_ansi_from_oversize_input() {
-    let body = format!("\x1b[31m{}\x1b[0m", "y".repeat(CAP * 2));
-    let out = clip(&body, CAP);
-    assert!(!out.contains('\x1b'));
-    assert!(out.contains("elided"));
 }

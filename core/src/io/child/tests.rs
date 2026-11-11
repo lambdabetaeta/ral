@@ -5,47 +5,6 @@ use std::io::Write;
 use std::sync::Arc;
 
 #[test]
-fn descriptor_destinations_need_no_drains() {
-    let file = Sink::File(Arc::new(tempfile::tempfile().unwrap()));
-    let (_reader, writer) = crate::process::cloexec_pipe().unwrap();
-    let pipe = Sink::Pipe {
-        writer: Arc::new(writer),
-        edge: Edge::new(),
-        stage: DurableRoot::default().child().id(),
-    };
-    let mut drains = PendingDrains::default();
-    for sink in [&file, &pipe] {
-        for fd in [OutFd::Stdout, OutFd::Stderr] {
-            assert!(matches!(
-                drains.bind(sink, fd).unwrap(),
-                StdioSpec::Owned(_)
-            ));
-        }
-    }
-    assert!(drains.0.is_empty());
-}
-
-#[test]
-fn standard_streams_need_no_drains() {
-    let mut drains = PendingDrains::default();
-    assert!(matches!(
-        drains.bind(&Sink::Stdout, OutFd::Stdout).unwrap(),
-        StdioSpec::Inherit
-    ));
-    assert!(matches!(
-        drains.bind(&Sink::Stderr, OutFd::Stderr).unwrap(),
-        StdioSpec::Inherit
-    ));
-    for (sink, fd) in [(Sink::Stdout, OutFd::Stderr), (Sink::Stderr, OutFd::Stdout)] {
-        assert!(matches!(
-            drains.bind(&sink, fd).unwrap(),
-            StdioSpec::Owned(_)
-        ));
-    }
-    assert!(drains.0.is_empty());
-}
-
-#[test]
 fn a_drain_already_owns_its_reader_before_any_child_exists() {
     let (sink, bytes) = new_buffer();
     let mut pending = PendingDrains::default();

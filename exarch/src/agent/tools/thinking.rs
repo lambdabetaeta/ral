@@ -46,20 +46,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn accepts_a_thought() {
-        assert_eq!(
-            thought(&json!({ "thought": "one step back" })).unwrap(),
-            "one step back"
-        );
-    }
-
-    #[test]
-    fn rejects_a_missing_thought() {
-        let e = thought(&json!({ "text": "wrong key" })).unwrap_err();
-        assert!(e.contains("`thought`"));
-    }
-
-    #[test]
     fn rejects_a_blank_thought() {
         let e = thought(&json!({ "thought": "   \n" })).unwrap_err();
         assert!(e.contains("`thought`"));

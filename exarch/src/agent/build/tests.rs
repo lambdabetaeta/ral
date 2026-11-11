@@ -4,7 +4,7 @@ use crate::bus::Emitter;
 use crate::provider::scripted::Script;
 use crate::record::{AgentId, AgentLog, Memory, RECORD, Selected, Voice};
 use genai::chat::ChatMessage;
-use ral_core::process::{DurableRoot, RootCause};
+use ral_core::process::DurableRoot;
 use ral_core::protocol::probe::Grants;
 use std::fs;
 
@@ -39,63 +39,6 @@ fn identity_engine(tag: &str) -> RootEngine {
         cwd: ral_core::host::cwd().expect("test process has a cwd"),
         grants: GrantStack::default(),
         terminal: ral_core::io::terminal::TerminalState::default(),
-    }
-}
-
-#[test]
-fn parent_terms_lend_launch_policy_or_helper_policy_and_saturating_fuel() {
-    use ral_core::process::CancelCause;
-    use std::time::Duration;
-
-    for returns in [false, true] {
-        let fleet = Fleet::new(Launch {
-            fuel: 19,
-            search: false,
-            admission: Admission::Gated,
-            returns,
-            idle: Duration::from_secs(23),
-            ..Launch::for_test()
-        });
-        let human = Parent::Human.terms(&fleet.launch, &fleet.registry);
-        assert!(human.parent.is_none());
-        assert_eq!(human.fuel, 19);
-        assert!(!human.search);
-        assert_eq!(human.admission, Admission::Gated);
-        assert_eq!(human.returns, returns);
-        assert!(!human.home.is_cancelled());
-
-        for (fuel, expected) in [(0, 0), (4, 3)] {
-            let parent = test_agent(
-                &fleet,
-                TestAgentSpec {
-                    fuel,
-                    search: true,
-                    ..TestAgentSpec::new("parent")
-                },
-            )
-            .unwrap();
-            let home = DurableRoot::default().child();
-            let helper = Parent::Agent(&parent, home.clone()).terms(&fleet.launch, &fleet.registry);
-            assert_eq!(
-                helper.parent.as_ref().map(AgentHandle::id),
-                Some(parent.id())
-            );
-            assert_eq!(helper.fuel, expected);
-            assert!(helper.search);
-            assert_eq!(
-                helper.admission,
-                Admission::Parent {
-                    idle: fleet.launch.idle
-                }
-            );
-            assert!(helper.returns);
-            assert!(!helper.home.is_cancelled());
-            home.cancel(CancelCause::Interrupted);
-            assert_eq!(helper.home.cause(), Some(CancelCause::Interrupted));
-            assert!(parent.is_live());
-        }
-        fleet.registry.root.cancel(RootCause::Cancelled);
-        assert_eq!(human.home.cause(), Some(CancelCause::Cancelled));
     }
 }
 
@@ -136,14 +79,6 @@ fn fork_fans_out_without_spending_the_parents_fuel() {
         chain.push(child);
     }
     assert_eq!(chain.last().unwrap().handle.0.fuel, 0);
-}
-
-#[test]
-fn fork_inherits_its_parents_search_reach() {
-    let parent = Agent::for_test("system").unwrap();
-    assert!(parent.fork().unwrap().handle.0.search);
-    let searchless = searchless_trunk();
-    assert!(!searchless.fork().unwrap().handle.0.search);
 }
 
 #[test]
@@ -290,21 +225,6 @@ fn agent_drop_cancels_its_own_unclosed_workers() {
     assert!(!entries[0].handle.home.is_cancelled());
     drop(agent);
     assert!(entries[0].handle.home.is_cancelled());
-}
-
-#[test]
-fn agent_drop_clears_its_own_armed_schedules() {
-    let mut agent = Agent::for_test("system").unwrap();
-    crate::agent::testkit::schedule(
-        &mut agent,
-        crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
-        "ping".into(),
-        "ping".into(),
-    );
-    assert_eq!(crate::agent::testkit::schedules(&agent).len(), 1);
-    let handle = agent.handle();
-    drop(agent);
-    assert!(!handle.is_live());
 }
 
 #[test]

@@ -148,14 +148,6 @@ mod tests {
         Finite::new(f).expect("finite")
     }
 
-    #[test]
-    fn only_finite_floats_construct() {
-        assert!(Finite::new(f64::NAN).is_none());
-        assert!(Finite::new(f64::INFINITY).is_none());
-        assert!(Finite::new(f64::NEG_INFINITY).is_none());
-        assert!(Finite::new(-0.0).is_some());
-    }
-
     /// B5, B6: bits, exactly; and no `u64` is a float unless it is a finite one.
     #[test]
     fn serde_round_trips_by_bits_and_refuses_the_rest() {

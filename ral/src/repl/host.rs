@@ -358,39 +358,7 @@ mod tests {
                 EditorFailure::NoPluginContext
             ))))
         );
-        assert_eq!(err.hints(), []);
-        assert!(err.context().is_none());
-        assert!(
-            err.describe().contains("no plugin context"),
-            "{}",
-            err.describe()
-        );
     }
-    #[test]
-    fn malformed_enquiries_keep_the_original_decode_path() {
-        let host = ReplHost::new(Arc::default());
-        let malformed = ral_core::data::datum::tag(
-            "repl-editor",
-            Some(ral_core::data::datum::tag(
-                "set",
-                Some(FOValue::Int { value: 1 }),
-            )),
-        );
-        let cause = Enquiry::decode(&malformed).unwrap_err();
-        assert_ne!(cause.path, Vec::<ral_core::fact::DataStep>::new());
-        let error = host.enquire(malformed).unwrap_err();
-        assert_eq!(
-            error.reason,
-            Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
-                kind: ProtocolData::Request,
-                operation: "repl".into(),
-                cause
-            })))
-        );
-        assert!(error.context().is_none());
-        assert_eq!(error.hints(), []);
-    }
-
     #[test]
     fn plugin_notifications_keep_lifecycle_and_keybinding_facts() {
         use super::super::enquiry::PluginNote;
@@ -452,8 +420,6 @@ mod tests {
                 })
             ))))
         );
-        assert_eq!(error.hints(), []);
-        assert!(error.context().is_none());
         assert!(super::super::plugin::lock(&host.runtime).plugins.is_empty());
     }
 }

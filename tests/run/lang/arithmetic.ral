@@ -1,0 +1,54 @@
+# Arithmetic and logic inside `$[...]`
+
+# Left associativity of `-` and `/`
+echo $[10 - 3 - 2]
+echo $[8 / 2 / 2]
+
+# Precedence, and parentheses overriding it
+echo $[1 + 2 * 3]
+echo $[(1 + 2) * 3]
+
+echo $[7 % 3]
+echo $[- 2 + 3]
+
+# Fused `&&` / `||`, and comparisons feeding them
+echo $[true && false]
+echo $[false || true]
+echo $[1 < 2 && 3 >= 3]
+
+# `not` binds tighter than the binary operators: this is `(not true) && false`,
+# not `not (true && false)`.
+echo $[not true && false]
+
+# Expressions interpolated inside a double-quoted string
+let n = 4
+echo "n+1 = $[$n + 1] half = $[$n / 2]"
+
+# A negative literal is an Int; unary minus takes its operand's type
+let neg = -3
+echo $neg
+echo $[-5]
+let half = 1.5
+echo $[-$half]
+
+# After a value `-` is binary however spaced; before one, a sign touching a
+# numeral is its sign
+echo $[5 -1] $[5 - 1] $[5-1] $[2*-3] $[1 - -1]
+
+# Division and remainder by zero, and the i64::MIN / -1 overflow, are errors
+let div = { |a b| return $[$a / $b] }
+let rem = { |a b| return $[$a % $b] }
+let min = $[-9223372036854775808]
+try { let _ = div 1 0 } { |_| echo 'div refused' }
+try { let _ = rem 1 0 } { |_| echo 'mod refused' }
+try { let _ = div $min -1 } { |_| echo 'min / -1 refused' }
+try { let _ = rem $min -1 } { |_| echo 'min % -1 refused' }
+
+# `&&` and `||` are lazy: the right side of a decided operator is never forced
+let boom = { fail 'forced' }
+echo $[false && !$boom]
+echo $[true || !$boom]
+
+# `&&` binds tighter than `||`
+echo $[false || true && true]
+echo $[false || true && false]

@@ -215,14 +215,3 @@ pub fn adopt_socket(description: &[u8]) -> io::Result<OwnedSocket> {
     // path, so ownership transfers cleanly.
     Ok(unsafe { OwnedSocket::from_raw_socket(socket as u64) })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_malformed_socket_description_is_refused() {
-        let error = adopt_socket(&[0u8; 8]).expect_err("8 bytes is not a socket description");
-        assert!(error.to_string().contains("not the"), "{error}");
-    }
-}

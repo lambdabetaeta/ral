@@ -4272,15 +4272,11 @@ For executable-level checks:
   stderr without type-checking or executing them;
 - `ral --audit` exercises the real program and exposes its audit trail.
 
-The repository's script harness discovers `tests/**/*.ral`, runs each runnable
-script through the real `ral` executable, and requires a zero exit status.
-For the portable deterministic subset, stdout is compared with a sibling
-`.out` file after ignoring carriage returns. `RAL_BLESS=1` rewrites those
-goldens:
-
-```text
-RAL_BLESS=1 cargo test -p ral --test scripts
-```
+The repository's corpus harness runs each script under `tests/run/` through
+the real `ral` executable and compares its stdout with a sibling `.out` file
+after ignoring carriage returns; leading `#` directives state any expected
+exit status and stderr fragments (`tests/README.md`). `just bless` rewrites
+those goldens.
 
 Those harness conventions test this implementation; they are not additional
 language semantics.

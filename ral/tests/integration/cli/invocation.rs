@@ -1,0 +1,327 @@
+//! The argv surface itself: how a script's positional arguments reach `args`
+//! / `$SCRIPT`, and how a script piped on stdin is run and located in
+//! diagnostics.  The unit tests in `ral/src/cli.rs` stop at the parsed `Mode`;
+//! these carry it through to evaluated output.
+
+use crate::common::{Output, fresh_tmp_path, ral_command};
+use std::io::Write;
+use std::path::Path;
+use std::process::Stdio;
+
+/// Run `ral <path> [args…]` with an empty stdin.
+fn run_script(path: &Path, args: &[&str]) -> Output {
+    let out = ral_command()
+        .arg(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn ral");
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
+/// Run `ral [args…]` with `script` piped on stdin and no script positional.
+fn run_c(code: &str) -> Output {
+    let out = ral_command()
+        .arg("-c")
+        .arg(code)
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn ral");
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
+fn run_stdin(args: &[&str], script: &str) -> Output {
+    let mut child = ral_command()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ral");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
+#[test]
+fn script_positionals_reach_args_and_script() {
+    // `args` holds the trailing positionals and nothing else — the script
+    // path is `$SCRIPT`, not `!{args}[0]` — and flag-shaped arguments are
+    // forwarded rather than eaten by clap (`--version` and `-n` are both
+    // real ral flags).
+    let tmp = fresh_tmp_path("ral_cli_args", "ral");
+    std::fs::write(
+        &tmp,
+        "echo !{length !{args}}\necho ...!{args}\necho !{basename $SCRIPT}\n",
+    )
+    .unwrap();
+    let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+
+    let o = run_script(&tmp, &["--version", "-n", "alpha"]);
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, format!("3\n--version -n alpha\n{name}\n"));
+
+    let o = run_script(&tmp, &[]);
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, format!("0\n\n{name}\n"));
+
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn a_lone_hyphen_names_a_script_and_fences_its_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("-"), "echo ...!{args}\n").unwrap();
+    for prefix in [&["-"][..], &["--", "-"][..]] {
+        let out = ral_command()
+            .current_dir(dir.path())
+            .args(prefix)
+            .args(["-n", "--check", "-ce", "--version"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"-n --check -ce --version\n");
+    }
+}
+
+#[test]
+fn code_options_preserve_code_and_its_arguments() {
+    for flag in ["-c", "-ec", "-lc", "-ic"] {
+        let out = ral_command()
+            .args([flag, "echo ...!{args}", "--version", "--", "-n"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            out.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"--version -- -n\n");
+
+        let out = ral_command()
+            .args([flag, "--version"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn ral");
+        assert!(
+            !out.status.success(),
+            "{flag}: code must not become a version request"
+        );
+    }
+}
+
+#[test]
+fn piped_stdin_runs_as_one_script() {
+    // Both the bare `cmd | ral` form and the explicit `-s` must evaluate the
+    // whole stdin as one script — not line by line at a prompt, and not
+    // dropping its last line.
+    for args in [&[][..], &["-s"][..]] {
+        let o = run_stdin(args, "let x = 2\necho $[$x + 1]\n");
+        assert_eq!(o.status, 0, "args {args:?}, stderr: {}", o.stderr);
+        assert_eq!(o.stdout, "3\n", "args {args:?}");
+    }
+}
+
+#[test]
+fn stdin_script_errors_carry_a_stdin_location() {
+    // The stdin source must be registered under a real name, so a runtime
+    // error can point a caret at it.
+    let o = run_stdin(&["-s"], "echo hi\nfail nope\n");
+    assert_ne!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "hi\n");
+    assert!(o.stderr.contains("nope"), "stderr: {}", o.stderr);
+    assert!(o.stderr.contains("<stdin>:2:1"), "stderr: {}", o.stderr);
+}
+
+#[test]
+fn exit_escapes_try_and_guard_cleanup_with_its_own_code() {
+    let o = run_c("try { exit 7 } { |_e| return () }");
+    assert_eq!(
+        o.status, 7,
+        "`try` must not swallow `exit`; stderr: {}",
+        o.stderr
+    );
+
+    let o = run_c("guard { echo body } { exit 5 }");
+    assert_eq!(
+        o.status, 5,
+        "a `guard` cleanup's `exit` must escape; stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn a_file_descriptor_prefix_on_input_redirects_is_a_parse_error() {
+    for (source, message) in [
+        ("audit { /bin/cat 1< f }", "always feeds standard input"),
+        ("audit { /bin/cat 2< f }", "always feeds standard input"),
+        ("/bin/cat 1< f", "always feeds standard input"),
+        ("/bin/echo hi 0> f", "standard input cannot be written to"),
+        ("/bin/echo hi 0>> f", "standard input cannot be written to"),
+        ("/bin/echo hi 0>~ f", "standard input cannot be written to"),
+        ("/bin/cat 1<< body", "drop the file-descriptor prefix"),
+    ] {
+        let o = run_c(source);
+        assert_ne!(o.status, 0, "{source:?} must not run");
+        assert!(o.stderr.contains(message), "{source:?} gave {}", o.stderr);
+    }
+}
+
+// ── Bytes that are not text ────────────────────────────────────────────────
+
+/// Run `ral -c <code> [extra…]` under `envs`, with an empty stdin.
+#[cfg(unix)]
+fn run_c_os(
+    code: &str,
+    extra: &[&std::ffi::OsStr],
+    envs: &[(&str, &std::ffi::OsStr)],
+) -> std::process::Output {
+    let mut cmd = ral_command();
+    cmd.arg("-c").arg(code).args(extra).stdin(Stdio::null());
+    for (key, val) in envs {
+        cmd.env(key, val);
+    }
+    cmd.output().expect("spawn ral")
+}
+
+/// `env` reads past a variable that is not UTF-8, leaving it out rather than
+/// panicking or mangling it.
+#[cfg(unix)]
+#[test]
+fn env_leaves_out_a_variable_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os(
+        "echo !{has !{env} RAL_TEST_BYTES} !{has !{env} PATH}",
+        &[],
+        &[("RAL_TEST_BYTES", std::ffi::OsStr::from_bytes(b"\xff\xfe"))],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "false true\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A default fills only an absent variable: one the host binds in bytes that
+/// are not UTF-8 reaches a child exactly as inherited.
+#[cfg(unix)]
+#[test]
+fn a_variable_that_is_not_utf8_reaches_children_untouched() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os(
+        "/usr/bin/printenv LANG",
+        &[],
+        &[("LANG", std::ffi::OsStr::from_bytes(b"C.\xff"))],
+    );
+    assert_eq!(
+        out.stdout,
+        b"C.\xff\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An argument that is not UTF-8 is refused, never mangled into one that is.
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = run_c_os("echo ran", &[std::ffi::OsStr::from_bytes(b"caf\xe9")], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+    assert!(out.stdout.is_empty(), "nothing may run");
+    assert!(
+        stderr.contains("argument 3 is not UTF-8 text"),
+        "the refusal names the argument: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_path_warns_and_preserves_path_commands() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let out = ral_command()
+        .args(["-c", "/bin/echo ok"])
+        .env("PATH", std::ffi::OsStr::from_bytes(b"/bin/\xff"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"ok\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("PATH is not valid UTF-8"));
+}
+
+/// A `.ral` source authored on Windows (Notepad, VS Code set to CRLF) has
+/// `\r\n` line endings throughout — inside comments, between statements,
+/// and inside a multi-line raw-string literal. This proves the lexer
+/// treats CRLF as one logical newline everywhere, not just at top level:
+/// it still finds the raw string's closing `'#` on the far side of a
+/// CRLF-turned-LF newline, and the run reproduces LF-only output exactly.
+///
+/// Disk-loaded source is run through `normalize_source_text`
+/// (core/src/source.rs) before lexing, which strips every `\r` —
+/// including inside the raw string — so this integration path does not
+/// observe CR *preservation*; the raw-string contract (a `\r` inside the
+/// literal is carried into its value verbatim) is pinned directly against
+/// un-normalized in-memory source by the lexer unit test
+/// `bumped_string_multiline_preserves_embedded_cr`
+/// (core/src/syntax/lexer.rs:2362-2374).
+///
+/// Synthesized here rather than checked into the repo as a real CRLF
+/// file: with no `.gitattributes` override, `core.autocrlf` differs by
+/// contributor and platform, so a checked-in CRLF fixture risks being
+/// silently renormalized (or double-CR'd) on some future checkout.
+/// Building the exact bytes at test time sidesteps that.
+#[test]
+fn crlf_source_lexes_and_runs() {
+    let lf = "\
+# CRLF fixture -- this comment, and every line below, is CRLF once converted.
+let peek = 2
+echo $[$peek + 1]
+
+let greeting = \"hello\"
+echo $greeting
+
+# A raw string spanning the converted newline keeps its content verbatim
+# once normalized (the lexer must still find the closing '# on the far
+# side of it, even though normalization turned this into a plain LF).
+echo #'raw
+line'#
+";
+    let crlf = lf.replace('\n', "\r\n");
+    assert!(
+        !lf.contains('\r'),
+        "fixture must be authored LF-only before the conversion"
+    );
+
+    let out = crate::common::run("crlf-fixture", &crlf);
+    assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
+    assert_eq!(
+        out.stdout.as_bytes(),
+        b"3\nhello\nraw\nline\n",
+        "normalized-CRLF run must reproduce exact LF-only output"
+    );
+}

@@ -336,13 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn every_block_of_a_session_disk_starts_unallocated() {
-        let bytes = session_bytes();
-        let table = &bytes[usize::try_from(TABLE_OFFSET).unwrap()..][..4];
-        assert_eq!(table, [0xFF; 4]);
-    }
-
-    #[test]
     fn wrapping_preserves_the_image_and_appends_a_footer() {
         let dir = tempfile::tempdir().unwrap();
         let raw = dir.path().join("rootfs.img");

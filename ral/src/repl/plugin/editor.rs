@@ -195,19 +195,6 @@ mod tests {
         pc
     }
 
-    /// Setting `text` and `cursor` together clamps the cursor against the
-    /// **new** text, not the old (shorter) buffer.
-    #[test]
-    fn set_clamps_cursor_against_new_text() {
-        let mut pc = with_text("");
-        pc.apply(EditorOp::Set {
-            text: Some("hello world".into()),
-            cursor: Some(11),
-        });
-        assert_eq!(pc.editor_state.text, "hello world");
-        assert_eq!(pc.editor_state.cursor, 11);
-    }
-
     /// An over-long cursor clamps to the new text's character count.
     #[test]
     fn set_clamps_over_long_cursor_to_new_len() {

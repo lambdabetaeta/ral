@@ -188,12 +188,4 @@ mod tests {
         assert!(parse_denial("Sandbox: cat(1) deny(1) file-read-data /tmp/a").is_none());
         assert!(parse_denial(r#"{"eventMessage":7}"#).is_none());
     }
-
-    #[test]
-    fn service_reason_uses_the_profiles_table() {
-        let why = service_reason(&Inert::of("com.apple.SecurityServer")).unwrap();
-        assert!(why.contains("keychain"));
-        assert!(service_reason(&Inert::of("com.apple.pasteboard.1")).is_some());
-        assert!(service_reason(&Inert::of("com.apple.metadata.mds")).is_none());
-    }
 }

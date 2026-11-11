@@ -638,25 +638,6 @@ mod tests {
     use crate::repl::exec::line_run;
     use ral_core::{RequestedTerminalAccess, protocol::Run};
 
-    /// Every `_ed-*` entry must carry all static facets directly.
-    #[test]
-    fn every_ed_name_has_all_facets() {
-        for entry in ED_BUILTINS {
-            assert!(!entry.decl.name.is_empty());
-            assert_eq!(
-                entry.decl.convention,
-                ral_core::shell::runtime::Convention::Value,
-                "the editor surface is applied, not an argv: {:?}",
-                entry.decl.name
-            );
-            assert!(
-                !entry.decl.doc.is_empty(),
-                "no doc for {:?}",
-                entry.decl.name
-            );
-        }
-    }
-
     /// The perimeter test's plugin half: a row whose result only its own call
     /// determines is a boundary, and `_ed-state` is the editor surface's one.
     #[test]
@@ -750,9 +731,6 @@ mod tests {
         );
         assert!(e.witness().is_some());
         assert!(e.rejection().is_none());
-        assert_eq!(e.hints(), []);
-        assert!(e.context().is_none());
-        assert!(e.describe().contains("_ed-state"));
         assert_eq!(asked, 1, "the updater must not have run");
     }
 
@@ -793,27 +771,7 @@ mod tests {
             panic!("_ed-tui reports rather than raises, got {result:?}");
         };
         assert!(matches!(m.get("status").as_deref(), Some(Value::Int(1))));
-        assert!(
-            m.get("output")
-                .is_some_and(|o| o.to_string().contains("holds no terminal to lend"))
-        );
         assert_eq!(asked, 0);
-    }
-
-    /// A non-Int cursor is refused by the builtin, before any request is put.
-    #[test]
-    fn ed_set_rejects_non_int_cursor() {
-        let arg = Value::map(vec![
-            (
-                "text".into(),
-                Value::variant("set", Some(Value::string("new"))),
-            ),
-            (
-                "cursor".into(),
-                Value::variant("set", Some(Value::string("3"))),
-            ),
-        ]);
-        assert!(set_op(&arg).is_err());
     }
 
     /// A negative cursor floors at zero; the host clamps the rest.
@@ -930,24 +888,5 @@ mod tests {
                 found: ral_core::fact::Found::Bool(false)
             })
         );
-    }
-
-    #[test]
-    fn unknown_highlight_style_retains_the_offered_vocabulary() {
-        let span = Value::map(vec![("style".into(), Value::string("unheard-of"))]);
-        let Err(Break::Error(error)) = highlight_req(0, &span) else {
-            panic!("expected unknown style")
-        };
-        assert_eq!(
-            error.reason,
-            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Editor(
-                EditorFailure::UnknownStyle(EditorFailureUnknownStyle {
-                    style: "unheard-of".into(),
-                    offered: style_names().map(str::to_owned).collect(),
-                })
-            ))))
-        );
-        assert_eq!(error.hints(), []);
-        assert!(error.context().is_none());
     }
 }

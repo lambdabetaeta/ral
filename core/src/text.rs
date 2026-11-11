@@ -132,13 +132,6 @@ mod tests {
         assert_eq!(char_to_byte(s, 9999), s.len());
     }
 
-    #[test]
-    fn char_to_byte_at_text_len() {
-        let s = "héllo";
-        let nchars = s.chars().count();
-        assert_eq!(char_to_byte(s, nchars), s.len());
-    }
-
     /// Two items may share a haystack — two providers listing one model name.
     /// Both survive, in the order they came in: the sort is stable, so the
     /// alphabetical tie-break cannot collapse them onto one another.

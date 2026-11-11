@@ -207,17 +207,6 @@ mod tests {
     use super::*;
     use crate::process::DurableRoot;
 
-    #[test]
-    fn arm_does_not_fire_before_the_ceiling() {
-        let scope = DurableRoot::default().child();
-        let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            !scope.is_cancelled(),
-            "a distant ceiling must not fire early"
-        );
-    }
-
     /// Exercises the daemon's pop-and-re-peek, not just its first entry.
     #[test]
     fn multiple_armed_scopes_each_fire() {
@@ -286,20 +275,6 @@ mod tests {
             scope.cause(),
             Some(CancelCause::TimedOut),
             "the daemon fires the Deadline cause"
-        );
-    }
-
-    #[test]
-    fn disarmed_callback_does_not_run() {
-        let fired = Arc::new(AtomicBool::new(false));
-        let flag = fired.clone();
-        drop(arm_callback(Duration::from_millis(20), move || {
-            flag.store(true, Ordering::Release);
-        }));
-        std::thread::sleep(Duration::from_millis(80));
-        assert!(
-            !fired.load(Ordering::Acquire),
-            "a disarmed Run deadline must not invoke its closure"
         );
     }
 

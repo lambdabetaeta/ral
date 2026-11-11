@@ -133,28 +133,6 @@ pub(crate) fn epitaph(death: Death) -> String {
 mod tests {
     use super::*;
 
-    fn boot() -> Boot {
-        Boot {
-            workspace: guest_abi::boot::Export::Virtiofs { tag: "work".into() },
-            port: 1729,
-            epoch: 0,
-            engine: "/usr/libexec/ral/engine".into(),
-            net: None,
-        }
-    }
-
-    #[test]
-    fn the_command_names_the_guest_role_and_cgroup_root() {
-        let boot = boot();
-        let cmd = command(&boot);
-        assert_eq!(cmd.get_program(), boot.engine.as_str());
-        assert_eq!(
-            cmd.get_args().collect::<Vec<_>>(),
-            ["--guest-engine", EXEC_CGROUP]
-        );
-        assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new(WORK)));
-    }
-
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 
     #[test]

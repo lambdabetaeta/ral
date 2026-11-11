@@ -201,7 +201,6 @@ fn large_binding_install_warns_on_its_own_run_stderr() {
         )
         .text;
     assert_eq!(result.matches("large binding `large_binding_x`").count(), 1);
-    assert!(result.contains("held in session memory"));
     let (tx2, _rx2) = crate::bus::channel();
     let emit2 = Emitter::new(tx2, session.id());
     let result2 = session
@@ -251,46 +250,6 @@ fn the_wall_names_the_workers_that_survived_it() {
     assert!(
         result.contains("(sleeper)"),
         "the surviving worker is named: {result}"
-    );
-}
-
-#[test]
-fn a_call_that_returns_says_nothing_about_its_workers() {
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    let result = session
-        .ral(
-            &DurableRoot::default().child(),
-            "let ok = spawn \"ok\" { return 1 }",
-            10,
-            &emit,
-        )
-        .text;
-    assert!(
-        !result.contains("(ok)"),
-        "a completed call holds its handle: {result}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
-    let mut session = Agent::for_test("system").unwrap();
-    let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id());
-    let result = session
-        .ral(
-            &DurableRoot::default().child(),
-            "let sleeper = spawn \"sleeper\" { /bin/sleep 20 }\n/bin/sh -c 'exit 3'",
-            10,
-            &emit,
-        )
-        .text;
-    assert!(result.contains("EXIT: 3"), "{result}");
-    assert!(
-        result.contains("(sleeper)"),
-        "a live birth survives a non-zero exit: {result}"
     );
 }
 

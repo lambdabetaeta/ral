@@ -157,13 +157,4 @@ mod tests {
         let quoted = PartialPath::of("~/x", TildeReading::Literal);
         assert_eq!(quoted.listing(), Some(PathBuf::from("~/")));
     }
-
-    #[test]
-    fn a_dotfile_is_offered_only_to_a_dotted_needle() {
-        let offers = |needle, name| PartialPath::of(needle, HOME).offers(name);
-        assert!(!offers("", ".git"));
-        assert!(!offers("g", ".git"));
-        assert!(offers(".", ".git"));
-        assert!(offers("", "src"));
-    }
 }

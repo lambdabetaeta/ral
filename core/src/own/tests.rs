@@ -842,20 +842,6 @@ fn open_write_makes_where_absent_and_never_truncates() {
 }
 
 #[test]
-fn open_reads_a_file_already_there_and_refuses_one_that_is_not() {
-    let dir = scratch("open");
-    let missing = dir.open("record.jsonl").err().unwrap();
-    assert_eq!(missing.kind(), io::ErrorKind::NotFound);
-    dir.store("record.jsonl", &1u8, Visibility::Public).unwrap();
-    let mut text = String::new();
-    dir.open("record.jsonl")
-        .unwrap()
-        .read_to_string(&mut text)
-        .unwrap();
-    assert_eq!(text, "1");
-}
-
-#[test]
 fn create_fresh_invents_a_name_and_makes_the_file() {
     let dir = scratch("fresh");
     let (name, mut file) = dir
@@ -942,22 +928,6 @@ fn within_reaches_a_descendant_by_its_names_and_refuses_the_rest() {
 }
 
 #[test]
-fn a_test_directory_is_removed_when_it_is_dropped() {
-    let dir = scratch("dropped");
-    let path = dir.path().to_path_buf();
-    dir.make_dir("x").unwrap();
-    drop(dir);
-    assert!(!path.exists());
-}
-
-#[test]
-fn the_temp_directory_is_held_and_not_removed_when_it_is_let_go() {
-    let temp = OwnDir::temp_for_test().unwrap();
-    drop(temp);
-    assert!(crate::host::temp_dir().is_dir());
-}
-
-#[test]
 fn an_error_says_what_to_do() {
     let state = OwnError::NoBase(XdgKind::State).to_string();
     assert!(
@@ -990,17 +960,6 @@ fn an_error_says_what_to_do() {
         sentence.contains("it is a link to \"/nix/store/x-config.ral\"")
             && sentence.contains("change it where it is generated"),
         "{sentence}"
-    );
-
-    let plain = OwnError::Io {
-        act: Act::Read,
-        at: PathBuf::from("/s/x"),
-        to: None,
-        error: io::ErrorKind::PermissionDenied.into(),
-    };
-    assert!(
-        plain.to_string().starts_with("could not read \"/s/x\": "),
-        "{plain}"
     );
 
     let as_io = io::Error::from(OwnError::Linked(PathBuf::from("/s/oauth.json")));

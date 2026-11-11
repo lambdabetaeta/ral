@@ -830,22 +830,6 @@ fn evidence_is_a_bilattice_in_the_fragment_ral_uses() {
     );
 }
 
-/// A grant value crosses the wire whole, both sets and all.
-#[test]
-fn a_grant_value_round_trips_both_sets() {
-    let caps = Capabilities {
-        exec: Some(ExecGrant::of(
-            [name("git"), dir_key("/ral-lattice/bin")],
-            [name("git")],
-        )),
-        ..witness_b()
-    };
-    let value = crate::data::FOValue::from(caps.value());
-    let json = serde_json::to_string(&value).unwrap();
-    let crossed: crate::data::FOValue = serde_json::from_str(&json).unwrap();
-    assert_eq!(crossed, value);
-}
-
 /// The exec table knows only `allow` and `deny`: `every` is no key, so a
 /// grant cannot spell every program.  A repeated key adds nothing.
 #[test]

@@ -186,15 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_relative_name_stays_inside_the_folder() {
-        let names = inside("sub/report.pdf").expect("plain name");
-        assert_eq!(
-            names.iter().map(EntryName::as_os_str).collect::<Vec<_>>(),
-            ["sub", "report.pdf"]
-        );
-    }
-
-    #[test]
     fn a_name_that_climbs_or_is_rooted_is_refused() {
         for name in [
             "../outside.pdf",

@@ -1,0 +1,61 @@
+# Text helpers of the prelude at their edges: padding, repetition,
+# indentation, stdin words and lines, and quoting that reads back
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+
+# repeat is empty for a count of zero or less, and for an empty string
+assert_eq 'repeat' 'ababab' !{repeat 3 ab}
+assert_eq 'repeat one' 'ab' !{repeat 1 ab}
+assert_eq 'repeat zero' '' !{repeat 0 ab}
+assert_eq 'repeat negative' '' !{repeat -2 ab}
+assert_eq 'repeat empty' '' !{repeat 4 ''}
+
+# pad-left / pad-right fill to a width and never truncate
+assert_eq 'pad-left' '00042' !{pad-left 5 '0' '42'}
+assert_eq 'pad-right' 'ab...' !{pad-right 5 '.' ab}
+assert_eq 'pad-left exact' '12' !{pad-left 2 '0' '12'}
+assert_eq 'pad-left overlong' '12345' !{pad-left 2 '0' '12345'}
+assert_eq 'pad-right overlong' '12345' !{pad-right 2 '.' '12345'}
+assert_eq 'pad-left of nothing' '---' !{pad-left 3 '-' ''}
+assert_eq 'pad-right zero width' '' !{pad-right 0 x ''}
+
+# indent skips blank lines, and a width of zero changes nothing
+assert_eq 'indent' "  a\n\n  b" !{indent 2 "a\n\nb"}
+assert_eq 'indent zero' 'a' !{indent 0 a}
+assert_eq 'indent single' '    x' !{indent 4 x}
+assert_eq 'indent empty' '' !{indent 3 ''}
+
+# from-words splits stdin on any run of whitespace
+assert_eq 'from-words' [a, bb, ccc, d] !{printf '  a bb\tccc\n\nd ' | from-words}
+assert_eq 'from-words empty' [] !{printf '' | from-words}
+assert_eq 'from-words blank' [] !{printf ' \n\t' | from-words}
+
+# filter-lines keeps the lines whose predicate holds; each-line runs for effect
+let one-char = { |l| return $[!{length $l} == 1] }
+assert_eq 'filter-lines' "a\nc\n" !{printf 'a\nbb\nc\n' | filter-lines $one-char | from-string}
+assert_eq 'filter-lines empty input' '' !{printf '' | filter-lines $one-char | from-string}
+assert_eq 'filter-lines none kept' '' !{printf 'aa\nbb\n' | filter-lines $one-char | from-string}
+let seen = temp-file
+printf 'a\nb\nc\n' | each-line { |l| echo "<$l>" >> $seen }
+assert_eq 'each-line' ['<a>', '<b>', '<c>'] !{from-lines < $seen}
+printf '' | each-line { |l| echo "never" >> $seen }
+assert_eq 'each-line empty input' 3 !{line-count $seen}
+rm $seen
+
+# ral-quote output reads back as the same string
+let d = temp-dir
+let roundtrips = { |s|
+    let q = ral-quote $s
+    echo "let v = return $q" > "$d/m.ral"
+    let m = use "$d/m.ral"
+    return $[$m[v] == $s]
+}
+each { |s| assert_eq "ral-quote $s" true !{roundtrips $s} } ['', 'hello', 'a b', '#hash', "it's", "a'#b", "two\nlines", '$x', '[a]', 'é', '1.5', 'true', '-x', '...', '@x', 'a,b', 'a:b']
+rm -rf $d
+
+echo 'prelude text tests done'

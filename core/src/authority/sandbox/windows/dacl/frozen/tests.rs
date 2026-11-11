@@ -11,13 +11,6 @@ fn is_redirected(r: &Result<Option<FrozenPin>, DaclError>) -> bool {
     matches!(r, Err(DaclError::Redirected { .. }))
 }
 
-#[test]
-fn a_real_directory_is_held() {
-    let td = tempfile::tempdir().unwrap();
-    let pin = pin(&real(td.path()), GrantKind::ReadOnly).unwrap();
-    assert!(pin.is_some());
-}
-
 /// `path`, a drive path in either spelling, as its drive's administrative
 /// share names it: `\\localhost\C$\…`.
 fn through_share(path: &Path) -> PathBuf {

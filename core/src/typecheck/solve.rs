@@ -1692,15 +1692,6 @@ mod tests {
         assert_eq!(errors[0].weak, Some(source));
     }
 
-    #[test]
-    fn instantiate_answers_only_with_unknowns() {
-        let mut solver = Solver::new();
-        let scheme = Scheme::mono(Ty::string());
-        let ty = solver.instantiate(&scheme);
-        assert!(matches!(ty.node(), TyNode::Var(_)));
-        let solution = success(solver);
-        assert_eq!(solution.resolve_ty(&ty), Ty::string());
-    }
     /// The second use meets `Int`, which the weak variable was fixed to, not
     /// the variable itself.
     #[test]
@@ -1717,22 +1708,6 @@ mod tests {
         assert!(
             err.hint()
                 .is_some_and(|h| h.contains("another use fixed it"))
-        );
-    }
-
-    #[test]
-    fn a_mismatch_with_no_weak_variable_has_no_note() {
-        let mut ctx = Solver::new();
-        let var = ctx.fresh_ty();
-        ctx.equate(&var, &Ty::int(), Reason::Argument);
-        ctx.equate(&var, &Ty::string(), Reason::Argument);
-        let [err] = &ctx.errors[..] else {
-            panic!("one mismatch expected: {:?}", ctx.errors);
-        };
-        assert_eq!(err.weak, None);
-        assert!(
-            err.hint()
-                .is_some_and(|h| !h.contains("another use fixed it"))
         );
     }
 

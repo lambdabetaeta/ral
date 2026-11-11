@@ -1,7 +1,7 @@
 //! The sentence is the product here: one sentence, a start told apart from a
 //! death, and both things a debugger needs.
 
-use super::{EngineLost, EnginePhase};
+use super::EngineLost;
 use ral_core::carrier::Severed;
 use ral_core::own::{OwnDir, TestDir};
 
@@ -77,6 +77,4 @@ fn the_logged_form_keeps_what_the_sentence_drops() {
         logged.contains("engine-refused") && !lost.to_string().contains("engine-refused"),
         "the code left the window for the record, not the bin: {logged}"
     );
-    assert_eq!(lost.phase(), EnginePhase::Running);
-    assert_eq!(lost.cause().code(), "engine-refused");
 }

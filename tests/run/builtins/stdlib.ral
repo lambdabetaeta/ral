@@ -1,0 +1,75 @@
+# Standard library functions (prelude wrappers)
+
+# sum
+echo !{sum [1, 2, 3, 4, 5]}
+
+echo !{sum [10, 20, 30]}
+
+# lines
+let parts = lines "hello\nworld\nfoo"
+let nparts = length $parts
+echo $nparts
+
+# line-count
+let tmpdir = temp-dir
+echo hello > "$tmpdir/test"
+echo world >> "$tmpdir/test"
+echo foo >> "$tmpdir/test"
+echo !{line-count "$tmpdir/test"}
+
+# read file via from-string < path
+let content = !{from-string < "$tmpdir/test"}
+echo $content
+
+rm -rf $tmpdir
+
+# data-last fold
+echo !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}
+
+# data-last reduce
+echo !{reduce { |a b| return $[$a * $b] } [2, 3, 4]}
+
+# Composition via substitution
+let doubled = map { |x| return $[$x * 2] } [1, 2, 3, 4, 5]
+let result = sum $doubled
+echo $result
+
+# range — builtin integer sequence, start (inclusive) to end (exclusive)
+echo !{range 0 5}
+
+echo !{range 3 7}
+
+echo !{range 5 5}
+
+echo !{range -2 1}
+
+# first-where is a non-failing search
+echo !{first-where { |_| return true } []}
+echo !{first-where { |x| $[$x > 2] } [1, 2, 3, 4]}
+
+echo !{flat-map { |x| return [$x, $x] } [1, 2]}
+
+# extension — what follows the last component's last dot, when a non-dot precedes it
+let show-ext = { |path|
+    case !{extension $path} [
+        `some: { |e| echo "$path: some [$e]" },
+        `none: { |_| echo "$path: none" }
+    ]
+}
+show-ext '..'
+show-ext '/a/..'
+show-ext '.'
+show-ext 'a/.'
+show-ext '...'
+show-ext '.bashrc'
+show-ext '..hidden'
+show-ext 'dir.d/file'
+show-ext 'dir.d/..f'
+show-ext 'foo.txt'
+show-ext 'a.tar.gz'
+show-ext 'foo.'
+show-ext 'foo..'
+show-ext '.a.b'
+show-ext '..a.b'
+
+echo 'stdlib tests done'

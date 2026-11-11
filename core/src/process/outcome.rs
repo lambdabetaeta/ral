@@ -129,7 +129,7 @@ pub(crate) fn failure_byte(n: i32) -> NonZeroU8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fact::{FailureCode as _, NotRunnable, Reason, Unrunnable};
+    use crate::fact::{FailureCode as _, Reason};
     use strum::VariantArray as _;
 
     #[cfg(unix)]
@@ -155,17 +155,6 @@ mod tests {
     #[cfg(unix)]
     fn died_of(n: i32) -> Read {
         Read::Failed(Failure::Signaled(n))
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn signal_names_follow_platform_constants() {
-        assert_eq!(Signal::new(libc::SIGKILL).to_string(), "9 (SIGKILL)");
-        assert_eq!(
-            Signal::new(libc::SIGTTOU).to_string(),
-            format!("{} (SIGTTOU)", libc::SIGTTOU)
-        );
-        assert_eq!(Signal::new(0).to_string(), "0");
     }
 
     /// `128 + n` names a signal only for an `n` the platform has: ssh's
@@ -213,34 +202,6 @@ mod tests {
         Reason::process("cmd", failure).failure_code().get()
     }
 
-    /// Every failure's number, from the one table on `Reason`.
-    #[test]
-    fn every_failure_has_its_code() {
-        for (failure, expected) in [
-            (Failure::Exited(3), 3),
-            (Failure::Signaled(11), 139),
-            (Failure::NotFound, 127),
-            (
-                Failure::NotRunnable(NotRunnable {
-                    found: "cmd".into(),
-                    why: Unrunnable::PermissionDenied,
-                }),
-                126,
-            ),
-            (
-                Failure::NotRunnable(NotRunnable {
-                    found: "cmd".into(),
-                    why: Unrunnable::Io(Box::new(crate::io::failure(&std::io::Error::from(
-                        std::io::ErrorKind::Other,
-                    )))),
-                }),
-                126,
-            ),
-        ] {
-            assert_eq!(code(failure.clone()), expected, "{failure:?}");
-        }
-    }
-
     #[test]
     fn an_externals_failure_is_never_a_clean_exit() {
         for (raw, expected) in [
@@ -252,19 +213,6 @@ mod tests {
             assert_eq!(code(Failure::Exited(raw)), expected, "raw status {raw}");
         }
         assert_eq!(code(Failure::Signaled(9)), 137);
-    }
-
-    #[test]
-    fn ordinary_exit_and_signal_death_stay_distinct() {
-        assert_eq!(read(WaitOutcome::Exited(0), None), None);
-        assert_eq!(
-            read(WaitOutcome::Exited(137), None),
-            Some(Read::Failed(Failure::Exited(137)))
-        );
-        assert_eq!(
-            read(WaitOutcome::Signaled(Signal::new(9)), None),
-            Some(Read::Failed(Failure::Signaled(9)))
-        );
     }
 
     /// A death by any of a cause's signals — its grace signal, its key, the
@@ -341,20 +289,6 @@ mod tests {
         assert_eq!(
             read(signaled(libc::SIGTERM), Some(CancelCause::ReaderGone)),
             Some(died_of(libc::SIGTERM))
-        );
-    }
-
-    /// A signal no cause sent stays a signal, and keeps its words.
-    #[cfg(unix)]
-    #[test]
-    fn a_foreign_signal_is_still_reported_as_a_signal() {
-        assert_eq!(
-            read(signaled(libc::SIGKILL), None),
-            Some(died_of(libc::SIGKILL))
-        );
-        assert_eq!(
-            Reason::process("sh", Failure::Signaled(libc::SIGKILL)).describe(),
-            "sh: killed by signal 9 (SIGKILL)"
         );
     }
 

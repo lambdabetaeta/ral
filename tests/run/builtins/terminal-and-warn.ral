@@ -1,0 +1,24 @@
+# Clear and reset write their escape sequences to stdout; warn writes
+# one line to stderr and nothing to stdout
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+
+# clear: home, erase screen, erase scrollback; reset: RIS
+assert_eq 'clear' "\e[H\e[2J\e[3J" !{clear | from-string}
+assert_eq 'reset' "\ec" !{reset | from-string}
+
+# warn returns unit; its line lands wherever stderr is sent
+let d = temp-dir
+let w = warn "to a file" 2> "$d/err"
+assert_eq 'warn returns unit' () $w
+assert_eq 'warn line' "to a file\n" !{from-string < "$d/err"}
+assert_eq 'warn is not stdout' '' !{warn "elsewhere" 2> "$d/err2" | from-string}
+assert_eq 'warn merged' "merged\n" !{warn merged 2>&1 | from-string}
+rm -rf $d
+
+echo 'terminal and warn tests done'

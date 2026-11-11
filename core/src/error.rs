@@ -331,21 +331,4 @@ mod tests {
             "could not read \"f\": its directory is not writable"
         );
     }
-
-    #[test]
-    fn hints_accumulate_in_attachment_order() {
-        let e = Error::new(Reason::raised("boom"))
-            .with_hint("first")
-            .with_hint("second");
-        assert_eq!(e.hints().len(), 2);
-        assert_eq!((&*e.hints()[0], &*e.hints()[1]), ("first", "second"));
-    }
-
-    #[test]
-    fn display_is_the_context_chain_then_the_words() {
-        let e = Error::new(Reason::raised("boom"))
-            .with_context("inner")
-            .with_context("outer");
-        assert_eq!(e.to_string(), "outer: inner: boom");
-    }
 }

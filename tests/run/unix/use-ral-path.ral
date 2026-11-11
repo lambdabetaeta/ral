@@ -1,0 +1,35 @@
+# Use finds a bare module name along RAL_PATH, first hit first
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+
+let d = temp-dir
+mkdir -p "$d/first" "$d/second" "$d/elsewhere"
+echo "let which = 'first'" > "$d/first/ral-path-mod.ral"
+echo "let which = 'second'" > "$d/second/ral-path-mod.ral"
+echo "let only-second = 2" > "$d/second/ral-path-only.ral"
+
+within [dir: "$d/elsewhere", env: [RAL_PATH: "$d/first:$d/second"]] {
+    let m = use 'ral-path-mod.ral'
+    assert_eq 'first hit wins' first $m[which]
+    let o = use 'ral-path-only.ral'
+    assert_eq 'later entry reached' 2 $o[only-second]
+}
+within [dir: "$d/elsewhere", env: [RAL_PATH: "$d/second"]] {
+    let m = use 'ral-path-mod.ral'
+    assert_eq 'single entry' second $m[which]
+}
+
+# Absent from every entry, the name is refused as a plain runtime error
+let refused = try {
+    within [dir: "$d/elsewhere", env: [RAL_PATH: "$d/first"]] { let _ = use 'ral-path-only.ral' }
+    return ran
+} { |e| return $e[frame] }
+assert_eq 'unfound' use $refused
+
+rm -rf $d
+echo 'ral path tests done'

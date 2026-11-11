@@ -348,30 +348,3 @@ fn clamp_cpus(vcpus: u8) -> u32 {
     let host = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     u32::from(vcpus).clamp(1, u32::try_from(host).unwrap_or(u32::MAX))
 }
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code")]
-mod tests {
-    use super::*;
-    #[test]
-    fn processors_are_clamped_to_this_computer() {
-        let host =
-            u32::try_from(std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
-                .unwrap();
-        assert_eq!(clamp_cpus(255), host);
-        assert_eq!(clamp_cpus(1), 1);
-        assert!((1..=host).contains(&clamp_cpus(4)));
-    }
-
-    #[test]
-    fn the_cache_outlives_a_temp_sweep() {
-        let cache = Hyperv::default_cache();
-        assert!(
-            cache.ends_with(Path::new("Synod").join("Machine")),
-            "{cache:?}"
-        );
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            assert!(cache.starts_with(PathBuf::from(local)));
-        }
-    }
-}

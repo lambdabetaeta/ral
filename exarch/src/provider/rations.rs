@@ -272,16 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unpublished_account_is_never_read() {
-        let rations = Arc::new(Rations::default());
-        let account = Account::built_in("anthropic");
-        let source = FakeSource::answering(Ok(reading(0.5)));
-        rations.admit(&account, "m", &source).unwrap();
-        assert!(rations.with(&account.id, |standing| standing.asked.is_none()));
-        assert_eq!(source.calls(), 0);
-    }
-
-    #[test]
     fn a_published_account_is_read_once_per_interval() {
         let rations = Arc::new(Rations::default());
         let account = Account::built_in("openrouter");

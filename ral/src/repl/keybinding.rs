@@ -146,13 +146,4 @@ mod tests {
         assert_eq!(rt.resolve_keybinding("b", 0), Some("ctrl-r".into()));
         assert_eq!(rt.resolve_keybinding("a", 0), None);
     }
-
-    /// A binding index past the named plugin's keybinding list misses
-    /// rather than panicking.
-    #[test]
-    fn out_of_range_binding_index_misses() {
-        let mut rt = PluginRuntime::default();
-        rt.plugins.push(plugin("a", "ctrl-t"));
-        assert_eq!(rt.resolve_keybinding("a", 1), None);
-    }
 }

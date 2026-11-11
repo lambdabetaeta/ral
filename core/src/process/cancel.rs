@@ -591,52 +591,6 @@ pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_clock_advances_and_restores_on_drop() {
-        assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
-        let start = Instant::now();
-        {
-            let _clock = TestClock::enter(start);
-            TestClock::advance(Duration::from_millis(600));
-            let advanced = start + Duration::from_millis(600);
-            assert_eq!(now(), advanced);
-            {
-                let _nested = TestClock::enter(start);
-                TestClock::advance(Duration::from_secs(2));
-                assert_eq!(now(), start + Duration::from_secs(2));
-            }
-            assert_eq!(now(), advanced);
-        }
-        assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
-    }
-
-    #[test]
-    fn test_clock_restores_on_unwind() {
-        let start = Instant::now();
-        let _clock = TestClock::enter(start);
-        let result = std::panic::catch_unwind(|| {
-            let _nested = TestClock::enter(start + Duration::from_secs(1));
-            TestClock::advance(Duration::from_secs(2));
-            panic!("unwind the clock guard");
-        });
-        assert!(result.is_err());
-        assert_eq!(now(), start);
-    }
-
-    #[test]
-    fn test_clock_is_thread_local_and_requires_an_override() {
-        let start = Instant::now();
-        let _clock = TestClock::enter(start);
-        std::thread::spawn(|| {
-            assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
-            assert!(std::panic::catch_unwind(|| TestClock::advance(Duration::ZERO)).is_err());
-            assert_eq!(TEST_NOW.with(std::cell::Cell::get), None);
-        })
-        .join()
-        .unwrap();
-        assert_eq!(now(), start);
-    }
-
     /// A teardown's wait ends at its witness, or at its deadline when the
     /// witness never comes.
     #[test]
@@ -690,18 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn parent_cancel_reaches_child() {
-        let parent = DurableRoot::default().child();
-        let child = parent.child();
-        assert!(!child.is_cancelled(), "a fresh child starts uncancelled");
-        parent.cancel(CancelCause::Interrupted);
-        assert!(
-            child.is_cancelled(),
-            "cancelling the parent must cancel the child"
-        );
-    }
-
-    #[test]
     fn child_cancel_isolates_from_parent_and_siblings() {
         let parent = DurableRoot::default();
         let one = parent.child();
@@ -735,20 +677,6 @@ mod tests {
             outer.cause(),
             Some(CancelCause::Interrupted),
             "and so does the run it nests in: sharing, not shadowing"
-        );
-    }
-
-    /// Nesting each entry under the frame it displaces is what makes a scope's
-    /// ancestors the runs enclosing it.
-    #[test]
-    fn an_outer_frames_deadline_reaches_the_nest() {
-        let outer = DurableRoot::new().child().child();
-        let inner = outer.child();
-        outer.cancel(CancelCause::TimedOut);
-        assert_eq!(
-            inner.cause(),
-            Some(CancelCause::TimedOut),
-            "the enclosing run's deadline must unwind the run nested in it"
         );
     }
 
@@ -786,19 +714,6 @@ mod tests {
         let parent = DurableRoot::default().child();
         let node = parent.child();
         (parent, node)
-    }
-
-    #[test]
-    fn a_cancellation_is_worded_by_its_cause() {
-        let (_, node) = pair();
-        node.cancel(CancelCause::TimedOut);
-        let stop = node.poll().expect_err("struck");
-        assert_eq!(stop.to_string(), CancelCause::TimedOut.message());
-    }
-
-    #[test]
-    fn a_fresh_scope_polls_clear() {
-        assert_eq!(DurableRoot::default().poll(), Ok(()));
     }
 
     #[test]

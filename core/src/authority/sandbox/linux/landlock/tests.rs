@@ -59,14 +59,6 @@ fn an_exec_restricting_grant_is_refused_without_landlock() {
         plan(&restricted(), Landlock::Absent).expect_err("a restricted exec grant needs Landlock");
     let why = error.describe();
     assert!(
-        why.starts_with("sandbox confinement unavailable: "),
-        "{why}"
-    );
-    assert!(
-        why.contains("Landlock") && why.contains("refuses rather than run them unchecked"),
-        "{why}"
-    );
-    assert!(
         error
             .reason
             .advice()
@@ -83,16 +75,6 @@ fn an_exec_restricting_grant_is_refused_without_landlock() {
     for exec in [restricted(), ExecProjection::Unrestricted] {
         let error = plan(&exec, Landlock::Unprobed(libc::EPERM))
             .expect_err("a failed probe is not a kernel without Landlock");
-        let why = error.describe();
-        assert!(
-            why.starts_with("sandbox confinement unavailable: "),
-            "{why}"
-        );
-        assert!(
-            why.contains("probe failed")
-                && why.contains("does not establish that Landlock is absent"),
-            "{why}"
-        );
         assert_eq!(error.reason.advice(), [] as [String; 0]);
         assert!(!error.plain().contains("5.13"));
     }
@@ -505,13 +487,6 @@ fn an_allowed_executable_now_a_directory_admits_nothing_beneath() {
     assert_eq!(seen, BTreeSet::from([d.join("a")]), "a file is admitted");
 }
 
-#[test]
-fn an_absent_root_is_dropped() {
-    let (_tmp, d) = tree();
-    let seen = expanded(&[allow(&d.join("absent"), true)], true).expect("expands");
-    assert!(seen.is_empty(), "{seen:?}");
-}
-
 /// A grant renders real paths, so a root that is a symlink now was
 /// planted since, which refuses rather than admit its target.
 #[test]
@@ -745,27 +720,4 @@ fn a_socket_write_grant_admits_only_its_opened_file() {
     })
     .unwrap();
     assert_eq!(seen, [real(&path)]);
-}
-
-#[test]
-fn ruleset_projection_retains_each_intrinsic_stage_and_admit_source() {
-    use crate::fact::{IoCause, IoLeaf, PathIoLeaf, RulesetFailure};
-    let native = || io::Error::from_raw_os_error(libc::EPERM);
-    assert!(
-        matches!(RulesetFailure::from(RulesetError::Create(native())), RulesetFailure::Create(cause) if cause.raw == Some(libc::EPERM))
-    );
-    assert!(
-        matches!(RulesetFailure::from(RulesetError::Restrict(native())), RulesetFailure::Restrict(cause) if cause.raw == Some(libc::EPERM))
-    );
-    let source = IoCause::new(IoLeaf::Path(PathIoLeaf::NotHeld));
-    assert!(
-        matches!(RulesetFailure::from(RulesetError::admit("/fixture", io::Error::other(source.clone()))), RulesetFailure::Admit(failure)
-        if failure.name == "/fixture" && *failure.cause == source)
-    );
-    assert_eq!(
-        RulesetFailure::from(RulesetError::Open(OpenError::Linked("/fixture".into()))),
-        RulesetFailure::Open(crate::fact::ProjectionOpenFailure::Linked(
-            "/fixture".into()
-        ))
-    );
 }

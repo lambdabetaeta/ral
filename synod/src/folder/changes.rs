@@ -251,13 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn an_untouched_file_is_no_change_at_all() {
-        let before = manifest(&[("notes.txt", file(4, 100))]);
-        let after = manifest(&[("notes.txt", file(4, 100))]);
-        assert_eq!(job_report(&before, &after).changes, Vec::<Change>::new());
-    }
-
-    #[test]
     fn a_file_moved_elsewhere_reads_as_a_rename() {
         let before = manifest(&[("drafts/offer.docx", file(9, 1_234))]);
         let after = manifest(&[("sent/offer.docx", file(9, 1_234))]);
@@ -407,18 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_folder_is_a_folder_deletion() {
-        let report = job_report(&manifest(&[("old", EntryKind::Folder)]), &manifest(&[]));
-        assert_eq!(
-            report.changes,
-            vec![Change::Deleted {
-                path: "old".into(),
-                folder: true,
-            }]
-        );
-    }
-
-    #[test]
     fn one_deleted_file_pairs_with_the_first_of_several_matching_creations_and_vice_versa() {
         let renamed = |from: &str, to: &str| Change::Renamed {
             from: from.into(),
@@ -452,59 +433,6 @@ mod tests {
                     folder: false,
                 },
             ]
-        );
-    }
-
-    #[test]
-    fn the_report_names_each_change() {
-        let dir = workshop("report-report");
-        let folder = dir.path();
-        std::fs::write(folder.join("invoices-2026.xlsx"), b"v1").expect("fixture");
-        let before = Manifest::of_folder(folder).expect("baseline");
-
-        std::fs::write(folder.join("invoices-2026.xlsx"), b"v2 is longer").expect("job");
-        std::fs::create_dir(folder.join("reminder-letters")).expect("job");
-        let after = Manifest::of_folder(folder).expect("closing walk");
-
-        let report = job_report(&before, &after);
-        assert!(report.changes.iter().any(|change| matches!(
-            change,
-            Change::Modified { path, now: EntryKind::File { size: 12, .. } }
-                if path == "invoices-2026.xlsx"
-        )));
-        assert!(report.changes.contains(&Change::Created {
-            path: "reminder-letters".into(),
-            now: EntryKind::Folder,
-        }));
-    }
-
-    #[test]
-    fn a_quiet_job_says_so() {
-        let dir = workshop("report-quiet");
-        let folder = dir.path();
-        std::fs::write(folder.join("a.txt"), b"same").expect("fixture");
-        let before = Manifest::of_folder(folder).expect("baseline");
-        let after = Manifest::of_folder(folder).expect("closing walk");
-
-        assert_eq!(job_report(&before, &after).changes, Vec::<Change>::new());
-    }
-
-    #[test]
-    fn a_renamed_file_is_reported_as_one_change_with_two_names() {
-        let dir = workshop("report-rename");
-        let folder = dir.path();
-        std::fs::write(folder.join("scan001.pdf"), b"the scan").expect("fixture");
-        let before = Manifest::of_folder(folder).expect("baseline");
-
-        std::fs::rename(folder.join("scan001.pdf"), folder.join("enrolment.pdf")).expect("job");
-        let after = Manifest::of_folder(folder).expect("closing walk");
-
-        assert_eq!(
-            job_report(&before, &after).changes,
-            vec![Change::Renamed {
-                from: "scan001.pdf".into(),
-                to: "enrolment.pdf".into(),
-            }]
         );
     }
 

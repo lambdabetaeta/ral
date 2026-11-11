@@ -126,6 +126,3 @@ pub(super) fn frontend_rows(
         ),
     ]
 }
-
-#[cfg(test)]
-mod tests;

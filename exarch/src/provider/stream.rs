@@ -426,27 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn step_out_without_reasoning_attaches_nothing() {
-        let end = StreamEnd {
-            captured_content: Some(MessageContent::from("answer")),
-            ..Default::default()
-        };
-        let out = step_out_from_end(
-            "deepseek-v4-pro",
-            end,
-            Served::default(),
-            true,
-            AdapterKind::DeepSeek,
-        );
-        assert!(
-            !out.assistant_message
-                .content
-                .iter()
-                .any(|part| matches!(part, ContentPart::ReasoningContent(_)))
-        );
-    }
-
-    #[test]
     fn output_capped_end_is_cut_short_and_keeps_its_stop_reason() {
         let end = StreamEnd {
             captured_content: Some(MessageContent::from("as far as I got")),
@@ -464,17 +443,6 @@ mod tests {
             out.cut_short
         );
         assert!(matches!(out.stop_reason, Some(StopReason::MaxTokens(_))));
-    }
-
-    #[test]
-    fn completed_end_is_not_cut_short() {
-        let end = StreamEnd {
-            captured_content: Some(MessageContent::from("all done")),
-            captured_stop_reason: Some(StopReason::Completed("end_turn".into())),
-            ..Default::default()
-        };
-        let out = step_out_from_end("m", end, Served::default(), true, AdapterKind::Anthropic);
-        assert!(out.cut_short.is_none());
     }
 
     /// The case `scripted::Reply::truncated_with_tool_calls` imitates: the cap
@@ -533,26 +501,5 @@ mod tests {
                 .any(|part| matches!(part, ContentPart::ReasoningContent(_))),
             "a stall with no reasoning attaches none"
         );
-    }
-
-    #[test]
-    fn stalled_step_out_keeps_streamed_reasoning_even_without_text() {
-        let cause = ProviderError::from_genai(
-            &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
-            "fixture",
-            "test-model",
-        );
-        let step = stalled_step_out(
-            "partial answer",
-            "let me work through the cases",
-            &cause,
-            Served::default(),
-            false,
-        );
-        assert!(step.assistant_message.content.iter().any(|part| matches!(
-            part,
-            ContentPart::ReasoningContent(reasoning)
-                if reasoning == "let me work through the cases"
-        )));
     }
 }

@@ -1,0 +1,54 @@
+# Runtime refusals are catchable, and `frame` tells which builtin refused;
+# no prose is pinned
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+
+# A refusal fails with status 1; check that without pinning refusal prose.
+let refusal = { |body|
+    try { !$body; fail 'ran' } { |e|
+        if $[$e[status] != 1] { fail "unexpected status $e[status]" }
+        return [frame: $e[frame]]
+    }
+}
+
+# re-replace and string-replace demand exactly one match: none or several is refused
+assert_eq 're-replace none' [frame: re-replace] !{refusal { let _ = re-replace 'x' 'y' 'abc' }}
+assert_eq 're-replace several' [frame: re-replace] !{refusal { let _ = re-replace 'a' 'y' 'aaa' }}
+assert_eq 'string-replace none' [frame: string-replace] !{refusal { let _ = string-replace 'x' 'y' 'abc' }}
+assert_eq 'string-replace several' [frame: string-replace] !{refusal { let _ = string-replace 'a' 'y' 'aaa' }}
+assert_eq 're-replace once' 'aYc' !{re-replace 'b' 'Y' 'abc'}
+assert_eq 're-replace-all several' 'yyy' !{re-replace-all 'a' 'y' 'aaa'}
+assert_eq 're-replace-all none' 'abc' !{re-replace-all 'x' 'y' 'abc'}
+
+# slice is start then length: a negative of either is refused, overshoot clamps
+assert_eq 'slice negative start' [frame: slice] !{refusal { let _ = slice 'abc' -1 2 }}
+assert_eq 'slice negative length' [frame: slice] !{refusal { let _ = slice 'abc' 0 -1 }}
+assert_eq 'slice past the end' '' !{slice 'abc' 5 6}
+assert_eq 'slice long length' 'abc' !{slice 'abc' 0 9}
+assert_eq 'slice middle' 'bc' !{slice 'abc' 1 2}
+
+# range is empty when the bounds are reversed or equal; only its span is refused
+assert_eq 'range reversed' [] !{range 5 1}
+assert_eq 'range equal' [] !{range 3 3}
+
+# A list read past its end is refused by the evaluator, not by a command
+let short = [1]
+let index = refusal { let _ = $short[3] }
+assert_eq 'index names the operation' index $index[frame]
+
+# from-json-at refuses a path that leaves the document
+let d = temp-dir
+to-string '{"a": [1, 2]}' > "$d/j"
+assert_eq 'json-at value' 2 !{from-json-at [a, '1'] < "$d/j"}
+assert_eq 'json-at missing key' [frame: from-json-at] !{refusal { let _ = from-json-at [b] < "$d/j" }}
+assert_eq 'json-at index past end' [frame: from-json-at] !{refusal { let _ = from-json-at [a, '5'] < "$d/j" }}
+assert_eq 'json-at key into list' [frame: from-json-at] !{refusal { let _ = from-json-at [a, x] < "$d/j" }}
+assert_eq 'json-at empty input' [frame: from-json-at] !{refusal { let _ = to-string '' | from-json-at [a] }}
+rm -rf $d
+
+echo 'runtime error class tests done'

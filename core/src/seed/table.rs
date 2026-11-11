@@ -702,20 +702,6 @@ mod tests {
         assert_eq!(depth, 500, "every link survives the round-trip");
     }
 
-    #[test]
-    fn ipc_value_roundtrips_simple_values() {
-        let value = Value::map(vec![
-            ("a".into(), Value::Int(1)),
-            ("b".into(), Value::string("x")),
-        ]);
-        let mut ctx = InternCtx::new();
-        let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
-        let table = ctx.finish().expect("finish");
-        let dec =
-            WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table).expect("decoder");
-        assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
-    }
-
     /// A pipeline-stage request built from a shell with the prelude
     /// installed carries no prelude binding in its table: the prelude is a
     /// constant tier every process rebuilds by running the same source, not

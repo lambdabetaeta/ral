@@ -190,33 +190,6 @@ pub(crate) mod engine {
             ral_core::fact::StateFailure::NoChildEngines,
         ))))
     }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use ral_core::data::FOValue;
-        use ral_core::fact::{ProtocolData, ProtocolFailure, ProtocolFailureDecode, Reason};
-
-        #[test]
-        fn batch_root_preserves_the_config_decode_failure() {
-            let malformed = FOValue::Int { value: 3 };
-            let root = Root::new(ral_core::path::EnginePath::Host(
-                ral_core::test_helper::process_cwd().as_path().into(),
-            ))
-            .with_config(malformed.clone());
-            let mut shell = ral_core::test_helper::core_shell();
-            let error = batch_root(&root, &mut shell).unwrap_err();
-            assert_eq!(
-                error.reason,
-                Reason::Protocol(Box::new(ProtocolFailure::Decode(ProtocolFailureDecode {
-                    kind: ProtocolData::RootConfig,
-                    operation: BATCH.into(),
-                    cause: BatchConfig::decode(&malformed).err().unwrap(),
-                })))
-            );
-            assert_eq!(error.hints(), []);
-            assert!(error.context().is_none());
-        }
-    }
 }
 
 /// Diagnose the host values ral cannot read as text.

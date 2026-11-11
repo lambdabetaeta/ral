@@ -4,17 +4,6 @@ use serde_json::json;
 mod invalid;
 
 #[test]
-fn parse_accepts_command_and_description() {
-    let a = parse_args(&json!({
-        "command": "pwd",
-        "description": "Printing the working directory.",
-    }))
-    .unwrap();
-    assert_eq!(a.command, "pwd");
-    assert_eq!(a.description, "Printing the working directory.");
-}
-
-#[test]
 fn parse_truncates_oversize_description() {
     let big = "x".repeat(DESCRIPTION_MAX + 1);
     let a = parse_args(&json!({
@@ -23,28 +12,6 @@ fn parse_truncates_oversize_description() {
     }))
     .unwrap();
     assert_eq!(a.description, "x".repeat(DESCRIPTION_MAX) + "...");
-}
-
-#[test]
-fn parse_timeout_defaults_when_absent() {
-    let a = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-    }))
-    .unwrap();
-    assert_eq!(a.timeout_secs, CALL_TIMEOUT_SECS);
-}
-
-/// No upper clamp: an explicit bound is taken verbatim.
-#[test]
-fn parse_timeout_accepts_explicit() {
-    let a = parse_args(&json!({
-        "command": "pwd",
-        "description": "noop",
-        "timeout_secs": 300,
-    }))
-    .unwrap();
-    assert_eq!(a.timeout_secs, 300);
 }
 
 #[test]

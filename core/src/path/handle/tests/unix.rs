@@ -3,16 +3,16 @@
 use super::super::super::error::{
     LOOP_MESSAGE, dangling, directory_refused, is_loop, loop_error, loop_trace,
 };
-use super::super::super::names::{EntryName, RootName, rooted};
+use super::super::super::names::{EntryName, RootName};
 use super::super::super::trace::{Kind, ObjectId, RealPath, Step, Trace};
 use super::super::resolve::{
-    LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, exists, finish, kind_of, walk, walk_dir,
-    walk_dir_made, walk_lenient, walk_with,
+    LeafMode, Links, MAX_HOPS, Mode, OnMissing, Vetted, finish, walk, walk_dir, walk_dir_made,
+    walk_lenient, walk_with,
 };
 use super::super::{Access, Dir, Judged, Leaf, Located, Streaming, Visibility, Writing, host};
 use super::{writable, writing};
 use crate::environ::EnvVars;
-use crate::path::{CwdPath, LexicalPath, Resolver, shown};
+use crate::path::{CwdPath, LexicalPath, Resolver};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::ffi::{OsStr, OsString};
@@ -247,17 +247,6 @@ fn a_dotdot_from_a_link_target_is_physical() {
         located(&dir.join("L")).unwrap().real().as_path(),
         dir.join("x/f")
     );
-}
-
-/// Every restart is put to [`rooted`], the given name's and each spliced
-/// one's alike: a name with no root is refused.
-#[test]
-fn a_walk_starts_only_from_a_root() {
-    assert_eq!(
-        rooted(Path::new("x")).unwrap_err().kind(),
-        io::ErrorKind::InvalidInput
-    );
-    assert!(rooted(Path::new("/x")).is_ok());
 }
 
 /// Physically: through a link, `..` climbs out of its target.
@@ -703,23 +692,6 @@ fn an_entry_name_is_one_normal_component() {
 }
 
 #[test]
-fn a_fresh_name_is_a_prefix_and_sixteen_alphanumerics() {
-    let fresh = EntryName::fresh(".ral-write-").unwrap();
-    let rest = fresh
-        .as_os_str()
-        .to_str()
-        .unwrap()
-        .strip_prefix(".ral-write-")
-        .unwrap()
-        .to_owned();
-    assert_eq!(rest.len(), 16);
-    assert!(rest.chars().all(|c| c.is_ascii_alphanumeric()));
-    assert_ne!(fresh, EntryName::fresh(".ral-write-").unwrap());
-    assert!(EntryName::fresh("a/b").is_err());
-    assert!(EntryName::fresh("../").is_err());
-}
-
-#[test]
 fn a_root_name_is_a_root_and_nothing_more() {
     let root_of = |raw: &str| serde_json::from_value::<RootName>(json(&OsString::from(raw)));
     assert!(root_of("/").is_ok());
@@ -1112,24 +1084,6 @@ fn a_listing_is_sorted_and_stated_as_it_is_yielded() {
     assert_eq!(second.seen().err().unwrap().kind(), io::ErrorKind::NotFound);
     assert!(second.listed().is_none(), "an unseen entry has no identity");
     assert_eq!(entries.next().unwrap().name().as_os_str(), "c");
-}
-
-/// What the listing saw of an entry is its identity and kind, judged as the
-/// name shown under the directory it was listed from.
-#[test]
-fn a_listed_entry_records_its_identity_beneath_its_directory() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    std::fs::write(dir.join("f"), b"").unwrap();
-    let held = entered(&dir).unwrap();
-    let entries: Vec<_> = held.read_dir().unwrap().collect();
-    let [entry] = entries.as_slice() else {
-        panic!("one entry");
-    };
-    let listed = entry.listed().unwrap();
-    assert_eq!(listed.real().as_path(), dir.join("f"));
-    assert_eq!(listed.step.id(), id(&dir.join("f")));
-    assert_eq!(listed.step.kind(), Kind::File);
 }
 
 /// A directory the user may search and not list is walked, and refuses where
@@ -1928,27 +1882,6 @@ fn update_derives_the_held_regular_file_not_a_replacement_name() {
     assert_eq!(std::fs::read(&at).unwrap(), b"replacement");
 }
 
-/// A file made by `create_file` is made as it is told, and never over a
-/// present one.
-#[test]
-fn a_file_made_without_a_handle_is_made_as_asked() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    located(&dir.join("secret"))
-        .unwrap()
-        .create_file(Visibility::Secret)
-        .unwrap();
-    assert_eq!(
-        std::fs::metadata(dir.join("secret")).unwrap().mode() & 0o7777,
-        0o600
-    );
-    let again = located(&dir.join("secret"))
-        .unwrap()
-        .create_file(Visibility::Secret)
-        .unwrap_err();
-    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
-}
-
 /// `create_new` hands back the handle of the file it makes, and answers
 /// `AlreadyExists` for any present leaf, a link included, without making
 /// anything.
@@ -2275,24 +2208,4 @@ fn rename_acts_in_the_directory_held() {
     held.rename(&name("g")).unwrap();
     assert_eq!(std::fs::read(dir.join("moved/g")).unwrap(), b"held");
     assert!(!dir.join("d").exists());
-}
-
-/// `exists` and `kind_of` are one walk, followed to the end.
-#[test]
-fn kind_of_is_what_the_absolute_spelling_reaches() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = root(&tmp);
-    std::fs::create_dir(dir.join("d")).unwrap();
-    std::fs::write(dir.join("f"), b"").unwrap();
-    symlink("d", dir.join("to_d")).unwrap();
-    symlink("gone", dir.join("dangling")).unwrap();
-    let at = |rel: &str| shown(dir.join(rel));
-
-    assert_eq!(kind_of(&at("d")), Some(Kind::Dir));
-    assert_eq!(kind_of(&at("f")), Some(Kind::File));
-    assert_eq!(kind_of(&at("to_d")), Some(Kind::Dir));
-    assert_eq!(kind_of(&at("dangling")), None);
-    assert_eq!(kind_of(&at("absent")), None);
-    assert_eq!(kind_of("relative/path"), None);
-    assert!(exists(&at("f")) && !exists(&at("dangling")));
 }

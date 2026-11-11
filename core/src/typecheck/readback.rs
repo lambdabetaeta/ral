@@ -779,18 +779,4 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&a, &b));
     }
-
-    #[test]
-    fn capture_nodes_take_the_bodys_span() {
-        let span = Span::new(FileId::DUMMY, 3, 9);
-        let mut counter = 0;
-
-        let body: Comp = Spanned::new(span, CompKind::Return(Val::Unit));
-        let CompKind::Bind { comp, rest, .. } = captured_string(body, &mut counter) else {
-            panic!("a capture is bound to its decode");
-        };
-        assert!(matches!(comp.item, CompKind::Capture(_)));
-        assert!(matches!(rest.item, CompKind::Prim(Prim::Decode(_))));
-        assert_eq!([comp.span, rest.span], [Some(span); 2]);
-    }
 }

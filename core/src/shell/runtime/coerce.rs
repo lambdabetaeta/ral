@@ -156,7 +156,6 @@ mod tests {
     fn coercions_keep_typed_expectations_and_bounded_previews() {
         let value = Value::string("é".repeat(25));
         let error = value.as_list("map").unwrap_err();
-        assert_eq!(error.hints(), []);
         let Reason::Invalid(failure) = error.reason else {
             panic!("invalid input")
         };

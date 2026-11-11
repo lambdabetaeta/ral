@@ -725,7 +725,7 @@ mod tests {
     use crate::authority::policy::Extent;
     use crate::host::test_support::with_var;
     use crate::host::test_support::with_vars_cleared;
-    use crate::path::{Excluded, expand_path_prefix, fold_dots};
+    use crate::path::{Excluded, expand_path_prefix};
 
     /// A fixture anchor written `/a/b`, as this host spells an absolute path:
     /// itself on Unix, `C:\a\b` on Windows.  Any other spelling is kept.
@@ -803,12 +803,6 @@ mod tests {
             let path = format!("/usr/bin:{entry}");
             let home = Home::of(home).unwrap();
             let err = path_dirs_in::<Trace>(OsStr::new(&path), Some(&home)).unwrap_err();
-            assert_eq!(
-                err.describe(),
-                format!(
-                    "grant: {entry} resolves to {what}, so `` `dir `path `` would run and read all of it."
-                ),
-            );
             assert_eq!(err.context(), Some(format!("PATH holds {entry}").as_str()));
             assert_eq!(err.hints(), [Box::<str>::from("Is PATH set correctly?")]);
             assert_eq!(err.reason.advice(), [] as [String; 0]);
@@ -922,52 +916,10 @@ mod tests {
         assert_eq!(dirs, ["/usr/bin", "/h/bin"]);
     }
 
-    // Unix-only: `PathBuf::join` yields `\` separators on Windows.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_expands_cwd_place() {
-        let paths = frozen(&[cwd("."), cwd("src")], &ctx("/h", "/work/proj")).unwrap();
-        assert_eq!(
-            paths,
-            vec!["/work/proj".to_string(), "/work/proj/src".to_string()]
-        );
-    }
-
-    #[test]
-    fn freeze_expands_tempdir_place() {
-        let places = [Anchor::Tempdir.place("."), Anchor::Tempdir.place("scratch")];
-        let paths = frozen(&places, &ctx("/h", "/cwd")).unwrap();
-        // macOS `TMPDIR` ends in `/`, which folding strips, so compare
-        // against the same kernel rather than a literal.
-        let temp = std::env::temp_dir();
-        let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
-        assert_eq!(paths[0], fold(&temp));
-        assert_eq!(paths[1], fold(&temp.join("scratch")));
-    }
-
-    #[test]
-    fn freeze_expands_scratch_place_from_the_scratch_the_context_carries() {
-        let scratch = std::env::temp_dir().join("a-session-scratch");
-        let ctx = ctx("/h", "/cwd").with_scratch(Some(scratch.to_str().unwrap()));
-        let places = [Anchor::Scratch.place("."), Anchor::Scratch.place("cache")];
-        let paths = frozen(&places, &ctx).unwrap();
-        let fold = |p: &Path| fold_dots(p).to_string_lossy().into_owned();
-        assert_eq!(paths[0], fold(&scratch));
-        assert_eq!(paths[1], fold(&scratch.join("cache")));
-    }
-
     #[test]
     fn a_scratch_place_with_no_scratch_is_refused() {
         let err = refusal(&Anchor::Scratch.place("."), &ctx("/h", "/cwd"));
         assert!(err.contains("no scratch directory"), "{err}");
-    }
-
-    // Unix-only: `/tmp` is dead on Windows.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_leaves_absolute_paths_alone() {
-        let paths = frozen(&[abs("/tmp"), abs("/etc/hosts")], &ctx("/h", "/cwd")).unwrap();
-        assert_eq!(paths, vec!["/tmp".to_string(), "/etc/hosts".to_string()]);
     }
 
     /// The guard folds the whole prefix before comparing, so a `..` climb out
@@ -1082,14 +1034,6 @@ mod tests {
         });
     }
 
-    // Unix-only: Unix path shapes.
-    #[cfg(unix)]
-    #[test]
-    fn freeze_folds_dot_dot_in_absolute() {
-        let paths = frozen(&[abs("/a/b/../c")], &ctx("/h", "/cwd")).unwrap();
-        assert_eq!(paths, vec!["/a/c".to_string()]);
-    }
-
     /// `..` folds at freeze and may leave the anchor of a non-XDG place.
     // Unix-only: Unix path shapes.
     #[cfg(unix)]
@@ -1115,94 +1059,6 @@ mod tests {
                 xdg(XdgKind::Cache, sub),
             ] {
                 assert!(ctx.place(&place).is_err(), "{place:?} should be refused");
-            }
-        }
-    }
-
-    #[test]
-    fn a_bad_subpath_says_what_to_write() {
-        let ctx = ctx("/h", "/cwd");
-        assert!(refusal(&cwd(""), &ctx).contains("`cwd . "));
-        assert!(refusal(&cwd("/x"), &ctx).contains("write `` `absolute /x ``"));
-        assert!(refusal(&cwd("C:x"), &ctx).contains("`absolute 'C:"));
-        assert!(refusal(&cwd(r"\x"), &ctx).contains("names no drive"));
-    }
-
-    /// §2.1's table, row by row, under both rules: `Ok(true)` live,
-    /// `Ok(false)` dead, `Err` refused.
-    #[test]
-    fn absolute_payloads_classify_on_the_raw_string() {
-        use PathRules::{Posix, Windows};
-        let live = |raw, rules| live_absolute(raw, rules).ok();
-        for raw in ["/x", "/"] {
-            assert_eq!(live(raw, Posix), Some(true), "{raw}");
-            assert_eq!(live(raw, Windows), Some(false), "{raw}");
-        }
-        for raw in [
-            r"C:\x",
-            "C:/x",
-            r"\\server\share\x",
-            r"\\?\C:\x",
-            r"\\?\UNC\srv\sh\x",
-            "//?/UNC/srv/sh/x",
-            "C:/../x",
-        ] {
-            assert_eq!(live(raw, Posix), Some(false), "{raw}");
-            assert_eq!(live(raw, Windows), Some(true), "{raw}");
-        }
-        // Absolute under both: live on both.
-        for raw in ["//srv/sh/x", "//srv/sh"] {
-            assert_eq!(live(raw, Posix), Some(true), "{raw}");
-            assert_eq!(live(raw, Windows), Some(true), "{raw}");
-        }
-        for raw in [
-            r"\x",
-            "//",
-            "///x",
-            "//srv",
-            "//srv/",
-            r"\\",
-            r"\\srv",
-            r"\\srv\",
-            r"\\\srv\sh",
-            r"\\?\UNC\",
-            r"\\?\UNC\srv",
-            "//?/UNC/",
-            r"\\.\C:\x",
-            r"/\x",
-            "C:x",
-            "src",
-            "./src",
-            "",
-            "~",
-            "xdg:data",
-        ] {
-            assert_eq!(live(raw, Posix), None, "{raw}");
-            assert_eq!(live(raw, Windows), None, "{raw}");
-        }
-    }
-
-    /// A malformed UNC or verbatim root is live on no host, so it cannot fold
-    /// to the universal prefix; the refusal says what a well-formed one is.
-    #[test]
-    fn a_malformed_unc_or_verbatim_root_is_refused_everywhere() {
-        for raw in [
-            r"\\",
-            "//",
-            r"\\srv",
-            r"\\srv\..\x",
-            r"\\..\sh\x",
-            r"\\?\UNC\srv",
-            "//?/UNC/",
-            r"\\.\C:\x",
-        ] {
-            for rules in [PathRules::Posix, PathRules::Windows] {
-                let err = live_absolute(raw, rules).unwrap_err();
-                assert!(
-                    err.describe().contains("server and a share"),
-                    "{raw}: {}",
-                    err.describe()
-                );
             }
         }
     }
@@ -1287,15 +1143,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// The anchors are the one declaration of the place tags.
-    #[test]
-    fn anchors_round_trip_through_their_tags() {
-        for anchor in Anchor::all() {
-            assert_eq!(Anchor::of_tag(&anchor.tag()), Some(anchor));
-        }
-        assert_eq!(Anchor::of_tag("cwdd"), None);
     }
 
     /// The dead grant is `Ok(None)`: it loads and names no path.

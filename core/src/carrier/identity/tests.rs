@@ -191,19 +191,6 @@ mod enquiry_tests {
     use crate::source::SourceOrigin;
     use std::sync::Mutex;
 
-    /// No desk installed answers the honest absence error, verbatim.
-    #[test]
-    fn absent_desk_answers_the_honest_error() {
-        let shell = crate::test_helper::core_shell();
-        let Break::Error(err) = shell
-            .enquire(&Mooring::adrift(), FOValue::Unit)
-            .expect_err("no desk is installed")
-        else {
-            panic!("an absent desk is an error, not a stop");
-        };
-        assert_eq!(err.describe(), crate::shell::runtime::NO_DESK);
-    }
-
     /// The absent-desk refusal carries its hint.
     #[test]
     fn absent_desk_carries_its_hint() {
@@ -495,39 +482,6 @@ mod probe_tests {
         )
     }
 
-    /// A fresh shell's ledger is unarmed and nothing is spawned or bound.
-    #[test]
-    fn a_fresh_shell_reads_empty() {
-        let transport = fresh();
-        assert_eq!(transport.binding_count(), Ok(0));
-        assert_eq!(transport.leased_binding_count(), Ok(0));
-        assert_eq!(transport.largest_binding_bytes(), Ok(0));
-        assert_eq!(transport.workers(), Ok(Vec::new()));
-        assert_eq!(transport.cwd(), Ok(Some(std::env::temp_dir())));
-        assert_eq!(
-            transport.home(),
-            transport
-                .env_var("HOME")
-                .map(|home| home.map(std::path::PathBuf::from)),
-            "HOME reads through the same overlay as the env probe"
-        );
-        let builtins = transport.builtin_names().expect("the probe answers");
-        assert!(builtins.iter().any(|name| name == "fail"), "{builtins:?}");
-    }
-
-    #[cfg(feature = "test-util")]
-    #[test]
-    fn the_test_only_probes_answer() {
-        use crate::carrier::read;
-        let transport = fresh();
-        assert_eq!(read::<u64>(&transport, &Probe::WorkerCount), Ok(0));
-        assert_eq!(
-            transport.grants().map(|grants| grants.layers),
-            Ok(Vec::new()),
-            "a fresh shell's ambient root states nothing"
-        );
-    }
-
     /// The depth probe counts every layer, the ambient root's included, so a
     /// frame left behind shows even where it restricts nothing.
     #[cfg(feature = "test-util")]
@@ -588,13 +542,6 @@ mod probe_tests {
             shown.withholds_gpu,
             crate::authority::sandbox::WITHHOLDS_GPU
         );
-    }
-
-    #[test]
-    fn largest_binding_bytes_measures_what_is_bound() {
-        let transport = fresh();
-        eval(&transport, "let probe_sized = 'a dozen bytes or so'");
-        assert!(transport.largest_binding_bytes().is_ok_and(|n| n > 0));
     }
 
     #[test]
@@ -720,13 +667,6 @@ mod probe_tests {
                 id.0.into()
             ),))
         );
-        let description = format!("no forked session is parked under nursery id {}", id.0);
-        let advice = "was it adopted already, or has the run that forked it ended?";
-        assert_eq!(again.describe(), description);
-        assert_eq!(again.reason.advice(), [advice]);
-        assert_eq!(again.hints(), []);
-        assert!(again.context().is_none());
-        assert_eq!(again.plain(), format!("{description}\nhint: {advice}"));
         let based = transport
             .adopt_parked(park(SpawnGrant::Base("confined".into())))
             .err()

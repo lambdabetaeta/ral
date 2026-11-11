@@ -1,0 +1,137 @@
+# Only `let` captures a command's output. Elsewhere commands write to stdout;
+# `to-json` exposes bound values alongside that output.
+
+# A let binds a command block whole
+let x = !{ echo pre; echo host }
+to-json $x
+echo
+
+# A bound block and a bound function that run a command are commands
+let f = { echo hi }
+let x = f
+to-json $x
+echo
+let f = { echo hi }
+let x = !$f
+to-json $x
+echo
+let g = { |n| echo $n }
+let x = g 5
+to-json $x
+echo
+
+# A join of command arms in hand is one command
+let t = { echo a }
+let u = { echo b }
+let x = if true $t else $u
+to-json $x
+echo
+
+# A wrapper that runs a block produces what the block does
+let x = retry 1 { echo hi }
+to-json $x
+echo
+let x = attempt { echo hi }
+to-json $x
+echo
+
+# Bare `map` writes each command's output, in input order
+map { |f| echo $f } [1, 2]
+
+# Bound `map` writes output and binds Unit elements
+let x = map { |f| echo $f } [1, 2]
+to-json $x
+echo
+
+# `map $g` also writes output from a command block in hand
+let g = { |f| echo $f }
+let x = map $g [1, 2]
+to-json $x
+echo
+
+# `par` replays command output in input order and returns Units
+let x = par { |u| echo $u } [1, 2] 2
+to-json $x
+echo
+
+# `cross`, a wrapper over `map`, writes command output in input order
+cross [1, 3] [2] { |x y| echo "$x$y" }
+
+# Heterogeneous `each` joins a command and a free Unit producer
+each { |b| !$b } [{ echo hi }, { return () }]
+
+# A value-demanding wrapper accepts an explicit capture
+let x = { |f| let y = f 5; return $y }
+let r = x { |n| return !{echo $n} }
+to-json $r
+echo
+
+# A stdout redirect leaves a value
+let d = temp-dir
+let x = to-json 1 > "$d/f"
+to-json $x
+echo
+
+# A mixed `try` needs explicit capture in its command body
+let x = try { return !{echo a} } { |e| return 'none' }
+to-json $x
+echo
+let x = try { return !{^false} } { |e| return 'none' }
+to-json $x
+echo
+
+# A unit arm stands as a command beside a command arm
+let c = true
+let x = if $c { echo a } else { warn b }
+to-json $x
+echo
+let c = false
+let x = if $c { echo a } else { warn b }
+to-json $x
+echo
+
+# A block runner streams a command at any grade into a pipe
+each { |x| echo $x } [1, 2] | cat
+
+# A unit stub stands in for a command and captures nothing
+within [handlers: [curl: { |a| return () }]] { let x = curl foo; to-json $x }
+echo
+
+# A block ending in a value streams what it wrote before
+let d = temp-dir
+echo x > "$d/f"
+let n = !{ echo progress; line-count "$d/f" }
+to-json $n
+echo
+
+# `spawn` absorbs a command
+let x = spawn { echo host }
+let r = await $x
+to-json $r
+echo
+let x = spawn { echo host }
+await $x
+
+# `audit` absorbs a command
+let d = temp-dir
+echo ERROR > "$d/log"
+let r = audit { grep -c ERROR "$d/log" }
+case $r[outcome] [`ok: { |v| to-json $v }, `err: { |_| echo failed }]
+echo
+
+# `echo` binds its line
+let x = echo
+to-json $x
+echo
+let x = echo a b c
+to-json $x
+echo
+
+# `echo` as a statement prints
+echo hi
+
+# A forced command block piped into a decoder yields its output
+let s = { echo one; echo two }
+let x = !$s | from-string
+to-json $x
+echo

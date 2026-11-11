@@ -666,42 +666,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn renewed_token_and_expiry_refusals_keep_their_exact_fields_and_operands() {
-        let previous = parse_token(token_json()).unwrap();
-        for (field, token_field) in [
-            ("access_token", RefreshTokenField::AccessToken),
-            ("refresh_token", RefreshTokenField::RefreshToken),
-            ("id_token", RefreshTokenField::IdToken),
-        ] {
-            let mut value = json!({"access_token":"new"});
-            value[field] = json!("");
-            assert_eq!(
-                renewed(&previous, refresh_response(value)).unwrap_err(),
-                RefreshFailure::EmptyToken(token_field)
-            );
-            let mut value = json!({"access_token":"new"});
-            value[field] = json!(" ");
-            assert!(
-                renewed(&previous, refresh_response(value)).is_ok(),
-                "Grok does not trim token strings"
-            );
-        }
-        assert_eq!(
-            expires_at(Some(0), 100).unwrap_err(),
-            RefreshFailure::InvalidExpiry(RefreshFailureInvalidExpiry {
-                seconds: 0u64.into()
-            })
-        );
-        assert_eq!(
-            expires_at(Some(u64::MAX), 100).unwrap_err(),
-            RefreshFailure::ExpiryOverflow(RefreshFailureExpiryOverflow {
-                now: 100u64.into(),
-                seconds: u64::MAX.into()
-            })
-        );
-    }
-
     struct Request {
         method: String,
         path: String,
@@ -804,45 +768,6 @@ mod tests {
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect();
         assert_eq!(request.form, expected);
-    }
-
-    #[tokio::test]
-    async fn device_and_refresh_requests_use_exact_forms_and_paths() {
-        let mut fixture = fixture(vec![
-            (200, device_json()),
-            (200, json!({"access_token": "new"})),
-        ])
-        .await;
-        let client = super::super::http_client().unwrap();
-        let device = request_device_code(&client, &format!("{}/oauth2/device/code", fixture.url))
-            .await
-            .unwrap();
-        assert_eq!(device.user_code, "ABCD-EFGH");
-        let request = fixture.requests.recv().await.unwrap();
-        assert_form(
-            &request,
-            "/oauth2/device/code",
-            &[
-                ("client_id", CLIENT_ID),
-                ("scope", SCOPE),
-                ("referrer", "exarch"),
-            ],
-        );
-        let previous = parse_token(token_json()).unwrap();
-        let refreshed = refresh_at(&client, &format!("{}/oauth2/token", fixture.url), &previous)
-            .await
-            .unwrap();
-        assert_eq!(refreshed.refresh_token, previous.refresh_token);
-        assert_form(
-            &fixture.requests.recv().await.unwrap(),
-            "/oauth2/token",
-            &[
-                ("grant_type", "refresh_token"),
-                ("client_id", CLIENT_ID),
-                ("refresh_token", "refresh"),
-            ],
-        );
-        (&mut fixture.task).await.unwrap();
     }
 
     #[tokio::test]

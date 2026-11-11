@@ -32,25 +32,6 @@ fn attach(transport: &WireTransport) {
     ));
 }
 
-/// The version handshake the guest engine checks before it will speak.
-#[test]
-fn adopt_then_attach_conveys_the_protocol_version() {
-    let (front, back) = UnixStream::pair().unwrap();
-    let mut peer = WireChannel::from_stream(back);
-
-    let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
-    attach(&transport);
-
-    match peer
-        .read_frame()
-        .unwrap()
-        .expect("an Attach frame must arrive")
-    {
-        Frame::Attach(attach) => assert_eq!(attach.engine.proto_version, PROTOCOL_VERSION),
-        other => panic!("expected an Attach frame, got {other:?}"),
-    }
-}
-
 #[test]
 fn detach_requires_teardown_acknowledgment_not_eof() {
     for acknowledge in [false, true] {

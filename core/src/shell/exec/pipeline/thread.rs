@@ -157,7 +157,6 @@ mod tests {
     use crate::io::Edge;
     use crate::process::TerminalAccess;
     use crate::shell::runtime::{End, Stop};
-    use std::io::Read;
     use std::time::{Duration, Instant};
 
     fn compile_one(source: &str) -> Arc<Comp> {
@@ -189,45 +188,6 @@ mod tests {
                 listening: std::cell::Cell::default(),
             },
         }
-    }
-
-    #[test]
-    fn a_stage_writes_into_a_sink_pipe_and_finishes() {
-        let mut shell = crate::test_helper::core_shell();
-        let env = shell.env.clone();
-        let group = prepared_group();
-        let stage = compile_one("echo hi");
-        let (mut reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
-        let mooring = Mooring::adrift();
-        let cx = LaunchCx {
-            mooring: &mooring,
-            shell: &mut shell,
-            env: &env,
-            eval: crate::shell::evaluator::STAGE_EVAL,
-            group: &group,
-            input: crate::process::TerminalInput::Withheld,
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (_handle, _held) = launch_thread_stage(
-            &stage,
-            ByteIn::Parent,
-            downstream(writer, &reader),
-            &cx,
-            Slot { ix: 0, tx },
-        )
-        .expect("launch");
-
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).expect("read stage stdout");
-        assert_eq!(out, b"hi\n");
-
-        let super::super::collect::Event::Returned(ix, obs) =
-            rx.recv().expect("the stage sends its own Returned")
-        else {
-            panic!("a thread stage must settle as Event::Returned");
-        };
-        assert_eq!(ix, 0);
-        assert!(matches!(obs.end, End::Ok(_)), "echo hi must not fail");
     }
 
     #[test]

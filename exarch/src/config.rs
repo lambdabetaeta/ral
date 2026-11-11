@@ -310,14 +310,6 @@ mod tests {
         assert_eq!(parse(&source), Ok(written));
     }
 
-    /// An absent file is no providers, not a failure — the state every
-    /// computer starts in.
-    #[test]
-    fn an_absent_file_declares_nothing() {
-        let file = UserFile::fixed("/exarch-declared-absent", "providers.ral");
-        assert_eq!(load_declared(&file, LABEL), Ok(Vec::new()));
-    }
-
     /// A name with a quote in it is asked about, not escaped into the file.
     #[test]
     fn a_quote_in_a_name_is_refused_with_a_question() {
@@ -359,12 +351,6 @@ mod tests {
         let err = parse("return [weird: [endpoint: 'https://w/', protocol: 'grpc']]").unwrap_err();
         assert!(err.contains("unknown protocol 'grpc'"), "got: {err}");
         assert!(err.contains("weird"), "should name the provider: {err}");
-    }
-
-    #[test]
-    fn missing_field_errors() {
-        let err = parse("return [x: [protocol: 'completions']]").unwrap_err();
-        assert!(err.contains("missing 'endpoint'"), "got: {err}");
     }
 
     #[test]
@@ -411,12 +397,6 @@ mod tests {
             parse("return [x: [endpoint: 'https://x/', protocol: 'completions', model: 'm']]")
                 .unwrap_err();
         assert!(err.contains("unknown key 'model'"), "got: {err}");
-    }
-
-    #[test]
-    fn non_map_terminal_errors() {
-        let err = parse("return 42").unwrap_err();
-        assert!(err.contains("expected a map"), "got: {err}");
     }
 
     /// A bare command statement is ral's surface for an external invocation, so

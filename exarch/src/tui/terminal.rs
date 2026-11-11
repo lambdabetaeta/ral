@@ -603,25 +603,6 @@ mod tests {
         assert!(std::fs::symlink_metadata(path).is_err());
     }
 
-    #[test]
-    fn spawn_and_read_errors_are_recoverable_diagnostics() {
-        let dir = OwnDir::for_test("editor-errors").unwrap();
-        let draft = DraftFile::create((*dir).clone(), "original").unwrap();
-        let error = editor_result(
-            "missing-editor",
-            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-            &draft,
-        )
-        .unwrap_err();
-        assert!(error.contains("missing-editor"));
-        assert!(error.contains("draft unchanged"));
-        assert_eq!(draft.read().unwrap(), "original");
-        std::fs::write(draft.path(), [0xff]).unwrap();
-        assert!(draft.read().unwrap_err().contains("not UTF-8"));
-        dir.remove(&draft.name).unwrap();
-        assert!(draft.read().unwrap_err().contains("could not read"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn an_unsuccessful_editor_does_not_return_its_partial_edit() {

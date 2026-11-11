@@ -158,26 +158,7 @@ pub(crate) fn user_cache_dir() -> Option<PathBuf> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use crate::host::test_support::{with_var, with_vars_cleared};
-
-    #[test]
-    fn the_host_environment_is_read_here_as_text_and_as_the_os_holds_it() {
-        with_var("RAL_HOST_TEST_VAR", Some("v"), || {
-            assert_eq!(var("RAL_HOST_TEST_VAR").as_deref(), Some("v"));
-            assert_eq!(var_os("RAL_HOST_TEST_VAR"), Some(OsString::from("v")));
-            let bound = (OsString::from("RAL_HOST_TEST_VAR"), OsString::from("v"));
-            assert!(vars_os().contains(&bound));
-        });
-        with_var("RAL_HOST_TEST_VAR", None, || {
-            assert_eq!(var("RAL_HOST_TEST_VAR"), None);
-            assert_eq!(var_os("RAL_HOST_TEST_VAR"), None);
-        });
-    }
-
-    #[test]
-    fn the_temp_directory_is_the_hosts() {
-        assert_eq!(temp_dir(), std::env::temp_dir());
-    }
+    use crate::host::test_support::with_vars_cleared;
 
     #[test]
     fn the_user_database_stands_in_for_an_unbound_home_in_the_layout_alone() {

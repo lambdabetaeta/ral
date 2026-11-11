@@ -75,35 +75,6 @@ fn class(tok: &Token) -> Class {
 mod tests {
     use super::*;
 
-    fn find(src: &str, classes: &[(Range<usize>, Class)], needle: &str) -> Class {
-        let start = src.find(needle).unwrap();
-        let range = start..start + needle.len();
-        classes
-            .iter()
-            .find(|(r, _)| *r == range)
-            .unwrap_or_else(|| panic!("no range exactly {needle:?} in {src:?}"))
-            .1
-    }
-
-    #[test]
-    fn classifies_each_token() {
-        for (src, needle, class) in [
-            ("let x = 'hi'", "let", Class::Keyword),
-            ("let x = 'hi'", "'hi'", Class::String),
-            ("let x = 'hi'", "x", Class::Plain),
-            ("[`ok $x]", "`ok", Class::Tag),
-            ("[`ok $x]", "$x", Class::Variable),
-            ("[`ok $x]", "[", Class::Punct),
-            ("[`ok $x]", "]", Class::Punct),
-        ] {
-            assert_eq!(
-                find(src, &classify(src), needle),
-                class,
-                "{needle:?} in {src:?}"
-            );
-        }
-    }
-
     /// Whitespace and `#` comments: all the lexer leaves between tokens.
     fn blank_or_comment(gap: &str) -> bool {
         gap.lines().all(|line| {

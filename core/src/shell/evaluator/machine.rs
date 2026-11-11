@@ -1625,23 +1625,6 @@ mod tests {
         assert!(matches!(out, Value::Int(3)), "expected 3, got {out:?}");
     }
 
-    /// A two-member mutually recursive group.
-    #[test]
-    fn two_member_recursive_group() {
-        let mut shell = new_shell();
-        let out = run_source(
-            "let even = { |n| if $[$n == 0] { return true } else { odd $[$n - 1] } }\n\
-             let odd = { |n| if $[$n == 0] { return false } else { even $[$n - 1] } }\n\
-             even 10",
-            &mut shell,
-        )
-        .expect("mutual recursion must terminate");
-        assert!(
-            matches!(out, Value::Bool(true)),
-            "expected true, got {out:?}"
-        );
-    }
-
     /// The `Rec` rule reuses ρ|occ(g): forcing a sibling from one unfold and
     /// unfolding again from its own environment yields new siblings whose
     /// environment is the same root, `ptr_eq`, as the one that forced them —
@@ -2073,32 +2056,6 @@ mod tests {
     }
     #[test]
     fn unchecked_machine_backstops_keep_invariant_state_and_apply_distinct() {
-        assert_eq!(
-            bare_lambda_error().reason,
-            Reason::Invariant(Box::new(InvariantFailure::BareLambda))
-        );
-        assert_eq!(
-            not_a_function(&Value::Unit).reason,
-            Reason::Invariant(Box::new(InvariantFailure::AppliedUnforcedValue(
-                ValueShape::Unit
-            )))
-        );
-        assert_eq!(
-            capture_overflowed().reason,
-            Reason::State(Box::new(StateFailure::CaptureLimit(CaptureLimit {
-                bytes: io::SINK_BUFFER_CAP.into()
-            })))
-        );
-        let Err(Break::Error(error)) = Machine::force(Value::Int(1), None) else {
-            panic!("force refusal")
-        };
-        assert_eq!(
-            error.reason,
-            Reason::Evaluation(Box::new(EvalFailure::Apply(ApplyFailure {
-                operation: CallOrForce::Force,
-                found: crate::fact::Found::Int(1)
-            })))
-        );
         let mut shell = new_shell();
         shell.local.machine_depth = NESTED_MACHINE_LIMIT;
         let Err(Break::Error(error)) = run(

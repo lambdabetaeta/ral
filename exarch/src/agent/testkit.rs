@@ -355,16 +355,6 @@ pub(crate) fn chat_trunk() -> Agent {
     .expect("chat test trunk")
 }
 
-/// A trunk whose network policy denies hosted search — the ceiling a fork inherits,
-/// in the direction the ordinary fixture does not cover.
-pub(crate) fn searchless_trunk() -> Agent {
-    Agent::for_test_with(crate::agent::TestLaunch {
-        search: false,
-        ..crate::agent::TestLaunch::new("system")
-    })
-    .expect("searchless test trunk")
-}
-
 /// An unlaunched child carrying the parent's shell snapshot and narrowed grant.
 pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
     use crate::agent::engine::{Engine, EngineKind};

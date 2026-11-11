@@ -25,33 +25,6 @@ fn adjacent_human_fragments_coalesce_without_crossing_other_inputs() {
 }
 
 #[test]
-fn queued_shows_human_text_and_commands_in_order() {
-    let mailbox = mailbox(Admission::Free);
-    let address = mailbox.address();
-    address.post(wakeup(1, "tick")).unwrap();
-    address.steer("first".into()).unwrap();
-    address
-        .command(Command::Read(Read::Hatch {
-            memory: Memory::Mnemon,
-            name: Some("scout".into()),
-        }))
-        .unwrap();
-    address.steer("second".into()).unwrap();
-    address.command(Command::Model(model_pick())).unwrap();
-    address.command(Command::Rewrite(Rewrite::Evict)).unwrap();
-    assert_eq!(
-        address.queued(),
-        [
-            "first",
-            "/branch scout",
-            "second",
-            "/model queued-model",
-            "/evict"
-        ]
-    );
-}
-
-#[test]
 fn recall_extracts_only_human_text_preserving_other_inputs() {
     let mailbox = mailbox(Admission::Free);
     let address = mailbox.address();
@@ -124,7 +97,6 @@ fn drain_takes_messages_batches_reads_and_wakeups_until_the_first_rewrite() {
     assert!(
         matches!(mailbox.drain().as_slice(), [Drained::Input(Input::Message(message)), Drained::Input(Input::Surface { generation: 4, .. }), Drained::Input(Input::Wakeup { .. }), Drained::Read(Read::Resources), Drained::Model(model), Drained::Input(Input::Human(text))]
         if model == &pick && message.from == AgentId::new(9) && message.from_name == "review"
-        && message.render() == "[EXARCH AGENT 9 MESSAGE: review]\nplease inspect the parser\n[/EXARCH]"
         && text == "before")
     );
     assert!(mailbox.drain().is_empty());

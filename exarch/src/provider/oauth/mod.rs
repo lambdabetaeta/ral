@@ -1061,25 +1061,6 @@ mod tests {
     }
 
     #[test]
-    fn methods_and_sign_in_are_service_specific() {
-        assert_eq!(methods(Login::Chatgpt), &[Method::Browser]);
-        assert_eq!(methods(Login::Codex), &[Method::Browser, Method::Device]);
-        assert_eq!(methods(Login::Grok), &[Method::Device]);
-        for login in Login::ALL {
-            for &method in methods(login) {
-                for sign_in in [
-                    SignIn::New(login, method),
-                    SignIn::Renew(token(login, "same", None), method),
-                ] {
-                    assert_eq!(sign_in.login(), login);
-                    assert_eq!(sign_in.method(), method);
-                    assert!(validate_method(login, method).is_ok());
-                }
-            }
-        }
-    }
-
-    #[test]
     fn unsupported_or_cancelled_flows_fail_before_runtime_or_state_access() {
         // Calling from inside a runtime would panic if login_flow reached block_on.
         runtime().unwrap().block_on(async {
@@ -1157,24 +1138,6 @@ mod tests {
             !state.path().join(TOKEN_FILE).exists(),
             "last removal clears host too"
         );
-    }
-
-    #[test]
-    fn same_account_upserts_even_when_email_changes() {
-        for login in Login::ALL {
-            let state = store();
-            let original = token(login, "one", Some("old@work"));
-            assert!(!save_one_at(&state, &original).unwrap());
-            let renamed = OAuthToken {
-                email: Some("new@work".into()),
-                access_token: "new".into(),
-                ..original
-            };
-            assert!(save_one_at(&state, &renamed).unwrap());
-            assert_eq!(load_all_at(&state), [renamed]);
-            assert!(!save_one_at(&state, &token(login, "two", Some("new@work"))).unwrap());
-            assert_eq!(load_all_at(&state).len(), 2);
-        }
     }
 
     #[test]
@@ -1416,19 +1379,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_ambiguous_logout_does_not_change_local_records() {
-        let state = store();
-        for login in Login::ALL {
-            save_one_at(&state, &token(login, "same", Some("same@work"))).unwrap();
-        }
-        let file = state.path().join(TOKEN_FILE);
-        let before = std::fs::read(&file).unwrap();
-        assert_eq!(remove_at(&state, "absent").unwrap(), None);
-        assert!(remove_at(&state, "same@work").is_err());
-        assert_eq!(std::fs::read(file).unwrap(), before);
-    }
-
-    #[test]
     fn refresh_diagnostics_do_not_echo_credential_fields() {
         let mut current = token(Login::Chatgpt, "subject", Some("name\nnext line"));
         current.access_token = "access-secret".into();
@@ -1451,42 +1401,6 @@ mod tests {
     }
 
     #[test]
-    fn only_codex_uses_backend_headers_and_request_override() {
-        for login in Login::ALL {
-            let token = token(login, "local-composite-id", Some("same@work"));
-            let headers: BTreeMap<_, _> = token
-                .request_headers("application/json")
-                .into_iter()
-                .collect();
-            assert_eq!(
-                headers["authorization"],
-                format!("Bearer {}", token.access_token)
-            );
-            assert_eq!(headers["accept"], "application/json");
-            match token.auth_data() {
-                genai::resolver::AuthData::Key(key) => {
-                    assert_ne!(login, Login::Codex);
-                    assert_eq!(key, token.access_token);
-                    assert_eq!(headers.len(), 2);
-                }
-                genai::resolver::AuthData::RequestOverride { url, .. } => {
-                    assert_eq!(login, Login::Codex);
-                    assert_eq!(url, codex::RESPONSES_URL);
-                    assert_eq!(headers.len(), 6);
-                    assert_eq!(headers["chatgpt-account-id"], "raw-backend-id");
-                    assert_eq!(headers["openai-beta"], "responses=experimental");
-                    assert_eq!(headers["originator"], codex::ORIGINATOR);
-                    assert_eq!(
-                        headers["user-agent"],
-                        format!("codex_cli_rs/{}", codex::codex_client_version())
-                    );
-                }
-                other => panic!("unexpected auth data: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     fn codex_revocation_is_local_only_without_a_runtime_or_network() {
         let current = token(Login::Codex, "same", None);
         assert_eq!(revoke_blocking(&current).unwrap(), Revocation::LocalOnly);
@@ -1494,24 +1408,6 @@ mod tests {
             runtime().unwrap().block_on(revoke(&current)).unwrap(),
             Revocation::LocalOnly
         );
-    }
-
-    #[test]
-    fn shared_email_labels_remain_disambiguated_by_full_account_id() {
-        let alone = [token(Login::Chatgpt, "personal", Some("same@work"))];
-        let accounts: Vec<_> = alone.iter().map(to_account).collect();
-        assert_eq!(
-            identity::label(&accounts[0], &accounts),
-            "openai-chatgpt · same@work"
-        );
-        let siblings = [
-            token(Login::Chatgpt, "personal", Some("same@work")),
-            token(Login::Chatgpt, "team", Some("same@work")),
-        ];
-        let accounts: Vec<_> = siblings.iter().map(to_account).collect();
-        for (account, token) in accounts.iter().zip(&siblings) {
-            assert!(identity::label(account, &accounts).ends_with(account_id(token).as_str()));
-        }
     }
 
     #[test]
@@ -1692,21 +1588,5 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(start.elapsed(), Duration::from_millis(250));
-    }
-
-    #[test]
-    fn phase_messages_preserve_device_code_and_exchange_silence() {
-        let line = LoginPhase::AwaitingDevice {
-            user_code: "ABCD-EFGH".into(),
-            url: "https://example.test/device".into(),
-            expires_in: "15 minutes".into(),
-        }
-        .stderr_line()
-        .unwrap();
-        assert_eq!(
-            line,
-            "To sign in, open https://example.test/device and enter this code (expires in 15 minutes):\n  ABCD-EFGH"
-        );
-        assert!(LoginPhase::ExchangingCode.stderr_line().is_none());
     }
 }

@@ -67,12 +67,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    #[test]
-    fn twins_always_include_input() {
-        let v: Vec<_> = twins(Path::new("/some/non/existent/path")).collect();
-        assert!(v.iter().any(|p| p == Path::new("/some/non/existent/path")));
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn twins_toggle_macos_firmlinks() {

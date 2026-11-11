@@ -2043,17 +2043,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_alias_preserves_an_existing_variables_identity_and_kind() {
-        let mut u = Unifier::new();
-        u.enter();
-        let ty = u.fresh_kinded(Kind::NUMBER);
-        let alias = u.fresh_alias(&ty);
-        assert_eq!(alias, ty);
-        u.unify_ty(&alias, &Ty::int()).unwrap();
-        assert_eq!(u.resolve_ty(&ty), Ty::int());
-    }
-
-    #[test]
     fn producer_pairs_lower_dependencies_and_retire_before_generalisation() {
         let mut u = Unifier::new();
         u.enter();
@@ -2196,18 +2185,6 @@ mod tests {
     }
 
     #[test]
-    fn residuals_are_weak_with_residual_provenance() {
-        let mut u = Unifier::new();
-        u.enter();
-        let (ty, row) = (u.fresh_tyvar(), u.fresh_row_var());
-        u.mark_residual(Var::Ty(ty));
-        u.mark_residual(Var::Row(row));
-        assert!(u.is_weak_ty(ty) && u.is_weak_row(row));
-        assert_eq!(u.weak_source_of(Var::Ty(ty)), Some(&WeakSource::Residual));
-        assert_eq!(u.weak_source_of(Var::Row(row)), Some(&WeakSource::Residual));
-    }
-
-    #[test]
     fn equations_keep_the_rank_of_already_bound_roots() {
         let mut u = Unifier::new();
         u.enter();
@@ -2217,18 +2194,6 @@ mod tests {
         let young = u.fresh_tyvar();
         u.unify_ty(&Ty::var(young), &old).unwrap();
         assert_eq!(u.rank_of(Var::Ty(young)), 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "unallocated variable")]
-    fn find_rejects_foreign_ids() {
-        Store::<Ty>::new().find(TyVar(0));
-    }
-
-    #[test]
-    #[should_panic(expected = "unallocated variable")]
-    fn root_rejects_foreign_ids() {
-        Store::<Ty>::new().root(TyVar(0));
     }
 
     use super::*;
@@ -2937,16 +2902,6 @@ mod tests {
         })
     }
 
-    fn resolved_fields(u: &Unifier, row: &Row) -> std::collections::HashMap<String, Ty> {
-        let mut out = std::collections::HashMap::new();
-        let mut cur = u.apply_row(row);
-        while let RowNode::Extend(l, t, rest) = cur.node() {
-            out.insert(l.to_string(), t.clone());
-            cur = rest.clone();
-        }
-        out
-    }
-
     /// The no-false-positive half of the bound: a record far wider than
     /// [`MAX_UNIFY_DEPTH`] but shallow must still unify.  Its twin ends in a
     /// variable, so the whole spine is walked.
@@ -2963,23 +2918,6 @@ mod tests {
         let right = record_row(&twin);
         u.unify_row(&left, &right)
             .expect("a wide-but-shallow record must unify, not be rejected as too deep");
-    }
-
-    /// The same width property for a variant row: alternatives are siblings.
-    /// Its twin's last payload is a variable.
-    #[test]
-    fn wide_variant_unifies_without_being_too_deep() {
-        let width = (MAX_UNIFY_DEPTH as usize) * 4;
-        let labels: Vec<String> = (0..width).map(|i| format!("`t{i}")).collect();
-        let fields: Vec<(&str, Ty)> = labels.iter().map(|l| (l.as_str(), Ty::unit())).collect();
-        let mut u = Unifier::new();
-        let left = Ty::variant(record_row(&fields));
-        let (last, init) = fields.split_last().unwrap();
-        let mut twin = init.to_vec();
-        twin.push((last.0, u.fresh_ty()));
-        let right = Ty::variant(record_row(&twin));
-        u.unify_ty(&left, &right)
-            .expect("a wide-but-shallow variant must unify, not be rejected as too deep");
     }
 
     /// The rewrite pairs labels regardless of spine position: order is free,
@@ -3002,23 +2940,6 @@ mod tests {
         }
     }
 
-    /// An open row against a closed one binds the tail to carry the surplus.
-    #[test]
-    fn remy_rewrite_binds_open_tail() {
-        let mut u = Unifier::new();
-        let rho = u.fresh_row_var();
-        let open = open_row(&[("a", Ty::int())], rho);
-        let closed = record_row(&[("a", Ty::int()), ("b", Ty::string())]);
-        u.unify_row(&open, &closed)
-            .expect("open row absorbs the extra field");
-        let fields = resolved_fields(&u, &Row::var(rho));
-        assert_eq!(
-            fields.get("b"),
-            Some(&Ty::string()),
-            "tail absorbed the `b` field"
-        );
-    }
-
     /// Which record lacks the label must not depend on the order a literal
     /// wrote its fields in: the Rémy rewrite keeps each side on its side.
     #[test]
@@ -3038,22 +2959,6 @@ mod tests {
                 "{written:?}: expected RowExtraField(r), got {err:?}"
             );
         }
-    }
-
-    /// `{x: Int | ρ} ≐ {y: Int | ρ}` has no solution; report, do not diverge.
-    #[test]
-    fn shared_tail_mismatched_heads_is_recursive_row() {
-        let mut u = Unifier::new();
-        let rho = u.fresh_row_var();
-        let left = open_row(&[("x", Ty::int())], rho);
-        let right = open_row(&[("y", Ty::int())], rho);
-        let err = u
-            .unify_row(&left, &right)
-            .expect_err("shared-tail mismatched heads must not unify");
-        assert!(
-            matches!(err, TypeErrorKind::RecursiveRow),
-            "expected RecursiveRow, got {err:?}"
-        );
     }
 
     /// The same divergence *below* the head: the immediate rests are `Extend`

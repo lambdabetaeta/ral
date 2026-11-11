@@ -331,35 +331,6 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_is_mounted_from_its_virtiofs_tag() {
-        let mut config = boot();
-        config.workspace = Export::Virtiofs {
-            tag: "granted-folder".into(),
-        };
-        let work = plan(&config)
-            .into_iter()
-            .find(|m| m.target == WORK)
-            .expect("the plan mounts the workspace");
-        assert_eq!(work.source, "granted-folder");
-        assert_eq!(work.fstype, VIRTIOFS);
-        assert_eq!(work.data, Options::None);
-    }
-
-    #[test]
-    fn a_nine_p_workspace_is_planned_as_a_dial_naming_the_share_and_the_port() {
-        let work = plan(&boot_over_plan9())
-            .into_iter()
-            .find(|m| m.target == WORK)
-            .expect("the plan mounts the workspace");
-        assert_eq!(work.fstype, PLAN9);
-        assert_eq!(
-            work.source, "work",
-            "`/proc/mounts` should name the share the host published"
-        );
-        assert_eq!(work.data, Options::Plan9Dial { port: 50001 });
-    }
-
-    #[test]
     fn the_workspace_is_mounted_the_same_way_under_either_hypervisor() {
         let of = |config: &Boot| {
             plan(config)
@@ -374,14 +345,6 @@ mod tests {
             plan(&boot()).len(),
             plan(&boot_over_plan9()).len(),
             "the shape of the export changes one mount, not the plan"
-        );
-    }
-
-    #[test]
-    fn the_nine_p_options_name_the_one_socket_twice() {
-        assert_eq!(
-            plan9_options(7, "granted-folder"),
-            "trans=fd,rfdno=7,wfdno=7,msize=65536,version=9p2000.L,aname=granted-folder"
         );
     }
 

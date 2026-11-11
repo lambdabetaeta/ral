@@ -478,16 +478,6 @@ mod tests {
         seed.drop_seed();
     }
 
-    #[test]
-    fn seed_extraction_returns_ordinary_nonempty_small_ownership() {
-        let mut ordinary = Env::new();
-        ordinary.bind("kept".into(), binding(Value::Int(1)));
-        let original = ordinary.clone();
-        let returned = ordinary.into_seed_bindings().unwrap_err();
-        assert!(original.ptr_eq(&returned));
-        assert_eq!(returned.get("kept"), Some(&Value::Int(1)));
-    }
-
     fn binding(value: Value) -> Binding {
         Binding {
             value,

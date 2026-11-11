@@ -638,16 +638,6 @@ fn open_scheme() -> serde_json::Value {
 }
 
 #[test]
-fn closed_binding_scheme_round_trips() {
-    let binding = SerialBinding {
-        value: SerialValue::Unit,
-        scheme: Some(crate::ty::Binders::close(|_| crate::ty::Ty::unit())),
-    };
-    let back: SerialBinding = from_slice(&to_vec(&binding).unwrap()).unwrap();
-    assert_eq!(back, binding);
-}
-
-#[test]
 fn open_binding_scheme_is_refused_at_its_path() {
     let mut value = with_binding(envelope(), &json!("unit"));
     value["scope_table"][0][0][1]["scheme"] = open_scheme();

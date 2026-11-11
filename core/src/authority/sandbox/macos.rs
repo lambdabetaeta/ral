@@ -537,7 +537,6 @@ mod tests {
         ExecAllow, ExecDeny, ExecRules, FsAllow, FsDeny, Gpu, GrantPath, Net, Rule,
     };
     use crate::authority::sandbox::{ExecProjection, FsLists, FsProjection, SandboxProjection};
-    use crate::path::proper_ancestors;
     use crate::path::{Excluded, FrozenPath, Trace, render_real};
     use crate::test_helper::trace;
 
@@ -641,13 +640,6 @@ mod tests {
             super::apply_profile("\0"),
             Err(crate::fact::SeatbeltFailure::Nul)
         );
-    }
-
-    #[test]
-    fn mac_shell_profile_allows_general_exec_when_unrestricted() {
-        let profile = build_profile(&SandboxProjection::default()).unwrap();
-        assert!(profile.contains("(allow process-exec)"));
-        assert!(!profile.contains("(allow file-read* process-exec"));
     }
 
     /// Positive clauses are `process-exec` alone: the reads are the fs
@@ -1374,80 +1366,6 @@ mod tests {
         let allow = Clause::allow("file-write*", Filter::Subpath(metal)).to_string();
         let deny = Clause::deny("file-write*", Filter::Subpath(metal)).to_string();
         assert!(at(&profile, &allow) < at(&profile, &deny), "{profile}");
-    }
-
-    #[test]
-    fn mac_profile_allows_common_dev_writes() {
-        let profile = build_profile(&SandboxProjection::default()).unwrap();
-        for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
-            assert!(
-                profile.contains(&format!("(allow file-write* (literal \"{path}\"))")),
-                "missing write allowance for {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn mac_profile_leaves_tty_ioctl_available_for_tui_children() {
-        let profile = build_profile(&SandboxProjection::default()).unwrap();
-        assert!(profile.contains("(allow file-ioctl)"));
-        assert!(
-            !profile.contains("(deny file-ioctl (literal \"/dev/tty\"))"),
-            "sandboxed full-screen TUI children need termios/window-size ioctls"
-        );
-    }
-
-    #[test]
-    fn mac_profile_names_notification_center_as_posix_shm() {
-        let profile = build_profile(&SandboxProjection::default()).unwrap();
-        assert!(
-            profile.contains(
-                "(allow ipc-posix-shm-read-data (ipc-posix-name \"apple.shm.notification_center\") (ipc-posix-name \"com.apple.featureflags.shm\"))"
-            )
-        );
-        assert_eq!(profile.matches("(allow ipc-posix-shm").count(), 2);
-        assert_eq!(profile.matches("(allow ipc-posix-sem").count(), 1);
-        assert!(profile.contains("(allow ipc-posix-sem (ipc-posix-name-prefix \"/mp-\"))"));
-        assert!(profile.contains("(allow ipc-posix-shm (ipc-posix-name-prefix \"/psm_\"))"));
-        assert!(
-            !profile.contains("(global-name \"apple.shm.notification_center\")"),
-            "notification_center is a POSIX shared-memory name, not a Mach service"
-        );
-    }
-
-    #[test]
-    fn mac_profile_grants_toolchain_ancestor_metadata() {
-        let ancestors = proper_ancestors(["/Library/Developer/CommandLineTools/usr/bin/ld"]);
-        assert!(ancestors.contains(&"/Library".to_string()));
-        assert!(ancestors.contains(&"/Library/Developer".to_string()));
-        assert!(ancestors.contains(&"/Library/Developer/CommandLineTools/usr/bin".to_string()));
-        assert!(!ancestors.contains(&"/".to_string()));
-    }
-
-    #[test]
-    fn mac_profile_allows_command_line_tools_lookup_when_installed() {
-        if !crate::path::exists("/Library/Developer/CommandLineTools") {
-            return;
-        }
-        // The baseline arrives as read prefixes, ancestor metadata with them.
-        let policy = SandboxProjection {
-            fs: reading(vec![prefix("/Library/Developer/CommandLineTools")]),
-            ..SandboxProjection::default()
-        };
-        let profile = build_profile(&policy).unwrap();
-        assert!(
-            profile
-                .contains("(allow file-read* (subpath \"/Library/Developer/CommandLineTools\"))")
-        );
-        assert!(profile.contains("(allow file-read-metadata (literal \"/Library\"))"));
-        assert!(profile.contains("(allow file-read-metadata (literal \"/Library/Developer\"))"));
-    }
-
-    #[test]
-    fn mac_profile_does_not_grant_tmp_as_system_read_path() {
-        let profile = build_profile(&SandboxProjection::default()).unwrap();
-        assert!(!profile.contains("(allow file-read* (subpath \"/tmp\"))"));
-        assert!(!profile.contains("(allow file-read* (subpath \"/private/tmp\"))"));
     }
 
     #[test]

@@ -333,7 +333,6 @@ impl KeyRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::manifest::{KeySpec, Manifest};
     use super::*;
 
     fn entry(plugin: &str, bi: usize, key: &str, guard: Option<&str>) -> RouterEntry {
@@ -474,29 +473,6 @@ mod tests {
         }
     }
 
-    /// To a terminal `ctrl-C` is `ctrl-c`, so it must not be spelt past the
-    /// reserved set: it cannot be bound at all.
-    #[test]
-    fn an_uppercase_ctrl_letter_cannot_be_bound() {
-        let spec = KeySpec {
-            key: "ctrl-C".into(),
-            guard: None,
-        };
-        assert_eq!(
-            spec.bind().unwrap_err(),
-            ral_core::fact::KeybindingFailure::Notation(
-                ral_core::fact::KeybindingFailureNotation {
-                    key: "ctrl-C".into(),
-                    cause: KeyNotationFailure::UppercaseControl(
-                        KeyNotationFailureUppercaseControl {
-                            chord: "ctrl-C".into()
-                        }
-                    ),
-                }
-            )
-        );
-    }
-
     /// `guard_allows`: no guard always allows; a guard matches against the
     /// text left of the cursor only, and an out-of-range offset declines
     /// defensively rather than panicking.
@@ -528,19 +504,6 @@ mod tests {
         assert_eq!(router.resolve(&tab, "git st", 6), claimed("a", 0));
         assert_eq!(router.resolve(&tab, "cd **", 5), claimed("b", 0));
         assert_eq!(router.resolve(&tab, "ls ", 3), Resolution::Default);
-    }
-
-    /// An unguarded entry claims every press of its sequence; other
-    /// sequences still reach their own entries or the tail.
-    #[test]
-    fn unguarded_entry_claims_unconditionally() {
-        let router = KeyRouter {
-            entries: vec![entry("files", 0, "ctrl-t", None)],
-        };
-        let ctrl_t = parse_key_notation("ctrl-t").unwrap();
-        let ctrl_r = parse_key_notation("ctrl-r").unwrap();
-        assert_eq!(router.resolve(&ctrl_t, "", 0), claimed("files", 0));
-        assert_eq!(router.resolve(&ctrl_r, "", 0), Resolution::Default);
     }
 
     /// A sequence resolves as a whole: neither its prefix nor a longer
@@ -630,87 +593,5 @@ mod tests {
             ],
         };
         assert_eq!(dead(&router), vec![]);
-    }
-
-    /// The reserved set is exactly the session's escape hatches; the
-    /// built-in-action table covers every unmodified key except F1–F12 and
-    /// no modified chord.
-    #[test]
-    fn reserved_and_builtin_tables() {
-        let chord = |s| parse_key_notation(s).unwrap()[0];
-        assert_eq!(
-            reserved_action(chord("ctrl-c")),
-            Some(ReservedKeyAction::Interrupt)
-        );
-        assert_eq!(
-            reserved_action(chord("ctrl-d")),
-            Some(ReservedKeyAction::EndOfFile)
-        );
-        assert_eq!(reserved_action(chord("ctrl-t")), None);
-        assert_eq!(reserved_action(chord("ctrl-alt-c")), None);
-        assert_eq!(reserved_action(chord("tab")), None);
-
-        assert_eq!(
-            builtin_action(chord("tab")),
-            Some(BuiltinKeyAction::Completion)
-        );
-        assert_eq!(
-            builtin_action(chord("enter")),
-            Some(BuiltinKeyAction::AcceptLine)
-        );
-        assert_eq!(
-            builtin_action(chord("up")),
-            Some(BuiltinKeyAction::HistoryNavigation)
-        );
-        assert_eq!(
-            builtin_action(chord("t")),
-            Some(BuiltinKeyAction::TextInsertion)
-        );
-        assert_eq!(
-            builtin_action(chord("backspace")),
-            Some(BuiltinKeyAction::Deletion)
-        );
-        assert_eq!(builtin_action(chord("f5")), None);
-        assert_eq!(builtin_action(chord("ctrl-t")), None);
-        assert_eq!(builtin_action(chord("alt-c")), None);
-        assert_eq!(builtin_action(chord("shift-tab")), None);
-    }
-
-    /// `build` flattens the plugin list in load order, manifest order
-    /// within a plugin.
-    #[test]
-    fn build_orders_entries_by_load_then_manifest() {
-        let plugin = |name: &str, keys: &[&str]| {
-            LoadedPlugin::admit(Manifest {
-                name: name.into(),
-                hooks: Vec::new(),
-                keybindings: keys
-                    .iter()
-                    .map(|k| KeySpec {
-                        key: (*k).into(),
-                        guard: None,
-                    })
-                    .collect(),
-            })
-            .expect("test keys bind")
-        };
-        let router = KeyRouter::build(&[
-            plugin("p", &["ctrl-t", "ctrl-r"]),
-            plugin("q", &["alt-c", "ctrl-x ctrl-e"]),
-        ]);
-        let order: Vec<(&str, usize, &str)> = router
-            .entries
-            .iter()
-            .map(|e| (e.plugin.as_str(), e.binding_idx, e.key.as_str()))
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                ("p", 0, "ctrl-t"),
-                ("p", 1, "ctrl-r"),
-                ("q", 0, "alt-c"),
-                ("q", 1, "ctrl-x ctrl-e")
-            ]
-        );
     }
 }

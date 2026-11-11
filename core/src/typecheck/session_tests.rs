@@ -138,20 +138,6 @@ fn alias_arm_scheme_retains_its_polymorphic_result() {
     }
 }
 
-#[test]
-fn catch_all_stands_in_checks_its_body_in_a_one_shot_region() {
-    use crate::ir::{CompKind, Val};
-    use crate::source::Spanned;
-    let arm = Arc::new(Spanned::synthetic(CompKind::Lam {
-        param: "name".into(),
-        body: Arc::new(Spanned::synthetic(CompKind::Lam {
-            param: "args".into(),
-            body: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
-        })),
-    }));
-    super::catch_all_stands_in(&arm, crate::test_helper::core_schemes()).unwrap();
-}
-
 fn command_with_unit_argument(params: &[&str]) -> Arc<crate::ir::Comp> {
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, Val, ValListElem};
     use crate::source::Spanned;

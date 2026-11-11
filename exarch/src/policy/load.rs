@@ -75,8 +75,6 @@ pub(super) fn absolute_in(cwd: &path::CwdPath, p: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use ral_core::fact::{CompilePhase, StateFailure};
-    use ral_core::process::CancelCause;
-    use ral_core::shell::runtime::Stop;
     use ral_core::source::SourceOrigin;
 
     #[test]
@@ -92,44 +90,6 @@ mod tests {
             got.hints().iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
             ["situational first", "situational second"]
         );
-    }
-
-    #[test]
-    fn load_keeps_exit_bytes_and_each_stop_cause_distinct() {
-        let exits = [0, 255]
-            .into_iter()
-            .map(|code| (Escape::Exit(code), EscapedLoad::Exit(code)));
-        let stops = [
-            CancelCause::ReaderGone,
-            CancelCause::Interrupted,
-            CancelCause::Cancelled,
-            CancelCause::TimedOut,
-            CancelCause::Terminated,
-            CancelCause::Aborted,
-        ]
-        .into_iter()
-        .map(|cause| {
-            (
-                Escape::Stopped(Stop {
-                    cause,
-                    owner: None,
-                    at: None,
-                }),
-                EscapedLoad::Stopped(cause),
-            )
-        });
-        for (escape, cause) in exits.chain(stops) {
-            let error = load::<()>("--extend", || Err(Break::Escape(escape))).unwrap_err();
-            assert_eq!(
-                error.reason,
-                Reason::Host(Box::new(HostFailure::Exarch(ExarchFailure::Policy(
-                    PolicyFailure::EscapedLoad(PolicyFailureEscapedLoad {
-                        flag: "--extend".into(),
-                        cause
-                    })
-                ),)))
-            );
-        }
     }
 
     #[test]

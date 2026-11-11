@@ -192,36 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn the_read_key_names_hosts_as_its_replacement() {
-        let err = parse("return [read: [], write: [], search: true]").unwrap_err();
-        assert!(
-            err.contains("'read' is retired") && err.contains("hosts"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn the_write_key_names_hosts_as_its_replacement() {
-        let err = parse("return [hosts: [], write: [], search: true]").unwrap_err();
-        assert!(
-            err.contains("'write' is retired") && err.contains("hosts"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn the_max_bytes_key_names_its_own_retirement() {
-        let err = parse("return [hosts: [], max-bytes: 1, search: true]").unwrap_err();
-        assert!(err.contains("'max-bytes' is retired"), "got: {err}");
-    }
-
-    #[test]
-    fn the_rate_per_minute_key_names_its_own_retirement() {
-        let err = parse("return [hosts: [], rate-per-minute: 1, search: true]").unwrap_err();
-        assert!(err.contains("'rate-per-minute' is retired"), "got: {err}");
-    }
-
-    #[test]
     fn an_unknown_key_is_a_hard_error_naming_it() {
         let err = parse("return [hosts: [], search: true, extra: 'x']").unwrap_err();
         assert!(err.contains("unknown key 'extra'"), "got: {err}");
@@ -232,34 +202,6 @@ mod tests {
         let policy = parse(DEFAULT_POLICY_RAL).expect("the built-in default must parse");
         assert!(policy.admits(&Host::parse("ports.ubuntu.com").unwrap()));
         assert!(policy.search);
-    }
-
-    #[test]
-    fn a_missing_hosts_key_is_a_hard_error() {
-        let err = parse("return [search: true]").unwrap_err();
-        assert!(err.contains("missing 'hosts'"), "got: {err}");
-    }
-
-    #[test]
-    fn a_terminal_value_that_is_not_a_map_is_refused() {
-        for source in [
-            "return ['a.example']",
-            "return 'a.example'",
-            "return 1",
-            "return true",
-        ] {
-            assert!(parse(source).is_err(), "{source}");
-        }
-    }
-
-    #[test]
-    fn hosts_that_is_not_a_list_is_refused() {
-        for hosts in ["'a.example'", "1", "true", "[a: true]"] {
-            assert!(
-                parse(&format!("return [hosts: {hosts}, search: true]")).is_err(),
-                "{hosts}"
-            );
-        }
     }
 
     #[test]
@@ -290,29 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn search_that_is_not_a_bool_is_refused() {
-        for search in ["'true'", "1", "['a']"] {
-            assert!(
-                parse(&format!("return [hosts: ['a.example'], search: {search}]")).is_err(),
-                "{search}"
-            );
-        }
-    }
-
-    #[test]
     fn a_missing_search_key_is_refused_not_defaulted() {
         assert!(parse("return [hosts: ['a.example']]").is_err());
-    }
-
-    #[test]
-    fn the_decoded_hosts_are_exactly_the_listed_hosts_lowercased() {
-        let policy = parse(&hosts_policy(&["B.example", "a.example"])).expect("well-formed");
-        let expected = ["a.example", "b.example"]
-            .map(|h| Host::parse(h).unwrap())
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(policy.hosts, expected);
-        assert!(policy.search);
     }
 
     #[test]

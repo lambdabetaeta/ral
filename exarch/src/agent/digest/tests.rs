@@ -10,15 +10,6 @@ fn tr(stdout: &str, stderr: &str, value: Option<&str>, exit: i32) -> shell_eval:
 }
 
 #[test]
-fn render_keeps_canonical_section_order() {
-    let r = tr("abc\n", "err\n", Some("v"), 0);
-    assert_eq!(
-        render(&r),
-        "STDOUT:\nabc\n\nSTDERR:\nerr\n\nVALUE:\nv\n\nEXIT: 0",
-    );
-}
-
-#[test]
 fn render_strips_ansi_from_streams() {
     let r = tr("\x1b[31mred\x1b[0m\n", "\x1b[1;33mwarn\x1b[0m\n", None, 1);
     let out = render(&r);

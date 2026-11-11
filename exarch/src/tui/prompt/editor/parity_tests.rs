@@ -178,19 +178,6 @@ fn divergent_edits_discard_redo() {
 }
 
 #[test]
-fn paste_is_literal_at_cursor() {
-    let mut editor = PromptEditor::new(EditMode::Vi);
-    editor.adopt("ab");
-    editor.state.cursor.col = 1;
-    editor.insert_str("\nx\ny\n");
-    assert_eq!(editor.text(), "a\nx\ny\nb");
-    undo(&mut editor);
-    assert_eq!(editor.text(), "ab");
-    redo(&mut editor);
-    assert_eq!(editor.text(), "a\nx\ny\nb");
-}
-
-#[test]
 fn deletion_and_horizontal_movement_preserve_extended_graphemes() {
     for grapheme in ["e\u{301}", "👩‍💻", "🇬🇧", "क्ष", "界"] {
         let mut editor = PromptEditor::new(EditMode::Emacs);

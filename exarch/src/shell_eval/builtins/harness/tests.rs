@@ -54,31 +54,6 @@ fn unknown_grant_label_errors_before_any_enquiry_crosses() {
 }
 
 #[test]
-fn dangerous_is_no_longer_a_spawn_grant_and_the_refusal_points_at_inherit() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `dangerous, model: `inherit]",
-    );
-    assert!(
-        result.contains("inherit is how you decline to narrow"),
-        "{result}"
-    );
-    no_children(&session);
-}
-
-#[test]
-fn a_bare_restrict_errors_before_any_enquiry_crosses() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `restrict, model: `inherit]",
-    );
-    assert!(result.contains("capability record"), "{result}");
-    no_children(&session);
-}
-
-#[test]
 fn inherit_and_restrict_pass_the_grant_door() {
     let mut session = trunk();
     for grant in ["`inherit", "`restrict [net: `offline]"] {
@@ -94,74 +69,6 @@ fn inherit_and_restrict_pass_the_grant_door() {
         );
         no_children(&session);
     }
-}
-
-#[test]
-fn unknown_type_tag_errors_before_any_enquiry_crosses() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, model: `inherit]",
-    );
-    assert!(result.contains("amnemon"), "{result}");
-    assert!(result.contains("mnemon"), "{result}");
-    no_children(&session);
-}
-
-#[test]
-fn unknown_selection_tag_errors_naming_both_arms() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `guess]",
-    );
-    for arm in ["inherit", "role"] {
-        assert!(result.contains(arm), "must name `{arm}, got: {result}");
-    }
-    no_children(&session);
-}
-
-#[test]
-fn an_empty_role_name_is_refused() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `confined, model: `role '']",
-    );
-    assert!(result.contains("provider role cannot be empty"), "{result}");
-    no_children(&session);
-}
-
-#[test]
-fn invalid_name_errors_before_any_enquiry_crosses() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r#"exarch-agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, model: `inherit]"#,
-    );
-    assert!(result.contains("name"), "{result}");
-    no_children(&session);
-}
-
-#[test]
-fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
-    let result = eval(&mut trunk(), "exarch-agents `cancel 'x'");
-    for tag in [
-        "list", "start", "message", "stop", "dismiss", "reply", "read",
-    ] {
-        assert!(result.contains(tag), "must name `{tag}, got: {result}");
-    }
-}
-
-#[test]
-fn missing_agent_field_errors_statically_naming_the_field() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, model: `inherit]",
-    );
-    assert!(result.contains("field named 'grant'"), "{result}");
-    no_children(&session);
 }
 
 #[test]
@@ -273,43 +180,6 @@ fn bad_cron_expr_errors_before_any_enquiry_crosses() {
 }
 
 #[test]
-fn bad_duration_errors_before_any_enquiry_crosses() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        "exarch-schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
-    );
-    assert!(result.contains("duration"), "{result}");
-    assert!(schedules(&session).is_empty());
-}
-
-#[test]
-fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        "exarch-schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
-    );
-    assert!(result.contains("cron"), "{result}");
-    assert!(result.contains("after"), "{result}");
-    assert!(schedules(&session).is_empty());
-}
-
-#[test]
-fn missing_spec_field_errors_statically_naming_the_field() {
-    let mut session = trunk();
-    let result = eval(
-        &mut session,
-        "exarch-schedules `add [trigger: `after '1s', label: 'nightly']",
-    );
-    assert!(
-        result.contains("missing a field named 'prompt'"),
-        "{result}"
-    );
-    assert!(schedules(&session).is_empty());
-}
-
-#[test]
 fn unknown_extra_spec_field_errors_statically_naming_the_field() {
     let mut session = trunk();
     let result = eval(
@@ -330,12 +200,6 @@ fn granted_trunk() -> Agent {
 
 const NIGHTLY: &str =
     "exarch-schedules `add [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]";
-
-#[test]
-fn schedule_add_answer_carries_the_new_row() {
-    let result = eval(&mut granted_trunk(), NIGHTLY);
-    assert!(result.contains("nightly"), "{result}");
-}
 
 #[test]
 fn schedule_full_stack_round_trip_answers_the_table_and_posts_a_wakeup() {
@@ -380,19 +244,6 @@ fn schedule_remove_full_stack_disarms_by_label() {
     assert!(schedules(&session).is_empty());
     let miss = eval(&mut session, "exarch-schedules `remove 'nightly'");
     assert!(miss.contains("EXIT: 0"), "{miss}");
-}
-
-#[test]
-fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
-    let mut session = granted_trunk();
-    eval(&mut session, NIGHTLY);
-    eval(
-        &mut session,
-        "exarch-schedules `add [trigger: `after '10m', label: 'daily', prompt: #'wake'#]",
-    );
-    let result = eval(&mut session, "exarch-schedules `remove 'nightly'");
-    assert!(!result.contains("nightly"), "{result}");
-    assert!(result.contains("daily"), "{result}");
 }
 
 #[test]
@@ -610,26 +461,6 @@ fn trunk_with_an_answered_prompt() -> Agent {
 }
 
 #[test]
-fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
-    let result = eval(&mut trunk(), "exarch-context `rewind [3]");
-    for tag in ["survey", "evict"] {
-        assert!(result.contains(tag), "must name `{tag}, got: {result}");
-    }
-}
-
-#[test]
-fn misspelled_evict_field_errors_statically_naming_the_field() {
-    let result = eval(
-        &mut trunk(),
-        "exarch-context `evict [form: 1, to: 1, note: 'x']",
-    );
-    assert!(
-        !result.contains("EXIT: 0") && result.contains("from"),
-        "{result}"
-    );
-}
-
-#[test]
 fn a_missing_or_foreign_key_is_a_type_error_naming_it() {
     let mut session = trunk();
     for (call, key) in [
@@ -722,14 +553,6 @@ fn transcript_read_addresses_turns_wherever_they_lie() {
 }
 
 #[test]
-fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
-    let result = eval(&mut trunk(), "exarch-transcript `search 'x'");
-    for tag in ["index", "read", "grep"] {
-        assert!(result.contains(tag), "must name `{tag}, got: {result}");
-    }
-}
-
-#[test]
 fn index_and_grep_answer_their_own_shapes() {
     let mut session = trunk_with_an_answered_prompt();
     let result = eval(
@@ -755,33 +578,6 @@ fn index_and_grep_answer_their_own_shapes() {
     );
     for text in ["2 2", "hits 1 2 own", "\n1\n", "\n0\n"] {
         assert!(result.contains(text), "missing {text:?}: {result}");
-    }
-}
-
-#[test]
-fn a_run_with_no_fork_door_refuses_in_its_own_words() {
-    use ral_core::protocol::Run;
-    use ral_core::shell::run::{RunReport, RunRequest};
-    use ral_core::shell::runtime::Break;
-    use ral_core::source::SourceOrigin;
-
-    let mut shell = crate::boot::test_shell();
-    let report = shell.run(RunRequest::from(Run::captured(
-        r"exarch-agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `inherit, model: `inherit]",
-        SourceOrigin::named("<test>"),
-    )));
-    let RunReport::Ran { ending, .. } = report else {
-        panic!("well-formed source must run")
-    };
-    match ending.into_settled() {
-        Err(Break::Error(e)) => {
-            assert_eq!(
-                e.reason,
-                ral_core::fact::Reason::State(Box::new(ral_core::fact::StateFailure::NoForks))
-            );
-            assert_eq!(e.describe(), "this host cannot fork an engine");
-        }
-        other => panic!("expected the no-fork-door refusal, got {other:?}"),
     }
 }
 

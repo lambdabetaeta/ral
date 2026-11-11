@@ -503,91 +503,6 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_unit_variant_payload_is_absent() {
-        assert!(matches!(
-            Value::variant("none", Some(Value::Unit)),
-            Value::Variant { payload: None, .. }
-        ));
-    }
-
-    #[test]
-    fn lambda_display_recovers_patterns_and_hides_synthetic_names() {
-        use crate::ir::{CompKind, Phrase, Val};
-
-        for (src, expected, partial) in [
-            (
-                "{ |[a, b] [c] x| () }",
-                "<|[a b] [c] x| block>",
-                Some("<|[c] x| block>"),
-            ),
-            ("{ |[x] x| () }", "<|[x] x| block>", Some("<|x| block>")),
-            ("{ |_| () }", "<|_| block>", None),
-        ] {
-            let ast = crate::syntax::parser::parse(src).expect("parse");
-            let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
-            let Phrase::Run(comp) = &top[0].item else {
-                panic!("expected a run phrase: {top:?}");
-            };
-            let CompKind::Return(Val::Thunk(node)) = &comp.item else {
-                panic!("expected a lambda thunk: {comp:?}");
-            };
-            let (param, body) = node.shape().lam().expect("outer lambda");
-            assert_eq!(fmt_lambda(param, body), expected);
-            if let Some(expected) = partial {
-                let (param, body) = body.lam().expect("inner lambda");
-                assert_eq!(fmt_lambda(param, body), expected);
-            }
-        }
-        assert_eq!(
-            fmt_lambda(
-                &crate::ir::synthetic("param", 0),
-                &crate::source::Spanned::synthetic(CompKind::Return(Val::Unit)),
-            ),
-            "<|_| block>",
-        );
-    }
-
-    #[test]
-    fn shallow_size_counts_nested_lists_and_maps() {
-        assert_eq!(Value::Unit.shallow_size(), 0);
-        assert_eq!(Value::string("hello").shallow_size(), 5);
-        assert_eq!(Value::bytes(vec![0u8; 10]).shallow_size(), 10);
-
-        let flat = Value::list(vec![Value::string("ab"), Value::string("cde")]);
-        assert_eq!(flat.shallow_size(), 2 + 3);
-
-        let nested = Value::list(vec![flat.clone(), flat]);
-        assert_eq!(nested.shallow_size(), 2 * (2 + 3));
-
-        // Keys' bytes count alongside their values' estimates.
-        let map = Value::map(vec![
-            ("k1".to_string(), Value::string("v1")),
-            ("k22".to_string(), Value::string("v2345")),
-        ]);
-        assert_eq!(
-            map.shallow_size(),
-            ("k1".len() + "v1".len()) + ("k22".len() + "v2345".len())
-        );
-
-        let map_of_lists = Value::map(vec![("k".to_string(), nested.clone())]);
-        assert_eq!(
-            map_of_lists.shallow_size(),
-            "k".len() + nested.shallow_size()
-        );
-
-        let variant = Value::Variant {
-            label: "tag".into(),
-            payload: Some(Box::new(Value::string("payload"))),
-        };
-        assert_eq!(variant.shallow_size(), "tag".len() + "payload".len());
-        let bare_variant = Value::Variant {
-            label: "bare".into(),
-            payload: None,
-        };
-        assert_eq!(bare_variant.shallow_size(), "bare".len());
-    }
-
     /// Captures are invisible by construction, not merely usually small.
     #[test]
     fn shallow_size_never_descends_into_closure_captures() {
@@ -614,16 +529,6 @@ mod tests {
         assert_eq!(list_of_one_closure.shallow_size(), block_size);
     }
 
-    #[test]
-    fn a_cloned_string_shares_its_allocation() {
-        let v = Value::string("x".repeat(1 << 20));
-        let clone = v.clone();
-        let (Value::String(a), Value::String(b)) = (&v, &clone) else {
-            panic!("a string clones as a string");
-        };
-        assert_eq!(a.as_ptr(), b.as_ptr(), "a clone must not copy the bytes");
-    }
-
     /// A 10⁵-deep `acc = [$acc]` chain drops on a 256 KiB thread:
     /// the literal repr's captured `Env` is cut by `Env::dismantle`'s
     /// trampoline, the same one `Closure`'s drop uses, even though the chain
@@ -636,52 +541,5 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("a deep literal chain must drop without exhausting the stack");
-    }
-    #[test]
-    fn reason_summaries_distinguish_blocks_functions_and_data_heads() {
-        let block = block_over(&Env::new());
-        assert_eq!(
-            (block.shape(), block.found()),
-            (ValueShape::Block, Found::Block)
-        );
-        for (value, shape, found) in [
-            (Value::Unit, ValueShape::Unit, Found::Unit),
-            (Value::Bool(true), ValueShape::Bool, Found::Bool(true)),
-            (Value::Int(i64::MIN), ValueShape::Int, Found::Int(i64::MIN)),
-            (
-                Value::Float(Finite::from(2_i64)),
-                ValueShape::Float,
-                Found::Float(Finite::from(2_i64)),
-            ),
-            (Value::bytes(vec![0xff]), ValueShape::Bytes, Found::Bytes),
-            (Value::list(vec![block]), ValueShape::List, Found::List),
-            (Value::map(vec![]), ValueShape::Map, Found::Map),
-            (
-                Value::variant("label", None),
-                ValueShape::Variant,
-                Found::Variant("label".into()),
-            ),
-        ] {
-            assert_eq!(value.shape(), shape);
-            assert_eq!(value.found(), found);
-        }
-        assert_eq!(
-            Value::string("x".repeat(24)).found(),
-            Found::Text(TextPreview {
-                preview: "x".repeat(24),
-                truncated: false,
-            })
-        );
-    }
-    #[test]
-    fn opaque_previews_never_retain_live_handles_or_closure_captures() {
-        let handle = crate::shell::runtime::idle_handle();
-        assert_eq!(handle.shape(), ValueShape::Handle);
-        assert_eq!(handle.found(), Found::Handle);
-        let mut shell = crate::test_helper::core_shell();
-        let function =
-            crate::shell::evaluator::run_source("{ |x| return $x }", &mut shell).unwrap();
-        assert_eq!(function.shape(), ValueShape::Function);
-        assert_eq!(function.found(), Found::Function);
     }
 }

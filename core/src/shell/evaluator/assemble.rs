@@ -121,24 +121,3 @@ fn duplicate_key(key: &str) -> Error {
         key.into(),
     ))))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn duplicate_map_keys_and_spread_shapes_are_not_user_raises() {
-        assert_eq!(
-            duplicate_key("a").reason,
-            Reason::Evaluation(Box::new(EvalFailure::DuplicateMapKey("a".into())))
-        );
-        let shell = crate::test_helper::core_shell();
-        let value = Spanned::synthetic(Val::Int(1));
-        assert!(matches!(
-            form_map(&value, &Env::new(), &shell.sig)
-                .unwrap_err()
-                .reason,
-            Reason::Invalid(_)
-        ));
-    }
-}

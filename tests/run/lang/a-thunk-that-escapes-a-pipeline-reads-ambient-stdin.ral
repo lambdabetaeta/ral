@@ -1,0 +1,6 @@
+# The stdin wiring belongs to the pipeline, not to a thunk that escapes it.
+# `echo hi`'s bytes go into an edge nobody reads, and forcing `reader`
+# afterwards runs `from-line` against the script's own stdin.
+let reader = echo hi | { from-line }
+let s = !$reader
+echo "[$s]"

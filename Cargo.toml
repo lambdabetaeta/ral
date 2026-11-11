@@ -12,6 +12,7 @@ members = [
     "ral-guest",
     "vm-image/build-tools",
     "clipboard",
+    "lint",
     "vendor/ripgrep-core",
     "vendor/edtui",
 ]

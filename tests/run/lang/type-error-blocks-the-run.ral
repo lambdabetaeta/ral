@@ -1,0 +1,4 @@
+# status: 1
+# contains: T0010
+# A type error anywhere in a script blocks evaluation: nothing before it runs either.
+echo before; return $[1 + 'x']

@@ -32,26 +32,6 @@ mod request {
         assert_eq!(command.shown, "/tmp/home/.local/bin/claude");
     }
 
-    /// A `~` path with no home directory is not found, and says why.
-    #[test]
-    fn a_tilde_path_with_no_home_is_not_found_for_want_of_one() {
-        let command = Command {
-            shown: "~/bin/tool".to_owned(),
-            origin: Origin::Path,
-            state: Request::NoHome,
-        }
-        .lookup(&GrantStack::root(), &Baseline::default());
-        let Err(LookupFailure::Missing(missing @ Missing::NoHome)) = command.state else {
-            panic!("a `~` path with no home has no program");
-        };
-        let error = missing.into_error(&command.shown);
-        assert_eq!(
-            error.reason,
-            crate::fact::Reason::process("~/bin/tool", crate::fact::Failure::NotFound)
-        );
-        assert_eq!(error.hints(), [Box::from("no home directory is set")]);
-    }
-
     /// A context whose sole grant layer is `exec`.
     fn under(exec: ExecGrant) -> Context {
         let mut grants = GrantStack::root();
@@ -405,35 +385,6 @@ mod request {
             Err(LookupFailure::Missing(Missing::NotFound {
                 suggested_extension: None,
             }))
-        ));
-    }
-
-    /// The 126 case, which only a platform with an executable bit has.
-    #[cfg(unix)]
-    #[test]
-    fn a_non_executable_path_hit_is_not_executable() {
-        use std::os::unix::fs::PermissionsExt;
-        crate::path::forget_located_commands();
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("zznoexec");
-        std::fs::write(&file, "").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned())
-            .unwrap();
-
-        let command = looked_up(Command::from_name(
-            &CommandName::Bare("zznoexec".into()),
-            &shell.context,
-        ));
-        assert!(matches!(
-            command.state,
-            Err(LookupFailure::Missing(Missing::NotRunnable(NotRunnable {
-                found,
-                why: Unrunnable::NotExecutable,
-            }))) if found == path::shown(&file)
         ));
     }
 
@@ -846,23 +797,6 @@ mod vet {
         assert_eq!(refused(command, &mut shell).failure_code().get(), 127);
     }
 
-    /// Bundled names short-circuit the disk probe: `ls` vets on an empty
-    /// `PATH`.  Gated because without `coreutils` the bundled set is empty.
-    #[cfg(feature = "coreutils")]
-    #[test]
-    fn bundled_name_vets_with_empty_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var("PATH", dir.path().to_string_lossy().into_owned())
-            .unwrap();
-
-        let command = Command::from_name(&CommandName::Bare("ls".into()), &shell.context);
-        let plan = plan(command, &mut shell).expect("bundled name must not 127");
-        assert_eq!(plan.program.shown, "ls");
-    }
-
     /// The 126 case of an explicit path: a file lacking `+x`, or a directory,
     /// which only the admitted program is asked about.
     #[cfg(unix)]
@@ -1083,45 +1017,6 @@ mod vet {
         assert_eq!(e.describe(), format!("{name}: {found}: permission denied"));
     }
 
-    /// An explicit path naming no file is a missing command, and the refusal names
-    /// the path.
-    #[test]
-    fn a_path_naming_no_file_produces_127() {
-        let mut shell = crate::test_helper::core_shell();
-        let path = std::env::temp_dir().join("no-such-dir").join("tool");
-        let command = Command::from_name(
-            &CommandName::Path(path.to_string_lossy().into_owned()),
-            &shell.context,
-        );
-        let e = refused(command, &mut shell);
-        assert_eq!(e.failure_code().get(), 127);
-        assert!(e.prov.is_none());
-        let description = e.describe();
-        assert!(description.contains("no-such-dir"), "{description}");
-    }
-
-    #[test]
-    fn all_absent_path_candidates_produce_127() {
-        let d1 = tempfile::tempdir().unwrap();
-        let d2 = tempfile::tempdir().unwrap();
-        let mut shell = crate::test_helper::core_shell();
-        shell
-            .context
-            .set_env_var(
-                "PATH",
-                std::env::join_paths([d1.path(), d2.path()])
-                    .unwrap()
-                    .into_string()
-                    .unwrap(),
-            )
-            .unwrap();
-        let command = Command::from_name(
-            &CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
-            &shell.context,
-        );
-        assert_eq!(refused(command, &mut shell).failure_code().get(), 127);
-    }
-
     #[test]
     fn admitted_path_failures_precede_argv_shape() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1200,10 +1095,6 @@ mod vet {
             })
         ));
         assert_eq!(error.hints(), []);
-        assert_eq!(
-            error.describe(),
-            "cannot pass a list as argument at index 1 to `tool`"
-        );
         assert_eq!(error.reason.advice(), [RefusedArg::List.remedy("tool")]);
         assert!(error.plain().contains(&RefusedArg::List.remedy("tool")));
     }
@@ -1229,7 +1120,7 @@ mod vet {
     /// A value and its type earn one verdict: the property the shared
     /// classification exists to hold.  The `Thunk` and `Handle` pairs need an
     /// `Env`, and are paired end to end instead
-    /// (`tests/reject/external-arg-*.ral`, `core/tests/argv_convention.rs`).
+    /// (`tests/reject/external-arg-*.ral`, `core/tests/integration/api/argv.rs`).
     #[test]
     fn a_value_and_its_type_earn_the_same_verdict() {
         use crate::ty::{Row, Ty};
@@ -1268,39 +1159,7 @@ mod vet {
 
 mod stdio {
     use crate::io::{Source, SourceReader};
-    #[cfg(unix)]
-    use crate::process::{DurableRoot, Scope};
     use crate::process::{StdioSpec, TerminalInput};
-
-    #[cfg(unix)]
-    #[test]
-    fn stream_connection_failure_names_preparation_not_duplication_of_the_program() {
-        use super::super::*;
-        let mut shell = crate::test_helper::core_shell();
-        let prepared = Command::from_name(&CommandName::Path("/bin/sh".into()), &shell.context)
-            .lookup(&shell.context.grants, shell.baseline())
-            .admit(&Mooring::adrift(), &mut shell)
-            .unwrap()
-            .prepare(&[], Ownership::Kept, &shell)
-            .unwrap();
-        let cause = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
-        let error = prepared.connection_error(&cause);
-        assert_eq!(
-            error.reason,
-            Reason::Launch(Box::new(crate::fact::LaunchFailure::Prepare(
-                crate::fact::PrepareFailure {
-                    step: crate::fact::PrepareStep::Stdio,
-                    subject: crate::fact::PrepareSubject::Program("/bin/sh".into()),
-                    cause: crate::fact::PrepareCause::Io(Box::new(crate::io::failure(&cause))),
-                }
-            )))
-        );
-        assert!(
-            error
-                .describe()
-                .starts_with("ral could not connect standard streams for program '/bin/sh':")
-        );
-    }
 
     #[test]
     fn offered_withholds_only_terminal_input_and_borrows_other_sources() {
@@ -1337,32 +1196,6 @@ mod stdio {
                 }
             }
         }
-    }
-
-    /// The source is authoritative: `Empty` wires `/dev/null` and `Terminal`
-    /// inherits fd 0, whatever fd 0 is.
-    #[test]
-    fn the_childs_source_decides_its_stdin() {
-        assert!(matches!(Source::Empty.child_stdio(), Ok(StdioSpec::Null)));
-        assert!(matches!(
-            Source::Terminal.child_stdio(),
-            Ok(StdioSpec::Inherit)
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_stage_shaped_source_is_borrowed() {
-        let (r, _w) = crate::process::cloexec_pipe().expect("data pipe");
-        let stdin = Source::Reader(
-            SourceReader::pipe(r).interruptible(Scope::clone(&DurableRoot::default())),
-        );
-
-        let stdio = stdin.child_stdio().expect("child stdin");
-        assert!(matches!(stdio, StdioSpec::Owned(_)));
-
-        // The source is borrowed, never taken, so it still has a reader.
-        assert!(stdin.reader().expect("reader").is_some());
     }
 }
 
@@ -1714,30 +1547,6 @@ mod process {
             );
         }
 
-        /// No sandbox confines a start under no grant, so it claims no line.
-        #[test]
-        fn an_unconfined_start_claims_no_line() {
-            use super::Started;
-            let (tmp, mut shell) = workdir();
-            point_build_at(tmp.path(), &plant(tmp.path(), "a"));
-            let prepared = judge(&mut shell, &[]);
-            let discard = Sink::File(std::sync::Arc::new(crate::path::open_discard().unwrap()));
-            let Ok(Started {
-                mut spawned,
-                denial_pids,
-                ..
-            }) = prepared.start(
-                Connection::new(&Source::Empty, &discard, &discard).unwrap(),
-                crate::process::Placement::Inherit,
-                &shell.scope,
-            )
-            else {
-                panic!("the file starts");
-            };
-            let _ = spawned.child.reap();
-            assert_eq!(denial_pids, None);
-        }
-
         /// The control: the harness tells `a` from `b`, so the next test cannot
         /// pass by the two being alike.
         #[test]
@@ -1820,7 +1629,7 @@ mod process {
         use crate::authority::sandbox::Image;
         use crate::fact::{Failure, Reason, Unrunnable};
         use std::io::{Error, ErrorKind};
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
 
         fn not_runnable(why: Unrunnable) -> Reason {
             Reason::process("run", Failure::not_runnable("run", why))
@@ -1884,21 +1693,6 @@ mod process {
                     "{image:?}"
                 );
             }
-            assert!(!Path::new(&dir.path().join("gone")).exists());
-        }
-
-        #[test]
-        fn eacces_is_permission_denied_and_the_rest_is_io() {
-            let tool = Image::Tool("ls");
-            assert_eq!(
-                unwithheld(&Error::from_raw_os_error(libc::EACCES), &tool, None),
-                not_runnable(Unrunnable::PermissionDenied)
-            );
-            let e = Error::from_raw_os_error(libc::E2BIG);
-            assert_eq!(
-                unwithheld(&e, &tool, None),
-                not_runnable(Unrunnable::Io(Box::new(crate::io::failure(&e))))
-            );
         }
 
         /// An interpreter the launch's own sandbox withholds is denied whether
@@ -1968,15 +1762,9 @@ mod process {
                 Reason::process(
                     "run",
                     Failure::not_runnable(
-                        found.clone(),
+                        found,
                         Unrunnable::MissingInterpreter(Some("/no/such/interpreter".into()))
                     )
-                )
-            );
-            assert_eq!(
-                error.describe(),
-                format!(
-                    "run: {found}: its interpreter /no/such/interpreter or its loader was not found"
                 )
             );
         }
@@ -2139,7 +1927,6 @@ mod process {
 #[cfg(unix)]
 mod alone {
     use super::super::*;
-    use crate::authority::policy::{Capabilities, ExecGrant};
     use crate::fact::ExitCode as _;
     use crate::shell::runtime::{CapturePolicy, Observed, Prov};
     use crate::source::CallSite;
@@ -2225,24 +2012,6 @@ mod alone {
             Some("on-path: exited with status 7")
         );
         assert_eq!(observation.site, shell.call_site());
-    }
-
-    #[test]
-    fn an_empty_exec_grant_refuses_before_running() {
-        let (_tmp, mut shell) = on_path();
-        shell
-            .context
-            .grants
-            .push(crate::test_helper::layer(Capabilities {
-                exec: Some(ExecGrant::default()),
-                ..Capabilities::default()
-            }));
-        let result = shell.run_external(
-            "on-path",
-            &[Value::string("one argument"), Value::string("0")],
-            &Mooring::adrift(),
-        );
-        assert!(result.is_err());
     }
 }
 

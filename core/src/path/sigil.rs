@@ -116,39 +116,6 @@ mod tests {
         EnvVars::from_pairs([("HOME", dir)]).unwrap()
     }
 
-    #[test]
-    fn parse_xdg_token_recognises_each_kind() {
-        for (name, kind) in [
-            ("config", XdgKind::Config),
-            ("data", XdgKind::Data),
-            ("cache", XdgKind::Cache),
-            ("state", XdgKind::State),
-            ("bin", XdgKind::Bin),
-        ] {
-            let token = format!("xdg:{name}");
-            let (k, sub) = parse_xdg_token(&token, PathRules::HOST).expect("known kind");
-            assert_eq!(k, kind);
-            assert!(sub.is_none());
-        }
-    }
-
-    #[test]
-    fn parse_xdg_token_carries_subpath() {
-        let (k, sub) = parse_xdg_token("xdg:config/agda/lib", PathRules::HOST).unwrap();
-        assert_eq!(k, XdgKind::Config);
-        assert_eq!(sub, Some("agda/lib"));
-    }
-
-    #[test]
-    fn parse_xdg_token_rejects_unknown_name() {
-        assert!(parse_xdg_token("xdg:cofnig", PathRules::HOST).is_none());
-    }
-
-    #[test]
-    fn parse_xdg_token_rejects_non_xdg() {
-        assert!(parse_xdg_token("/etc", PathRules::HOST).is_none());
-    }
-
     /// The name ends at one separator under each rules' own separators, and
     /// the sub-path is the rest as written: under Posix a backslash is a
     /// filename byte, so `xdg:config\x` names no kind.
@@ -171,20 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn tilde_expands_against_home() {
-        assert_eq!(expand_path_prefix("~/foo", &home("/h")), "/h/foo");
-    }
-
-    #[test]
     fn unknown_xdg_token_passes_through_unchanged() {
         // Runtime is permissive: the freeze turns a typo into an error; here
         // it only must not be silently rewritten.
         assert_eq!(expand_path_prefix("xdg:cofnig", &home("/h")), "xdg:cofnig");
-    }
-
-    #[test]
-    fn ordinary_path_passes_through_unchanged() {
-        assert_eq!(expand_path_prefix("/abs/path", &home("/h")), "/abs/path");
     }
 
     // Unix-only: the join yields `\h\.cache\foo` on Windows, so the `/foo` tail

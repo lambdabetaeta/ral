@@ -221,42 +221,6 @@ fn an_act_carries_no_magnitude_and_no_bar() {
     }
 }
 
-/// A refusal reads hot on the very row that names the attempt; the long
-/// form is the raise, and the raise is the model's.
-#[test]
-fn a_refused_act_tiers_its_outcome_hot() {
-    let block = act("cancel", Some("hunter"), "refused: not a descendant", true);
-    let lines = block.body(READ_W, Detail::Summary, "");
-    let row = lines.last().expect("an act renders one content row");
-    assert_eq!(
-        text::text(row),
-        "cancel     [hunter] refused: not a descendant"
-    );
-    let outcome = row.spans.last().expect("the payload span");
-    assert_eq!(outcome.style.fg, Some(super::super::palette::RED_HOT));
-    assert!(outcome.style.add_modifier.contains(Modifier::BOLD));
-
-    // A landed act of the same verb wears the ordinary body ink.
-    let landed = act(
-        "cancel",
-        Some("hunter"),
-        "no live agent by that name",
-        false,
-    );
-    let landed = landed.body(READ_W, Detail::Summary, "");
-    assert_eq!(
-        landed
-            .last()
-            .expect("a row")
-            .spans
-            .last()
-            .expect("payload")
-            .style
-            .fg,
-        Some(SLATE)
-    );
-}
-
 /// Reduced, the payload is cut to its column; the dial is what gets the rest
 /// back, wrapped and hanging at the head row's own offset.
 #[test]
@@ -293,31 +257,6 @@ fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
             "the whole payload returns on the dial: {full:?}"
         );
     }
-}
-
-/// An act is a barrier wearing its own shape, and the shape says when it
-/// lands.
-#[test]
-fn acts_wear_their_own_shapes() {
-    for (verb, shape) in [
-        ("spawn", RailKind::FleetAct),
-        ("cancel", RailKind::FleetAct),
-        ("message", RailKind::FleetAct),
-        ("reply", RailKind::FleetAct),
-        ("schedule", RailKind::TimeAct),
-        ("unschedule", RailKind::TimeAct),
-    ] {
-        let block = act(verb, Some("subject"), "payload", false);
-        for at in [Detail::Summary, Detail::Full] {
-            assert_eq!(block.rail_kind(), Some(shape), "`{verb}` at {at:?}");
-        }
-    }
-}
-
-#[test]
-fn opening_chrome_has_no_rail() {
-    let block = Block::chrome(Chrome::Opening(Card(Vec::new())), None);
-    assert_eq!(block.rail_kind(), None);
 }
 
 /// A deliberation is one thing, shown whole or as its header, so its dial

@@ -1,0 +1,44 @@
+# One structural equality over data, one ordering behind lt, gt,
+# sort-list, sort-list-by and the `$[…]` operators
+
+# Equality is reflexive on Bytes and structural on variants
+let bb = !{ints-to-bytes [65, 66] | from-bytes}
+let other = !{ints-to-bytes [65, 67] | from-bytes}
+echo $[$bb == $bb] $[$bb == $other]
+# Expected: true false
+
+# Bare-word variants take the next atom as payload, so bind each operand first
+let a1 = `ok
+let a2 = `ok
+let e1 = `err
+let s1 = `some 1
+let s2 = `some 1
+let s3 = `some 2
+let n1 = `none
+echo $[$a1 == $a2] $[$a1 == $e1] $[$s1 == $s2] $[$s1 == $s3] $[$s1 == $n1]
+# Expected: true false true false false
+
+let n2 = `none ()
+echo $[$n1 == $n2] $[[`none] == [`none ()]]
+# Expected: true true
+
+# lt and gt order numbers numerically, not by spelling
+echo !{lt 2 10} !{gt 2 10} !{lt 10 2}
+# Expected: true false false
+echo !{lt 2.5 10.0} !{gt 2.5 10.0}
+# Expected: true false
+
+# The expression operators keep i64 precision above 2^53
+echo $[9007199254740993 > 9007199254740992] $[9007199254740992 < 9007199254740993]
+# Expected: true true
+
+# Sorting uses the same ordering
+echo !{sort-list [10, 9, 2]}
+echo !{sort-list-by { |x| return $[0 - $x] } [2, 9, 10]}
+echo !{sort-list-by { |s| length $s } ['ccc', 'a', 'bb']}
+
+# A bare arity-one builtin in command position is a discarded function, but
+# `$name` takes the value: application, not position, is the one arity gate
+echo $upper $lower $dedent $posix-quote $posix-split
+
+echo 'comparison tests done'

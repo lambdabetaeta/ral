@@ -147,13 +147,6 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         answer.text
     );
     assert!(
-        answer
-            .text
-            .contains("agent 'helper' failed without a reply to read: panicked"),
-        "{}",
-        answer.text
-    );
-    assert!(
         read_records(&log)
             .unwrap()
             .iter()

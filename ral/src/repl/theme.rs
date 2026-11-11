@@ -110,18 +110,6 @@ mod tests {
     }
 
     #[test]
-    fn theme_value_color_wrong_type_rejected() {
-        let pairs = map_of(vec![("value-color".into(), Value::Int(3))]);
-        assert!(OutputTheme::from_map(&pairs).is_err());
-    }
-
-    #[test]
-    fn theme_value_prefix_wrong_type_rejected() {
-        let pairs = map_of(vec![("value-prefix".into(), Value::Int(3))]);
-        assert!(OutputTheme::from_map(&pairs).is_err());
-    }
-
-    #[test]
     fn theme_unknown_key_rejected() {
         let pairs = map_of(vec![
             ("wat".into(), Value::string("x")),

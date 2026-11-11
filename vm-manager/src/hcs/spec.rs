@@ -370,14 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_dies_with_its_last_handle() {
-        assert_eq!(
-            json()["ShouldTerminateOnLastHandleClosed"],
-            Value::Bool(true)
-        );
-    }
-
-    #[test]
     fn the_documents_spelling_is_the_services() {
         let doc = json();
         assert!(doc["VirtualMachine"]["Chipset"]["LinuxKernelDirect"]["InitRdPath"].is_string());

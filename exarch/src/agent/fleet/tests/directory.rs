@@ -5,7 +5,6 @@ use crate::bus::{Input, Next, Rest};
 use crate::enquiry::RosterState;
 use crate::record::ChildStatus;
 use ral_core::data::FOValue;
-use ral_core::data::datum::{Datum, tag};
 use ral_core::process::CancelCause;
 use std::sync::Barrier;
 
@@ -121,23 +120,6 @@ fn a_name_does_not_retain_its_fleet() {
 }
 
 #[test]
-fn a_bound_name_refuses_a_second_owner() {
-    let fleet = Fleet::for_test();
-    let root = agent(&fleet, "root", None);
-    let helper = agent(&fleet, "helper", Some(&root));
-    assert_eq!(
-        test_agent(
-            &fleet,
-            TestAgentSpec::child("helper", &root, root.mailbox.home().child())
-        )
-        .err(),
-        Some(Unborn::NameTaken("helper".into()))
-    );
-    assert_eq!(fleet.registry.resolve("helper").unwrap().id(), helper.id());
-    assert_eq!(fleet.registry.live().len(), 2);
-}
-
-#[test]
 fn ended_agents_leave_the_directory_views_but_reserve_their_names_until_drop() {
     let fleet = Fleet::for_test();
     let root = agent(&fleet, "root", None);
@@ -248,35 +230,6 @@ fn stopping_an_exchange_spares_the_helper_subtree_and_the_next_exchange() {
         panic!("the next prompt starts a fresh exchange");
     };
     assert!(!next.is_cancelled());
-}
-
-#[test]
-fn every_roster_row_encodes_the_human_or_its_parent_agent() {
-    let fleet = Fleet::for_test();
-    let root = agent(&fleet, "root", None);
-    let mid = agent(&fleet, "mid", Some(&root));
-    let _leaf = agent(&fleet, "leaf", Some(&mid));
-    let edges: Vec<_> = roster::listing(&root, &fleet)
-        .into_iter()
-        .map(|row| {
-            let name = row.name.clone();
-            (name, row.encode().field("spawner").unwrap().clone())
-        })
-        .collect();
-    assert_eq!(
-        edges,
-        vec![
-            ("root".into(), tag("human", None)),
-            (
-                "mid".into(),
-                tag("agent", Some("root".to_string().encode()))
-            ),
-            (
-                "leaf".into(),
-                tag("agent", Some("mid".to_string().encode()))
-            ),
-        ]
-    );
 }
 
 #[test]

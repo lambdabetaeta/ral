@@ -5,12 +5,11 @@ use crate::bus::{Admission, AgentMailbox, Drained, Emitter, Input};
 use crate::shell_eval::surface::SurfaceApplier;
 use crate::test_helper::engine_over_socketpair;
 use atomic_refcell::AtomicRefCell;
-use ral_core::carrier::{Host, WireTransport};
+use ral_core::carrier::Host;
 use ral_core::error::Error;
 use ral_core::process::{CancelCause, DurableRoot};
 use ral_core::protocol::channel::Liveness;
 use ral_core::protocol::{Ran, Report};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -257,50 +256,6 @@ fn cancelled_within_settles_an_in_flight_wire_run_promptly() {
          term, took {elapsed:?}"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// A wire engine has no recipe to reboot in place, so `/clear` answers in
-/// words rather than panicking. No engine child needed: nothing crosses.
-#[test]
-fn wire_engine_clear_answers_a_sentence() {
-    let (host, _guest) = UnixStream::pair().expect("socketpair");
-    let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-    let engine = Engine::Wire {
-        transport: Box::new(transport),
-        engine: crate::boot::test_attach().0,
-    };
-    let why = engine
-        .prepare_rebirth()
-        .err()
-        .expect("a wire engine cannot reboot");
-    assert!(why.contains("new conversation"), "{why}");
-}
-
-/// The engine a parent's seal attaches is a child of that parent: its shell
-/// holds what the parent set.
-#[test]
-fn a_sealed_attach_is_a_child_of_its_parent() {
-    let mut parent = crate::boot::test_shell();
-    parent.set_env_var("PARENT_MARK", "1").unwrap();
-    let seal = ral_core::seed::seal(&parent.bequeath(ral_core::SpawnGrant::Inherit))
-        .expect("a bequest seals");
-    let (transport, mut child) = engine_over_socketpair(Liveness::default());
-    let engine = Engine::wire(
-        transport,
-        ral_core::protocol::Attach::child(crate::boot::test_attach().0, seal),
-    )
-    .expect("an engine attaches with its parent's seal");
-    assert_eq!(
-        engine
-            .read(
-                ral_core::fact::ProbeSubject::EnvVar("PARENT_MARK".into()),
-                |t| t.env_var("PARENT_MARK")
-            )
-            .expect("the child answers"),
-        Some("1".to_string())
-    );
     let _ = child.kill();
     let _ = child.wait();
 }

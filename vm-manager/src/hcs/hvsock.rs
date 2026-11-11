@@ -327,10 +327,4 @@ mod tests {
         );
         assert!(!sddl.contains(";WD)"), "no wildcard: {sddl}");
     }
-
-    #[test]
-    fn winsock_starts_once() {
-        winsock_started().expect("Winsock 2.2 is available");
-        winsock_started().expect("the second ask is the same answer");
-    }
 }

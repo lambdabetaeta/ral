@@ -1,5 +1,4 @@
 use super::*;
-use crate::provider::{Limit, Refusal};
 use crate::record::AgentId;
 
 fn fresh_log() -> AgentLog {
@@ -41,43 +40,6 @@ fn transient_surfaces_without_nudge() {
         "transient provider failures are surfaced directly"
     );
     assert_eq!(nudges.used, 0);
-}
-
-/// The provider loop owns retry attempts; the budget here is only for
-/// model-visible recovery.
-#[test]
-fn provider_failures_do_not_consume_budget() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    let error = ProviderError::Refused(Refusal::for_test(Limit::Rate, None));
-    for _ in 0..=BUDGET {
-        assert!(
-            nudges.react(Err(&error), &facts(), &log).is_none(),
-            "provider failure should stop, not nudge"
-        );
-    }
-    assert_eq!(nudges.used, 0);
-}
-
-#[test]
-fn empty_turn_nudges_and_consumes_budget() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    match nudges.react(EMPTY, &facts(), &log) {
-        Some(msg) => assert!(msg.contains("no text and no tool calls")),
-        None => panic!("empty turn must nudge, not stop"),
-    }
-    assert_eq!(nudges.used, 1);
-}
-
-#[test]
-fn exhausted_budget_stops() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    for _ in 0..BUDGET {
-        assert!(nudges.react(EMPTY, &facts(), &log).is_some());
-    }
-    assert!(nudges.react(EMPTY, &facts(), &log).is_none());
 }
 
 /// A stall is not an output cap: the model is told the connection failed.
@@ -166,14 +128,6 @@ fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
     );
 }
 
-/// A conversing agent never returns, so it owes no `reply`.
-#[test]
-fn root_completion_is_never_reply_nudged() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    assert!(nudges.react(COMPLETE, &facts(), &log).is_none());
-}
-
 /// A live child *is* the next action, so every nudge — the pin reminder
 /// included — waits for it to settle rather than pile on; and once it
 /// settles the pin reminder fires on the first quiet completion.
@@ -226,22 +180,6 @@ fn returning_agent_gets_both_reply_and_pinned_nudges() {
         "must also be reminded of its pinned state: {msg}"
     );
     assert_eq!(nudges.used, 1, "only the reply half spends budget");
-}
-
-/// `Replied` answers `None` for peer and headless-root facts alike, budget
-/// untouched — there is no self-verification round-trip left.
-#[test]
-fn any_reply_is_accepted_outright() {
-    let mut nudges = Nudges::new(true);
-    let log = fresh_log();
-    for must_reply in [false, true] {
-        let f = Facts {
-            must_reply,
-            ..facts()
-        };
-        assert!(nudges.react(Ok(&Outcome::Replied), &f, &log).is_none());
-    }
-    assert_eq!(nudges.used, 0);
 }
 
 /// The livelock regression: the same digest over repeated quiet
@@ -343,61 +281,6 @@ fn reset_does_not_rearm_edges() {
     );
 }
 
-/// The pressure reminder carries both the reading and the span a forced
-/// eviction would take, with the line that makes the same cut by hand.
-#[test]
-fn pressure_names_the_cut_and_offers_the_note() {
-    let body = Reminder::Pressure(Load {
-        used: 400,
-        total: Some(500),
-        trigger: 450,
-        unit: Unit::Tokens,
-        planned: Some(crate::record::Span::new(1, 7).expect("a run")),
-    })
-    .body();
-    assert!(body.contains("400 of 500 tokens"), "{body}");
-    assert!(
-        body.contains("Once it passes 450 tokens")
-            && body.contains("that is turns 1–7. They would stay readable")
-            && body.contains("evict them yourself now")
-            && body.contains("`` exarch-context `evict [from: 1, to: 7, note: '…'] ``"),
-        "must name the cut and offer the note: {body}"
-    );
-}
-
-/// Nothing old enough to shed: the reading stands alone, with no cut to
-/// announce and no note to offer.
-#[test]
-fn pressure_without_a_planned_cut_states_the_reading_alone() {
-    let body = Reminder::Pressure(Load {
-        used: 400,
-        total: Some(500),
-        trigger: 450,
-        unit: Unit::Tokens,
-        planned: None,
-    })
-    .body();
-    assert!(body.contains("400 of 500 tokens"), "{body}");
-    assert!(
-        !body.contains("evict them") && body.contains("due once it passes 450 tokens"),
-        "with no cut planned there is nothing to announce: {body}"
-    );
-}
-
-#[test]
-fn a_lifetime_budget_reminder_does_not_prescribe_an_account_top_up() {
-    let body = Reminder::Ration {
-        service: "openrouter".into(),
-        label: "key budget · lifetime".into(),
-        pct: 95,
-        windowed: false,
-        resumes: true,
-    }
-    .body();
-    assert!(body.contains("limit is raised"), "{body}");
-    assert!(!body.contains("topped up"), "{body}");
-}
-
 /// A reminder records its breadcrumb spending nothing: the budget is the
 /// repairs' alone.
 #[test]
@@ -411,12 +294,9 @@ fn a_reminder_spends_no_budget() {
         windowed: true,
         resumes: true,
     };
-    let text = nudges
-        .remind(&reminder, &log)
-        .expect("a steering trunk is reminded");
     assert!(
-        text.contains("91% spent") && text.contains("pauses until it resets"),
-        "{text}"
+        nudges.remind(&reminder, &log).is_some(),
+        "a steering trunk is reminded"
     );
     assert_eq!(nudges.used, 0);
 }

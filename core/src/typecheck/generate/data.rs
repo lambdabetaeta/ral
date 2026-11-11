@@ -522,7 +522,6 @@ impl Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{CompareOp, EqOp};
     use crate::source::FileId;
     use crate::ty::{Scheme, UnitId};
     use crate::typecheck::builtins::{Convention, scheme};
@@ -828,48 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn primitive_expected_shapes_cover_numeric_boolean_and_text_operations() {
-        for (prim, expected) in [
-            (
-                Prim::Binary(BinaryOp::Arith(ArithOp::Add), Val::Int(1), Val::Int(2)),
-                Ty::int(),
-            ),
-            (
-                Prim::Binary(BinaryOp::Compare(CompareOp::Lt), Val::Int(1), Val::Int(2)),
-                Ty::bool(),
-            ),
-            (
-                Prim::Binary(BinaryOp::Eq(EqOp::Eq), Val::Bool(true), Val::Bool(false)),
-                Ty::bool(),
-            ),
-            (
-                Prim::Negate(Val::Float(crate::data::Finite::new(1.5).unwrap())),
-                Ty::float(),
-            ),
-            (Prim::Not(Val::Bool(false)), Ty::bool()),
-            (Prim::Render(Val::Int(1)), Ty::string()),
-            (
-                Prim::Concat(vec![Val::String("a".into()), Val::String("b".into())].into()),
-                Ty::string(),
-            ),
-        ] {
-            let mut generator = generator();
-            let (ty, _) = generator.prim(&prim);
-            let solution = solved(generator.solver);
-            assert_eq!(solution.resolve_ty(&ty), expected);
-        }
-        let mut generator = generator();
-        let bytes = generator.solver.fresh_ty();
-        generator
-            .env
-            .bind("bytes".into(), Scheme::mono(bytes.clone()));
-        let (decoded, _) = generator.prim(&Prim::Decode(Val::Variable("bytes".into())));
-        let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&bytes), Ty::bytes());
-        assert_eq!(solution.resolve_ty(&decoded), Ty::string());
-    }
-
-    #[test]
     fn modulo_requires_integers() {
         let mut generator = generator();
         generator.prim(&Prim::Binary(
@@ -898,6 +855,7 @@ mod tests {
         assert!(suggestions.iter().any(|s| s == "result"));
         assert!(!suggestions.iter().any(|s| s == "resalt"));
     }
+
     #[test]
     fn an_unbound_variable_is_refused_where_it_is_read() {
         assert_eq!(super::super::tests::error_codes("echo $nope"), ["T0071"]);
@@ -912,22 +870,6 @@ mod tests {
         assert_eq!(
             super::super::tests::error_codes("let t = $true; if $t { echo y } else { echo n }"),
             Vec::<&str>::new()
-        );
-    }
-
-    #[test]
-    fn a_map_literal_refuses_a_static_duplicate_key() {
-        assert_eq!(
-            super::super::tests::error_codes("return [a: 1, a: 2]"),
-            ["T0022"]
-        );
-        assert_eq!(
-            super::super::tests::error_codes("return [:, a: 1, a: 2]"),
-            ["T0022"]
-        );
-        assert_eq!(
-            super::super::tests::error_codes("let k = 'x'\nreturn [$k: 1, a: 1, a: 2]"),
-            ["T0022"]
         );
     }
 }

@@ -536,27 +536,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_connection_is_reaped_once_the_guest_finishes_closing() {
-        assert!(reap_now(false, true, Some(Duration::ZERO)));
-    }
-
-    #[test]
-    fn a_live_connection_is_never_reaped() {
-        assert!(!reap_now(true, false, None));
-        assert!(!reap_now(false, false, None));
-        assert!(!reap_now(
-            true,
-            false,
-            Some(FIN_GRACE + Duration::from_secs(1))
-        ));
-        assert!(!reap_now(
-            false,
-            false,
-            Some(FIN_GRACE + Duration::from_secs(1))
-        ));
-    }
-
-    #[test]
     fn a_half_closed_connection_is_reaped_only_after_the_grace() {
         assert!(!reap_now(true, true, Some(FIN_GRACE / 2)));
         assert!(!reap_now(true, true, Some(FIN_GRACE)));

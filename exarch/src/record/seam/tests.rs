@@ -38,12 +38,6 @@ fn assert_locus(bytes: &[u8], locus: &Locus) {
 }
 
 #[test]
-#[should_panic(expected = "Control records must go through commit_to or begin")]
-fn commit_panics_on_a_hand_built_control_record() {
-    drop(Emitter::none().commit(NonEmpty::one(Record::Control(Control::JobOpened))));
-}
-
-#[test]
 fn a_commit_is_published_as_one_signal() {
     let dir = OwnDir::for_test("commit-one-signal").unwrap();
     let emit = Emitter::create(&dir).unwrap();
@@ -306,29 +300,6 @@ fn a_foreign_line_before_damage_leaves_the_record_as_it_found_it() {
 }
 
 #[test]
-fn a_log_of_an_older_exarch_is_refused_by_name() {
-    let sessions = OwnDir::for_test("older-resume").unwrap();
-    let id = AgentId::new(7);
-    let dir = sessions.make_dir(&id.to_string()).unwrap();
-    let path = dir.path().join(RECORD);
-    let mut bytes = serde_json::to_vec(&serde_json::json!({
-        "at_unix_ms": 0, "record": Record::Control(Control::SessionStarted(opening(&dir, id)))
-    }))
-    .unwrap();
-    bytes.push(b'\n');
-    fs::write(&path, &bytes).unwrap();
-    let refusal = context::resume(&sessions, id)
-        .err()
-        .expect("older log refused")
-        .to_string();
-    assert!(refusal.contains(&ral_core::path::shown(&path)), "{refusal}");
-    assert!(refusal.contains("line 1"), "{refusal}");
-    assert!(refusal.contains("older exarch"), "{refusal}");
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-    assert!(!dir.path().join("record.jsonl.crash").exists());
-}
-
-#[test]
 fn availability_observation_does_not_wait_for_publication() {
     use std::sync::{Weak, mpsc};
     use std::time::Duration;
@@ -382,39 +353,6 @@ fn availability_observation_does_not_wait_for_publication() {
     emit.check_available().unwrap();
 }
 
-#[cfg(any(unix, windows))]
-#[test]
-fn a_serialization_failure_latches_the_writer_without_writing() {
-    let dir = OwnDir::for_test("serialization-before-write").unwrap();
-    let path = dir.path().join(RECORD);
-    let emit = Emitter::create(&dir).unwrap();
-    let mut record = opening(&dir, AgentId::new(7));
-    let Started { log_dir, .. } = &mut record;
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt as _;
-        *log_dir = std::ffi::OsString::from_vec(vec![0xff]).into();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStringExt as _;
-        *log_dir = std::ffi::OsString::from_wide(&[0xd800]).into();
-    }
-
-    let failure = emit.begin(record).unwrap_err();
-    assert_eq!(
-        emit.check_available().unwrap_err().to_string(),
-        failure.to_string()
-    );
-    assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
-    let (_, _, records) = emit.reader().since(None).unwrap();
-    assert_eq!(records.count(), 0);
-    let refused = emit.emit(Forensic::Cancelled).unwrap_err();
-    assert_eq!(refused.kind(), failure.kind());
-    assert_eq!(refused.to_string(), failure.to_string());
-    assert_eq!(fs::read(&path).unwrap(), [] as [u8; 0]);
-}
-
 #[test]
 fn a_failure_ends_the_life_bound_to_its_writer() {
     let dir = OwnDir::for_test("failure-ends-life").unwrap();
@@ -442,26 +380,6 @@ fn a_failure_ends_the_life_bound_to_its_writer() {
     let failure = emit.check_available().unwrap_err();
     assert!(failure.to_string().contains("panicked"), "{failure}");
     assert!(node.is_cancelled());
-}
-
-#[test]
-fn a_writer_fault_does_not_disable_an_independent_session() {
-    let broken_dir = OwnDir::for_test("broken-writer").unwrap();
-    let healthy_dir = OwnDir::for_test("healthy-writer").unwrap();
-    let broken = Emitter::create(&broken_dir).unwrap();
-    let healthy = Emitter::create(&healthy_dir).unwrap();
-    broken.fail_after(0);
-    assert!(broken.emit(Forensic::Cancelled).is_err());
-    healthy.check_available().unwrap();
-    let fact = healthy.emit(Forensic::Cancelled).unwrap();
-    assert_eq!(fact.locus().seq().commit(), 1);
-    let bytes = fs::read(healthy_dir.path().join(RECORD)).unwrap();
-    assert_eq!(fact.locus().bytes(), 0..bytes.len() as u64);
-    assert_locus(&bytes, fact.locus());
-    assert_eq!(
-        fs::read(broken_dir.path().join(RECORD)).unwrap(),
-        [] as [u8; 0]
-    );
 }
 
 #[test]

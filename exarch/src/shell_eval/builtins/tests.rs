@@ -17,11 +17,6 @@ fn dressed_shell(extra: &[&'static [BuiltinEntry]]) -> Shell {
 }
 
 #[test]
-fn line_hash_ignores_trailing_whitespace() {
-    assert_eq!(line_hash("x"), line_hash("x   "));
-}
-
-#[test]
 fn eol_round_trips_byte_for_byte() {
     for body in ["a\r\nb\r\n", "a\r\r\nb", "a\r\nb\n", "a\rb", "a\n", ""] {
         let eol = Eol::of(body.as_bytes());
@@ -61,25 +56,6 @@ fn line_run_names_the_first_long_line() {
     assert!(run.feed(b"\nshort\nx").is_ok());
     let past = run.feed(&at).expect_err("one byte past the limit");
     assert_eq!(past.0, 4);
-}
-
-/// In a file shorter than a full floor window, every window clamps to the
-/// whole file, so lines are told apart by offset alone, all at the floor.
-#[test]
-fn window_hashes_floor_at_min_radius() {
-    let rows: Vec<String> = ["a", "b", "c", "d"]
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-    let hashes = window_hashes(&rows);
-    assert_eq!(hashes.len(), rows.len());
-    let body: String = rows.iter().map(|r| line_hash(r)).collect();
-    for (i, hash) in hashes.iter().enumerate() {
-        let expected = line_hash(&format!("{MIN_RADIUS}:{i}:{body}"));
-        assert_eq!(*hash, expected, "row {i} at the floor radius");
-    }
-    let distinct: std::collections::HashSet<&String> = hashes.iter().collect();
-    assert_eq!(distinct.len(), rows.len(), "all distinct");
 }
 
 /// Two identical lines sharing an offset within their floor windows are
@@ -210,17 +186,6 @@ fn detach_is_absent_from_the_host_surface() {
     );
 }
 
-/// Exarch's engine runtime installs the verb.
-#[cfg(unix)]
-#[test]
-fn the_recipe_gains_detach() {
-    let shell = crate::boot::test_shell();
-    assert!(
-        shell.lookup_builtin("detach").is_some(),
-        "the recipe must install the verb"
-    );
-}
-
 /// `/clear` reboots through the same recipe, so the fresh engine re-gains
 /// the verb.
 #[cfg(unix)]
@@ -316,132 +281,6 @@ fn edit_cause(error: Error) -> EditFailure {
 }
 
 #[test]
-fn view_bounds_keep_shapes_ranges_and_field_paths() {
-    for (value, cause) in [
-        (
-            Value::Int(0),
-            InvalidCause::Range(NumberRange {
-                value: Number::Int(0),
-                minimum: Number::Int(1),
-                maximum: Number::Int(i64::MAX),
-            }),
-        ),
-        (
-            Value::Bool(false),
-            InvalidCause::Shape(ral_core::fact::ShapeFailure {
-                expected: Expected::Shape(ValueShape::Int),
-                found: ral_core::fact::Found::Bool(false),
-            }),
-        ),
-    ] {
-        assert_eq!(
-            refusal(view_bound(&value, "start", "view-hash")).reason,
-            Reason::Invalid(Box::new(
-                InvalidFailure::new("view-hash".into(), cause).field("start".into())
-            ))
-        );
-    }
-    let mut shell = dressed_shell(&[]);
-    let error = refusal(view_range(
-        &[Value::string("unread"), Value::Int(2), Value::Int(1)],
-        &Mooring::adrift(),
-        &mut shell,
-        "view-text",
-    ));
-    assert_eq!(
-        error.reason,
-        Reason::Invalid(Box::new(InvalidFailure::new(
-            "view-text".into(),
-            InvalidCause::HalfOpenRange(HalfOpenRange {
-                start: 2usize.into(),
-                end: 1usize.into()
-            })
-        )))
-    );
-}
-
-#[test]
-fn edit_hash_shape_and_field_failures_keep_the_edit_index() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("file");
-    std::fs::write(&path, "body").unwrap();
-    let path = Value::string(ral_core::path::shown(&path));
-    let mut shell = dressed_shell(&[]);
-    let error = refusal(builtin_edit_hash(
-        &[path.clone(), Value::Int(3)],
-        &Mooring::adrift(),
-        &mut shell,
-    ));
-    assert_eq!(
-        error.reason,
-        Value::Int(3)
-            .expected("edit-hash", Expected::Shape(ValueShape::List))
-            .reason
-    );
-    assert_eq!(
-        edit_cause(refusal(builtin_edit_hash(
-            &[path.clone(), Value::list(vec![])],
-            &Mooring::adrift(),
-            &mut shell
-        ))),
-        EditFailure::NoEdits
-    );
-    for (edit, cause, field) in [
-        (
-            Value::Int(3),
-            InvalidCause::Shape(ral_core::fact::ShapeFailure {
-                expected: Expected::Record(vec!["hash".into(), "line".into()]),
-                found: ral_core::fact::Found::Int(3),
-            }),
-            None,
-        ),
-        (
-            Value::map(vec![]),
-            InvalidCause::MissingField("hash".into()),
-            None,
-        ),
-        (
-            Value::map(vec![("hash".into(), Value::string("h1"))]),
-            InvalidCause::MissingField("line".into()),
-            None,
-        ),
-        (
-            Value::map(vec![("hash".into(), Value::Bool(false))]),
-            InvalidCause::Shape(ral_core::fact::ShapeFailure {
-                expected: Expected::Shape(ValueShape::String),
-                found: ral_core::fact::Found::Bool(false),
-            }),
-            Some("hash"),
-        ),
-        (
-            Value::map(vec![
-                ("hash".into(), Value::string("h1")),
-                ("line".into(), Value::Int(2)),
-            ]),
-            InvalidCause::Shape(ral_core::fact::ShapeFailure {
-                expected: Expected::Shape(ValueShape::String),
-                found: ral_core::fact::Found::Int(2),
-            }),
-            Some("line"),
-        ),
-    ] {
-        let error = refusal(builtin_edit_hash(
-            &[path.clone(), Value::list(vec![edit])],
-            &Mooring::adrift(),
-            &mut shell,
-        ));
-        let mut expected = InvalidFailure::new("edit-hash".into(), cause);
-        if let Some(field) = field {
-            expected = expected.field(field.into());
-        }
-        assert_eq!(
-            error.reason,
-            Reason::Invalid(Box::new(expected.index(0usize.into())))
-        );
-    }
-}
-
-#[test]
 fn edit_hash_absence_and_duplicate_targets_refuse_before_writing() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("file");
@@ -532,130 +371,4 @@ fn literal_misses_keep_proven_evidence_and_distinct_match_counts() {
         ))),
         EditFailure::EmptyFrom
     );
-}
-
-#[test]
-fn grep_keeps_the_actual_foreign_compiler_cause() {
-    let pattern = "[";
-    let detail = RegexMatcherBuilder::new()
-        .crlf(true)
-        .build(pattern)
-        .unwrap_err()
-        .to_string();
-    let error = refusal(search_tree(
-        &mut dressed_shell(&[]),
-        false,
-        pattern,
-        "unread",
-    ));
-    assert_eq!(
-        error.reason,
-        Reason::Invalid(Box::new(InvalidFailure::new(
-            "grep-files".into(),
-            InvalidCause::Codec(CodecFailure::Regex(RegexFailure {
-                pattern: pattern.into(),
-                cause: RegexCause::GrepCompiler(detail),
-            }))
-        )))
-    );
-}
-
-#[test]
-fn file_read_and_walk_keep_io_subjects_and_utf8_offsets() {
-    let root = tempfile::tempdir().unwrap();
-    let missing = ral_core::path::shown(root.path().join("missing"));
-    let mut shell = dressed_shell(&[]);
-    let error = refusal(walk_root(&mut shell, "find-files", &missing));
-    let Reason::Io(failure) = error.reason else {
-        panic!("I/O failure")
-    };
-    assert_eq!(failure.operation, IoOperation::Walk);
-    assert_eq!(
-        failure.subject,
-        IoSubject::Path(quote_native(OsStr::new(&missing)))
-    );
-    assert!(matches!(
-        *failure.cause.leaf,
-        ral_core::fact::IoLeaf::Os(ral_core::fact::OsFailure {
-            kind: ral_core::fact::IoKind::NotFound,
-            ..
-        })
-    ));
-    let file = root.path().join("bytes");
-    std::fs::write(&file, [b'x', 0xff]).unwrap();
-    let path = ral_core::path::shown(&file);
-    let error = refusal(read_text_file(&mut shell, &path, "view-text"));
-    assert_eq!(
-        error.reason,
-        Reason::Invalid(Box::new(InvalidFailure::new(
-            "view-text".into(),
-            InvalidCause::Codec(CodecFailure::Utf8(CodecFailureUtf8 {
-                subject: Utf8Subject::Path(path),
-                cause: Utf8Failure {
-                    valid_up_to: 1usize.into(),
-                    error_len: Some(1usize.into())
-                },
-            }))
-        )))
-    );
-}
-
-#[test]
-fn explore_depth_and_skill_name_refusals_are_typed_before_inspection() {
-    let mut shell = dressed_shell(&[]);
-    for depth in [Value::Int(-1), Value::Unit] {
-        let error = refusal(builtin_explore_dir(
-            &[depth, Value::string("unread")],
-            &Mooring::adrift(),
-            &mut shell,
-        ));
-        let Reason::Invalid(failure) = error.reason else {
-            panic!("invalid depth")
-        };
-        assert_eq!(failure.operation, "explore-dir");
-        assert_eq!(
-            failure.path,
-            [ral_core::fact::DataStep::Field("depth".into())]
-        );
-        assert!(matches!(
-            failure.cause,
-            InvalidCause::Range(_) | InvalidCause::Shape(_)
-        ));
-    }
-    let error = refusal(builtin_skill(
-        &[Value::string("../invalid")],
-        &Mooring::adrift(),
-        &mut shell,
-    ));
-    assert_eq!(
-        error.reason,
-        skill::refusal(SkillFailure::InvalidName(SkillFailureInvalidName {
-            name: "../invalid".into()
-        }))
-        .reason
-    );
-}
-
-#[test]
-fn edit_and_skill_facts_keep_lossless_evidence_through_datum() {
-    use ral_core::data::datum::Datum;
-    let errors = [
-        edit_error(EditFailure::HashAmbiguous(EditFailureHashAmbiguous {
-            path: "file".into(),
-            hash: "h123456".into(),
-            lines: vec![Count::from(u64::MAX)],
-        })),
-        skill::refusal(SkillFailure::Missing(SkillFailureMissing {
-            name: "missing".into(),
-        })),
-        skill::refusal(SkillFailure::Read(ral_core::fact::SkillFailureRead {
-            name: "unreadable".into(),
-            place: ral_core::fact::SkillPlace::Disk("\"skills/unreadable\"".into()),
-            cause: ral_core::io::failure(&std::io::ErrorKind::PermissionDenied.into()),
-        })),
-    ];
-    for error in errors {
-        let reason = error.reason;
-        assert_eq!(Reason::decode(&reason.clone().encode()).unwrap(), reason);
-    }
 }

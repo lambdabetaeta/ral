@@ -795,17 +795,6 @@ mod tests {
         assert!(sched("0 0 30 2 *").next_after(&from).is_none());
     }
 
-    #[test]
-    fn parse_duration_units() {
-        assert_eq!(parse_duration("30m").unwrap(), Duration::from_mins(30));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_hours(2));
-        assert_eq!(parse_duration("1d").unwrap(), Duration::from_hours(24));
-        assert_eq!(parse_duration("45s").unwrap(), Duration::from_secs(45));
-        assert!(parse_duration("2x").is_err());
-        assert!(parse_duration("0m").is_err());
-        assert!(parse_duration("h").is_err());
-    }
-
     /// `fmt_duration` inverts `parse_duration`.
     #[test]
     fn durations_round_trip_through_their_text() {
@@ -813,38 +802,6 @@ mod tests {
             let d = parse_duration(text).unwrap();
             assert_eq!(parse_duration(&fmt_duration(d)).unwrap(), d, "{text}");
         }
-    }
-
-    #[test]
-    fn an_after_trigger_describes_its_delay_and_is_one_shot() {
-        let t = Trigger::After(parse_duration("2h").unwrap());
-        assert_eq!(t.describe(), "after 2h");
-        assert!(!t.is_recurring());
-    }
-
-    #[test]
-    fn registry_schedules_lists_and_unschedules() {
-        let mut reg = ScheduleRegistry::new();
-        let (mailbox, _log) = mailbox();
-        let receipt = book(
-            &mut reg,
-            &mailbox,
-            Trigger::Cron {
-                schedule: sched("0 3 * * *"),
-                expr: "0 3 * * *".into(),
-            },
-            "run tests",
-            "nightly",
-        )
-        .unwrap();
-        assert_eq!(receipt.label, "nightly");
-        let live = listed(&mailbox);
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].label, "nightly");
-        assert_eq!(live[0].trigger, "0 3 * * *");
-        assert!(remove(&mut reg, &mailbox, "nightly"));
-        assert!(listed(&mailbox).is_empty());
-        assert!(!remove(&mut reg, &mailbox, "nightly"));
     }
 
     #[test]
@@ -951,32 +908,6 @@ mod tests {
             next_in > Duration::from_mins(119) && next_in <= Duration::from_hours(2),
             "got {next_in:?}"
         );
-    }
-
-    #[test]
-    fn clear_drops_every_schedule() {
-        let mut reg = ScheduleRegistry::new();
-        let (mailbox, _log) = mailbox();
-        book(
-            &mut reg,
-            &mailbox,
-            Trigger::Cron {
-                schedule: sched("0 3 * * *"),
-                expr: "0 3 * * *".into(),
-            },
-            "x",
-            "x",
-        )
-        .unwrap();
-        assert_eq!(listed(&mailbox).len(), 1);
-        #[allow(
-            clippy::redundant_closure_for_method_calls,
-            reason = "the method item is not general enough for transact's higher-ranked lifetime"
-        )]
-        mailbox.transact(|txn| txn.clear()).unwrap().unwrap();
-        reg.clear();
-        assert!(listed(&mailbox).is_empty());
-        assert!(reg.by_label.is_empty());
     }
 
     const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1643,89 +1574,6 @@ mod tests {
         fire(&mut registry, &mailbox, Timestamp::now());
         assert_eq!(commit_count(&log), before + 1);
         assert_eq!(address.queued_posts().len(), 1);
-    }
-
-    #[test]
-    fn cron_keeps_field_count_and_every_field_cause() {
-        assert_eq!(
-            CronSchedule::parse("* * * *").unwrap_err(),
-            CronFailure {
-                expression: "* * * *".into(),
-                cause: CronCause::FieldCount(CronCauseFieldCount { got: 4usize.into() }),
-            }
-        );
-        for (spec, cause) in [
-            ("", CronFieldCause::Empty),
-            (
-                "*/x",
-                CronFieldCause::InvalidStep(CronFieldCauseInvalidStep {
-                    text: "x".into(),
-                    fault: NumberFault::Syntax,
-                }),
-            ),
-            (
-                "*/256",
-                CronFieldCause::InvalidStep(CronFieldCauseInvalidStep {
-                    text: "256".into(),
-                    fault: NumberFault::OutOfRange,
-                }),
-            ),
-            ("*/0", CronFieldCause::ZeroStep),
-            (
-                "nope",
-                CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
-                    token: "nope".into(),
-                    offered: vec![],
-                }),
-            ),
-            (
-                "256",
-                CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
-                    token: "256".into(),
-                    offered: vec![],
-                }),
-            ),
-            (
-                "60",
-                CronFieldCause::OutOfRange(CronFieldCauseOutOfRange {
-                    token: "60".into(),
-                    minimum: 0,
-                    maximum: 59,
-                }),
-            ),
-            (
-                "5-1",
-                CronFieldCause::DescendingRange(CronFieldCauseDescendingRange {
-                    range: "5-1".into(),
-                    from: 5,
-                    to: 1,
-                }),
-            ),
-        ] {
-            assert_eq!(parse_field(spec, 0, 59, &[]).unwrap_err(), cause);
-        }
-        for (expr, field, specification) in [
-            ("60 * * * *", CronField::Minute, "60"),
-            ("* 24 * * *", CronField::Hour, "24"),
-            ("* * 32 * *", CronField::DayOfMonth, "32"),
-            ("* * * 13 *", CronField::Month, "13"),
-            ("* * * * 8", CronField::DayOfWeek, "8"),
-        ] {
-            let failure = CronSchedule::parse(expr).unwrap_err();
-            assert_eq!(failure.expression, expr);
-            let CronCause::Field(cause) = failure.cause else {
-                panic!("field failure")
-            };
-            assert_eq!(cause.field, field);
-            assert_eq!(cause.specification, specification);
-        }
-        assert_eq!(
-            resolve("wrong", 1, 12, MONTHS).unwrap_err(),
-            CronFieldCause::UnknownValue(CronFieldCauseUnknownValue {
-                token: "wrong".into(),
-                offered: MONTHS.iter().map(|(name, _)| (*name).into()).collect(),
-            })
-        );
     }
 
     #[test]

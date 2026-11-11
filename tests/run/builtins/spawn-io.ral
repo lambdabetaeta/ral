@@ -1,0 +1,66 @@
+# `await` replays what a spawned block wrote, as if the block had run
+# where it is awaited, and a spawned block runs in the dynamic context of
+# its spawner
+
+# await replays the block's bytes before the next statement
+let h1 = spawn { echo from-child }
+await $h1
+echo marker-after
+# Expected: from-child, then marker-after
+
+# The result is claimed once: a second await replays nothing
+let h2 = spawn { echo just-once }
+await $h2
+try { await $h2 } { |_| echo claimed }
+# Expected: just-once, then claimed
+
+# Unawaited loose workers replay their bytes at the script's end, in birth order
+let lost1 = spawn { echo alpha }
+let lost2 = spawn { echo bravo }
+sleep 0.1
+echo only-this
+
+# The block's stderr replays to the awaiter's stderr, here a redirect to a
+# file: none of it reaches stdout
+let d = temp-dir
+let h3 = spawn { warn 'diag' }
+await $h3 2> "$d/err"
+echo after-diag
+rm -rf $d
+
+# A spawned command awaited where a value is wanted is captured, as the bind
+# rule decodes it; a value block's value is returned
+let h4 = spawn { echo hi }
+echo "[!{await $h4}]"
+let h5 = spawn { return 5 }
+echo "$[!{await $h5} + 1]"
+
+# A pipeline stage can close over a handle from outside and await it in place
+let h6 = spawn { return 7 }
+let r6 = echo x | !{ await $h6 }
+echo $r6
+
+# Handlers installed by `within` reach spawned and parallel blocks ...
+within [handlers: [mycmd: { |args| echo "handled" }]] {
+    let h7 = spawn { mycmd }
+    await $h7
+    let res = par { |x| let r = mycmd $x; return $r } [a, b] 0
+    echo ...$res
+}
+
+# ... so does `within [dir:]` ...
+let target = temp-dir
+within [dir: $target] {
+    let h8 = spawn { cwd }
+    echo $[!{await $h8} == $target]
+}
+rm -rf $target
+
+# ... but a handler installed inside a spawn does not leak out of it
+let h9 = spawn {
+    within [handlers: [localcmd: { |args| echo "child-handler" }]] { localcmd }
+}
+await $h9
+try { localcmd } { |_| echo "parent: no handler" }
+
+echo 'spawn io tests done'

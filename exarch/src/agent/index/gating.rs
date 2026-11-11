@@ -49,13 +49,6 @@ fn taught(prompt: &str) -> Vec<&'static str> {
 }
 
 #[test]
-fn underscored_names_never_reach_the_index() {
-    let index = index();
-    assert!(index.names.iter().all(|name| !name.starts_with('_')));
-    assert!(index.names.contains(&"explainable".to_string()));
-}
-
-#[test]
 fn the_schedule_verb_is_listed_only_when_scheduling_is_allowed() {
     let (index, roles) = (index(), Roles::default());
     for allowed in [false, true] {

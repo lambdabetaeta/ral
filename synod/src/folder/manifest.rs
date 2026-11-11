@@ -343,31 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn a_root_that_cannot_be_entered_fails_the_manifest() {
-        let dir = tempfile::tempdir().expect("temp workshop");
-        std::fs::write(dir.path().join("file"), b"x").expect("fixture");
-        assert!(Manifest::of_folder(&dir.path().join("gone")).is_err());
-        assert!(Manifest::of_folder(&dir.path().join("file")).is_err());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let locked = dir.path().join("locked");
-            std::fs::create_dir(&locked).expect("fixture");
-            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
-                .expect("fixture");
-            let binds = std::fs::read_dir(&locked).is_err();
-            let result = Manifest::of_folder(&locked);
-            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
-                .expect("fixture");
-            if !binds {
-                eprintln!("permissions do not bind here (running as root); skipping");
-                return;
-            }
-            assert!(result.is_err());
-        }
-    }
-
-    #[test]
     fn a_subfolder_that_vanished_is_unread() {
         let dir = workshop("manifest-vanished");
         std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");

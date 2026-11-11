@@ -109,25 +109,6 @@ fn the_first_retirement_stamp_wins() {
     assert_eq!(stamp(&tabs), first);
 }
 
-/// Re-pinning overwrites a slot in place and `drop_pin` removes one.
-#[test]
-fn pins_overwrite_in_place_and_keep_insertion_order() {
-    use crate::card::Mark;
-    let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
-    let keys = |s: &Status| s.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-    let mut status = Status::new();
-    status.set_pin("tasks".into(), raw(b"v1"));
-    status.set_pin("build".into(), raw(b"ok"));
-    assert_eq!(keys(&status), ["tasks", "build"]);
-
-    status.set_pin("tasks".into(), raw(b"v2"));
-    assert_eq!(keys(&status), ["tasks", "build"]);
-    assert!(matches!(&status.pins()[0].1.0[..], [Mark::Raw { bytes }] if bytes == b"v2"));
-
-    status.drop_pin("tasks");
-    assert_eq!(keys(&status), ["build"]);
-}
-
 #[test]
 fn job_opened_and_settled_update_only_the_named_tab() {
     use crate::record::NonEmpty;

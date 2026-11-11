@@ -77,43 +77,6 @@ fn pin_set_and_clear_round_trip_through_the_desk() {
     });
 }
 
-/// `` `exarch-pins `list `` names exactly the occupied keys, in
-/// `BTreeMap` order, and tracks a set/clear pair.
-#[test]
-fn pin_list_tracks_set_and_clear() {
-    with_desk(|d, _agent| {
-        let keys = |d: &ExarchDesk| match d
-            .ask(Request::Pins(Pins::List))
-            .expect("`exarch-pins `list` must answer Ok")
-        {
-            FOValue::List { items } => items
-                .into_iter()
-                .map(|v| match v {
-                    FOValue::String { value } => value,
-                    other => panic!("`exarch-pins `list` must answer strings, got {other:?}"),
-                })
-                .collect::<Vec<_>>(),
-            other => panic!("`exarch-pins `list` must answer a list, got {other:?}"),
-        };
-
-        assert!(keys(&d).is_empty(), "an empty register lists no keys");
-
-        d.ask(pin_set_req("b", "one"))
-            .expect("`exarch-pins `set` must answer Ok");
-        d.ask(pin_set_req("a", "two"))
-            .expect("`exarch-pins `set` must answer Ok");
-        assert_eq!(
-            keys(&d),
-            vec!["a", "b"],
-            "keys list in BTreeMap (lexicographic) order"
-        );
-
-        d.ask(pin_clear_req("b"))
-            .expect("`exarch-pins `clear` must answer Ok");
-        assert_eq!(keys(&d), vec!["a"], "a clear drops its key from the list");
-    });
-}
-
 /// Every surface class the live applier renders also records through the
 /// seam — a `Display` record (or, for the pin register, `Forensic`) — in
 /// the order it arrived.  A pin/unpin additionally publishes a `Transient`

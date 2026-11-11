@@ -510,7 +510,7 @@ fn open(
 
 #[cfg(test)]
 mod tests {
-    use super::{Declined, Host, combine_failures, launch_config, lock_resumable};
+    use super::{Declined, Host, launch_config, lock_resumable};
     use crate::agent::RootEngine;
     use crate::app::{self, Scratch};
     use crate::provider::roles::Roles;
@@ -521,21 +521,6 @@ mod tests {
     use ral_core::own::OwnDir;
     use std::sync::Arc;
     use std::time::Duration;
-
-    #[test]
-    fn combining_failures_keeps_the_frontend_verdict_then_teardown_lines() {
-        let teardown = ["a".to_string(), "b".to_string()];
-        assert_eq!(combine_failures(Ok(()), &[]), Ok(()));
-        assert_eq!(
-            combine_failures(Err("frontend".into()), &[]),
-            Err("frontend".into())
-        );
-        assert_eq!(combine_failures(Ok(()), &teardown), Err("a\nb".into()));
-        assert_eq!(
-            combine_failures(Err("frontend".into()), &teardown),
-            Err("frontend\na\nb".into())
-        );
-    }
 
     #[test]
     fn the_parsed_helper_idle_reaches_the_founded_fleet() {

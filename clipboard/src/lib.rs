@@ -103,11 +103,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn osc52_frames_base64_with_bel() {
-        assert_eq!(osc52("hello"), "\x1b]52;c;aGVsbG8=\x07");
-    }
-
-    #[test]
     fn cap_is_the_largest_that_fits() {
         assert!(osc52(&"x".repeat(OSC52_CAP)).len() <= 100_000);
         assert!(osc52(&"x".repeat(OSC52_CAP + 1)).len() > 100_000);

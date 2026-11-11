@@ -1,0 +1,63 @@
+# Redirects, decoders and here-strings
+
+let assert_eq = { |name expected actual|
+    if $[$expected != $actual] {
+        warn "FAIL: $name expected: !{to-json $expected} actual: !{to-json $actual}"
+        fail "assertion failed: $name"
+    }
+}
+
+let d = temp-dir
+
+# A final decoder yields a String that is an ordinary argument
+assert_eq 'decoded argument' "HELLO-WORLD\n" !{upper !{echo 'hello-world' | from-string}}
+
+# to-lines | from-lines round-trips a list across the byte boundary
+let fruits = ["cherry", "apple", "banana"]
+let back = !{to-lines !{sort-list $fruits} | from-lines}
+assert_eq 'to-lines | from-lines' [apple, banana, cherry] $back
+
+# `>` truncates, `>>` appends
+echo first > "$d/out"
+assert_eq '> writes' "first" !{cat "$d/out"}
+echo second >> "$d/out"
+assert_eq '>> appends' "first\nsecond" !{cat "$d/out"}
+echo third > "$d/out"
+assert_eq '> truncates' "third" !{cat "$d/out"}
+
+# Unlike `>`, a stderr redirect streams: a failing command's stderr stays
+attempt { sh -c 'echo oops >&2; exit 1' 2> "$d/err" }
+assert_eq '2> keeps stderr of a failing command' "oops" !{cat "$d/err"}
+attempt { sh -c 'echo oops2 >&2; exit 1' 2>~ "$d/err" }
+assert_eq '2>~ keeps stderr of a failing command' "oops2" !{cat "$d/err"}
+
+# Capture strips exactly one trailing newline
+let name = echo alice | from-string
+assert_eq 'from-string keeps its input' "alice\n" $name
+assert_eq 'capture strips the newline' alice !{echo alice}
+
+# from-line strips only the final newline
+assert_eq 'from-line strips the final newline' hello !{printf "hello\n" | from-line}
+assert_eq 'from-line keeps internal newlines' "foo\nbar" !{printf "foo\nbar\n" | from-line}
+assert_eq 'from-line without a newline' no-newline !{printf "no-newline" | from-line}
+
+# Capturing an external strips one terminator, CRLF counting as one;
+# a lone CR is text
+let c1 = printf 'a\r\n\r\n'
+assert_eq 'capture strips one CRLF' "a\r\n" $c1
+let c2 = printf 'a\r'
+assert_eq 'capture keeps a lone CR' "a\r" $c2
+
+# Here-string: `<< str` feeds the string to stdin; one newline at the
+# very front of the value is dropped so the body starts below the command
+let h1 = cat << #'
+alpha
+beta
+'# | from-string
+assert_eq 'here-string drops the leading newline' "alpha\nbeta\n" $h1
+let body = "\ngamma"
+let h2 = from-string << $body
+assert_eq 'here-string round-trips' gamma $h2
+
+rm -rf $d
+echo 'redirect tests done'

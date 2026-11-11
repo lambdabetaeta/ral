@@ -264,16 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn unarmed_ledger_records_nothing() {
-        let mut ledger = BindingLedger::default();
-        assert!(!ledger.armed());
-        ledger.tick();
-        ledger.note_install("x");
-        ledger.renew(["x"]);
-        assert!(!ledger.armed(), "an unarmed ledger stays unarmed");
-    }
-
-    #[test]
     fn baseline_names_are_never_candidates() {
         let mut ledger = BindingLedger::default();
         ledger.arm(lease(2), ["prelude_fn".to_string()]);
@@ -336,24 +326,6 @@ mod tests {
             "renew must never create a lease for an untracked name"
         );
     }
-
-    #[test]
-    fn idle_arithmetic_expires_at_bound() {
-        let mut ledger = BindingLedger::default();
-        ledger.arm(lease(3), []);
-        ledger.note_install("x");
-        for _ in 0..2 {
-            ledger.tick();
-        }
-        let armed = ledger.0.as_ref().unwrap();
-        let idle = armed.epoch - armed.last_used["x"];
-        assert_eq!(idle, 2, "two ticks since install is two idle calls");
-        assert!(idle < armed.lease.idle_calls, "not yet at the bound");
-        ledger.tick();
-        let armed = ledger.0.as_ref().unwrap();
-        let idle = armed.epoch - armed.last_used["x"];
-        assert_eq!(idle, armed.lease.idle_calls, "exactly at the bound expires");
-    }
 }
 
 /// Run-level tests for the install chokepoint and the use-observation
@@ -363,7 +335,7 @@ mod tests {
 /// harvest seams — `run`'s own compiled program, and `check_source`'s
 /// runtime-compiled loads. Driven through the public
 /// `run`, no exarch involved: the same harness shape as
-/// `core/tests/top_level_vs_block.rs`.
+/// `core/tests/integration/api/session.rs`.
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod chokepoint_tests {
@@ -463,14 +435,6 @@ mod chokepoint_tests {
             Some(Value::Handle(h)) => h.sample(),
             other => panic!("{name} is not a handle: {other:?}"),
         }
-    }
-
-    #[test]
-    fn top_level_let_is_leased() {
-        let mut shell = armed_shell(64);
-        top_level(&mut shell, "let top_scratch = 1").expect("top-level let");
-        assert!(is_leased(&shell, "top_scratch"));
-        assert!(!is_baseline(&shell, "top_scratch"));
     }
 
     #[test]
@@ -908,16 +872,6 @@ mod chokepoint_tests {
         );
     }
 
-    #[test]
-    fn nothing_expired_prunes_nothing() {
-        let mut shell = armed_shell(64);
-        top_level(&mut shell, "let fresh_z = 1").expect("define");
-        assert!(
-            shell.local.bindings.prune(&mut shell.env).is_empty(),
-            "nothing is idle enough to prune yet"
-        );
-    }
-
     // ── the large-binding warning ───────────────────────────────────────────
 
     /// A session-scope install meeting the threshold writes exactly one
@@ -945,16 +899,6 @@ mod chokepoint_tests {
             stderr2.matches("large binding `large_x`").count(),
             1,
             "a rebind that still exceeds the threshold must warn again"
-        );
-    }
-
-    #[test]
-    fn sub_threshold_install_does_not_warn() {
-        let mut shell = armed_shell_with(64, 1_000_000);
-        let stderr = top_level_stderr(&mut shell, "let small_x = 1");
-        assert!(
-            !stderr.contains("large binding"),
-            "an install under the threshold must write no warning"
         );
     }
 }

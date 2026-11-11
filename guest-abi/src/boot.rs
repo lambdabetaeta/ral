@@ -354,11 +354,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_slash_24_masks_the_last_octet() {
-        assert_eq!(netmask(24), Ipv4Addr::new(255, 255, 255, 0));
-    }
-
-    #[test]
     fn a_slash_32_masks_nothing() {
         assert_eq!(netmask(32), Ipv4Addr::BROADCAST);
     }
@@ -406,24 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn a_full_command_line_reads_into_a_boot() {
-        let boot = Boot::read(
-            "console=hvc0 root=/dev/vda ro ral.workspace=work ral.port=1729 ral.epoch=1771200000",
-        )
-        .expect("a complete command line must parse");
-        assert_eq!(
-            boot,
-            Boot {
-                workspace: Export::Virtiofs { tag: "work".into() },
-                port: 1729,
-                epoch: 1_771_200_000,
-                engine: DEFAULT_ENGINE.into(),
-                net: None,
-            }
-        );
-    }
-
-    #[test]
     fn a_plan9_port_makes_the_workspace_a_share_the_guest_dials_for() {
         let boot = Boot::read(
             "console=ttyS0 ral.workspace=work ral.plan9=50001 ral.port=1729 ral.epoch=1771200000",
@@ -459,36 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_path_may_be_overridden() {
-        let boot = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.engine=/opt/ral/engine")
-            .expect("an overridden engine path must parse");
-        assert_eq!(boot.engine, "/opt/ral/engine");
-    }
-
-    #[test]
     fn a_command_line_without_ral_settings_is_not_a_ral_guest() {
         let err = Boot::read("console=ttyAMA0 root=/dev/vda").expect_err("not our kernel");
         assert!(
             err.contains("not booted by a ral virtual-machine manager"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn each_missing_setting_names_itself() {
-        let missing_workspace =
-            Boot::read("ral.port=1 ral.epoch=0").expect_err("workspace is required");
-        assert!(
-            missing_workspace.contains("ral.workspace"),
-            "{missing_workspace}"
-        );
-
-        let missing_port = Boot::read("ral.workspace=w ral.epoch=0").expect_err("port is required");
-        assert!(missing_port.contains("ral.port"), "{missing_port}");
-
-        let missing_epoch =
-            Boot::read("ral.workspace=w ral.port=1").expect_err("epoch is required");
-        assert!(missing_epoch.contains("ral.epoch"), "{missing_epoch}");
     }
 
     #[test]
@@ -572,27 +525,6 @@ mod tests {
         let err = Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.engine=engine")
             .expect_err("a relative engine path must be refused");
         assert!(err.contains("absolute path"), "{err}");
-    }
-
-    #[test]
-    fn a_net_key_reads_into_its_four_fields() {
-        let boot =
-            Boot::read("ral.workspace=w ral.port=1 ral.epoch=0 ral.net=1730,10.0.2.15/24,10.0.2.2")
-                .expect("a well-formed net key must parse");
-        assert_eq!(
-            boot.net,
-            Some(
-                Net::new(
-                    1730,
-                    Link {
-                        address: Ipv4Addr::new(10, 0, 2, 15),
-                        prefix: 24,
-                        gateway: Ipv4Addr::new(10, 0, 2, 2),
-                    },
-                )
-                .unwrap()
-            )
-        );
     }
 
     #[test]

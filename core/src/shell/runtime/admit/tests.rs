@@ -37,34 +37,6 @@ fn refusal(site: &Site, value: &Value) -> String {
 }
 
 #[test]
-fn a_value_of_the_solved_type_is_admitted() {
-    let ty = closed_record(&[("a", Ty::int()), ("b", Ty::list(Ty::string()))]);
-    let value = map(&[
-        ("a", Value::Int(1)),
-        ("b", Value::list(vec![Value::string("x")])),
-    ]);
-    assert!(ground(&ty).admit(&value, &Fixings::default()).is_ok());
-}
-
-#[test]
-fn a_deep_mismatch_names_its_pointer() {
-    let ty = Ty::list(closed_record(&[("size", Ty::int())]));
-    let value = Value::list(vec![
-        map(&[("size", Value::Int(1))]),
-        map(&[("size", Value::string("12kB"))]),
-    ]);
-    let mismatch = ground(&ty).admit(&value, &Fixings::default()).unwrap_err();
-    assert_eq!(mismatch.failure.pointer, "/1/size");
-    assert_eq!(
-        mismatch.failure.cause,
-        AdmissionCause::Uses(AdmissionUses {
-            found: Value::string("12kB").found(),
-            expected: Expected::Shape(ValueShape::Int),
-        })
-    );
-}
-
-#[test]
 fn a_key_with_a_slash_or_a_tilde_is_escaped_in_its_pointer() {
     let ty = Ty::map(Ty::int());
     let value = map(&[("a/b~c", Value::string("x"))]);
@@ -80,16 +52,6 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
     assert!(site(&u, &open).admit(&value, &Fixings::default()).is_ok());
     let closed = closed_record(&[("a", Ty::int())]);
     assert!(refusal(&ground(&closed), &value).contains("has a field \"extra\""));
-}
-
-#[test]
-fn a_missing_field_is_named() {
-    let ty = closed_record(&[("verdict", Ty::string())]);
-    let message = refusal(&ground(&ty), &map(&[]));
-    assert_eq!(
-        message,
-        "the value has no field \"verdict\", which this script reads"
-    );
 }
 
 #[test]

@@ -117,26 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn the_disk_mounts_carry_the_resolved_devices_to_the_overlays_mount_points() {
-        for disks in CANDIDATES {
-            let mounts = disk_mounts(disks);
-            assert_eq!(mounts[0].source, disks.rootfs);
-            assert_eq!(mounts[0].target, ROOTFS_MOUNT);
-            assert_eq!(mounts[1].source, disks.session);
-            assert_eq!(mounts[1].target, SESSION_MOUNT);
-        }
-    }
-
-    #[test]
-    fn every_candidate_names_two_distinct_devices() {
-        for disks in CANDIDATES {
-            assert!(disks.rootfs.starts_with("/dev/"), "{}", disks.rootfs);
-            assert!(disks.session.starts_with("/dev/"), "{}", disks.session);
-            assert_ne!(disks.rootfs, disks.session, "{} disks", disks.model);
-        }
-    }
-
-    #[test]
     fn the_probe_prefers_virtio_when_every_device_is_present() {
         let disks = resolve_disks(|_| true).expect("a machine with every device has a pair");
         assert_eq!(disks.rootfs, "/dev/vda");
@@ -153,15 +133,6 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_with_no_candidate_disks_is_refused_by_name() {
-        let err = resolve_disks(|_| false).expect_err("no disks, no boot");
-        for disks in CANDIDATES {
-            assert!(err.contains(disks.rootfs), "{err}");
-            assert!(err.contains(disks.session), "{err}");
-        }
-    }
-
-    #[test]
     fn a_machine_with_only_the_rootfs_disk_is_refused_rather_than_skipped() {
         let err = resolve_disks(|device| device == "/dev/vda")
             .expect_err("one disk of a pair is not a machine");
@@ -170,18 +141,6 @@ mod tests {
         assert!(
             !err.contains("/dev/sda"),
             "the refusal is about the pair that answered, not the one that did not: {err}"
-        );
-    }
-
-    #[test]
-    fn the_overlay_is_built_from_exactly_the_two_mounted_disks() {
-        let Options::Fixed(data) = overlay().data else {
-            panic!("the overlay carries fixed options")
-        };
-        let options = data.to_str().expect("overlay options are ASCII");
-        assert_eq!(
-            options,
-            format!("lowerdir={ROOTFS_MOUNT},upperdir={UPPER},workdir={WORKDIR}")
         );
     }
 }

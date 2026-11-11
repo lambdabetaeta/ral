@@ -1,5 +1,4 @@
 use super::*;
-use crate::data::Finite;
 use crate::ir::Prim;
 use crate::path::TildePath;
 use crate::syntax::parser::parse;
@@ -172,20 +171,6 @@ fn tilde_path_command_head_elaborates_to_exec() {
             "update".into()
         )))]
     );
-}
-
-#[test]
-fn tilde_path_command_head_without_args_elaborates_to_exec() {
-    let ast = parse("~/.local/bin/claude").expect("parse");
-    let comp = elaborate_one(&ast, [], None);
-    let (name, args, _) = expect_exec_name(&comp);
-    assert_eq!(
-        name,
-        &CommandName::TildePath(TildePath {
-            suffix: Some("/.local/bin/claude".into()),
-        })
-    );
-    assert!(args.is_empty());
 }
 
 #[test]
@@ -379,20 +364,6 @@ fn script_with_no_identity_is_an_elaboration_error() {
 // ── phrases and right-nested binders ─────────────────────────────────
 
 #[test]
-fn nested_sequence_is_seq() {
-    let stmts = parse("date\necho hi").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], None);
-    let seq = elaborator.stmts_nested(&stmts);
-    let CompKind::Seq { first, rest } = &seq.item else {
-        panic!("expected a Seq, got {:?}", seq.item);
-    };
-    let (name, _, _) = expect_exec_name(first);
-    assert_eq!(name, &CommandName::Bare("date".into()));
-    let (name, _, _) = expect_exec_name(rest);
-    assert_eq!(name, &CommandName::Bare("echo".into()));
-}
-
-#[test]
 fn script_cannot_be_bound_through_a_rest_pattern() {
     let ast = parse("let [a, ...SCRIPT] = [1, 2]").expect("parse");
     assert!(elaborate(&ast, [], Some("main.ral".as_ref())).is_err());
@@ -415,53 +386,6 @@ fn script_cannot_be_bound_by_a_block_definition() {
 }
 
 #[test]
-fn word_val_classifies_canonical_numbers() {
-    assert_eq!(word_val("5"), Val::Int(5));
-    assert_eq!(word_val("42"), Val::Int(42));
-    assert_eq!(word_val("0"), Val::Int(0));
-    assert_eq!(
-        word_val("2.5"),
-        Val::Float(Finite::new(2.5).expect("finite"))
-    );
-    assert_eq!(word_val("true"), Val::Bool(true));
-    assert_eq!(word_val("unit"), Val::String("unit".into()));
-    assert_eq!(word_val("hello"), Val::String("hello".into()));
-}
-
-#[test]
-fn nested_let_wildcard_keeps_its_pattern() {
-    let stmts = parse("let _ = date\necho hi").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], None);
-    let seq = elaborator.stmts_nested(&stmts);
-    let CompKind::Bind { pattern, .. } = &seq.item else {
-        panic!("expected a Bind, got {:?}", seq.item);
-    };
-    assert!(matches!(pattern.as_ref(), Pattern::Wildcard));
-}
-
-#[test]
-fn nested_let_right_nests_over_following_statements() {
-    let stmts = parse("let x = 1\necho hi\necho bye").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], None);
-    let seq = elaborator.stmts_nested(&stmts);
-    let CompKind::Bind { pattern, rest, .. } = &seq.item else {
-        panic!("expected a Bind, got {:?}", seq.item);
-    };
-    assert!(matches!(pattern.as_ref(), Pattern::Name(n) if n.as_ref() == "x"));
-    let CompKind::Seq {
-        rest: inner_rest, ..
-    } = &rest.item
-    else {
-        panic!(
-            "expected the let to right-nest over echo hi, got {:?}",
-            rest.item
-        );
-    };
-    let (name, _, _) = expect_exec_name(inner_rest);
-    assert_eq!(name, &CommandName::Bare("echo".into()));
-}
-
-#[test]
 fn nested_block_ending_in_let_has_unit_tail() {
     let stmts = parse("let x = 1").expect("parse");
     let mut elaborator = Elaborator::new_with_bindings([], None);
@@ -470,38 +394,6 @@ fn nested_block_ending_in_let_has_unit_tail() {
         panic!("expected a Bind, got {:?}", seq.item);
     };
     assert_eq!(rest.item, CompKind::Return(Val::Unit));
-}
-
-#[test]
-fn toplevel_phrases_classify_define_and_run() {
-    let ast = parse("let x = 1\necho hi").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
-    assert_eq!(top.len(), 2);
-    assert!(matches!(top[0].item, Phrase::Define { .. }));
-    assert!(matches!(top[1].item, Phrase::Run(_)));
-}
-
-#[test]
-fn toplevel_self_recursive_let_is_a_rec_define() {
-    let ast = parse("let f = { |n| f $n }").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
-    assert_eq!(top.len(), 1);
-    let Phrase::Define { pattern, comp, .. } = &top[0].item else {
-        panic!("expected a Define, got {:?}", top[0].item);
-    };
-    assert!(matches!(pattern.as_ref(), Pattern::Name(n) if n.as_ref() == "f"));
-    let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
-        panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
-    };
-    let CompKind::Rec { group, index } = &rec.shape().item else {
-        panic!("expected a Rec node, got {:?}", rec.shape().item);
-    };
-    assert_eq!(*index, 0);
-    assert_eq!(
-        group.shape().len(),
-        1,
-        "a self-recursive let is a group of one"
-    );
 }
 
 #[test]

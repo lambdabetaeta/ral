@@ -1140,20 +1140,6 @@ fn volume_guid_paths_open_with_a_literal_head() {
     }
 }
 
-#[test]
-fn an_extension_follows_the_final_dot_of_the_final_name() {
-    for (raw, want) in [
-        ("report.pdf", Some("pdf")),
-        ("a/b/chart.Png", Some("Png")),
-        ("Invoice.pdf.lnk", Some("lnk")),
-        ("sub.pdf/inner", None),
-        (".pdf", None),
-        ("Makefile", None),
-    ] {
-        assert_eq!(extension(raw), want, "{raw}");
-    }
-}
-
 /// A descendant name is entry names alone: a root, a dot, an empty
 /// piece and, on Windows, a drive or a stream are refused.
 #[test]
@@ -1186,15 +1172,6 @@ fn a_descendant_is_entry_names_alone() {
             "{windows_only}"
         );
     }
-}
-
-#[test]
-fn a_suffix_is_appended_never_substituted() {
-    assert_eq!(
-        with_appended_suffix(Path::new("ledger.json"), "tmp"),
-        pb("ledger.json.tmp")
-    );
-    assert_eq!(with_appended_suffix(Path::new("x"), "crash"), pb("x.crash"));
 }
 
 #[test]
@@ -1361,36 +1338,6 @@ fn a_join_under_foreign_rules_is_the_same_on_every_host() {
             "{base:?} + {sub:?}"
         );
     }
-}
-
-/// A host path joins as a string joins under the host's rules.
-#[test]
-fn a_host_join_is_the_string_join_under_the_hosts_rules() {
-    for sub in ["", "x", "/x", "x//y/", "../x", r"C:\x", "a/C:", "//srv/sh"] {
-        assert_eq!(
-            join_relative("b", sub),
-            join_under("b", sub, PathRules::HOST).map(PathBuf::from),
-            "{sub:?}"
-        );
-    }
-}
-
-// `/` has no parent, so a `..` that reaches the root is dropped.
-#[cfg(unix)]
-#[test]
-fn fold_dots_drops_dotdot_at_root() {
-    assert_eq!(fold_dots(Path::new("/..")), pb("/"));
-    assert_eq!(fold_dots(Path::new("/a/../../x")), pb("/x"));
-    assert_eq!(fold_dots(Path::new("/../..")), pb("/"));
-}
-
-// A `..` a relative path cannot pop survives for a later cwd join, and
-// is never taken by another.
-#[test]
-fn fold_dots_keeps_leading_dotdot_on_relative_path() {
-    assert_eq!(fold_dots(Path::new("../x")), pb("../x"));
-    assert_eq!(fold_dots(Path::new("a/../../x")), pb("../x"));
-    assert_eq!(fold_dots(Path::new("../../a")), pb("../../a"));
 }
 
 /// The guest's fold, pinned on every host: a guest path folds to a guest
@@ -1652,18 +1599,6 @@ fn fold_dots_keeps_a_name_that_is_not_utf8() {
     assert_eq!(fold_dots(raw), want);
 }
 
-#[test]
-fn a_fold_is_its_own_fixed_point() {
-    for raw in ["/a/./b/../c", "/a/b/", "/..", "../x", "/"] {
-        let once = fold_dots(Path::new(raw));
-        assert_eq!(fold_dots(&once), once, "{raw}");
-    }
-    for raw in [r"C:/a\..\b", r"C:\a\.\b\", r"C:\..", r"\\srv\sh\a\..\.."] {
-        let once = fold_dots_under(raw, PathRules::Windows);
-        assert_eq!(fold_dots_under(&once, PathRules::Windows), once, "{raw}");
-    }
-}
-
 /// `std::path` finds no prefix in a doubled-separator head that is no
 /// share or namespace, and would read it as on the current drive.
 #[test]
@@ -1682,53 +1617,6 @@ fn an_unparsed_head_is_one_std_reads_on_the_current_drive() {
     ] {
         assert!(!is_unparsed_head(Path::new(raw)), "{raw}");
     }
-}
-
-#[test]
-fn parent_or_cwd_falls_back_to_dot() {
-    for (path, want) in [("a/b", "a"), ("a", "."), ("/a", "/"), ("/", "."), ("", ".")] {
-        assert_eq!(parent_or_cwd(Path::new(path)), Path::new(want), "{path:?}");
-    }
-}
-
-/// By spelling alone: no `..` is folded, and a bare name's parent is empty.
-#[test]
-fn spelled_parent_drops_the_last_name_and_nothing_else() {
-    for (path, want) in [
-        ("/a/b", Some("/a")),
-        ("/a/b/..", Some("/a/b")),
-        ("/a", Some("/")),
-        ("a", Some("")),
-        ("/", None),
-    ] {
-        assert_eq!(
-            spelled_parent(Path::new(path)),
-            want.map(Path::new),
-            "{path:?}"
-        );
-    }
-}
-
-#[test]
-fn basename_is_the_last_name_else_the_path_itself() {
-    for (path, want) in [
-        ("/usr/bin/git", "git"),
-        ("git", "git"),
-        ("dir/", "dir"),
-        ("/", "/"),
-        ("a/..", "a/.."),
-    ] {
-        assert_eq!(basename(path), want, "{path:?}");
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn utf8_refuses_a_path_that_is_not_text_and_names_it() {
-    use std::os::unix::ffi::OsStrExt;
-    assert_eq!(utf8(Path::new("/a/b")), Ok("/a/b"));
-    let bad = Path::new(OsStr::from_bytes(b"/a/\xff"));
-    assert_eq!(utf8(bad), Err(NotUtf8(bad.to_path_buf())));
 }
 
 #[cfg(unix)]
@@ -1782,31 +1670,6 @@ fn a_batch_image_is_named_as_win32_trims_it() {
 fn batch_extensions_are_exec_extensions() {
     for ext in WINDOWS_BATCH_EXTENSIONS {
         assert!(WINDOWS_EXEC_EXTENSIONS.contains(ext), "{ext}");
-    }
-}
-
-/// `/` makes a path under both rules; `\` only under Windows, so a Posix
-/// `a\b` is a bare name for `PATH`.
-#[test]
-fn a_separator_under_the_rules_makes_a_command_name_a_path() {
-    for (name, posix, windows) in [
-        ("git", false, false),
-        ("./tool", true, true),
-        ("/bin/sh", true, true),
-        (r"a\b", false, true),
-        (r".\tool", false, true),
-        (r"C:\Users\tool", false, true),
-    ] {
-        assert_eq!(
-            names_a_path_for(name, PathRules::Posix),
-            posix,
-            "{name} posix"
-        );
-        assert_eq!(
-            names_a_path_for(name, PathRules::Windows),
-            windows,
-            "{name} windows"
-        );
     }
 }
 

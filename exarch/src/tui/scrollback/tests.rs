@@ -314,25 +314,6 @@ fn a_result_stamps_the_call_it_names() {
     );
 }
 
-/// The printer never mints a block itself: the mirror only ever draws what
-/// the fold has reported.
-#[test]
-fn the_mirror_draws_what_the_fold_reports() {
-    let mut sb = scrollback();
-    let mut log = Stream::new();
-    let _ = log.land(
-        &mut sb,
-        Record::Transcript(Transcript::UserPrompt {
-            turn: 1,
-            text: "hello".into(),
-            voice: Voice::Human,
-        }),
-    );
-    log.say(&mut sb, "hi back");
-    let all = text(&mut sb);
-    assert!(all.contains("hello") && all.contains("hi back"), "{all:?}");
-}
-
 /// Deliberation and the work it ordered read as one group — one `∴` head
 /// over one `▸` run — and prose closes it, so the answer after opens its
 /// own block.

@@ -13,6 +13,26 @@ const HELPER: &str = "RAL_ISOLATED_TEST";
 const DONE: &str = "RAL_ISOLATED_TEST_DONE";
 const WAIT: Duration = Duration::from_secs(30);
 
+/// [`isolated`] for the enclosing test `$test`, named as libtest names it.
+#[macro_export]
+macro_rules! isolated {
+    ($test:ident, $check:expr) => {
+        $crate::test_helper::subprocess::isolated(
+            &$crate::test_helper::subprocess::exact_name(module_path!(), stringify!($test)),
+            $check,
+        )
+    };
+}
+
+/// libtest's name for `test` in `module`: the module path without its crate.
+#[must_use]
+pub fn exact_name(module: &str, test: &str) -> String {
+    match module.split_once("::") {
+        Some((_, path)) => format!("{path}::{test}"),
+        None => test.to_owned(),
+    }
+}
+
 /// Re-enter this exact test with null stdin and captured diagnostics.
 /// A completion marker rejects misspelled test names; helper exit is bounded.
 /// Concurrent actors still need checkpoints.
@@ -20,7 +40,7 @@ const WAIT: Duration = Duration::from_secs(30);
 /// # Panics
 /// If spawn, bounded exit, test execution, or the completion marker fails.
 #[track_caller]
-pub(crate) fn isolated(test: &str, check: impl FnOnce()) {
+pub fn isolated(test: &str, check: impl FnOnce()) {
     if std::env::var(HELPER).as_deref() == Ok(test) {
         check();
         // Tested stdout and libtest output cannot stand in for completion.

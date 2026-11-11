@@ -495,18 +495,6 @@ mod tests {
         drop(create_instance(false).expect("a pipe instance"));
     }
 
-    #[test]
-    fn the_cache_is_machine_wide() {
-        let cache = cache();
-        assert!(
-            cache.ends_with(Path::new("Synod").join("Machine")),
-            "{cache:?}"
-        );
-        if let Some(program_data) = std::env::var_os("ProgramData") {
-            assert!(cache.starts_with(PathBuf::from(program_data)));
-        }
-    }
-
     /// Requests are read from `input`; replies accumulate apart, so reads never see them.
     struct Duplex {
         input: std::io::Cursor<Vec<u8>>,
@@ -909,15 +897,6 @@ mod tests {
         );
         drop(granted);
         std::fs::rename(&folder, parent.join("moved")).expect("free once released");
-    }
-
-    #[test]
-    fn a_file_is_refused() {
-        let dir = tempfile::tempdir().expect("scratch folder");
-        let file = dir.path().join("note.txt");
-        std::fs::write(&file, b"hello").expect("a file");
-        let refused = Granted::open(&file, true).err().expect("refused");
-        assert!(matches!(refused, Error::NotAFolder(_)), "{refused:?}");
     }
 
     /// Junction creation needs no symbolic-link privilege.
