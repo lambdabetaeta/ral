@@ -548,7 +548,7 @@ mod tests {
 
         for (fields, use_text) in [
             (
-                "name: 'p', handlers: [foo: { |args| return $d }]",
+                "name: 'p', handlers: [:, foo: { |args| return $d }]",
                 "return $d",
             ),
             ("name: $d", "name: $d"),

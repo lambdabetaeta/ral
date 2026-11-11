@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+generated_at_date: 2026-11-11
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -53,7 +53,7 @@ The request supplies:
 - **source + a virtual `origin` naming the call's turn (`turn N`).** Core's `compile_run` runs
   `compile_and_typecheck` seeded from the live session (`shell.session_schemes()`,
   the one name→scheme seed —
-  [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); the
+  [[internals/type-inference|type-inference]]); the
   prelude's schemes ride scope[0], installed when the annotated prelude was
   evaluated at boot. The check is strict — any type error is fatal — over the
   one inference pass every evaluated path shares.

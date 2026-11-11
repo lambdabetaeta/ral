@@ -33,9 +33,9 @@ mod table;
 
 /// Wire mirror of a user-installed [`HandlerFrame`].
 ///
-/// Hydration does not re-check arity: a per-name entry is unary by
-/// construction ([`HandlerEntry::ral_per_name`]) and the sender vetted the
-/// thunk at install.
+/// Per-name entries are unary by construction ([`HandlerEntry::ral_per_name`]).
+/// Scoped handlers are statically checked; persistent handlers are vetted at
+/// install. Hydration needs no further inference.
 #[derive(Debug, Clone)]
 pub(crate) struct WireHandlerFrame {
     entries: Vec<(String, SerialValue)>,

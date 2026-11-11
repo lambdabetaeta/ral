@@ -233,7 +233,7 @@ context uses stack frames where later re-exposure is actually needed.
 
 **A handler supplies another interpretation for an open operation.**
 
-`within [handlers: [git: H], handler: K] { body }` installs interpretations for
+`within [handlers: [:, git: H], handler: K] { body }` installs interpretations for
 the dynamic extent of `body`. Resolution is env-first, so a lexical binding, a
 native, or a prelude function retains its ordinary meaning at a bare head even
 where a handler of the same name is installed; only a bare name which reaches
@@ -251,7 +251,7 @@ Handlers in `ral` are deliberately restricted:
 Self-masking makes wrap-and-forward finite:
 
 ```ral
-within [handlers: [git: { |args| git ...$args }]] {
+within [handlers: [:, git: { |args| git ...$args }]] {
   git status
 }
 ```
@@ -272,17 +272,30 @@ host's base interpretation of a command-shaped name, and the operating system
 share one convention, differing in what they do with it rather than in what
 they receive.
 
-Arity is checked where a handler is written and again when it is installed, and
-it is the handler's type, not its spelling. Inferring it at dispatch would be
-unsafe under currying: applying one argument to a binary lambda returns a
-closure, so a malformed handler could otherwise succeed with a plausible but
-nonsensical result.
+Arity is the handler's type, not its spelling. `within` checks handlers
+statically; persistent handlers (rc, manifest) are also vetted at installation.
+Inferring arity at dispatch would be unsafe under currying: applying one
+argument to a binary lambda returns a closure, so a malformed handler could
+otherwise succeed with a plausible but nonsensical result.
 
-A handler changes interpretation, not typing. Σ and lexical bindings alone
-determine a head's type and argument gate: a base frame keeps its own scheme
-and in-shell gate; every other command name keeps the external gate and
-`Command` result. The stack contributes names only to diagnostics, never
-persisted arm schemes. Handling `ls` cannot make `ls [1, 2]` valid.
+`handlers:` is a map everywhere, with type `Map(U([String] → Command))`.
+Its keys are data, so a table may be computed, bound, or extended by a spread;
+a record is not silently converted to one. The option names of `within`
+remain syntax, but their values are ordinary values. A written handler map is
+checked entry by entry so each diagnostic names its command and points at its
+handler. Other values, and the rc and manifest fields, take one equation
+against the map type. Written map labels inform diagnostics in the body,
+never typing. Only persistent installation needs to re-vet handlers: `within`'s
+static check is total.
+
+Every handler is a command: a named arm has type `U([String] → Command)`,
+the catch-all `U(String → [String] → Command)`, independent of the name and Σ.
+An argv manifest row likewise has `[String] → Command` by construction, with
+no type rule a host could vary. A handler changes interpretation, not typing:
+Σ and lexical bindings determine the head's argument gate — in-shell for a
+base frame, external for every other command name. The stack contributes names
+only to diagnostics, never persisted arm schemes. Handling `ls` cannot make
+`ls [1, 2]` valid.
 
 Persistent handlers come from the host, between units, through the rc's and
 plugin manifest's `handlers:` field. Scoped handlers use

@@ -94,7 +94,7 @@ echo
 each { |x| echo $x } [1, 2] | cat
 
 # A unit stub stands in for a command and captures nothing
-within [handlers: [curl: { |a| return () }]] { let x = curl foo; to-json $x }
+within [handlers: [:, curl: { |a| return () }]] { let x = curl foo; to-json $x }
 echo
 
 # A block ending in a value streams what it wrote before

@@ -60,7 +60,8 @@ fn tag_loader_error(e: Break) -> Break {
 /// needs only *an* environment to run the module's phrases under — the
 /// session environment, `Mode::Module`, never the caller's own block-local
 /// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
-/// name read from `ran.env`.
+/// name read from `ran.env`. The admitted export record carries delayed
+/// caller contracts.
 pub(crate) fn builtin_use(
     args: &[Value],
     site: &Arc<Site>,
@@ -104,7 +105,7 @@ pub(crate) fn builtin_use(
     let record = Value::map(bindings);
     site.admit_module(&record, &top.exported_schemes(), shell.fixings())
         .map_err(|mismatch| mismatch.refusal("use"))?;
-    Ok(record)
+    Ok(site.wrap(record))
 }
 
 /// `$dir/$name` over `RAL_PATH`, relative entries read against the shell's

@@ -51,7 +51,9 @@ transport are runtime mechanisms, not mechanised rules.
   binding capture as `Capture(M) to d. Prim::Decode(d)`.
   No runtime rule forces implicitly or converts a value producer to a command.
 - A variant always has a payload: a bare tag carries `()`.
-- A form's options are spread-free record nodes; handler labels remain syntax.
+- A form's options are one spread-free record node. `within`'s `handlers:`
+  is an ordinary map-valued field; command names are data, with no
+  handler-specific syntax, AST or IR node.
 
 **A new IR form must be classified as control, primitive, or shell.** A core
 form requires an Agda counterpart, including its typing and machine rule or

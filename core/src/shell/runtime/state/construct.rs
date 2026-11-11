@@ -179,7 +179,7 @@ pub(super) fn natives_and_base(
 ) -> (Vec<(String, Value)>, Vec<BuiltinEntry>) {
     let natives = entries
         .iter()
-        .filter(|entry| entry.decl.convention == Convention::Value)
+        .filter(|entry| matches!(entry.decl.convention, Convention::Value(_)))
         .map(|entry| {
             (
                 entry.decl.name.clone().into_owned(),
@@ -189,7 +189,7 @@ pub(super) fn natives_and_base(
         .collect();
     let base = entries
         .iter()
-        .filter(|entry| entry.decl.convention == Convention::Argv)
+        .filter(|entry| matches!(entry.decl.convention, Convention::Argv))
         .cloned()
         .collect();
     (natives, base)

@@ -1,28 +1,28 @@
 # Within [handlers:] installs per-name command arms
 
 # Simple handler ignoring args
-within [handlers: [mycmd: { |args| echo 'handled' }]] {
+within [handlers: [:, mycmd: { |args| echo 'handled' }]] {
     mycmd
 }
 
 # Lambda handler receives args
-within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
+within [handlers: [:, mycmd: { |args| echo 'got' ...$args }]] {
     mycmd a b c
 }
 
 # An arm's arity is its type: a block whose body is a function of the argv
 let prefixed = { |prefix| return { |args| echo $prefix ...$args } }
-within [handlers: [mycmd: { prefixed 'made' }]] {
+within [handlers: [:, mycmd: { prefixed 'made' }]] {
     mycmd a b
 }
 let wrap = { |f| return { !$f } }
 let wrapped = wrap { |args| echo 'wrapped' ...$args }
-within [handlers: [mycmd: $wrapped]] {
+within [handlers: [:, mycmd: $wrapped]] {
     mycmd c
 }
 # An arm escaped from its scope is vetted against what it captured
 let mkhi = { |p| let greet = { |w args| echo $w ...$args }; return { greet $p } }
-within [handlers: [hi: !{mkhi 'yo'}]] {
+within [handlers: [:, hi: !{mkhi 'yo'}]] {
     hi a
 }
 
@@ -30,44 +30,44 @@ within [handlers: [hi: !{mkhi 'yo'}]] {
 try { mycmd | from-string } { |_| echo 'mycmd gone'; return "" }
 
 # Nesting: inner wins
-within [handlers: [mycmd: { |args| echo 'outer' }]] {
-    within [handlers: [mycmd: { |args| echo 'inner' }]] {
+within [handlers: [:, mycmd: { |args| echo 'outer' }]] {
+    within [handlers: [:, mycmd: { |args| echo 'inner' }]] {
         mycmd
     }
     mycmd
 }
 
 # ^name is the binary: it escapes the handler.
-within [handlers: [cat: { |args| echo 'handler-cat' }]] {
+within [handlers: [:, cat: { |args| echo 'handler-cat' }]] {
     cat
     echo hi | ^cat
 }
 
 # Combined keys
-within [env: [MY_VAR: scoped], handlers: [mycmd: { |args| let v = !{env}[MY_VAR]; echo "env=$v" }]] {
+within [env: [MY_VAR: scoped], handlers: [:, mycmd: { |args| let v = !{env}[MY_VAR]; echo "env=$v" }]] {
     mycmd
 }
 
 # An outer frame answers when the inner one has no entry for the name
-within [handlers: [cmd2: { |args| echo outer }]] {
-    within [handlers: [cmd1: { |args| echo inner }]] { cmd2 }
+within [handlers: [:, cmd2: { |args| echo outer }]] {
+    within [handlers: [:, cmd1: { |args| echo inner }]] { cmd2 }
 }
 
 # A handler applies to a command inside a pipeline
-within [handlers: [cat: { |args| echo mocked }]] {
+within [handlers: [:, cat: { |args| echo mocked }]] {
     let text = !{cat /nonexistent | from-string}
     echo !{length $text}
 }
 
 # A handler under a native's name installs, but the bare head still resolves
 # to the native: `length` keeps its Int result, not the arm's bytes
-within [handlers: [length: { |xs| echo hi }]] {
+within [handlers: [:, length: { |xs| echo hi }]] {
     let r = !{length [1, 2, 3]}
     echo $[$r + 1]
 }
 
 # An arm stacked on `echo` intercepts the bare name, and may preserve its byte mode
-within [handlers: [echo: { |args| echo mocked }]] { echo hi }
+within [handlers: [:, echo: { |args| echo mocked }]] { echo hi }
 
 # Value-world spellings for what a handler cannot return
 let three = { |xs| length $xs }
@@ -76,24 +76,30 @@ let inc = { |n| $[!{int $n} + 1] }
 echo !{inc 5}
 
 # A local binding beats a handler of the same name
-within [handlers: [foo: { |args| echo handler }]] {
+within [handlers: [:, foo: { |args| echo handler }]] {
     let foo = { return 41 }
     let r = !{foo}
     echo $[$r + 1]
 }
 
 # An argv is a list of text whatever was written, and a spread reaches the arm
-within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd hello 1 true }
-within [handlers: [mycmd2: { |args| echo ...$args }]] {
+within [handlers: [:, mycmd: { |args| echo ...$args }]] { mycmd hello 1 true }
+within [handlers: [:, mycmd2: { |args| echo ...$args }]] {
     mycmd2 hello 1 true
 }
-within [handlers: [spreader: { |args| echo ...$args }]] {
+within [handlers: [:, spreader: { |args| echo ...$args }]] {
     let xs = [1]
     spreader ...$xs
 }
-within [handlers: [spreader2: { |a| echo ...$a }]] {
+within [handlers: [:, spreader2: { |a| echo ...$a }]] {
     let ys = [hi]
     spreader2 ...$ys
 }
+
+# Handler maps may be bound, spread, or empty
+let h = [:, ll: { |args| echo 'bound' }]
+within [handlers: $h] { ll }
+within [handlers: [:, ...$h, la: { |args| echo 'la' }]] { ll; la }
+within [handlers: [:]] { echo 'empty' }
 
 echo 'within handler tests done'

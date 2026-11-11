@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 40af72fb
-verified_at_commit: 40af72fb
-verified_at_date: 2026-11-09
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+verified_at_date: 2026-11-11
 anchors: [StartFailure, StartFailure::settle, Connection, PendingDrains::start, SINK_BUFFER_CAP, Drains::join_under, Prepared::start, Launch::born, Launch::spawn_detached, EnvelopedLaunch::spawn_detached, ProgramLaunch, TerminalHold, drained, Started::collect, spawn_child, Placement::NewSession, process::deadline, WorkerRegistry, Stamp, Owner, builtin_workers, WorkerRow, spawn_detached, Command, Survivor, Capture, decode_utf8_strict, CapturedBytes::peek]
 ---
 
@@ -178,7 +178,7 @@ owner ends it: no policy reaps a running worker for neglect or age**
   shell cancels every registered worker through `Roster`'s `Drop`.
 - *Nobody* owns a `detach`ed process: it files nothing here, because it is not
   a worker at all — it is meant to outlive the host
-  ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+  ([[design/exec|exec]]).
 
 What bounds a forgotten session worker is the session alone: the admission
 cap (`Mooring::worker_cap`; exarch's is 64) refuses a birth while `cap` workers
@@ -256,16 +256,18 @@ the rest.
 **Every mechanism above is in-process: the pump, the buffer cap, the registry
 all presuppose a thread the session can still reach.** `detach` gives
 that up — the thing to escape is not the session but the parent's *observation*
-of the child's pgid.
+of the child's pgid. It is a first-class value with type
+`String → String → [String] → F [pid: Int, desc: String]`, called as
+`detach desc program [args]`. A binding, not a handler, stubs `detach`.
 
 - Everything up to the birth is the ordinary external-command machinery —
   `Command::from_name`, `Command::lookup`, `Command::admit`, and the vetting and
   launch any external is prepared with, surrendered here (`Prepared::detach`,
   `core/src/shell/exec/command/detach.rs`) — so the grant judges the call
-  exactly as it judges any exec and a head a handler in scope intercepts is
-  refused, birthing nothing: a handler runs inside this session, so there is
-  nothing to detach (to run the real program, `^name`). Only the last act
-  differs: `Prepared::detach` matches `ProgramLaunch` to the direct or
+  exactly as it judges any exec. Program lookup bypasses bindings and the
+  whole handler stack, including base frames, as `^program` does; an
+  intercepted program name is never refused merely for having a handler.
+  Only the last act differs: `Prepared::detach` matches `ProgramLaunch` to the direct or
   enveloped `spawn_detached`. The inner `Launch::spawn_detached` **double-forks**. The intermediate exits at
   once and hands the grandchild's pid back over a pipe, so no collector
   ever records the pgid its kills address. Reaching the same lifetime by
@@ -320,8 +322,7 @@ of the child's pgid.
   verb exists to renounce ([[design/residency|residency]]).
 
 See also
-[[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
-(the verb, the race it replaces, and why the type change earns the name),
+[[design/exec|exec]] (the detached program and its receipt),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (why a handle marks a worker),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the root/foreground

@@ -1,5 +1,5 @@
 # codes: T0011
 # status: 1
-# at: 5:29
+# at: 5:32
 # contains: its one parameter is the argv
-within [handlers: [greet: { echo hi }]] { greet }
+within [handlers: [:, greet: { echo hi }]] { greet }

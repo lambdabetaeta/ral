@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -14,7 +14,7 @@ A whole program is a `Toplevel { phrases, admits }`: `admits` holds imported
 bindings' first-use contracts for readmission before execution; each
 `Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
 pattern binds,
-[[decisions/260603_session-scheme-continuity|session-scheme-continuity]]) or
+[[internals/type-inference|type-inference]]) or
 `Run` (anything else) — runs in order, extending the
 session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
@@ -106,9 +106,11 @@ are runtime mechanisms, not IR constructors or mechanised rules.
   and it cannot occur in a checked tree. Builtin application never becomes IR;
   partial builtins are runtime `Value::Native(entry, args)`. Boundary builtins
   remain η-expanded over `Exec`, retaining their per-use checked site.
-- `Within.opts` and `Grant.caps` are `Arc<FieldsNode>`, the same nodes as
-  record literals. `Within.handlers` stays separate syntax; `None` and an
-  explicitly empty handler list install different scopes.
+- `Within { opts, body }` and `Grant { caps, body }` carry their options as
+  one spread-free `Arc<FieldsNode>`, the same node as a record literal.
+  `handlers:` is an ordinary map-valued field; no handler-specific AST or IR
+  survives. Readback traverses that field through the option record. An absent
+  field and `handlers: [:]` still install different scopes.
 
 See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 

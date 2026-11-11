@@ -43,7 +43,7 @@ rendering partial beyond `()`, do not gate an in-shell argv beyond it, do not re
 variable or on a spread's elements, and do not state the refused set a second
 time — extend `RefusedArg` and let both sides read it.
 
-See [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] for
+See [[design/exec|exec]] for
 why an argv is `List String` inside and bytes at the call, and
 [[invariants/fixed-arity|fixed-arity]] for the argv/application split the
 boundary sits on.

@@ -1,5 +1,5 @@
 # codes: T0011
 # status: 1
-# at: 5:25
+# at: 5:28
 # contains: couldn't match type Command with type Returns Integer
-within [handlers: [foo: { |args| return 3 }]] { foo }
+within [handlers: [:, foo: { |args| return 3 }]] { foo }

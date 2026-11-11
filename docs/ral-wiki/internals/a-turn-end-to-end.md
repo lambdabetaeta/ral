@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
@@ -82,7 +82,7 @@ module's framed scaffold:
   the signal count, never the reaper, so the armed ceiling survives the compile.
 - The source arm's `compile_run` runs `compile_and_typecheck` seeded from the
   live session's schemes ([[internals/compilation-ladder|the ladder]];
-  [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]). A
+  [[internals/type-inference|type-inference]]). A
   parse or type failure returns `RunReport::Static { diagnostics }` at once —
   no run state, no root context. The diagnostic carries the `Source`
   its carets point into rather than registering it: a run that failed to

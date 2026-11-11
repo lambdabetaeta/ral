@@ -181,7 +181,7 @@ fn rc_plugin_installs_a_handler() {
     let manifest = plug.path().join("greeter.ral");
     std::fs::write(
         &manifest,
-        "return { |options| return [name: 'greeter', handlers: [hail: { |args| echo hail-from-plugin }]] }",
+        "return { |options| return [name: 'greeter', handlers: [:, hail: { |args| echo hail-from-plugin }]] }",
     )
     .unwrap();
     let (_dir, env) = rc_home(&format!(
@@ -209,7 +209,7 @@ fn a_plugin_made_by_application_loads() {
     std::fs::write(
         &manifest,
         "let greet = { |word args| echo $word ...$args }\n\
-         let make = { |word options| return [name: 'greeter', handlers: [hail: { greet $word }]] }\n\
+         let make = { |word options| return [name: 'greeter', handlers: [:, hail: { greet $word }]] }\n\
          let factory = make hail-from-plugin\n\
          return $factory\n",
     )
@@ -238,7 +238,7 @@ fn rc_plugins_take_differently_shaped_options() {
             plug.path().join(format!("{handler}.ral")),
             format!(
                 "return {{ |options| return [name: '{handler}', \
-                 handlers: [{handler}: {{ |args| echo {handler} }}]] }}"
+                 handlers: [:, {handler}: {{ |args| echo {handler} }}]] }}"
             ),
         )
         .unwrap();
@@ -269,7 +269,7 @@ fn rc_plugins_take_differently_shaped_options() {
 /// its fresh-grade `Unit` result unifies with `Command`.
 #[test]
 fn a_handler_ending_in_cd_installs_with_no_trailing_write() {
-    let (dir, env) = rc_home("return [handlers: [gohome: { |args| cd ~ }]]");
+    let (dir, env) = rc_home("return [handlers: [:, gohome: { |args| cd ~ }]]");
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
@@ -285,7 +285,7 @@ fn a_handler_ending_in_cd_installs_with_no_trailing_write() {
 #[test]
 fn a_handler_whose_if_join_is_all_value_still_installs() {
     let (dir, env) = rc_home(
-        "return [handlers: [gohome: { |args| \
+        "return [handlers: [:, gohome: { |args| \
              if !{is-empty $args} { cd ~ } else { cd ~ } }]]",
     );
     let marker = env[1].1.join("it-worked");
@@ -302,11 +302,11 @@ fn a_handler_whose_if_join_is_all_value_still_installs() {
 /// check, before even its first phrase runs, not by handler installation.
 #[test]
 fn a_handler_returning_a_string_is_still_rejected() {
-    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [greet: { |args| \"hi\" }]]");
+    let (_dir, env) =
+        rc_home("echo must-not-run\nreturn [handlers: [:, greet: { |args| \"hi\" }]]");
     let out = repl(&["-i"], &env, "echo ok\n");
     assert!(
-        out.stderr
-            .contains("an arm for `greet` stands in for a command")
+        out.stderr.contains("a handler stands in for a command")
             && out.stderr.contains("String")
             && out.stderr.contains("skipped, since it does not compile"),
         "a value-returning arm over a fresh name must still fail; stderr was:\n{}",
@@ -318,7 +318,7 @@ fn a_handler_returning_a_string_is_still_rejected() {
 
 #[test]
 fn a_written_non_block_rc_handler_is_refused_before_sourcing() {
-    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [greet: 3]]");
+    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [:, greet: 3]]");
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
         out.stderr.contains("skipped, since it does not compile"),
@@ -338,7 +338,7 @@ fn written_factory_handlers_are_refused_before_the_plugin_runs() {
         std::fs::write(
             &path,
             format!(
-                "echo must-not-run\nreturn {{ |options| return [name: 'p', handlers: [greet: {arm}]] }}"
+                "echo must-not-run\nreturn {{ |options| return [name: 'p', handlers: [:, greet: {arm}]] }}"
             ),
         )
         .unwrap();

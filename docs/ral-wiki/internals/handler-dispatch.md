@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
-anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, BuiltinEntry::framed, render_handler_args, Frame::Unmask, WithinUndo]
+anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, BuiltinEntry::framed, render_handler_args, Frame::Unmask, WithinUndo, WithinScope::parse, HandlerEntry::vet, arm_stands_in]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -18,13 +18,16 @@ handler stack is consulted for every other name. Shadowing, not admission, is
 the interception discipline: a handler installs under any name and intercepts
 it at the bare head only; `^name`, like a path head, skips the env and the
 handler stack alike and reaches the external command directly
-([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+([[design/builtins|builtins]]).
 
 **The stack has two layers.** Above are scoped frames pushed by `within` and
 persistent frames installed by the host between units from rc or manifest
-`handlers:`; below is a permanent *base layer* holding the
-*base-frame manifest*'s rows — `echo` and `detach`, each variadic over a list of strings
-(`HandlerStack::over`, over the rows `natives_and_base` selects). Permanence is representational:
+`handlers:` map; below is a permanent *base layer* holding the
+*base-frame manifest*'s rows — `echo` and any host-supplied rows, each variadic
+over a list of strings (`HandlerStack::over`, over the rows `natives_and_base`
+selects). `detach` is a native value, reached before this stack; handlers
+cannot intercept it. Its program lookup also bypasses the whole stack, as
+`^program` does. Permanence is representational:
 the mutators index the run frames alone, so no stack mutation removes a base
 frame. No statement or builtin value mutates persistent frames.
 The base layer never crosses the wire — the wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs
@@ -51,13 +54,18 @@ list, as `{ |args| … }` does; a catch-all takes two, the name and the argument
 list, as `{ |name args| … }` does. That list is a `List String` — `machine::render_handler_args` renders
 every element through the total `to-string` as it packs the argv, so an arm
 consumes what an exec call would
-([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+([[design/exec|exec]]). Every base frame has `[String] → Command`; stored
+named arms have `U([String] → Command)`, and catch-alls
+`U(String → [String] → Command)`. No handler result depends on its name or Σ.
 Dispatch invokes the matched entry under the convention its install site demands
 rather than inspecting the stored value; an arm whose type takes other
-parameters, or a value that is no block, is refused where it is written and
-again at install (`docs/SPEC.md` §9.4), so no
-malformed entry ever reaches lookup. Install-time `arm_stands_in` returns only
-a verdict: no handler scheme is persisted or shipped. The checker imports
+parameters, or a value that is no block, is refused statically in `within`
+(`docs/SPEC.md` §9.4). `WithinScope::parse` consumes the checked option
+record, builds per-name entries from its `handlers:` map and takes `handler:`
+as checked; neither is re-vetted. Naming either option installs a frame, even
+for `handlers: [:]`; naming neither leaves the stack alone. Persistent rc and
+manifest handlers retain install-time `arm_stands_in`, which returns only a
+verdict: no handler scheme is persisted or shipped. The checker imports
 handled names for diagnostics alone; Σ and lexical bindings determine the
 head's type and argument gate, with the external gate for every non-base
 command name even when handled.
@@ -72,7 +80,7 @@ reaches the next outer handler — or the OS — never itself. `restore_matched`
 re-inserts the frame afterwards, using the monotonically allocated `FrameHandle` to find the position
 that preserves the original ordering even if the body pushed frames of its own.
 This is what makes the wrap-and-forward idiom
-`within [handlers: [git: { |args| my-git ...$args }]] { … }` terminate rather than
+`within [handlers: [:, git: { |args| my-git ...$args }]] { … }` terminate rather than
 diverge.
 
 **Deep** means the frame persists across the body's whole extent, re-reached by
@@ -85,6 +93,6 @@ carry them.
 
 See also [[design/effects-handlers|effects-handlers]],
 [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]],
-[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]];
+[[design/builtins|builtins]];
 map [[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]].
 `docs/SPEC.md` §9.4, §9.6.

@@ -15,7 +15,7 @@ let pick = { |ours theirs src args k|
                 FZF_DEFAULT_OPTS: "--height $h --min-height 20+ --bind=ctrl-z:ignore $ours\n!{from-string < !{var FZF_DEFAULT_OPTS_FILE ''} ? ''}\n!{var FZF_DEFAULT_OPTS ''} $theirs",
                 FZF_DEFAULT_OPTS_FILE: '',
             ],
-            handlers: [fzf: { |a|
+            handlers: [:, fzf: { |a|
                 if $[not !{is-empty !{var TMUX_PANE ''}} && (!{var FZF_TMUX '0'} != '0' || not !{is-empty !{var FZF_TMUX_OPTS ''}})] {
                     fzf-tmux ...!{posix-split !{var FZF_TMUX_OPTS "-d$h"}} -- ...$a
                 } else { fzf ...$a }

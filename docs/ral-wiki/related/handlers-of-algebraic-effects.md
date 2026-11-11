@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
 against: [design/effects-handlers, design/exec, design/pipelines]
 ---
@@ -38,7 +38,7 @@ primary.
   frame, and ultimately to the OS.
 - **Stream redirection is the shared example.** Their
   `{out_c(z) ↦ z, in(z) ↦ z(y)}` is `> /dev/null` plus `yes |` as one handler;
-  ral's wrap-and-forward `within [handlers: [git: { |args| … }]]` idiom is the
+  ral's wrap-and-forward `within [handlers: [:, git: { |args| … }]]` idiom is the
   same shape.
 
 ## Divergences
@@ -62,7 +62,7 @@ primary.
   model, so a handler is an ordinary runtime lambda — a per-name clause unary
   over the argv, a catch-all binary
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]) —
-  installed for a scope by `within` or persistently by the host
+  installed from an ordinary map for a scope by `within` or persistently by the host
   ([[decisions/260622_functions-and-handlers|functions-and-handlers]]), in a
   single language where thunks are first-class values rather than the
   obstruction their two-calculus split works around.

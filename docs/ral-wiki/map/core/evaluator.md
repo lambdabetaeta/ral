@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -123,8 +123,14 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 
 ## Shell interpretation
 
-- `scope.rs` installs dynamic frames. `WithinScope` forms the option record
-  and handlers; `WithinUndo` restores cwd, env overrides and handlers.
+- `Within` forms only its option record, then calls `WithinScope::parse(opts,
+  shell)` in `scope.rs`. `handlers:` builds per-name entries from the map;
+  `handler:` takes the checked value directly. Neither is re-vetted: the
+  static check is total. Hoisted operand computations run in written order;
+  the inert option fields are then formed in sorted key order (`dir`, `env`,
+  `handler`, `handlers`). Naming either handler option installs a frame,
+  even for an empty map.
+  `WithinUndo` restores cwd, env overrides and handlers.
   Grants attenuate authority; guard frames live in `machine.rs` and release
   restores the body's outcome unless release itself halts. Handler dispatch is
   [[internals/handler-dispatch|deep and self-masking]].

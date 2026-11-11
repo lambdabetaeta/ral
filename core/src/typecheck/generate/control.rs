@@ -606,8 +606,7 @@ mod tests {
             generator.env.builtins.push(
                 vec![Decl::new(
                     Cow::Borrowed("decode-at"),
-                    Convention::Value,
-                    scheme::from_json_at,
+                    Convention::Value(scheme::from_json_at),
                     "",
                     true,
                 )]
@@ -632,7 +631,7 @@ mod tests {
             let (store, errors) = generator.solver.refused();
             assert_eq!(errors.len(), 1, "{errors:?}");
             assert!(
-                matches!(&errors[0].kind, TypeErrorKind::BuiltinArity { name, expected: 1, got: 0 } if name == "decode-at")
+                matches!(&errors[0].kind, TypeErrorKind::BuiltinArity { name, expected: 1, got: 0, .. } if name == "decode-at")
             );
             assert_eq!(errors[0].pos, Some(at(2)));
             let resolved = store.resolve_comp_ty_graded(&cty);
@@ -654,8 +653,7 @@ mod tests {
             let mut generator = generator();
             let mut decl = Decl::new(
                 Cow::Borrowed("decode"),
-                Convention::Value,
-                scheme::from_json,
+                Convention::Value(scheme::from_json),
                 "",
                 true,
             );

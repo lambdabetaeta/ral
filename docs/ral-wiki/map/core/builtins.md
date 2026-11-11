@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -11,13 +11,16 @@ shell process. `shell/builtins.rs` holds the `builtin_registry!` macro: each ent
 binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`), so the facets cannot drift apart. A `BuiltinEntry` is a
-`Decl` (everything the checker may know: name, `Convention`, doc, type rule,
-diagnostic, a `boundary` flag) plus the body only the runtime runs; its
+`Decl` (everything the checker may know: name, `Convention`, doc,
+diagnostic, a `boundary` flag) plus the body only the runtime runs.
+`Convention::Value(rule)` carries the type rule; `Convention::Argv` carries
+none and fixes `[String] → Command` through `Arm::ty`, shared with named
+handlers. The `handlers_ty` map member uses that same constant. Its
 constructors set `boundary` from the body they are handed, so the flag and the
-body cannot disagree. Arity is no facet: `Decl::fixed_arity` derives it from the
-type rule and caches it with the settle-at-`Unit` fact in one `Spine`, a `usize`
-for every entry in the table. What a row does with stdout is
-in its scheme: a writing row (the encoders, `echo`, `help`, `explain`, `clear`,
+body cannot disagree. Application arity is no facet: `Decl::fixed_arity`
+derives it from a value row's closed scheme, caching it with the
+settle-at-`Unit` fact in one `Spine`. Argv rows have no application arity.
+What a row does with stdout is in its scheme: a writing row (the encoders, `echo`, `help`, `explain`, `clear`,
 `reset`, `ints-to-bytes`) ends in `Command`, `F^w Unit`, and there is no
 separate output facet. `Decl::scheme` gives ordinary results fresh grades,
 while boundaries retain `p` and already graded results retain their grade
@@ -31,14 +34,13 @@ The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
 `Value::Native` in the base scope, a base-frame row seeds a base handler frame
 (`native_value`, `Runtime::install_set` in `shell/runtime/state/construct.rs`;
-[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+[[design/builtins|builtins]], [[design/exec|exec]]).
 A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
 Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
 with state to carry — so the run's mooring arrives beside the shell
 ([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
 enquires, or starts a nested run parented under the run that called it. The
-type-rule facet is a `BuiltinTypeRule`, which is a scheme factory —
+value convention's type rule is a `BuiltinTypeRule`, a scheme factory —
 `fn(&mut Binders) -> Ty`, closed by `Binders::close` — and nothing else. The streaming reducer
 `fold-lines` is an ordinary one whose factory (`scheme::fold_lines`) is a
 plain scheme ([[map/core/typecheck|typecheck]]);
@@ -75,11 +77,14 @@ surfaces through the session's deferred sink (`Sink::Watch`), which outlives
 the run — so only a host with a deferred sink installs it, and elsewhere
 `watch` is an unknown-name diagnostic rather than a runtime refusal
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). The second,
-`DETACH_BUILTIN` (`cfg(unix)`, over `concurrency::builtin_detach`), is the
-base-frame manifest's second row — typed `List String -> F Any`, no arity to it
-— and is carried only where a host installs it, so absence is an
-unknown-name diagnostic rather than a veto, while
-whether a given call may spend it is the live grant stack's question
+`DETACH_BUILTIN` (`cfg(unix)`, over `concurrency::builtin_detach` /
+`scheme::detach`), is a value row of arity three — typed
+`String → String → [String] → F [pid: Int, desc: String]` — and is carried
+only where a host installs it, so absence is an unknown-name diagnostic rather
+than a veto. It seeds a first-class native; handlers cannot intercept it,
+and a value binding stubs it. Its program lookup bypasses bindings and the
+whole handler stack as `^program` does. Whether a given call may spend it is
+the live grant stack's question
 (`GrantStack::permits(Flag::Shell(ShellVerb::Detach))`). The third, `SURFACE_BUILTIN`, wraps
 `misc::builtin_surface` / `scheme::surface_op` under the bare name `surface`;
 exarch declares its own entry over the same body under `exarch-surface`, with
@@ -322,8 +327,16 @@ Bodies are grouped by concern, one submodule each:
   whose result is or holds one projects to `Err`, status 1
   (`core/src/shell/run/report.rs`);
 - `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
-  record and admits it with `Site::admit_module`, holding each function to the
-  scheme the module was checked at). It runs its phrases through
+  record and admits it with `Site::admit_module`, checking every used export's
+  complete scheme, including functions nested in records, lists, maps or
+  variants, against its use). A known incompatible nested scheme is refused at
+  `use`. The admitted record also carries `Site::wrap`'s recursive delayed
+  contracts, including through unresolved re-exported shapes. An opaque or weak
+  function carries exactly the caller-required arrow and result contract;
+  incompatible applications or results raise when reached. These contracts do
+  not certify function bodies before invocation. Imported functions retain their
+  checked sites; scoped handler installation performs no inference or re-vetting.
+  It runs its phrases through
   `shell::load::module_phrases`, the cycle stack and depth bound it shares with the
   host loading door `shell::load::evaluate_source` (rank 10, `core/src/shell/load.rs`,
   which also holds `check_source`, the compile door both share: it checks

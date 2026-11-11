@@ -1,7 +1,7 @@
 # codes: T0057
 # status: 1
-# at: 7:50
+# at: 7:53
 # contains: as an argument to `ls`
 # contains: `ls` has a handler here, but a handler stands in for the command `ls`, which takes only text
 # contains: spread a list with `...$xs`, or bind `ls` as a function
-within [handlers: [ls: { |a| echo ...$a }]] { ls [1, 2] }
+within [handlers: [:, ls: { |a| echo ...$a }]] { ls [1, 2] }

@@ -4,9 +4,8 @@ use super::env::{Inferring, Membrane};
 use super::generate::LiveSchemes;
 use super::solve::{BindHole, Mode, Solution};
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, FieldsNode, GroupNode,
-    HandlerArmV, Name, Pattern, Phase, Phrase, Prim, Redirects, Toplevel, Val, ValListElem,
-    synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, FieldsNode, GroupNode, Name,
+    Pattern, Phase, Phrase, Prim, Redirects, Toplevel, Val, ValListElem, synthetic,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::{Site, Ty, UnitId};
@@ -202,20 +201,8 @@ impl<'a> Readback<'a> {
                 body: self.val(body),
                 release: self.val(release),
             },
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            } => CompKind::Within {
+            CompKind::Within { opts, body } => CompKind::Within {
                 opts: self.fields(opts),
-                handlers: handlers.as_ref().map(|arms| {
-                    arms.iter()
-                        .map(|arm| HandlerArmV {
-                            name: arm.name.clone(),
-                            value: self.spanned_val(&arm.value),
-                        })
-                        .collect()
-                }),
                 body: self.val(body),
             },
             CompKind::Grant { caps, body } => CompKind::Grant {

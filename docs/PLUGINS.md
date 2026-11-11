@@ -57,7 +57,7 @@ fields by name; there is no options schema.
 | `name` | required; unique among loaded plugins |
 | `hooks` | `[event: handler, …]` (section 4) |
 | `keybindings` | `[[key: Str, handler: block, guard?: Str], …]` (section 5) |
-| `handlers` | `[name: block, …]` (section 6) |
+| `handlers` | `[:, name: handler, …]`, or `[:]` for none (SPEC §9.4) |
 
 The keyset is closed. In particular `capabilities:` is not an unknown key
 but a refused one, with its own message, for the reason in section 2.
@@ -69,13 +69,15 @@ change elaboration or open holes. Factory shape and result equations run in
 that same live phase. For example, `name:` can fix a decoded value's type to
 text, so incompatible data is refused at its decode, naming the field use.
 
-`handlers:` holds command arms by the same stand-in relation as `within`:
-a written name takes Σ's base-frame result, or `[String] → Command` for
-an external name. Computed-name maps require `[String] → Command` members;
-installation also checks each actual name. These live equations reach sites
-inside locally checked arms. Imported arms retain their module's sites.
-Hooks and keybindings retain host validation; their results do not enter
-typed code unchecked.
+`handlers:` is a map, held by one equation against
+`Map(U([String] → Command))`, as in the rc. Keys are data: written and
+computed names follow the same rule. A record such as `[hi: …]` is refused;
+write `[:, hi: { |args| … }]`, or `[:]` for none. The live equation reaches
+sites inside locally checked handlers; imported handlers retain their module's
+sites. Persistent handlers are also vetted by actual name at installation.
+Unlike `within`, persistent installation must cover unresolved returns and
+member types. Hooks and keybindings retain host validation; their results do
+not enter typed code unchecked.
 
 ## 2 Authority
 
@@ -163,12 +165,13 @@ The file is typechecked and evaluated in a fresh scope under the
 manifest's declared table, a factory is applied to its options, and the
 result is parsed: handler arity, hook names, key notation, guard
 regexes, and handler collisions are all checked before anything is
-installed. Command arms already held statically are vetted again against
-their actual names at installation, yielding only a verdict, no stored
-scheme. Runtime parsing also covers wholly unresolved returns and unresolved
-field or member types. Hooks and handlers are then committed and the host told; if
-the host refuses the manifest, the whole namespace is rolled back. Errors are reported as
-`plugin 'NAME': …`, with source spans in the plugin file.
+installed. Persistent command handlers already held statically by the map
+equation are vetted again against their actual names at installation, yielding
+only a verdict, no stored scheme. Runtime parsing also covers wholly
+unresolved returns and unresolved field or member types. Hooks and handlers
+are then committed and the host told; if the host refuses the manifest, the
+whole namespace is rolled back. Errors are reported as `plugin 'NAME': …`,
+with source spans in the plugin file.
 
 The rc file's `plugins:` map supplies options (section 8); `[:]` supplies
 only the plugin's defaults. Handing a non-empty options map to a plugin

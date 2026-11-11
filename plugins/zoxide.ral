@@ -55,7 +55,7 @@ return { |options|
 
     return [
         name: "zoxide",
-        handlers: [z: $_z, zi: $_zi_cmd],
+        handlers: [:, z: $_z, zi: $_zi_cmd],
         hooks: [chpwd: $_chpwd],
         keybindings: [[key: $key, handler: $_zi]],
     ]

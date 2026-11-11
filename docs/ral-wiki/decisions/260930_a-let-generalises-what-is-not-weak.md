@@ -72,6 +72,5 @@ a known list and one indexing a not-yet-known one are treated alike.
 
 The value restriction. Generalising a boundary's result, as today.
 
-Refines [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]:
-a stored scheme is closed up to its weak residuals
+A stored scheme is closed up to its weak residuals
 ([[invariants/schemes-leave-closed|schemes-leave-closed]]).

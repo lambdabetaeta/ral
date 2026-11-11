@@ -21,6 +21,7 @@ Both use `Value::Map`, an ordered collection of `String → Value` pairs
 
 Both iterate sorted by key; written order is not data. Ordered data belongs
 in a list. A set is `Map Unit`, as in `[:, alice: (), bob: ()]`.
+`handlers:` is a map because its keys are command names, which are data, not labels.
 
 ## The alphabet is shared
 

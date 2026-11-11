@@ -1,5 +1,5 @@
 # codes: T0074
 # status: 1
-# at: 5:86
+# at: 5:89
 # contains: but a number (Int or Float) is needed
-within [handlers: [length: { |xs| echo mocked }]] { let r = !{^length hello}; return $[$r + 0] }
+within [handlers: [:, length: { |xs| echo mocked }]] { let r = !{^length hello}; return $[$r + 0] }

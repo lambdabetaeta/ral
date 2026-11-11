@@ -7,8 +7,10 @@ handler reifies a continuation — are two independent choices layered on top, a
 ral takes the smallest on both: a restricted, continuation-free fragment.
 
 ral installs effect handlers over a dynamic frame stack with
-`within [handlers: [name: handler], handler: fallback] { body }`. A handler maps
-an operation name to a lambda; the catch-all `handler:` applies when no per-name
+`within [handlers: [:, name: $arm], handler: $fallback] { body }`. The
+`handlers:` map associates command names with handlers; its keys are data,
+and the map may be computed (`handlers: $table`). A record is refused: write
+`[:, name: $arm]`, not `[name: $arm]`. The catch-all `handler:` applies when no per-name
 entry matches. Handlers intercept **command names**, including base frames,
 only at the *bare* head — lexical bindings, native values, and the prelude cannot be
 overridden, and `^name`, like a path head, skips the handler
@@ -20,25 +22,29 @@ the catch-all must be a **function of two**, such as `{ |name args| … }`,
 applied to the command's name and its argument list. The calling convention
 is fixed by the surface position, and an arm's arity is its type, not its
 spelling: `{ forward 'git' }` is an arm when `forward 'git'` takes the argv;
-`{ echo hi }` is not, and is refused where it is written and again at
-install.
+`{ echo hi }` is not. A scoped arm is checked statically; a persistent
+handler is also vetted at installation.
 
-**A handler reinterprets an operation; it cannot re-declare its type.** An arm
-stands in for the head it is installed under: its type is that of the base
-frame declared by Σ there, and `List String → Command` for any other
-command. Its argument gate is likewise the head's: in-shell for a base frame,
+**Every handler is a command.** A named arm has type
+`U([String] → Command)`, the catch-all `U(String → [String] → Command)`,
+independent of the name, Σ, or other handlers. Every argv base frame also
+has `[String] → Command` by construction: its manifest row has no type rule.
+The call's argument gate remains the head's: in-shell for a base frame,
 external otherwise, even when handled. Σ and lexical bindings alone determine
 call typing; handler names affect diagnostics only. No arm scheme is persisted.
-An arm for `curl`, per-name or under the catch-all, has a command's value,
-its output. A fresh-grade `()`-returning stub is admitted and captures `""`
-when called under `let`; an arm for `detach` returns what `detach` returns.
+An arm for `echo` or `curl` has a command's value, its output. A fresh-grade
+`()`-returning stub is admitted and captures `""` when called under `let`. `detach` is a first-class native value, so no
+handler intercepts it; stub it with a lexical binding.
 A user handler cannot introduce a value-returning, variable-arity command.
 That capability belongs to the value world instead, as a binding of fixed
 arity taking a list — `let f = { |xs| … }; f [a, b, c]`
 ([[design/capture|grades and capture]]).
 
 Persistent handlers are installed by the host between units from the rc's or
-manifest's `handlers:` field. Scoped handlers use `within`;
+manifest's `handlers:` map, held by one equation against
+`Map(U([String] → Command))`. Scoped handlers use `within`: a written map is
+checked entry by entry for named diagnostics, any other value by the same
+map equation. This check is total, so scoped handlers are not re-vetted at runtime;
 interactive functions use `let`. No statement or builtin value installs or
 removes a persistent handler.
 
@@ -51,15 +57,15 @@ along three axes — the first two recorded in
 - **Self-masking.** While a handler's own body runs, its frame is lifted from the
   stack, so a same-name call inside the body reaches the next outer handler (or
   the OS), never itself.
-- **Tail-resumptive.** A handler receives the command name and arguments and
-  either returns a value, forwards to the next enclosing frame, or fails. A
-  returned value is *substituted for the intercepted operation* and the body
-  resumes — that substitution **is** the resumption.
+- **Tail-resumptive.** A handler receives the argv (and, for the catch-all,
+  the name) and either completes as a command, forwards to the next enclosing
+  frame, or fails. Successful completion substitutes `()` for the intercepted
+  operation and the body resumes — that substitution **is** the resumption.
 
 This is why there is **no first-class `resume`**: resumption is implicit,
 exactly-once, and in tail position. What ral omits is the reified continuation
 that non-tail or multi-shot resumption would require. The natural idiom is
-wrap-and-forward, `within [handlers: [git: { |args| my-git ...$args }]] { ... }`,
+wrap-and-forward, `within [handlers: [:, git: { |args| my-git ...$args }]] { ... }`,
 which self-masking keeps from diverging; the live semantic question is therefore the
 masking discipline — which handler is in scope at each point — not how a captured
 continuation is re-entered.

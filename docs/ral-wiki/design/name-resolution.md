@@ -23,13 +23,13 @@ under that spelling. From most reserved to most peripheral:
   builtins, because each manipulates dynamic frames or audit ownership that no
   value can observe ([[design/control-operators|control-operators]]).
 - **Core builtins** — Rust atoms of the boot manifest, each a
-  [[internals/builtins-registry|registry]] entry binding names, type rule, doc,
-  and body together. The manifest is a *boot* manifest, not a resolution layer,
-  and it is authored as two: a native table entry seeds the base scope as a
+  [[internals/builtins-registry|registry]] entry binding names, convention, doc,
+  and body together. Only the value convention carries a type rule; every
+  argv row is `[String] → Command` by construction. The manifest is a *boot*
+  manifest, not a resolution layer, and it is authored as two: a native table entry seeds the base scope as a
   native value and is reached as a binding, a base-frame row seeds a base frame
   and is reached as a handler
-  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]],
+  ([[design/builtins|builtins]], [[design/exec|exec]],
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].
 - **Underscore primitives** — `_ansi-ok` and the host `_ed-*`:

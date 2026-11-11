@@ -32,7 +32,7 @@ try { grant [shell: []] { chdir-at-bottom 2 } } { |_| echo 'grant survives the t
 let probe-env = { |n| if $[$n <= 0] { return !{env}[MARK] } else { probe-env $[$n - 1] } }
 echo !{within [env: [MARK: inside]] { probe-env 3 }}
 let probe-handled = { |n| if $[$n <= 0] { return !{within-probe} } else { probe-handled $[$n - 1] } }
-echo !{within [handlers: [within-probe: { |args| to-string pong }]] { probe-handled 3 }}
+echo !{within [handlers: [:, within-probe: { |args| to-string pong }]] { probe-handled 3 }}
 
 # Deep tail recursion stays flat through a `?` chain, a case arm, and a bind continuation
 let no = { |x| fail "x" }

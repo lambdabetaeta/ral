@@ -1,0 +1,4 @@
+# codes: T0050
+# status: 1
+# contains: write the arguments from the 2nd on as one list
+intercalate ', ' a b c

@@ -123,7 +123,7 @@ fn source(args: &[&str], detached: bool) -> String {
     let exe = std::env::current_exe().unwrap();
     let command = if detached {
         format!(
-            "detach #'a confined assurance survivor'# '{}'",
+            "detach #'a confined assurance survivor'# '{}' []",
             exe.display()
         )
     } else {

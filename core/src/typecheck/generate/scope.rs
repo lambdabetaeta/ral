@@ -1,8 +1,7 @@
 //! Scope forms, options and retained protection contracts.
 
 use super::Generator;
-use super::call::Arm;
-use crate::ir::{Comp, CompKind, FieldsNode, HandlerArmV, Val};
+use crate::ir::{Comp, CompKind, FieldsNode, Val};
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Site, Ty};
 use crate::typecheck::builtins::audit_record;
@@ -10,8 +9,6 @@ use crate::typecheck::contract::{Form, Held, Holds, Key, NestedCheck, Table, dec
 use crate::typecheck::env::Inferring;
 use crate::typecheck::error::{Reason, TypeErrorKind};
 use std::sync::Arc;
-
-type HandlerBindings = (Vec<String>, Option<Vec<HandlerArmV<Inferring>>>);
 
 impl Generator {
     fn check_options(
@@ -56,17 +53,34 @@ impl Generator {
         table: &'static Table,
     ) -> Val<Inferring> {
         let key = table.keys.iter().find(|key| key.label == label);
-        let (found, node) = match key {
+        if let (
             Some(Key {
-                holds: Holds::CatchAll,
+                holds: Holds::Handlers,
                 ..
-            }) => {
-                let (cty, node) = self.region(|this| this.arm(value, Arm::CatchAll, at));
-                (Ty::thunk(cty), node)
-            }
-            _ => self.val(value, at),
-        };
+            }),
+            Val::Map(entries),
+        ) = (key, value)
+        {
+            let nodes = entries
+                .shape()
+                .iter()
+                .enumerate()
+                .map(|(i, (label, value))| {
+                    let node = self.with_span(value.span, |this| {
+                        if entries.shape()[..i].iter().any(|(seen, _)| seen == label) {
+                            this.solver.diagnose(TypeErrorKind::DuplicateField {
+                                label: label.to_string(),
+                            });
+                        }
+                        this.install_arm(&value.item, label, value.span)
+                    });
+                    (label.clone(), Spanned::with_span(value.span, node))
+                })
+                .collect();
+            return Val::Map(FieldsNode::new(nodes));
+        }
         let Some(key) = key else {
+            let (_, node) = self.val(value, at);
             self.solver.diagnose(TypeErrorKind::UnknownKey {
                 form: table.form,
                 key: label.to_string(),
@@ -75,10 +89,14 @@ impl Generator {
             return node;
         };
         match key.holds.held() {
+            Held::Arm(arm) => self.region(|this| this.arm(value, arm, at).1),
             Held::Unify(declared) => {
+                let (found, node) = self.val(value, at);
                 self.solver.equate_held(&declared, &found, table, key);
+                node
             }
             Held::Nested(sub) => {
+                let (found, node) = self.val(value, at);
                 let pos = *self.span_slot();
                 self.solver.nested(NestedCheck::Table {
                     key: key.label,
@@ -87,59 +105,40 @@ impl Generator {
                     pos,
                     written: None,
                 });
+                node
             }
-            Held::Refuse(advice) => self.solver.diagnose(TypeErrorKind::RefusedKey {
-                form: table.form,
-                key: key.label,
-                advice,
-            }),
-            Held::Arms => unreachable!("arm collections belong to return contracts"),
-            Held::Nothing => {}
+            Held::Refuse(advice) => {
+                let (_, node) = self.val(value, at);
+                self.solver.diagnose(TypeErrorKind::RefusedKey {
+                    form: table.form,
+                    key: key.label,
+                    advice,
+                });
+                node
+            }
+            Held::Nothing => self.val(value, at).1,
         }
-        node
-    }
-
-    fn handler_bindings(&mut self, arms: Option<&[HandlerArmV]>) -> HandlerBindings {
-        let mut bindings = Vec::new();
-        let nodes = arms.map(|arms| {
-            arms.iter()
-                .map(|arm| {
-                    let value = self.with_span(arm.value.span, |this| {
-                        this.install_arm(&arm.value.item, &arm.name, arm.value.span)
-                    });
-                    bindings.push(arm.name.clone());
-                    HandlerArmV {
-                        name: arm.name.clone(),
-                        value: Spanned::with_span(arm.value.span, value),
-                    }
-                })
-                .collect()
-        });
-        (bindings, nodes)
     }
 
     pub(in crate::typecheck) fn within(
         &mut self,
         opts: &FieldsNode,
-        handlers: Option<&[HandlerArmV]>,
         body: &Val,
     ) -> (CompTy, CompKind<Inferring>) {
         let opts = self.check_options(opts, declared(Form::Within));
-        let (bindings, handlers) = self.handler_bindings(handlers);
         let (cty, body) = self.scope(|this| {
-            for name in bindings {
-                this.env.bind_handler(name);
+            for (label, value) in opts.shape() {
+                if label.as_ref() == "handlers"
+                    && let Val::Map(entries) = &value.item
+                {
+                    for (name, _) in entries.shape() {
+                        this.env.bind_handler(name.to_string());
+                    }
+                }
             }
             this.scope_body(body)
         });
-        (
-            cty,
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            },
-        )
+        (cty, CompKind::Within { opts, body })
     }
 
     pub(in crate::typecheck) fn grant(
@@ -272,7 +271,7 @@ mod tests {
                 let body = block(comp);
                 let opts = FieldsNode::new(Vec::new().into());
                 let (cty, item) = match form {
-                    0 => generator.within(&opts, None, &body),
+                    0 => generator.within(&opts, &body),
                     1 => generator.grant(&opts, &body),
                     2 => generator.guard(
                         &block(node(0, CompKind::Return(Val::Unit))),
@@ -465,37 +464,110 @@ mod tests {
     fn within_installs_named_arms_only_for_its_body_and_keeps_arm_spans() {
         let mut generator = generator();
         generator.env.bind_handler("outer".into());
-        let arms = [HandlerArmV {
-            name: "tool".into(),
-            value: Spanned::new(
-                at(1),
-                block(node(
-                    2,
-                    CompKind::Lam {
-                        param: "args".into(),
-                        body: Arc::new(command(3, "tool")),
-                    },
-                )),
-            ),
-        }];
-        let (cty, item) = generator.within(
-            &FieldsNode::new(Vec::new().into()),
-            Some(&arms),
-            &block(command(4, "tool")),
+        let entries = FieldsNode::new(
+            vec![(
+                "tool".into(),
+                Spanned::new(
+                    at(1),
+                    block(node(
+                        2,
+                        CompKind::Lam {
+                            param: "args".into(),
+                            body: Arc::new(command(3, "tool")),
+                        },
+                    )),
+                ),
+            )]
+            .into(),
         );
-        let CompKind::Within {
-            handlers: Some(arms),
-            ..
-        } = item
-        else {
-            panic!("named arms preserved")
+        let opts = FieldsNode::new(
+            vec![("handlers".into(), Spanned::new(at(0), Val::Map(entries)))].into(),
+        );
+        let (cty, item) = generator.within(&opts, &block(command(4, "tool")));
+        let CompKind::Within { opts, .. } = item else {
+            panic!("within preserved")
         };
-        assert_eq!(arms[0].value.span, Some(at(1)));
+        let Val::Map(entries) = &opts.shape()[0].1.item else {
+            panic!("handler map preserved")
+        };
+        assert_eq!(entries.shape()[0].1.span, Some(at(1)));
         assert!(generator.env.is_handled("outer"));
         assert!(!generator.env.is_handled("tool"));
         assert!(generator.env.lookup_binding("args").is_none());
         let solution = solved(generator.solver);
         assert_eq!(solution.resolve_comp(&cty), CompTy::command());
+    }
+
+    #[test]
+    fn written_handler_maps_bind_labels_for_body_diagnostics_but_bound_maps_do_not() {
+        for (source, handled) in [
+            (
+                "within [handlers: [:, tool: { |args| echo ...$args }]] { tool () }",
+                true,
+            ),
+            (
+                "let h = [:, tool: { |args| echo ...$args }]; within [handlers: $h] { tool () }",
+                false,
+            ),
+        ] {
+            let errors = crate::compile::compile_and_typecheck(
+                source,
+                crate::test_helper::core_schemes(),
+                FileId::DUMMY,
+                None,
+                None,
+            )
+            .expect_err("unit is not a command argument");
+            let crate::compile::CompileError::Types(errors) = errors else {
+                panic!("{source}: {errors:?}")
+            };
+            let [error] = &errors[..] else {
+                panic!("one argv refusal: {errors:?}")
+            };
+            assert!(matches!(
+                error.kind,
+                TypeErrorKind::ExecArgNotText { handled: found, .. } if found == handled
+            ));
+        }
+    }
+
+    #[test]
+    fn written_handler_maps_check_each_arm_without_joining_members() {
+        let mut generator = generator();
+        let entries = FieldsNode::new(
+            vec![
+                (
+                    "first".into(),
+                    Spanned::new(
+                        at(1),
+                        arm(&["args"], node(2, CompKind::Return(Val::Int(1)))),
+                    ),
+                ),
+                (
+                    "second".into(),
+                    Spanned::new(
+                        at(3),
+                        arm(&["args"], node(4, CompKind::Return(Val::Bool(true)))),
+                    ),
+                ),
+            ]
+            .into(),
+        );
+        generator.check_option(
+            "handlers",
+            &Val::Map(entries),
+            Some(at(0)),
+            declared(Form::Within),
+        );
+        let errors = generator.solver.refused().1;
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        for (error, name, pos) in [(&errors[0], "first", at(1)), (&errors[1], "second", at(3))] {
+            assert!(matches!(
+                &error.reason,
+                Some(Reason::StandsIn(crate::typecheck::Standing::Command(found))) if found == name
+            ));
+            assert_eq!(error.pos, Some(pos));
+        }
     }
 
     #[test]

@@ -453,7 +453,7 @@ mod tests {
         let path = dir.path().join("plugin.ral");
         std::fs::write(
             &path,
-            "return [name: p, hooks: [post-exec: { |_ev| return () }], handlers: [xx: { |_args| echo hi }]]",
+            "return [name: p, hooks: [post-exec: { |_ev| return () }], handlers: [:, xx: { |_args| echo hi }]]",
         )
         .unwrap();
         let original =
@@ -496,16 +496,8 @@ pub(in crate::repl) mod harness {
     use crate::repl::plugin::{PluginRuntime, lock};
     use ral_core::carrier::IdentityTransport;
     use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
-    use ral_core::ty::{Binders, Ty};
-    use ral_core::typecheck::builtins::{fun, pure, thunk};
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
-
-    /// The sink's type: an argv in, `Unit` out — the base-frame convention,
-    /// since the sink takes whatever a hook body hands it, however much of it.
-    fn sink_scheme(_: &mut Binders) -> Ty {
-        thunk(fun(Ty::argv(), pure(Ty::unit())))
-    }
 
     /// A test-only sink base frame: `record` appends its argument values into
     /// the shared vector, so a hook handler's projections out of the event
@@ -513,7 +505,6 @@ pub(in crate::repl) mod harness {
     fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
         BuiltinEntry::base_frame(
             Cow::Borrowed("record"),
-            sink_scheme,
             "record: test sink appending its arguments.",
             BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
                 sink.lock().unwrap().extend(args.iter().cloned());

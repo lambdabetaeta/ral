@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
 anchors: [Solver, Settled, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
 ---
@@ -47,7 +47,7 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   - Each `Phrase::Define` carries its harvested per-name `Scheme`s unsettled.
     The successful unit's readback settles weak references and residual grades
     with `settle_weak` into `Closed`, so the schemes outlive the per-run unifier
-    ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+    ([[internals/type-inference|type-inference]]).
   - A `Pipeline` carries nothing per stage: every interior edge is a byte pipe
     allocated from position, so there is nothing to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).

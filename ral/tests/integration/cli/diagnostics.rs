@@ -22,7 +22,7 @@ fn repl_stderr(rc: &str, args: &[&str], line: &str) -> String {
 /// so the caret must point there rather than at the compact one-liner.
 #[test]
 fn an_rc_handler_faults_against_the_rc_file() {
-    let rc = "[\n  handlers: [ boom: { |args| fail 'nope' } ]\n]\n";
+    let rc = "[\n  handlers: [:, boom: { |args| fail 'nope' } ]\n]\n";
     let stderr = repl_stderr(rc, &[], "boom\n");
     assert!(
         stderr.contains("ral/rc:2:") && stderr.contains("fail 'nope' }"),

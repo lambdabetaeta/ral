@@ -16,7 +16,7 @@ within [handler: { |name args| echo caught $name }] {
 }
 
 # A per-name entry beats a catch-all, whichever frame holds it
-within [handlers: [other: { |args| echo outer }]] {
+within [handlers: [:, other: { |args| echo outer }]] {
     within [handler: { |n _a| echo catch }] { other }
 }
 

@@ -249,15 +249,13 @@ impl crate::data::datum::Datum for IllTyped {
 /// What a vetted block was to stand in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockRole {
-    /// A per-command handler, persistent or scoped by `within [handlers: …]`.
+    /// A persistent per-command handler.
     Handler(String),
-    /// `within [handler: …]`, which stands in for every command.
-    CatchAll,
     Hook(String),
     /// An rc `bindings:` entry.
     Binding(String),
 }
-variant!(BlockRole { Handler(String): "handler", CatchAll: "catch-all", Hook(String): "hook", Binding(String): "binding" });
+variant!(BlockRole { Handler(String): "handler", Hook(String): "hook", Binding(String): "binding" });
 
 /// One checker diagnostic: its stable code (`T0057`) and rendered message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1098,7 +1096,6 @@ impl BlockRole {
     pub fn describe(&self) -> String {
         match self {
             Self::Handler(command) => format!("the `{command}` handler"),
-            Self::CatchAll => "the catch-all handler".to_owned(),
             Self::Hook(name) => format!("hook `{name}`"),
             Self::Binding(name) => format!("binding `{name}`"),
         }

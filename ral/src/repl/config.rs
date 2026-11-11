@@ -113,7 +113,7 @@ const DEFAULT_RC: &str = "\
     #     PAGER:  less,
     # ],
 
-    # handlers: [
+    # handlers: [:,
     #     ll: { |args| ls -lh ...$args },
     #     la: { |args| ls -lha ...$args },
     # ],
@@ -705,22 +705,53 @@ mod tests {
         assert!(!shell.has_hook(&HookName::session("prompt")));
     }
 
-    /// A refused rc installs none of its handlers: one good, one non-thunk.
+    #[test]
+    fn a_record_of_handlers_refuses_the_rc_statically() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("must-not-run");
+        let source = format!(
+            "echo ran > {}\nreturn [handlers: [ll: {{ |args| echo hi }}]]\n",
+            ral_core::syntax::quote_word(&ral_core::path::shown(&marker))
+        );
+        let mut shell = prelude_shell();
+        let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+            &Mooring::adrift(),
+            &mut shell,
+            &source,
+            &ral_core::source::SourceOrigin::named("rc.ral"),
+            Some(ral_core::typecheck::contract::declared(Form::Rc)),
+        ) else {
+            panic!("a record under handlers must refuse the rc");
+        };
+        assert!(matches!(&error.reason, Reason::Compile(_)), "{error:?}");
+        let rendered = error.rejection().expect("static refusal").render();
+        assert!(
+            rendered.contains("write `[:, ll: { |args| … }]`"),
+            "{rendered}"
+        );
+        assert!(!marker.exists(), "no rc phrase may run before refusal");
+        assert!(!shell.has_handler("ll"));
+    }
+
+    /// A non-thunk member refuses the homogeneous map before installation.
     #[test]
     fn refused_rc_installs_no_handlers() {
         let mut shell = prelude_shell();
-        let pairs = rc_map(
+        let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+            &Mooring::adrift(),
             &mut shell,
-            "return [handlers: [ll: { |args| ls ...$args }, bad: 3]]\n",
-        );
-        let error = commit(&pairs, &Mooring::adrift(), &mut shell)
-            .err()
-            .expect("a non-block member must refuse the whole rc");
+            "return [handlers: [:, ll: { |args| ls ...$args }, bad: 3]]\n",
+            &ral_core::source::SourceOrigin::named("rc.ral"),
+            Some(ral_core::typecheck::contract::declared(Form::Rc)),
+        ) else {
+            panic!("a non-block member must refuse the whole rc");
+        };
+        assert!(matches!(&error.reason, Reason::Compile(_)), "{error:?}");
+        let rendered = error.rejection().expect("static refusal").render();
         assert!(
-            error.contains("handler 'bad' is Int, not a function"),
-            "{error}"
+            rendered.contains("a map's keys are data, so every value must have the one type"),
+            "{rendered}"
         );
-        assert!(error.contains("not applied"), "{error}");
         assert!(!shell.has_handler("ll") && !shell.has_handler("bad"));
     }
 
@@ -772,7 +803,7 @@ mod tests {
     /// a nullary call succeeds, but a block argument is refused at check time.
     #[test]
     fn rc_handler_keeps_the_external_argument_gate() {
-        let src = "return [\n    handlers: [\n        ws: { |args| echo $args },\n    ],\n]\n";
+        let src = "return [\n    handlers: [:,\n        ws: { |args| echo $args },\n    ],\n]\n";
         let (shell, _) = apply_rc_inner(src);
         // Persistent handler frame, not a scope binding.
         assert!(shell.has_handler("ws"));
@@ -806,7 +837,7 @@ mod tests {
         use ral_core::source::SourceOrigin;
 
         for (field, use_text) in [
-            ("handlers: [foo: { |args| return $d }]", "return $d"),
+            ("handlers: [:, foo: { |args| return $d }]", "return $d"),
             ("umask: $d", "$d"),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -842,45 +873,6 @@ mod tests {
             assert!(!marker.exists(), "nothing after the decoder may run");
             assert!(!shell.has_handler("foo"));
         }
-    }
-
-    #[test]
-    fn computed_handler_name_is_vetted_against_its_actual_base_frame() {
-        use ral_core::ty::{Binders, CompTy};
-
-        fn frame(_: &mut Binders) -> Ty {
-            Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::int())))
-        }
-        let mut runtime = crate::repl::prelude_runtime();
-        runtime.install_captured_builtins(
-            &vec![BuiltinEntry::base_frame(
-                Cow::Borrowed("frame"),
-                frame,
-                "test frame returning an integer",
-                BuiltinBody::Static(|_, _, _| Ok(Value::Int(0))),
-            )]
-            .into(),
-        );
-        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
-        let source = "let name = 'frame'\nreturn [handlers: [$name: { |args| echo ...$args }]]";
-        let value = ral_core::shell::load::evaluate_source(
-            &Mooring::adrift(),
-            &mut shell,
-            source,
-            &ral_core::source::SourceOrigin::named("rc.ral"),
-            Some(ral_core::typecheck::contract::declared(Form::Rc)),
-        )
-        .expect("a computed-name map stands in for an external command at check time");
-        let Value::Map(pairs) = value else {
-            panic!("the rc must return a record");
-        };
-        let error = RcPlan::decode(&pairs, &shell)
-            .err()
-            .expect("the actual base frame needs an integer result");
-        assert!(error.contains("handler 'frame'"), "{error}");
-        assert!(error.contains("Int"), "{error}");
-        assert!(error.contains("not applied"), "{error}");
-        assert!(!shell.has_handler("frame"));
     }
 
     /// Every key `Form::Rc`'s table declares reaches its own arm in

@@ -131,8 +131,8 @@ fn detach_host() {
     let receipt = birth(
         &mut with_detach(),
         &format!(
-            "detach #'the survivor a test outlives'# /bin/sh -c 'while :; do \
-             echo {MARKER}; echo {MARKER} >&2; echo {MARKER} >> {}; sleep 0.05; done'",
+            "detach #'the survivor a test outlives'# /bin/sh ['-c', 'while :; do \
+             echo {MARKER}; echo {MARKER} >&2; echo {MARKER} >> {}; sleep 0.05; done']",
             trace.display()
         ),
     );
@@ -180,7 +180,7 @@ impl Drop for Survivor {
 #[test]
 fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
     let mut shell = with_detach();
-    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
+    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep ['300']");
     let survivor = Survivor::of(&receipt);
 
     let mut fields: Vec<&str> = receipt
@@ -207,7 +207,7 @@ fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
         a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it,
         || {
             let mut shell = with_detach();
-            let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
+            let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep ['300']");
             let survivor = Survivor::of(&receipt);
 
             let mut status = 0;
@@ -233,7 +233,7 @@ fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
 #[test]
 fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
     let mut shell = with_detach();
-    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
+    let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep ['300']");
     let survivor = Survivor::of(&receipt);
     assert!(
         survivor.alive(),
@@ -260,7 +260,7 @@ fn a_frame_that_withholds_detach_refuses_the_call() {
     let mut shell = with_detach();
     let message = refusal(
         &mut shell,
-        "grant [shell: [`chdir]] { detach #'a long sleep'# /bin/sleep 300 }",
+        "grant [shell: [`chdir]] { detach #'a long sleep'# /bin/sleep ['300'] }",
     );
     assert!(
         message.contains("withholds"),
@@ -279,7 +279,7 @@ fn a_launch_whose_interpreter_is_missing_says_so() {
     std::fs::set_permissions(&no_interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
     let message = refusal(
         &mut shell,
-        &format!("detach #'never born'# {}", no_interpreter.display()),
+        &format!("detach #'never born'# {} []", no_interpreter.display()),
     );
     assert!(
         message.contains(
@@ -295,7 +295,7 @@ fn a_detach_of_a_missing_program_leaves_one_record_carrying_its_failure() {
     let mut shell = with_detach();
     let (result, events) = crate::common::run_recorded(
         &mut shell,
-        "detach #'never born'# /nonexistent/ral-test-program",
+        "detach #'never born'# /nonexistent/ral-test-program []",
         true,
     );
     assert!(result.is_err(), "a missing program is not born");
@@ -315,7 +315,7 @@ fn a_detach_the_grant_refuses_leaves_its_check_and_no_command_record() {
     let mut shell = with_detach();
     let (result, events) = crate::common::run_recorded(
         &mut shell,
-        &crate::common::under_grant("detach #'never born'# /bin/sleep 300"),
+        &crate::common::under_grant("detach #'never born'# /bin/sleep ['300']"),
         true,
     );
     assert!(result.is_err(), "the grant runs only /bin/cat");
@@ -357,22 +357,30 @@ fn the_survivor_writes_to_dev_null_because_std_dup2s_stdio_before_pre_exec_runs(
     }
 }
 
-/// A user handler stacks on `detach`, and a `detach` call from inside its
-/// body reaches the base frame under self-masking, birthing a real survivor
-/// instead of recursing.
+/// A binding replaces `detach` without crossing the launch boundary.
 #[test]
-fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
+fn a_bound_stub_stands_in_for_detach() {
     let mut shell = with_detach();
-    let receipt = birth(
+    let (result, events) = crate::common::run_recorded(
         &mut shell,
-        "within [handlers: [detach: { |args| detach ...$args }]] \
-         { detach #'through a stacked frame'# /bin/sleep 300 }",
+        "let detach = { |d p a| return [pid: 0, desc: $d] }; \
+         detach 'x' /bin/sleep ['300']",
+        true,
     );
-    let survivor = Survivor::of(&receipt);
-    assert_eq!(receipt["desc"], "through a stacked frame");
+    let receipt = result.expect("a bound stub returns its receipt");
+    assert_eq!(
+        receipt,
+        Value::map(vec![
+            ("pid".into(), Value::Int(0)),
+            ("desc".into(), Value::string("x")),
+        ])
+    );
+    let commands = crate::common::commands(&events);
     assert!(
-        survivor.alive(),
-        "the forwarded call must still birth a live survivor"
+        commands
+            .iter()
+            .all(|command| command.origin != CommandOrigin::Detached),
+        "a stub births nothing: {commands:?}"
     );
 }
 
@@ -403,12 +411,11 @@ fn a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it() {
     assert!(survivor.alive(), "and it is still there afterwards");
 }
 
-/// A program the grant denies is refused as denied, before its argument's
-/// runtime shape is looked at, and its check reaches the surface.
+/// A denied program leaves one check with no recorded arguments.
 #[test]
-fn a_denied_program_is_refused_before_its_arguments_are_shaped() {
+fn a_denied_detach_leaves_one_check_without_args() {
     let source = "let go = { |v| detach #'a sleep'# /bin/sleep $v }; \
-                  grant [exec: [allow: []]] { go [a: 1] }";
+                  grant [exec: [allow: []]] { go ['300'] }";
     let (result, events) = crate::common::run_recorded(&mut with_detach(), source, true);
     match result {
         Err(Break::Error(e)) => assert!(

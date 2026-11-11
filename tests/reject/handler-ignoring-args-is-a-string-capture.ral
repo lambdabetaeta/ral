@@ -1,5 +1,5 @@
 # codes: T0074
 # status: 1
-# at: 5:79
+# at: 5:82
 # contains: but a number (Int or Float) is needed
-let r = !{ within [handlers: [greet: { |args| echo hi }]] { greet } }; return $[$r + 0]
+let r = !{ within [handlers: [:, greet: { |args| echo hi }]] { greet } }; return $[$r + 0]

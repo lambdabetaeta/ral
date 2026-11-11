@@ -780,23 +780,9 @@ impl Machine {
                 }
             }
 
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            } => {
+            CompKind::Within { opts, body } => {
                 let opts = form(&Val::Record(Arc::clone(opts)), &env, &shell.sig)?;
-                let arms = handlers
-                    .as_ref()
-                    .map(|arms| {
-                        arms.iter()
-                            .map(|arm| {
-                                Ok((arm.name.clone(), form(&arm.value.item, &env, &shell.sig)?))
-                            })
-                            .collect::<Settled<Vec<_>>>()
-                    })
-                    .transpose()?;
-                let scope = WithinScope::parse(&opts.as_map("within")?, arms, shell)?;
+                let scope = WithinScope::parse(&opts.as_map("within")?, shell)?;
                 let body = form(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Within(scope.enter(shell)));
@@ -1538,7 +1524,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "within [handlers: [curl: { |a| echo note; echo body }]] {\n\
+                "within [handlers: [:, curl: { |a| echo note; echo body }]] {\n\
                  let x = curl\nreturn $x\n}",
                 shell,
             )
@@ -1554,7 +1540,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "within [handlers: [boom: { |a| echo partial; fail 'x' }]] {\n\
+                "within [handlers: [:, boom: { |a| echo partial; fail 'x' }]] {\n\
                  let x = boom\nreturn $x\n}",
                 shell,
             )
@@ -1570,7 +1556,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "within [handlers: [boom: { |a| echo partial; fail 'x' }]] {\n\
+                "within [handlers: [:, boom: { |a| echo partial; fail 'x' }]] {\n\
                  let x = try { return !{ echo in | boom } } { |_| return 'handled' }\n\
                  return $x\n}",
                 shell,
@@ -1585,7 +1571,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "within [handlers: [boom: { |a| echo cde; fail 'x' }]] {\n\
+                "within [handlers: [:, boom: { |a| echo cde; fail 'x' }]] {\n\
                  let x = !{ echo ab; let y = boom; echo z }\nreturn $x\n}",
                 shell,
             )
@@ -1633,7 +1619,7 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "within [handlers: [boom: { |a| echo partial; exit 3 }]] {\n\
+                "within [handlers: [:, boom: { |a| echo partial; exit 3 }]] {\n\
                  let x = boom\nreturn $x\n}",
                 shell,
             )

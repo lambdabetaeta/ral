@@ -623,15 +623,8 @@ impl<P: Phase> Mentions for Comp<P> {
                 body.mentions(out);
                 release.mentions(out);
             }
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            } => {
+            CompKind::Within { opts, body } => {
                 out.extend(opts.occ().names());
-                for arm in handlers.iter().flatten() {
-                    arm.value.item.mentions(out);
-                }
                 body.mentions(out);
             }
             CompKind::Grant { caps, body } => {
@@ -789,13 +782,10 @@ pub enum CompKind<P: Phase = Checked> {
         body: Arc<Comp<P>>,
         redirects: Redirects<Val<P>>,
     },
-    /// `within OPTS BODY` — install the option overrides in `opts`, written
-    /// out pair by pair, for the duration of `body`.  `handlers` is not
-    /// among them: its labels are the names it binds in `body`, so the arms
-    /// are syntax and `None` is a `within` that wrote none.
+    /// `within OPTS BODY` — install option overrides for the duration of `body`.
+    /// `opts` is a spread-free record node, as `grant`'s capabilities are.
     Within {
         opts: Arc<FieldsNode<P>>,
-        handlers: Option<Vec<HandlerArmV<P>>>,
         body: Val<P>,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
@@ -951,15 +941,6 @@ impl<P: Phase> Prim<P> {
             ),
         }
     }
-}
-
-/// One arm of a `within [handlers: …]`: the command name it stands in for,
-/// and the value installed under it.  Arms are syntax, as [`CaseArm`]s are.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(bound = "P: Serial")]
-pub struct HandlerArmV<P: Phase = Checked> {
-    pub name: String,
-    pub value: Spanned<Val<P>>,
 }
 
 /// One arm of a [`CompKind::Case`]: a tag and a thunk of a function of its

@@ -37,7 +37,7 @@ fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> 
         .unwrap_or_default()
 }
 
-/// A surface holding `detach`, the base frame core publishes for a host to install.
+/// A surface holding `detach`, the value builtin core publishes for a host to install.
 #[cfg(unix)]
 fn detach_surface() -> ral_core::HostSurface {
     ral_core::HostSurface {
@@ -187,49 +187,83 @@ fn par_accepts_a_command_callback_and_returns_its_unit_values() {
     assert_eq!(captures(repaired), 1);
 }
 
-/// A base frame takes an argv, and `...` is exactly its notation.  `detach` is
-/// checked against a surface that installs it, because core's table alone
-/// publishes only `echo`: read as an external, `detach` would accept the spread
-/// for an external's reasons and say nothing about frames.
 #[cfg(unix)]
 #[test]
-fn a_spread_into_detach_is_legal() {
+fn a_spread_into_detach_goes_inside_its_argv_list() {
+    let surface = detach_surface();
     ok_against(
+        "let xs = ['300']; detach #'a long sleep'# /bin/sleep [...$xs]",
+        &surface,
+    );
+    let errs = errors_against(
         "let xs = ['300']; detach #'a long sleep'# /bin/sleep ...$xs",
-        &detach_surface(),
+        &surface,
     );
+    assert_eq!(codes_of(&errs), ["T0056"]);
+    let hint = errs[0].hint().expect("a spread refusal explains the list");
+    assert!(hint.contains("spread inside it, `[...$xs]`"), "{hint}");
 }
 
-/// `detach` is a frame for the same reason `echo` is: it takes an argv, so
-/// there is no `$detach` either.  Checked against the surface that installs it
-/// — the bare table would answer about an external.
 #[cfg(unix)]
 #[test]
-fn detach_is_a_base_frame_not_a_value() {
-    let codes: Vec<_> = errors_against("return $detach", &detach_surface())
-        .iter()
-        .map(|e| e.kind.code())
-        .collect();
-    assert_eq!(codes, ["T0042"]);
-}
-
-/// An arm for `detach` stands in for ral's own `detach`, so it returns the
-/// receipt `detach` returns — not a command's `()`, and not anything else.
-#[cfg(unix)]
-#[test]
-fn an_arm_for_detach_returns_its_receipt() {
-    ok_against(
-        "within [handlers: [detach: { |a| return [pid: 1, desc: 'stub'] }]] { return () }",
-        &detach_surface(),
-    );
-    let codes: Vec<_> = errors_against(
-        "within [handlers: [detach: { |a| return 3 }]] { return () }",
-        &detach_surface(),
+fn detach_is_a_first_class_value() {
+    let surface = detach_surface();
+    ok_against("return $detach", &surface);
+    let top = typecheck(
+        &toplevel("let f = $detach; let bg = detach 'docs'; return ()"),
+        crate::common::schemes_for(&surface),
+        None,
     )
-    .iter()
-    .map(|e| e.kind.code())
-    .collect();
-    assert_eq!(codes, ["T0011"]);
+    .expect("detach can be bound and partially applied");
+    assert_eq!(
+        scheme_at(&top, 0),
+        "String → String → [String] → Returns [desc: String, pid: Integer]"
+    );
+    assert_eq!(
+        scheme_at(&top, 1),
+        "String → [String] → Returns [desc: String, pid: Integer]"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_handler_named_detach_is_a_command() {
+    let surface = detach_surface();
+    let errs = errors_against(
+        "within [handlers: [:, detach: { |a| return [pid: 1, desc: 'stub'] }]] { return () }",
+        &surface,
+    );
+    assert_eq!(codes_of(&errs), ["T0011"]);
+    let hint = errs[0].hint().expect("a handler refusal explains commands");
+    assert!(hint.contains("stands in for a command"), "{hint}");
+    ok_against(
+        "within [handlers: [:, detach: { |a| echo stub }]] { return () }",
+        &surface,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn detach_requires_a_list_of_strings() {
+    let surface = detach_surface();
+    for src in ["detach 'nap' sleep 300", "detach 'nap' sleep [300]"] {
+        assert_eq!(codes_of(&errors_against(src, &surface)), ["T0010"], "{src}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_over_applied_detach_explains_its_last_list() {
+    let errs = errors_against(
+        "detach 'docs' python3 -m http.server 8000",
+        &detach_surface(),
+    );
+    assert_eq!(codes_of(&errs), ["T0050"]);
+    let hint = errs[0].hint().expect("an arity refusal explains the list");
+    assert!(
+        hint.contains("write the arguments from the 3rd on as one list, `[a, b]`"),
+        "{hint}"
+    );
 }
 
 // ─── Toplevel phrase typechecking ─────────────────────────────────────────

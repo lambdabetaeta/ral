@@ -1,6 +1,6 @@
 # codes: T0011
 # status: 1
-# at: 6:26
-# contains: stands in for the `echo` in force
+# at: 6:29
+# contains: an arm for `echo` stands in for a command
 let h = { |args| fold-lines { |a l| fail 'callback never runs' } 0 }
-within [handlers: [echo: $h]] { echo hi }
+within [handlers: [:, echo: $h]] { echo hi }

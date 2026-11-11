@@ -258,6 +258,185 @@ fn a_denied_search_says_the_same_whether_or_not_the_local_name_exists() {
 }
 
 #[test]
+fn nested_exported_handlers_with_incompatible_schemes_are_refused_at_use() {
+    use ral_core::fact::{AdmissionCause, InvalidCause, Reason};
+    use ral_core::shell::runtime::Break;
+
+    let (_tmp, root) = scratch();
+    let module = root.join("handlers.ral");
+    for (case, arm, option) in [
+        (
+            "named handler returning Int",
+            "{ |args| return 7 }",
+            "handlers: [:, foo: $m[bundle][arm]]",
+        ),
+        (
+            "named handler with too few parameters",
+            "{ echo handled }",
+            "handlers: [:, foo: $m[bundle][arm]]",
+        ),
+        (
+            "named handler with too many parameters",
+            "{ |args extra| echo handled }",
+            "handlers: [:, foo: $m[bundle][arm]]",
+        ),
+        (
+            "catch-all returning Int",
+            "{ |name args| return 7 }",
+            "handler: $m[bundle][arm]",
+        ),
+        (
+            "catch-all with too few parameters",
+            "{ |args| echo handled }",
+            "handler: $m[bundle][arm]",
+        ),
+        (
+            "catch-all with too many parameters",
+            "{ |name args extra| echo handled }",
+            "handler: $m[bundle][arm]",
+        ),
+    ] {
+        std::fs::write(&module, format!("let bundle = [arm: {arm}]\n")).unwrap();
+        let source = format!(
+            "let m = use {}; within [{option}] {{ foo }}",
+            quote_word(&shown(&module))
+        );
+        let mut shell = fresh_shell();
+        let Break::Error(error) = top_level(&mut shell, &source).expect_err(case) else {
+            panic!("{case}: expected a use admission error");
+        };
+        let Reason::Invalid(failure) = &error.reason else {
+            panic!("{case}: expected invalid admission, got {error:?}");
+        };
+        assert_eq!(failure.operation, "use", "{case}");
+        let InvalidCause::Admission(admission) = &failure.cause else {
+            panic!("{case}: expected admission, got {failure:?}");
+        };
+        assert_eq!(admission.pointer, "/bundle", "{case}");
+        assert!(
+            matches!(&admission.cause, AdmissionCause::Export(_)),
+            "{case}: expected an export scheme refusal, got {admission:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_exported_command_handlers_are_admitted_with_their_complete_schemes() {
+    let (_tmp, root) = scratch();
+    let module = root.join("handlers.ral");
+    for (case, arm, option, expected) in [
+        (
+            "named handler",
+            "{ |args| echo handled }",
+            "handlers: [:, foo: $m[bundle][arm]]",
+            "handled",
+        ),
+        (
+            "catch-all",
+            "{ |name args| echo $name }",
+            "handler: $m[bundle][arm]",
+            "foo",
+        ),
+    ] {
+        std::fs::write(&module, format!("let bundle = [arm: {arm}]\n")).unwrap();
+        let source = format!(
+            "let m = use {}; let text = within [{option}] {{ foo }}; return $text",
+            quote_word(&shown(&module))
+        );
+        let value = top_level(&mut fresh_shell(), &source).expect(case);
+        assert_eq!(value, Value::string(expected), "{case}");
+    }
+}
+
+#[test]
+fn reexported_opaque_handlers_are_checked_when_invoked() {
+    use ral_core::fact::{InvalidCause, Reason};
+    use ral_core::shell::runtime::Break;
+
+    let (_tmp, root) = scratch();
+    let inner = root.join("b.ral");
+    let outer = root.join("a.ral");
+    std::fs::write(
+        &outer,
+        format!("let bundle = use {}\n", quote_word(&shown(&inner))),
+    )
+    .unwrap();
+    for (case, arm, option) in [
+        (
+            "reexported named handler returning Int",
+            "{ |args| return 7 }",
+            "handlers: [:, foo: $m[bundle][bad]]",
+        ),
+        (
+            "reexported named handler with too many parameters",
+            "{ |args extra| echo handled }",
+            "handlers: [:, foo: $m[bundle][bad]]",
+        ),
+        (
+            "reexported catch-all returning Int",
+            "{ |name args| return 7 }",
+            "handler: $m[bundle][bad]",
+        ),
+        (
+            "reexported catch-all with too many parameters",
+            "{ |name args extra| echo handled }",
+            "handler: $m[bundle][bad]",
+        ),
+    ] {
+        std::fs::write(&inner, format!("let bad = {arm}\n")).unwrap();
+        let source = format!(
+            "let m = use {}; within [{option}] {{ foo }}",
+            quote_word(&shown(&outer))
+        );
+        let Break::Error(error) = top_level(&mut fresh_shell(), &source).expect_err(case) else {
+            panic!("{case}: expected a delayed admission error");
+        };
+        let Reason::Invalid(failure) = &error.reason else {
+            panic!("{case}: expected invalid admission, got {error:?}");
+        };
+        assert_eq!(failure.operation, "imported value", "{case}");
+        assert!(
+            matches!(&failure.cause, InvalidCause::Admission(_)),
+            "{case}: expected admission, got {failure:?}"
+        );
+    }
+}
+
+#[test]
+fn reexported_opaque_command_handlers_remain_callable() {
+    let (_tmp, root) = scratch();
+    let inner = root.join("b.ral");
+    let outer = root.join("a.ral");
+    std::fs::write(
+        &outer,
+        format!("let bundle = use {}\n", quote_word(&shown(&inner))),
+    )
+    .unwrap();
+    for (case, arm, option, expected) in [
+        (
+            "reexported named handler",
+            "{ |args| echo handled }",
+            "handlers: [:, foo: $m[bundle][bad]]",
+            "handled",
+        ),
+        (
+            "reexported catch-all",
+            "{ |name args| echo $name }",
+            "handler: $m[bundle][bad]",
+            "foo",
+        ),
+    ] {
+        std::fs::write(&inner, format!("let bad = {arm}\n")).unwrap();
+        let source = format!(
+            "let m = use {}; let text = within [{option}] {{ foo }}; return $text",
+            quote_word(&shown(&outer))
+        );
+        let value = top_level(&mut fresh_shell(), &source).expect(case);
+        assert_eq!(value, Value::string(expected), "{case}");
+    }
+}
+
+#[test]
 fn a_module_raising_use_prefixed_text_still_gets_loader_context_once() {
     use ral_core::fact::Reason;
     use ral_core::shell::runtime::Break;

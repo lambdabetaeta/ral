@@ -9,18 +9,18 @@ use crate::ir::CommandName;
 use crate::process::{Scope, StdioSpec, group::Survivor};
 use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell, Value};
 
-/// `detach <desc> <cmd> <args…>`: start `cmd` as a program, as `^cmd` would,
-/// and return the receipt `{pid, desc}`. The session never waits for,
+/// `detach <desc> <program> <args>`: resolve `program` as `^program` would,
+/// and return the receipt `[pid: Int, desc: String]`. The session never waits for,
 /// signals or reaps it.
 pub(in crate::shell) fn detach(
     desc: &str,
-    command: &Value,
+    program: &str,
     argv: &[Value],
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
-    let command = Command::from_name(&CommandName::of(&command.to_string()), &shell.context)
+    let command = Command::from_name(&CommandName::of(program), &shell.context)
         .lookup(&shell.context.grants, shell.baseline())
         .admit(mooring, shell)?;
     let origin = CommandOrigin::Detached;

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -209,7 +209,7 @@ bind with its inferred scheme in one checked pass) and returns the
 so core cannot bake its own prelude, and each embedding host bakes it from core's
 source. Evaluating the annotated prelude installs each binding's scheme into
 scope[0], so the per-run seed and the prelude's own schemes agree by construction
-([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+([[internals/type-inference|type-inference]]).
 
 ## Platform glue
 

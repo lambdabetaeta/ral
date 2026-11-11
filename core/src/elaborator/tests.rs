@@ -637,10 +637,7 @@ fn scope_options_are_record_fields_with_written_order_hoists() {
             rest = next;
         }
         let fields = match &rest.item {
-            CompKind::Within { opts, handlers, .. } => {
-                assert!(handlers.is_none());
-                opts
-            }
+            CompKind::Within { opts, .. } => opts,
             CompKind::Grant { caps, .. } => caps,
             other => panic!("expected a scope form, got {other:?}"),
         };
@@ -658,25 +655,34 @@ fn scope_options_are_record_fields_with_written_order_hoists() {
 }
 
 #[test]
-fn empty_scope_options_preserve_the_handler_frame_distinction() {
-    for (src, named_handlers) in [
-        ("within [] { return () }", None),
-        ("within [handlers: []] { return () }", Some(0)),
-    ] {
+fn empty_scope_options_are_empty_records() {
+    for src in ["within [] { return () }", "grant [] { return () }"] {
         let ast = parse(src).expect("parse");
         let comp = elaborate_one(&ast, [], None);
-        let CompKind::Within { opts, handlers, .. } = &comp.item else {
-            panic!("expected Within, got {:?}", comp.item);
+        let fields = match &comp.item {
+            CompKind::Within { opts, .. } => opts,
+            CompKind::Grant { caps, .. } => caps,
+            other => panic!("expected a scope form, got {other:?}"),
         };
-        assert!(opts.shape().is_empty());
-        assert_eq!(handlers.as_ref().map(Vec::len), named_handlers);
+        assert!(fields.shape().is_empty());
     }
-    let ast = parse("grant [] { return () }").expect("parse");
+}
+
+#[test]
+fn an_empty_handler_map_is_preserved_as_an_option() {
+    let ast = parse("within [handlers: [:]] { return () }").expect("parse");
     let comp = elaborate_one(&ast, [], None);
-    let CompKind::Grant { caps, .. } = &comp.item else {
-        panic!("expected Grant, got {:?}", comp.item);
+    let CompKind::Within { opts, .. } = &comp.item else {
+        panic!("expected Within, got {:?}", comp.item);
     };
-    assert!(caps.shape().is_empty());
+    let [(key, value)] = opts.shape().as_ref() else {
+        panic!("expected one option, got {opts:?}");
+    };
+    assert_eq!(key.as_ref(), "handlers");
+    let Val::Map(entries) = &value.item else {
+        panic!("expected handler map, got {:?}", value.item);
+    };
+    assert!(entries.shape().is_empty());
 }
 
 #[test]

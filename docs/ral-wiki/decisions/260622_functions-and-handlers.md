@@ -1,5 +1,5 @@
 ---
-status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: an open-argv entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Persistent installation now uses host-owned rc and manifest `handlers:` maps; the dynamic surface proposed here was not retained. Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0. Done 2026-08-12: ArgSig::Optional deleted — `cd` and the REPL job verbs are natives, leaving `echo` and `detach` the only base frames.'
+status: 'superseded in part — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: an open-argv entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Persistent installation now uses host-owned rc and manifest `handlers:` maps; the dynamic surface proposed here was not retained. Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0. Done 2026-08-12: ArgSig::Optional deleted — `cd` and the REPL job verbs are natives.'
 ---
 
 # Functions and handlers
@@ -64,7 +64,7 @@ argv-as-list remains. The current `arity: _` entries were never one shape:
 > **2026-08-12.** `ArgSig::Optional`, the variant the `from-*` row names, is
 > itself deleted: an entry declares its arguments or it takes an open argv, and
 > nothing in between
-> ([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]).
+> ([[invariants/fixed-arity|fixed-arity]]).
 
 Because every builtin is a function, no `Function | Handler` kind is recorded on
 the registry at all: the distinction lives entirely in the handler stack
@@ -234,10 +234,6 @@ confirm, not assume.
   `HandlerArity` are *user*-handler machinery; there was never a
   native-handler-in-stack path to remove. "No builtin is a handler" is conceptual
   clarity here, not code reduction.
-
-Superseded in part by
-[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-which keeps the dichotomy and partitions the builtins across it by arity.
 
 Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],

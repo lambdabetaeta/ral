@@ -1,13 +1,13 @@
 //! Type-checker side of the builtin registry.
 //!
-//! Here live the typing rule each `builtin_registry!` entry in
-//! `core/src/shell/builtins.rs` selects through its `ty:` field, the scheme
-//! factories it picks from — base frames included, which name one directly —
-//! and the record shapes the record-valued builtins share.
+//! Value rows select a typing rule through `builtin_registry!`'s `ty:` field;
+//! argv rows share the named-handler type by construction. Here live those
+//! rules, the handler types and the record shapes the builtins share.
 //!
 //! Scheme factories draw their variables from a local [`Binders`] supply,
 //! independent of any inference session.
 
+use super::error::Standing;
 use crate::fact::{DirEntry, FileInfo};
 use crate::fact::{ErrorRecord, Io, Observation, Receipt};
 use crate::protocol::probe::WorkerRow;
@@ -18,11 +18,7 @@ use crate::ty::{
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
-/// How the type checker types a registered builtin: its type, under binders
-/// it draws from the supply it is handed.
-///
-/// A base frame names one directly, the same as any value builtin — an argv
-/// is one argument of one type, not a list of slots to diagnose one by one.
+/// A value builtin's type, under binders drawn from the supplied scope.
 pub(crate) type BuiltinTypeRule = fn(&mut Binders) -> Ty;
 
 /// Extra non-typing behaviour a builtin's [`Decl`] carries: which diagnostic
@@ -38,19 +34,53 @@ pub(crate) enum BuiltinDiagnostic {
 /// Which of ral's two argument conventions a manifest row uses.  The manifest
 /// is authored as two, and what a name can do follows from which half it is in
 /// rather than from its arity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Convention {
     /// Curried application at the arity the row's type declares, and
     /// first-class as `$name`: the row seeds the base env scope as a
     /// `Value::Native(entry, [])`; partial applications hold their arguments.
-    Value,
-    /// An argv base frame: intercepted, stacked, and never a value.
-    /// `^name` bypasses it. The checker reads its scheme directly from Σ.
-    /// Typed `List String`,
-    /// an argv's elements crossing rendered — though the body is handed the
-    /// values themselves, and renders what it writes (`echo`) or vets what it
-    /// launches (`detach`) as its own boundary demands.
+    Value(BuiltinTypeRule),
+    /// An argv base frame: `[String] → Command`, intercepted, stacked, and
+    /// never a value. `^name` bypasses it. Its argv words are gated, not
+    /// unified with `String`; the body receives the values themselves.
     Argv,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Arm<'a> {
+    Named(&'a str),
+    CatchAll,
+}
+
+impl Arm<'_> {
+    pub(crate) fn shape(self, body: CompTy) -> CompTy {
+        match self {
+            Self::Named(_) => CompTy::arrows([Ty::argv()], body),
+            Self::CatchAll => CompTy::arrows([Ty::string(), Ty::argv()], body),
+        }
+    }
+
+    pub(crate) fn ty(self) -> CompTy {
+        match self {
+            Self::Named(_) => handler(),
+            Self::CatchAll => self.shape(CompTy::command()),
+        }
+    }
+
+    pub(crate) fn standing(self) -> Standing {
+        match self {
+            Self::Named(name) => Standing::Command(name.into()),
+            Self::CatchAll => Standing::EveryCommand,
+        }
+    }
+}
+
+fn handler() -> CompTy {
+    CompTy::arrows([Ty::argv()], CompTy::command())
+}
+
+pub(super) fn handlers_ty() -> Ty {
+    Ty::map(Ty::thunk(handler()))
 }
 
 /// `true` and `false` — language-given names in every base scope, live and
@@ -58,7 +88,7 @@ pub enum Convention {
 /// them `Bool`.
 pub(crate) const LANGUAGE_CONSTANTS: [(&str, bool); 2] = [("true", true), ("false", false)];
 
-/// What a row's type rule fixes once: its curry depth and whether it settles
+/// What a row's scheme fixes once: its curry depth and whether it settles
 /// at `Unit`.
 #[derive(Debug, Clone, Copy)]
 struct Spine {
@@ -101,7 +131,6 @@ pub struct Decl {
     pub name: Cow<'static, str>,
     pub convention: Convention,
     pub doc: &'static str,
-    type_rule: BuiltinTypeRule,
     /// Which diagnostic an over-application or a literal misuse earns; `None`
     /// for the overwhelming majority of rows.
     pub(crate) diagnostic: BuiltinDiagnostic,
@@ -116,7 +145,6 @@ impl Decl {
     pub(crate) const fn new(
         name: Cow<'static, str>,
         convention: Convention,
-        type_rule: BuiltinTypeRule,
         doc: &'static str,
         boundary: bool,
     ) -> Self {
@@ -124,7 +152,6 @@ impl Decl {
             name,
             convention,
             doc,
-            type_rule,
             diagnostic: BuiltinDiagnostic::None,
             boundary,
             scheme: OnceLock::new(),
@@ -136,10 +163,7 @@ impl Decl {
         self.boundary
     }
 
-    /// The row's closed type, with a quantified grade on ordinary results.
-    ///
-    /// # Panics
-    /// If a base frame does not declare a ground result payload.
+    /// The row's closed type; value rows quantify ordinary result grades.
     pub fn scheme(&self) -> &Closed {
         self.scheme.get_or_init(|| {
             /// `body` with a `Value` grade past its arrows made a fresh grade
@@ -155,22 +179,16 @@ impl Decl {
                     CompTyNode::Return(..) | CompTyNode::Var(_) => body.clone(),
                 }
             }
-            Binders::close(|binders| {
-                let ty = (self.type_rule)(binders);
-                if self.convention == Convention::Argv {
-                    let TyNode::Thunk(body) = ty.node() else {
-                        panic!("base frame `{}` must declare a thunk", self.name);
-                    };
-                    let mut result = body;
-                    while let CompTyNode::Fun(_, rest) = result.node() { result = rest; }
-                    assert!(matches!(result.node(), CompTyNode::Return(_, payload) if payload.is_ground()),
-                        "base frame `{}` must declare a ground result payload", self.name);
-                }
-                match ty.node() {
-                    TyNode::Thunk(body) if !self.is_boundary() => {
-                        Ty::thunk(quantified(body, binders))
+            Binders::close(|binders| match self.convention {
+                Convention::Argv => Ty::thunk(Arm::Named(&self.name).ty()),
+                Convention::Value(rule) => {
+                    let ty = rule(binders);
+                    match ty.node() {
+                        TyNode::Thunk(body) if !self.is_boundary() => {
+                            Ty::thunk(quantified(body, binders))
+                        }
+                        _ => ty,
                     }
-                    _ => ty,
                 }
             })
         })
@@ -239,7 +257,7 @@ impl Manifest {
     /// position through the handler stack; `^name` bypasses it.
     pub fn value(&self, name: &str) -> Option<&Decl> {
         self.rows()
-            .find(|decl| decl.name == name && decl.convention == Convention::Value)
+            .find(|decl| decl.name == name && matches!(decl.convention, Convention::Value(_)))
     }
 
     /// The base-frame row for `name`, independent of installed handlers.
@@ -250,13 +268,13 @@ impl Manifest {
     /// Every base-frame row in Σ.
     pub(crate) fn base_frames(&self) -> impl Iterator<Item = &Decl> {
         self.rows()
-            .filter(|decl| decl.convention == Convention::Argv)
+            .filter(|decl| matches!(decl.convention, Convention::Argv))
     }
 
     /// Names a `$name` reference reaches: the value rows.
     pub(crate) fn value_names(&self) -> impl Iterator<Item = &str> {
         self.rows()
-            .filter(|decl| decl.convention == Convention::Value)
+            .filter(|decl| matches!(decl.convention, Convention::Value(_)))
             .map(|decl| decl.name.as_ref())
     }
 
@@ -293,7 +311,7 @@ pub fn command() -> CompTy {
 // `pub(crate)`-by-default discipline
 // (`docs/ral-wiki/decisions/260909_pub-crate-by-default.md`).  Per-arm
 // visibility would mean threading a `$vis` through every call site to narrow
-// members that a base frame's row already names — and a row is a caller, so no
+// members that a value row already names — and a row is a caller, so no
 // member of this family can be stranded silently the way a loose function can.
 
 macro_rules! scheme {
@@ -554,26 +572,7 @@ pub mod scheme {
     // workers :: F [WorkerRow]
     scheme!(workers_op: pure Ty::list(WorkerRow::ty()));
 
-    // ── Base frames ──────────────────────────────────────────────────────
-
-    /// A base frame's type: an argv in, the computation the frame names out.
-    /// One shape for the whole argv half of the manifest — a frame differs
-    /// from its siblings only in the result it names.
-    fn base_frame(result: CompTy) -> Ty {
-        thunk(fun(Ty::argv(), result))
-    }
-
-    /// `echo :: [Str] → Command` — join the argv with single spaces and write it
-    /// with a trailing newline.
-    pub(crate) fn echo(_: &mut Binders) -> Ty {
-        base_frame(command())
-    }
-
-    /// `detach :: [Str] → F [pid: Int, desc: Str]` — the receipt of a process this
-    /// session stops owning.
-    pub fn detach(_: &mut Binders) -> Ty {
-        base_frame(pure(Receipt::ty()))
-    }
+    scheme!(detach: [Ty::string(), Ty::string(), Ty::argv()] -> Receipt::ty());
 
     // ── First-class constants / queries ──────────────────────────────────
 
@@ -692,49 +691,31 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "must declare a ground result payload")]
-    fn host_base_frame_cannot_produce_a_quantified_payload() {
-        fn nonground(binders: &mut Binders) -> Ty {
-            thunk(fun(Ty::argv(), pure(Ty::var(binders.ty(Kind::ANY)))))
-        }
-        Decl::new(
-            Cow::Borrowed("host"),
-            Convention::Argv,
-            nonground,
-            "",
-            false,
-        )
-        .scheme();
+    fn an_argv_row_has_a_fixed_command_scheme() {
+        let decl = Decl::new(Cow::Borrowed("host"), Convention::Argv, "", false);
+        let expected = Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::command()));
+        assert_eq!(decl.scheme().ty, expected);
+        assert_eq!(handlers_ty(), Ty::map(expected));
     }
 
     #[test]
-    fn base_frame_unit_result_instantiates_at_independent_grades() {
-        fn unit(_: &mut Binders) -> Ty {
-            thunk(fun(Ty::argv(), pure(Ty::unit())))
-        }
-        let decl = Decl::new(Cow::Borrowed("host"), Convention::Argv, unit, "", false);
+    fn value_unit_results_instantiate_at_independent_grades() {
+        let decl = Decl::new(
+            Cow::Borrowed("host"),
+            Convention::Value(scheme::string_to_unit),
+            "",
+            false,
+        );
         let mut unifier = super::super::Unifier::new();
         for grade in [Grade::Value, Grade::Output] {
             let instance = super::super::instantiate(&mut unifier, decl.scheme());
-            let wanted = thunk(CompTy::arrows([Ty::argv()], CompTy::ret(grade, Ty::unit())));
+            let wanted = thunk(CompTy::arrows(
+                [Ty::string()],
+                CompTy::ret(grade, Ty::unit()),
+            ));
             unifier
                 .unify_ty(&instance, &wanted)
                 .expect("independent result grade");
-        }
-    }
-
-    #[test]
-    fn base_frames_accept_ground_record_results() {
-        fn record(_: &mut Binders) -> Ty {
-            thunk(fun(
-                Ty::argv(),
-                pure(closed_record(&[("count", Ty::int())])),
-            ))
-        }
-        let decl = Decl::new(Cow::Borrowed("host"), Convention::Argv, record, "", false);
-        decl.scheme();
-        for frame in crate::HostSurface::default().manifest().base_frames() {
-            frame.scheme();
         }
     }
 
@@ -744,8 +725,7 @@ mod tests {
             .map(|name| {
                 Decl::new(
                     Cow::Borrowed(*name),
-                    Convention::Value,
-                    scheme::str_to_str,
+                    Convention::Value(scheme::str_to_str),
                     "",
                     false,
                 )

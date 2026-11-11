@@ -6,15 +6,11 @@ use crate::ir::BinaryOp;
 use crate::source::Span;
 use crate::ty::{CompTy, CompTyNode, Kind, Label, RefusedArg, Row, Ty, TyNode};
 
-/// What an arm stands in for, which decides what it must produce.
+/// Which commands an arm stands in for; its value is their output.
 #[derive(Debug, Clone)]
 pub enum Standing {
-    /// A command the program does not define: the arm's value is its output.
+    /// A named command.
     Command(String),
-    /// A computed name: held to the external-command obligation.
-    Computed,
-    /// A base frame in Σ: the arm returns what that returns.
-    Own(String),
     /// The catch-all `handler:`, for every command in its extent.
     EveryCommand,
 }
@@ -56,10 +52,10 @@ pub enum Reason {
     ListPattern,
     RecordPattern,
     Argument,
-    /// A named arm against the one parameter its slot hands it, the argv.
-    HandlerParam,
-    /// The catch-all against its two parameters, the name and the argv.
-    CatchAllParams,
+    /// An arm against the parameters its slot hands it.
+    HandlerParams(Standing),
+    /// A handler map against the uniform named-handler type.
+    Handlers,
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
     /// argument is not a computation that can run.
     PipelineStageShape {
@@ -78,8 +74,7 @@ pub enum Reason {
     ReturnShape,
     /// A checker-inserted protection node re-inferred against its contract.
     ProtectContract,
-    /// An arm against what it stands in for: a command's value is its output,
-    /// a base frame returns what it returns.
+    /// An arm against the command it stands in for: its value is its output.
     StandsIn(Standing),
     /// A non-final pipeline stage against `Unit`: a stage feeds the next by
     /// writing.  `stage` and `next` are the two heads, when they are named.
@@ -181,7 +176,11 @@ impl StdinFeed {
 #[derive(Debug, Clone)]
 pub enum SpreadHead {
     /// A builtin, whose signature declares both name and arity.
-    Builtin { name: String, arity: usize },
+    Builtin {
+        name: String,
+        arity: usize,
+        list_last: bool,
+    },
     /// Any other applied head — a lambda, a parameter, a bound name — whose
     /// arity is not yet known, and need never be for the spread to be wrong.
     Applied,
@@ -328,6 +327,7 @@ pub enum TypeErrorKind {
         name: String,
         expected: usize,
         got: usize,
+        list_last: bool,
     },
     /// A `from-*` decoder reads the byte channel — no argument slot to fill.
     DecoderTakesNoArgument {
@@ -449,6 +449,7 @@ impl TypeErrorKind {
                     name: builtin.name.clone(),
                     expected: builtin.expected,
                     got: builtin.got,
+                    list_last: false,
                 }
             }
             _ => self,
@@ -598,7 +599,7 @@ mod tests {
                     .reported(&reason);
                     if builtin {
                         assert!(matches!(reported, TypeErrorKind::BuiltinArity {
-                            name, expected: 2, got: 1,
+                            name, expected: 2, got: 1, list_last: false,
                         } if name == "add"));
                     } else {
                         assert!(matches!(reported, TypeErrorKind::CompTyMismatch { .. }));

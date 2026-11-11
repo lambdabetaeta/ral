@@ -2,32 +2,12 @@
 
 use crate::error::Error;
 use crate::fact::{
-    ArityFailure, CountRule, Expected, InvalidCause, InvalidFailure, IoOperation, IoSubject,
-    Number, NumberRange, OperationState, Reason, RegexCause, RegexFailure, ShapeFailure,
-    StandardStream, StateFailure, ValueShape,
+    Expected, InvalidCause, InvalidFailure, IoOperation, IoSubject, Number, NumberRange,
+    OperationState, Reason, RegexCause, RegexFailure, ShapeFailure, StandardStream, StateFailure,
+    ValueShape,
 };
 use crate::io::Source;
-use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Shell, Value};
-
-/// Arity floor for a builtin, retaining its semantic operation.
-///
-/// # Errors
-/// Returns `Err` if `args.len() < min`.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
-    if args.len() < min {
-        return Err(invalid(
-            name,
-            InvalidCause::Arity(ArityFailure {
-                expected: CountRule::AtLeast(min.into()),
-                got: args.len().into(),
-            }),
-        )
-        .into());
-    }
-    Ok(())
-}
 
 /// Bytes written by number, one `Int` per byte — [`Value::as_bytes`] is the
 /// other spelling, for a `Bytes` value already in hand.

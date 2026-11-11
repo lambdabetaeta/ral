@@ -34,7 +34,7 @@ type records and variants, never computations.
   its arity fixed by the install site
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]],
   [[decisions/260622_functions-and-handlers|functions-and-handlers]],
-  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+  [[design/exec|exec]]).
 - **Equations are dropped on both sides.** "As with most other implementations
   of effect handlers, we do not consider equations" — ral agrees, with the
   sharper reason that its external-command theory is free

@@ -1,14 +1,14 @@
 # A nested handler sits above the enclosing within frame
-within [handlers: [foo: { |args| echo A }]] {
-    within [handlers: [foo: { |args| echo B }]] { foo }
+within [handlers: [:, foo: { |args| echo A }]] {
+    within [handlers: [:, foo: { |args| echo B }]] { foo }
 }
 
 # A handler arm may capture and re-emit its own output
-within [handlers: [cap: { |args| let u = echo hi; echo $u }]] { cap }
+within [handlers: [:, cap: { |args| let u = echo hi; echo $u }]] { cap }
 
 # Forwarding to another handler keeps the route
-within [handlers: [one: { |args| echo one }]] {
-    within [handlers: [two: { |args| one }]] { two }
+within [handlers: [:, one: { |args| echo one }]] {
+    within [handlers: [:, two: { |args| one }]] { two }
 }
 
 echo 'nested handler tests done'

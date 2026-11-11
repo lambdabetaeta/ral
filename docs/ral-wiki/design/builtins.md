@@ -97,7 +97,7 @@ fallback chains is [[design/failure|failure]].
 
 ## How a builtin is typed
 
-**A builtin is a function, and its type rule is a scheme.** There is one rule,
+**A value builtin is a function, and its type rule is a scheme.** There is one rule,
 `fn(&mut Binders) -> Ty`, closed independently of inference by `Binders::close`.
 Its first-class polytype is instantiated fresh per use, in command position
 *or* as a value (`$map`). A table entry has an arity and a value form, both by
@@ -130,22 +130,31 @@ earns the codec hint wherever it happens. So the help reaches a user lambda's
 argument as readily as a builtin's, and one application path serves both
 ([[internals/type-inference|type-inference]]).
 
-`echo` and `detach` are not table entries. They are the two rows of the
-*base-frame manifest*, typed `List String -> Command` and
-`List String -> F [pid: Int, desc: String]` — the argv convention a handler and an external already
-share, `List String` inside and bytes at the OS call. The checker reads their
-schemes directly from Σ's manifest, not from the handler stack. A base-frame
-name keeps its in-shell argument gate; every other command name keeps the
-external gate even when handled. Handler names serve diagnostics only; no
-handler scheme is persisted
-([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-`detach` starts its command as a program, as `^command` would: a handler
-or base frame runs inside this session, so neither is consulted.
+`echo` is a row of the *base-frame manifest*, typed `List String -> Command`;
+a host may install more rows. This is the argv convention a handler and an
+external already share, `List String` inside and bytes at the OS call. The
+argv convention carries no type rule: every base frame is `[String] → Command`
+by construction, and command-position checking returns `Command` without
+reading a row's scheme. Σ distinguishes the in-shell argument gate from the
+external gate, which every other command name keeps even when handled.
+Every named handler has the same type `U([String] → Command)`, independent of
+its name and Σ; the name serves diagnostics only. No handler scheme is persisted
+([[design/exec|exec]]).
+
+`detach` is a host-installed native with type
+`String → String → [String] → F [pid: Int, desc: String]`: a description, a
+program name and one argument list. It curries and has a first-class `$detach`
+form. Its program is resolved as `^program` resolves one, bypassing bindings
+and the whole handler stack, base frames included. Handlers cannot intercept
+`detach` itself; stub it by binding its name:
+`let detach = { |desc program args| return [pid: 0, desc: $desc] }`.
+Its grant gate remains `ShellVerb::Detach` ([[design/exec|exec]], SPEC §11.5).
 
 No builtin value installs or removes a handler. Persistent handlers are
 host-installed between units from rc or manifest `handlers:`;
-scoped handlers use `within [handlers: …]`. Interactive helpers are
-`let`-bound functions.
+scoped handlers use `within [handlers: …]`. All three doors take
+`Map(U([String] → Command))`, never a record; `handler:` takes
+`U(String → [String] → Command)`. Interactive helpers are `let`-bound functions.
 
 Each codec being its own entry rather than one polymorphic `decode` / `encode`
 is what lets `from-json < file` dispatch straight through the command arm with
@@ -155,9 +164,7 @@ lookup rather than as a runtime "unknown codec" string.
 ## A name is a value or it is handled
 
 **The set is not a third kind of name: the manifest is authored as two, one half
-for each of ral's two existing mechanisms**
-([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+for each of ral's two existing mechanisms**.
 
 - **A table entry → a *native* value.** It declares its arguments, so it has a
   curried function type (arity 0: a thunk type) and is a first-class value bound
@@ -177,14 +184,14 @@ for each of ral's two existing mechanisms**
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,
   so there is no arity, nothing to curry, and no meaning for partial
   application: it is only interpretable as command syntax and lives at the
-  bottom of the handler stack; `echo` and `detach` are the two. A user frame
-  stacks above it and forwards into it
+  bottom of the handler stack; `echo` is the standard row and hosts may add
+  others. A user frame stacks above it and forwards into it
   ([[internals/handler-dispatch|handler-dispatch]]).
 
 Interception is therefore lexical shadowing rather than admission: a binding
-under a native's name shadows it, a handler under any name installs and
-intercepts at the bare head, and `^name` — like a path head — skips both and
-reaches the external directly
+under a native's name shadows it; a handler under any name installs, but only
+intercepts a bare head no binding holds. `^name` — like a path head — skips
+both and reaches the external directly
 ([[design/name-resolution|resolution]]).
 
 See also [[design/exec|exec]] (builtins are the pure fragment — not every kernel call is an effect),

@@ -140,7 +140,7 @@ exec /bin/sleep "$@"
     std::fs::write(
         &wrapper,
         format!(
-            "within [handlers: [sleep: {{ |argv| /bin/sh {} ...$argv }}]] {{ let _ = use {} }}\n",
+            "within [handlers: [:, sleep: {{ |argv| /bin/sh {} ...$argv }}]] {{ let _ = use {} }}\n",
             ral_core::syntax::quote_word(&ral_core::path::shown(dir.path().join("sleep"))),
             ral_core::syntax::quote_word(&ral_core::path::shown(&example)),
         ),

@@ -136,11 +136,10 @@ impl Site {
         Ok(value)
     }
 
-    /// [`Self::admit`] for a module's export record, whose closures are also
-    /// held to the schemes the module was checked at: each export's scheme is
-    /// instantiated in one scratch unifier that covers the whole record, since
-    /// field types share variables, and unified with the type the script uses
-    /// it at.
+    /// [`Self::admit`] for a module's export record, also checking each used
+    /// export's complete scheme, including nested closures, against its use.
+    /// One scratch unifier covers the whole record, since field types share
+    /// variables.
     ///
     /// # Errors
     /// As [`Self::admit`], or an export whose scheme cannot be that type.
@@ -151,18 +150,8 @@ impl Site {
         fixings: &Fixings,
     ) -> Result<(), Mismatch> {
         self.admit(record, fixings)?;
-        let Value::Map(fields) = record else {
-            return Ok(());
-        };
         let mut exports = self.exports();
         for (name, scheme) in schemes {
-            let is_block = matches!(
-                fields.get(name).as_deref(),
-                Some(Value::Thunk(_) | Value::Native(..))
-            );
-            if !is_block {
-                continue;
-            }
             if let Some(Err((found, expected))) = exports.fits(name, scheme) {
                 return Err(Mismatch {
                     failure: AdmissionFailure {

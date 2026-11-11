@@ -1,8 +1,7 @@
 use super::branches::Junction;
 use super::{
-    Arc, Ast, Comp, CompKind, Elaborator, HandlerArmV, ListElem, MapEntry, MapEntryV, Name,
-    Pattern, RecordEntry, Redirects, ScopeAst, Span, Spanned, Val, ValListElem, WithSpan, Word,
-    word_val,
+    Arc, Ast, Comp, CompKind, Elaborator, ListElem, MapEntry, MapEntryV, Name, Pattern,
+    RecordEntry, Redirects, ScopeAst, Span, Spanned, Val, ValListElem, WithSpan, Word, word_val,
 };
 
 use crate::ir::{FieldsNode, Key, Prim};
@@ -146,32 +145,13 @@ impl Elaborator {
                         release: self.to_val(release, binds),
                     }
                 ),
-                ScopeAst::Within {
-                    opts,
-                    handlers,
-                    body,
-                } => {
-                    let opts = self.options(opts, binds);
-                    let handlers = handlers.as_ref().map(|arms| {
-                        arms.iter()
-                            .map(|arm| HandlerArmV {
-                                name: arm.name.clone(),
-                                value: Spanned::with_span(
-                                    arm.value.span,
-                                    self.to_val(&arm.value.item, binds),
-                                ),
-                            })
-                            .collect()
-                    });
-                    comp!(
-                        self,
-                        CompKind::Within {
-                            opts,
-                            handlers,
-                            body: self.to_val(body, binds),
-                        }
-                    )
-                }
+                ScopeAst::Within { opts, body } => comp!(
+                    self,
+                    CompKind::Within {
+                        opts: self.options(opts, binds),
+                        body: self.to_val(body, binds),
+                    }
+                ),
                 ScopeAst::Grant { caps, body } => comp!(
                     self,
                     CompKind::Grant {

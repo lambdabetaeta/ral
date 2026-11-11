@@ -1,5 +1,5 @@
 # codes: T0011
 # status: 1
-# at: 5:26
+# at: 5:29
 # contains: couldn't match type Command with type Returns String
-within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }
+within [handlers: [:, echo: { |args| return "not bytes" }]] { echo hi }

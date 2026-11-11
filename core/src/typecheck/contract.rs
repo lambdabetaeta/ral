@@ -26,10 +26,9 @@ use std::fmt;
 
 pub(crate) use grant::{DIR_TARGET, EDITOR, EXEC_TARGET, GPU, NET, PLACE, SHELL};
 
-use super::builtins::Manifest;
+use super::builtins::{Arm, handlers_ty};
 use super::error::{Clash, Reason, Standing, TypeError, TypeErrorKind};
-use super::generate::call::Arm;
-use super::solve::{Settled, Solver};
+use super::solve::Settled;
 use super::unify::Unifier;
 use crate::fact::{
     GrantFailure, GrantFailureUnknownVocabulary, GrantVocabulary, RefusedGrantKey, UnknownField,
@@ -57,8 +56,8 @@ pub enum Holds {
     Required(fn() -> Ty),
     /// The decoders': a fresh variable per occurrence, nothing imposed.
     Decoded,
-    /// Named command stand-ins, in a record or a computed-key map.
-    Arms,
+    /// The handler map.
+    Handlers,
     /// `within`'s catch-all handler, the one value inferred in context.
     CatchAll,
     /// A nested table, whose optional keys no row can express: ascribed once
@@ -72,7 +71,8 @@ pub enum Holds {
 pub(super) enum Held {
     /// Unified with this type, minted fresh.
     Unify(Ty),
-    Arms,
+    /// Checked as a handler in its own inference region.
+    Arm(Arm<'static>),
     /// Ascribed once inference has finished.
     Nested(&'static Table),
     /// Refused with this advice.
@@ -87,11 +87,11 @@ impl Holds {
     pub(super) fn held(&self) -> Held {
         match self {
             Self::At(mint) | Self::Required(mint) => Held::Unify(mint()),
-            Self::CatchAll => Held::Unify(catch_all_ty()),
+            Self::CatchAll => Held::Arm(Arm::CatchAll),
             Self::Table(table) => Held::Nested(table),
             Self::Refused(cause) => Held::Refuse(cause.advice()),
             Self::Decoded => Held::Nothing,
-            Self::Arms => Held::Arms,
+            Self::Handlers => Held::Unify(handlers_ty()),
         }
     }
 }
@@ -179,11 +179,10 @@ pub(super) enum NestedCheck {
     },
     Walked {
         row: Row,
-        table: Option<&'static Table>,
+        table: &'static Table,
         seen: Vec<String>,
         written: Option<Val>,
         pos: Option<Span>,
-        manifest: Manifest,
     },
 }
 
@@ -233,8 +232,8 @@ impl Table {
     }
 }
 
-/// `within`'s options.  `env:` is heterogeneous and `parse_env`'s to judge, so
-/// it stays the decoder's.
+/// `within`'s options.  `handlers:` is a map.  `env:` is heterogeneous and
+/// `parse_env`'s to judge, so it stays the decoder's.
 ///
 /// The catch-all stands in for every command, so it is a function of the name
 /// and the argv that is a command.
@@ -256,14 +255,18 @@ static WITHIN: Table = Table {
             holds: Holds::CatchAll,
             reason: Some(Reason::StandsIn(Standing::EveryCommand)),
         },
+        Key {
+            label: "handlers",
+            holds: Holds::Handlers,
+            reason: Some(Reason::Handlers),
+        },
     ],
     factory: false,
 };
 
 /// The rc file's thirteen keys.  `apply_rc_key` dispatches off this table and
-/// applies what each one means; the shapes left to it — a map of hooks, a map
-/// of handlers, a theme — are one type per key rather than one across the key,
-/// and no single `Ty` pins them.
+/// applies what each one means.  `handlers:` is a map; the shapes left to the
+/// decoder — hooks, a theme — have no single `Ty` that pins them.
 static RC: Table = Table {
     form: "rc",
     keys: &[
@@ -289,8 +292,8 @@ static RC: Table = Table {
         },
         Key {
             label: "handlers",
-            holds: Holds::Arms,
-            reason: None,
+            holds: Holds::Handlers,
+            reason: Some(Reason::Handlers),
         },
         Key {
             label: "bindings",
@@ -352,8 +355,8 @@ static MANIFEST: Table = Table {
         },
         Key {
             label: "handlers",
-            holds: Holds::Arms,
-            reason: None,
+            holds: Holds::Handlers,
+            reason: Some(Reason::Handlers),
         },
         Key {
             label: "hooks",
@@ -373,16 +376,6 @@ static MANIFEST: Table = Table {
     ],
     factory: true,
 };
-
-/// The catch-all's shape around what it produces: the name, then the argv.
-pub(super) fn catch_all_shape(body: CompTy) -> CompTy {
-    CompTy::arrows([Ty::string(), Ty::argv()], body)
-}
-
-/// What the catch-all `handler:` is: `String → [String] → Command`.
-fn catch_all_ty() -> Ty {
-    Ty::thunk(catch_all_shape(CompTy::command()))
-}
 
 /// The table `form` declares.
 pub fn declared(form: Form) -> &'static Table {
@@ -484,7 +477,6 @@ pub(super) fn written_at(opts: &Val, label: &str) -> Option<Span> {
 /// but before sites and schemes are frozen.
 pub(super) fn ascribe(
     settled: &mut Settled,
-    manifest: &Manifest,
     tail: Option<&Spanned<Phrase<()>>>,
     cty: Option<CompTy>,
     table: &'static Table,
@@ -502,13 +494,12 @@ pub(super) fn ascribe(
         _ => None,
     };
     settled.with_span(tail.and_then(|phrase| phrase.span), |settled| {
-        hold_value(settled, manifest, &value, table, written, table.factory);
+        hold_value(settled, &value, table, written, table.factory);
     });
 }
 
 fn hold_value(
     settled: &mut Settled,
-    manifest: &Manifest,
     value: &Ty,
     table: &'static Table,
     written: Option<&Val>,
@@ -516,8 +507,8 @@ fn hold_value(
 ) {
     let found = settled.resolve_ty(value);
     match found.node() {
-        TyNode::Record(row) => hold_row(settled, manifest, row, Some(table), written),
-        TyNode::Unit => hold_row(settled, manifest, &Row::empty(), Some(table), written),
+        TyNode::Record(row) => hold_row(settled, row, table, written),
+        TyNode::Unit => hold_row(settled, &Row::empty(), table, written),
         TyNode::Var(_) => {}
         TyNode::Thunk(body) if factory => {
             let made = settled.fresh_ty();
@@ -525,7 +516,7 @@ fn hold_value(
             let grade = settled.fresh_grade();
             let shape = CompTy::arrows([options], CompTy::ret(grade, made.clone()));
             if settled.equate_comp(&shape, body, Reason::Factory) {
-                hold_value(settled, manifest, &made, table, None, false);
+                hold_value(settled, &made, table, None, false);
             }
         }
         _ => settled.diagnose(TypeErrorKind::ReturnNotRecord {
@@ -536,78 +527,38 @@ fn hold_value(
     }
 }
 
-fn hold_arms(
-    settled: &mut Settled,
-    manifest: &Manifest,
-    found: &Ty,
-    written: Option<&Val>,
-) -> bool {
-    match settled.resolve_ty(found).node() {
-        TyNode::Record(row) => hold_row(settled, manifest, row, None, written),
-        TyNode::Map(member) => {
-            settled.stands_in(member, Arm::Computed, manifest);
-        }
-        TyNode::Var(_) => return false,
-        _ => settled.diagnose(TypeErrorKind::TyMismatch {
-            expected: Ty::map(Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::command()))),
-            actual: settled.resolve_ty(found),
-        }),
-    }
-    true
-}
-
 /// Re-read the live tail after each field; closure judges the final keyset
 /// and only newly revealed fields on scratch.
-fn hold_row(
-    settled: &mut Settled,
-    manifest: &Manifest,
-    row: &Row,
-    table: Option<&'static Table>,
-    written: Option<&Val>,
-) {
+fn hold_row(settled: &mut Settled, row: &Row, table: &'static Table, written: Option<&Val>) {
     let pos = *settled.span_slot();
     let mut seen = Vec::new();
     let mut rest = settled.resolve_row(row);
     while let RowNode::Extend(label, payload, tail) = rest.node() {
         if let Label::Field(label) = label {
-            let mut held = true;
             let at = written.and_then(|w| written_at(w, label)).or(pos);
             settled.with_span(at, |settled| {
-                if let Some(table) = table {
-                    if let Some(key) = table.keys.iter().find(|k| k.label == label) {
-                        match key.holds.held() {
-                            Held::Unify(declared) => {
-                                settled.equate_held(&declared, payload, table, key);
-                            }
-                            Held::Arms => {
-                                held = hold_arms(
-                                    settled,
-                                    manifest,
-                                    payload,
-                                    written
-                                        .and_then(|w| written_field(w, label))
-                                        .map(|v| &v.item),
-                                );
-                            }
-                            Held::Nested(table) => settled.nested(NestedCheck::Table {
-                                key: key.label,
-                                table,
-                                ty: payload.clone(),
-                                pos: at,
-                                written: written
-                                    .and_then(|w| written_field(w, label))
-                                    .map(|v| v.item.clone()),
-                            }),
-                            Held::Refuse(_) | Held::Nothing => {}
+                if let Some(key) = table.keys.iter().find(|k| k.label == label) {
+                    match key.holds.held() {
+                        Held::Unify(declared) => {
+                            settled.equate_held(&declared, payload, table, key);
                         }
+                        Held::Arm(arm) => {
+                            settled.equate_held(&Ty::thunk(arm.ty()), payload, table, key);
+                        }
+                        Held::Nested(table) => settled.nested(NestedCheck::Table {
+                            key: key.label,
+                            table,
+                            ty: payload.clone(),
+                            pos: at,
+                            written: written
+                                .and_then(|w| written_field(w, label))
+                                .map(|v| v.item.clone()),
+                        }),
+                        Held::Refuse(_) | Held::Nothing => {}
                     }
-                } else {
-                    settled.stands_in(payload, Arm::Named(label), manifest);
                 }
             });
-            if held {
-                seen.push(label.clone());
-            }
+            seen.push(label.clone());
         }
         rest = settled.resolve_row(tail);
     }
@@ -617,12 +568,10 @@ fn hold_row(
         seen,
         written: written.cloned(),
         pos,
-        manifest: manifest.clone(),
     });
 }
 
 struct Ascription {
-    manifest: Manifest,
     pos: Option<Span>,
     errors: Vec<TypeError>,
 }
@@ -669,19 +618,18 @@ impl Ascription {
             self.pos = written.and_then(|w| written_at(w, label)).or(phrase_pos);
             if let Some(key) = table.keys.iter().find(|k| k.label == label) {
                 match key.holds.held() {
-                    Held::Unify(_) | Held::Nested(_) | Held::Arms if seen.contains(label) => {}
-                    Held::Arms => self.arms(
-                        scratch,
-                        payload,
-                        written
-                            .and_then(|w| written_field(w, label))
-                            .map(|v| &v.item),
-                        &self.manifest.clone(),
-                        &[],
-                    ),
+                    Held::Unify(_) | Held::Arm(_) | Held::Nested(_) if seen.contains(label) => {}
                     Held::Unify(declared) => {
                         scratch.at = self.pos;
                         if let Err(clash) = unify_held(table, key)(scratch, &declared, payload) {
+                            self.report(clash.0, Some(clash.1));
+                        }
+                    }
+                    Held::Arm(arm) => {
+                        scratch.at = self.pos;
+                        if let Err(clash) =
+                            unify_held(table, key)(scratch, &Ty::thunk(arm.ty()), payload)
+                        {
                             self.report(clash.0, Some(clash.1));
                         }
                     }
@@ -724,57 +672,6 @@ impl Ascription {
         }
     }
 
-    fn arms(
-        &mut self,
-        store: &Unifier,
-        ty: &Ty,
-        written: Option<&Val>,
-        manifest: &Manifest,
-        seen: &[String],
-    ) {
-        let mut solver = Solver::scratch(store);
-        let pos = self.pos;
-        match store.resolve_ty(ty).node() {
-            TyNode::Record(row) => {
-                let mut rest = store.resolve_row(row);
-                while let RowNode::Extend(label, payload, tail) = rest.node() {
-                    if let Label::Field(label) = label
-                        && !seen.contains(label)
-                    {
-                        solver.with_span(
-                            written.and_then(|w| written_at(w, label)).or(pos),
-                            |solver| {
-                                solver.stands_in(payload, Arm::Named(label), manifest);
-                            },
-                        );
-                    }
-                    rest = store.resolve_row(tail);
-                }
-            }
-            TyNode::Map(member) => {
-                solver.with_span(pos, |solver| {
-                    solver.stands_in(member, Arm::Computed, manifest)
-                });
-            }
-            TyNode::Var(_) => {}
-            _ => {
-                self.report(
-                    TypeErrorKind::TyMismatch {
-                        expected: Ty::map(Ty::thunk(CompTy::arrows(
-                            [Ty::argv()],
-                            CompTy::command(),
-                        ))),
-                        actual: store.resolve_ty(ty),
-                    },
-                    None,
-                );
-            }
-        }
-        if let Err(errors) = solver.settle().close() {
-            self.errors.extend(errors);
-        }
-    }
-
     fn nested(
         &mut self,
         store: &Unifier,
@@ -802,7 +699,6 @@ impl Ascription {
 /// Queued tables are checked during closure, before any successful export.
 pub(super) fn check_nested(store: &Unifier, nested: Vec<NestedCheck>) -> Vec<TypeError> {
     let mut check = Ascription {
-        manifest: Manifest::default(),
         pos: None,
         errors: Vec::new(),
     };
@@ -824,15 +720,9 @@ pub(super) fn check_nested(store: &Unifier, nested: Vec<NestedCheck>) -> Vec<Typ
                 seen,
                 written,
                 pos,
-                manifest,
             } => {
                 check.pos = pos;
-                check.manifest = manifest.clone();
-                if let Some(table) = table {
-                    check.row_unseen(&mut store.clone(), &row, table, written.as_ref(), &seen);
-                } else {
-                    check.arms(store, &Ty::record(row), written.as_ref(), &manifest, &seen);
-                }
+                check.row_unseen(&mut store.clone(), &row, table, written.as_ref(), &seen);
             }
         }
     }
@@ -894,23 +784,67 @@ mod tests {
     }
 
     #[test]
-    fn external_arms_are_held_at_the_written_member_in_rc_and_factory() {
+    fn handler_records_are_refused_with_the_map_spelling() {
         for (form, src) in [
-            (Form::Rc, "return [handlers: [foo: { |a| return 5 }]]"),
+            (Form::Rc, "return [handlers: [foo: { |a| echo hi }]]"),
             (
                 Form::Manifest,
-                "return { |options| return [name: 'p', handlers: [foo: { |a| return 5 }]] }",
+                "return [name: 'p', handlers: [foo: { |a| echo hi }]]",
+            ),
+            (
+                Form::Manifest,
+                "return { |options| return [name: 'p', handlers: [foo: { |a| echo hi }]] }",
             ),
         ] {
             let errors = contract_errors(form, src);
             let [error] = &errors[..] else {
                 panic!("{errors:?}")
             };
+            assert!(matches!(error.reason, Some(super::Reason::Handlers)));
+            assert!(matches!(
+                error.kind,
+                super::TypeErrorKind::TyMismatch { .. }
+            ));
+            let hint = error.hint().expect("handler map spelling");
+            assert!(hint.contains("write `[:, foo: { |args| … }]`"), "{hint}");
+            let pos = error
+                .pos
+                .expect("the refused handler map has a source location");
+            assert!(src[pos.start as usize..pos.end as usize].contains("[foo:"));
+        }
+    }
+
+    #[test]
+    fn handler_maps_are_held_by_one_equation_in_rc_and_manifest() {
+        for (form, src) in [
+            (Form::Rc, "return [handlers: [:, foo: { |a| return 5 }]]"),
+            (
+                Form::Manifest,
+                "return [name: 'p', handlers: [:, foo: { |a| return 5 }]]",
+            ),
+            (
+                Form::Manifest,
+                "return { |options| return [name: 'p', handlers: [:, foo: { |a| return 5 }]] }",
+            ),
+        ] {
+            let errors = contract_errors(form, src);
+            let [error] = &errors[..] else {
+                panic!("{errors:?}")
+            };
+            assert!(matches!(error.reason, Some(super::Reason::Handlers)));
+            assert!(matches!(
+                error.kind,
+                super::TypeErrorKind::CompTyMismatch { .. }
+            ));
+            let hint = error.hint().expect("handler command obligation");
             assert!(
-                matches!(&error.reason, Some(super::Reason::StandsIn(super::Standing::Command(name))) if name == "foo")
+                hint.contains("this one returns an Int: write it, `echo …`"),
+                "{hint}"
             );
-            let pos = error.pos.expect("the refused arm has a source location");
-            assert!(src[pos.start as usize..pos.end as usize].contains("{ |a| return 5 }"));
+            let pos = error
+                .pos
+                .expect("the refused handler map has a source location");
+            assert!(src[pos.start as usize..pos.end as usize].contains("[:, foo:"));
         }
     }
 
@@ -923,7 +857,7 @@ mod tests {
             (Form::Rc, "[umask: $d]", Value::string("022"), "$d"),
             (
                 Form::Rc,
-                "[handlers: [foo: { |a| return $d }]]",
+                "[handlers: [:, foo: { |a| return $d }]]",
                 Value::Unit,
                 "return $d",
             ),
@@ -935,7 +869,7 @@ mod tests {
             ),
             (
                 Form::Manifest,
-                "{ |options| return [name: 'p', handlers: [foo: { |a| return $d }]] }",
+                "{ |options| return [name: 'p', handlers: [:, foo: { |a| return $d }]] }",
                 Value::Unit,
                 "return $d",
             ),
@@ -968,14 +902,14 @@ mod tests {
     }
 
     #[test]
-    fn arm_collections_check_shapes_and_computed_members() {
-        for returned in ["1", "[foo: 1]", "[$key: { |a| return 5 }]"] {
+    fn handler_maps_check_shapes_and_computed_members() {
+        for returned in ["1", "[]", "[:, foo: 1]", "[$key: { |a| return 5 }]"] {
             let src = format!("let key = 'foo'; return [handlers: {returned}]");
             assert!(!contract_errors(Form::Rc, &src).is_empty(), "{src}");
         }
         for returned in [
             "[:]",
-            "[foo: { |a| echo ...$a }]",
+            "[:, foo: { |a| echo ...$a }]",
             "[$key: { |a| echo ...$a }]",
         ] {
             checked(
@@ -990,11 +924,11 @@ mod tests {
             )
             .is_empty()
         );
-        checked(Form::Rc, "return [handlers: [echo: { |a| echo ...$a }]]");
+        checked(Form::Rc, "return [handlers: [:, echo: { |a| echo ...$a }]]");
     }
 
     #[test]
-    fn computed_arm_refusal_names_the_obligation_not_a_fabricated_head() {
+    fn computed_handler_refusal_names_the_obligation_not_a_fabricated_head() {
         let errors = contract_errors(
             Form::Rc,
             "let key = 'foo'; return [handlers: [$key: { |a| return 5 }]]",
@@ -1002,38 +936,11 @@ mod tests {
         let [error] = &errors[..] else {
             panic!("{errors:?}")
         };
-        assert!(matches!(
-            error.reason,
-            Some(super::Reason::StandsIn(super::Standing::Computed))
-        ));
-        let hint = error.hint().expect("computed-name obligation");
-        assert!(hint.contains("computed command name"), "{hint}");
+        assert!(matches!(error.reason, Some(super::Reason::Handlers)));
+        let hint = error.hint().expect("handler command obligation");
+        assert!(hint.contains("a handler stands in for a command"), "{hint}");
         assert!(!hint.contains("<computed>"), "{hint}");
         assert!(!error.to_string().contains("<computed>"));
-    }
-
-    #[test]
-    fn written_handler_name_uses_its_base_frame_result() {
-        use crate::ty::{Binders, CompTy, Ty};
-        use crate::typecheck::builtins::{Convention, Decl};
-        fn frame(_: &mut Binders) -> Ty {
-            Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::int())))
-        }
-        let mut schemes = crate::test_helper::core_schemes();
-        schemes.builtins.push(
-            vec![Decl::new(
-                "frame".into(),
-                Convention::Argv,
-                frame,
-                "",
-                false,
-            )]
-            .into(),
-        );
-        let src = "return [handlers: [frame: { |a| return 5 }]]";
-        let top = elaborate(&parse(src).unwrap(), [], None).unwrap();
-        typecheck(&top, schemes, Some(declared(Form::Rc)))
-            .expect("a written handler name uses the base frame's integer result");
     }
 
     #[test]
@@ -1044,56 +951,20 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_arm_collection_is_judged_after_a_later_field_solves_it() {
+    fn handler_map_constrains_an_unresolved_value_before_a_later_field() {
         let src = "let d = echo '\"x\"' | from-json; return [handlers: $d, umask: $d]";
         let errors = contract_errors(Form::Rc, src);
         let [error] = &errors[..] else {
             panic!("{errors:?}")
         };
         assert!(
-            matches!(&error.kind, super::TypeErrorKind::TyMismatch { actual, .. } if *actual == crate::ty::Ty::string())
+            matches!(&error.kind, super::TypeErrorKind::TyMismatch { expected, actual }
+                if *expected == crate::ty::Ty::string() && *actual == super::handlers_ty())
         );
-        assert_eq!(error.pos.unwrap().start as usize, src.find("$d").unwrap());
-    }
-
-    #[test]
-    fn previously_walked_arm_row_gets_only_a_final_scratch_judgment() {
-        use crate::ty::{CompTy, Label, Row, Ty};
-        use crate::typecheck::solve::Solver;
-        static TABLE: super::Table = super::Table {
-            form: "test",
-            factory: false,
-            keys: &[
-                super::Key {
-                    label: "a",
-                    holds: Holds::Arms,
-                    reason: None,
-                },
-                super::Key {
-                    label: "b",
-                    holds: Holds::At(|| crate::ty::closed_record(&[("foo", Ty::int())])),
-                    reason: None,
-                },
-            ],
-        };
-        let mut solver = Solver::new();
-        let late = solver.fresh_row();
-        let row = Row::extend(
-            Label::Field("a".into()),
-            Ty::record(late.clone()),
-            Row::extend(Label::Field("b".into()), Ty::record(late), Row::empty()),
+        assert!(
+            matches!(&error.reason, Some(super::Reason::OptionField { key, .. }) if key == "umask")
         );
-        let mut settled = solver.settle();
-        super::ascribe(
-            &mut settled,
-            &super::Manifest::default(),
-            None,
-            Some(CompTy::pure(Ty::record(row))),
-            &TABLE,
-        );
-        let errors = settled.close().err().expect("late non-thunk member");
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(matches!(errors[0].reason, Some(super::Reason::HandlerArm)));
+        assert_eq!(error.pos.unwrap().start as usize, src.rfind("$d").unwrap());
     }
 
     #[test]
@@ -1158,7 +1029,6 @@ mod tests {
         let mut settled = solver.settle();
         super::ascribe(
             &mut settled,
-            &super::Manifest::default(),
             None,
             Some(CompTy::pure(Ty::record(row))),
             &TABLE,

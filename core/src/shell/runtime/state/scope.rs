@@ -6,7 +6,7 @@
 use super::Shell;
 use crate::fact::BlockRole;
 use crate::shell::runtime::{
-    Binding, Closure, Env, FrameHandle, HandlerEntry, HandlerRole, Settled, Value, ill_typed,
+    Binding, Closure, Env, FrameHandle, HandlerEntry, Settled, Value, ill_typed,
 };
 
 impl Shell {
@@ -30,7 +30,7 @@ impl Shell {
     /// # Errors
     /// As [`Self::install_handler`].
     pub fn vet_handler(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
-        HandlerEntry::vet(name, thunk, self, HandlerRole::Handler)
+        HandlerEntry::vet(name, thunk, self)
     }
 
     /// The committing half: replace any persistent handler of the same name.

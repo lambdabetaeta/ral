@@ -248,20 +248,8 @@ fn strip_scope(op: ScopeAst) -> ScopeAst {
             body: s(body),
             release: s(release),
         },
-        ScopeAst::Within {
-            opts,
-            handlers,
-            body,
-        } => ScopeAst::Within {
+        ScopeAst::Within { opts, body } => ScopeAst::Within {
             opts: strip_opts(opts),
-            handlers: handlers.map(|arms| {
-                arms.into_iter()
-                    .map(|arm| HandlerArm {
-                        name: arm.name,
-                        value: Spanned::synthetic(strip_one(arm.value.item)),
-                    })
-                    .collect()
-            }),
             body: s(body),
         },
         ScopeAst::Grant { caps, body } => ScopeAst::Grant {
@@ -1026,7 +1014,7 @@ fn parse_newline_separates_statements_in_block_inside_record() {
 
 #[test]
 fn parse_if_else_blocks_across_newline_with_explicit_else() {
-    let src = "return [handlers: [ls: { |args| if $is-mac { echo a }\nelse { echo b } }]]";
+    let src = "return [handlers: [:, ls: { |args| if $is-mac { echo a }\nelse { echo b } }]]";
     let ast = unwrap_stmts(parse(src).unwrap());
     let Ast::Return(Some(val)) = &ast[0] else {
         panic!("expected return");
@@ -1041,10 +1029,10 @@ fn parse_if_else_blocks_across_newline_with_explicit_else() {
     else {
         panic!("expected handlers entry");
     };
-    let Ast::Record(handler_entries) = &handlers_val.item else {
-        panic!("expected handlers record");
+    let Ast::Map(handler_entries) = &handlers_val.item else {
+        panic!("expected handlers map");
     };
-    let RecordEntry::Field { value: ls_val, .. } = &handler_entries[0] else {
+    let MapEntry::Entry { value: ls_val, .. } = &handler_entries[0] else {
         panic!("expected ls entry");
     };
     let Ast::Lambda { body, .. } = &ls_val.item else {
@@ -1696,55 +1684,35 @@ fn a_bound_or_spread_option_bundle_is_refused() {
 fn a_repeated_option_is_refused() {
     for src in [
         "within [dir: 'a', dir: 'b'] { body }",
+        "within [handlers: [:], handlers: [:]] { body }",
         "grant [net: true, net: false] { body }",
     ] {
         parse(src).unwrap_err();
     }
 }
 
-/// `handlers:` binds the names it lists in the body, so the list is
-/// syntax: a table assembled elsewhere could never spell them.
 #[test]
-fn a_computed_handler_table_is_refused() {
-    for src in [
-        "within [handlers: $hs] { body }",
-        "within [handlers: [$key: { echo }]] { body }",
-        "within [handlers: [...$hs]] { body }",
-    ] {
-        parse(src).unwrap_err();
-    }
-    parse("within [handlers: [:]] { body }").unwrap_err();
-}
-
-/// The arms leave the options bracket: their labels are names, not data.
-/// `[]` keeps the empty handler set.
-#[test]
-fn handler_arms_are_lifted_out_of_the_options() {
+fn a_handler_map_stays_among_the_options() {
     let op = unwrap_single_scope(
-        parse("within [dir: '/tmp', handlers: [deploy: { echo hi }]] { body }").unwrap(),
+        parse("within [handlers: [:, a: { |x| echo }], dir: '/'] { echo }").unwrap(),
     );
-    match op {
-        ScopeAst::Within { opts, handlers, .. } => {
-            assert_eq!(
-                handlers.as_deref().map(<[HandlerArm]>::len),
-                Some(1),
-                "the one arm is lifted out"
-            );
-            assert_eq!(opts.len(), 1, "only `dir` is left among the options");
-        }
-        other => panic!("expected ScopeAst::Within, got {other:?}"),
-    }
-    let op = unwrap_single_scope(parse("within [handlers: []] { body }").unwrap());
-    match op {
-        ScopeAst::Within { handlers, .. } => assert_eq!(handlers, Some(Vec::new())),
-        other => panic!("expected ScopeAst::Within, got {other:?}"),
-    }
-}
-
-/// One name, one arm — as `case` refuses a repeated tag.
-#[test]
-fn a_repeated_handler_name_is_refused() {
-    parse("within [handlers: [foo: { echo a }, foo: { echo b }]] { body }").unwrap_err();
+    let ScopeAst::Within { opts, body } = op else {
+        panic!("expected ScopeAst::Within, got {op:?}");
+    };
+    assert_eq!(opts.len(), 2);
+    assert_eq!(opts[0].0, "handlers");
+    let Ast::Map(entries) = &opts[0].1.item else {
+        panic!("expected handler map");
+    };
+    assert_eq!(entries.len(), 1);
+    let MapEntry::Entry { key, value } = &entries[0] else {
+        panic!("expected map entry");
+    };
+    assert_eq!(key.item, Ast::Literal("a".into()));
+    assert!(matches!(value.item, Ast::Lambda { .. }));
+    assert_eq!(opts[1].0, "dir");
+    assert_eq!(opts[1].1.item, Ast::Literal("/".into()));
+    assert!(matches!(*body, Ast::Block(_)));
 }
 
 #[test]

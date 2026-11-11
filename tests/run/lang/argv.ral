@@ -2,11 +2,11 @@
 # Numbers and booleans render implicitly; structured values need an encoder.
 
 # An arm is handed its argv as text, and may index it as the list it is
-within [handlers: [mycmd: { |args| echo 'got' ...$args }]] { mycmd 1 true }
-within [handlers: [handled: { |args| echo 'got' ...$args }]] {
+within [handlers: [:, mycmd: { |args| echo 'got' ...$args }]] { mycmd 1 true }
+within [handlers: [:, handled: { |args| echo 'got' ...$args }]] {
     handled 3.5 !{to-json [a: 1]}
 }
-within [handlers: [second: { |args| echo $args[1] }]] { second first second }
+within [handlers: [:, second: { |args| echo $args[1] }]] { second first second }
 # Expected: got 1 true / got 3.5 {"a":1} / second
 
 # Rendering inside the shell is total: every value has a text form
@@ -29,8 +29,8 @@ reads its stdin
 
 # echo is a base frame: a handler stacked on it intercepts the bare name,
 # and the frame returns at the brace
-within [handlers: [echo: { |args| echo 'mocked' ...$args }]] { echo hi there }
-within [handlers: [echo: { |args| echo 'mocked' }]] { echo hi }
+within [handlers: [:, echo: { |args| echo 'mocked' ...$args }]] { echo hi there }
+within [handlers: [:, echo: { |args| echo 'mocked' }]] { echo hi }
 echo plain
 
 # echo with no arguments writes one newline

@@ -78,6 +78,5 @@ comparisons must stay within one unifier run or go through `Scheme`'s
 letters. Raw variable ids are not canonical: re-checking a checked tree need
 not reproduce them.
 
-See [[decisions/260603_session-scheme-continuity|session-scheme-continuity]] for
-the decision this rule serves, and [[internals/type-inference|type-inference]]
-for how the roles are represented.
+See [[internals/type-inference|type-inference]] for how the roles are
+represented and how closed schemes persist between units.

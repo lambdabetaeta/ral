@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -29,8 +29,9 @@ reads back checked CBPV IR.** The algorithm is
 - `bake_prelude` checks against the manifest and returns the annotated prelude;
   `SessionSchemes::from_prelude` reads its exported definition schemes, with
   no separate scheme blob.
-- `arm_stands_in` enters a region to check an arm against its stand-in and
-  closes the unit before returning an install verdict. It stores no scheme.
+- `arm_stands_in(name, comp, schemes)` enters a region to check a persistent
+  handler against `U([String] → Command)` and closes the unit before returning
+  an install verdict. `within` needs no runtime vet. It stores no scheme.
   `binding_value_scheme` instead exports a closed lexical binding scheme;
   `close_thunk_scheme` generalises after region exit, then settles only a
   successful unit. Both doors retain every error from close (`Vec<TypeError>`);
@@ -51,15 +52,16 @@ reads back checked CBPV IR.** The algorithm is
 - `generate/call.rs`: application chains, head lookup, builtin calls,
   boundary saturation, argv and handler arms. `head_class` follows
   binding → value builtin → base frame → external, consulting Σ and lexical
-  bindings alone. Stand-in lookup uses the manifest's base-frame scheme or
-  `[String] → Command`, never the handler stack. `apply_args` takes
+  bindings alone. A base-frame call has result `Command` without consulting
+  its row's scheme. `apply_args` takes
   one `CallHole` and writes left-to-right argument matches, naming the head
   variable when there is one; a bare binding
   head becomes `CompKind::BindingCall`. `argv` queues single-element gates,
   while a spread only demands a list. `arm` generates the block (literal
   bodies use `check_arm_body`), then calls `stands_in`. That is the sole
-  arm-to-head relation, shared with catch-all and contract arms;
-  `install_arm` owns a region.
+  rule for written scoped entries, the catch-all and persistent install
+  checks: equate the slot shape, then its fresh result with `Command`,
+  independent of the name and Σ. `install_arm` owns a region.
 - `generate/data.rs`: values, records, maps, primitives, updates and indexing.
   `Key::{Label, Position, Data}` immediately requires a record slot, list or
   string-keyed map. There is no deferred read or index-made weakness
@@ -75,8 +77,14 @@ reads back checked CBPV IR.** The algorithm is
   are refused there. `stage_root_stdin_feed` rejects an overridden pipe edge.
   Stdout redirects retain the payload at a fresh result grade.
 - `generate/scope.rs`: `within`, `grant`, options, audit, spawn,
-  gather and protection. Written options are checked key by key; nested table
-  obligations wait for closure.
+  gather and protection. Written options are checked key by key. For
+  `Holds::Handlers`, a `Val::Map` checks each entry through `install_arm` in
+  its own region, retaining the name and span for diagnostics. Any other value
+  uses the ordinary map equation. Only a written map contributes handled
+  names to the body's diagnostics; a computed map contributes none.
+  `Held::Arm(Arm::CatchAll)` checks the catch-all by the arm rule alone,
+  without a redundant held-type equation. Nested table obligations wait for
+  closure.
 
 ## Solver and readback
 
@@ -134,25 +142,33 @@ reads back checked CBPV IR.** The algorithm is
   `settle_weak` (to `Closed`), `reseed_weak`, cyclic snapshots and syntactic
   closure over the whole scheme graph. No environment scan or cached environment free variables
   ([[invariants/schemes-leave-closed|schemes leave closed]]).
-- `builtins.rs`: `Decl`, `Manifest`, `BuiltinTypeRule = fn(&mut Binders) -> Ty`
-  closed by `Binders::close`, and cached schemes/curry spines. `Manifest`
-  clones share declaration rows and their caches; the checker borrows those
-  rows. A declaration fixes its arity and ordinary
-  result-grade quantifier without the live unifier. Building a base-frame
-  declaration asserts that its result payload is ground; result grades may
-  still quantify
+- `builtins.rs`: `Decl`, `Manifest`, `Convention::{Value(BuiltinTypeRule), Argv}`,
+  and cached schemes/curry spines. Value rules are closed by `Binders::close`
+  without the live unifier. `Argv` has no type rule: `Decl::scheme` derives
+  `U([String] → Command)` from `Arm::Named(name).ty()`. `Arm::{Named, CatchAll}`
+  supplies `shape`, `ty` and diagnostic `standing`; the private `handler()`
+  also supplies the member type of `handlers_ty()`. No name or manifest lookup
+  selects a handler's type. `Manifest` clones share declaration rows and caches
   ([[invariants/fixed-arity|fixed arity]], [[map/core/builtins|builtins]]).
 - `site.rs`: `Site::{snapshot, instantiate, scheme, exports}`. Free identities
   in every sort retain sharing; `Site::scheme` enters a scratch region before
-  instantiation, exits, generalises and settles. Module exports share one
-  scratch unifier across the record. The graph data is in
-  [[map/core/ty|ty]]; runtime admission is `shell/runtime/admit.rs`.
+  instantiation, exits, generalises and settles. `Exports::fits` compares each
+  used module export's complete scheme against its use, including functions
+  nested in records, lists, maps or variants. Exports share one scratch unifier
+  across the record. Known incompatible nested schemes fail at `use`; unresolved
+  re-exported shapes additionally carry recursive delayed contracts from
+  `Site::wrap`, guarding exactly the caller-required arrows and results when
+  reached, without inferring function bodies at handler installation. The graph
+  data is in [[map/core/ty|ty]]; runtime admission is `shell/runtime/admit.rs`
+  and delayed wrapping is `shell/runtime/protect.rs`.
 - `contract.rs` and `contract/`: closed declared keysets and held-type rules,
-  `ascribe`, nested checks and enum-derived shapes. `ascribe` takes `Settled`
-  and the `Manifest`, not the generator; it holds fields and factory equations
-  live after elaboration settles. `Held::Unify` uses `equate_held`;
-  `Holds::Arms`/`Held::Arms` holds rc and manifest `handlers:` through
-  `stands_in` (record labels) or `[String] → Command` (map values).
+  `ascribe`, nested checks and enum-derived shapes. `ascribe` takes `Settled`,
+  not the generator or a manifest; it holds fields and factory equations live
+  after elaboration settles. `Held::Unify` uses `equate_held`;
+  `Holds::Handlers` holds rc and manifest `handlers:` by one equation against
+  `Map(U([String] → Command))`, without a per-field arm rule. `Reason::Handlers`
+  explains records and lists with the map spelling and diagnoses handler
+  result or parameter mismatches. No record-to-map coercion exists.
   It re-reads row tails after each field, then judges final keysets on scratch
   and holds only fields not already held, without replaying live clashes or inference.
   `written_at` supplies written field spans, the tail phrase otherwise.

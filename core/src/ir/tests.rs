@@ -143,11 +143,16 @@ fn every_variant() -> Vec<Arc<Comp>> {
         release: var("r_guard_release"),
     });
     let scope_within = Spanned::synthetic(CompKind::Within {
-        opts: Node::new(vec![("dir".into(), svar("r_within_opts"))].into()),
-        handlers: Some(vec![HandlerArmV {
-            name: "deploy".into(),
-            value: Spanned::synthetic(var("r_within_arm")),
-        }]),
+        opts: Node::new(
+            vec![
+                ("dir".into(), svar("r_within_opts")),
+                (
+                    "handlers".into(),
+                    Spanned::synthetic(Val::map(vec![("deploy".into(), svar("r_within_arm"))])),
+                ),
+            ]
+            .into(),
+        ),
         body: var("r_within_body"),
     });
     let scope_grant = Spanned::synthetic(CompKind::Grant {

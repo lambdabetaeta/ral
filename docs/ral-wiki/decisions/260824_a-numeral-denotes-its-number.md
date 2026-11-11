@@ -23,7 +23,7 @@ there are exactly two candidates — the *grammar* or the *checker*. The recent
 answers all put the meaning in syntax: what a `case` arm is
 ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]), what
 an argv's elements are
-([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]), what
+([[design/exec|exec]]), what
 a coercion is
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]). This is the
 same answer for the leaf, and it was left open at
@@ -218,8 +218,7 @@ echoes, not about how a unit renders, and it stands.
 
 [[invariants/numerals-denote-numbers|numerals-denote-numbers]] (the rule as an
 invariant),
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] (the
-rendering that carries a number into an external's argv),
+[[design/exec|exec]] (the rendering that carries a number into an external's argv),
 [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]] (the same doctrine
 one level up: a meaning the ambient session can change is not a meaning),
 [[design/types|types]], [[internals/surface-syntax|surface-syntax]],

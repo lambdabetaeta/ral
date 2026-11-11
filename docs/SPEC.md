@@ -1,5 +1,5 @@
-<!-- verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b -->
-<!-- generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b -->
+<!-- verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57 -->
+<!-- generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1234,7 +1234,7 @@ The spelling of the head selects one of four paths.
 | Bare head | `git status`, `map $f $xs` | Use the lookup order in §6.3. |
 | Path head | `./build`, `/usr/bin/env`, `~/bin/tool`, `.\build` (Windows) | Run that path directly. |
 | Explicit value head | `$f 3`, `!$factory 3` | Apply the value. Never search for a program. |
-| Caret head | `^git status` | Skip value bindings, then continue through handlers and program lookup. |
+| Caret head | `^git status` | Skip value bindings and the whole handler stack; use program lookup. |
 
 A head is a path when it contains a path separator: `/`, or on Windows also
 `\` (§3.5). A path head does not consult bindings, handlers, bundled commands,
@@ -1289,9 +1289,10 @@ ral resolves an ordinary bare head in this order. The first match wins.
    handlers installed by `within [handlers: …]`. The innermost handler for
    the name wins.
 3. **A base handler.** ral's own commands that take an argument list live
-   here. `echo` is the standard example, and a host may install more, such as
-   `detach`. A base handler has no arity: it takes the whole argument list, a
-   `List String`.
+   here. `echo` is the standard example, and a host may install more.
+   Every base handler has type `[String] → Command` by construction: an
+   argv manifest row carries no type rule. It has no application arity and
+   takes the whole argument list.
 4. **A catch-all handler.** `within [handler: …]` handles the call only if no
    binding, named handler, or base handler claimed it.
 5. **A bundled or external command.** A bundled command wins when the current
@@ -1316,7 +1317,7 @@ A named handler takes one parameter: the command's argument list. ral renders
 the arguments after the head and passes them as one `List String`:
 
 ```ral
-within [handlers: [deploy: { |args| audit-deploy $args }]] {
+within [handlers: [:, deploy: { |args| audit-deploy $args }]] {
     deploy 'prod' '--wait'
 }
 ```
@@ -1337,23 +1338,24 @@ interchangeable with the command it replaces. So an arm cannot do arithmetic on
 or `float` when the arm wants a number.
 
 A head's type and argument gate depend only on Σ (the host's manifest and
-prelude) and lexical bindings, never on the handler stack. A base-frame name
-keeps its own scheme and in-shell argument gate; every other command name
-has `[String] → Command` and the external argument gate, even when handled.
+prelude) and lexical bindings, never on the handler stack. Every base frame
+has `[String] → Command` and the in-shell argument gate; every other command
+name has the same type and the external argument gate, even when handled.
 Thus `ls [1, 2]` is refused under a handler for `ls` too: spread the list or
 bind a function with `let`. Handled names inform diagnostics, not typing.
 
-ral checks a handler's arity, which is its type and not its spelling, where
-the handler is written and again when it is installed. It also checks that the
-arm stands in for the head it names (§9.4). A handler for `echo`, for example,
-stands in for a command, so its value is its output.
+ral checks a handler's arity, which is its type and not its spelling,
+statically. Persistent handlers (rc, manifest) are checked again when installed;
+`within` needs no install-time check. A written `within` map entry is also
+checked as an arm standing in for the head it names (§9.4). A handler for
+`echo`, for example, stands in for a command, so its value is its output.
 
 Handlers are self-masking. While a selected handler runs, its own frame is
 temporarily absent. A call to the same name from its body reaches an outer
 handler, a base handler, a catch-all handler, or an external command:
 
 ```ral
-within [handlers: [git: { |args|
+within [handlers: [:, git: { |args|
     warn 'running git'
     git ...$args
 }]] {
@@ -2409,7 +2411,7 @@ within [env: [MODE: 'test']] {
 within [
     dir: 'project',
     env: [MODE: 'test', RETRIES: 3],
-    handlers: [deploy: { |args| to-json [mock: true, args: $args] }],
+    handlers: [:, deploy: { |args| to-json [mock: true, args: $args] }],
     handler: { |name args|
         fail "unexpected command: $name"
     },
@@ -2423,7 +2425,7 @@ names:
 
 - `dir` — the effective working directory;
 - `env` — environment-variable overrides;
-- `handlers` — named command handlers;
+- `handlers` — a map from command name to handler;
 - `handler` — one catch-all command handler.
 
 Unknown names are errors, reported before the program runs. `[]` is the empty
@@ -2445,17 +2447,23 @@ present is therefore a fact about the program's text, never about a value: to
 set `dir` only sometimes, lift the condition to the form — `if $c { within
 [dir: $d] { … } } else { within [] { … } }`.
 
-`handlers` is syntax in a stronger sense: its labels are the command names it
-binds in the body, so they must be written out, and `handlers: $table` is a
-parse error.
+`handlers:` is an ordinary map-valued option. Its keys are data, not option
+names: `handlers: $table` and `handlers: [:, ...$table, ll: { |args| ls -lh ...$args }]`
+are both valid. A record such as `[ll: …]` is refused; write
+`[:, ll: { |args| … }]`. The empty handler map is `[:]`, not `[]`.
 
 A map is no options bundle either, and so a genuine one — off `from-json`, a
 plugin's configuration — is refused at the same place: its keys are data, a
 form's options are names.
 
-All options are evaluated and validated before the body begins. The environment scope is installed outermost, then the directory scope, then the handler frame. This makes the environment visible while commands resolve beneath the directory and handler scopes.
+All option values are evaluated left to right in written order, like ordinary
+record fields, and validated before the body begins. `handlers:` follows the
+same evaluation rule as every other option. The environment scope is installed
+outermost, then the directory scope, then the handler frame. This makes the
+environment visible while commands resolve beneath the directory and handler
+scopes.
 
-Validation uses the incoming dynamic context. Options in the same map do not
+Validation uses the incoming dynamic context. Options in the same bracket do not
 take effect one by one: for example, `dir` is resolved before the new `env`
 overlay is installed, so a `HOME` override beside it does not change how that
 `dir` value is resolved.
@@ -2510,7 +2518,7 @@ The previous environment overlay is restored exactly when the scope ends. A spaw
 A named handler reinterprets one command name:
 
 ```ral
-within [handlers: [
+within [handlers: [:,
     git: { |args|
         echo "git called with: $args"
     },
@@ -2519,13 +2527,55 @@ within [handlers: [
 }
 ```
 
-Every value in `handlers` must be a function of one parameter, such as `{ |args| ... }`. It receives the command’s argument list: a `List String` holding every argument after the head, rendered as text.
+`handlers:` has type `Map(U([String] → Command))`: a map from command
+names to functions of one parameter, such as `{ |args| … }`. Each receives
+the command's argument list: a `List String` holding every argument after the
+head, rendered as text. Use `[:, git: { |args| … }]` for one handler and
+`[:]` for none. A record (`[git: …]`) or a list (`[]`) is a static type error;
+there is no record-to-map conversion. The map may be computed or bound elsewhere:
 
-The singular `handler` field is a catch-all and must be a function of two parameters, such as `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
+```ral
+let h = [:, git: { |args| echo "git called with: $args" }]
+within [handlers: $h] { git status }
+```
 
-The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed, where the refusal is one failure naming the block's role and every checker diagnostic with its code (``the `git` handler does not typecheck: T0057 …``). A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for any name not declared as a base frame in Σ stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, returns what that base frame returns. Neither another arm nor a catch-all changes the stand-in type or argument gate. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
+The singular `handler` field has type `U(String → [String] → Command)`:
+its function takes two parameters, such as `{ |name args| … }`, receiving
+the command name as a `String` and its argument list as a `List String`.
 
-`detach` never consults handlers: its command is always a program (§11.5). To stub `detach`, stand in for `detach` itself.
+The number of parameters is the arm's type, not its spelling: with
+`let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an
+arm, while `{ echo hi }` and `{ |a b| … }` are not. `within` checks its named
+handlers and catch-all statically and does not re-vet them at installation.
+Persistent handlers (rc, manifest) retain an install-time check: a refusal is
+one failure naming the block's role and every checker diagnostic with its code
+(``the `git` handler does not typecheck: T0057 …``).
+
+A written `handlers:` map in `within` is checked entry by entry, each arm in
+its own region, so a diagnostic names the command and points at that handler.
+Any other value, including a bound map or a map with a spread or computed key,
+is checked by one equation against `Map(U([String] → Command))`. Written map
+labels inform diagnostics in the body; computed maps contribute no such names.
+Neither changes a head's type.
+
+**Every handler is a command.** A named arm has type
+`U([String] → Command)`, independent of its name, Σ, or other handlers;
+the catch-all has the same command result. Thus
+`curl: { |args| echo '{"ok":1}' }` is an arm, and
+`curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where
+it should write — write it with `echo`. The same rule holds for `echo` and
+every base frame. An arm returning `()` at a free grade unifies as a command
+and captures `""` under a `let`; an arm whose grade is already fixed to `p`
+does not stand as a command. Handlers do not change a head's argument gate.
+An arm installed under a name held by a value binding, including a builtin,
+is accepted silently but never reached, because bindings resolve first (§9.5).
+A handler may change what a command writes, but not what kind of thing it is;
+use an explicit codec when conversion is intended.
+
+`detach` is a first-class builtin, so handlers cannot intercept it. Its program
+is resolved as `^program` would resolve one, bypassing bindings and the whole
+handler stack (§11.5). To stub `detach`, bind its name:
+`let detach = { |desc program args| return [pid: 0, desc: $desc] }`.
 
 Handlers are command operations, not first-class names. They are invoked in command position and cannot be fetched with `$name`.
 
@@ -2545,8 +2595,7 @@ A lexical binding still wins over every handler. Installing a handler under an a
 
 Persistent handlers are installed by the host between units from the rc's or
 manifest's `handlers:` field. Scoped frames are removed when their `within`
-ends. No `alias` or `unalias` statement or builtin value installs or removes a
-handler. For an interactive helper, bind a function:
+ends. For an interactive helper, bind a function:
 
 ```ral
 let ll = { |args| ls -lh ...$args }
@@ -2564,7 +2613,7 @@ Handlers are deep: a frame remains installed after one interception, so every ma
 They are also self-masking. While a matched handler body runs, ral temporarily removes the entire matched frame. A same-name call in that body therefore reaches the next outer named handler, a base command, a catch-all in another frame, or the external command. It never immediately calls itself.
 
 ```ral
-within [handlers: [git: { |args|
+within [handlers: [:, git: { |args|
     echo 'before'
     git ...$args          # forwards past this frame
     echo 'after'
@@ -2690,7 +2739,7 @@ let mean = { |xs| $[_sum $xs / length $xs] }
 
 The module’s final expression is evaluated, but `use` returns the bindings rather than that expression’s value. A module's bindings are heterogeneous and reached by name, so the result is a record: `$m[mean]` reads one, and a key computed at run time has no type to give.
 
-`use` is a checked boundary (§7.3): the record is admitted against the fields the script reads, so a read of a name the module does not export fails at the `use`, and each exported function is held to the type the script uses it at.
+`use` is a checked boundary (§7.3): the record is admitted against the fields the script reads, so a read of a name the module does not export fails at the `use`. Every used export's complete scheme is checked against the type the script uses it at, including functions nested in records, lists, maps, or variants. A known incompatible nested scheme is refused at `use`. Unresolved re-exported shapes additionally carry recursive delayed contracts: an opaque or weak function is guarded by exactly the caller-required arrow and result contract, and an incompatible application or result raises when reached. This does not certify every function body before invocation. Imported functions retain the module's checked sites; scoped handler installation performs no inference or re-vetting.
 
 `use` first resolves a path. A `~` or `xdg:` head expands first, as in any written path, and only a path still relative after that is read relative to the containing file, or relative to `cwd` when there is no containing file; an absolute one is resolved exactly as any written path is, never joined onto the file's directory; the containing file's own directory is never read for such a head, so a script under a directory named `~` is still found there. That path is the first candidate, and the directories in the effective `RAL_PATH` give the rest, in order; the first candidate that is a file the grant lets ral read is loaded, and one the grant refuses is passed over. Where none is admitted, the first refusal is the error, whether or not the refused file exists. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
 
@@ -3328,11 +3377,10 @@ command when survival is the requirement.
 
 The core language provides the `spawn` and `gather` forms and the builtins
 `await`, `poll`, `is-done`, `first-settled`, `race`, `cancel`, and `workers`;
-the standard prelude adds `par`, `both`, and `first-of` over them. `watch` and `detach`
-are optional host commands: `watch` is a builtin, and `detach` is a base handler taking an argument list. If a host
-does not install one, its name is absent from that shell's base scope
-(`watch`) or its base frames (`detach`), and is checked and resolved like any
-other unknown command.
+the standard prelude adds `par`, `both`, and `first-of` over them. `watch` and
+`detach` are optional host builtins, both first-class values. If a host does
+not install one, its name is absent from that shell's base scope and is
+checked and resolved like any other unknown command.
 
 #### Live output with `watch`
 
@@ -3357,19 +3405,36 @@ because a worker cannot safely retain that run's sink.
 
 #### Work that survives with `detach`
 
-`detach description command arguments...` starts an operating-system process
-that the session deliberately stops owning. It takes one argument list: the
-description first, then the command and its own arguments.
+`detach description program args` starts an operating-system process that
+the session deliberately stops owning. It is an ordinary first-class builtin
+with type `String → String → [String] → F [pid: Int, desc: String]`: a task
+description, a program name, and one list of its arguments.
 
 ```ral
-let receipt = detach 'local documentation server' python -m http.server 8000
+let receipt = detach 'local documentation server' python3 ['-m', 'http.server', '8000']
 echo $receipt[pid]
 ```
 
-The command is always a program, as `^command` would be: handlers and base
-frames such as `echo` are not consulted, since they run inside the session.
+The program is resolved as `^program` would resolve one: bindings and the
+whole handler stack, including base frames such as `echo`, are bypassed,
+since they run inside the session. `^detach` likewise names an external
+program, not this builtin.
 
-The description must be a non-empty, single-line `String`. The result is:
+Handlers cannot intercept `detach` itself. To stub it, bind its name:
+
+```ral
+let detach = { |desc program args| return [pid: 0, desc: $desc] }
+```
+
+Like other functions, it supports higher-order use (`$detach`) and partial
+application (`let bg = detach 'docs'`). Its last argument is a list, not an
+argv at the call site: write `detach 'nap' sleep [...$xs]`, not
+`detach 'nap' sleep ...$xs`. Every list element must be a `String`; it is not
+rendered from another type.
+
+The description must be a non-empty, single-line `String`, and the program
+name must be non-empty; an empty program is refused before lookup. The result
+is:
 
 ```text
 [pid: Int, desc: String]
@@ -4328,7 +4393,7 @@ try {
 changing global process state:
 
 ```ral
-within [handlers: [fetch-clock: { |args| echo '12:00' }]] {
+within [handlers: [:, fetch-clock: { |args| echo '12:00' }]] {
     assert-equal 'clock' '12:00' !{fetch-clock}
 }
 ```
@@ -4851,7 +4916,7 @@ return [
     prompt: { return "!{abbreviate-home !{cwd}} ❯ " },
     env: [EDITOR: 'vim', PAGER: 'less'],
     bindings: [work: '/srv/work'],
-    handlers: [ll: { |args| ls -lh ...$args }],
+    handlers: [:, ll: { |args| ls -lh ...$args }],
     theme: [value-prefix: '⇒ ', value-color: cyan],
     startup: { echo 'ready' },
 ]
@@ -4864,7 +4929,7 @@ The recognized fields are:
 | `env: Record` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
-| `handlers: Record or Map` | Install command arms held to their stand-ins (§9.4); use `bindings:` for lexical values and functions. |
+| `handlers: Map(U([String] → Command))` | Install command handlers (§9.4); use `bindings:` for lexical values and functions. |
 | `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal` or `readline`; default `readline`. |
@@ -4902,13 +4967,15 @@ agreeing with the static check above — the shell starts with defaults. An
 unknown key inside `theme` produces a warning rather than a refusal.
 Unresolved field or member types also retain their runtime checks.
 
-The `handlers:` collection holds arms to their stand-ins in this unit's live
-solver: a written name takes Σ's base-frame result or, for any other name,
-`[String] → Command` (§9.4). A map with computed names holds its value type
-to `[String] → Command`; installation still checks each actual name against
-Σ. These equations reach decoder admission sites inside locally checked
-arms. An arm obtained through `use` retains its module's sites and still
-requires the install-time check.
+The `handlers:` field is held by one equation against
+`Map(U([String] → Command))` in this unit's live solver, not by per-name
+checks. Write `[:, ll: { |args| ls -lh ...$args }]`, or `[:]` for none;
+a record such as `[ll: …]` is refused with the map spelling. The equation
+reaches decoder admission sites inside locally checked handlers. Persistent
+handlers are still vetted against the same constant type at installation;
+the name supplies diagnostic wording only. A handler obtained
+through `use` retains its module's sites; unresolved returns and member types
+also require that install-time check.
 
 `return [edit_mde: 'vi']` never runs the rest of the file: a misspelling is a
 compile error and the rc is skipped before its first statement executes. A
@@ -4977,7 +5044,7 @@ return { |options|
             key: $key,
             handler: { |_event| _ed-insert 'hello' },
         ]],
-        handlers: [hi: { |args| echo 'hello' ...$args }],
+        handlers: [:, hi: { |args| echo 'hello' ...$args }],
     ]
 }
 ```
@@ -4989,7 +5056,7 @@ The manifest schema is:
     name: String,
     hooks?: Map<String, Block>,
     keybindings?: List<[key: String, handler: Block, guard?: String]>,
-    handlers?: Map<String, Block>,
+    handlers?: Map(U([String] → Command)),
 ]
 ```
 
@@ -5006,12 +5073,14 @@ options, and what it makes is ascribed as a returned manifest is, so
 `return { [name: 'example'] }` and `return { |a b| [name: 'example'] }` are
 refused statically. Factory shape and result equations run on the same live
 settled solver, after every `let` mode and call split is fixed (§15.3).
-The `name:` field can therefore solve a decoder's type, and `handlers:` arms
-use the same stand-in relation as scoped handlers. For example, a written
-external arm returning `5` is refused statically; one returning decoded data
-is held to `Command`, so incompatible data is refused at its decode, naming
-the arm's use. Computed-name maps hold their members to
-`[String] → Command`, with the actual names checked again at installation.
+The `name:` field can therefore solve a decoder's type. The `handlers:` field
+is a map, held by one equation against `Map(U([String] → Command))`, just as
+in the rc; written and computed keys follow the same rule. A record such as
+`[hi: …]` is refused with the map spelling `[:, hi: { |args| … }]`; `[:]`
+is the empty map. A handler returning `5` is refused statically; one returning
+decoded data is held to `Command`, so incompatible data is refused at its
+decode, naming the field use. Persistent handlers are vetted against the same
+constant type again at installation; names supply diagnostic wording only.
 What a factory returns is checked again as it is parsed; unresolved returns,
 fields and members remain runtime questions.
 Each declared field is checked exactly: ral does not stringify a value of the wrong
@@ -5902,20 +5971,21 @@ Pattern inference recursively constrains list elements to one element type,
 record fields to their labelled types, and a list rest name to `List A`. A
 binding generalizes its bound value as §17.5's `Let` says.
 
-**Heads and commands.** A bare head `c` has one *class*, decided by the lookup
-order of §6.3 and §9.5, which the runtime dispatches in too:
+**Heads and commands.** A bare head `c` has one static *class*, decided by
+Σ and lexical bindings alone. Runtime dispatch (§6.3, §9.5) may select a
+handler without changing that class:
 
 ```text
 class(c) = binding(σ)     c is a lexical or session binding, of scheme σ
          | row(σ)         c is a builtin value row, of scheme σ
-         | arm(c', σ)     a handler is in scope for c, standing in for c' at σ = standsFor(c')
+         | base-frame     Σ declares c as an argv row
          | external       otherwise, and always for ^c, ./p and ~/p
 ```
 
 A row's scheme says what it produces. The rows that write — the encoders
 (`to-json`, `to-string`, `to-line`, `to-lines`, `to-jsonl`, `to-csv`,
-`to-bytes`, `ints-to-bytes`), `echo`, `help`, `explain`, `clear` and `reset` —
-end in `Command`, and a row that writes only when applied at its full arity:
+`to-bytes`, `ints-to-bytes`), `help`, `explain`, `clear` and `reset` —
+end in `Command`, and a row writes only when applied at its full arity:
 `to-json` alone is a function, and `to-json $x` is a command. The rest end in
 freshly graded returners, with `warn` among them: stderr is not the byte
 channel. Boundary results remain `p`. `map`, `each`, `fold`, `fold-lines`
@@ -5923,24 +5993,29 @@ and `audit` run a body of either grade, stream its output and keep its value;
 `filter` and `sort-list-by` demand value-returning callbacks.
 `watch`, like the `spawn` form, keeps the body's grade in the `Handle_ε A` it
 returns, and `await` and `race` give it back (§11.2); `fail`, `raise`, `exit` and `diverges` inhabit
-every grade. A
-handler does not change the answer, since an arm stands in for the head it names
-and keeps that head's class; an arm for the name of a value row is never
+every grade. Every base frame, including `echo`, is `[String] → Command`
+by construction. A handler does not change the answer: every handler has the
+constant command type of §17.7. An arm for the name of a value row is never
 reached, because builtins resolve first.
 
 A command takes an argv and produces output:
 
 ```text
-class(c) ∈ {external, arm(external)}    Γ ⊢ ā : argv
------------------------------------------------------ Ext
-Γ ⊢c c ā : F_w Unit
+class(c) = external    Γ ⊢ ā : argv
+------------------------------------- Ext
+Γ ⊢c c ā : Command
+
+class(c) = base-frame    Γ ⊢ ā : argv_in-shell
+-------------------------------------------- Base-frame
+Γ ⊢c c ā : Command
 
 class(c) = row(σ)    σ ⊑ A1 -> ... -> An -> C    Γ ⊢v ai : Ai
 --------------------------------------------------------------- Row
 Γ ⊢c c a1 ... an : C
 ```
 
-`Γ ⊢ ā : argv` says every element renders as text, and a spread spreads a list.
+`Γ ⊢ ā : argv` and `Γ ⊢ ā : argv_in-shell` require text rendering and
+list-valued spreads, with the external and in-shell gates of §6.6 respectively.
 For a single argv argument, generation records `gate τ` rather than deciding
 from the head known at that visit. After rank-zero defaults at unit closure,
 the gate judges the final head: `Unit` is refused for all argv calls; bytes,
@@ -6205,8 +6280,9 @@ field. Unknown, missing and refused keys are judged on the final rows after
 the live walk. Each walked row is then re-read to its final tail; a field not
 held by the walk is judged on a scratch copy, without replaying live clashes.
 Contract equations introduce ground types apart from fresh variables used
-once, and every base frame has a ground result payload, so such a revealed
-field needs no further solving. There is no repeated inference or fixpoint.
+once, and every base frame has result `Command` with payload `Unit` by
+construction, so such a revealed field needs no further solving. There is no
+repeated inference or fixpoint.
 Nested tables are queued and checked on scratch only at close, after live
 holds have solved their inputs. The declared table itself is never unified
 as a record type.
@@ -6402,46 +6478,57 @@ arm-result constraints are equations against fresh shape unknowns and retain ord
 diagnostic provenance and source spans. Scope bodies preserve types without
 reading a partial solution.
 
-`within` additionally types known option fields and installs schemes for
-literal handler entries while checking its body. Each installed arm is checked
-inside its own region, closed before its scheme is generalized by rank; a match
-on an old scrutinee still belongs to the enclosing region (§17.5). The catch-all
-is likewise checked in a region. `grant` types known capability fields.
-Unknown, spread, or dynamic option keys remain subject to runtime decoding.
+`within` checks its options as one spread-free record node, as `grant` does.
+Option names must be written; their values are ordinary computed values.
+Unknown, repeated, spread, or dynamic option keys are refused before execution.
+`handlers:` is a map: a written map is checked entry by entry, each arm inside
+its own region, closed without generalizing or storing a scheme. A match on
+an old scrutinee still belongs to the enclosing region (§17.5). Written map
+labels are imported while checking the body for diagnostics alone; a computed
+map imports none. The catch-all is likewise checked in a region. Other
+`handlers:` values take one equation against `Map(U([String] → Command))`,
+as rc and manifest fields always do. `grant` checks known capability fields.
 
-An arm stands in for the head it names, and is checked against what that head
-is. `standsFor(c)` reads only Σ: the scheme of its base frame named `c`,
-and `[String] -> F_w Unit` for anything else:
+Every named handler has one type, independent of its name and Σ. The
+catch-all adds the command name as its first parameter. `Command` is `F_w Unit`:
 
 ```text
-standsFor(c) = σ                      Σ declares c as a base frame of scheme σ
-             = [String] -> F_w Unit   otherwise
+Γ ⊢v M : Map (U ([String] -> Command))          Γ ⊢v V : U (String -> [String] -> Command)
+-------------------------------------- Handlers  ------------------------------------------ Catch-all
+Γ ⊢ [handlers : M] ok                            Γ ⊢ [handler : V] ok
 
-Γ ⊢v V : U (standsFor(c))            Γ ⊢v V : U (String -> [String] -> F_w Unit)
------------------------- Arm        ------------------------------------------- Catch-all
-Γ ⊢ [c : V] ok                       Γ ⊢ [handler : V] ok
+Σ declares c as a base frame  ⟹  Σ(c) = [String] -> Command
 ```
 
-So an arm for an external stands in at `[String] -> Command`, and its value is
-its output: `curl: { |args| echo '{"ok":1}' }` is an arm, and
-`curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it
-should write. An arm returning `()` at a free grade unifies as a command,
+A written map `[:, c : V, …]` is checked entry by entry:
+`Γ ⊢v V : U ([String] -> Command)` for each entry. This is the same judgement
+with a diagnostic per handler. Every argv manifest row has this type by
+construction: it carries no type rule, so a host cannot declare a base frame
+with another result.
+
+A handler's value is its output: `curl: { |args| echo '{"ok":1}' }` is an arm,
+and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where
+it should write. An arm returning `()` at a free grade unifies as a command,
 and under `let x = curl` captures `""`. A unit producer already fixed to `p`
-is refused; handler arms do not coerce. An arm for `echo`, a base
-frame that writes, has `echo`'s own scheme. An arm for `detach`, a base frame
-that returns, has `detach`'s scheme and returns a receipt. A call through an arm
-types as its head does. The catch-all stands in for every command in its block,
+is refused; handler arms do not coerce. The rule is identical for `echo` and
+all other names. `detach` is a first-class builtin: an arm named `detach`
+must be a command, not return a receipt, and is never reached because the
+value binding wins. Stub `detach` by binding its name (§11.5). A call through
+an arm types as its head does. The catch-all has the same command result,
 so `{ |name args| cd $name }` is valid. A host-installed persistent arm is
 checked by the same rule when it is installed. Generation first equates the
-arm with a thunk taking the slot's parameters and producing a fresh result, then equates
-that result with what the replaced head produces. It does not coerce the arm
-or inspect a partial solution. An equation's success flag only suppresses a
-second complaint when the slot shape has already failed. The constraint is on
-the arm's type, never its spelling: `{ forward 'git' }` is an arm when
-`forward 'git'` is a function of the argv, and `{ echo hi }`, whose type takes
-no parameter, is not. The install-time one-shot check must close successfully
-before installation (§17.5); it returns only a verdict, never a stored handler
-scheme. Session checking imports handled names for diagnostics alone.
+arm with a thunk taking the slot's parameters and producing a fresh result,
+then equates that result with `Command`. The name affects diagnostics only.
+Generation does not coerce the arm or inspect a partial solution. An equation's
+success flag only suppresses a second complaint when the slot shape has already
+failed. The constraint is on the arm's type, never its spelling:
+`{ forward 'git' }` is an arm when `forward 'git'` is a function of the argv,
+and `{ echo hi }`, whose type takes
+no parameter, is not. For persistent handlers only (rc, manifest), the
+install-time one-shot check must close successfully before installation
+(§17.5); it returns only a verdict, never a stored handler scheme. `within`'s
+static check is total and needs no install-time re-vet. Session checking
+imports handled names for diagnostics alone.
 
 ### 17.8. Operational outcomes
 

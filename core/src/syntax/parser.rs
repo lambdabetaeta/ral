@@ -19,8 +19,8 @@ use crate::ir::{
 use crate::source::{Span, Spanned};
 use crate::syntax::CONTROL_OPERATORS;
 use crate::syntax::ast::{
-    Ast, CaseArm, HandlerArm, Head, IfBranch, IndexKey, ListElem, MapEntry, Options, RecordEntry,
-    ScopeAst, Stmt, Word, WordLiteral,
+    Ast, CaseArm, Head, IfBranch, IndexKey, ListElem, MapEntry, Options, RecordEntry, ScopeAst,
+    Stmt, Word, WordLiteral,
 };
 use crate::syntax::lexer::{
     self, LexError, LexErrorKind, Lexeme, Operator, RedirectOp, StringPart, Token,
@@ -661,19 +661,15 @@ impl Parser {
             "within" => {
                 let mut form = Form::new("within", "options, body", 2);
                 self.operand_slot(&mut form)?;
-                let (opts, handlers) = self.parse_options(form, true, "dir: $d")?;
+                let opts = self.parse_options(form, "dir: $d")?;
                 let body = Box::new(self.operand(&mut form)?);
                 self.no_more_operands(form)?;
-                ScopeAst::Within {
-                    opts,
-                    handlers,
-                    body,
-                }
+                ScopeAst::Within { opts, body }
             }
             "grant" => {
                 let mut form = Form::new("grant", "capabilities, body", 2);
                 self.operand_slot(&mut form)?;
-                let (caps, _) = self.parse_options(form, false, "net: $n")?;
+                let caps = self.parse_options(form, "net: $n")?;
                 let body = Box::new(self.operand(&mut form)?);
                 self.no_more_operands(form)?;
                 ScopeAst::Grant { caps, body }
@@ -750,16 +746,7 @@ impl Parser {
     /// may be computed, but the option names are written out, the way `case`
     /// writes its arms: a bundle assembled elsewhere, a spread and a computed
     /// key are refused here.
-    ///
-    /// Where the form takes arms, `handlers:` is lifted out of the bracket:
-    /// its labels are the names it binds in the body, so they are syntax and
-    /// no computed table can spell them.
-    fn parse_options(
-        &mut self,
-        form: Form,
-        arms: bool,
-        example: &str,
-    ) -> Result<(Options, Option<Vec<HandlerArm>>), ParseError> {
+    fn parse_options(&mut self, form: Form, example: &str) -> Result<Options, ParseError> {
         let written = || {
             format!(
                 "`{name}` takes its options written in its own bracket. The values may be \
@@ -775,7 +762,7 @@ impl Parser {
         self.advance(); // consume `[`
         if self.eat(&Token::RBracket) {
             self.end_unit(open.join(self.prev_byte_span()))?;
-            return Ok((Vec::new(), None));
+            return Ok(Vec::new());
         }
         if self.peek() == &Token::Colon {
             return Err(self.error(format!(
@@ -793,22 +780,9 @@ impl Parser {
         self.end_unit(open.join(self.prev_byte_span()))?;
 
         let mut options: Options = Vec::new();
-        let mut handlers = None;
         for item in items {
             match item {
                 CollectionItem::Spread(base) => return Err(ParseError::new(base.span, written())),
-                CollectionItem::Entry {
-                    key: MapKeyForm::Label(key),
-                    value,
-                } if arms && key.item == "handlers" => {
-                    if handlers.is_some() {
-                        return Err(ParseError::new(
-                            value.span,
-                            "`handlers:` is written once; put every arm in the one list",
-                        ));
-                    }
-                    handlers = Some(Self::handler_arms(form, value)?);
-                }
                 CollectionItem::Entry {
                     key: MapKeyForm::Label(key),
                     value,
@@ -852,71 +826,7 @@ impl Parser {
                 }
             }
         }
-        Ok((options, handlers))
-    }
-
-    /// `handlers: [name: arm, …]` — the arm list, read as syntax.  The table
-    /// is written out here for the same reason `case`'s arms are: the labels
-    /// are the names bound in the body, and a table assembled elsewhere hides
-    /// them.  An arm's *value* is any atom, the name being what is syntax.
-    fn handler_arms(form: Form, value: Spanned<Ast>) -> Result<Vec<HandlerArm>, ParseError> {
-        let spelling = format!(
-            "write the arms out (`{name} [handlers: [deploy: {{ |args| … }}]] …`) \
-             since each name is bound in the body",
-            name = form.name,
-        );
-        let entries = match value.item {
-            Ast::List(ref elems) if elems.is_empty() => Vec::new(),
-            Ast::Record(entries) => entries,
-            // `[:]` is a map, not the arm list's own empty; give an explicit
-            // error rather than let it fall through as a type mismatch.
-            Ast::Map(ref entries) if entries.is_empty() => {
-                return Err(ParseError::new(
-                    value.span,
-                    "the empty handler set is `handlers: []`; `[:]` is a map, \
-                     and an arm's name is not data",
-                ));
-            }
-            Ast::Map(_) => {
-                return Err(ParseError::new(
-                    value.span,
-                    format!("`handlers:` takes named arms, not a map; {spelling}"),
-                ));
-            }
-            _ => {
-                return Err(ParseError::new(
-                    value.span,
-                    format!("`handlers:` is an arm list, not a value; {spelling}"),
-                ));
-            }
-        };
-        let mut arms: Vec<HandlerArm> = Vec::new();
-        for entry in entries {
-            match entry {
-                RecordEntry::Field { key, value } => {
-                    if arms.iter().any(|arm| arm.name == key.item) {
-                        return Err(ParseError::new(
-                            value.span,
-                            format!(
-                                "`{key}` already has an arm; one name, one arm",
-                                key = key.item
-                            ),
-                        ));
-                    }
-                    arms.push(HandlerArm {
-                        name: key.item,
-                        value,
-                    });
-                }
-                RecordEntry::Spread(base) => {
-                    return Err(ParseError::new(
-                        base.span,
-                        format!("`handlers:` spreads no other table; {spelling}"),
-                    ));
-                }
-            }
-        }
-        Ok(arms)
+        Ok(options)
     }
 
     /// case = 'case' atom '[' arm (',' arm)* trailing-comma? ']'

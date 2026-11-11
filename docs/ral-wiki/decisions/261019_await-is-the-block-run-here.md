@@ -350,7 +350,7 @@ node.
 [[invariants/fixed-arity|Fixed arity]] and
 [[invariants/optionality-via-variants|optionality-via-variants]] make it a
 hard rule that no value's signature spells an argument the call site may leave
-out ([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]).
+out.
 The one place an optional part already lives is syntax: `if` without `else`.
 So the title can be optional only if `spawn` is a control operator, parsed as
 `spawn BODY` or `spawn TITLE BODY` — one operand, and a second if another
@@ -374,7 +374,7 @@ The title is the handle's `title`, the birth record's, the `` `done ``
 event's, the notice's parenthesis and `workers`' column. `watch` stays a
 builtin with its mandatory label: both its arguments are mandatory, so it
 needs no syntax, and a host must still be able to *lack* it
-([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+([[design/exec|exec]]).
 
 ## Why `service` and the leases went
 
@@ -442,8 +442,6 @@ code renders anything.
   window closed),
   [[decisions/260617_long-running-work|long-running-work]],
   [[decisions/260705_session-ledger|session-ledger]] (the durable grade gone),
-  [[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
-  (`service` deleted; `detach` stands),
   [[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]
   (`worker` replaces `service-handle`),
   [[design/capture|grades and capture]] (`Handle` carries the grade), and

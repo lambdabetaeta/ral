@@ -123,10 +123,12 @@ operation.** The classification is in `core/src/shell/exec/command.rs`
 
 **A handled command is not a performance of the operation.** A named arm
 receives the rendered argument list, `List String`; the catch-all receives the
-name as well. The arm stands in for the command it replaces, so its type is
-`List String → Command` unless a base frame fixes another
-([[design/effects-handlers|effects-handlers]]). While the arm runs its frame
-is masked, so a same-name call inside it reaches the next frame or the OS.
+name as well. Every named arm has type `U([String] → Command)` and the
+catch-all `U(String → [String] → Command)`, independent of the name and Σ
+([[design/effects-handlers|effects-handlers]]). Every argv base frame likewise
+has `[String] → Command` by construction, with no type rule. While the arm
+runs its frame is masked, so a same-name call inside it reaches the next
+frame or the OS.
 The head's type and argument gate come from Σ and lexical bindings alone:
 a base frame keeps its in-shell gate, and every other command name keeps the
 external gate. A handler cannot widen that gate; `ls [1, 2]` is refused even
@@ -140,8 +142,7 @@ only the externals the arm runs.
 
 - **The argument list is a list of strings, one word each.** Nothing is split,
   globbed or re-lexed, at the call or in captured output
-  ([[design/words|words]],
-  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+  ([[design/words|words]]).
 - **Values that are not words are refused at an external name, handled or not**:
   `()`, a list, a map or record, a block, a handle, bytes. One declaration (`RefusedArg`) is
   read by the checker on concrete types and again by `prepare`, through
@@ -350,9 +351,14 @@ and `ending`
   buffered stdout and stderr, no terminal lease and `NewSession` groups, so no
   terminal key reaches it. `await` replays the bytes, then returns the value
   ([[design/residency|residency]], `docs/SPEC.md` §11.1).
-- **Detached.** `detach` (a Unix base frame) launches with null streams and
-  surrenders ownership, so the process outlives the session
-  (`core/src/shell/exec/command.rs`, `docs/SPEC.md` §11.5).
+- **Detached.** `detach description program args` is a Unix native value
+  builtin, typed `String → String → [String] → F [pid: Int, desc: String]`.
+  It launches with null streams and surrenders ownership, so the process
+  outlives the session. The program is resolved as `^program` resolves one,
+  bypassing bindings and the whole handler stack, including base frames.
+  Handlers cannot intercept `detach` itself; a value binding stubs it:
+  `let detach = { |desc program args| return [pid: 0, desc: $desc] }`
+  (`core/src/shell/exec/command/detach.rs`, `docs/SPEC.md` §11.5).
 - **A host hook.** The REPL's external editor runs `$VISUAL`/`$EDITOR`
   through `Shell::run_external`, `^program args…` for a host holding no
   syntax, which skips bindings and handlers.
@@ -391,8 +397,7 @@ where the kernel can render one.
 ## What it returns
 
 **A successful performance returns `()`.** The exit status is not a value, and
-the bytes are not the result ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]],
-`docs/SPEC.md` §6.8).
+the bytes are not the result (`docs/SPEC.md` §6.8).
 
 - **Bytes become a value only at a capture or a decoder.** A `let` decodes the
   capture as a `String`; `from-json`, `from-lines` and the other `from-X`

@@ -25,11 +25,11 @@ pub use self::error::{
 pub(crate) use self::explain::{hyphen_boundary, hyphen_boundary_hint, spread_into_application};
 pub(crate) use self::unify::Unifier;
 
+use self::builtins::Arm;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use self::generalize::has_result_only_var;
 pub(crate) use self::generalize::{instantiate, reseed_weak};
 use self::generate::Generator;
-pub(crate) use self::generate::call::Arm;
 use self::readback::Readback;
 use self::solve::Solver;
 use crate::ir::{Comp, Phrase, Toplevel, Val};
@@ -128,13 +128,7 @@ pub fn typecheck(
     if !settled.has_errors()
         && let Some(table) = contract
     {
-        contract::ascribe(
-            &mut settled,
-            &generator.env.builtins,
-            phrases.last(),
-            tail,
-            table,
-        );
+        contract::ascribe(&mut settled, phrases.last(), tail, table);
     }
     let solution = settled.close()?;
     Ok(
@@ -164,17 +158,17 @@ pub fn bake_prelude(phrases: &[Spanned<Phrase<()>>], manifest: &Manifest) -> Top
     }
 }
 
-/// Decide whether an arm stands in for its command, without exporting a scheme.
+/// Decide whether `comp` is a handler for `name`.
 ///
 /// # Errors
-/// The arm takes other than its parameters, or produces other than its head.
+/// The handler takes other than an argv, or produces other than `Command`.
 pub(crate) fn arm_stands_in(
-    arm: Arm<'_>,
+    name: &str,
     comp: &Arc<Comp>,
     schemes: SessionSchemes,
 ) -> Result<(), Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
-    generator.region(|this| this.arm(&Val::thunk(Arc::clone(comp)), arm, None));
+    generator.region(|this| this.arm(&Val::thunk(Arc::clone(comp)), Arm::Named(name), None));
     generator.solver.settle().close().map(drop)
 }
 

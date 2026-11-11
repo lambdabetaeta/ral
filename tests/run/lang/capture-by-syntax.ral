@@ -123,15 +123,15 @@ let mixed_taken = if true { return !{!$cmd_a} } else { return b }
 assert_eq 'captured command arm in hand, taken' a $mixed_taken
 
 # A stand-in writes as the command it stands in for does, all of it
-within [handlers: [curl: { |a| echo note; echo body }]] {
+within [handlers: [:, curl: { |a| echo note; echo body }]] {
     let both = curl
     assert_eq 'stand-in chatter' "note\nbody" $both
 }
-within [handlers: [curl: { |a| echo '{"ok":1}' }]] {
+within [handlers: [:, curl: { |a| echo '{"ok":1}' }]] {
     let direct = curl | from-json
     assert_eq 'stand-in as a stage' 1 $direct[ok]
 }
-within [handlers: [curl: { |a| return () }]] {
+within [handlers: [:, curl: { |a| return () }]] {
     let stub = curl foo
     assert_eq 'a () stub stands in for a command' '' $stub
 }

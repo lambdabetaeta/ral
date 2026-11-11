@@ -4,14 +4,15 @@ generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 ---
 
 > **Amended 2026-11-11 — Return contracts.** A contract is a use of the
-> returned value. After all elaboration settles, its field, arm and factory
+> returned value. After all elaboration settles, its field and factory
 > equations run live on `Settled`, before gates and nested checks close the
 > unit and readback freezes sites. It cannot select a `let` mode or call
 > split or open holes. Thus `let d = echo 5 | from-json; return [umask: $d]`
-> checks but refuses at the decode, naming the `umask:` use. The shared
-> `stands_in` relation likewise reaches decoder sites inside locally checked
-> rc and manifest arms. Arms received through `use` retain their module's
-> sites and remain an install-time check.
+> checks but refuses at the decode, naming the `umask:` use. The one equation
+> for rc and manifest `handlers:` against `Map(U([String] → Command))`
+> likewise reaches decoder sites inside locally checked handlers. Imported
+> handlers retain their module's sites. Persistent installation still vets
+> each handler; `within`'s total static check needs no runtime vet.
 
 > **Amended 2026-11-11 — Sessions.** Every checked `Toplevel`, including
 > a file loaded by `use` or `load::evaluate_source`, is readmitted before its
@@ -22,7 +23,7 @@ generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 > refusal points into that file; a `use` retains its loader context.
 >
 > **Perimeter correction.** `detach` has the concrete scheme
-> `[String] → F [pid: Int, desc: String]`
+> `String → String → [String] → F [pid: Int, desc: String]`
 > (`core/src/typecheck/builtins.rs`, `scheme::detach`), not a result-only
 > `∀α`; it is no exception to the perimeter rule.
 

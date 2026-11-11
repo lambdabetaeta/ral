@@ -15,8 +15,8 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode, HandlerArmV,
-    MapEntryV, Name, Pattern, Phrase, Redirects, Unchecked, Val, ValListElem, synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode, MapEntryV, Name,
+    Pattern, Phrase, Redirects, Unchecked, Val, ValListElem, synthetic,
 };
 use crate::prelude_manifest;
 use crate::source::Span;

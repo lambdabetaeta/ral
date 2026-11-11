@@ -1,0 +1,4 @@
+# codes: T0010
+# status: 1
+# contains: the empty one is `[:]`
+within [handlers: []] { echo x }

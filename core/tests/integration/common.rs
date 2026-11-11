@@ -51,7 +51,7 @@ pub fn schemes_for(surface: &HostSurface) -> ral_core::SessionSchemes {
 /// stages — so checker-built nodes at any depth, such as `Capture`, are
 /// all reached.
 pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
-    use ral_core::ir::{CompKind, Val};
+    use ral_core::ir::CompKind;
     visit(comp);
     let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
     match &comp.item {
@@ -78,9 +78,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             .iter()
             .for_each(|arm| walk_val(ral_core::test_access::case_arm_val(arm), visit)),
         CompKind::Rec { group, .. } => group.shape().iter().for_each(|(_, m)| sub(m)),
-        CompKind::Force(Val::Thunk(node)) | CompKind::Return(Val::Thunk(node)) => {
-            walk_comp(node.shape(), visit);
-        }
+        CompKind::Force(value) | CompKind::Return(value) => walk_val(value, visit),
         CompKind::Capture(c) | CompKind::Redirect { body: c, .. } => {
             walk_comp(c, visit);
         }
@@ -98,22 +96,9 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
                 walk_val(v, visit);
             }
         }
-        CompKind::Grant { caps, body } => {
-            for (_, v) in caps.shape() {
-                walk_val(&v.item, visit);
-            }
-            walk_val(body, visit);
-        }
-        CompKind::Within {
-            opts,
-            handlers,
-            body,
-        } => {
+        CompKind::Grant { caps: opts, body } | CompKind::Within { opts, body } => {
             for (_, v) in opts.shape() {
                 walk_val(&v.item, visit);
-            }
-            for arm in handlers.iter().flatten() {
-                walk_val(&arm.value.item, visit);
             }
             walk_val(body, visit);
         }
@@ -146,8 +131,28 @@ fn walk_args(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
 }
 
 fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
-    if let ral_core::ir::Val::Thunk(node) = val {
-        walk_comp(node.shape(), visit);
+    use ral_core::ir::Val;
+    match val {
+        Val::Thunk(node) => walk_comp(node.shape(), visit),
+        Val::List(node) => {
+            for value in node.shape() {
+                walk_val(&value.item, visit);
+            }
+        }
+        Val::Record(node) | Val::Map(node) => {
+            for (_, value) in node.shape() {
+                walk_val(&value.item, visit);
+            }
+        }
+        Val::Variant { payload, .. } | Val::Protected { value: payload, .. } => {
+            walk_val(payload, visit);
+        }
+        Val::Unit
+        | Val::String(_)
+        | Val::Int(_)
+        | Val::Float(_)
+        | Val::Bool(_)
+        | Val::Variable(_) => {}
     }
 }
 

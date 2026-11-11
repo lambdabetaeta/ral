@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
 anchors: [Generator, Solver, Settled, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
@@ -41,10 +41,10 @@ verdict from a partially solved type.
   introduce neither suspended matches nor weakness
   ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
 - A bare head is classified from Σ and lexical bindings alone: binding,
-  value builtin, base frame, external. Base frames keep their own schemes and
-  in-shell gate; every other command name takes the external gate, handled or
-  not. Handled-name sets serve diagnostics only. A binding is required to be
-  a thunk by equation, with named-head provenance for T0072; an unbound `$name`
+  value builtin, base frame, external. A base-frame call has result `Command`
+  without consulting the row's scheme and uses the in-shell gate; every other
+  command name takes the external gate, handled or not. Handled-name sets
+  serve diagnostics only. A binding is required to be a thunk by equation, with named-head provenance for T0072; an unbound `$name`
   is T0071, never a fresh unknown.
 
 ## Two matches choose elaboration
@@ -153,7 +153,11 @@ predecessors' closed schemes.
 - Seeding occurs at rank zero from `SessionSchemes`: binding schemes, handled
   names for diagnostics and the host's builtin `Manifest`. No handler scheme
   is persisted or seeded. A builtin declaration caches one closed
-  scheme and its curry spine; it never receives the live unifier.
+  scheme and its curry spine; it never receives the live unifier. An argv row
+  has no type rule: its scheme is always `U([String] → Command)`.
+- A host binding without a stored scheme receives one fresh rank-zero
+  monomorphic type. It is never omitted or generalised to `∀α. α`; every use
+  in the unit shares that one type.
 - A one-shot enters a region before checking its body and closes the unit
   before returning. A lexical binding's scheme is generalised after region
   exit and settled only after successful closure. An install-time arm check
@@ -163,7 +167,7 @@ predecessors' closed schemes.
   and yields `Settled`: every elaboration match has retired, including on
   refusal. Every mode and split is fixed.
 - Unless settling reported errors, the return contract is held live on
-  `Settled`, using the manifest for stand-ins. It can equate and resolve types,
+  `Settled`. It can equate and resolve types,
   instantiate schemes, mint fresh types, queue nested tables and diagnose;
   it cannot open a hole or enter a region. A contract is a use of the returned
   value, never a choice of elaboration.
@@ -190,19 +194,29 @@ A table is consulted key by key, never unified as a record type.
 - `Held::Unify` uses `equate_held`, as written options do. Factory shape and
   result equations also propagate through the live solver. Their solutions
   reach decoder sites, schemes, readmissions and final argv gates.
-- The rc's and manifest's `handlers:` use `Holds::Arms`/`Held::Arms`.
-  `stands_in` is the sole arm-to-head relation for these fields, scoped arms
-  and the catch-all. Record labels select Σ's stand-in; computed-name maps
-  hold their value type to `[String] → Command`. Install-time checking still
-  judges each actual name. Imported arms retain their module's sites.
+- `Holds::Handlers` gives rc and manifest `handlers:` one `Held::Unify`
+  equation against `Map(U([String] → Command))`, with `Reason::Handlers`.
+  Records are refused with the map spelling; there is no coercion or per-field
+  arm hold. Ascription needs no manifest. Persistent handlers retain their
+  install-time check, and imported arms retain their module's sites.
+- `within` checks a written handler map entry by entry through `install_arm`,
+  each in its own region with its name and span for diagnostics. Any other
+  value uses the same map equation. Only a written map contributes handled
+  names to the body's diagnostics; computed maps contribute none. Options
+  remain one record node, with no handler-specific syntax or IR. The total
+  static check makes runtime vetting of scoped handlers and catch-alls redundant.
+  The arm rule first equates the slot's parameter shape, then its fresh result
+  with `Command`; it reads neither the handler's name nor Σ to choose a type.
+  The catch-all uses `Held::Arm(Arm::CatchAll)`, not a second held-type equation.
 - The walk re-reads each row's tail after every field. After all live holds,
   unknown, missing and refused keys are judged on the final types. Each
   walked row is re-read to its final tail; fields the walk did not hold are
   judged on scratch, without repeating a live clash or its weak-variable note.
 - Contract equations introduce ground types apart from fresh variables used
-  once. Base-frame result payloads must be ground (their grades may quantify).
-  A field revealed in a row already left therefore has no variable needing
-  solving: the final scratch judgement suffices, without repeated inference.
+  once. Every base-frame result is `Command`, with payload `Unit` by
+  construction. A field revealed in a row already left therefore has no
+  variable needing solving: the final scratch judgement suffices, without
+  repeated inference.
 - Nested tables are queued, then checked on scratch at close against the
   final live types. They do not feed equations back into inference.
 - A wholly variable tail remains a runtime question: decoded data contains
@@ -231,8 +245,7 @@ wraps the whole RHS. See
   itself; `Toplevel.admits` records imported residual names' first-use types
   for readmission before execution.
 - Readback settles each definition's schemes into `Closed`. The prelude bake,
-  live scope and sealed seed transport those same schemes
-  ([[decisions/260603_session-scheme-continuity|session scheme continuity]]).
+  live scope and sealed seed transport those same schemes.
 - Re-checking a checked tree accepts it and inserts no further elaboration
   (`readback.rs`: `elaborated_capture_and_repeated_splits_reinfer_unchanged`).
   Raw unifier ids in schemes and sites are not canonical, so a re-checked tree

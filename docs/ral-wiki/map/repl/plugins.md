@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
@@ -220,10 +220,10 @@ earlier, or on a proper prefix wherever loaded.
   it refused, with that advice as its own sentence. The table also closes the
   keyset — `name` (required, `String`), `handlers`, `hooks`, `keybindings` —
   so an unknown key is an error naming the list, here and in the checker
-  both. `handlers:` uses `Holds::Arms`, reaching the shared `stands_in`
-  relation live after elaboration settles, before gates, nested tables and
-  errors close and readback freezes sites. Written labels select Σ's
-  stand-in; computed-name maps hold members to `[String] → Command`.
+  both. `handlers:` uses `Holds::Handlers` and one `Held::Unify` equation
+  against `Map(U([String] → Command))`, live after elaboration settles and
+  before closure and readback. A record is refused with the map spelling,
+  `[:, name: { |args| … }]`; there is no per-field arm hold.
   Field and factory equations reach decoder admission sites inside this
   unit's IR. `hooks:` and `keybindings:` retain runtime shape validation;
   their results are host-checked, rendered or discarded, not passed unchecked
@@ -233,8 +233,7 @@ earlier, or on a proper prefix wherever loaded.
   gates depend only on Σ and lexical bindings; handled names contribute only
   diagnostic context. A handler for an external name therefore cannot widen
   its external argument gate. `handlers:` installs persistent handlers;
-  scoped handlers use `within`, and
-  interactive functions use `let`, not `alias` or `unalias` statements.
+  scoped handlers use `within`, and interactive functions use `let`.
 - `plugin/load.rs` — startup-only `load_plugin`, called by the rc plan with
   an options `Map`. It resolves a plugin under `~/.config/ral/plugins/` or
   `RAL_PATH`, then typechecks and evaluates it through

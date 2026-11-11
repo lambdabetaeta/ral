@@ -1,5 +1,5 @@
 ---
-status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the ledger, the single-writer argument, the install chokepoint, and the pruning/pinning mechanism all stand. What resolves otherwise: `source`, one of the three renewal seams, is deleted, and with it `classify_command`''s `Resolution::Env` dispatch-time renewal and `BindingLedger::renew_one` — two seams remain, not three.'
+status: 'superseded in part — the ledger, the single-writer argument, the install chokepoint, and the pruning/pinning mechanism all stand. What resolves otherwise: `source`, one of the three renewal seams, is deleted, and with it `classify_command`''s `Resolution::Env` dispatch-time renewal and `BindingLedger::renew_one` — two seams remain, not three.'
 ---
 
 > **Amended 2026-10-13.** The rule stands: a fork's baseline is everything it
@@ -163,8 +163,7 @@ set**, read off the compiled IR at three seams sharing one exhaustive walker,
    on the pure-lookup path) holds exactly.
 
 > **2026-09-11.** Seam 3 is gone.
-> [[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
-> deletes `source`, the only way a bound head could resolve to a name the
+> `source` is deleted: it was the only way a bound head could resolve to a name the
 > elaborator's bound set never saw; a bound head otherwise compiles to an
 > `App`, never an `Exec`, so `Resolution::Env`'s renewal touch had no
 > remaining name to renew. It is deleted along with `BindingLedger::renew_one`,
@@ -383,7 +382,4 @@ See also [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260617_long-running-work|long-running-work]],
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]],
 [[decisions/260705_session-ledger|session-ledger]],
-[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
-(deletes `source`, the seam-3 producer, so the renewal walk narrows to two
-seams),
 [[map/core/shell-state|shell-state]], and [[map/exarch/agent|agent]].

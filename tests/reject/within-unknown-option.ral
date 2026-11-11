@@ -1,6 +1,5 @@
 # codes: T0076
 # status: 1
-# at: 6:15
-# contains: unknown key 'dirr': `within` takes dir, env, handler
-# contains: `within` also takes `handlers:`
+# at: 5:15
+# contains: unknown key 'dirr': `within` takes dir, env, handler, handlers
 within [dirr: "x"] { return "ok" }

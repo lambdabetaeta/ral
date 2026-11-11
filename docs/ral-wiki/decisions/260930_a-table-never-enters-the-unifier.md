@@ -11,16 +11,18 @@ generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 > `let` mode or call split, enter a region or open a hole.
 >
 > Fields use `equate_held`; factory equations propagate through the same live
-> solver. RC and manifest `handlers:` use `Holds::Arms`, with `stands_in` the
-> sole relation also used by scoped arms and the catch-all. Their equations
-> reach decoder admission sites before freezing. Computed-name maps hold
-> members to `[String] → Command`; installation still judges actual names.
+> solver. RC and manifest `handlers:` use `Holds::Handlers`, one equation
+> against `Map(U([String] → Command))`, with no per-field arm hold or manifest
+> dependency. Records are refused with the map spelling. These equations
+> reach decoder admission sites before freezing; persistent installation
+> still vets each handler. `within` checks a written map entry by entry for
+> named diagnostics, any other value by the same equation, with no runtime vet.
 >
 > The walk re-reads row tails after each field. Afterwards, keysets are judged
 > on final types and only fields unseen by the walk are held on scratch,
 > without replaying live clashes. Contract equations introduce ground types
-> apart from fresh variables used once; base-frame result payloads are ground
-> (grades may quantify), so those revealed fields need no further solving.
+> apart from fresh variables used once, so those revealed fields need no
+> further solving.
 > There is no repeated inference or fixpoint. Nested tables remain queued
 > scratch judgements at close, after live holds. Variable returns and
 > unresolved field/member types retain runtime checks. The table itself

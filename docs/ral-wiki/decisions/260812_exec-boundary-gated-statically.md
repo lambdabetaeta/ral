@@ -12,9 +12,8 @@ moments cannot come to different verdicts.**
 
 ## Context
 
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] made
-the checker hold each argument's type at the exec boundary, in order to type the
-call at all, and left this diagnostic reachable and untaken.
+The checker already held each argument's type at the exec boundary, in
+order to type the call at all, leaving this diagnostic reachable and untaken.
 `docs/SPEC.md` §6.5 already promises that "ral checks known arity and
 argument-type errors before execution"; for an external's arguments it did not
 deliver, because the boundary's refusal was a match on a *runtime value*.
@@ -120,8 +119,6 @@ prelude blast radius, or to leave it where it now is.
 
 ## See also
 
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] (made
-this reachable; its "the prize is reachable" section points here),
 [[invariants/exec-argv-is-words|exec-argv-is-words]] (the rule this decision
 installs), [[invariants/fixed-arity|fixed-arity]] (the argv/application split
 the boundary sits on),

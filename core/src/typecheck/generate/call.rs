@@ -6,21 +6,13 @@ use crate::ir::{
 };
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, CompTyNode, Scheme, Ty, TyNode};
-use crate::typecheck::builtins::{BuiltinDiagnostic, Decl, Manifest};
-use crate::typecheck::contract::catch_all_shape;
+use crate::typecheck::builtins::{Arm, BuiltinDiagnostic, Decl, Manifest};
 use crate::typecheck::env::{Inferring, Membrane};
 use crate::typecheck::error::{Reason, SpreadHead, TypeErrorKind};
 use crate::typecheck::readback::{self, exec_node};
 use crate::typecheck::solve::{ArgvBoundary, CallHole};
 use crate::typecheck::unify::WeakSource;
 use std::sync::Arc;
-
-#[derive(Clone, Copy)]
-pub(crate) enum Arm<'a> {
-    Named(&'a str),
-    Computed,
-    CatchAll,
-}
 
 type BuiltinCall = (CompTy, Vec<Spanned<Val<Inferring>>>, Option<(Ty, usize)>);
 
@@ -44,7 +36,7 @@ fn in_source_order<T>(mut generated: Vec<(usize, T)>) -> Vec<T> {
 enum HeadClass<'m> {
     Binding(Arc<Scheme>),
     Value(&'m Decl),
-    BaseFrame(&'m Decl),
+    BaseFrame,
     External,
 }
 
@@ -193,6 +185,10 @@ impl Generator {
 
     fn builtin_call(&mut self, entry: &Decl, name: &str, argv: &Argv) -> BuiltinCall {
         let arity = entry.fixed_arity();
+        let (mut params, tail) = self.declared_spine(entry);
+        let list_last = params
+            .last()
+            .is_some_and(|ty| matches!(ty.node(), TyNode::List(_)));
         let Some(args) = argv.positional() else {
             self.infer_refused_args(argv.iter().map(ValListElem::slot));
             self.refuse_spread(
@@ -200,6 +196,7 @@ impl Generator {
                 SpreadHead::Builtin {
                     name: name.into(),
                     arity,
+                    list_last,
                 },
             );
             return (self.solver.fresh_comp(), Vec::new(), None);
@@ -213,16 +210,16 @@ impl Generator {
                     name: name.into(),
                     expected: arity,
                     got: args.len(),
+                    list_last,
                 },
             });
+            self.infer_refused_args(args.iter().copied());
+            return (self.solver.fresh_comp(), Vec::new(), None);
         }
-        let (mut params, tail) = self.declared_spine(entry);
-        let boundary = self.note_boundary_call(entry, &tail, arity.saturating_sub(args.len()));
-        let rest = params.split_off(args.len().min(params.len()));
-        let (typed, surplus) = args.split_at(params.len());
-        let typed: Vec<_> = typed.iter().copied().zip(params).collect();
+        let boundary = self.note_boundary_call(entry, &tail, arity - args.len());
+        let rest = params.split_off(args.len());
+        let typed: Vec<_> = args.iter().copied().zip(params).collect();
         let nodes = self.check_arguments(&typed);
-        self.infer_refused_args(surplus.iter().copied());
         (CompTy::arrows(rest, tail), nodes, boundary)
     }
 
@@ -346,16 +343,12 @@ impl Generator {
                     (cty, exec_node(&exec.head, argv, redirects, site))
                 }
             }
-            HeadClass::BaseFrame(entry) => {
-                let head = self.instantiate_comp(name, entry.scheme());
-                let result = self.solver.fresh_comp();
-                self.solver.equate_comp(
-                    &head,
-                    &CompTy::arrows([Ty::argv()], result.clone()),
-                    Reason::HandlerParam,
-                );
+            HeadClass::BaseFrame => {
                 let argv = self.argv(&exec.argv, &ArgvBoundary::InShell(name.into()));
-                (result, exec_node(&exec.head, argv, redirects, None))
+                (
+                    CompTy::command(),
+                    exec_node(&exec.head, argv, redirects, None),
+                )
             }
             HeadClass::External => {
                 let (cty, argv) =
@@ -370,8 +363,8 @@ impl Generator {
             HeadClass::Binding(Arc::clone(scheme))
         } else if let Some(entry) = builtins.value(name) {
             HeadClass::Value(entry)
-        } else if let Some(entry) = builtins.base_frame(name) {
-            HeadClass::BaseFrame(entry)
+        } else if builtins.base_frame(name).is_some() {
+            HeadClass::BaseFrame
         } else {
             HeadClass::External
         }
@@ -467,12 +460,8 @@ impl Generator {
         self.with_span(at, |this| {
             let value = this.solver.fresh_ty();
             let producer = this.produces(value);
-            let (wanted, why) = match arm {
-                Arm::Named(_) | Arm::Computed => {
-                    (CompTy::arrows([Ty::argv()], producer), Reason::HandlerParam)
-                }
-                Arm::CatchAll => (catch_all_shape(producer), Reason::CatchAllParams),
-            };
+            let wanted = arm.shape(producer);
+            let why = Reason::HandlerParams(arm.standing());
             let (found, node) = match block {
                 Val::Thunk(body) => {
                     let (met, node) =
@@ -502,7 +491,7 @@ impl Generator {
     }
 
     pub(in crate::typecheck) fn stands_in(&mut self, found: &Ty, arm: Arm<'_>) -> CompTy {
-        self.solver.stands_in(found, arm, &self.env.builtins)
+        self.solver.stands_in(found, arm)
     }
 }
 
@@ -631,12 +620,44 @@ mod tests {
     }
 
     #[test]
+    fn overapplied_builtins_refuse_parameter_checks_and_keep_declared_list_help() {
+        for (source, list_last) in [("intercalate ', ' a b c", true), ("upper 1 2", false)] {
+            let errors = crate::compile::compile_and_typecheck(
+                source,
+                crate::test_helper::core_schemes(),
+                FileId::DUMMY,
+                None,
+                None,
+            )
+            .expect_err("overapplied builtin");
+            let crate::compile::CompileError::Types(errors) = errors else {
+                panic!("{source}: {errors:?}")
+            };
+            assert_eq!(
+                errors
+                    .iter()
+                    .map(|error| error.kind.code())
+                    .collect::<Vec<_>>(),
+                ["T0050"],
+                "{source}: {errors:?}"
+            );
+            assert_eq!(
+                errors[0]
+                    .hint()
+                    .unwrap()
+                    .contains("write the arguments from the 2nd on as one list"),
+                list_last,
+                "{source}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
     fn partial_boundary_exec_eta_expands_from_its_declared_spine_and_keeps_a_weak_result() {
         let mut generator = generator();
         let entry = Decl::new(
             Cow::Borrowed("decode-at"),
-            Convention::Value,
-            scheme::from_json_at,
+            Convention::Value(scheme::from_json_at),
             "",
             true,
         );
@@ -681,12 +702,34 @@ mod tests {
         );
         let (store, errors) = generator.solver.refused();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0].reason, Some(Reason::HandlerParam)));
+        assert!(matches!(
+            errors[0].reason,
+            Some(Reason::HandlerParams(crate::typecheck::Standing::Command(
+                _
+            )))
+        ));
         assert_solved_comp(
             &store,
             &installed,
             &CompTy::arrows([Ty::argv()], CompTy::command()),
         );
+    }
+
+    #[test]
+    fn a_base_frame_is_typed_as_a_handler_for_its_name() {
+        let manifest = crate::HostSurface::default().manifest();
+        for entry in manifest.base_frames() {
+            let expected = Arm::Named(&entry.name).ty();
+            assert_eq!(entry.scheme().ty, Ty::thunk(expected));
+            let mut generator = generator();
+            generator.env.builtins = manifest.clone();
+            let source = bare(&entry.name, Argv::default());
+            let (result, _) = generator.comp(&source);
+            assert_eq!(
+                solved(generator.solver).resolve_comp(&result),
+                CompTy::command()
+            );
+        }
     }
 
     #[test]
@@ -802,7 +845,7 @@ mod tests {
         for name in ["echo", "tool"] {
             for prefix in [
                 String::new(),
-                format!("within [handlers: [{name}: {{ |args| echo ...$args }}]] "),
+                format!("within [handlers: [:, {name}: {{ |args| echo ...$args }}]] "),
             ] {
                 let source = format!("{prefix}{{ let n = {name} 'x'; return $[$n + 1] }}");
                 let errors = crate::compile::compile_and_typecheck(

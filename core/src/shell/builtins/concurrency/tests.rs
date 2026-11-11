@@ -1127,16 +1127,37 @@ fn detach_test_shell() -> Shell {
     .expect("a test host resolves its baseline")
 }
 
-/// Neither description nor program is optional: a shorter call never
-/// reaches the exec boundary.
 #[cfg(unix)]
 #[test]
-fn detach_requires_a_description_and_a_command() {
+fn a_detach_missing_its_arguments_is_refused_statically() {
     let mut shell = detach_test_shell();
-    let err = run_captured(&mut shell, r#"detach "a server""#, None)
+    for src in [r#"detach "a server""#, r#"detach "a server" /bin/echo"#] {
+        let report = shell.run(crate::protocol::Run::captured(
+            src,
+            crate::source::SourceOrigin::named("<test>"),
+        ));
+        assert!(
+            matches!(report, crate::shell::run::RunReport::Static { .. }),
+            "{src} must be refused before evaluation"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_program_is_refused_before_lookup() {
+    let mut shell = detach_test_shell();
+    let Break::Error(error) = run_captured(&mut shell, r#"detach "x" "" []"#, None)
         .0
-        .expect_err("a description alone is not a detach");
-    assert_eq!(status(err), 1);
+        .expect_err("an empty program must be refused")
+    else {
+        panic!("an invalid program must report an error");
+    };
+    let Reason::Invalid(failure) = &error.reason else {
+        panic!("an empty program must not reach lookup: {error:?}");
+    };
+    assert_eq!(failure.operation, "detach");
+    assert_eq!(failure.cause, InvalidCause::Empty);
 }
 
 /// A description is legible or refused, before any birth.
@@ -1144,11 +1165,11 @@ fn detach_requires_a_description_and_a_command() {
 #[test]
 fn detach_rejects_an_illegible_description() {
     let mut shell = detach_test_shell();
-    let empty = run_captured(&mut shell, r#"detach "   " /bin/echo hi"#, None)
+    let empty = run_captured(&mut shell, r#"detach "   " /bin/echo ['hi']"#, None)
         .0
         .expect_err("an empty description must be refused");
     assert_eq!(status(empty), 1);
-    let multiline = run_captured(&mut shell, "detach \"one\ntwo\" /bin/echo hi", None)
+    let multiline = run_captured(&mut shell, "detach \"one\ntwo\" /bin/echo ['hi']", None)
         .0
         .expect_err("a multiline description must be refused");
     assert_eq!(status(multiline), 1);
@@ -1160,9 +1181,9 @@ fn detach_rejects_an_illegible_description() {
 fn detach_starts_the_program_past_handlers_and_base_frames() {
     let mut shell = detach_test_shell();
     for src in [
-        r#"within [handlers: [true: { |args| echo ...$args }]] { detach "x" true }"#,
-        r#"within [handler: { |n _a| echo $n }] { detach "x" true }"#,
-        r#"detach "x" echo hi"#,
+        r#"within [handlers: [:, true: { |args| echo ...$args }]] { detach "x" 'true' [] }"#,
+        r#"within [handler: { |n _a| echo $n }] { detach "x" 'true' [] }"#,
+        r#"detach "x" echo ['hi']"#,
     ] {
         let born = run_captured(&mut shell, src, None)
             .0
@@ -1178,7 +1199,7 @@ fn detach_reports_an_unknown_command_as_127() {
     let mut shell = detach_test_shell();
     let err = run_captured(
         &mut shell,
-        r#"detach "a server" definitely-not-a-real-tool-xyz"#,
+        r#"detach "a server" definitely-not-a-real-tool-xyz []"#,
         None,
     )
     .0
@@ -1192,9 +1213,13 @@ fn detach_reports_an_unknown_command_as_127() {
 #[test]
 fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
     let mut shell = detach_test_shell();
-    let born = run_captured(&mut shell, r#"detach "the greeter" /bin/echo hello"#, None)
-        .0
-        .expect("the birth must succeed");
+    let born = run_captured(
+        &mut shell,
+        r#"detach "the greeter" /bin/echo ['hello']"#,
+        None,
+    )
+    .0
+    .expect("the birth must succeed");
     let fields = expect_map(&born);
     assert_eq!(
         fields.len(),

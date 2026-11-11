@@ -1,1 +1,1 @@
-within [handlers: [greet: { |args| echo hi }]] { greet }
+within [handlers: [:, greet: { |args| echo hi }]] { greet }

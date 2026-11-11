@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-02
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+generated_at_date: 2026-11-11
 covers_paths: [core/src/elaborator.rs, core/src/elaborator/, core/src/syntax/group.rs]
 ---
 
@@ -112,9 +112,11 @@ become generic string-valued keys.
 - A written sequence becomes `Seq`; a written `let _` remains `Bind` on
   `Wildcard`. Hoists use synthetic name patterns, distinguishing them from
   written continuations for failure hints.
-- A bare tag gets `Val::Unit` as its payload. A form's options lower as a
-  spread-free record node, hoisted, spanned and sorted; handler labels stay
-  separate syntax.
+- A bare tag gets `Val::Unit` as its payload. A form's options lower as one
+  spread-free record node, hoisted, spanned and sorted. `within` lowers only
+  `opts` and `body`: `handlers:` is an ordinary map-valued option, with no
+  separate handler node. A plain map becomes `Val::Map`; a spread or computed
+  key uses `Prim::Map` and ordinary operand hoists.
 
 An arm of `if` and `case` elaborates to a thunk the form forces
 (`Elaborator::elab_arm`): a literal `{ … }` or `{ |p| … }`, or a name holding

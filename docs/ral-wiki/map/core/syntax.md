@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/syntax/, editors/]
 ---
@@ -67,7 +67,11 @@ sees raw bytes and bare words.
   labels alone an `Ast::Record`, no keyed entry a list. `parse_static_key`
   admits words and constant single- or double-quoted strings. Patterns and
   options accept this same alphabet but refuse computed keys; a tag keys
-  nothing. `parse_index_key` emits `IndexKey::{Label, Position, Data}`:
+  nothing. `parse_options(form, example)` returns one `Options` record for
+  `within` or `grant`. Its values are ordinary atoms: `handlers: $table` and
+  `handlers: [:, name: { |args| … }]` need no special parser. A repeated option
+  uses the generic duplicate-key refusal. `parse_index_key` emits
+  `IndexKey::{Label, Position, Data}`:
   written names, whole-number positions from zero, or computed expressions.
   Negative and fractional numerals, path and tilde words, and tags are refused
   with guidance about the permitted key form. The items are read in one pass, each
@@ -108,6 +112,8 @@ sees raw bytes and bare words.
   `Ast::Redirected` holds a stage's trailing redirects, one node for every stage
   form; `Call` and `Scope` carry none
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
+  `ScopeAst::Within { opts, body }` carries only the option record and body;
+  there is no handler-specific AST node.
   `Ast::Unit` is the `()`
   literal — punctuation denoting the unit value, like `[]` and `[:]`, so not a
   word. `Ast::Case` carries `arms: Vec<CaseArm>`, a finite list of tag-and-body

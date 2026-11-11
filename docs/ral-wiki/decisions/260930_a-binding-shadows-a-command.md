@@ -20,8 +20,8 @@ question, bindings first, and no host state enters it.
   elaborator's `is_bound` already chose `App(Force)` for a bound head. The
   refusal was the lone place where the host's `PATH` was consulted to decide
   whether a binding was legal.
-- **`^name` is the escape**, as it has been since
-  [[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]].
+- **`^name` is the escape**, bypassing bindings and the whole handler stack
+  ([[design/exec|exec]]).
 
 ## Why
 

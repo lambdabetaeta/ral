@@ -51,7 +51,7 @@ return [
 
     # Command handlers, consulted before external-command lookup.
     # A block receives any trailing arguments as $args.
-    handlers: [
+    handlers: [:,
         ll: { |args| ls -lh ...$args },
         la: { |args| ls -lha ...$args },
         g:  { |args| git ...$args },

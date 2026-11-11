@@ -1,5 +1,5 @@
 # codes: T0010
 # status: 1
-# at: 5:41
+# at: 5:44
 # contains: so it is a block the call runs
-let s = 'hi'; within [handlers: [greet: $s]] { greet }
+let s = 'hi'; within [handlers: [:, greet: $s]] { greet }

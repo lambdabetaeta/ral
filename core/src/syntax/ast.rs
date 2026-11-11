@@ -242,13 +242,7 @@ pub enum ScopeAst {
         release: Box<Ast>,
     },
     /// `within OPTS BODY` — install option overrides for the duration of `body`.
-    /// `handlers:` is not among `opts`: its labels are the names it binds in
-    /// `body`, so it is an arm list the form reads, not data the options carry.
-    Within {
-        opts: Options,
-        handlers: Option<Vec<HandlerArm>>,
-        body: Box<Ast>,
-    },
+    Within { opts: Options, body: Box<Ast> },
     /// `grant CAPS BODY` — attenuate active capabilities across `body`.
     Grant { caps: Options, body: Box<Ast> },
     /// `audit BODY` — run `body` while recording an audit subtree.
@@ -265,17 +259,6 @@ pub enum ScopeAst {
 
 /// A form's written options: each label is syntax, each value a term.
 pub type Options = Vec<(String, Spanned<Ast>)>;
-
-/// One arm of `within [handlers: …]`: the command name it stands in for, and
-/// the value installed under it.
-///
-/// Arms are syntax, as `case`'s are: the labels are the names bound in the
-/// body, so a table assembled elsewhere could never spell them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HandlerArm {
-    pub name: String,
-    pub value: Spanned<Ast>,
-}
 
 // ── Utilities ────────────────────────────────────────────────────────────
 

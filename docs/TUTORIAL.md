@@ -692,7 +692,7 @@ session. It is absent when the host cannot provide those semantics; ask
 handler receives its argument list:
 
     within [
-        handlers: [
+        handlers: [:,
             curl: { |args| echo #'{"status": "ok", "revision": "abc123"}'# },
         ],
     ] {
@@ -701,12 +701,19 @@ handler receives its argument list:
     }
 
 No request occurs: the handler supplies `curl`'s meaning inside the block.
+`handlers:` takes a map: `[:, name: handler]`, or `[:]` for none, not a record
+`[name: handler]` or a list `[]`. Its keys are data, so the map can be computed
+or bound elsewhere:
+
+    let h = [:, curl: { |args| echo #'{"status": "ok"}'# }]
+    within [handlers: $h] { curl https://example.test/status }
+
 Handlers are deep, so functions called by the body see them too.
 
 Handlers are self-masking. They may call the same command to forward it without
 recursing:
 
-    within [handlers: [git: { |args|
+    within [handlers: [:, git: { |args|
         echo "+ git !{intercalate ' ' $args}"
         git ...$args
     }]] {

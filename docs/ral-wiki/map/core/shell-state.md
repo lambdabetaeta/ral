@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
@@ -37,11 +37,15 @@ fact data are reached through their owning modules.
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* arm is a block whose type takes its slot's parameters:
   `HandlerEntry` carries its `HandlerArity` (`Unary` for a per-name arm, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
-  every install boundary refuses a value that is no block (`arm_closure`) or
+  persistent installation refuses a value that is no block (`arm_closure`) or
   whose type takes other parameters (`arm_stands_in`,
-  inferred over the closure's own capture by `Shell::closure_schemes`), which
-  it refuses as one `InvalidCause::IllTyped` fact (role and every checker
-  diagnostic) — the calling convention is never inferred from the runtime shape
+  inferred over the closure's own capture by `Shell::closure_schemes`), as one
+  `InvalidCause::IllTyped` fact naming the handler and every checker diagnostic.
+  Every named handler has `U([String] → Command)` and every catch-all
+  `U(String → [String] → Command)`, independent of names and Σ. Argv rows
+  carry no type rule and fix `[String] → Command` by construction.
+  Scoped handlers and catch-alls are checked statically and not re-vetted;
+  the calling convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
 - `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
   shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
@@ -83,7 +87,7 @@ fact data are reached through their owning modules.
   `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
   `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
   rides next to the value
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+  ([[internals/type-inference|type-inference]]).
   **A shared write clones a node, and a node clones cheaply**: `Env`'s
   private `Entries` is a sorted array of at most `SMALL` (8) bindings, a persistent
   hash map past it, so a `bind` into an environment another holder still

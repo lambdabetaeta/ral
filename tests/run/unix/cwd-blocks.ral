@@ -54,7 +54,7 @@ hop ()
 cwd-is "$root/outer"
 
 # `cd` is a native: a handler under its name sits shadowed, and it is a first-class value
-within [handlers: [cd: { |args| echo intercepted }]] { cd "$root/inner"; cwd-is "$root/inner" }
+within [handlers: [:, cd: { |args| echo intercepted }]] { cd "$root/inner"; cwd-is "$root/inner" }
 let chdir-fn = $cd
 $chdir-fn "$root/outer"
 cwd-is "$root/outer"

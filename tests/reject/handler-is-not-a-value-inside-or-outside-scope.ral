@@ -3,7 +3,7 @@
 # at: 7:13
 # contains: is a handler entry
 # contains: undefined variable: $foo
-within [handlers: [foo: { |args| echo 3 }]] {
+within [handlers: [:, foo: { |args| echo 3 }]] {
     let f = $foo
 }
 let g = $foo

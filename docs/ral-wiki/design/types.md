@@ -95,9 +95,10 @@ have ranks but are not weak scheme entries.
 
 Every external command is `F^w Unit`. **A head's type and argument gate depend
 only on Σ and lexical bindings.** The checker classifies a head as a binding,
-a value builtin, a base frame or an external. A base frame takes its own
-scheme and in-shell gate; every other command name takes the external gate,
-even when handled. The handler stack supplies diagnostic names only.
+a value builtin, a base frame or an external. Every base frame has type
+`[String] → Command` by construction and takes the in-shell gate; every other
+command name has the same type and takes the external gate, even when handled.
+The handler stack supplies diagnostic names only.
 
 ## One coercion, at `let`
 
@@ -151,22 +152,37 @@ nothing, so nothing reaches `cat`". A value or block literal in stage position
 value is its final stage's, always
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
-## An arm stands in for what it is
+## A handler is a command
 
-`standsFor(c)` reads Σ alone: its base-frame scheme for `c`, or
-`[String] → Command` for anything else. An arm for `curl` therefore has a
-command's value, its output; an arm for `detach` returns what `detach` returns.
-A `()`-returning stub for an external is admitted when its grade is free and
-captures `""`. A call through the arm types as its head does; no handler scheme
-is persisted. A mismatch is `Reason::StandsIn`, naming the stand-in and what to
-write. The catch-all `handler:` stands in for every command in its block.
-`stands_in` is the sole arm-to-head relation: scoped arms, the catch-all and
-rc/manifest `handlers:` reach it in the unit holding their IR. Contract record
-labels select their stand-in; computed-name maps require
-`[String] → Command`, with actual names judged at installation. The run-time
-vet (`arm_stands_in`) yields only a verdict. Arms imported through `use`
-retain their module's sites and still rely on that installation check. An arm's
+**Every named handler has type `U([String] → Command)`; the catch-all has
+`U(String → [String] → Command)`.** Neither depends on a name, Σ, or other
+handlers. Every argv manifest row is `[String] → Command` by construction:
+it has no type rule. An arm for `echo` follows exactly the same rule as one
+for `curl`. Its value is its output.
+
+`detach` is a first-class value builtin, not a base frame: an arm named
+`detach` must be a command and is accepted silently but never reached,
+because the value binding wins. Stub it by binding its name
+([[design/builtins|builtins]]).
+A `()`-returning stub is admitted when its grade is free and captures `""`.
+A call through the arm types as its head does; no handler scheme is persisted.
+A mismatch is `Reason::StandsIn`; the name supplies diagnostic wording only.
+`within` checks a written `handlers:` map entry by entry through `stands_in`,
+with a name and site for each diagnostic. Any other value, and rc/manifest
+`handlers:`, is held by one equation against `Map(U([String] → Command))`;
+a record is refused, with the map spelling. The catch-all also uses the arm
+rule. Only persistent handlers retain the run-time vet (`arm_stands_in`),
+which yields a verdict, not a scheme. Imported arms retain their module's
+sites. `within`'s static check is total and needs no install-time vet. An arm's
 parameters are its slot's, read off its type, never its spelling (SPEC §17.7).
+
+The module boundary checks complete used-export schemes, including nested
+functions, and refuses a known incompatible scheme at `use`. Unresolved
+re-exported shapes additionally carry recursive delayed contracts: an opaque
+or weak function is guarded by exactly the caller-required arrow and result
+contract, with incompatible applications or results raising when reached.
+This is not certification of every function body before invocation, nor
+inference at scoped handler installation (SPEC §10.3).
 
 ## A return contract is a use, not an elaboration rule
 

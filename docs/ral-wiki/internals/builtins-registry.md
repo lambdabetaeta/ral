@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 verified_at_date: 2026-11-11
-anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
+anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke, Convention, Arm::ty, handlers_ty, Decl::scheme]
 ---
 
 # Builtins: structure and registration
@@ -23,12 +23,13 @@ each builtin as one row, collapsed into the `CORE_BUILTINS` static
 
 Because the facets are one entry, they cannot drift apart. Arity is not among
 them: `Decl::fixed_arity` (the entry's checker-facing half) *derives* it from the
-type rule — the curry depth of the scheme — and answers a `usize` for every entry
-in the table, so the arity the checker enforces is the arity the body assumes with
-nothing to keep in agreement ([[invariants/fixed-arity|fixed-arity]]). The
-derivation runs a throwaway unifier once per row, together with the
-settles-at-`Unit` fact, so it is cached; it feeds the checker's diagnostics as
-well as the evaluator's application gate.
+value row's type rule — the curry depth of the closed scheme — so the arity
+the checker enforces is the arity the body assumes with nothing to keep in
+agreement ([[invariants/fixed-arity|fixed-arity]]). The cached `Spine` also
+records whether the result settles at `Unit`; it feeds diagnostics and the
+evaluator's application gate. An argv row has no type rule or application
+arity: `Convention::Argv` fixes `[String] → Command`, using the same `Arm::ty`
+as named handlers. `Convention::Value(rule)` alone carries a scheme factory.
 
 The diagnostic facet is deliberately not a typing rule. It says what a wrong
 call *means* for this verb, which no polytype can state — that an argument
@@ -58,10 +59,8 @@ authored as two, so installing a set is two installs rather than one sorting
 door onto an entry's value form, shared with wire hydration): a table entry
 becomes a `Value::Native` in the shell's *base scope*, reached as an ordinary
 binding; a base-frame row becomes a *base frame* under the handler stack's run
-frames ([[internals/handler-dispatch|handler-dispatch]],
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-Dispatch consults no builtin table
-([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]);
+frames ([[internals/handler-dispatch|handler-dispatch]], [[design/exec|exec]]).
+Dispatch consults no builtin table ([[design/builtins|builtins]]);
 the installed table remains as the manifest that the checker's rule side-table,
 `help`/`explain`, tab completion, and wire re-linking are read from. The base scope is
 reached by lookup after the user scopes and enumerated by no harvest — the
@@ -86,8 +85,11 @@ sibling helpers.
 core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
 they seed through the same two installs, so a host contributes natives as well
-as base frames: the REPL's `_ed-*` family are natives; `detach` is a base frame where the host installs it. Two core-implemented entries
-register this way too — `WATCH_BUILTIN` and `DETACH_BUILTIN`, each a public
+as base frames: the REPL's `_ed-*` family and the host-installed `detach` are
+natives. `detach` takes a description, a program name and an argument list,
+with a fixed arity of three; a binding, not a handler, stubs it. Two
+core-implemented entries register this way too — `WATCH_BUILTIN` and
+`DETACH_BUILTIN`, each a public
 one-entry wrapper over a private body — so a host whose streams are capture
 buffers can omit `watch`, and a host that offers no survivors can omit `detach`
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]],

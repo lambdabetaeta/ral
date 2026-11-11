@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -24,16 +24,17 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   There is no builtin arm: a native table entry is
   an `Env` hit on a native value, and a base-frame row is a
   `Handler(HandlerLookup::Base)` hit on the handler stack's base layer, run by the `Exec` rule with the argv slice
-  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+  ([[design/builtins|builtins]], [[design/exec|exec]]).
   `^name` and a path-bearing head are the external directly, consulting
   neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm looks the head up and
   admits it (`Command::lookup`, `Command::admit`) before its redirects open,
   refusing it outright, and carries the admitted `Command` to preparation; the
   env, base, and handler arms pass through.
-  Handler arms have the unary argv or binary name-and-argv type —
-  written as `{ |args| … }` or `{ |name args| … }`, or computed.
+  Every base frame has `[String] → Command`; stored named handlers have
+  `U([String] → Command)`, and catch-alls `U(String → [String] → Command)`,
+  independent of names and Σ.
+  Arms are written as `{ |args| … }` or `{ |name args| … }`, or computed.
   The install position fixes the convention, checked by type rather than
   inferred from a value's runtime shape
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
@@ -118,8 +119,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     run, so this is the backstop for what a type variable hid from it
     ([[invariants/exec-argv-is-words|exec-argv-is-words]],
     [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
-  - `command/detach.rs` checks detach permission and then uses the same
-    command lookup, admission and preparation (`Ownership::Surrendered`) up to
+  - `command/detach.rs` receives a description, a program name and an argv
+    slice from the first-class native `detach`, whose type is
+    `String → String → [String] → F [pid: Int, desc: String]`. It checks
+    `ShellVerb::Detach` permission and then uses the same command lookup,
+    admission and preparation (`Ownership::Surrendered`) up to
     the one act that differs, `Prepared::detach`, private to that file:
     the child is born by
     the matching direct or enveloped `spawn_detached`
@@ -131,10 +135,10 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     parent-death tie, so the survivor's authority is frozen as that frame
     left it and no later frame can widen it — it cannot name the process at
     all ([[map/core/capabilities|capabilities]]). All three of its standard
-    descriptors are `/dev/null`. `detach` refuses a head a handler intercepts
-    (an arm, the catch-all, or a base frame): a handler runs inside this
-    session, so nothing could be detached; its scheme is
-    `[String] → F [pid: Int, desc: String]`.
+    descriptors are `/dev/null`. The program is resolved as `^program`
+    resolves one, bypassing bindings and the whole handler stack, including
+    base frames; an installed handler never causes a refusal. Handlers cannot
+    intercept `detach` itself either: stub it by binding its name.
   - **A bundled coreutils/diffutils/ripgrep head is a `Program::Tool`,
     always run as a `ral --ral-bundled-tool <tool>` child** — its inherited
     stdio, env, cwd, process group, and sandbox are the execution context, so it

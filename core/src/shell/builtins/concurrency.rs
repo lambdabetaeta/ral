@@ -13,8 +13,6 @@ mod eliminate;
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests;
 
-#[cfg(unix)]
-use super::util::check_arity;
 use crate::fact::{InvalidCause, Multiline};
 use crate::shell::evaluator::machine;
 use crate::shell::runtime::invalid;
@@ -115,7 +113,7 @@ pub(super) fn builtin_watch(
 
 // ── detach ───────────────────────────────────────────────────────────────
 
-/// `detach <desc> <cmd> <args…>` -- birth a process this session stops owning,
+/// `detach <desc> <program> <args>` -- birth a process this session stops owning,
 /// returning a receipt rather than a handle.
 ///
 /// The one concurrency verb whose axis is *ownership*: the others reify a
@@ -130,7 +128,15 @@ pub(super) fn builtin_detach(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "detach")?;
     let desc = legible_title(&args[0], "detach")?;
-    crate::shell::exec::detach(&desc, &args[1], &args[2..], mooring, shell)
+    let program = args[1].as_str("detach")?;
+    if program.is_empty() {
+        return Err(invalid("detach", InvalidCause::Empty).into());
+    }
+    let argv = args[2]
+        .as_list("detach")?
+        .iter()
+        .map(std::borrow::Cow::into_owned)
+        .collect::<Vec<_>>();
+    crate::shell::exec::detach(&desc, program, &argv, mooring, shell)
 }

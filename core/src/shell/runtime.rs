@@ -22,9 +22,7 @@ pub use closure::Closure;
 
 mod handler;
 pub use handler::{FrameHandle, HandlerEntry};
-pub(crate) use handler::{
-    FrameKind, HandlerArity, HandlerFrame, HandlerLookup, HandlerRole, arm_closure, refused_arm,
-};
+pub(crate) use handler::{FrameKind, HandlerArity, HandlerFrame, HandlerLookup};
 
 // The shared state behind `Value::Handle`.
 mod handle;

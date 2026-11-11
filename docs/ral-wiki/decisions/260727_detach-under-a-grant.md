@@ -5,8 +5,7 @@ generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
 
 # A survivor is confined by the frame that bore it
 
-[[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
-left one question open and named the shape of its answer: *"`detach` under a
+The open question was: *"`detach` under a
 sandbox is either impossible or requires escaping the envelope — which is a
 capability question, not a lifetime one, and probably wants a
 [[design/grant|grant]] authority of its own."* This is that ADR. The answer is
@@ -124,8 +123,7 @@ while the daemon lives on inside a namespace whose init outlives the session.
 
 ## See also
 
-[[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]
-(the verb, and the open question this closes),
+[[design/exec|exec]] (the detached program and its receipt),
 [[design/grant|grant]] (the lattice this adds a dimension to),
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] (absence versus
 veto, and why both survive here), and `docs/SPEC.md` §12.6, §12.9, §11.5.

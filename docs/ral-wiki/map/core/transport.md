@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
 generated_at_date: 2026-11-11
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
@@ -30,7 +30,8 @@ new variant fail the build, a field-complete struct literal a new field:
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
   its `FrameKind`; a persistent frame remains host-managed. A per-name entry
-  is unary by construction and hydration does not re-check its arity, which the sender's install already validated
+  is unary by construction and hydration does not re-check its arity, validated
+  by the sender's static check or persistent-install vet
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]);
 - *kinds* ride as serde enums (`SerialClosure`, `SpawnGrant`), and *floats* by
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
@@ -54,7 +55,7 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   ordinary partial builtins cross by name with their arguments.
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+  ([[internals/type-inference|type-inference]]).
 - `data/datum.rs` — `Datum`, the one strict first-order codec every typed
   protocol payload goes through (`encode`; a `decode` naming what arrived
   ill-shaped), with `tag` / `untag` / `field` / `exact_keys` and the `record!`

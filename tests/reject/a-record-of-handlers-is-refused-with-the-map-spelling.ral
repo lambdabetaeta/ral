@@ -1,0 +1,4 @@
+# codes: T0010
+# status: 1
+# contains: write `[:, ll: { |args| … }]`
+within [handlers: [ll: { |args| echo hi }]] { ll }

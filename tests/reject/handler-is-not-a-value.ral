@@ -1,5 +1,5 @@
 # codes: T0041
 # status: 1
-# at: 5:58
+# at: 5:61
 # contains: handler entry
-within [handlers: [greet: { |args| echo hi }]] { let f = $greet; return $f }
+within [handlers: [:, greet: { |args| echo hi }]] { let f = $greet; return $f }

@@ -10,8 +10,9 @@
 //!
 //! [`BuiltinEntry::new`], [`BuiltinEntry::boundary`] and
 //! [`BuiltinEntry::base_frame`] are the only constructors — the value half's
-//! two kinds of row, and the argv half's: `BuiltinBody` has no bodiless
-//! variant, so no entry is expressible without a live body.
+//! two kinds of row, and the argv half's. The convention carries a value
+//! row's type rule or fixes an argv row at `[String] → Command`.
+//! `BuiltinBody` has no bodiless variant, so every entry has a live body.
 
 use super::flow::Settled;
 use super::value::Value;
@@ -72,25 +73,24 @@ impl BuiltinEntry {
     const fn row(
         name: Cow<'static, str>,
         convention: Convention,
-        type_rule: BuiltinTypeRule,
         doc: &'static str,
         body: BuiltinBody,
     ) -> Self {
         let boundary = matches!(body, BuiltinBody::Boundary(_));
         Self {
-            decl: Decl::new(name, convention, type_rule, doc, boundary),
+            decl: Decl::new(name, convention, doc, boundary),
             body,
         }
     }
 
-    /// A value row: applied at the arity `type_rule` declares.
+    /// A value row: applied at the arity `rule` declares.
     pub const fn new(
         name: Cow<'static, str>,
-        type_rule: BuiltinTypeRule,
+        rule: BuiltinTypeRule,
         doc: &'static str,
         body: BuiltinBody,
     ) -> Self {
-        Self::row(name, Convention::Value, type_rule, doc, body)
+        Self::row(name, Convention::Value(rule), doc, body)
     }
 
     /// A value row that is a boundary: its result enters typed code through
@@ -104,16 +104,9 @@ impl BuiltinEntry {
         Self::new(name, type_rule, doc, BuiltinBody::Boundary(body))
     }
 
-    /// A base-frame row, typed by the scheme `argv` names.  A signature of
-    /// argument templates is the value half's vocabulary and cannot be written
-    /// here: this half has one argument, the argv, and one type for it.
-    pub const fn base_frame(
-        name: Cow<'static, str>,
-        argv: BuiltinTypeRule,
-        doc: &'static str,
-        body: BuiltinBody,
-    ) -> Self {
-        Self::row(name, Convention::Argv, argv, doc, body)
+    /// A base-frame row: its convention fixes `[String] → Command`.
+    pub const fn base_frame(name: Cow<'static, str>, doc: &'static str, body: BuiltinBody) -> Self {
+        Self::row(name, Convention::Argv, doc, body)
     }
 
     /// Attach a diagnostic facet to an otherwise-built entry.
@@ -259,7 +252,9 @@ impl BuiltinTable {
     /// The *value* row for `name`, with its body.
     pub(crate) fn value(&self, name: &str) -> Option<BuiltinEntry> {
         self.rows()
-            .find(|entry| entry.decl.name == name && entry.decl.convention == Convention::Value)
+            .find(|entry| {
+                entry.decl.name == name && matches!(entry.decl.convention, Convention::Value(_))
+            })
             .cloned()
     }
 }

@@ -126,11 +126,7 @@ impl Generator {
             CompKind::Tilde(path) => (self.produces(Ty::string()), CompKind::Tilde(path.clone())),
             CompKind::If { cond, then, else_ } => self.if_(cond, then, else_),
             CompKind::Case { scrutinee, arms } => self.case(scrutinee, arms),
-            CompKind::Within {
-                opts,
-                handlers,
-                body,
-            } => self.within(opts, handlers.as_deref(), body),
+            CompKind::Within { opts, body } => self.within(opts, body),
             CompKind::Grant { caps, body } => self.grant(caps, body),
             CompKind::Try { body, handler } => self.try_(body, handler),
             CompKind::Guard {

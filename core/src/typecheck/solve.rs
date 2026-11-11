@@ -1,13 +1,11 @@
 //! Constraints while a unit is open; observations only after it closes.
 
 use super::SessionSchemes;
-use super::builtins::{Decl, Manifest};
+use super::builtins::{Arm, Decl};
 use super::contract::{self, Key, NestedCheck, Table};
 use super::env::TyEnv;
-use super::error::Standing;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::{generalize, instantiate, reseed_weak, settle_weak};
-use super::generate::call::Arm;
 use super::unify::{Unifier, WeakSource};
 use crate::source::{Span, WithSpan};
 use crate::ty::{
@@ -693,69 +691,24 @@ impl Settled {
     pub(super) fn diagnose(&mut self, kind: TypeErrorKind) {
         self.0.diagnose(kind);
     }
-    pub(super) fn stands_in(&mut self, found: &Ty, arm: Arm<'_>, manifest: &Manifest) -> CompTy {
-        self.0.stands_in(found, arm, manifest)
-    }
 }
 
 impl Solver {
-    pub(super) fn stands_in(&mut self, found: &Ty, arm: Arm<'_>, manifest: &Manifest) -> CompTy {
+    pub(super) fn stands_in(&mut self, found: &Ty, arm: Arm<'_>) -> CompTy {
         let payload = self.fresh_ty();
         let producer = CompTy::ret(self.fresh_grade(), payload);
-        let (wanted, why) = match arm {
-            Arm::Named(_) | Arm::Computed => (
-                CompTy::arrows([Ty::argv()], producer.clone()),
-                Reason::HandlerParam,
-            ),
-            Arm::CatchAll => (
-                contract::catch_all_shape(producer.clone()),
-                Reason::CatchAllParams,
-            ),
-        };
+        let wanted = arm.shape(producer.clone());
         let got = self.fresh_comp();
         let met = self.equate(found, &Ty::thunk(got.clone()), Reason::HandlerArm)
-            && self.equate_comp(&wanted, &got, why);
-        let (head, standing) = match arm {
-            Arm::Named(name) if let Some(entry) = manifest.base_frame(name) => {
-                let ty = self.instantiate(entry.scheme());
-                let head = self.fresh_comp();
-                self.equate(&ty, &Ty::thunk(head.clone()), Reason::ReturnShape);
-                (head, Standing::Own(name.into()))
-            }
-            Arm::Named(name) => (
-                CompTy::arrows([Ty::argv()], CompTy::command()),
-                Standing::Command(name.into()),
-            ),
-            Arm::Computed => (
-                CompTy::arrows([Ty::argv()], CompTy::command()),
-                Standing::Computed,
-            ),
-            Arm::CatchAll => (
-                CompTy::arrows([Ty::argv()], CompTy::command()),
-                Standing::EveryCommand,
-            ),
-        };
-        let value = self.fresh_ty();
-        let result = CompTy::ret(self.fresh_grade(), value);
-        self.equate_comp(
-            &head,
-            &CompTy::arrows([Ty::argv()], result.clone()),
-            Reason::ReturnShape,
-        );
+            && self.equate_comp(&wanted, &got, Reason::HandlerParams(arm.standing()));
         if met {
-            self.equate_comp(&result, &producer, Reason::StandsIn(standing));
+            self.equate_comp(
+                &CompTy::command(),
+                &producer,
+                Reason::StandsIn(arm.standing()),
+            );
         }
-        match arm {
-            Arm::Named(_) | Arm::Computed => CompTy::arrows([Ty::argv()], result),
-            Arm::CatchAll => contract::catch_all_shape(result),
-        }
-    }
-
-    pub(super) fn scratch(store: &Unifier) -> Self {
-        Self {
-            unifier: store.clone(),
-            ..Self::new()
-        }
+        arm.ty()
     }
 }
 

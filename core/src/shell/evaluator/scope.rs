@@ -4,10 +4,7 @@
 
 use crate::environ::EnvVars;
 use crate::fact::{Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape};
-use crate::shell::runtime::{
-    Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value, arm_closure,
-    refused_arm,
-};
+use crate::shell::runtime::{Error, FrameHandle, HandlerEntry, Map, Settled, Shell, Value};
 
 use crate::path::{CwdPath, Reading};
 
@@ -19,29 +16,32 @@ pub(crate) struct WithinScope {
 }
 
 impl WithinScope {
-    /// `shell` resolves and permission-checks `dir:`; an arm is vetted against
-    /// what its own closure captured (`Shell::closure_schemes`).  `arms` are
-    /// the `handlers:` list, which is syntax and so arrives beside `opts`
-    /// rather than in it.
-    pub(crate) fn parse(
-        opts: &Map,
-        arms: Option<Vec<(String, Value)>>,
-        shell: &mut Shell,
-    ) -> Settled<Self> {
+    /// `shell` resolves and permission-checks `dir:`. Handlers are statically checked.
+    pub(crate) fn parse(opts: &Map, shell: &mut Shell) -> Settled<Self> {
         let mut env_overrides = None;
         let mut cwd = None;
         let mut catch_all: Option<Value> = None;
         // `handlers` and `handler` are independent: naming either installs a
         // frame, naming neither leaves the stack alone.
-        let mut saw_handlers = arms.is_some();
-        let entries = parse_handlers(arms.unwrap_or_default(), shell)?;
+        let mut saw_handlers = false;
+        let mut entries = Vec::new();
 
         for (k, v) in opts {
             match k {
                 "env" => env_overrides = Some(parse_env(&v)?),
                 "dir" => cwd = Some(parse_dir(&v, shell)?),
                 "handler" => {
-                    catch_all = Some(parse_catch_all(&v, shell)?);
+                    catch_all = Some(v.into_owned());
+                    saw_handlers = true;
+                }
+                "handlers" => {
+                    entries = v
+                        .as_map("within")?
+                        .iter()
+                        .map(|(name, thunk)| {
+                            HandlerEntry::ral_per_name(name.to_string(), thunk.into_owned())
+                        })
+                        .collect();
                     saw_handlers = true;
                 }
                 _ => unreachable!(
@@ -153,35 +153,6 @@ fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
             )))
         })?,
     )
-}
-
-/// `handlers:` — one named handler per entry, each vetted against its
-/// command's scheme.
-fn parse_handlers(arms: Vec<(String, Value)>, shell: &Shell) -> Settled<Vec<HandlerEntry>> {
-    arms.into_iter()
-        .map(|(cmd, thunk)| HandlerEntry::vet(cmd, thunk, shell, HandlerRole::Scoped))
-        .collect()
-}
-
-/// `handler:` — the catch-all, which stands in for *every* command, so its
-/// value is its output.
-fn parse_catch_all(v: &Value, shell: &Shell) -> Settled<Value> {
-    let closure = arm_closure(v, HandlerRole::CatchAll, "handler")?;
-    crate::typecheck::arm_stands_in(
-        crate::typecheck::Arm::CatchAll,
-        closure.comp(),
-        shell.closure_schemes(closure),
-    )
-    .map_err(|errors| {
-        refused_arm(
-            HandlerRole::CatchAll,
-            "handler",
-            &errors,
-            closure.comp().span,
-            shell,
-        )
-    })?;
-    Ok(v.clone())
 }
 
 /// The undo token `WithinScope::enter` returns: what to put back, and in
@@ -423,20 +394,25 @@ mod tests {
         assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
 
-    /// A session function's scheme is what a `within` vets its arm
-    /// against whether the `within` runs at top level or inside a block that
-    /// captured only that one function: `Shell::closure_schemes` reads the
-    /// arm closure's own capture, so `h`'s scheme shows through it exactly as
-    /// it would off the session `Env`.
     #[test]
-    fn within_vets_an_arm_against_a_captured_scheme() {
+    fn within_runs_a_handler_that_captures_a_session_function() {
         let mut shell = crate::test_helper::core_shell();
         let src = "let h = { |n| return $[$n + 1] }\n\
-                   let blk = { within [handlers: [g: { |args| h 1; echo hi }]] { g } }\n\
+                   let blk = { within [handlers: [:, g: { |args| h 1; echo hi }]] { g } }\n\
                    !$blk";
         let out = crate::shell::evaluator::run_source(src, &mut shell)
-            .expect("a captured block's within must vet its arm exactly as it would at top level");
+            .expect("a handler in a captured block must retain its session function");
         assert_eq!(out, Value::Unit);
+    }
+
+    #[test]
+    fn an_empty_handler_map_still_installs_a_scoped_frame() {
+        let mut shell = crate::test_helper::core_shell();
+        let absent = WithinScope::parse(&Map::new(), &mut shell).expect("no options");
+        assert!(absent.handlers.is_none());
+        let opts = Map::from_iter([("handlers".into(), Value::map(vec![]))]);
+        let present = WithinScope::parse(&opts, &mut shell).expect("an empty handler map");
+        assert!(matches!(present.handlers, Some((entries, None)) if entries.is_empty()));
     }
 
     /// A key the table declares but the parser lacks an arm for would reach
@@ -448,7 +424,7 @@ mod tests {
         let mut shell = crate::test_helper::core_shell();
         for key in declared(Form::Within).keys {
             let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
-            let _ = WithinScope::parse(&opts, None, &mut shell);
+            let _ = WithinScope::parse(&opts, &mut shell);
         }
     }
     #[test]

@@ -118,6 +118,7 @@ impl TypeErrorKind {
                 name,
                 expected,
                 got,
+                ..
             } => format!(
                 "`{name}` expected {}, got {got}",
                 plural(*expected, "argument")
@@ -133,7 +134,7 @@ impl TypeErrorKind {
             ),
             Self::SpreadIntoApplication { head } => {
                 let takes = match head {
-                    SpreadHead::Builtin { name, arity } => {
+                    SpreadHead::Builtin { name, arity, .. } => {
                         format!("`{name}` takes {}", plural(*arity, "argument"))
                     }
                     SpreadHead::Applied => "this head takes its arguments".into(),
@@ -521,10 +522,9 @@ fn describe_producer(cty: &CompTy) -> String {
     }
 }
 
-/// The hint for an arm that stands in for a head and produces the wrong
-/// thing: `expected` is what the head produces, `actual` what the arm does.
+/// The hint for an arm that returns a value instead of writing output.
 fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
-    let TypeErrorKind::CompTyMismatch { expected, actual } = kind else {
+    let TypeErrorKind::CompTyMismatch { actual, .. } = kind else {
         return "an arm produces what the head it stands in for produces".to_string();
     };
     let returned = describe_producer(actual);
@@ -533,20 +533,48 @@ fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
             "an arm for `{head}` stands in for a command, so its value is its output; \
              this one returns {returned}: write it, `echo …`"
         ),
-        Standing::Own(head) => format!(
-            "an arm for `{head}` stands in for the `{head}` in force, so it produces what \
-             that produces: {}; this one returns {returned}",
-            describe_producer(expected)
-        ),
-        Standing::Computed => format!(
-            "an arm for a computed command name must produce a command's output; this one \
-             returns {returned}: write it with `echo …`, or use a written name for a base frame"
-        ),
         Standing::EveryCommand => format!(
             "the catch-all `handler:` stands in for every command in this block, so its \
              value is its output; this one returns {returned}: write it, `echo …`, or \
-             handle specific names with `handlers: [name: …]`"
+             handle specific names with `handlers: [:, deploy: {{ |args| … }}]`"
         ),
+    }
+}
+
+const HANDLER_PARAM_HINT: &str = "a handler is invoked as a command, so its one parameter is \
+     the argv: a list of strings. Write it `{ |args| … }` and read \
+     `$args[0]`, or call the function directly, as in `!{$f 1}`";
+
+fn handlers_hint(kind: &TypeErrorKind) -> String {
+    match kind {
+        TypeErrorKind::TyMismatch { actual, .. } => match actual.node() {
+            TyNode::Record(row) => {
+                let name = row
+                    .fields()
+                    .next()
+                    .map_or("name", |(label, _)| label.name());
+                format!(
+                    "`handlers:` is a map from command name to handler, and `[{name}: …]` \
+                     is a record: write `[:, {name}: {{ |args| … }}]`"
+                )
+            }
+            TyNode::List(_) => {
+                "`handlers:` is a map from command name to handler; the empty one is \
+                 `[:]`, and one handler is `[:, ll: { |args| … }]`"
+                    .into()
+            }
+            _ => HANDLER_PARAM_HINT.into(),
+        },
+        TypeErrorKind::CompTyMismatch { expected, actual }
+            if matches!(expected.node(), CompTyNode::Return(..)) =>
+        {
+            format!(
+                "a handler stands in for a command, so its value is its output; this one \
+                 returns {}: write it, `echo …`",
+                describe_producer(actual)
+            )
+        }
+        _ => HANDLER_PARAM_HINT.into(),
     }
 }
 
@@ -772,12 +800,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         TypeErrorKind::RefusedKey { advice, .. } => Some((*advice).to_string()),
-        // `handlers:` is the parser's, so `offered` cannot name it.
-        TypeErrorKind::UnknownKey { form: "within", .. } => Some(
-            "`within` also takes `handlers:`, written as a list of arms: \
-             `within [handlers: [deploy: { |args| … }]] { … }`"
-                .to_string(),
-        ),
         TypeErrorKind::ReturnNotRecord {
             form,
             found,
@@ -804,16 +826,34 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         TypeErrorKind::HeadBoundToValue { name, .. } => Some(format!(
             "`${name}` is the value; if you meant a command named `{name}`, `^{name}` runs it"
         )),
+        TypeErrorKind::BuiltinArity { name, expected, list_last: true, .. } => {
+            let suffix = match (expected % 100, expected % 10) {
+                (11..=13, _) => "th",
+                (_, 1) => "st",
+                (_, 2) => "nd",
+                (_, 3) => "rd",
+                _ => "th",
+            };
+            Some(format!(
+                "the last of `{name}`'s {} is a list: write the arguments from the \
+                 {expected}{suffix} on as one list, `[a, b]`; `explain {name}` gives its command shape",
+                plural(*expected, "argument")
+            ))
+        }
         TypeErrorKind::BuiltinArity { name, .. } => {
             Some(format!("`explain {name}` gives its command shape"))
         }
         // Name the rewrite, not merely the refusal: this is the one place the
         // rule costs a user a program that ran.
         TypeErrorKind::SpreadIntoApplication { head } => Some(match head {
-            SpreadHead::Builtin { name, arity } if *arity == 1 => {
+            SpreadHead::Builtin { name, arity, list_last: true } => format!(
+                "the last of `{name}`'s {} is a list: spread inside it, `[...$xs]`",
+                plural(*arity, "argument")
+            ),
+            SpreadHead::Builtin { name, arity, .. } if *arity == 1 => {
                 format!("pass the element itself, as in `{name} $xs[0]`, or spread into a command")
             }
-            SpreadHead::Builtin { name, arity } => format!(
+            SpreadHead::Builtin { name, arity, .. } => format!(
                 "pass the {} one at a time, as in `{name} $xs[0] $xs[1]`, \
                  or spread into a command",
                 plural(*arity, "argument")
@@ -1018,9 +1058,10 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
+        Reason::Handlers => Some(handlers_hint(kind)),
         Reason::HandlerArm => Some(
-            "an arm installed under a name stands in for that command, so it is a block \
-             the call runs: `[handlers: [deploy: { |args| … }]]`, or a name bound to one"
+            "a handler installed under a name stands in for that command, so it is a block \
+             the call runs: `[handlers: [:, deploy: { |args| … }]]`, or a name bound to one"
                 .to_string(),
         ),
         Reason::ListElem => Some(
@@ -1082,17 +1123,14 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              and result types as the rest of the definition"
                 .to_string(),
         ),
-        Reason::HandlerParam => Some(
-            "a handler is invoked as a command, so its one parameter is \
-             the argv: a list of strings. Write the arm `{ |args| … }` and read \
-             `$args[0]`, or call the function directly, as in `!{$f 1}`"
-                .to_string(),
-        ),
-        Reason::CatchAllParams => Some(
-            "the catch-all stands in for every command, so its two parameters are the \
-             name and the argv: write `{ |name args| … }`"
-                .to_string(),
-        ),
+        Reason::HandlerParams(standing) => Some(match standing {
+            Standing::Command(_) => HANDLER_PARAM_HINT.into(),
+            Standing::EveryCommand => {
+                "the catch-all stands in for every command, so its two parameters are the \
+                 name and the argv: write `{ |name args| … }`"
+                    .to_string()
+            }
+        }),
         Reason::Factory => Some(
             "a plugin returns its manifest, or a block of one parameter, the options, \
              that makes it: `return { |options| [name: …] }`"
@@ -1746,6 +1784,117 @@ mod tests {
                     assert_eq!(guidance(&producer, Some(&Reason::Argument)), wanted);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn handler_parameter_hints_distinguish_named_and_catch_all_slots() {
+        let kind = mismatch(Ty::argv(), Ty::int());
+        for (standing, expected) in [
+            (
+                Standing::Command("echo".into()),
+                "a handler is invoked as a command, so its one parameter is the argv: \
+                 a list of strings. Write it `{ |args| … }` and read `$args[0]`, or call \
+                 the function directly, as in `!{$f 1}`",
+            ),
+            (
+                Standing::EveryCommand,
+                "the catch-all stands in for every command, so its two parameters are the \
+                 name and the argv: write `{ |name args| … }`",
+            ),
+        ] {
+            assert_eq!(
+                guidance(&kind, Some(&Reason::HandlerParams(standing))),
+                Some(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn named_handlers_stand_in_for_commands_including_base_frames() {
+        let kind = producer_mismatch(Ty::unit(), Ty::int(), (Grade::Output, Grade::Value));
+        for name in ["echo", "deploy"] {
+            assert_eq!(
+                guidance(
+                    &kind,
+                    Some(&Reason::StandsIn(Standing::Command(name.into())))
+                ),
+                Some(format!(
+                    "an arm for `{name}` stands in for a command, so its value is its output; \
+                     this one returns an Int: write it, `echo …`"
+                ))
+            );
+        }
+        assert_eq!(
+            guidance(&kind, Some(&Reason::StandsIn(Standing::EveryCommand))),
+            Some(
+                "the catch-all `handler:` stands in for every command in this block, so its \
+                 value is its output; this one returns an Int: write it, `echo …`, or \
+                 handle specific names with `handlers: [:, deploy: { |args| … }]`"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn handler_maps_explain_records_lists_and_returners() {
+        let handlers = Ty::map(Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::command())));
+        for (actual, name) in [
+            (
+                Ty::record(Row::empty()).extend("deploy", Ty::int()),
+                "deploy",
+            ),
+            (Ty::record(Row::empty()), "name"),
+        ] {
+            assert_eq!(
+                guidance(&mismatch(handlers.clone(), actual), Some(&Reason::Handlers)),
+                Some(format!(
+                    "`handlers:` is a map from command name to handler, and `[{name}: …]` \
+                     is a record: write `[:, {name}: {{ |args| … }}]`"
+                ))
+            );
+        }
+        assert_eq!(
+            guidance(
+                &mismatch(handlers, Ty::list(Ty::int())),
+                Some(&Reason::Handlers)
+            ),
+            Some(
+                "`handlers:` is a map from command name to handler; the empty one is \
+                 `[:]`, and one handler is `[:, ll: { |args| … }]`"
+                    .into()
+            )
+        );
+        assert_eq!(
+            guidance(
+                &producer_mismatch(Ty::unit(), Ty::int(), (Grade::Output, Grade::Value)),
+                Some(&Reason::Handlers)
+            ),
+            Some(
+                "a handler stands in for a command, so its value is its output; this one \
+                 returns an Int: write it, `echo …`"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn other_handler_map_clashes_use_the_parameter_hint() {
+        for kind in [
+            mismatch(Ty::argv(), Ty::int()),
+            mismatch(Ty::record(Row::empty()), Ty::map(Ty::int())),
+            TypeErrorKind::CompTyMismatch {
+                expected: CompTy::arrows([Ty::argv()], CompTy::command()),
+                actual: CompTy::pure(Ty::int()),
+            },
+        ] {
+            assert_eq!(
+                guidance(&kind, Some(&Reason::Handlers)),
+                guidance(
+                    &kind,
+                    Some(&Reason::HandlerParams(Standing::Command("deploy".into())))
+                )
+            );
         }
     }
 

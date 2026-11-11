@@ -110,7 +110,7 @@ short spellings.
 | `let h = hostname`; `let f = { hostname }; let h = f` | captures |
 | `let x = if $c { echo a } else { warn b }` | captures |
 | `try { mkdir d } { \|e\| warn no }` | one `Command` |
-| `within [handlers: [curl: { \|a\| return () }]] { let x = curl foo }` | captures `""` |
+| `within [handlers: [:, curl: { \|a\| return () }]] { let x = curl foo }` | captures `""` |
 | `try { curl $u > out } { \|e\| echo failed }` | one `Command` |
 | `try { each-line { \|l\| warn $l } } { \|e\| echo failed }` | one `Command` |
 | `let u = (); if $c { return $u } else { echo a }` | one `Command` |

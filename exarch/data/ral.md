@@ -355,6 +355,6 @@ Every worker spawned inside a `gather` is its own: when the block returns, each 
 
 Should you wish for a process that runs *after* the session is over, use `detach`:
 
-    let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
+    let d = within [dir: #'/data'#] { detach #'background export job'# python3 ['export.py'] }
 
-`detach` takes a task description, a binary (not a block!), and arguments. It returns a receipt; `await`, `poll`, and `cancel` do not apply. Stdin, stdout and stderr are `/dev/null`, so you will not receive updates. Call `explain detach` for monitoring and grant restrictions. In a VM, everything you detach shares one command's memory and process allowance.
+`detach` takes a task description, a program name and a list of its arguments (not a block!). It is an ordinary first-class function. Its program is resolved as `^program` would resolve one, bypassing bindings, handlers and base frames. Handlers cannot intercept `detach` itself; to stub it, bind the name: `let detach = { |desc program args| return [pid: 0, desc: $desc] }`. It returns a receipt; `await`, `poll`, and `cancel` do not apply. Stdin, stdout and stderr are `/dev/null`, so you will not receive updates. Call `explain detach` for monitoring and grant restrictions. In a VM, everything you detach shares one command's memory and process allowance.

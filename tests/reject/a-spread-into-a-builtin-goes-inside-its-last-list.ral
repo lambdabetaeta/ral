@@ -1,0 +1,4 @@
+# codes: T0056
+# status: 1
+# contains: spread inside it, `[...$xs]`
+let xs = ['a']; let y = intercalate ', ' ...$xs

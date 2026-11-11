@@ -331,7 +331,15 @@ fn capture_program_table_accepted_rows_have_exactly_the_written_coercions() {
         ("let c = true; let x = if $c { echo a } else { warn b }", 1),
         ("try { mkdir d } { |e| warn no }", 0),
         (
-            "within [handlers: [curl: { |a| return () }]] { let x = curl foo }",
+            "within [handlers: [:, curl: { |a| return () }]] { let x = curl foo }",
+            1,
+        ),
+        (
+            "within [handlers: [:, curl: { |_| let x = echo hi; echo $x }]] { curl }",
+            1,
+        ),
+        (
+            "let handlers = [:, curl: { |_| let x = echo hi; echo $x }]; within [handlers: $handlers] { curl }",
             1,
         ),
         (
@@ -418,13 +426,13 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
     // External names are handled so these examples need neither installed tools nor network.
     let cases = [
         (
-            "within [handlers: [hostname: { |_| echo host }]] { let h = hostname; return $h }",
+            "within [handlers: [:, hostname: { |_| echo host }]] { let h = hostname; return $h }",
             "",
             "",
             Value::string("host"),
         ),
         (
-            "within [handlers: [hostname: { |_| echo host }]] { let f = { hostname }; let h = f; return $h }",
+            "within [handlers: [:, hostname: { |_| echo host }]] { let f = { hostname }; let h = f; return $h }",
             "",
             "",
             Value::string("host"),
@@ -436,19 +444,19 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
             Value::string("a"),
         ),
         (
-            "within [handlers: [mkdir: { |_| return () }]] { try { mkdir d } { |e| warn no } }",
+            "within [handlers: [:, mkdir: { |_| return () }]] { try { mkdir d } { |e| warn no } }",
             "",
             "",
             Value::Unit,
         ),
         (
-            "within [handlers: [curl: { |a| return () }]] { let x = curl foo; return $x }",
+            "within [handlers: [:, curl: { |a| return () }]] { let x = curl foo; return $x }",
             "",
             "",
             Value::string(""),
         ),
         (
-            "within [handlers: [curl: { |_| echo fetched }]] { let u = 'url'; try { curl $u > $out } { |e| echo failed } }",
+            "within [handlers: [:, curl: { |_| echo fetched }]] { let u = 'url'; try { curl $u > $out } { |e| echo failed } }",
             "",
             "",
             Value::Unit,
@@ -491,7 +499,7 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
             units(),
         ),
         (
-            "within [handlers: [curl: { |a| echo ...$a }]] { let us = ['a', 'b']; par { |u| curl $u } $us 4 }",
+            "within [handlers: [:, curl: { |a| echo ...$a }]] { let us = ['a', 'b']; par { |u| curl $u } $us 4 }",
             "a\nb\n",
             "",
             units(),

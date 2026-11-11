@@ -8,8 +8,8 @@
 //!
 //! Those are the *value* half of the manifest.  The argv half — a name that
 //! takes an argv rather than arguments, and installs as a base handler frame —
-//! is authored beside it in [`CORE_BASE_FRAMES`], because the two conventions
-//! share nothing but a body signature.
+//! is authored beside it in [`CORE_BASE_FRAMES`]. Its convention fixes
+//! `[String] → Command`, with no type rule to supply.
 
 use crate::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Shell, Value};
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
@@ -391,11 +391,9 @@ builtin_registry! {
 /// The argv half of core's manifest: names that take an argv rather than
 /// arguments, and so install as base handler frames instead of natives.
 ///
-/// `echo` is core's only one.  `DETACH_BUILTIN` is the other frame core
-/// publishes, withheld from here for a host to install.
+/// `echo` is core's only one.
 static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("echo"),
-    scheme::echo,
     "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame; it is the operating system's `echo`, not ral's.",
     BuiltinBody::Static(codecs::builtin_echo),
 )];
@@ -496,15 +494,14 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 /// question, asked of the live grant stack
 /// ([`crate::authority::policy::GrantStack::permits`]) and answered as a refusal.
 ///
-/// The other three verbs vary policy over one type; this one changes it — it
-/// takes an argv, hence a base frame and no `$detach`, returning a plain record
-/// rather than a [`Value::Handle`] because no eliminator here can reach what it
-/// births.  The birth is a double-fork, which Windows has no analogue of.
+/// A first-class value returning a receipt rather than a [`Value::Handle`]:
+/// no eliminator here can reach what it births. The birth is a double-fork,
+/// which Windows has no analogue of.
 #[cfg(unix)]
-static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
+static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
     Cow::Borrowed("detach"),
     scheme::detach,
-    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle: await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup (port already in use, bad flag, a missing import) nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it; pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts is refused, since a handler runs inside this session and nothing could be detached; to stub `detach`, stand in for `detach` itself. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. Each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached; control from inside a later grant must use whatever the survivor serves. A grant may also withhold the verb outright by leaving `detach` out of its `shell` list, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    "detach <desc> <program> <args>  — start <program> with the argument list <args> as a process that keeps running after this session is over, as in `detach 'docs server' python3 ['-m', 'http.server', '8000']`, and return its receipt [pid: Int, desc: String]. The receipt is data, not a handle: await, poll, race and cancel do not apply, and nothing in ral can stop the process once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup (port already in use, bad flag, a missing import) nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. The pid is the name it had at birth, not a capability over it; pids are recycled, so that number may later name something else entirely. <program> is always a program, found as `^program` finds one: a binding, handler or base frame of that name runs inside this session, so none is consulted. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not. `detach` is an ordinary function: to stub it, bind the name, `let detach = { |desc program args| return [pid: 0, desc: $desc] }`. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. Each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached; control from inside a later grant must use whatever the survivor serves. A grant may also withhold the verb outright by leaving `` `detach `` out of its `shell` list, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
     BuiltinBody::Static(concurrency::builtin_detach),
 )];
 #[cfg(unix)]

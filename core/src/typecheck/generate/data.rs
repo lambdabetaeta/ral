@@ -604,8 +604,7 @@ mod tests {
         let mut generator = generator();
         let entry = Decl::new(
             Cow::Borrowed("decode-at"),
-            Convention::Value,
-            scheme::from_json_at,
+            Convention::Value(scheme::from_json_at),
             "",
             true,
         );
@@ -654,8 +653,7 @@ mod tests {
             let mut generator = generator();
             let entry = Decl::new(
                 Cow::Borrowed("unknown"),
-                Convention::Value,
-                unknown,
+                Convention::Value(unknown),
                 "",
                 boundary,
             );

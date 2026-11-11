@@ -12,10 +12,16 @@ undefined ([[design/builtins|builtins]]).
 **An entry that takes an argv is not applied, so the rule does not reach it.**
 An external command, an intercepted operation, and a command-shaped builtin
 take an *argv*, not a curried argument sequence: an intercepted operation takes
-as many arguments as the call site writes, and `echo` and `detach` are variadic
-over a list of strings, typed `List String -> Command` and
-`List String -> F [pid: Int, desc: String]`
-([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
+as many arguments as the call site writes, and `echo` is variadic over a list
+of strings, typed `List String -> Command`. Host-supplied base frames share
+that argv convention and the one type `[String] → Command`. An argv manifest
+row carries no type rule, so no other base-frame result can be declared.
+
+`detach` is instead a native value builtin of fixed arity three:
+`String → String → [String] → F [pid: Int, desc: String]`. Its program's
+arguments are one list value, so write `detach 'nap' sleep [...$xs]`, not a
+spread into application. It supports `$detach` and partial application, and
+is stubbed by a value binding, not a handler ([[design/builtins|builtins]]).
 
 **The manifest is authored as two, and arity is the consequence.** A native
 table entry declares its arguments, so it has an arity — the curry-spine depth
@@ -24,8 +30,7 @@ of its scheme, which is the one place any arity is read from
 first-class *native* value. A base-frame manifest row takes an argv instead, so
 the argv half has no arity at all: the row is a *base frame* on the handler
 stack, whose arguments arrive as an argv like any command's
-([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]). So
+([[design/builtins|builtins]], [[design/exec|exec]]). So
 `$name` exists exactly where an arity does, by construction rather than by
 agreement between a declaration and a check.
 
@@ -81,9 +86,10 @@ alone.
 `render_handler_args` (`core/src/shell/evaluator/machine.rs`) hands a handler its arguments
 as one list value — `[argv]` for a per-name entry, `[name, argv]` for a
 catch-all — every element rendered as it is packed, so a variadic operation is
-consumed by a block typed `[String] → B`
-([[internals/handler-dispatch|handler-dispatch]],
-[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+consumed by a block typed `U([String] → Command)`; the catch-all is
+`U(String → [String] → Command)`
+([[internals/handler-dispatch|handler-dispatch]], [[design/exec|exec]]).
+These types depend on neither the handler's name nor Σ.
 Variable arity is a surface phenomenon; at the value level it is always a list
 of strings. The call's argument gate belongs to the head, not its handler:
 Σ supplies a base frame's in-shell gate; every other command name keeps the
@@ -94,8 +100,7 @@ Optionality is data too, never a hole in an argument list: an
 [[invariants/optionality-via-variants|open variant]] (`` `some v `` /
 `` `none ``), passed as an ordinary value. The caller always supplies every
 argument; the *value* it supplies may carry presence or absence, and no
-signature spells an argument the call site may leave out
-([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]).
+signature spells an argument the call site may leave out.
 
 This is a hard rule, not a stylistic preference. Do not introduce variadic
 application, a splat parameter, a defaulted argument on a function or prelude

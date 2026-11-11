@@ -39,7 +39,7 @@ assert_eq 'ints-to-bytes non-utf8 roundtrip' 3 !{length $raw}
 
 # The byte-to-value coercion is syntax, not a call: a handler under
 # the coercion's old name cannot blank a captured binding.
-within [handlers: [__decode-captured: { |_| echo "" }]] {
+within [handlers: [:, __decode-captured: { |_| echo "" }]] {
     let greeting = echo hello
     assert_eq 'handler cannot blank a capture' hello $greeting
 }

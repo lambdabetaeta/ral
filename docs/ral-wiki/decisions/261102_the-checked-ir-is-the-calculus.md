@@ -68,9 +68,7 @@ partition and elaboration rules.
 - A runtime destructuring-parameter mismatch points at the parameter, not the
   call site.
 
-This amends the native representation of
-[[260801_a-name-is-a-value-or-it-is-handled|a name is a value or it is handled]],
-the coercion representation of [[260811_a-coercion-is-syntax|a coercion is syntax]],
+This amends the coercion representation of [[260811_a-coercion-is-syntax|a coercion is syntax]],
 and the application and sequencing rules of
 [[260826_the-evaluator-steps-closures|the evaluator steps closures]].
 

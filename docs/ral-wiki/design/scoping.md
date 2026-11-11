@@ -45,6 +45,15 @@ hoisted, and so run before the form chose, is refused at elaboration: bind it
 first. The type of the form is the type of the body, so no arm rule is
 specific to scoping ([[design/capture|capture]]).
 
+**Module loading does not install caller bindings.** `use` is the only
+language-level module loader: it returns exports as data, leaving the caller
+to bind them. There is no `source` operation that changes a checked unit's
+bindings at runtime (`shell/builtins/modules.rs`, `builtin_use`).
+
+**`cd` requires a non-empty path.** `cd ''` is refused at runtime, neither
+interpreted as `HOME` nor accepted as a successful cwd no-op
+(`shell/builtins/shell.rs`, `builtin_chdir`).
+
 ## Two layers: lexical scope vs fork inheritance
 
 The lexical scoping above is one mechanism; *crossing a shell boundary* is a
