@@ -5,8 +5,8 @@
 //! `Form::Rc`'s table, and the checker ascribes that table to the file's
 //! inferred return type, so an unknown key or a wrong field type is a static
 //! error and the whole file is skipped.  A file whose return the checker
-//! cannot type (decoded JSON) meets the same keyset and field types in
-//! [`RcPlan::decode`].
+//! cannot type (decoded JSON), or whose fields remain unresolved, meets the
+//! same keyset and field types in [`RcPlan::decode`].
 //!
 //! The rc is a plan, decoded then committed: `decode` makes every fallible
 //! judgement reading the shell only, so a refused rc has changed nothing;
@@ -113,7 +113,7 @@ const DEFAULT_RC: &str = "\
     #     PAGER:  less,
     # ],
 
-    # aliases: [
+    # handlers: [
     #     ll: { |args| ls -lh ...$args },
     #     la: { |args| ls -lha ...$args },
     # ],
@@ -160,7 +160,7 @@ fn unknown_rc_key(cause: &ral_core::fact::UnknownField) -> String {
 }
 
 /// A fully judged rc: every field already has its final shape and every hook
-/// and alias has passed the shell's gate, so [`Self::apply`] refuses only a
+/// and handler has passed the shell's gate, so [`Self::apply`] refuses only a
 /// shell that is not the session, before committing anything.
 #[derive(Default)]
 pub(crate) struct RcPlan {
@@ -172,14 +172,14 @@ pub(crate) struct RcPlan {
     env: Map,
     bindings: Map,
     plugins: Map,
-    aliases: Vec<HandlerEntry>,
+    handlers: Vec<HandlerEntry>,
     hooks: Vec<(HookName, Hook)>,
 }
 
 impl RcPlan {
     /// Judge the rc's map against `shell`, which it only reads: the keyset,
     /// every field's shape, the theme, the prompt and startup blocks, and each
-    /// alias.  The map contract (and the diagnostic for breaking it) lives
+    /// handler.  The map contract (and the diagnostic for breaking it) lives
     /// with the sourcing in [`source`].
     pub(crate) fn decode(pairs: &Map, shell: &Shell) -> Result<Self, String> {
         let table = ral_core::typecheck::contract::declared(Form::Rc);
@@ -200,18 +200,18 @@ impl RcPlan {
                 ("theme", Value::Map(m)) => {
                     plan.settings.theme = OutputTheme::from_map(&m).map_err(refuse)?;
                 }
-                ("aliases", Value::Map(m)) => {
-                    plan.aliases = m
+                ("handlers", Value::Map(m)) => {
+                    plan.handlers = m
                         .iter()
                         .map(|(name, f)| match f.into_owned() {
-                            f @ Value::Thunk(_) => shell.vet_alias(name.to_string(), f).map_err(|b| {
+                            f @ Value::Thunk(_) => shell.vet_handler(name.to_string(), f).map_err(|b| {
                                 refuse(match b {
-                                    Break::Error(e) => format!("alias '{name}': {}", e.describe()),
-                                    Break::Escape(_) => format!("alias '{name}' escaped"),
+                                    Break::Error(e) => format!("handler '{name}': {}", e.describe()),
+                                    Break::Escape(_) => format!("handler '{name}' escaped"),
                                 })
                             }),
                             other => Err(refuse(format!(
-                                "alias '{name}' is {}, not a function; did you mean to put it under `bindings:`?",
+                                "handler '{name}' is {}, not a function; did you mean to put it under `bindings:`?",
                                 other.type_name()
                             ))),
                         })
@@ -255,7 +255,7 @@ impl RcPlan {
                 }
                 (k, other) if table.holds(k).is_some() => {
                     let want = match k {
-                        "env" | "bindings" | "aliases" | "theme" => "a map",
+                        "env" | "bindings" | "handlers" | "theme" => "a map",
                         "plugins" => {
                             "a map from plugin name to its options, e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]"
                         }
@@ -300,8 +300,8 @@ impl RcPlan {
         for (k, v) in &self.bindings {
             shell.bind_value(k.to_string(), v.into_owned())?;
         }
-        for entry in self.aliases {
-            shell.commit_alias(entry);
+        for entry in self.handlers {
+            shell.commit_handler(entry);
         }
         if let Some(n) = self.stack_limit {
             shell.set_stack_limit(n);
@@ -448,6 +448,7 @@ mod tests {
         )
     }
 
+    // Uncontracted evaluation keeps the runtime decoder independently covered.
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
         match crate::repl::eval(shell, rc_src) {
             Value::Map(pairs) => pairs,
@@ -595,7 +596,7 @@ mod tests {
         assert!(err.contains("recursion-limit") && err.contains("not applied"));
     }
 
-    // ── RcPlan: bindings / aliases routing ───────────────────────
+    // ── RcPlan: bindings / handlers routing ───────────────────────
 
     /// Apply `config` to a fresh shell, expecting `RcPlan::decode` to
     /// refuse it — the decoded spelling's contract check.  Returns the shell
@@ -704,16 +705,23 @@ mod tests {
         assert!(!shell.has_hook(&HookName::session("prompt")));
     }
 
-    /// A refused rc installs none of its aliases: one good, one non-thunk.
+    /// A refused rc installs none of its handlers: one good, one non-thunk.
     #[test]
-    fn refused_rc_installs_no_aliases() {
+    fn refused_rc_installs_no_handlers() {
         let mut shell = prelude_shell();
         let pairs = rc_map(
             &mut shell,
-            "return [aliases: [ll: { |args| ls ...$args }, bad: 3]]\n",
+            "return [handlers: [ll: { |args| ls ...$args }, bad: 3]]\n",
         );
-        assert!(commit(&pairs, &Mooring::adrift(), &mut shell).is_err());
-        assert!(!shell.has_alias("ll") && !shell.has_alias("bad"));
+        let error = commit(&pairs, &Mooring::adrift(), &mut shell)
+            .err()
+            .expect("a non-block member must refuse the whole rc");
+        assert!(
+            error.contains("handler 'bad' is Int, not a function"),
+            "{error}"
+        );
+        assert!(error.contains("not applied"), "{error}");
+        assert!(!shell.has_handler("ll") && !shell.has_handler("bad"));
     }
 
     /// A malformed *value* on a known key refuses the whole map, exactly as
@@ -741,19 +749,18 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// A function under `bindings:` is a lexical binding, not an alias: it
+    /// A function under `bindings:` is a lexical binding, not a handler: it
     /// lands in scope and carries a session scheme, so a heterogeneous
     /// call `ws 'x' { ... }` (a String and a Block — two independently
-    /// typed parameters) typechecks at the prompt.  As an argv alias the
-    /// same call would force the argv element type to be both String and
-    /// Block, a [T0010] mismatch.
+    /// typed parameters) typechecks at the prompt. A handler for the external
+    /// command `ws` would instead refuse the block argument.
     #[test]
     fn rc_bindings_function_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
         let (shell, _) = apply_rc_inner(src);
-        // Lexical binding, not an alias handler frame.
+        // Lexical binding, not a persistent handler frame.
         assert!(shell.scope_lookup("ws").is_some());
-        assert!(!shell.has_alias("ws"));
+        assert!(!shell.has_handler("ws"));
         let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
         assert!(
             errs.is_empty(),
@@ -761,26 +768,119 @@ mod tests {
         );
     }
 
-    /// A function under `aliases:` installs as an argv-handler alias (a
-    /// handler frame, not a scope binding).  An alias takes one parameter, the
-    /// argv, and an argv is a list of strings every element crosses rendered —
-    /// so where the `bindings:` function above has two typed parameters, this
-    /// one has no arity at all: the same heterogeneous call lands, and so does
-    /// a call with nothing to pass.
+    /// A `handlers:` handler for an external name keeps the external text gate:
+    /// a nullary call succeeds, but a block argument is refused at check time.
     #[test]
-    fn rc_aliases_function_is_argv_alias() {
-        let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
+    fn rc_handler_keeps_the_external_argument_gate() {
+        let src = "return [\n    handlers: [\n        ws: { |args| echo $args },\n    ],\n]\n";
         let (shell, _) = apply_rc_inner(src);
-        // Alias handler frame, not a scope binding.
-        assert!(shell.has_alias("ws"));
+        // Persistent handler frame, not a scope binding.
+        assert!(shell.has_handler("ws"));
         assert!(shell.scope_lookup("ws").is_none());
-        for call in ["ws 'x' { echo lol }\n", "ws\n"] {
-            let errs = typecheck_against_session(&shell, call);
-            assert!(
-                errs.is_empty(),
-                "an argv alias takes any argv, rendered: `{call}` gave {errs:?}"
+        let errs = typecheck_against_session(&shell, "ws\n");
+        assert!(
+            errs.is_empty(),
+            "a nullary call to an external handler should typecheck: {errs:?}"
+        );
+
+        let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
+        assert!(
+            !errs.is_empty(),
+            "an external handler must not admit a block argument"
+        );
+        assert!(
+            errs.iter()
+                .filter_map(ral_core::TypeError::hint)
+                .any(|hint| {
+                    hint.contains("`ws` has a handler here")
+                        && hint.contains("takes only text")
+                        && hint.contains("...$xs")
+                        && hint.contains("bind `ws` as a function")
+                }),
+            "the refusal should explain the handled head's text gate and alternatives: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn rc_contract_admits_decoded_fields_before_later_effects() {
+        use ral_core::source::SourceOrigin;
+
+        for (field, use_text) in [
+            ("handlers: [foo: { |args| return $d }]", "return $d"),
+            ("umask: $d", "$d"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("after-decode");
+            let source = format!(
+                "let d = from-json << '5'\necho ran > {}\nreturn [{field}]\n",
+                ral_core::syntax::quote_word(&ral_core::path::shown(&marker))
             );
+            let mut shell = prelude_shell();
+            let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+                &Mooring::adrift(),
+                &mut shell,
+                &source,
+                &SourceOrigin::named("rc.ral"),
+                Some(ral_core::typecheck::contract::declared(Form::Rc)),
+            ) else {
+                panic!("the live rc contract must refuse decoded 5: {source}");
+            };
+            assert!(
+                matches!(&error.reason, Reason::Invalid(failure)
+                    if failure.operation == "from-json"
+                        && matches!(failure.cause, InvalidCause::Admission(_))),
+                "{error:?}"
+            );
+            let fact = error.fact(&shell);
+            assert_eq!(fact.site().script.as_ref(), "rc.ral");
+            assert_eq!(fact.site().line, 1);
+            let witness = error.witness().expect("the contract must name the use");
+            assert!(
+                source[witness.start as usize..witness.end as usize].contains(use_text),
+                "the witness must identify {field}: {error:?}"
+            );
+            assert!(!marker.exists(), "nothing after the decoder may run");
+            assert!(!shell.has_handler("foo"));
         }
+    }
+
+    #[test]
+    fn computed_handler_name_is_vetted_against_its_actual_base_frame() {
+        use ral_core::ty::{Binders, CompTy};
+
+        fn frame(_: &mut Binders) -> Ty {
+            Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::int())))
+        }
+        let mut runtime = crate::repl::prelude_runtime();
+        runtime.install_captured_builtins(
+            &vec![BuiltinEntry::base_frame(
+                Cow::Borrowed("frame"),
+                frame,
+                "test frame returning an integer",
+                BuiltinBody::Static(|_, _, _| Ok(Value::Int(0))),
+            )]
+            .into(),
+        );
+        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+        let source = "let name = 'frame'\nreturn [handlers: [$name: { |args| echo ...$args }]]";
+        let value = ral_core::shell::load::evaluate_source(
+            &Mooring::adrift(),
+            &mut shell,
+            source,
+            &ral_core::source::SourceOrigin::named("rc.ral"),
+            Some(ral_core::typecheck::contract::declared(Form::Rc)),
+        )
+        .expect("a computed-name map stands in for an external command at check time");
+        let Value::Map(pairs) = value else {
+            panic!("the rc must return a record");
+        };
+        let error = RcPlan::decode(&pairs, &shell)
+            .err()
+            .expect("the actual base frame needs an integer result");
+        assert!(error.contains("handler 'frame'"), "{error}");
+        assert!(error.contains("Int"), "{error}");
+        assert!(error.contains("not applied"), "{error}");
+        assert!(!shell.has_handler("frame"));
     }
 
     /// Every key `Form::Rc`'s table declares reaches its own arm in

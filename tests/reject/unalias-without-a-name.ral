@@ -1,5 +1,0 @@
-# codes: T0053
-# status: 1
-# at: 5:12
-# contains: malformed unalias
-unalias g; unalias

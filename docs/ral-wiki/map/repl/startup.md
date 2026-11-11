@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
-generated_at_date: 2026-11-06
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -230,7 +230,7 @@ Builtins are shell-scoped: each mode declares its surface as one
 the runtime surface cannot drift. Batch's surface is core plus
 `WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot builtin, and the same value seeds `--check`'s builtin table
 (`HostSurface::manifest`, the checker's Σ with no live shell); the REPL's
-adds the [[map/repl/plugins|`_ed-*` builtins and the plugin load builtins]] and
+adds the [[map/repl/plugins|`_ed-*` editor builtins]] and
 `_external-editor`, all static. Both ral front-ends print a watched worker's lines, so `watch` is the
 ral hosts' to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

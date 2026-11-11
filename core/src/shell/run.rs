@@ -235,9 +235,8 @@ impl Shell {
                 }
 
                 self.run_built(req, foreground, wall, compact, base, |m, s| {
-                    crate::shell::evaluator::readmit(&top, s)?;
                     crate::shell::evaluator::run_phrases(
-                        &top.phrases,
+                        &top,
                         s.env.clone(),
                         crate::shell::evaluator::Mode::Session,
                         m,

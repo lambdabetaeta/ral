@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c4856951
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -130,7 +130,9 @@ Bodies are grouped by concern, one submodule each:
   line. Each JSON direction has one typed refusal, worded by each codec in its
   own terms: `json_to_value`'s `OutOfRange`, `value_to_json`'s
   `Unrepresentable`, which `to-jsonl` prefixes with the element's index;
-- `shell.rs` — `cd`, `alias` / `unalias`;
+- `shell.rs` — `cd`. No builtin installs or removes a handler; persistent
+  handlers are host-installed through rc or manifest `handlers:`,
+  and scoped frames use `within [handlers: …]`;
 - `concurrency.rs` — the `spawn` form's door (`spawn_form`), `watch` /
   `detach`, the handle verbs
   `await` / `poll` / `is-done` / `first-settled` / `race` / `cancel`, and the

@@ -36,16 +36,19 @@ let f = { |x| /bin/echo $x }
 $f hello > "$d/f3" | /usr/bin/true
 cat "$d/f3"
 
-# A redirect on an aliased head is installed for the alias body
-alias myecho { |a| /bin/echo ...$a }
-myecho stdout_marker > "$d/a1"
+# A redirect on a handled head is installed for the handler body
+within [handlers: [myecho: { |a| /bin/echo ...$a }]] {
+    myecho stdout_marker > "$d/a1"
+}
 cat "$d/a1"
-alias myerr { |a| /bin/sh -c 'echo stderr_marker >&2' }
-myerr 2> "$d/a2"
+within [handlers: [myerr: { |a| /bin/sh -c 'echo stderr_marker >&2' }]] {
+    myerr 2> "$d/a2"
+}
 cat "$d/a2"
 echo stdin_marker > "$d/a3"
-alias mycat { |a| /bin/cat }
-mycat < "$d/a3"
+within [handlers: [mycat: { |a| /bin/cat }]] {
+    mycat < "$d/a3"
+}
 
 # ... and for a handler head, whether it is a stage, a builtin body, or catch-all
 within [handlers: [foo: { |args| /bin/echo stage_marker }]] { foo > "$d/h1" | cat }

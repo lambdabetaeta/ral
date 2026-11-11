@@ -1,16 +1,16 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
 # Map: repl / plugins
 
 The plugin runtime — the hook model, the `_ed-*` editor builtins,
-keybindings, and the load builtins plugins program against. **A plugin is split
-at the protocol: its hooks and aliases live engine-side, in the shell's hook
-table, and never cross; its editor state, keybinding table, and first-order
-manifest live host-side, in the REPL's `PluginRuntime`; the two meet only
+keybindings, and startup loading. **A plugin is split
+at the protocol: its hooks and persistent command handlers live engine-side,
+in the shell's hook table and handler stack, and never cross to the REPL host;
+its editor state, keybinding table, and first-order manifest live host-side, in the REPL's `PluginRuntime`; the two meet only
 through dispatches one way and two enquiry classes the other.** Editor state
 is a host concern, so core holds none of it
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]).
@@ -156,8 +156,7 @@ so plugin code never handles UTF-8.
 `` `repl-editor `` carries an `EditorOp` (`get`, `set`, `set-lbuffer`,
 `insert`, `push`, `accept`, `ghost`, `highlight`, `history`, `state-get`,
 `state-set`) and answers `EditorSnapshot` or data; `` `repl-plugin `` carries
-a `PluginNote` — `loaded` with the manifest's first-order part, `unloaded`
-with a name; `` `repl-clipboard `` carries a `ClipboardReq` and answers
+a `PluginNote` — `loaded` with the manifest's first-order part; `` `repl-clipboard `` carries a `ClipboardReq` and answers
 whether the whole text landed. A bare `` `state-set `` sets `()` as
 `` `state-set () `` does. `EditorOp` and `ClipboardReq` are `Gated`. An
 unknown class or tag is refused by name.
@@ -206,7 +205,7 @@ earlier, or on a proper prefix wherever loaded.
 - `plugin/manifest.rs` — a manifest is the Map a plugin's top-level block
   returns. `parse` splits it into the first-order `Manifest` (`{name, hooks,
   keybindings: [{key, guard}]}`) the host is told and the `ManifestHandlers`
-  (hook, keybinding, and alias values) the engine keeps. A `KeySpec` is
+  (hook, keybinding, and command-handler values) the engine keeps. A `KeySpec` is
   validated at load — notation parsed, optional `guard:` regex compiled:
   `ctrl-c`/`ctrl-d` are reserved outright, as any chord of a sequence
   (`reserved_action`, the session's escape hatches); a sequence not beginning
@@ -219,33 +218,37 @@ earlier, or on a proper prefix wherever loaded.
   the invocation in `grant { … }`. It is not an *unknown* key either: the
   manifest's declared table (`typecheck::contract`, `Form::Manifest`) marks
   it refused, with that advice as its own sentence. The table also closes the
-  keyset — `name` (required, `String`), `aliases`, `hooks`, `keybindings` —
+  keyset — `name` (required, `String`), `handlers`, `hooks`, `keybindings` —
   so an unknown key is an error naming the list, here and in the checker
-  both; `hooks:`/`keybindings:`/`aliases:` stay on this file's own runtime
-  parse for their *shape*, their handler values having no one fixed type to
-  pin.
-- `plugin/load.rs` — the `load-plugin` and `unload-plugin` builtins (`BUILTINS`),
-  engine-side static builtins on the REPL surface. `load_plugin` resolves a
-  plugin under `~/.config/ral/plugins/` or `RAL_PATH`, typechecks and
-  evaluates it through `shell::load::evaluate_source` in a fresh scope, under
-  the return contract `contract::declared(Form::Manifest)`; `instantiate`
-  applies a parameterised plugin's factory to its options map, nested under
-  the builtin's own mooring, to yield its manifest (the contract sees only a
-  literal `return [...]`, so a factory's manifest stays on `manifest::parse`'s
-  runtime check alone). Options arrive as a `Map`: the rc's own `plugins:`
-  entry is where a non-map value is caught and named, and `load-plugin`,
-  which takes a name alone, passes the empty map. The builtin then commits the
-  hooks and aliases and enquires `` `repl-plugin `loaded ``; any failure
-  past the commit — the host's refusal included — rolls the plugin's whole
-  namespace back. The builtins return their outcome: a failed `load-plugin` or `unload-plugin`
-  raises, its error contexted `plugin 'NAME'`, and an `exit` escape
-  propagates. A relative path resolves through `shell.resolve` (live cwd,
-  `~`). The plugin ledger `PluginEntry { name, aliases }` lives in the session's
-  `HookTable` beside the hooks it undoes, aliases by `FrameHandle` so an
-  alias the user replaced survives unload. Unloading is the exact inverse:
-  the host is told first and may refuse, then the hooks and aliases go. Only
-  the booted session has a `HookTable`; a load from an aside, a worker or a
-  stage fails at once with `RegisterError::NoSession`. Loading also runs the
+  both. `handlers:` uses `Holds::Arms`, reaching the shared `stands_in`
+  relation live after elaboration settles, before gates, nested tables and
+  errors close and readback freezes sites. Written labels select Σ's
+  stand-in; computed-name maps hold members to `[String] → Command`.
+  Field and factory equations reach decoder admission sites inside this
+  unit's IR. `hooks:` and `keybindings:` retain runtime shape validation;
+  their results are host-checked, rendered or discarded, not passed unchecked
+  to typed code. Runtime parsing also covers unresolved returns, fields and
+  members. Command arms are vetted again at install against their actual
+  stand-in from Σ, yielding a verdict, never a scheme. Head types and argument
+  gates depend only on Σ and lexical bindings; handled names contribute only
+  diagnostic context. A handler for an external name therefore cannot widen
+  its external argument gate. `handlers:` installs persistent handlers;
+  scoped handlers use `within`, and
+  interactive functions use `let`, not `alias` or `unalias` statements.
+- `plugin/load.rs` — startup-only `load_plugin`, called by the rc plan with
+  an options `Map`. It resolves a plugin under `~/.config/ral/plugins/` or
+  `RAL_PATH`, then typechecks and evaluates it through
+  `shell::load::evaluate_source` in a fresh scope under
+  `contract::declared(Form::Manifest)`. `instantiate` applies a factory to its
+  options under the startup mooring. The contract holds its shape and inferred
+  result live on `Settled`, without choosing a `let` mode or call split or
+  opening a hole; `manifest::parse` checks the actual result again at runtime.
+  Hooks and handlers are installed before the host enquiry
+  `` `repl-plugin `loaded ``. Any failure, including host refusal, removes the
+  hooks and the locally retained `FrameHandle`s. Only committed names enter
+  the session's `HookTable` ledger, for duplicate checks. A relative path uses
+  `shell.resolve` (live cwd, `~`). Plugins live for the session; there is no
+  load or unload command. A new plugin requires a new session. Loading also runs the
   shadow lint host-side (`PluginRuntime::admit`): a binding the router's
   `dead_entries` flags is warned about, not rejected, when either it or its
   blocker belongs to the plugin being loaded — a later unguarded prefix can
@@ -262,8 +265,7 @@ earlier, or on a proper prefix wherever loaded.
   `PendingKeybinding.mode` carries across the accepted line (`insert` in
   emacs). A `PendingKeybinding` carries the
   plugin's name plus a binding index *within* it, never a position in the
-  runtime `Vec` — an unload compacts that vector, so a runtime index would
-  address the wrong plugin; a resolution miss re-edits the line unchanged.
+  runtime `Vec`; a resolution miss re-edits the line unchanged.
 - `plugins/` (repo root) ships the example plugins (`autosuggestion.ral`,
   `fzf-*.ral`, `zoxide.ral`, the shared `lib/fzf.ral`), each a parameterised
   manifest factory written against the `_ed-*` builtins; they are data to

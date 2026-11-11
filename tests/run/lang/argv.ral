@@ -1,12 +1,13 @@
-# A name taking an argv receives renderings; only the exec boundary
-# refuses shapes an operating system has no argument for
+# An external name takes text even when a handler intercepts it.
+# Numbers and booleans render implicitly; structured values need an encoder.
 
 # An arm is handed its argv as text, and may index it as the list it is
 within [handlers: [mycmd: { |args| echo 'got' ...$args }]] { mycmd 1 true }
-alias aliased { |args| echo 'got' ...$args }
-aliased 3.5 [a: 1]
+within [handlers: [handled: { |args| echo 'got' ...$args }]] {
+    handled 3.5 !{to-json [a: 1]}
+}
 within [handlers: [second: { |args| echo $args[1] }]] { second first second }
-# Expected: got 1 true / got 3.5 [a: 1] / second
+# Expected: got 1 true / got 3.5 {"a":1} / second
 
 # Rendering inside the shell is total: every value has a text form
 let f = { |x| return $x }

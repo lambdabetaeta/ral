@@ -42,11 +42,6 @@ pub(super) fn dispatch_keybinding(
     keymap: Keymap,
 ) -> KeybindingOutcome {
     let unchanged = || KeybindingOutcome::Edit(current.to_string(), current.chars().count());
-    // Resolve the owning plugin by name, not by position: a stale binding's
-    // index could address whatever plugin now occupies that slot.  A miss
-    // (the plugin was unloaded between keypress and dispatch) is benign —
-    // the line re-edits unchanged, and the sequence is unbound on the next
-    // `sync_plugins`.
     let resolved = {
         let rt = lock(&host.runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
@@ -103,47 +98,5 @@ pub(super) fn dispatch_keybinding(
         KeybindingOutcome::Accept(text)
     } else {
         KeybindingOutcome::Edit(text, cursor)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::plugin::PluginRuntime;
-    use super::super::plugin::manifest::{KeySpec, LoadedPlugin, Manifest};
-
-    /// A plugin record carrying one keybinding under `key`, so resolution
-    /// can be checked by the key it yields.
-    fn plugin(name: &str, key: &str) -> LoadedPlugin {
-        LoadedPlugin::admit(Manifest {
-            name: name.to_string(),
-            hooks: Vec::new(),
-            keybindings: vec![KeySpec {
-                key: key.to_string(),
-                guard: None,
-            }],
-        })
-        .expect("test key binds")
-    }
-
-    /// J3 regression: after `unload_plugin` compacts the runtime `Vec`, a
-    /// keybinding still flagged for the unloaded plugin must not dispatch
-    /// to whichever plugin slid into its old slot — name lookup either hits
-    /// the right plugin or misses entirely.
-    #[test]
-    fn stale_keybinding_does_not_resolve_to_a_different_plugin() {
-        let mut rt = PluginRuntime::default();
-        rt.plugins.push(plugin("a", "ctrl-t"));
-        rt.plugins.push(plugin("b", "ctrl-r"));
-
-        // Before unload, "a"'s binding resolves.
-        assert_eq!(rt.resolve_keybinding("a", 0), Some("ctrl-t".into()));
-
-        // `unload_plugin` removes "a"; "b" shifts down to slot 0: the
-        // exact compaction that index-based dispatch would mishandle.
-        rt.plugins.remove(0);
-
-        // The stale "a" binding now misses; it must NOT pick up "b"'s
-        assert_eq!(rt.resolve_keybinding("b", 0), Some("ctrl-r".into()));
-        assert_eq!(rt.resolve_keybinding("a", 0), None);
     }
 }

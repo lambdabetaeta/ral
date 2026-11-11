@@ -1,5 +1,0 @@
-# codes: T0052
-# status: 1
-# at: 5:17
-# contains: malformed alias
-let xs = ["g"]; alias ...xs { return 42 }

@@ -94,7 +94,7 @@ impl Error {
     /// of an input that compiled to a single command.
     ///
     /// Shape alone will not do: `boom` at the prompt is one command, but as an
-    /// alias its error lives in the rc, where only a caret can point.
+    /// installed handler its error lives in the rc, where only a caret can point.
     ///
     /// Always ends in `\n`.  A caller that hands it straight to a sink
     /// expecting a trailing newline (`eprint!`, `write_all`, a wire payload)

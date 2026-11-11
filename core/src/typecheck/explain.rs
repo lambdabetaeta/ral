@@ -16,6 +16,7 @@ use crate::ty::{
     CompTy, CompTyNode, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, TyNode,
     Typed as _, fmt_comp_ty_ctx, fmt_ty_ctx,
 };
+use std::fmt::Write as _;
 
 impl TypeErrorKind {
     /// The headline sentence for this error.
@@ -147,8 +148,6 @@ impl TypeErrorKind {
             Self::ExecArgNotText { command, ty, .. } => {
                 RefusedArg::headline(command, fmt_ty_ctx(ty, &FmtCtx::for_value_types(&[ty])))
             }
-            Self::MalformedAlias { .. } => "malformed alias definition".into(),
-            Self::MalformedUnalias { .. } => "malformed unalias".into(),
             Self::IndexOnLiteral { literal, key } => format!(
                 "`[{key}]` reads from {literal} itself: an index attaches to the one word right before it"
             ),
@@ -220,9 +219,7 @@ impl TypeErrorKind {
             | Self::HandlerNotFirstClass { .. }
             | Self::BuiltinNotFirstClass { .. }
             | Self::BuiltinArity { .. }
-            | Self::DecoderTakesNoArgument { .. }
-            | Self::MalformedAlias { .. }
-            | Self::MalformedUnalias { .. } => "here".into(),
+            | Self::DecoderTakesNoArgument { .. } => "here".into(),
             Self::UnboundVariable { .. } => "not defined".into(),
             Self::IndexOnLiteral { literal, .. } => {
                 format!("this index belongs to {literal} alone")
@@ -541,6 +538,10 @@ fn stands_in_hint(standing: &Standing, kind: &TypeErrorKind) -> String {
              that produces: {}; this one returns {returned}",
             describe_producer(expected)
         ),
+        Standing::Computed => format!(
+            "an arm for a computed command name must produce a command's output; this one \
+             returns {returned}: write it with `echo …`, or use a written name for a base frame"
+        ),
         Standing::EveryCommand => format!(
             "the catch-all `handler:` stands in for every command in this block, so its \
              value is its output; this one returns {returned}: write it, `echo …`, or \
@@ -786,7 +787,7 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
             "did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"
         )),
         TypeErrorKind::HandlerNotFirstClass { .. } => Some(
-            "aliases and `within` handlers are command handlers; use command position to invoke them"
+            "handlers stand in for commands; use command position to invoke them"
                 .to_string(),
         ),
         TypeErrorKind::BuiltinNotFirstClass { name } => {
@@ -860,10 +861,19 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         // The remedy is the shape's own, and the shape's own is where the
         // spawn-time refusal reads it too.
         TypeErrorKind::ExecArgNotText {
-            command, refused, ..
-        } => Some(refused.remedy(command)),
-        TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
-            Some(detail.to_string())
+            command, refused, handled, ..
+        } => {
+            let mut hint = refused.remedy(command);
+            if *handled {
+                write!(
+                    hint,
+                    " `{command}` has a handler here, but a handler stands in for the command \
+                     `{command}`, which takes only text: pass text, spread a list with \
+                     `...$xs`, or bind `{command}` as a function."
+                )
+                .expect("writing to a string cannot fail");
+            }
+            Some(hint)
         }
         TypeErrorKind::IndexOnLiteral { literal, key } => Some(format!(
             "did you mean to index what a command returns? Force the command first, \
@@ -1060,8 +1070,8 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
              and result types as the rest of the definition"
                 .to_string(),
         ),
-        Reason::AliasParam => Some(
-            "a handler or an alias is invoked as a command, so its one parameter is \
+        Reason::HandlerParam => Some(
+            "a handler is invoked as a command, so its one parameter is \
              the argv: a list of strings. Write the arm `{ |args| … }` and read \
              `$args[0]`, or call the function directly, as in `!{$f 1}`"
                 .to_string(),

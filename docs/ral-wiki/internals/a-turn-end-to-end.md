@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-verified_at_date: 2026-11-10
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
@@ -125,7 +125,7 @@ module's framed scaffold:
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 - `run_phrases` writes each `let` straight into `shell.env` as its `Define`
-  lands, and a `cd`, `alias`, or hook registration is an unbracketed write
+  lands, and a `cd` or hook registration is an unbracketed write
   straight to `shell.context` — there is no post-run install step, so a
   halted run keeps every write that landed before the halt and the run
   remains a resume point regardless of completion, error, or `exit`

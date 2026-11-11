@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 96e103a5
-verified_at_date: 2026-11-01
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
 anchors: [HandlerStack, lookup, HandlerLookup, HandlerStack::over, natives_and_base, strip_matched, restore_matched, step_exec, BuiltinEntry::framed, render_handler_args, Frame::Unmask, WithinUndo]
 ---
 
@@ -20,13 +20,14 @@ it at the bare head only; `^name`, like a path head, skips the env and the
 handler stack alike and reaches the external command directly
 ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
 
-**The stack has two layers.** Above are the *run frames* pushed by `within` and
-`handle`; below is a permanent *base layer* holding the *base-frame manifest*'s
-rows — `echo` and `detach`, each variadic over a list of strings
+**The stack has two layers.** Above are scoped frames pushed by `within` and
+persistent frames installed by the host between units from rc or manifest
+`handlers:`; below is a permanent *base layer* holding the
+*base-frame manifest*'s rows — `echo` and `detach`, each variadic over a list of strings
 (`HandlerStack::over`, over the rows `natives_and_base` selects). Permanence is representational:
-the mutators (`strip_matched`, `remove_alias`) index the run frames alone, so no
-operation can name a base frame. The base layer never crosses the wire — the
-wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs
+the mutators index the run frames alone, so no stack mutation removes a base
+frame. No statement or builtin value mutates persistent frames.
+The base layer never crosses the wire — the wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs
 its own.
 
 **Lookup is per-name first, catch-all last.** `HandlerStack::lookup(name)` scans
@@ -45,7 +46,7 @@ Rust body never self-forwards (`step_exec`'s `Base` arm). A user frame therefore
 that reaches an outer handler.
 
 **The calling convention is fixed by surface position, not value shape.** A
-per-name entry (and every alias) takes one parameter, the command's argument
+per-name entry takes one parameter, the command's argument
 list, as `{ |args| … }` does; a catch-all takes two, the name and the argument
 list, as `{ |name args| … }` does. That list is a `List String` — `machine::render_handler_args` renders
 every element through the total `to-string` as it packs the argv, so an arm
@@ -55,7 +56,11 @@ Dispatch invokes the matched entry under the convention its install site demands
 rather than inspecting the stored value; an arm whose type takes other
 parameters, or a value that is no block, is refused where it is written and
 again at install (`docs/SPEC.md` §9.4), so no
-malformed entry ever reaches lookup.
+malformed entry ever reaches lookup. Install-time `arm_stands_in` returns only
+a verdict: no handler scheme is persisted or shipped. The checker imports
+handled names for diagnostics alone; Σ and lexical bindings determine the
+head's type and argument gate, with the external gate for every non-base
+command name even when handled.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of
 the matched handler's body, `strip_matched(depth)` lifts *only that frame* off

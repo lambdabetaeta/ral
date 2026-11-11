@@ -1,7 +1,3 @@
----
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
----
-
 # The type system: Hindley–Milner with rows
 
 ral is typed by Hindley–Milner inference with let-polymorphism, run over the
@@ -97,9 +93,11 @@ not a restriction on declarative type formation. Grades are atomic — a grade
 variable binds only to `p` or `w` — so there is no occurs check or kind. Grades
 have ranks but are not weak scheme entries.
 
-Every external command is `F^w Unit`. Head classification in
-`core/src/typecheck/generate/call.rs` follows the runtime's lookup order:
-a binding, a value builtin, an arm standing in for a head, or an external.
+Every external command is `F^w Unit`. **A head's type and argument gate depend
+only on Σ and lexical bindings.** The checker classifies a head as a binding,
+a value builtin, a base frame or an external. A base frame takes its own
+scheme and in-shell gate; every other command name takes the external gate,
+even when handled. The handler stack supplies diagnostic names only.
 
 ## One coercion, at `let`
 
@@ -154,17 +152,35 @@ value is its final stage's, always
 
 ## An arm stands in for what it is
 
-`standsFor(c)` is the scheme of the base frame or arm already in force under
-`c`, and `[String] → Command` for anything else (`Generator::arm`). An
-arm for `curl` therefore has a command's value, its output; an arm for `detach`
-returns what `detach` returns. A `()`-returning stub for an external is admitted
-when its grade is free and captures `""`; the installed scheme has the head's producer
-kind, so a call through the arm types as the head does. A mismatch is
-`Reason::StandsIn`, with a sentence naming what the arm stands in for and what
-to write. The catch-all `handler:` stands in for every command in its block. The
-checker at the literal arm and the run-time vet at install (`alias_arm_scheme`,
-`catch_all_stands_in`) apply the same rule (`Generator::arm`). Its parameters
-are its slot's, and are read off its type, never its spelling (SPEC §17.7).
+`standsFor(c)` reads Σ alone: its base-frame scheme for `c`, or
+`[String] → Command` for anything else. An arm for `curl` therefore has a
+command's value, its output; an arm for `detach` returns what `detach` returns.
+A `()`-returning stub for an external is admitted when its grade is free and
+captures `""`. A call through the arm types as its head does; no handler scheme
+is persisted. A mismatch is `Reason::StandsIn`, naming the stand-in and what to
+write. The catch-all `handler:` stands in for every command in its block.
+`stands_in` is the sole arm-to-head relation: scoped arms, the catch-all and
+rc/manifest `handlers:` reach it in the unit holding their IR. Contract record
+labels select their stand-in; computed-name maps require
+`[String] → Command`, with actual names judged at installation. The run-time
+vet (`arm_stands_in`) yields only a verdict. Arms imported through `use`
+retain their module's sites and still rely on that installation check. An arm's
+parameters are its slot's, read off its type, never its spelling (SPEC §17.7).
+
+## A return contract is a use, not an elaboration rule
+
+**Infer the structure, settle its elaboration, then hold its result live.**
+Like ML signature matching, a return contract may fix weak variables, but
+never chooses a `let` mode or call split. The settled phase cannot open a
+hole. Only afterwards do gates and scratch-only nested tables close the unit,
+and readback freeze sites, schemes and readmissions.
+
+A declared table is consulted field by field, not unified as a record type.
+Its live equations therefore reach decoder admission sites: returning decoded
+`5` under `umask:` is refused at the decode, naming the use requiring text.
+Final keyset checks and scratch judgement of fields revealed after the live
+walk require neither repeated inference nor a fixpoint
+([[internals/type-inference|type inference]]).
 
 ## Branching is HM over thunks, joined by grade
 

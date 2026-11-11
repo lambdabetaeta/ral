@@ -11,7 +11,9 @@ use crate::ty::{CompTy, CompTyNode, Kind, Label, RefusedArg, Row, Ty, TyNode};
 pub enum Standing {
     /// A command the program does not define: the arm's value is its output.
     Command(String),
-    /// A base frame ral itself provides: the arm returns what that returns.
+    /// A computed name: held to the external-command obligation.
+    Computed,
+    /// A base frame in Σ: the arm returns what that returns.
     Own(String),
     /// The catch-all `handler:`, for every command in its extent.
     EveryCommand,
@@ -55,7 +57,7 @@ pub enum Reason {
     RecordPattern,
     Argument,
     /// A named arm against the one parameter its slot hands it, the argv.
-    AliasParam,
+    HandlerParam,
     /// The catch-all against its two parameters, the name and the argv.
     CatchAllParams,
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
@@ -349,14 +351,8 @@ pub enum TypeErrorKind {
         command: String,
         ty: Ty,
         refused: RefusedArg,
-    },
-    /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
-    MalformedAlias {
-        detail: &'static str,
-    },
-    /// The elaborated IR for an `unalias name` statement has the wrong shape.
-    MalformedUnalias {
-        detail: &'static str,
+        /// Whether a handler was in scope at the written bare head.
+        handled: bool,
     },
     /// An index on a literal, `'x'[f]`: it binds to that word alone, so this
     /// is `cmd 'x'[f]` meant as `!{cmd 'x'}[f]`.  Both spelled as written.
@@ -478,8 +474,6 @@ impl TypeErrorKind {
             Self::HandlerNotFirstClass { .. } => "T0041",
             Self::BuiltinNotFirstClass { .. } => "T0042",
             Self::BuiltinArity { .. } => "T0050",
-            Self::MalformedAlias { .. } => "T0052",
-            Self::MalformedUnalias { .. } => "T0053",
             Self::DecoderTakesNoArgument { .. } => "T0054",
             Self::SpreadIntoApplication { .. } => "T0056",
             Self::ExecArgNotText { .. } => "T0057",

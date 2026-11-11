@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40987f49313cf2a1d643b0402b6e4fe0553b0919
-generated_at_date: 2026-11-06
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -97,7 +97,7 @@ base, and then no history).
 
 The `repl` installer's recipe (`startup::engine::repl_runtime` and `repl_root`)
 boots the REPL surface — the batch surface plus the [[map/repl/plugins|`_ed-*`
-builtins and the plugin load builtins]] and the `_external-editor` builtin
+editor builtins]] and the `_external-editor` builtin
 ([[map/repl/frontend|frontend]]) — through `boot_shell`, so the typechecker and
 the runtime see one surface by construction; then exit hints, the
 interactive flag, `$TERMINAL`, the `external-editor` session hook, and the boot
@@ -120,33 +120,44 @@ The rc returns a configuration record, or `()` to leave the defaults. An
 `exit N` in the rc ends the session with status N; any other failure is
 reported and the boot goes on. The rc goes through `shell::load::evaluate_source`,
 compiled against the live session and the `FileId` its text is registered
-with, so an alias or function it defines keeps naming the rc for the whole
-session. It compiles under a **return contract**
+with, so a function or persistent handler it supplies keeps naming the rc
+for the whole session. It compiles under a **return contract**
 (`ral_core::typecheck::ReturnContract`): `contract::declared(Form::Rc)`, whose
 closed keyset the rc's own returned *row* is held to — the same rule
 `within`/`grant` options get, extended to a program's own return value. It is
-the inferred row and not the syntax that produced it, so a key misspelled
-inside a spread is caught with one written out; a return carrying no row (a
-`Map`) meets the same keyset in `RcPlan::decode` instead. A file that does
+the inferred type and not the syntax that produced it, so a key misspelled
+inside a spread is caught with one written out, and a known `Map` return is
+statically refused. A file that does
 not compile — a parse or type error, a broken contract among the latter — is
 *reported and skipped*: `errfmt::report_failed_load` prints the caret report
 its `Error::uncompiled` carries ([[map/core/diagnostics|diagnostics]]), then
 names the file `skipped, since it does not compile`, as against `sourcing
 stopped at the error above` for one that failed partway; the boot always survives, the
 whole rc unapplied rather than only the offending key. A *computed* rc return
-(a bound variable, a call) is invisible to the contract and stays on
-`RcPlan::decode`, which meets the same keyset and field types, reading the
-shell only, and refuses the whole rc on an unknown key, a malformed value, an
-unknown theme key, a prompt or startup block `vet_hook` rejects, or an alias
-`HandlerEntry::vet` rejects (a non-function under `aliases:` is pointed at
+(a bound variable, a call) is checked through its inferred type; only unresolved
+types fall back to runtime validation. `RcPlan::decode` validates the resulting
+value against the same keyset and field types, reading the shell only, and
+refuses the whole rc on an unknown key, a malformed value, an
+unknown theme key, a prompt or startup block `vet_hook` rejects, or a handler
+`HandlerEntry::vet` rejects (a non-function under `handlers:` is pointed at
 `bindings:`); only then does `RcPlan::apply` commit, with no refusal left
 (a plugin that fails to load is reported and skipped, an `exit` propagates). An rc `startup` block registers as
 the `Session/"startup"` hook, and the host dispatches it as a hook run under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak.
 
 The rc's `env:` sets environment entries only; lexical values belong under
-`bindings:`. `umask:` takes one to four octal digits as a string, at most
-`0777`, and sets the process mask before plugins load. `limits:` validates
+`bindings:`. Persistent command handlers come from its `handlers:` field,
+installed by the host after the rc unit has run and been validated.
+No statement or builtin value changes persistent frames;
+interactive helpers use `let`, scoped interception uses `within [handlers: …]`.
+Install-time arm checking yields only a verdict, not a stored handler scheme.
+The next unit imports handled names for diagnostics; its head types and gates
+come only from Σ and lexical bindings.
+
+The rc `plugins:` map is the only plugin-loading entry point. Plugins load
+at startup; adding one requires a new session.
+
+`umask:` takes one to four octal digits as a string, at most `0777`, and sets the process mask before plugins load. `limits:` validates
 `open-files`, `core-bytes`, and `stack-bytes` against ral's hard limits, then
 stores child soft limits without changing ral's own limits. Grant limits
 apply after these session limits and win. Both keys are refused on Windows.
@@ -257,7 +268,7 @@ and completion live in
   render print together through `prompt_fault`, when they differ from the last
   render's, and the session survives so the user can rebind it.
 - `config.rs` — the rc's thirteen keys (`env`, `prompt` — registered as the
-  `Session/"prompt"` hook — `bindings`, `aliases`, `edit-mode`, `bell`,
+  `Session/"prompt"` hook — `bindings`, `handlers`, `edit-mode`, `bell`,
   `surface`, `recursion-limit`, `plugins`, `startup`, `theme`, `umask`, `limits`) are declared
   once, in `Form::Rc`'s table, and `RcPlan::decode` judges them all engine-side,
   inside the boot builtin, before `RcPlan::apply` commits to the shell and the

@@ -28,7 +28,8 @@ pub(crate) use self::unify::Unifier;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use self::generalize::has_result_only_var;
 pub(crate) use self::generalize::{instantiate, reseed_weak};
-use self::generate::{Generator, call::Arm};
+use self::generate::Generator;
+pub(crate) use self::generate::call::Arm;
 use self::readback::Readback;
 use self::solve::Solver;
 use crate::ir::{Comp, Phrase, Toplevel, Val};
@@ -54,16 +55,17 @@ pub type ReturnContract = &'static Table;
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
     pub(crate) bindings: Vec<(String, Option<Closed>)>,
-    pub(crate) aliases: Vec<(String, Closed)>,
+    /// Installed handler names, used only to word diagnostics.
+    pub(crate) handled: Vec<String>,
     pub(crate) builtins: Manifest,
 }
 
 impl SessionSchemes {
-    /// No bindings, no aliases: only Σ.
+    /// No bindings or handled names: only Σ.
     pub fn new(builtins: Manifest) -> Self {
         Self {
             bindings: Vec::new(),
-            aliases: Vec::new(),
+            handled: Vec::new(),
             builtins,
         }
     }
@@ -91,7 +93,7 @@ fn seeded_generator(schemes: SessionSchemes) -> Generator {
 /// Exit the inference region before generalising, and export only after closure.
 fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Vec<TypeError>> {
     let scheme = generator.solver.generalise(&Ty::thunk(cty));
-    let solution = generator.solver.close()?;
+    let solution = generator.solver.settle().close()?;
     Ok(solution.settle(Arc::new(scheme)))
 }
 
@@ -122,10 +124,19 @@ pub fn typecheck(
 ) -> Result<Toplevel, Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
     let (pending, tail) = generator.phrases(phrases);
-    let solution = generator.solver.close()?;
-    if let Some(table) = contract {
-        contract::ascribe(&solution, phrases.last(), tail, table)?;
+    let mut settled = generator.solver.settle();
+    if !settled.has_errors()
+        && let Some(table) = contract
+    {
+        contract::ascribe(
+            &mut settled,
+            &generator.env.builtins,
+            phrases.last(),
+            tail,
+            table,
+        );
     }
+    let solution = settled.close()?;
     Ok(
         Readback::new(&solution, UnitId::fresh(), generator.synth_counter)
             .toplevel(&pending, &generator.residual_uses),
@@ -153,37 +164,18 @@ pub fn bake_prelude(phrases: &[Spanned<Phrase<()>>], manifest: &Manifest) -> Top
     }
 }
 
-/// The scheme for a handler arm, computed by `HandlerEntry::vet` at install
-/// and persisted only on alias frames, which outlive their run: the arm rule
-/// ([`Generator::arm`]) over the closure's comp, closed against its
-/// own unifier so a later run's check can be seeded with it.
+/// Decide whether an arm stands in for its command, without exporting a scheme.
 ///
 /// # Errors
-/// The arm takes other than the argv, or produces other than its head.
-pub(crate) fn alias_arm_scheme(
-    head: &str,
-    arm: &Arc<Comp>,
-    schemes: SessionSchemes,
-) -> Result<Closed, Vec<TypeError>> {
-    let mut generator = seeded_generator(schemes);
-    let (cty, _) =
-        generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::Named(head), None));
-    close_thunk_scheme(generator, cty)
-}
-
-/// The computed catch-all's vet — `within [handler: $k]` — by the arm rule,
-/// closed against its own unifier; no scheme persists, a catch-all frame not
-/// outliving its run.
-///
-/// # Errors
-/// The catch-all takes other than the name and the argv, or is no command.
-pub(crate) fn catch_all_stands_in(
-    arm: &Arc<Comp>,
+/// The arm takes other than its parameters, or produces other than its head.
+pub(crate) fn arm_stands_in(
+    arm: Arm<'_>,
+    comp: &Arc<Comp>,
     schemes: SessionSchemes,
 ) -> Result<(), Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
-    generator.region(|this| this.arm(&Val::thunk(Arc::clone(arm)), Arm::CatchAll, None));
-    generator.solver.close().map(drop)
+    generator.region(|this| this.arm(&Val::thunk(Arc::clone(comp)), arm, None));
+    generator.solver.settle().close().map(drop)
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`):

@@ -44,8 +44,9 @@ pub enum Convention {
     /// first-class as `$name`: the row seeds the base env scope as a
     /// `Value::Native`.
     Value,
-    /// An argv, so the row seeds a base handler frame instead: intercepted,
-    /// stacked, reached by `^name`, and never a value.  Typed `List String`,
+    /// An argv base frame: intercepted, stacked, and never a value.
+    /// `^name` bypasses it. The checker reads its scheme directly from Σ.
+    /// Typed `List String`,
     /// an argv's elements crossing rendered — though the body is handed the
     /// values themselves, and renders what it writes (`echo`) or vets what it
     /// launches (`detach`) as its own boundary demands.
@@ -136,6 +137,9 @@ impl Decl {
     }
 
     /// The row's closed type, with a quantified grade on ordinary results.
+    ///
+    /// # Panics
+    /// If a base frame does not declare a ground result payload.
     pub fn scheme(&self) -> &Closed {
         self.scheme.get_or_init(|| {
             /// `body` with a `Value` grade past its arrows made a fresh grade
@@ -153,6 +157,15 @@ impl Decl {
             }
             Binders::close(|binders| {
                 let ty = (self.type_rule)(binders);
+                if self.convention == Convention::Argv {
+                    let TyNode::Thunk(body) = ty.node() else {
+                        panic!("base frame `{}` must declare a thunk", self.name);
+                    };
+                    let mut result = body;
+                    while let CompTyNode::Fun(_, rest) = result.node() { result = rest; }
+                    assert!(matches!(result.node(), CompTyNode::Return(_, payload) if payload.is_ground()),
+                        "base frame `{}` must declare a ground result payload", self.name);
+                }
                 match ty.node() {
                     TyNode::Thunk(body) if !self.is_boundary() => {
                         Ty::thunk(quantified(body, binders))
@@ -222,15 +235,19 @@ impl Manifest {
     }
 
     /// The *value* row for `name`: the half an application and a `$name`
-    /// reference reach.  `None` for a base frame, which command position and
-    /// `^name` reach through the handler stack instead.
+    /// reference reach. `None` for a base frame, reached only in bare command
+    /// position through the handler stack; `^name` bypasses it.
     pub fn value(&self, name: &str) -> Option<&Decl> {
         self.rows()
             .find(|decl| decl.name == name && decl.convention == Convention::Value)
     }
 
-    /// Every base-frame row: what the checker's handler bindings are seeded
-    /// from.
+    /// The base-frame row for `name`, independent of installed handlers.
+    pub(crate) fn base_frame(&self, name: &str) -> Option<&Decl> {
+        self.base_frames().find(|decl| decl.name == name)
+    }
+
+    /// Every base-frame row in Σ.
     pub(crate) fn base_frames(&self) -> impl Iterator<Item = &Decl> {
         self.rows()
             .filter(|decl| decl.convention == Convention::Argv)
@@ -629,20 +646,6 @@ pub mod scheme {
     // Shared by `floor`, `ceil`, and `trunc`.
     scheme!(float_to_int: [Ty::float()] -> Ty::int());
 
-    // ── Aliasing, job control, plugins ───────────────────────────────────
-
-    /// `alias :: String → U(comp) → F Unit`.
-    ///
-    /// The block's computation type is unconstrained; its binder is quantified.
-    pub(crate) fn alias(binders: &mut Binders) -> Ty {
-        let block = binders.comp();
-        thunk(fun(
-            Ty::string(),
-            fun(thunk(CompTy::var(block)), pure(Ty::unit())),
-        ))
-    }
-    scheme!(unalias: [Ty::string()] -> Ty::unit());
-
     scheme!(string_to_unit: [Ty::string()] -> Ty::unit());
 
     // ── Divergence ───────────────────────────────────────────────────────
@@ -687,6 +690,53 @@ pub fn builtin_type_hint(manifest: &Manifest, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "must declare a ground result payload")]
+    fn host_base_frame_cannot_produce_a_quantified_payload() {
+        fn nonground(binders: &mut Binders) -> Ty {
+            thunk(fun(Ty::argv(), pure(Ty::var(binders.ty(Kind::ANY)))))
+        }
+        Decl::new(
+            Cow::Borrowed("host"),
+            Convention::Argv,
+            nonground,
+            "",
+            false,
+        )
+        .scheme();
+    }
+
+    #[test]
+    fn base_frame_unit_result_instantiates_at_independent_grades() {
+        fn unit(_: &mut Binders) -> Ty {
+            thunk(fun(Ty::argv(), pure(Ty::unit())))
+        }
+        let decl = Decl::new(Cow::Borrowed("host"), Convention::Argv, unit, "", false);
+        let mut unifier = super::super::Unifier::new();
+        for grade in [Grade::Value, Grade::Output] {
+            let instance = super::super::instantiate(&mut unifier, decl.scheme());
+            let wanted = thunk(CompTy::arrows([Ty::argv()], CompTy::ret(grade, Ty::unit())));
+            unifier
+                .unify_ty(&instance, &wanted)
+                .expect("independent result grade");
+        }
+    }
+
+    #[test]
+    fn base_frames_accept_ground_record_results() {
+        fn record(_: &mut Binders) -> Ty {
+            thunk(fun(
+                Ty::argv(),
+                pure(closed_record(&[("count", Ty::int())])),
+            ))
+        }
+        let decl = Decl::new(Cow::Borrowed("host"), Convention::Argv, record, "", false);
+        decl.scheme();
+        for frame in crate::HostSurface::default().manifest().base_frames() {
+            frame.scheme();
+        }
+    }
 
     fn set(names: &[&'static str]) -> Arc<[Decl]> {
         names

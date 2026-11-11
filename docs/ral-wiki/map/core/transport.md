@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
 
@@ -29,10 +29,9 @@ new variant fail the build, a field-complete struct literal a new field:
 - *value walks* (`shell/runtime/value/first_order.rs`) match `Value` / `FOValue` exhaustively, once forward and once back;
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
-  its `FrameKind`, so a hydrated alias stays removable by `unalias`; a
-  per-name entry is unary by construction and hydration does not re-check its
-  arity, which the sender's install already validated
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]);
+  its `FrameKind`; a persistent frame remains host-managed. A per-name entry
+  is unary by construction and hydration does not re-check its arity, which the sender's install already validated
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]);
 - *kinds* ride as serde enums (`SerialClosure`, `SpawnGrant`), and *floats* by
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
   into `null`.
@@ -155,9 +154,10 @@ parent closure's `FileId` resolves in the child to the file it named, and
 `terms` is the same `Terms` type the constructor destructures, so a term added
 to it rides or the build fails. A bequest cannot express a hook, and none
 rides.
-`WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame,
-each alias arm with its scheme
-([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+`WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame
+carrying its arms and frame kind, never handler schemes. Lexical bindings still
+carry their schemes; handler names contribute only diagnostic context to the
+next unit's check.
 
 - `EngineSeed::encode(&Bequest)` builds one from a bequest `Shell::bequeath`
   produced — the package both seats take, so an identity fork and a sealed child

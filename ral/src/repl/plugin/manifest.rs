@@ -170,12 +170,12 @@ impl LoadedPlugin {
 }
 
 /// The handler values a manifest parse extracts, which the engine registers
-/// into its hook table and env; `aliases` are also what unload removes.
+/// into its hook table and persistent handler frames.
 #[derive(Debug)]
 pub(super) struct ManifestHandlers {
     pub(super) hooks: Vec<(HookEvent, Value)>,
     pub(super) keybindings: Vec<(String, Value)>,
-    pub(super) aliases: Vec<(String, Value)>,
+    pub(super) handlers: Vec<(String, Value)>,
 }
 
 /// Parse a plugin manifest value into its first-order part plus the handler
@@ -246,11 +246,11 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
             ));
         }
     };
-    let aliases = match map.get("aliases").as_deref() {
-        Some(Value::Map(m)) => parse_aliases(m)?,
+    let handlers = match map.get("handlers").as_deref() {
+        Some(Value::Map(m)) => parse_handlers(m)?,
         Some(other) => {
             return Err(expected_at(
-                vec![DataStep::Field("aliases".into())],
+                vec![DataStep::Field("handlers".into())],
                 other,
                 Expected::Shape(ValueShape::Map),
             ));
@@ -287,7 +287,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
     let handlers = ManifestHandlers {
         hooks,
         keybindings: keybinding_handlers,
-        aliases,
+        handlers,
     };
     Ok((manifest, handlers))
 }
@@ -396,14 +396,14 @@ where
     Ok((out, handlers))
 }
 
-fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
+fn parse_handlers(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
     entries
         .iter()
         .map(|(name, value)| {
             if !matches!(value.as_ref(), Value::Thunk(_)) {
                 return Err(expected_at(
                     vec![
-                        DataStep::Field("aliases".into()),
+                        DataStep::Field("handlers".into()),
                         DataStep::Field(name.into()),
                     ],
                     &value,
@@ -416,6 +416,7 @@ fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
     use ral_core::shell::runtime::Closure;
@@ -472,8 +473,7 @@ mod tests {
     }
 
     /// A key the table does not name is refused with the table's own list —
-    /// the door a manifest arriving from a factory meets, having no row for
-    /// the checker to hold.
+    /// the runtime fallback for a manifest whose row remains unresolved.
     #[test]
     fn unknown_key_names_the_manifests_list() {
         let manifest = Value::map(vec![
@@ -540,6 +540,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn factory_contract_admits_decoded_fields_before_later_effects() {
+        use ral_core::shell::runtime::{Break, Mooring};
+        use ral_core::source::SourceOrigin;
+        use ral_core::typecheck::{Form, contract};
+
+        for (fields, use_text) in [
+            (
+                "name: 'p', handlers: [foo: { |args| return $d }]",
+                "return $d",
+            ),
+            ("name: $d", "name: $d"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("after-decode");
+            let source = format!(
+                "return {{ |options|\nlet d = from-json << '5'\necho ran > {}\nreturn [{fields}]\n}}",
+                ral_core::syntax::quote_word(&ral_core::path::shown(&marker))
+            );
+            let mut shell = ral_core::test_helper::core_shell();
+            let mooring = Mooring::adrift();
+            let factory = ral_core::shell::load::evaluate_source(
+                &mooring,
+                &mut shell,
+                &source,
+                &SourceOrigin::named("plugin.ral"),
+                Some(contract::declared(Form::Manifest)),
+            )
+            .expect("JSON contents must not be inspected at check time");
+            let Err(Break::Error(error)) = ral_core::shell::evaluator::apply(
+                &factory,
+                vec![Value::Map(Map::new())],
+                &mooring,
+                &mut shell,
+            ) else {
+                panic!("the live factory contract must refuse decoded 5: {source}");
+            };
+            assert!(
+                matches!(&error.reason, Reason::Invalid(failure)
+                    if failure.operation == "from-json"
+                        && matches!(failure.cause, InvalidCause::Admission(_))),
+                "{error:?}"
+            );
+            let fact = error.fact(&shell);
+            assert_eq!(fact.site().script.as_ref(), "plugin.ral");
+            assert_eq!(fact.site().line, 2);
+            let witness = error.witness().expect("the contract must name the use");
+            assert!(
+                source[witness.start as usize..witness.end as usize].contains(use_text),
+                "the witness must identify {fields}: {error:?}"
+            );
+            assert!(!marker.exists(), "nothing after the decoder may run");
+            assert!(!shell.has_handler("foo"));
+        }
+    }
+
+    #[test]
+    fn non_block_handler_member_is_a_runtime_decode_error() {
+        let manifest = Value::map(vec![
+            ("name".into(), Value::string("p")),
+            (
+                "handlers".into(),
+                Value::map(vec![("foo".into(), Value::Int(3))]),
+            ),
+        ]);
+        let error = parse(&manifest).unwrap_err();
+        assert_eq!(
+            invalid_reason(&error).path,
+            vec![
+                DataStep::Field("handlers".into()),
+                DataStep::Field("foo".into()),
+            ]
+        );
+        assert_eq!(
+            invalid_reason(&error).cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Closure,
+                found: ral_core::fact::Found::Int(3),
+            })
+        );
+    }
+
     /// A trivial block-shaped `Value::Thunk` handler for well-formed
     /// keybinding entries.
     fn dummy_block() -> Value {
@@ -566,7 +648,7 @@ mod tests {
     fn wrong_typed_fields_are_load_errors() {
         for (field, expected) in [
             ("name", ValueShape::String),
-            ("aliases", ValueShape::Map),
+            ("handlers", ValueShape::Map),
             ("hooks", ValueShape::Map),
             ("keybindings", ValueShape::List),
         ] {

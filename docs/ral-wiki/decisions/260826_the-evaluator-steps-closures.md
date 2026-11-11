@@ -1,6 +1,6 @@
 ---
 status: accepted
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 ---
 
@@ -45,7 +45,7 @@ a different prelude from its host and only the wire hid it.
   rest of its block without a scope push (S5, S11).
 - **One thunk value, and `force` is not a bracket.** `Value::Thunk(Closure)`;
   `force(thunk M) = M` pushes nothing. An unbracketed store write in any body
-  — `cd`, `alias`, a hook registration — persists; `within [dir:]`/`within
+  — `cd`, a hook registration — persists; `within [dir:]`/`within
   [handlers:]` are the scoped forms (S1, S10). Lambda-ness is read off the
   body's shape (`Comp::arrow`), guaranteed by the checker's η-expansion of
   every arrow-typed computation into a thunked λ (S3).

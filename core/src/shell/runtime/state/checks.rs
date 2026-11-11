@@ -224,7 +224,7 @@ impl Shell {
 
     /// Run `f` with `layer` pushed for its dynamic extent.  The single gate
     /// into capability-checked code — `grant { … }` blocks and plugin hook /
-    /// keybinding / alias dispatch all funnel through here.  The push sits on
+    /// keybinding / handler dispatch all funnel through here.  The push sits on
     /// top of the caller's stack, so effective authority is always caller ∩
     /// this layer.
     pub fn with_layer<R>(&mut self, layer: GrantLayer, f: impl FnOnce(&mut Self) -> R) -> R {

@@ -113,7 +113,6 @@ pub(crate) mod engine {
         let mut surface = batch_surface();
         surface.statics.extend([
             crate::repl::ED_BUILTINS,
-            crate::repl::PLUGIN_LOAD_BUILTINS,
             crate::repl::external_editor::BUILTINS,
         ]);
         surface

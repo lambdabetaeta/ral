@@ -1,0 +1,5 @@
+# codes: T0011 T0074
+# status: 1
+# at: 5:25
+# contains: couldn't match
+within [handlers: [inc: { |a| return $[$a[0] + 1] }]] { inc 5 }

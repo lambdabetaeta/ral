@@ -1,8 +1,7 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-verified_at_commit: b1ba0713
-verified_at_date: 2026-11-03
-anchors: [compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed]
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
+anchors: [Solver, Settled, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
 ---
 
 # The compilation ladder: source to typed IR
@@ -82,19 +81,26 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   it does not decide where capture belongs. ([[map/core/typecheck|typecheck]])
 
 A loading form may also hand this rung a `ReturnContract` — one of the
-declared `typecheck::contract::Table`s — and once inference has finished the
-checker ascribes that table's closed keyset to the toplevel's own returned
-type (`contract::ascribe`), in a scratch copy of the unifier, so the table
-never enters inference. The rc's eleven keys, a plugin manifest's four and a
-capability profile's six are vetted with the same spans as the rest of the
-file, and the inferred type is what is checked rather than the syntax that
-built it, so a key misspelled inside a spread is caught with one written out.
-`()` is the empty keyset; a map, a list, a scalar, or (but for a manifest) a
-function is refused with the spelling to use. A program whose return is a
-variable — `from-json` — or a manifest factory's `Thunk` is left to its
-loader's runtime check, which dispatches off the same table.
+declared `typecheck::contract::Table`s. The phase order is **generate on
+`Solver` → settle all remaining elaboration into `Settled` → hold the return
+contract live → close gates, nested tables and errors into `Solution` →
+freeze by readback**. If settling reports errors, the hold is skipped.
+The contract can solve weak types but cannot select a `let` mode or call
+split, or open a hole. Its field and factory equations reach decoder sites
+before they freeze; the declared table is never unified as a record type.
 
-After inference, nested checks and return-contract ascription succeed,
+The rc's thirteen keys, a plugin manifest's four and a capability profile's
+six are judged over inferred types, including fields introduced by spreads.
+The live walk re-reads row tails after each field; final keysets and unseen
+fields are judged afterwards, the latter on scratch without repeated
+inference. Nested tables remain scratch judgements at close, after live
+holds. See [[internals/type-inference|type inference]] for this boundary.
+`()` is the empty keyset; a map, list, scalar, or (but for a manifest) a
+function is refused with the spelling to use. A manifest factory's shape and
+result are held live too. Wholly variable returns and unresolved fields or
+members retain their loader's runtime checks against the same table.
+
+After settling, live return-contract holds and closure succeed,
 `Readback::toplevel` maps the pending tree to the checked `Toplevel`. One
 `UnitId` identifies all site snapshots and the first-use readmissions in
 `Toplevel.admits`. Imported value membranes survive only when their solved
@@ -104,11 +110,20 @@ projections share one group through both phases. An erroneous unit is refused
 whole and its pending IR discarded; one-shot inference sessions also discard
 their pending IR.
 
+Before any phrase runs, `run_phrases` readmits the whole checked `Toplevel`
+against the `Env` supplied for its execution, using the session's fixings.
+This holds in every mode: a loaded file is a unit, whether entered by `use`
+or `load::evaluate_source`. A refusal returns the supplied environment
+unchanged and no defined names; no phrase runs. It names the use that imposed
+the type, with the loaded file's own location and, for `use`, its loader context.
+See [[map/core/evaluator|evaluator]].
+
 Each run's check is seeded from the live session — one `SessionSchemes`, the
-scope's name→scheme map plus the alias arms' schemes — so a binding made in one
-run enters the next run's check at its inferred scheme rather than a fresh
-variable. The evaluator installs each top-level bind's scheme next to its value,
-so the seed never drifts from the values it describes.
+scope's name→scheme map, handled names for diagnostics and the host's manifest.
+A binding made in one run enters the next run's check at its inferred scheme
+rather than a fresh variable. The evaluator installs each top-level bind's
+scheme next to its value. Handler entries carry no schemes: head typing and
+argument gates depend only on Σ and lexical bindings, not the dynamic stack.
 
 The prelude is baked once at build time as a schema-less `postcard` blob of this
 same IR, so any field added to `Comp`, `Val`, or `Pattern` invalidates every

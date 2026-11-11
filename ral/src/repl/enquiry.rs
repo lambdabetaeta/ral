@@ -128,7 +128,6 @@ record!(ClipboardReq {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PluginNote {
     Loaded(Manifest),
-    Unloaded(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,9 +226,6 @@ impl Datum for Enquiry {
             Self::Plugin(PluginNote::Loaded(m)) => {
                 tag(PLUGIN, Some(tag("loaded", Some(m.encode()))))
             }
-            Self::Plugin(PluginNote::Unloaded(name)) => {
-                tag(PLUGIN, Some(tag("unloaded", Some(name.encode()))))
-            }
             Self::Clipboard(req) => tag(CLIPBOARD, Some(req.encode())),
         }
     }
@@ -242,11 +238,10 @@ impl Datum for Enquiry {
             PLUGIN => {
                 let note = carried(label, payload)?;
                 (|| {
-                    const NOTES: &[&str] = &["loaded", "unloaded"];
+                    const NOTES: &[&str] = &["loaded"];
                     let (label, payload) = tagged(note, NOTES)?;
                     match label {
                         "loaded" => datum(label, payload).map(PluginNote::Loaded),
-                        "unloaded" => datum(label, payload).map(PluginNote::Unloaded),
                         _ => Err(unknown(label, NOTES)),
                     }
                 })()
@@ -321,8 +316,6 @@ mod tests {
             let req = Enquiry::Editor(op);
             assert_eq!(Enquiry::decode(&req.clone().encode()), Ok(req));
         }
-        let note = Enquiry::Plugin(PluginNote::Unloaded("p".into()));
-        assert_eq!(Enquiry::decode(&note.clone().encode()), Ok(note));
         let copy = Enquiry::Clipboard(ClipboardReq {
             text: "hi".into(),
             osc52: true,

@@ -249,7 +249,7 @@ impl crate::data::datum::Datum for IllTyped {
 /// What a vetted block was to stand in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockRole {
-    /// A per-command handler (`alias`, `within [handlers: …]`).
+    /// A per-command handler, persistent or scoped by `within [handlers: …]`.
     Handler(String),
     /// `within [handler: …]`, which stands in for every command.
     CatchAll,

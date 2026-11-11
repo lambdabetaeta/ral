@@ -32,7 +32,7 @@ A *grade* says how a computation produces its result, not whether it writes.
   their result grade is `p`: joining with a command must not turn that
   supplied data into `()`.
 - **Fresh grades: other producers.** `return`, primitives, `~`, `capture`,
-  `spawn`, `audit`, and handled `alias`/`unalias` statements; ordinary builtin
+  `spawn` and `audit`; ordinary builtin
   results, except commands, boundaries and already graded results such as
   `fail`, `raise` and `await`; and stdout redirects, `M > f : F^ν A` for `M : F^g A`.
 - Ordinary text/byte decoders (`from-bytes`, `from-string`, `from-line`,

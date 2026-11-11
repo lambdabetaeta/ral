@@ -1,8 +1,7 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-verified_at_date: 2026-11-10
-anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
+anchors: [Generator, Solver, Settled, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
 
 # Type inference: constraints, closure, readback
@@ -41,9 +40,12 @@ verdict from a partially solved type.
   a record slot, a literal position a list, a computed string a map. Reads
   introduce neither suspended matches nor weakness
   ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
-- A bare head resolves as binding, value builtin, handler, external. A binding
-  is required to be a thunk by equation, with named-head provenance for T0072;
-  an unbound `$name` is T0071, never a fresh unknown.
+- A bare head is classified from Σ and lexical bindings alone: binding,
+  value builtin, base frame, external. Base frames keep their own schemes and
+  in-shell gate; every other command name takes the external gate, handled or
+  not. Handled-name sets serve diagnostics only. A binding is required to be
+  a thunk by equation, with named-head provenance for T0072; an unbound `$name`
+  is T0071, never a fresh unknown.
 
 ## Two matches choose elaboration
 
@@ -144,31 +146,68 @@ This is the rank formulation of
 
 ## Unit closure precedes every export
 
-A unit is `typecheck` or one of the one-shot sessions `alias_arm_scheme`,
-`catch_all_stands_in`, `binding_value_scheme`. A REPL phrase starts with its
+A unit is `typecheck` or one of the one-shot sessions `arm_stands_in`,
+`binding_value_scheme`. A REPL phrase starts with its
 predecessors' closed schemes.
 
-- Seeding occurs at rank zero from `SessionSchemes`: bindings, alias schemes
-  and the host's builtin `Manifest`. A builtin declaration caches one closed
+- Seeding occurs at rank zero from `SessionSchemes`: binding schemes, handled
+  names for diagnostics and the host's builtin `Manifest`. No handler scheme
+  is persisted or seeded. A builtin declaration caches one closed
   scheme and its curry spine; it never receives the live unifier.
-- A one-shot enters a region before checking its body, exits before
-  generalising a stored scheme, and closes the unit before settlement/export.
-  The catch-all stores no scheme. `Site::scheme` likewise enters its scratch
-  region before instantiating the site.
-- A top-level `Run` introduces no region. `Solver::close` defaults rank zero,
-  checks final-head argv gates and queued nested tables, and attaches `()`
-  notes. It returns a `Solution` only when the unit has no errors, and then
-  every hole is decided; otherwise the errors, sorted stably by source span.
+- A one-shot enters a region before checking its body and closes the unit
+  before returning. A lexical binding's scheme is generalised after region
+  exit and settled only after successful closure. An install-time arm check
+  exports only a verdict, never a scheme.
+  `Site::scheme` likewise enters its scratch region before instantiating the site.
+- A top-level `Run` introduces no region. `Solver::settle` closes rank zero
+  and yields `Settled`: every elaboration match has retired, including on
+  refusal. Every mode and split is fixed.
+- Unless settling reported errors, the return contract is held live on
+  `Settled`, using the manifest for stand-ins. It can equate and resolve types,
+  instantiate schemes, mint fresh types, queue nested tables and diagnose;
+  it cannot open a hole or enter a region. A contract is a use of the returned
+  value, never a choice of elaboration.
+- `Settled::close` then judges final-head argv gates and queued nested tables,
+  attaches `()` notes and returns a `Solution` only without errors; otherwise
+  the errors, sorted stably by source span.
 - A `Solution` is read-only: decisions (`mode`, `splits`), resolution, sites,
-  settlement and a `scratch` copy of the store. A return contract is ascribed
-  only after successful closure, on a scratch copy; no table enters the
-  solution.
-- Gates refuse known `Unit` at in-shell argv boundaries and the declared
-  refused shapes at OS argv boundaries. A still-free head remains a runtime
-  question; spread elements are not statically gated. The runtime distinction
+  settlement and scratch judgements. Readback freezes its sites, schemes and
+  readmissions only after the live holds and close succeed.
+- Gates refuse known `Unit` at base-frame argv boundaries and the declared
+  refused shapes at external heads, including handled ones. An external gate
+  retains whether its head was handled where written, so its diagnostic can
+  explain why a handler does not widen admission. A still-free head remains
+  a runtime question; spread elements are not statically gated. The runtime distinction
   for arbitrary handlers is documented in `docs/SPEC.md` §6.6, not closed by
   this inference architecture.
 - A unit with errors is discarded before readback or scheme export.
+
+## A return contract holds live after settling
+
+**Generate → settle → hold → close → freeze is one inference, not a loop.**
+A table is consulted key by key, never unified as a record type.
+
+- `Held::Unify` uses `equate_held`, as written options do. Factory shape and
+  result equations also propagate through the live solver. Their solutions
+  reach decoder sites, schemes, readmissions and final argv gates.
+- The rc's and manifest's `handlers:` use `Holds::Arms`/`Held::Arms`.
+  `stands_in` is the sole arm-to-head relation for these fields, scoped arms
+  and the catch-all. Record labels select Σ's stand-in; computed-name maps
+  hold their value type to `[String] → Command`. Install-time checking still
+  judges each actual name. Imported arms retain their module's sites.
+- The walk re-reads each row's tail after every field. After all live holds,
+  unknown, missing and refused keys are judged on the final types. Each
+  walked row is re-read to its final tail; fields the walk did not hold are
+  judged on scratch, without repeating a live clash or its weak-variable note.
+- Contract equations introduce ground types apart from fresh variables used
+  once. Base-frame result payloads must be ground (their grades may quantify).
+  A field revealed in a row already left therefore has no variable needing
+  solving: the final scratch judgement suffices, without repeated inference.
+- Nested tables are queued, then checked on scratch at close against the
+  final live types. They do not feed equations back into inference.
+- A wholly variable tail remains a runtime question: decoded data contains
+  no thunk. Unresolved field and member types likewise retain runtime checks.
+  Written tails use field spans; computed tails use the tail phrase's span.
 
 ## Readback fixes terms and sites
 

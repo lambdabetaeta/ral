@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c485695114d984277a516d253ba847ad19ef185d
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 generated_at_date: 2026-11-11
 covers_paths: [core/src/error.rs, core/src/fact/error.rs, core/src/fact/error/, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
@@ -191,7 +191,7 @@ module, rc or profile prints, at every door, the report its own run as a script
 would. Otherwise it takes `compact_root: Option<FileId>` — `Some(root)` when
 the input compiled to a single command, carrying that input's own id — and
 renders compact only when the error's span is absent or names `root`. A single
-command that dispatches into an rc alias, a `use`d function or a lambda from an
+command that dispatches into an rc handler, a `use`d function or a lambda from an
 earlier run faults in text the user cannot see, so it gets the caret.
 
 The shell's own stderr lines sit below the renderer, in

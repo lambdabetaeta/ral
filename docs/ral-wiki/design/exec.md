@@ -20,7 +20,8 @@ computations, which *do* ([[related/call-by-push-value|Levy]]). The principle
 says what the doing consists of.
 
 - **The effect signature has one operation, `exec`.** A bare name that no
-  binding or handler claims is an open name for it
+  value binding or base frame declares is an open name for it, whether or not
+  a user handler reinterprets it
   ([[design/name-resolution|name-resolution]]).
 - **The rest of the language does not touch the world on its own account.**
   `$name` dereferences a binding; a value never runs; bindings, the prelude
@@ -125,9 +126,13 @@ receives the rendered argument list, `List String`; the catch-all receives the
 name as well. The arm stands in for the command it replaces, so its type is
 `List String → Command` unless a base frame fixes another
 ([[design/effects-handlers|effects-handlers]]). While the arm runs its frame
-is masked, so a same-name call inside it reaches the next frame or the OS. No
-process starts for the handled call itself, and audit records only the
-externals the arm runs.
+is masked, so a same-name call inside it reaches the next frame or the OS.
+The head's type and argument gate come from Σ and lexical bindings alone:
+a base frame keeps its in-shell gate, and every other command name keeps the
+external gate. A handler cannot widen that gate; `ls [1, 2]` is refused even
+when `ls` is handled. The checker imports handled names for diagnostics, not
+arm schemes. No process starts for the handled call itself, and audit records
+only the externals the arm runs.
 
 ## Inputs
 
@@ -137,8 +142,8 @@ externals the arm runs.
   globbed or re-lexed, at the call or in captured output
   ([[design/words|words]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-- **Values that are not words are refused at the boundary**: `()`, a list, a
-  map or record, a block, a handle, bytes. One declaration (`RefusedArg`) is
+- **Values that are not words are refused at an external name, handled or not**:
+  `()`, a list, a map or record, a block, a handle, bytes. One declaration (`RefusedArg`) is
   read by the checker on concrete types and again by `prepare`, through
   `check_argv`, on the values, so the two refusals speak one language ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - **Arguments play no part in authority.** An admitted program runs with any

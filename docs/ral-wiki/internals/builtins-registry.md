@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c4856951
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 verified_at_date: 2026-11-11
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
@@ -86,13 +86,16 @@ sibling helpers.
 core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
 they seed through the same two installs, so a host contributes natives as well
-as base frames: the REPL's `_ed-*` family and `load-plugin`/`unload-plugin`
-are natives; `detach` is a base frame where the host installs it. Two core-implemented entries
+as base frames: the REPL's `_ed-*` family are natives; `detach` is a base frame where the host installs it. Two core-implemented entries
 register this way too — `WATCH_BUILTIN` and `DETACH_BUILTIN`, each a public
 one-entry wrapper over a private body — so a host whose streams are capture
 buffers can omit `watch`, and a host that offers no survivors can omit `detach`
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|builtins]]).
+
+Plugins load only from the rc's `plugins:` map at startup, not through
+builtin values. Their handlers live for the session; adding a plugin requires
+a new session.
 
 Why these primitives exist and how the set is shaped is
 [[design/builtins|builtins]]; which layer any given capability lands in is

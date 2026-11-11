@@ -1,7 +1,3 @@
----
-generated_at_commit: f2a121e8
----
-
 # Call-by-push-value: values and commands
 
 **ral's organising principle is the call-by-push-value separation of *values*
@@ -30,7 +26,7 @@ source — never arises, and neither do the escaping bugs that follow from it.
 
 The parameterised block `{ |x| M }` is the language's single abstraction
 mechanism. It subsumes what conventional shells splinter across functions,
-aliases, `eval`, subshells, and trap handlers: a block can be bound, passed,
+command interceptors, `eval`, subshells, and trap handlers: a block can be bound, passed,
 returned, or installed as an effect handler. Currying desugars to nested
 name-binding lambdas, followed by pattern binds for destructuring parameters,
 so partial and under-application are uniform. Later parameters shadow earlier

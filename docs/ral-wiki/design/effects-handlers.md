@@ -9,12 +9,12 @@ ral takes the smallest on both: a restricted, continuation-free fragment.
 ral installs effect handlers over a dynamic frame stack with
 `within [handlers: [name: handler], handler: fallback] { body }`. A handler maps
 an operation name to a lambda; the catch-all `handler:` applies when no per-name
-entry matches. Handlers intercept **external commands only**, and only at the
-*bare* head — lexical bindings, builtins, and the prelude are not shell aliases
-and cannot be overridden, and `^name`, like a path head, skips the handler
+entry matches. Handlers intercept **command names**, including base frames,
+only at the *bare* head — lexical bindings, native values, and the prelude cannot be
+overridden, and `^name`, like a path head, skips the handler
 stack too and reaches the external binary directly.
 
-A per-name handler (and every alias) must be a **function of one parameter**,
+A per-name handler must be a **function of one parameter**,
 such as `{ |args| … }`, applied to the intercepted command's argument list;
 the catch-all must be a **function of two**, such as `{ |name args| … }`,
 applied to the command's name and its argument list. The calling convention
@@ -25,16 +25,22 @@ install.
 
 **A handler reinterprets an operation; it cannot re-declare its type.** An arm
 stands in for the head it is installed under: its type is that of the base
-frame or arm already in force there, and `List String → Command` for any other
-command. So an arm for `curl`, per-name or under the catch-all, has a command's
-value, its output, and a fresh-grade `()`-returning stub is admitted and captures `""`
-when called under `let`; an
-arm for `detach` returns what `detach` returns. The command
-world is argv in, bytes out, uniformly. A value-returning, variable-arity
-command is therefore not expressible; that capability belongs to the value
-world instead, as a binding of fixed arity taking a list —
-`let f = { |xs| … }; f [a, b, c]`. A name is a value or it is handled; if it is handled, it is a command, and a command's value is its output
+frame declared by Σ there, and `List String → Command` for any other
+command. Its argument gate is likewise the head's: in-shell for a base frame,
+external otherwise, even when handled. Σ and lexical bindings alone determine
+call typing; handler names affect diagnostics only. No arm scheme is persisted.
+An arm for `curl`, per-name or under the catch-all, has a command's value,
+its output. A fresh-grade `()`-returning stub is admitted and captures `""`
+when called under `let`; an arm for `detach` returns what `detach` returns.
+A user handler cannot introduce a value-returning, variable-arity command.
+That capability belongs to the value world instead, as a binding of fixed
+arity taking a list — `let f = { |xs| … }; f [a, b, c]`
 ([[design/capture|grades and capture]]).
+
+Persistent handlers are installed by the host between units from the rc's or
+manifest's `handlers:` field. Scoped handlers use `within`;
+interactive functions use `let`. No statement or builtin value installs or
+removes a persistent handler.
 
 ral's handlers are the **tail-resumptive fragment** of algebraic-effect handlers,
 along three axes — the first two recorded in

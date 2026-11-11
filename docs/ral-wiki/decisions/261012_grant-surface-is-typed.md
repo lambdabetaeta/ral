@@ -1,11 +1,21 @@
 ---
 status: active
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-verified_at_date: 2026-10-25
-anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, drain_nested]
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
+anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, check_nested, Solver::settle, Settled::close]
 ---
+
+> **Amended 2026-11-11 — Return-contract order.** Generate on `Solver`,
+> settle all remaining elaboration into `Settled`, hold the return contract
+> live, close gates, queued nested tables and errors into `Solution`, then
+> freeze by readback. The contract solves types but cannot select a `let`
+> mode or call split or open a hole; its equations reach decoder sites before
+> freezing. Nested tables remain scratch-only judgements of the final live
+> types at close (`contract::check_nested`), after return-contract holds,
+> not before as recorded below. See
+> [[decisions/260930_a-table-never-enters-the-unifier|the contract amendment]].
 
 > **Amended 2026-11-02** by
 > [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
@@ -258,7 +268,7 @@ named.
     `typecheck`** (`contract::drain_nested`), after the pending labels settle
     and before the contract ascription, in a scratch unifier, against the type
     as it then stands. Deferring makes the check independent of statement
-    order. The one-shot sessions (`alias_arm_scheme`, `binding_value_scheme`,
+    order. The one-shot sessions (handler-arm checking, `binding_value_scheme`,
     `catch_all_stands_in`) re-infer bodies `typecheck` already accepted and
     drop their queue unread.
   - **The check never constrains.** A `Shaped` value constrains a bound
@@ -484,7 +494,8 @@ Findings, in order:
 `authority::grant::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
 `shell::grant` (`decode_capability_map`, `Shell::decode_grant`, `Shell::freeze_ctx`),
 `authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`),
-`typecheck::contract` (`Holds`, `drain_nested`). See [[design/grant|grant]],
+`typecheck::contract` (`Holds`, `check_nested`),
+`typecheck::solve` (`Solver::settle`, `Settled::close`). See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],
 [[design/two-enforcers|two-enforcers]] and `docs/SPEC.md` §12.
 

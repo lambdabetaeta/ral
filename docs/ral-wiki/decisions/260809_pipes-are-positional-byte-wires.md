@@ -143,7 +143,7 @@ value in one step — and no live code unifies a route against a detached
     return type: couldn't match Unit with Integer
   ```
 
-- **`pin_arm_to_head`**, which unifies a handler or alias arm's route against
+- **`pin_arm_to_head`**, which unifies a handler arm's route against
   the head it reinterprets. **This one did not enforce the pairing, and that
   was a live bug at HEAD.** It pinned the bare route and discarded the arm's
   value type in the same motion, so an arm whose own route was still an open
@@ -194,7 +194,7 @@ Superseded with it, as consequences of the same collapse:
   no second engine to disagree with.
 - The IR pipespec annotation, whose
   per-stage `Wire` is the annotation this page's single `final_route` replaces.
-- The alias-head-defines-its-modes rule,
+- The handler-head-defines-its-modes rule,
   whose "fresh head defines its own modes, known head constrains the arm" rule
   is restated above as a route pin, not a mode pair pin — with the WF-2
   obligation it was missing.

@@ -358,7 +358,7 @@ below is this page's own rewrite):
 
 ## Open questions
 
-- Should aliases eventually get a parallel lease policy over removable
+- Should persistent handlers eventually get a parallel lease policy over removable
   handler frames?
 
 Resolved, 260705:

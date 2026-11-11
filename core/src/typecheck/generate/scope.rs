@@ -4,14 +4,14 @@ use super::Generator;
 use super::call::Arm;
 use crate::ir::{Comp, CompKind, FieldsNode, HandlerArmV, Val};
 use crate::source::{Span, Spanned, WithSpan};
-use crate::ty::{CompTy, Scheme, Site, Ty};
+use crate::ty::{CompTy, Site, Ty};
 use crate::typecheck::builtins::audit_record;
 use crate::typecheck::contract::{Form, Held, Holds, Key, NestedCheck, Table, declared};
-use crate::typecheck::env::{HandlerOrigin, Inferring};
+use crate::typecheck::env::Inferring;
 use crate::typecheck::error::{Reason, TypeErrorKind};
 use std::sync::Arc;
 
-type HandlerBindings = (Vec<(String, Scheme)>, Option<Vec<HandlerArmV<Inferring>>>);
+type HandlerBindings = (Vec<String>, Option<Vec<HandlerArmV<Inferring>>>);
 
 impl Generator {
     fn check_options(
@@ -80,11 +80,12 @@ impl Generator {
             }
             Held::Nested(sub) => {
                 let pos = *self.span_slot();
-                self.solver.nested(NestedCheck {
+                self.solver.nested(NestedCheck::Table {
                     key: key.label,
                     table: sub,
                     ty: found,
                     pos,
+                    written: None,
                 });
             }
             Held::Refuse(advice) => self.solver.diagnose(TypeErrorKind::RefusedKey {
@@ -92,6 +93,7 @@ impl Generator {
                 key: key.label,
                 advice,
             }),
+            Held::Arms => unreachable!("arm collections belong to return contracts"),
             Held::Nothing => {}
         }
         node
@@ -102,10 +104,10 @@ impl Generator {
         let nodes = arms.map(|arms| {
             arms.iter()
                 .map(|arm| {
-                    let (scheme, value) = self.with_span(arm.value.span, |this| {
+                    let value = self.with_span(arm.value.span, |this| {
                         this.install_arm(&arm.value.item, &arm.name, arm.value.span)
                     });
-                    bindings.push((arm.name.clone(), scheme));
+                    bindings.push(arm.name.clone());
                     HandlerArmV {
                         name: arm.name.clone(),
                         value: Spanned::with_span(arm.value.span, value),
@@ -125,8 +127,8 @@ impl Generator {
         let opts = self.check_options(opts, declared(Form::Within));
         let (bindings, handlers) = self.handler_bindings(handlers);
         let (cty, body) = self.scope(|this| {
-            for (name, scheme) in bindings {
-                this.env.bind_handler(name, scheme, HandlerOrigin::Within);
+            for name in bindings {
+                this.env.bind_handler(name);
             }
             this.scope_body(body)
         });
@@ -224,7 +226,7 @@ mod tests {
     use super::*;
     use crate::ir::{Argv, CommandName, CommandWord, Pattern, Redirects};
     use crate::source::FileId;
-    use crate::ty::{CompTyNode, Grade, UnitId};
+    use crate::ty::{CompTyNode, Grade, Scheme, UnitId};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::generate::tests::{assert_solved_comp, assert_solved_type, solved};
     use crate::typecheck::readback::{Readback, exec_node};
@@ -463,13 +465,7 @@ mod tests {
     #[test]
     fn within_installs_named_arms_only_for_its_body_and_keeps_arm_spans() {
         let mut generator = generator();
-        let original = Arc::new(Scheme::mono(Ty::thunk(CompTy::arrows(
-            [Ty::argv()],
-            CompTy::pure(Ty::int()),
-        ))));
-        generator
-            .env
-            .bind_handler("tool".into(), Arc::clone(&original), HandlerOrigin::Alias);
+        generator.env.bind_handler("outer".into());
         let arms = [HandlerArmV {
             name: "tool".into(),
             value: Spanned::new(
@@ -478,7 +474,7 @@ mod tests {
                     2,
                     CompKind::Lam {
                         param: "args".into(),
-                        body: Arc::new(node(3, CompKind::Return(Val::Int(1)))),
+                        body: Arc::new(command(3, "tool")),
                     },
                 )),
             ),
@@ -496,12 +492,11 @@ mod tests {
             panic!("named arms preserved")
         };
         assert_eq!(arms[0].value.span, Some(at(1)));
-        let outer = generator.env.lookup_handler("tool").unwrap();
-        assert!(Arc::ptr_eq(&outer.scheme, &original));
-        assert!(outer.origin == HandlerOrigin::Alias);
+        assert!(generator.env.is_handled("outer"));
+        assert!(!generator.env.is_handled("tool"));
         assert!(generator.env.lookup_binding("args").is_none());
         let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_comp(&cty), CompTy::pure(Ty::int()));
+        assert_eq!(solution.resolve_comp(&cty), CompTy::command());
     }
 
     #[test]

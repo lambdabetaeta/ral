@@ -1021,7 +1021,7 @@ fn parse_newline_separates_statements_in_block_inside_record() {
 
 #[test]
 fn parse_if_else_blocks_across_newline_with_explicit_else() {
-    let src = "return [aliases: [ls: { |args| if $is-mac { echo a }\nelse { echo b } }]]";
+    let src = "return [handlers: [ls: { |args| if $is-mac { echo a }\nelse { echo b } }]]";
     let ast = unwrap_stmts(parse(src).unwrap());
     let Ast::Return(Some(val)) = &ast[0] else {
         panic!("expected return");
@@ -1030,15 +1030,16 @@ fn parse_if_else_blocks_across_newline_with_explicit_else() {
         panic!("expected record");
     };
     let RecordEntry::Field {
-        value: aliases_val, ..
+        value: handlers_val,
+        ..
     } = &entries[0]
     else {
-        panic!("expected aliases entry");
+        panic!("expected handlers entry");
     };
-    let Ast::Record(alias_entries) = &aliases_val.item else {
-        panic!("expected aliases record");
+    let Ast::Record(handler_entries) = &handlers_val.item else {
+        panic!("expected handlers record");
     };
-    let RecordEntry::Field { value: ls_val, .. } = &alias_entries[0] else {
+    let RecordEntry::Field { value: ls_val, .. } = &handler_entries[0] else {
         panic!("expected ls entry");
     };
     let Ast::Lambda { body, .. } = &ls_val.item else {

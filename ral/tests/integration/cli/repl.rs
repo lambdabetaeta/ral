@@ -174,15 +174,14 @@ fn rc_bad_value_in_a_decoded_rc_fails_the_whole_file() {
 }
 
 /// A plugin named by the rc is loaded before the first prompt, its manifest's
-/// alias is dispatchable as a command, and `unload-plugin` removes exactly the
-/// bindings that plugin installed.
+/// handler is dispatchable as a command.
 #[test]
-fn rc_plugin_installs_an_alias_and_unload_removes_it() {
+fn rc_plugin_installs_a_handler() {
     let plug = tempfile::tempdir().unwrap();
     let manifest = plug.path().join("greeter.ral");
     std::fs::write(
         &manifest,
-        "return { |options| return [name: 'greeter', aliases: [hail: { |args| echo hail-from-plugin }]] }",
+        "return { |options| return [name: 'greeter', handlers: [hail: { |args| echo hail-from-plugin }]] }",
     )
     .unwrap();
     let (_dir, env) = rc_home(&format!(
@@ -190,23 +189,19 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
         manifest.display()
     ));
 
-    let out = repl(&["-i"], &env, "hail\nunload-plugin greeter\nhail\n");
+    let out = repl(&["-i"], &env, "hail\n");
     assert_eq!(
         out.stdout.matches("hail-from-plugin").count(),
         1,
-        "the alias runs before the unload and not after: {}",
-        out.stdout
-    );
-    assert!(
-        out.stderr.contains("hail: command not found"),
-        "unload must take the alias with it: {}",
+        "the startup handler runs: {}{}",
+        out.stdout,
         out.stderr
     );
 }
 
 /// A factory made by application is a block of function type, not a written
-/// lambda, and its alias calls a helper the plugin's discarded scope held:
-/// both load, the alias vetted against what its own closure captured.
+/// lambda, and its handler calls a helper the plugin's discarded scope held:
+/// both load, the handler vetted against what its own closure captured.
 #[test]
 fn a_plugin_made_by_application_loads() {
     let plug = tempfile::tempdir().unwrap();
@@ -214,7 +209,7 @@ fn a_plugin_made_by_application_loads() {
     std::fs::write(
         &manifest,
         "let greet = { |word args| echo $word ...$args }\n\
-         let make = { |word options| return [name: 'greeter', aliases: [hail: { greet $word }]] }\n\
+         let make = { |word options| return [name: 'greeter', handlers: [hail: { greet $word }]] }\n\
          let factory = make hail-from-plugin\n\
          return $factory\n",
     )
@@ -226,7 +221,7 @@ fn a_plugin_made_by_application_loads() {
     let out = repl(&["-i"], &env, "hail there\n");
     assert!(
         out.stdout.contains("hail-from-plugin there"),
-        "the made plugin loads and its alias runs: {}{}",
+        "the made plugin loads and its handler runs: {}{}",
         out.stdout,
         out.stderr
     );
@@ -238,12 +233,12 @@ fn a_plugin_made_by_application_loads() {
 #[test]
 fn rc_plugins_take_differently_shaped_options() {
     let plug = tempfile::tempdir().unwrap();
-    for alias in ["ping-alpha", "ping-beta"] {
+    for handler in ["ping-alpha", "ping-beta"] {
         std::fs::write(
-            plug.path().join(format!("{alias}.ral")),
+            plug.path().join(format!("{handler}.ral")),
             format!(
-                "return {{ |options| return [name: '{alias}', \
-                 aliases: [{alias}: {{ |args| echo {alias} }}]] }}"
+                "return {{ |options| return [name: '{handler}', \
+                 handlers: [{handler}: {{ |args| echo {handler} }}]] }}"
             ),
         )
         .unwrap();
@@ -268,64 +263,98 @@ fn rc_plugins_take_differently_shaped_options() {
     );
 }
 
-// ── The head pin admits `Value Unit ⊑ Bytes` ────────────────────────────────
+// ── Contract arms stand in for their heads ────────────────────────────────
 
-/// An alias body ending in a value-routed, `Unit`-returning builtin (`cd`)
-/// installs under a fresh name with no trailing byte-write: the head pin
-/// (`pin_arm_to_head`) now shares the arm-join's subsumption instance,
-/// `Value Unit ⊑ Bytes`, rather than demanding the arm write a byte itself.
+/// A handler body ending in `cd` checks and installs without a trailing write:
+/// its fresh-grade `Unit` result unifies with `Command`.
 #[test]
-fn an_alias_ending_in_cd_installs_with_no_trailing_write() {
-    let (dir, env) = rc_home("return [aliases: [gohome: { |args| cd ~ }]]");
+fn a_handler_ending_in_cd_installs_with_no_trailing_write() {
+    let (dir, env) = rc_home("return [handlers: [gohome: { |args| cd ~ }]]");
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("alias 'gohome'"),
-        "an alias ending in `cd` must install; stderr was:\n{}",
-        out.stderr
-    );
-    assert!(
         marker.exists(),
-        "the alias must actually have run `cd ~`, landing `touch` in the home directory"
+        "the handler must actually have run `cd ~`, landing `touch` in the home directory; stderr:\n{}",
+        out.stderr
     );
     drop(dir);
 }
 
-/// The same, where the arm is an `if` whose branches are *both* ground
-/// `Value` (so the join lands on the value side, per `conclude_value_side`)
-/// before the whole arm pins to the head's `Bytes` route.
+/// An `if` with `cd` in both branches also has a fresh-grade `Unit` result
+/// that unifies with `Command`.
 #[test]
-fn an_alias_whose_if_join_is_all_value_still_installs() {
+fn a_handler_whose_if_join_is_all_value_still_installs() {
     let (dir, env) = rc_home(
-        "return [aliases: [gohome: { |args| \
+        "return [handlers: [gohome: { |args| \
              if !{is-empty $args} { cd ~ } else { cd ~ } }]]",
     );
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
-        !out.stderr.contains("alias 'gohome'"),
-        "an if/else of two `cd`s must install; stderr was:\n{}",
-        out.stderr
-    );
-    assert!(
         marker.exists(),
-        "the alias must actually have run `cd ~`, landing `touch` in the home directory"
+        "the handler must actually have run `cd ~`, landing `touch` in the home directory; stderr:\n{}",
+        out.stderr
     );
     drop(dir);
 }
 
-/// An arm that genuinely returns a payload — a `String`, under a head with
-/// no prior handler — is still rejected: the subsumption only ever admits
-/// `Value Unit`, never a value that survives to the boundary.
+/// An arm returning a `String` under an external head is refused by the rc's
+/// check, before even its first phrase runs, not by handler installation.
 #[test]
-fn an_alias_returning_a_string_is_still_rejected() {
-    let (_dir, env) = rc_home("return [aliases: [greet: { |args| \"hi\" }]]");
+fn a_handler_returning_a_string_is_still_rejected() {
+    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [greet: { |args| \"hi\" }]]");
     let out = repl(&["-i"], &env, "echo ok\n");
     assert!(
-        out.stderr.contains("alias 'greet'") && out.stderr.contains("String"),
+        out.stderr
+            .contains("an arm for `greet` stands in for a command")
+            && out.stderr.contains("String")
+            && out.stderr.contains("skipped, since it does not compile"),
         "a value-returning arm over a fresh name must still fail; stderr was:\n{}",
         out.stderr
     );
+    assert!(!out.stdout.contains("must-not-run"), "{out:?}");
+    assert!(out.stdout.contains("ok"), "{out:?}");
+}
+
+#[test]
+fn a_written_non_block_rc_handler_is_refused_before_sourcing() {
+    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [greet: 3]]");
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("skipped, since it does not compile"),
+        "{out:?}"
+    );
+    assert!(out.stderr.contains("greet: 3"), "{out:?}");
+    assert!(!out.stderr.contains("not a function"), "{out:?}");
+    assert!(!out.stdout.contains("must-not-run"), "{out:?}");
+    assert!(out.stdout.contains("alive"), "{out:?}");
+}
+
+#[test]
+fn written_factory_handlers_are_refused_before_the_plugin_runs() {
+    for arm in ["3", "{ |args| return 5 }"] {
+        let plug = tempfile::tempdir().unwrap();
+        let path = plug.path().join("plugin.ral");
+        std::fs::write(
+            &path,
+            format!(
+                "echo must-not-run\nreturn {{ |options| return [name: 'p', handlers: [greet: {arm}]] }}"
+            ),
+        )
+        .unwrap();
+        let (_dir, env) = rc_home(&format!(
+            "let plugin = return {}; return [plugins: [$plugin: [:]]]",
+            ral_core::syntax::quote_word(&ral_core::path::shown(&path))
+        ));
+        let out = repl(&["-i"], &env, "echo alive\n");
+        assert!(
+            out.stderr.contains("skipped, since it does not compile"),
+            "{arm}: {out:?}"
+        );
+        assert!(out.stderr.contains(&format!("greet: {arm}")), "{out:?}");
+        assert!(!out.stdout.contains("must-not-run"), "{out:?}");
+        assert!(out.stdout.contains("alive"), "{out:?}");
+    }
 }
 
 // ── `-s` beats `-i` ────────────────────────────────────────────────────────

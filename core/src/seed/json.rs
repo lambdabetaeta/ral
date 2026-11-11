@@ -42,7 +42,7 @@ pub(crate) struct RawSerialBinding {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct RawWireHandlerFrame {
-    entries: Vec<(String, RawSerialValue, Option<Arc<Scheme>>)>,
+    entries: Vec<(String, RawSerialValue)>,
     catch_all: Option<RawSerialValue>,
     kind: FrameKind,
 }
@@ -144,20 +144,14 @@ impl RawWireHandlerFrame {
             catch_all: None,
             kind: self.kind,
         };
-        for (index, (name, value, scheme)) in self.entries.iter().enumerate() {
-            let at = |error: DecodeFailure, slot: usize| {
+        for (index, (name, value)) in self.entries.iter().enumerate() {
+            let value = validate_value(value).map_err(|error| {
                 error
-                    .index(slot.into())
+                    .index(1usize.into())
                     .index(index.into())
                     .field("entries")
-            };
-            let scheme = scheme
-                .as_ref()
-                .map(close)
-                .transpose()
-                .map_err(|error| at(error, 2))?;
-            let value = validate_value(value).map_err(|error| at(error, 1))?;
-            frame.entries.push((name.clone(), value, scheme));
+            })?;
+            frame.entries.push((name.clone(), value));
         }
         frame.catch_all = self
             .catch_all
@@ -174,7 +168,7 @@ impl RawWireHandlerFrame {
                 .entries
                 .iter()
                 .enumerate()
-                .map(|(index, (name, value, scheme))| {
+                .map(|(index, (name, value))| {
                     Ok((
                         name.clone(),
                         encode_value(value).map_err(|error| {
@@ -183,7 +177,6 @@ impl RawWireHandlerFrame {
                                 .index(index.into())
                                 .field("entries")
                         })?,
-                        scheme.as_ref().map(raw_scheme),
                     ))
                 })
                 .collect::<Result<_, JsonEncodeFailure>>()?,

@@ -239,14 +239,7 @@ impl Generator {
     }
 
     pub(super) fn statement(&mut self, comp: &Comp) -> (CompTy, Comp<Inferring>) {
-        let (cty, node) = if let Some(item) = self.handler_statement(comp) {
-            (
-                self.produces(Ty::unit()),
-                Spanned::with_span(comp.span, item),
-            )
-        } else {
-            self.comp(comp)
-        };
+        let (cty, node) = self.comp(comp);
         self.force_discarded_shape(comp, &cty);
         (cty, node)
     }
@@ -518,7 +511,10 @@ mod tests {
     use crate::typecheck::solve::{Mode, Solution};
 
     pub(super) fn solved(solver: Solver) -> Solution {
-        solver.close().unwrap_or_else(|errors| panic!("{errors:?}"))
+        solver
+            .settle()
+            .close()
+            .unwrap_or_else(|errors| panic!("{errors:?}"))
     }
 
     pub(super) fn assert_solved_type(store: &Unifier, actual: &Ty, expected: &Ty) {

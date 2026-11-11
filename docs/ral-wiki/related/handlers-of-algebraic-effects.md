@@ -1,6 +1,6 @@
 ---
-verified_at_commit: d9abfb52
-verified_at_date: 2026-09-11
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
 against: [design/effects-handlers, design/exec, design/pipelines]
 ---
 
@@ -61,8 +61,8 @@ primary.
   equations** (the world validates none), every clause set is trivially a
   model, so a handler is an ordinary runtime lambda — a per-name clause unary
   over the argv, a catch-all binary
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]) —
-  installed for a scope by `within` or persistently by `handle`
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]) —
+  installed for a scope by `within` or persistently by the host
   ([[decisions/260622_functions-and-handlers|functions-and-handlers]]), in a
   single language where thunks are first-class values rather than the
   obstruction their two-calculus split works around.

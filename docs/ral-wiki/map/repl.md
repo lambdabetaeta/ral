@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-generated_at_date: 2026-11-01
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [ral/src/]
 ---
 
@@ -55,10 +55,10 @@ REPL makes that state the thing the loop threads.
   highlight table (`ral/src/repl/frontend*`, `external_editor.rs`,
   `completion.rs`, `complete.rs`, `cursor.rs`, `highlight_style.rs`).
 - [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins,
-  the plugin load builtins, and the one ordered keybinding router
+  startup loading from the rc `plugins:` map, and the one ordered keybinding router
   (chord, guard, first match, built-in tail) every frontend dispatches
-  through; hooks and aliases live engine-side, editor state host-side, and
-  every hook run is a dispatch
+  through; hooks and handlers live engine-side, editor state host-side, and
+  every hook run is a dispatch. A new plugin requires a new session
   (`ral/src/repl/plugin*`, `plugin/ed_builtins.rs`, `plugin/load.rs`,
   `keybinding.rs`).
 

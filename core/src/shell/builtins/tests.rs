@@ -294,20 +294,6 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
         .cause,
         InvalidCause::AddressableRange(_)
     ));
-    for args in [
-        vec![],
-        vec![Value::Int(1), Value::Unit],
-        vec![Value::string("f"), Value::Unit],
-    ] {
-        let _ = invalid(super::shell::builtin_alias(&args, &mut shell), "alias");
-    }
-    for args in [vec![], vec![Value::Int(1)]] {
-        let _ = invalid(super::shell::builtin_unalias(&args, &mut shell), "unalias");
-    }
-    assert!(
-        matches!(super::shell::builtin_unalias(&[Value::string("not-installed")], &mut shell),
-        Err(Break::Error(crate::Error { reason: Reason::State(f), .. })) if *f == crate::fact::StateFailure::AliasMissing("not-installed".into()))
-    );
     for arg in [Value::string(""), Value::Int(1)] {
         let _ = invalid(super::shell::builtin_chdir(&[arg], &mut shell), "cd");
     }

@@ -108,14 +108,13 @@ variant!(EditorWorkspaceFailure { Io(IoCause): "io", ExpectedRegularFile(EditorW
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginFailure {
     AlreadyLoaded(PluginFailureAlreadyLoaded),
-    NotLoaded(PluginFailureNotLoaded),
     NotFound(PluginFailureNotFound),
     OptionsWithoutFactory(PluginFailureOptionsWithoutFactory),
     FactoryReturnedBlock(PluginFailureFactoryReturnedBlock),
     UnknownHookEvent(PluginFailureUnknownHookEvent),
-    AliasInstallationEscaped(PluginFailureAliasInstallationEscaped),
+    HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped),
 }
-variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotLoaded(PluginFailureNotLoaded): "not-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", FactoryReturnedBlock(PluginFailureFactoryReturnedBlock): "factory-returned-block", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", AliasInstallationEscaped(PluginFailureAliasInstallationEscaped): "alias-installation-escaped" });
+variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", FactoryReturnedBlock(PluginFailureFactoryReturnedBlock): "factory-returned-block", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped): "handler-installation-escaped" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeybindingFailure {
@@ -1018,12 +1017,6 @@ pub struct PluginFailureAlreadyLoaded {
 record!(PluginFailureAlreadyLoaded { name: "name" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginFailureNotLoaded {
-    pub name: String,
-}
-record!(PluginFailureNotLoaded { name: "name" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginFailureNotFound {
     pub requested: String,
 }
@@ -1054,12 +1047,12 @@ record!(PluginFailureUnknownHookEvent {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginFailureAliasInstallationEscaped {
-    pub alias: String,
+pub struct PluginFailureHandlerInstallationEscaped {
+    pub handler: String,
     pub cause: EscapedLoad,
 }
-record!(PluginFailureAliasInstallationEscaped {
-    alias: "alias",
+record!(PluginFailureHandlerInstallationEscaped {
+    handler: "handler",
     cause: "cause"
 });
 
@@ -2174,12 +2167,11 @@ impl PluginFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::AlreadyLoaded(value) => value.describe(),
-            Self::NotLoaded(value) => value.describe(),
             Self::NotFound(value) => value.describe(),
             Self::OptionsWithoutFactory(value) => value.describe(),
             Self::FactoryReturnedBlock(value) => value.describe(),
             Self::UnknownHookEvent(value) => value.describe(),
-            Self::AliasInstallationEscaped(value) => value.describe(),
+            Self::HandlerInstallationEscaped(value) => value.describe(),
         }
     }
 }
@@ -3293,12 +3285,6 @@ impl PluginFailureAlreadyLoaded {
     }
 }
 
-impl PluginFailureNotLoaded {
-    pub fn describe(&self) -> String {
-        format!("plugin '{}' is not loaded", self.name.escape_debug())
-    }
-}
-
 impl PluginFailureNotFound {
     pub fn describe(&self) -> String {
         format!("plugin '{}' was not found", self.requested.escape_debug())
@@ -3329,11 +3315,11 @@ impl PluginFailureUnknownHookEvent {
     }
 }
 
-impl PluginFailureAliasInstallationEscaped {
+impl PluginFailureHandlerInstallationEscaped {
     pub fn describe(&self) -> String {
         format!(
-            "installation of alias '{}' escaped: {}",
-            self.alias.escape_debug(),
+            "installation of handler '{}' escaped: {}",
+            self.handler.escape_debug(),
             self.cause.describe()
         )
     }
@@ -4716,9 +4702,7 @@ impl PluginFailure {
                         .join(", ")
                 )]
             }
-            Self::AlreadyLoaded(_) | Self::NotLoaded(_) | Self::AliasInstallationEscaped(_) => {
-                Vec::new()
-            }
+            Self::AlreadyLoaded(_) | Self::HandlerInstallationEscaped(_) => Vec::new(),
         }
     }
 }

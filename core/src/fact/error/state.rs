@@ -130,14 +130,13 @@ pub enum StateFailure {
     MissingBuiltin(String),
     MissingHook(HookRef),
     HookRegistration(HookRegistrationFailure),
-    AliasMissing(String),
-    AliasConflict(String),
+    HandlerConflict(String),
     NoDesk,
     NoForks,
     NoChildEngines,
     NurseryMissing(Count),
 }
-variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", ModuleCycle(ModuleCycle): "module-cycle", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", AliasMissing(String): "alias-missing", AliasConflict(String): "alias-conflict", NoDesk: "no-desk", NoForks: "no-forks", NoChildEngines: "no-child-engines", NurseryMissing(Count): "nursery-missing" });
+variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", ModuleCycle(ModuleCycle): "module-cycle", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", HandlerConflict(String): "handler-conflict", NoDesk: "no-desk", NoForks: "no-forks", NoChildEngines: "no-child-engines", NurseryMissing(Count): "nursery-missing" });
 
 impl OperationState {
     pub fn describe(&self) -> String {
@@ -291,8 +290,7 @@ impl StateFailure {
             Self::MissingBuiltin(name) => format!("required builtin {name:?} is unavailable"),
             Self::MissingHook(hook) => format!("hook {} is not installed", hook.describe()),
             Self::HookRegistration(cause) => cause.describe(),
-            Self::AliasMissing(name) => format!("alias {name:?} is not installed"),
-            Self::AliasConflict(name) => format!("alias {name:?} is already installed"),
+            Self::HandlerConflict(name) => format!("handler {name:?} is already installed"),
             Self::NoDesk => "this host answers no enquiries".into(),
             Self::NoForks => "this host cannot fork an engine".into(),
             Self::NoChildEngines => "this host provides no child engines".into(),

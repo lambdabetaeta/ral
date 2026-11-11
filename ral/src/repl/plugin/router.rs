@@ -230,7 +230,7 @@ fn guard_allows(guard: Option<&regex::Regex>, line: &str, pos: usize) -> bool {
 /// One dispatch-table entry.  `key` retains the manifest notation for lint
 /// messages; `(plugin, binding_idx)` is the same identity
 /// [`PluginRuntime::resolve_keybinding`](super::PluginRuntime::resolve_keybinding)
-/// re-resolves by name at dispatch time, stale-safe across unloads.
+/// re-resolves by name at dispatch time.
 pub(in crate::repl) struct RouterEntry {
     pub(in crate::repl) plugin: String,
     pub(in crate::repl) binding_idx: usize,

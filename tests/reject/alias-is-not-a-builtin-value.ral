@@ -1,0 +1,5 @@
+# codes: T0071
+# status: 1
+# at: 5:10
+# contains: undefined variable: $alias
+let al = $alias

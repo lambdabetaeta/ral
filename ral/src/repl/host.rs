@@ -365,7 +365,7 @@ mod tests {
         use super::super::plugin::manifest::{KeySpec, Manifest};
         use ral_core::fact::{
             KeyNotationFailure, KeybindingFailure, KeybindingFailureNotation, PluginFailure,
-            PluginFailureAlreadyLoaded, PluginFailureNotLoaded,
+            PluginFailureAlreadyLoaded,
         };
         let host = ReplHost::new(Arc::default());
         let manifest = Manifest {
@@ -385,17 +385,6 @@ mod tests {
             error.reason,
             Reason::Host(Box::new(HostFailure::Ral(RalFailure::Plugin(
                 PluginFailure::AlreadyLoaded(PluginFailureAlreadyLoaded { name: "p".into() })
-            ))))
-        );
-        host.enquire(Enquiry::Plugin(PluginNote::Unloaded("p".into())).encode())
-            .unwrap();
-        let error = host
-            .enquire(Enquiry::Plugin(PluginNote::Unloaded("p".into())).encode())
-            .unwrap_err();
-        assert_eq!(
-            error.reason,
-            Reason::Host(Box::new(HostFailure::Ral(RalFailure::Plugin(
-                PluginFailure::NotLoaded(PluginFailureNotLoaded { name: "p".into() })
             ))))
         );
         let error = host
@@ -420,6 +409,14 @@ mod tests {
                 })
             ))))
         );
-        assert!(super::super::plugin::lock(&host.runtime).plugins.is_empty());
+        assert_eq!(
+            super::super::plugin::lock(&host.runtime)
+                .plugins
+                .iter()
+                .map(|plugin| plugin.name.as_str())
+                .collect::<Vec<_>>(),
+            ["p"],
+            "rejected plugins must leave the successful registration intact"
+        );
     }
 }

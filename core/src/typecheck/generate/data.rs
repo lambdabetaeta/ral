@@ -326,14 +326,14 @@ impl Generator {
                         // Rows are borrowed, not cloned: a cloned row's scheme cache dies with it.
                         None => match self.env.builtins.clone().value(name) {
                             Some(entry) => self.builtin_value(entry, at),
-                            // Base frames are also handlers; name the builtin the user wrote.
+                            // A base frame has no first-class value.
                             None if self.env.builtins.get(name).is_some() => {
                                 self.solver.diagnose(TypeErrorKind::BuiltinNotFirstClass {
                                     name: name.to_string(),
                                 });
                                 (self.solver.fresh_ty(), Val::Unit)
                             }
-                            None if self.env.lookup_handler(name).is_some() => {
+                            None if self.env.is_handled(name) => {
                                 self.solver.diagnose(TypeErrorKind::HandlerNotFirstClass {
                                     name: name.to_string(),
                                 });
@@ -842,11 +842,7 @@ mod tests {
     fn unbound_reads_suggest_values_not_handlers() {
         let mut generator = generator();
         generator.env.bind("result".into(), Scheme::mono(Ty::int()));
-        generator.env.bind_handler(
-            "resalt".into(),
-            Scheme::mono(Ty::unit()),
-            crate::typecheck::env::HandlerOrigin::Alias,
-        );
+        generator.env.bind_handler("resalt".into());
         generator.val(&Val::Variable("reslt".into()), None);
         let errors = generator.solver.refused().1;
         let TypeErrorKind::UnboundVariable { suggestions, .. } = &errors[0].kind else {

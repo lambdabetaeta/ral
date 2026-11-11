@@ -102,7 +102,7 @@ pub(crate) fn module_phrases(
         );
     }
     let frame = ModuleStackFrame::enter(shell, origin.clone());
-    let ran = crate::shell::evaluator::run_phrases(&top.phrases, env, mode, mooring, frame.shell);
+    let ran = crate::shell::evaluator::run_phrases(top, env, mode, mooring, frame.shell);
     drop(frame);
     Ok(ran)
 }

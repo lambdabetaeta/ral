@@ -1435,7 +1435,8 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias curl { |a| echo note; echo body }\nlet x = curl\nreturn $x",
+                "within [handlers: [curl: { |a| echo note; echo body }]] {\n\
+                 let x = curl\nreturn $x\n}",
                 shell,
             )
         });
@@ -1450,8 +1451,8 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo partial; fail 'x' }\n\
-                 let x = boom\nreturn $x",
+                "within [handlers: [boom: { |a| echo partial; fail 'x' }]] {\n\
+                 let x = boom\nreturn $x\n}",
                 shell,
             )
         });
@@ -1466,9 +1467,9 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo partial; fail 'x' }\n\
+                "within [handlers: [boom: { |a| echo partial; fail 'x' }]] {\n\
                  let x = try { return !{ echo in | boom } } { |_| return 'handled' }\n\
-                 return $x",
+                 return $x\n}",
                 shell,
             )
         });
@@ -1481,8 +1482,8 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo cde; fail 'x' }\n\
-                 let x = !{ echo ab; let y = boom; echo z }\nreturn $x",
+                "within [handlers: [boom: { |a| echo cde; fail 'x' }]] {\n\
+                 let x = !{ echo ab; let y = boom; echo z }\nreturn $x\n}",
                 shell,
             )
         });
@@ -1529,7 +1530,8 @@ mod tests {
         let mut shell = new_shell();
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source(
-                "alias boom { |a| echo partial; exit 3 }\nlet x = boom\nreturn $x",
+                "within [handlers: [boom: { |a| echo partial; exit 3 }]] {\n\
+                 let x = boom\nreturn $x\n}",
                 shell,
             )
         });

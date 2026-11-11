@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -31,15 +31,14 @@ fact data are reached through their owning modules.
   parameter patterns. `Value::variant` normalises a unit payload to absence.
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
-  A *handler* or alias arm is a block whose type takes its slot's parameters:
-  `HandlerEntry` carries its `HandlerArity` (`Unary` for a per-name arm or
-  alias, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
+  A *handler* arm is a block whose type takes its slot's parameters:
+  `HandlerEntry` carries its `HandlerArity` (`Unary` for a per-name arm, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
   every install boundary refuses a value that is no block (`arm_closure`) or
-  whose type takes other parameters (`alias_arm_scheme`, `catch_all_stands_in`,
+  whose type takes other parameters (`arm_stands_in`,
   inferred over the closure's own capture by `Shell::closure_schemes`), which
   it refuses as one `InvalidCause::IllTyped` fact (role and every checker
   diagnostic) — the calling convention is never inferred from the runtime shape
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
 - `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
   shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
   one match on a head with one `remedy` each. Rendering an argv inside the shell
@@ -87,10 +86,10 @@ fact data are reached through their owning modules.
   references copies only the touched node — the whole array up to `SMALL`,
   a path past it — and copying a node clones every `Binding` stored inline in
   it. Each such clone is cheap, whatever the binding holds: `Binding.scheme`
-  sits behind an `Arc`, and the value copies no payload (above). An alias's
-  `HandlerEntry.scheme` is shared the same way, so `binding_schemes` and
-  `alias_schemes` hand the next run's check the very `Arc`s the scope holds;
-  only the wire form keeps its own type and converts at its boundary.
+  sits behind an `Arc`, and the value copies no payload (above).
+  `binding_schemes` hands the next run's check those same `Arc`s.
+  Handler entries carry no schemes: `handled_names` supplies diagnostic names
+  only. Their install check yields a verdict, not a type to persist.
   `signature.rs` — `Signature`, Σ: the natives and the frozen prelude, one
   per `Shell`, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env,
   sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
@@ -135,7 +134,7 @@ field name *is* the invariant — joined by `Shell`
 `env` (ρ, the session environment, extended by every `Define` that lands),
 `sig` (Σ — natives and the frozen prelude, `Arc<Signature>`, one per shell,
 never checkpointed since nothing but boot and the one prelude bake ever
-writes it) and `context` (dynamic context — `cd`, aliases) — three
+writes it) and `context` (dynamic context — `cd`, handlers) — three
 flat fields, since a step's focus carries its own environment and there is no
 ambient `scope` for a bundle to snapshot — plus `Io`, `SessionState`, and
 `LocalState` below. `Shell::run_under` checkpoints and rolls back the `(env,
@@ -440,11 +439,15 @@ caller's `&Mooring` is passed along, so the body observes the caller's audit
 trail, byte sinks, builtin table, cancel scope, and terminal lease without any
 of them being copied — there is no second store to drift from the first.
 Block and lambda entry are uniform: an unbracketed store write in either
-body (`cd`, `alias`, a hook registration) persists to the caller, no snapshot
+body (`cd`, a hook registration) persists to the caller, no snapshot
 standing between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);
 `within [dir:]` is the working directory's local-state handler, undoing a `cd`
-in its body, and `within [handlers:]` the scoped form for handlers
+in its body, and `within [handlers:]` the scoped form for handlers. Persistent
+handlers come only from host installation between units, through rc and
+manifest `handlers:` and `Shell::install_handler` /
+`vet_handler` / `remove_handler_frame`; no statement or builtin
+value changes persistent frames
 ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 
 The owned-`Shell` modes *are* genuine runtime forks — a different store — and are

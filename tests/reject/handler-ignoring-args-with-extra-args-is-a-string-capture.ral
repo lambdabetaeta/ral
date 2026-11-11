@@ -1,0 +1,5 @@
+# codes: T0074
+# status: 1
+# at: 5:90
+# contains: but a number (Int or Float) is needed
+let r = !{ within [handlers: [greet: { |args| echo hi }]] { greet extra args } }; return $[$r + 0]

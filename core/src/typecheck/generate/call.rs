@@ -1,7 +1,6 @@
 //! Calls, argv boundaries and handler arms.
 
 use super::Generator;
-use crate::data::Str;
 use crate::ir::{
     Argv, CommandName, CommandWord, Comp, CompKind, Exec, Redirects, ThunkNode, Val, ValListElem,
 };
@@ -9,16 +8,17 @@ use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, CompTyNode, Scheme, Ty, TyNode};
 use crate::typecheck::builtins::{BuiltinDiagnostic, Decl, Manifest};
 use crate::typecheck::contract::catch_all_shape;
-use crate::typecheck::env::{HandlerBinding, HandlerOrigin, Inferring, Membrane};
-use crate::typecheck::error::{Reason, SpreadHead, Standing, TypeErrorKind};
+use crate::typecheck::env::{Inferring, Membrane};
+use crate::typecheck::error::{Reason, SpreadHead, TypeErrorKind};
 use crate::typecheck::readback::{self, exec_node};
 use crate::typecheck::solve::{ArgvBoundary, CallHole};
 use crate::typecheck::unify::WeakSource;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
-pub(in crate::typecheck) enum Arm<'a> {
+pub(crate) enum Arm<'a> {
     Named(&'a str),
+    Computed,
     CatchAll,
 }
 
@@ -44,129 +44,11 @@ fn in_source_order<T>(mut generated: Vec<(usize, T)>) -> Vec<T> {
 enum HeadClass<'m> {
     Binding(Arc<Scheme>),
     Value(&'m Decl),
-    Arm(HandlerBinding),
+    BaseFrame(&'m Decl),
     External,
 }
 
-/// A call of a bare name, as `exec_comp_ty` dispatches on it.
-fn bare_call(comp: &Comp) -> Option<(&str, &Exec)> {
-    let CompKind::Exec(exec) = &comp.item else {
-        return None;
-    };
-    let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
-        return None;
-    };
-    Some((head.as_ref(), exec))
-}
-
-/// The elaborator's IR shape for `alias name { body }` and `unalias name`,
-/// which bind and unbind a handler scheme for the statements after them.
-enum HandlerStatement<'a> {
-    Alias {
-        head: &'a CommandWord,
-        name: Spanned<&'a Str>,
-        block: &'a Spanned<Val>,
-    },
-    Unalias {
-        head: &'a CommandWord,
-        name: Spanned<&'a Str>,
-    },
-}
-
-impl<'a> HandlerStatement<'a> {
-    /// `Ok(None)` when `comp` is neither statement; `Err` when it is one,
-    /// malformed.
-    fn of(comp: &'a Comp) -> Result<Option<Self>, TypeErrorKind> {
-        let Some((head, exec)) = bare_call(comp) else {
-            return Ok(None);
-        };
-        if !matches!(head, "alias" | "unalias") {
-            return Ok(None);
-        }
-        let malformed = |detail| match head {
-            "alias" => TypeErrorKind::MalformedAlias { detail },
-            _ => TypeErrorKind::MalformedUnalias { detail },
-        };
-        if !exec.redirects.is_empty() {
-            return Err(malformed("redirects are not allowed here"));
-        }
-        if exec
-            .argv
-            .iter()
-            .any(|slot| matches!(slot, ValListElem::Spread(_)))
-        {
-            return Err(malformed("spread arguments are not allowed here"));
-        }
-        match (head, &exec.argv[..]) {
-            (
-                "alias",
-                [
-                    ValListElem::Single(Spanned {
-                        item: Val::String(name),
-                        span,
-                    }),
-                    ValListElem::Single(block),
-                ],
-            ) if matches!(block.item, Val::Thunk(_)) => Ok(Some(Self::Alias {
-                head: &exec.head,
-                name: Spanned::with_span(*span, name),
-                block,
-            })),
-            ("alias", _) => Err(malformed("expected `alias name { body }`")),
-            (
-                _,
-                [
-                    ValListElem::Single(Spanned {
-                        item: Val::String(name),
-                        span,
-                    }),
-                ],
-            ) => Ok(Some(Self::Unalias {
-                head: &exec.head,
-                name: Spanned::with_span(*span, name),
-            })),
-            _ => Err(malformed("expected `unalias name`")),
-        }
-    }
-}
-
 impl Generator {
-    pub(in crate::typecheck) fn handler_statement(
-        &mut self,
-        comp: &Comp,
-    ) -> Option<CompKind<Inferring>> {
-        self.with_span(comp.span, |this| match HandlerStatement::of(comp) {
-            Ok(Some(HandlerStatement::Alias { head, name, block })) => {
-                let (scheme, arm) = this.install_arm(&block.item, name.item.as_str(), block.span);
-                this.env
-                    .bind_handler(name.item.to_string(), scheme, HandlerOrigin::Alias);
-                let argv = vec![
-                    ValListElem::Single(Spanned::with_span(
-                        name.span,
-                        Val::String(name.item.clone()),
-                    )),
-                    ValListElem::Single(Spanned::with_span(block.span, arm)),
-                ]
-                .into();
-                Some(exec_node(head, argv, Redirects::default(), None))
-            }
-            Ok(Some(HandlerStatement::Unalias { head, name })) => {
-                this.env.unbind_removable_handler(name.item.as_str());
-                let argv = vec![ValListElem::Single(Spanned::with_span(
-                    name.span,
-                    Val::String(name.item.clone()),
-                ))]
-                .into();
-                Some(exec_node(head, argv, Redirects::default(), None))
-            }
-            Ok(None) => None,
-            Err(kind) => {
-                this.solver.diagnose(kind);
-                Some(CompKind::Return(Val::Unit))
-            }
-        })
-    }
-
     pub(in crate::typecheck) fn app(
         &mut self,
         head: &Comp,
@@ -384,7 +266,7 @@ impl Generator {
             }
             CommandWord::External(name)
             | CommandWord::Name(name @ (CommandName::Path(_) | CommandName::TildePath(_))) => {
-                let (cty, argv) = self.external_exec_comp_ty(&name.written(), &exec.argv);
+                let (cty, argv) = self.external_exec_comp_ty(&name.written(), &exec.argv, false);
                 (cty, exec_node(&exec.head, argv, redirects, None))
             }
         };
@@ -464,12 +346,20 @@ impl Generator {
                     (cty, exec_node(&exec.head, argv, redirects, site))
                 }
             }
-            HeadClass::Arm(handler) => {
-                let (cty, argv) = self.apply_alias_arm(name, &handler.scheme, &exec.argv);
-                (cty, exec_node(&exec.head, argv, redirects, None))
+            HeadClass::BaseFrame(entry) => {
+                let head = self.instantiate_comp(name, entry.scheme());
+                let result = self.solver.fresh_comp();
+                self.solver.equate_comp(
+                    &head,
+                    &CompTy::arrows([Ty::argv()], result.clone()),
+                    Reason::HandlerParam,
+                );
+                let argv = self.argv(&exec.argv, &ArgvBoundary::InShell(name.into()));
+                (result, exec_node(&exec.head, argv, redirects, None))
             }
             HeadClass::External => {
-                let (cty, argv) = self.external_exec_comp_ty(name, &exec.argv);
+                let (cty, argv) =
+                    self.external_exec_comp_ty(name, &exec.argv, self.env.is_handled(name));
                 (cty, exec_node(&exec.head, argv, redirects, None))
             }
         }
@@ -480,46 +370,36 @@ impl Generator {
             HeadClass::Binding(Arc::clone(scheme))
         } else if let Some(entry) = builtins.value(name) {
             HeadClass::Value(entry)
-        } else if let Some(handler) = self.env.lookup_handler(name) {
-            HeadClass::Arm(handler.clone())
+        } else if let Some(entry) = builtins.base_frame(name) {
+            HeadClass::BaseFrame(entry)
         } else {
             HeadClass::External
         }
     }
 
-    fn apply_alias_arm(
+    fn external_exec_comp_ty(
         &mut self,
-        name: &str,
-        scheme: &Scheme,
+        shown: &str,
         argv: &Argv,
+        handled: bool,
     ) -> (CompTy, Argv<Inferring>) {
-        let head = self.instantiate_comp(name, scheme);
-        let result = self.solver.fresh_comp();
-        self.solver.equate_comp(
-            &head,
-            &CompTy::arrows([Ty::argv()], result.clone()),
-            Reason::AliasParam,
-        );
-        let argv = self.argv(argv, ArgvBoundary::InShell(name.into()));
-        (result, argv)
-    }
-
-    fn external_exec_comp_ty(&mut self, shown: &str, argv: &Argv) -> (CompTy, Argv<Inferring>) {
         (
             CompTy::command(),
-            self.argv(argv, ArgvBoundary::Exec(shown.into())),
+            self.argv(
+                argv,
+                &ArgvBoundary::Exec {
+                    command: shown.into(),
+                    handled,
+                },
+            ),
         )
     }
 
     pub(in crate::typecheck) fn argv(
         &mut self,
         argv: &Argv,
-        boundary: ArgvBoundary,
+        boundary: &ArgvBoundary,
     ) -> Argv<Inferring> {
-        let (command, external) = match boundary {
-            ArgvBoundary::Exec(command) => (command, true),
-            ArgvBoundary::InShell(command) => (command, false),
-        };
         let generated = argument_order(argv.iter().map(ValListElem::slot))
             .into_iter()
             .map(|i| {
@@ -529,12 +409,7 @@ impl Generator {
                     let node = Spanned::with_span(arg.span, value);
                     match &argv[i] {
                         ValListElem::Single(_) => {
-                            let boundary = if external {
-                                ArgvBoundary::Exec(command.clone())
-                            } else {
-                                ArgvBoundary::InShell(command.clone())
-                            };
-                            this.solver.gate(&ty, boundary);
+                            this.solver.gate(&ty, boundary.clone());
                             ValListElem::Single(node)
                         }
                         ValListElem::Spread(_) => {
@@ -593,45 +468,25 @@ impl Generator {
             let value = this.solver.fresh_ty();
             let producer = this.produces(value);
             let (wanted, why) = match arm {
-                Arm::Named(_) => (
-                    CompTy::arrows([Ty::argv()], producer.clone()),
-                    Reason::AliasParam,
-                ),
-                Arm::CatchAll => (catch_all_shape(producer.clone()), Reason::CatchAllParams),
+                Arm::Named(_) | Arm::Computed => {
+                    (CompTy::arrows([Ty::argv()], producer), Reason::HandlerParam)
+                }
+                Arm::CatchAll => (catch_all_shape(producer), Reason::CatchAllParams),
             };
-            let (met, node) = match block {
+            let (found, node) = match block {
                 Val::Thunk(body) => {
                     let (met, node) =
                         this.scope(|this| this.check_arm_body(body.shape(), &wanted, why.clone()));
-                    (met, Val::thunk(Arc::new(node)))
+                    let found = if met {
+                        Ty::thunk(wanted)
+                    } else {
+                        this.solver.fresh_ty()
+                    };
+                    (found, Val::thunk(Arc::new(node)))
                 }
-                held => {
-                    let (ty, node) = this.val(held, at);
-                    let got = this.solver.fresh_comp();
-                    let thunk =
-                        this.solver
-                            .equate(&ty, &Ty::thunk(got.clone()), Reason::HandlerArm);
-                    let met = thunk && this.solver.equate_comp(&wanted, &got, why);
-                    (met, node)
-                }
+                held => this.val(held, at),
             };
-            let (head, standing) = this.stands_for(arm);
-            let value = this.solver.fresh_ty();
-            let head_producer = this.produces(value);
-            this.solver.equate_comp(
-                &head,
-                &CompTy::arrows([Ty::argv()], head_producer.clone()),
-                Reason::ReturnShape,
-            );
-            if met {
-                this.solver
-                    .equate_comp(&head_producer, &producer, Reason::StandsIn(standing));
-            }
-            let installed = match arm {
-                Arm::Named(_) => CompTy::arrows([Ty::argv()], head_producer),
-                Arm::CatchAll => catch_all_shape(head_producer),
-            };
-            (installed, node)
+            (this.stands_in(&found, arm), node)
         })
     }
 
@@ -640,30 +495,14 @@ impl Generator {
         block: &Val,
         name: &str,
         at: Option<Span>,
-    ) -> (Scheme, Val<Inferring>) {
-        let (cty, node) = self.with_span(at, |this| {
-            this.region(|this| this.arm(block, Arm::Named(name), at))
-        });
-        (self.solver.generalise(&Ty::thunk(cty)), node)
+    ) -> Val<Inferring> {
+        self.with_span(at, |this| {
+            this.region(|this| this.arm(block, Arm::Named(name), at).1)
+        })
     }
 
-    fn stands_for(&mut self, arm: Arm<'_>) -> (CompTy, Standing) {
-        match arm {
-            Arm::Named(name) => match self.env.lookup_handler(name).cloned() {
-                Some(handler) => (
-                    self.instantiate_comp(name, &handler.scheme),
-                    Standing::Own(name.into()),
-                ),
-                None => (
-                    CompTy::arrows([Ty::argv()], CompTy::command()),
-                    Standing::Command(name.into()),
-                ),
-            },
-            Arm::CatchAll => (
-                CompTy::arrows([Ty::argv()], CompTy::command()),
-                Standing::EveryCommand,
-            ),
-        }
+    pub(in crate::typecheck) fn stands_in(&mut self, found: &Ty, arm: Arm<'_>) -> CompTy {
+        self.solver.stands_in(found, arm, &self.env.builtins)
     }
 }
 
@@ -832,23 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_handler_statement_reports_once_without_touching_the_environment() {
-        let mut generator = generator();
-        let source = bare("alias", Argv::default());
-        assert!(matches!(
-            generator.handler_statement(&source),
-            Some(CompKind::Return(Val::Unit))
-        ));
-        let errors = generator.solver.refused().1;
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0].kind,
-            TypeErrorKind::MalformedAlias { .. }
-        ));
-        assert_eq!(errors[0].pos, Some(at(0)));
-    }
-
-    #[test]
     fn arm_checks_its_slot_before_standing_in_and_installs_at_the_head_after_refusal() {
         let mut generator = generator();
         // This nullary block is refused at the slot, not also for its return value.
@@ -859,7 +681,7 @@ mod tests {
         );
         let (store, errors) = generator.solver.refused();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0].reason, Some(Reason::AliasParam)));
+        assert!(matches!(errors[0].reason, Some(Reason::HandlerParam)));
         assert_solved_comp(
             &store,
             &installed,
@@ -895,83 +717,113 @@ mod tests {
     }
 
     #[test]
-    fn install_arm_generalises_only_after_its_body_region_closes() {
-        use crate::ty::{Binders, Kind};
-        use crate::typecheck::builtins::thunk;
-
+    fn handled_external_keeps_its_gate_and_hint_after_scope_exit() {
         let mut generator = generator();
-        let original = Binders::close(|binders| {
-            let a = Ty::var(binders.ty(Kind::ANY));
-            thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::list(a))))
+        generator.scope(|this| {
+            this.env.bind_handler("tool".into());
+            this.statement(&bare("tool", vec![ValListElem::Single(block(1))].into()));
         });
-        generator.env.bind_handler(
-            "items".into(),
-            Arc::clone(original.scheme()),
-            HandlerOrigin::Within,
+        assert!(!generator.env.is_handled("tool"));
+        let errors = generator
+            .solver
+            .settle()
+            .close()
+            .err()
+            .expect("external gate refusal");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0].kind,
+            TypeErrorKind::ExecArgNotText { handled: true, .. }
+        ));
+        assert!(
+            errors[0]
+                .hint()
+                .unwrap()
+                .contains("`tool` has a handler here")
         );
-        let block = Val::thunk(Arc::new(Spanned::new(
-            at(1),
-            CompKind::Lam {
-                param: "args".into(),
-                body: Arc::new(Spanned::new(at(2), CompKind::Return(Val::list(Vec::new())))),
-            },
-        )));
-        let (stored, _) = generator.install_arm(&block, "items", Some(at(0)));
-        for elem in [Ty::int(), Ty::bool()] {
-            let instance = generator.instantiate_comp("items", &stored);
-            assert!(generator.solver.equate_comp(
-                &instance,
-                &CompTy::arrows([Ty::argv()], CompTy::pure(Ty::list(elem))),
-                Reason::Argument,
+    }
+    #[test]
+    fn forced_and_path_heads_never_report_a_handler() {
+        let heads = [
+            CommandWord::External(CommandName::Bare("tool".into())),
+            CommandWord::Name(CommandName::Path("./tool".into())),
+            CommandWord::Name(CommandName::TildePath(TildePath {
+                suffix: Some("/tool".into()),
+            })),
+        ];
+        for head in heads {
+            let mut generator = generator();
+            for name in ["tool", "./tool", "~/tool"] {
+                generator.env.bind_handler(name.into());
+            }
+            let source = Spanned::new(
+                at(0),
+                exec_node(
+                    &head,
+                    vec![ValListElem::Single(block(1))].into(),
+                    Redirects::default(),
+                    None,
+                ),
+            );
+            generator.statement(&source);
+            let errors = generator
+                .solver
+                .settle()
+                .close()
+                .err()
+                .expect("external gate refusal");
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(
+                errors[0].kind,
+                TypeErrorKind::ExecArgNotText { handled: false, .. }
             ));
+            assert!(!errors[0].hint().unwrap().contains("has a handler here"));
         }
-        solved(generator.solver);
     }
 
     #[test]
-    fn handler_statements_install_and_remove_only_aliases() {
-        let mut generator = generator();
-        let arm = Val::thunk(Arc::new(Spanned::new(
-            at(2),
-            CompKind::Lam {
-                param: "args".into(),
-                body: Arc::new(bare("tool", Argv::default())),
-            },
-        )));
-        let alias = bare(
-            "alias",
-            vec![
-                ValListElem::Single(Spanned::new(at(1), Val::String("tool".into()))),
-                ValListElem::Single(Spanned::new(at(2), arm)),
-            ]
-            .into(),
-        );
-        assert!(matches!(
-            generator.handler_statement(&alias),
-            Some(CompKind::Exec(_))
-        ));
-        assert_eq!(
-            generator
-                .env
-                .lookup_handler("tool")
-                .map(|binding| binding.origin == HandlerOrigin::Alias),
-            Some(true)
-        );
-        let unalias = bare(
-            "unalias",
-            vec![ValListElem::Single(Spanned::new(
-                at(3),
-                Val::String("tool".into()),
-            ))]
-            .into(),
-        );
-        assert!(matches!(
-            generator.handler_statement(&unalias),
-            Some(CompKind::Exec(_))
-        ));
-        assert!(generator.env.lookup_handler("tool").is_none());
-        solved(generator.solver);
+    fn lexical_functions_shadow_value_builtins_and_base_frames() {
+        for name in ["upper", "echo"] {
+            let source =
+                format!("let {name} = {{ |x| return 41 }}; let n = {name} 'x'; return $[$n + 1]");
+            crate::compile::compile_and_typecheck(
+                &source,
+                crate::test_helper::core_schemes(),
+                FileId::DUMMY,
+                None,
+                None,
+            )
+            .unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
+        }
     }
+
+    #[test]
+    fn installing_handlers_does_not_change_command_result_types() {
+        for name in ["echo", "tool"] {
+            for prefix in [
+                String::new(),
+                format!("within [handlers: [{name}: {{ |args| echo ...$args }}]] "),
+            ] {
+                let source = format!("{prefix}{{ let n = {name} 'x'; return $[$n + 1] }}");
+                let errors = crate::compile::compile_and_typecheck(
+                    &source,
+                    crate::test_helper::core_schemes(),
+                    FileId::DUMMY,
+                    None,
+                    None,
+                )
+                .expect_err("command output remains text, not an integer");
+                let crate::compile::CompileError::Types(errors) = errors else {
+                    panic!("{source}: {errors:?}")
+                };
+                assert!(
+                    errors.iter().any(|error| error.kind.code() == "T0074"),
+                    "{source}: {errors:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_session_head_must_be_a_thunk() {
         let bound = |ty: Option<Ty>| {

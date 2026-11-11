@@ -376,18 +376,6 @@ fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
     );
 }
 
-/// `unalias` indexes run frames alone; `detach`'s base frame is not one, so
-/// `unalias detach` refuses as for any name with no alias installed.
-#[test]
-fn unalias_detach_refuses_because_no_run_frame_holds_it() {
-    let mut shell = with_detach();
-    let message = refusal(&mut shell, "unalias detach");
-    assert!(
-        message.contains("is not installed"),
-        "expected a not-installed refusal, got {message:?}"
-    );
-}
-
 /// The single property the whole verb exists for.  The host is a real
 /// process, it is fully gone — waited for, not merely told to leave — and
 /// its survivor is not only alive but still working.

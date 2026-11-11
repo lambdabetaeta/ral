@@ -2,7 +2,7 @@
 //! and a runtime error says where it happened, even when the value that raised
 //! it was compiled by an earlier run.
 //!
-//! An alias, a `use`d function, a lambda bound at the prompt: each is a
+//! A handler, a `use`d function, a lambda bound at the prompt: each is a
 //! live value in the next run, carrying spans the run before it minted.  The
 //! source registry only grows, so those spans still resolve — and the caret
 //! is drawn wherever they point, which is the whole answer when the text is
@@ -21,12 +21,12 @@ fn repl_stderr(rc: &str, args: &[&str], line: &str) -> String {
 /// `boom` at the prompt is one command, but the fault is inside the rc,
 /// so the caret must point there rather than at the compact one-liner.
 #[test]
-fn an_rc_alias_faults_against_the_rc_file() {
-    let rc = "[\n  aliases: [ boom: { |args| fail 'nope' } ]\n]\n";
+fn an_rc_handler_faults_against_the_rc_file() {
+    let rc = "[\n  handlers: [ boom: { |args| fail 'nope' } ]\n]\n";
     let stderr = repl_stderr(rc, &[], "boom\n");
     assert!(
         stderr.contains("ral/rc:2:") && stderr.contains("fail 'nope' }"),
-        "the caret must name the rc file, at the alias body's line; stderr was:\n{stderr}"
+        "the caret must name the rc file, at the handler body's line; stderr was:\n{stderr}"
     );
 }
 

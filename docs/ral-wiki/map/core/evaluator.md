@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ad2123a08dfd12616ada6318e9740042ab7e9e37
-generated_at_date: 2026-11-03
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
@@ -16,10 +16,18 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 - `machine::evaluate(comp, env, mooring, shell)` injects ⟨M, ρ⟩ over an
   empty stack. `machine::apply(f, args, …)` pushes the arguments, if any,
   then forces the value. Both are crate-private and return `Settled<Value>`.
-- `run_phrases` (`shell/evaluator.rs`) runs `Phrase::{Define, Run}` in
-  order. A landed `Define` immediately extends the environment; under
-  `Mode::Session` it also updates `shell.env` and the lease ledger.
-  Earlier definitions survive a later failure.
+- `run_phrases(top: &Toplevel, env: Env, …)` (`shell/evaluator.rs`)
+  readmits `top.admits` against the supplied `env` before the first phrase,
+  in every mode, including loaded files. Private `readmit` uses that `Env`
+  and `shell.fixings()`, not `shell.env`. A refusal returns `Ran` with the
+  supplied environment, no defined names and the error; no phrase runs.
+  Readmission claims provenance at the mismatch witness, naming the use
+  that imposed the type; loaded-file errors retain the file's own location
+  and, for `use`, its loader context.
+- It then runs `Phrase::{Define, Run}` in order. A landed `Define`
+  immediately extends the environment; under `Mode::Session` it also updates
+  `shell.env` and the lease ledger. Earlier definitions survive a later
+  phrase's failure.
 - Higher-order natives re-enter through `machine::apply`; session hooks
   through `evaluator::apply`. `NESTED_MACHINE_LIMIT` bounds host-stack
   nesting independently of the machine's frame cap.

@@ -1,6 +1,5 @@
-//! The user handler stack — one flat stack of [`HandlerFrame`]s shared by `alias` and
-//! `within [handlers: …]`, ordered innermost-last.  Scoped frames come off by
-//! handle, alias frames by name.
+//! The user handler stack, ordered innermost-last. Scoped frames come off by
+//! handle; host-installed handler frames also come off by name.
 
 use super::builtin::BuiltinEntry;
 use super::value::Value;
@@ -16,7 +15,7 @@ use super::flow::Settled;
 
 /// Frame identity, minted from a monotonic counter on [`HandlerStack`].
 ///
-/// Removal finds the frame by handle rather than index, so an alias dropped
+/// Removal finds the frame by handle rather than index, so a handler dropped
 /// between a push and its paired pop cannot shift the wrong frame out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHandle(pub(crate) u64);
@@ -27,7 +26,7 @@ pub struct FrameHandle(pub(crate) u64);
 pub(crate) enum HandlerArity {
     /// `within [handler: …]` — the thunk receives `(name, args)`.
     CatchAll,
-    /// `alias` or `within [handlers: …]` — the thunk receives `(args)`.
+    /// A named handler — the thunk receives `(args)`.
     Unary,
 }
 
@@ -38,9 +37,6 @@ pub struct HandlerEntry {
     pub name: Cow<'static, str>,
     pub(crate) arity: HandlerArity,
     pub(crate) thunk: Value,
-    /// The arm's closed scheme, kept only on alias entries: their frames
-    /// outlive the installing run and must seed the next run's check.
-    pub(crate) scheme: Option<crate::ty::Closed>,
 }
 
 impl HandlerEntry {
@@ -51,12 +47,11 @@ impl HandlerEntry {
             name: Cow::Owned(name),
             arity: HandlerArity::Unary,
             thunk,
-            scheme: None,
         }
     }
 
     /// Vet `thunk` as the arm for `name` and build the entry to install —
-    /// the one gate shared by `Shell::install_alias` and `within [handlers:
+    /// the one gate shared by `Shell::install_handler` and `within [handlers:
     /// …]`, so each check is written once.
     ///
     /// A name already a lexical binding or a native installs fine: bare
@@ -73,28 +68,22 @@ impl HandlerEntry {
         role: HandlerRole,
     ) -> Settled<Self> {
         let closure = arm_closure(&thunk, role, &name)?;
-        let scheme = crate::typecheck::alias_arm_scheme(
-            &name,
+        crate::typecheck::arm_stands_in(
+            crate::typecheck::Arm::Named(&name),
             closure.comp(),
             shell.closure_schemes(closure),
         )
         .map_err(|errors| refused_arm(role, &name, &errors, closure.comp().span, shell))?;
-        let mut entry = Self::ral_per_name(name, thunk);
-        if role.persists_scheme() {
-            entry.scheme = Some(scheme);
-        }
-        Ok(entry)
+        Ok(Self::ral_per_name(name, thunk))
     }
 }
 
-/// Which install path is calling [`HandlerEntry::vet`] — picks the diagnostic's
-/// label and whether the inferred scheme is kept on the entry.
+/// Which install path is calling [`HandlerEntry::vet`] — picks the diagnostic's label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 pub(crate) enum HandlerRole {
-    /// `alias NAME { |args| … }` — the frame outlives its installing run, so
-    /// its scheme seeds the next run's check.
-    Alias,
+    /// Host-installed handler, retained between units.
+    Handler,
     /// `within [handlers: …]` — the frame is popped before the run ends.
     #[strum(serialize = "within handlers")]
     Scoped,
@@ -105,14 +94,14 @@ pub(crate) enum HandlerRole {
 impl HandlerRole {
     fn operation(self) -> &'static str {
         match self {
-            Self::Alias => "alias",
+            Self::Handler => "handler",
             Self::Scoped | Self::CatchAll => "within",
         }
     }
 
     fn invalid(self, subject: &str, cause: InvalidCause) -> super::Error {
         let path = match self {
-            Self::Alias => vec![DataStep::Field(subject.into())],
+            Self::Handler => vec![DataStep::Field(subject.into())],
             Self::Scoped => vec![
                 DataStep::Field("handlers".into()),
                 DataStep::Field(subject.into()),
@@ -128,13 +117,9 @@ impl HandlerRole {
 
     fn block(self, subject: &str) -> BlockRole {
         match self {
-            Self::Alias | Self::Scoped => BlockRole::Handler(subject.into()),
+            Self::Handler | Self::Scoped => BlockRole::Handler(subject.into()),
             Self::CatchAll => BlockRole::CatchAll,
         }
-    }
-
-    fn persists_scheme(self) -> bool {
-        matches!(self, Self::Alias)
     }
 }
 
@@ -188,31 +173,28 @@ impl fmt::Debug for HandlerEntry {
     }
 }
 
-/// What installed a frame: `unalias` removes only an [`Self::Alias`].
+/// What installed a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum FrameKind {
     /// `within [handlers: …, handler: …]`: popped by handle when the scope ends.
     Within,
-    /// `alias`: outlives its run.
-    Alias,
+    /// Host-installed: retained between units.
+    Handler,
 }
 
-/// One frame of the handler stack, shared shape for scoped handlers and
-/// aliases.
+/// One frame of the handler stack, shared by scoped and persistent handlers.
 #[derive(Debug, Clone)]
 pub(crate) struct HandlerFrame {
     pub(crate) entries: Vec<HandlerEntry>,
-    /// `within [handler: thunk]`; `None` on alias frames.
+    /// `within [handler: thunk]`; `None` on persistent handler frames.
     pub(crate) catch_all: Option<Value>,
     pub(crate) kind: FrameKind,
 }
 
 impl HandlerFrame {
-    /// Whether this frame is *the* alias frame for `name` — the one shape
-    /// predicate behind both [`HandlerStack::remove_alias`] and
-    /// `Shell::has_alias`.
-    pub(crate) fn is_alias_for(&self, name: &str) -> bool {
-        self.kind == FrameKind::Alias && self.entries.first().is_some_and(|e| e.name == name)
+    /// Whether this is the persistent handler frame for `name`.
+    pub(crate) fn is_handler_for(&self, name: &str) -> bool {
+        self.kind == FrameKind::Handler && self.entries.first().is_some_and(|e| e.name == name)
     }
 
     /// Every value this frame holds: each entry's thunk, then the catch-all.
@@ -241,7 +223,7 @@ pub(crate) enum HandlerLookup {
 /// `seed`'s `WireHandlerFrame` does field by field.
 ///
 /// `base` is a permanent layer below every run frame — manifest rows, not
-/// `HandlerFrame`s, so [`Self::strip_matched`] and [`Self::remove_alias`],
+/// `HandlerFrame`s, so [`Self::strip_matched`] and [`Self::remove_handler`],
 /// which index `frames` alone, cannot reach it.  It never crosses the wire:
 /// the wire form is a `Vec` of frames, and a receiving shell's own boot
 /// installs its base layer.
@@ -276,17 +258,17 @@ impl HandlerStack {
         })
     }
 
-    /// Push a frame that `unalias` can remove.
-    pub(crate) fn push_alias(&mut self, entries: Vec<HandlerEntry>) -> FrameHandle {
+    /// Push a host-installed handler frame.
+    pub(crate) fn push_handler(&mut self, entries: Vec<HandlerEntry>) -> FrameHandle {
         self.push_frame(HandlerFrame {
             entries,
             catch_all: None,
-            kind: FrameKind::Alias,
+            kind: FrameKind::Handler,
         })
     }
 
     /// Append a whole frame under a fresh handle: identity belongs to this
-    /// stack, so a wire-hydrated alias stays removable by `unalias`.
+    /// stack, so a wire-hydrated handler stays removable by the host.
     pub(crate) fn push_frame(&mut self, frame: HandlerFrame) -> FrameHandle {
         let handle = FrameHandle(self.next_handle);
         self.next_handle += 1;
@@ -300,14 +282,13 @@ impl HandlerStack {
         Some(self.frames.remove(pos).1)
     }
 
-    /// Remove the innermost alias frame for `name`.  The [`FrameKind`] excludes
-    /// a `within [handlers: [foo: t]]` frame by construction, even though it
-    /// shares an alias's one-entry, no-catch-all shape.
-    pub fn remove_alias(&mut self, name: &str) -> Option<HandlerFrame> {
+    /// Remove the innermost persistent handler frame for `name`.
+    /// [`FrameKind`] keeps scoped frames out, even with the same shape.
+    pub fn remove_handler(&mut self, name: &str) -> Option<HandlerFrame> {
         let pos = self
             .frames
             .iter()
-            .rposition(|(_, f)| f.is_alias_for(name))?;
+            .rposition(|(_, f)| f.is_handler_for(name))?;
         Some(self.frames.remove(pos).1)
     }
 
@@ -333,7 +314,6 @@ impl HandlerStack {
                         name: Cow::Owned(name.to_string()),
                         arity: HandlerArity::CatchAll,
                         thunk: thunk.clone(),
-                        scheme: None,
                     }),
                     depth + 1,
                 ));
@@ -348,18 +328,11 @@ impl HandlerStack {
         self.iter().rev().flat_map(|f| f.entries.iter())
     }
 
-    /// The installed alias arms' schemes, outermost first — the alias half of
-    /// the seed `Shell::session_schemes` hands the next run's check.
-    pub(crate) fn alias_schemes(&self) -> Vec<(String, crate::ty::Closed)> {
+    /// Installed per-name handlers, outermost first, for checker diagnostics.
+    pub(crate) fn handled_names(&self) -> Vec<String> {
         self.iter()
-            .filter(|f| f.kind == FrameKind::Alias)
-            .flat_map(|f| f.entries.iter())
-            .filter_map(|entry| {
-                entry
-                    .scheme
-                    .clone()
-                    .map(|scheme| (entry.name.as_ref().to_string(), scheme))
-            })
+            .flat_map(|frame| frame.entries.iter())
+            .map(|entry| entry.name.to_string())
             .collect()
     }
 
@@ -412,7 +385,7 @@ mod tests {
             unit: None,
         };
         let Break::Error(refused) = refused_arm(
-            HandlerRole::Alias,
+            HandlerRole::Handler,
             "echo",
             std::slice::from_ref(&error),
             span,
@@ -423,7 +396,7 @@ mod tests {
         let Reason::Invalid(failure) = &refused.reason else {
             panic!("invalid")
         };
-        assert_eq!(failure.operation, "alias");
+        assert_eq!(failure.operation, "handler");
         assert_eq!(
             failure.cause,
             InvalidCause::IllTyped(
@@ -441,6 +414,6 @@ mod tests {
         let shell = crate::test_helper::core_shell();
         let native = crate::shell::runtime::lookup("length", &shell.env, &shell.sig).unwrap();
         assert_eq!(native.shape(), crate::fact::ValueShape::Function);
-        assert!(arm_closure(native, HandlerRole::Alias, "length").is_err());
+        assert!(arm_closure(native, HandlerRole::Handler, "length").is_err());
     }
 }

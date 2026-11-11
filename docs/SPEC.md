@@ -1,5 +1,5 @@
-<!-- verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a -->
-<!-- generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a -->
+<!-- verified_at_commit: 058c114df79583f281c2d4c004dcc293dc4761db -->
+<!-- generated_at_commit: 058c114df79583f281c2d4c004dcc293dc4761db -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1278,8 +1278,9 @@ ral resolves an ordinary bare head in this order. The first match wins.
    fails without falling through: `let date = 5; date +%s` is a static error
    that says `date` is bound to an `Int`, and `^date` runs the command.
 2. **A named user handler.** This includes persistent handlers installed by
-   `alias` and scoped handlers installed by `within [handlers: …]`. The
-   innermost handler for the name wins.
+   the host from the rc's or a plugin manifest's `handlers:` field, and scoped
+   handlers installed by `within [handlers: …]`. The innermost handler for
+   the name wins.
 3. **A base handler.** ral's own commands that take an argument list live
    here. `echo` is the standard example, and a host may install more, such as
    `detach`. A base handler has no arity: it takes the whole argument list, a
@@ -1302,10 +1303,10 @@ name still selects the binding. `^name` is the external command `name`: it
 skips bindings, natives, and every handler, base frames included — `^echo` is
 the operating system's `echo`, not ral's.
 
-### 6.4. Handlers and aliases
+### 6.4. Command handlers
 
-A named handler or alias takes one parameter: the command's argument list. ral
-renders the arguments after the head and passes them as one `List String`:
+A named handler takes one parameter: the command's argument list. ral renders
+the arguments after the head and passes them as one `List String`:
 
 ```ral
 within [handlers: [deploy: { |args| audit-deploy $args }]] {
@@ -1327,6 +1328,13 @@ command would send; an arm that expected typed arguments would not be
 interchangeable with the command it replaces. So an arm cannot do arithmetic on
 `$args[0]`: it holds that argument's rendering, `'1'` rather than `1`. Use `int`
 or `float` when the arm wants a number.
+
+A head's type and argument gate depend only on Σ (the host's manifest and
+prelude) and lexical bindings, never on the handler stack. A base-frame name
+keeps its own scheme and in-shell argument gate; every other command name
+has `[String] → Command` and the external argument gate, even when handled.
+Thus `ls [1, 2]` is refused under a handler for `ls` too: spread the list or
+bind a function with `let`. Handled names inform diagnostics, not typing.
 
 ral checks a handler's arity, which is its type and not its spelling, where
 the handler is written and again when it is installed. It also checks that the
@@ -1384,14 +1392,15 @@ and `!{…}` supplies a forced block's result. What becomes of them next depends
 on which of the two mechanisms of *Application and arity* the head uses.
 
 An argument list is the flat sequence of arguments that a base handler, a
-handler or alias arm, or a bundled or external command receives. Its type is
+handler arm, or a bundled or external command receives. Its type is
 `List String`.
 
-A handler or alias arm receives rendered strings. In-shell argument rendering
+A handler arm receives rendered strings. In-shell argument rendering
 uses the text conversion of *Display*, the same conversion `str` exposes and
 `echo` writes. That conversion has a text form for every value; admission to
 an argument list is a separate rule. Bytes, collections, blocks and handles
-can be rendered inside the shell, and nothing crosses a user handler's
+can be rendered at a base-frame call such as `echo`. Handling an external
+name does not grant it this wider gate. Nothing crosses a user handler's
 argument list as an unrendered ral value:
 
 ```ral
@@ -1433,8 +1442,9 @@ they construct and destructure a list, and neither forms an argument list.
 
 `Unit` is nothing, not a word: the checker refuses it at both the in-shell
 and operating-system argv boundaries. Write `'()'` for the text. Other shapes
-are admitted inside the shell. The OS boundary is narrower: it admits strings,
-integers, floats, Booleans and tagged values, but refuses bytes, lists, maps,
+are admitted at base-frame calls. The external gate, also used for handled
+external names, is narrower: it admits strings, integers, floats, Booleans and
+tagged values, but refuses bytes, lists, maps,
 records, blocks, functions, builtins and handles as single arguments. Spread a
 list, and send bytes through a byte pipe or decode them first.
 
@@ -1568,7 +1578,7 @@ thunk and runs nothing. `cat f | { from-line }` is accepted and does nothing;
 In a multi-stage pipeline, a ral-written stage runs on its own thread and an
 external command runs as its own process; every `|` uses an operating-system
 byte pipe regardless. State changes made by a stage are private to it: its
-working directory, environment changes, aliases, loaded modules, and bindings
+working directory, environment changes, handlers, loaded modules, and bindings
 do not alter the parent, since a stage thread evaluates over a cloned shell
 that is simply dropped at the stage's end. Only pipe contents, the final
 result, and recorded observations cross the boundary.
@@ -2449,7 +2459,7 @@ Every value in `handlers` must be a function of one parameter, such as `{ |args|
 
 The singular `handler` field is a catch-all and must be a function of two parameters, such as `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
-The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed, where the refusal is one failure naming the block's role and every checker diagnostic with its code (``the `git` handler does not typecheck: T0057 …``). A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for an external, and any name that is neither a handler nor a base frame, stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, or for a head that is already a handler, returns what that frame or handler returns, so an alias over an alias keeps its own type. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
+The number of parameters is the arm's type, not its spelling: with `let forward = { |tool args| echo $tool ...$args }`, `{ forward 'git' }` is an arm, while `{ echo hi }` and `{ |a b| ... }` are not. A value that is not a block, or a block of the wrong number of parameters, is refused where it is written when its type shows it, and again when the frame is installed, where the refusal is one failure naming the block's role and every checker diagnostic with its code (``the `git` handler does not typecheck: T0057 …``). A handler reinterprets a command, not a value binding: an arm **stands in** for the head it names (`standsFor`), and is checked against what that head is. An arm for any name not declared as a base frame in Σ stands in for a command, so its value is its output; `curl: { |args| echo '{"ok":1}' }` is an arm, and `curl: { |args| '{"ok":1}' }` is refused, since it returns a `String` where it should write — write it with `echo`. An arm returning `()` at a free grade unifies as a command and captures `""` under a `let`; an arm whose grade is already fixed to `p` does not stand as a command. An arm for a base frame, such as `echo`, returns what that base frame returns. Neither another arm nor a catch-all changes the stand-in type or argument gate. The catch-all stands in for every command in its block, so its value is its output. An arm written for a builtin that returns a value is never reached, because builtins are resolved first (§9.5). A handler may change what a command writes, but not what kind of thing it is; use an explicit codec when conversion is intended.
 
 `detach` never consults handlers: its command is always a program (§11.5). To stub `detach`, stand in for `detach` itself.
 
@@ -2469,7 +2479,19 @@ Named handlers are searched in a complete innermost-first pass before catch-alls
 
 A lexical binding still wins over every handler. Installing a handler under an already-bound name is allowed, but a normal bare call will not reach it. The explicit head `^name`, like a path head such as `./tool` or `/usr/bin/tool`, skips handlers entirely and executes the external of that name.
 
-Aliases use the same named-handler stack but persist beyond a `within` block until removed or replaced. Scoped handler frames themselves are removed when their `within` ends.
+Persistent handlers are installed by the host between units from the rc's or
+manifest's `handlers:` field. Scoped frames are removed when their `within`
+ends. No `alias` or `unalias` statement or builtin value installs or removes a
+handler. For an interactive helper, bind a function:
+
+```ral
+let ll = { |args| ls -lh ...$args }
+ll ['--all']
+```
+
+The function takes its list by ordinary application; a handler instead receives
+the command's packed argv. The handler stack is fixed throughout a unit except
+for scoped `within` frames and self-masking during dispatch.
 
 ### 9.6. Deep, self-masking handlers
 
@@ -2495,13 +2517,13 @@ Redirects apply to handler dispatch just as they do to other command calls. Byte
 
 ### 9.7. State flow and containment
 
-The body of `within` is a block. Its bindings stay local, and when the body ends `within` restores exactly what it scoped: the working directory under `dir`, which undoes any `cd` made inside (§9.2), the `env` overlay, and its handler frame. An alias or any other unbracketed shell-state write made inside persists, as in any block, and so does a `cd` under a `within` without `dir`.
+The body of `within` is a block. Its bindings stay local, and when the body ends `within` restores exactly what it scoped: the working directory under `dir`, which undoes any `cd` made inside (§9.2), the `env` overlay, and its handler frame. An unbracketed shell-state write such as `cd` persists, as in any block, unless the surrounding `within` scopes it with `dir`.
 
 Boundary rules are deliberately specific:
 
 - A forced block and a function call keep their bindings private; a `cd` or other unbracketed shell-state write inside either persists to the caller. Inside a surrounding `within [dir:]`, a `cd` persists only until that `within` exits.
 - Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
-- Each stage of a pipeline runs as a subshell with a snapshot of the active lexical and dynamic context — a ral-written stage on its own thread over a cloned shell, an external command as a process. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
+- Each stage of a pipeline runs as a subshell with a snapshot of the active lexical and dynamic context — a ral-written stage on its own thread over a cloned shell, an external command as a process. Stage-local bindings, cwd changes, environment changes, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
 - A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its body runs under that capture; `use` and `explain` inside it read the creator's session as of the birth. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
 - An external process receives the effective cwd and environment at launch. It cannot mutate ral’s shell state.
 
@@ -2637,7 +2659,7 @@ A batch invocation owns one fresh shell and ends with the process. A REPL or emb
 Successful top-level changes persist between those runs, including:
 
 - `let` bindings and their inferred types;
-- aliases and loaded definitions;
+- loaded definitions;
 - the logical working directory.
 
 Changes completed before a later command fails also persist:
@@ -2649,7 +2671,7 @@ failing-command
 
 A later REPL run can still read `$ready`; statements after the failure never ran.
 
-A nested block's bindings stay local, but its shell-state writes, such as `cd` or `alias`, persist into the session like any other (§2.6). Use `within` for a temporary directory, environment, or handler change.
+A nested block's bindings stay local, but its shell-state writes, such as `cd`, persist into the session like any other (§2.6). Use `within` for a temporary directory, environment, or handler change.
 
 Interactive sessions load their rc file unless `--norc` (or its
 `--noprofile` alias) is given. Login sessions additionally load the system and
@@ -2657,7 +2679,7 @@ user login profiles. These are ral source with host-level result contracts:
 each login profile must return `Unit`, while the rc file must return a
 configuration `Map`. Their evaluation is not transactional, so bindings and
 effects completed before a runtime failure, `exit`, or result-contract check
-remain part of the session. Applied RC bindings, aliases, environment
+remain part of the session. Applied RC bindings, handlers, environment
 configuration, hooks, and startup behavior likewise belong to that session.
 
 ## 11. Concurrency and process lifetime
@@ -3860,7 +3882,7 @@ hint: REPAIR
 
 The status suffix appears only for worker `timed-out` and `cancelled` reasons;
 the hint line appears only when a hint or advice exists (§13.1). Errors in
-scripts, startup files, aliases, and other stored sources use the source-aware
+scripts, startup files, handlers, and other stored sources use the source-aware
 form instead.
 
 A failure the OS sandbox reports for a spawned program is diagnosed from the
@@ -4317,11 +4339,11 @@ for a sourced library, help also prints a `Library:` section.
 `explain name` prints the name's full documentation, inferred type or command
 signature where one exists, and where the name comes from. It understands
 language forms and literals, core and host builtins, prelude entries,
-documented host libraries, session bindings, aliases, handlers, and external
+documented host libraries, session bindings, handlers, and external
 commands. Language entries are short standalone usage guides. The renderer
 heads the entry with the name and its source, prints the prose, then labels the
 facts it has as `usage`, `type`, `path`, and `shadows`; a missing fact is omitted.
-The source is `language syntax`, `session`, `prelude`, `alias`, `handler`,
+The source is `language syntax`, `session`, `prelude`, `handler`,
 `builtin`, `bundled` for a bundled tool, or the file a command would run. Where
 the active grant refuses a command it reads `denied by grant`, and `path` names
 the refused candidate. Every other place that holds the name is listed under
@@ -4347,7 +4369,7 @@ await  : ∀α ν. Handle (Command[ν] α) → Command[ν] α
 kind, as ν is chosen. Unit values are written `()` in programs.
 
 `help` is the canonical catalogue of documented standard and host-library
-entries, not a list of every command that might be reachable. Arbitrary aliases,
+entries, not a list of every command that might be reachable. Arbitrary handlers,
 plugin bindings, and programs found on `PATH` are dynamic. Use `explain name`
 to inspect one of those.
 
@@ -4560,8 +4582,8 @@ encodes it, one per line.
 
 ### 14.6. Failure, session control, and concurrency
 
-The core session family includes `fail`, `raise`, `exit` and `quit`, `cd`, `alias` and
-`unalias`, `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
+The core session family includes `fail`, `raise`, `exit` and `quit`, `cd`,
+`use`, `ask`, `echo`, `warn`, `surface`, `clear`,
 `reset`, `help`, and `explain`. All of them are builtins except `echo`, which is a base
 handler: it takes an argument list, writes each argument's text conversion
 separated by single spaces, and ends with one newline.
@@ -4600,8 +4622,8 @@ more names before user code is typechecked; those names then appear in that
 shell's `help` and `explain` output.
 
 The ral command-line host provides `watch`. Its interactive form also supplies
-plugin-lifecycle commands and private editor interfaces. A plugin may install
-validated aliases, hooks, and keybindings; those are session
+private editor builtins. Plugins load only from rc during startup and may install
+validated handlers, hooks, and keybindings; those are session
 extensions, not portable standard names.
 
 Exarch installs its agent operations and a documented ral helper library. It
@@ -4738,7 +4760,7 @@ return [
     prompt: { return "!{abbreviate-home !{cwd}} ❯ " },
     env: [EDITOR: 'vim', PAGER: 'less'],
     bindings: [work: '/srv/work'],
-    aliases: [ll: { |args| ls -lh ...$args }],
+    handlers: [ll: { |args| ls -lh ...$args }],
     theme: [value-prefix: '⇒ ', value-color: cyan],
     startup: { echo 'ready' },
 ]
@@ -4751,7 +4773,7 @@ The recognized fields are:
 | `env: Record` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt: Block` | Install the zero-argument base-prompt body. |
 | `bindings: Record` | Install lexical values, including functions. |
-| `aliases: Record` | Install block or function values as command aliases; any other value is refused, with a pointer to `bindings:`. |
+| `handlers: Record or Map` | Install command arms held to their stand-ins (§9.4); use `bindings:` for lexical values and functions. |
 | `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal` or `readline`; default `readline`. |
@@ -4772,8 +4794,13 @@ let extra = [surfase: 'minimal', env: [:]]
 return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
 ```
 
-The table is ascribed to the file once it has been inferred, as ML ascribes a
-signature. The return must be a record, or `()`: `return ["edit-mode": 'vi']`
+The table is ascribed live after all remaining elaboration decisions settle,
+as ML ascribes a signature, but before gates, nested tables and errors close
+the unit and readback freezes its sites (§17.5). It solves the returned value's
+types; it never selects a `let` mode or call split, and cannot open a hole.
+Thus `let d = echo 5 | from-json; return [umask: $d]` checks, but admission
+refuses the integer at the decode, naming the `umask:` use that requires text.
+The return must be a record, or `()`: `return ["edit-mode": 'vi']`
 is a record checked against the table, while `return ["edit_mde": 'vi']`
 has an unknown field. `return [:, edit-mode: 'vi']` is a map and `return []`
 the empty list; each is refused before the file runs, with the spelling to
@@ -4782,6 +4809,15 @@ and the same field types, when the value is applied instead: an unknown key or
 a wrongly-typed value both name the mistake and refuse the whole rc,
 agreeing with the static check above — the shell starts with defaults. An
 unknown key inside `theme` produces a warning rather than a refusal.
+Unresolved field or member types also retain their runtime checks.
+
+The `handlers:` collection holds arms to their stand-ins in this unit's live
+solver: a written name takes Σ's base-frame result or, for any other name,
+`[String] → Command` (§9.4). A map with computed names holds its value type
+to `[String] → Command`; installation still checks each actual name against
+Σ. These equations reach decoder admission sites inside locally checked
+arms. An arm obtained through `use` retains its module's sites and still
+requires the install-time check.
 
 `return [edit_mde: 'vi']` never runs the rest of the file: a misspelling is a
 compile error and the rc is skipped before its first statement executes. A
@@ -4827,7 +4863,7 @@ entries. These commands are informational: a missing query prints a message
 and leaves status zero.
 
 Because help is assembled from the live shell, it describes host additions
-such as `watch` and `load-plugin` only where they are actually installed.
+such as `watch` and `_ed-*` only where they are actually installed.
 
 ### 15.5. Plugins
 
@@ -4850,7 +4886,7 @@ return { |options|
             key: $key,
             handler: { |_event| _ed-insert 'hello' },
         ]],
-        aliases: [hi: { |args| echo 'hello' ...$args }],
+        handlers: [hi: { |args| echo 'hello' ...$args }],
     ]
 }
 ```
@@ -4862,7 +4898,7 @@ The manifest schema is:
     name: String,
     hooks?: Map<String, Block>,
     keybindings?: List<[key: String, handler: Block, guard?: String]>,
-    aliases?: Map<String, Block>,
+    handlers?: Map<String, Block>,
 ]
 ```
 
@@ -4877,14 +4913,22 @@ use. `return ()` lacks `name`, and is refused for that. A factory is held to
 the same table before the file runs: it must be a block of one parameter, the
 options, and what it makes is ascribed as a returned manifest is, so
 `return { [name: 'example'] }` and `return { |a b| [name: 'example'] }` are
-refused statically. What a factory returns is checked again as it is parsed.
-Each
-declared field is checked exactly: ral does not stringify a value of the wrong
+refused statically. Factory shape and result equations run on the same live
+settled solver, after every `let` mode and call split is fixed (§15.3).
+The `name:` field can therefore solve a decoder's type, and `handlers:` arms
+use the same stand-in relation as scoped handlers. For example, a written
+external arm returning `5` is refused statically; one returning decoded data
+is held to `Command`, so incompatible data is refused at its decode, naming
+the arm's use. Computed-name maps hold their members to
+`[String] → Command`, with the actual names checked again at installation.
+What a factory returns is checked again as it is parsed; unresolved returns,
+fields and members remain runtime questions.
+Each declared field is checked exactly: ral does not stringify a value of the wrong
 type or silently drop a malformed handler. Hook and keybinding handlers each
 take exactly one argument. Unknown hook names, wrong handler arity, invalid
-key notation, invalid guard regexes, and alias conflicts are load errors.
+key notation, invalid guard regexes, and handler conflicts are load errors.
 Validation and registration are atomic; a rejected load leaves no hooks,
-keybindings, or aliases installed.
+keybindings, or handlers installed.
 
 Plugins run with the authority of the live session and current grant stack. A
 manifest `capabilities:` field is rejected because it would not enforce
@@ -4892,16 +4936,16 @@ confinement. Use `grant` around an invocation that needs narrower authority.
 Plugin options must be a first-order map: they cannot contain blocks, handles,
 or other non-transportable values.
 
-`load-plugin name-or-path` searches in this order:
+Plugins load only from the RC's `plugins:` map at startup and remain installed
+for the session. A new plugin requires a new session. Each name or path is
+resolved in this order:
 
 1. the `ral/plugins` subdirectory of the user configuration directory;
 2. each directory in `RAL_PATH`;
 3. the literal path;
 4. the literal path with `.ral` appended.
 
-The interactive command supplies an empty options map to a factory. A direct
-manifest rejects non-empty options. To configure a factory, load it from the RC
-file:
+A direct manifest rejects non-empty options. Configure plugins in the RC file:
 
 ```ral
 return [
@@ -4917,15 +4961,13 @@ hyphenated name needs no quoting, but a path must be quoted. Each value is
 that plugin's options map, forwarded verbatim to the plugin's top-level block
 as its single argument; `[:]` is the empty map, for a plugin taking no
 options. A plugin whose value is not a map is reported by name and skipped;
-the other plugins still load. `unload-plugin name` removes that plugin's
-hooks, keybindings, and aliases. Loading a duplicate plugin name or unloading
-a name that is not loaded is an error.
+the other plugins still load. Loading a duplicate plugin name is an error.
 
-Plugin aliases occupy the alias namespace. A collision with an existing alias
+Plugin handlers occupy the handler namespace. A collision with an existing handler
 is a load error. A lexical or native command with the same name is permitted,
-but the alias underneath it is then unreachable: a bare head hits the lexical
+but the handler underneath it is then unreachable: a bare head hits the lexical
 binding or native first, and `^name` is the external of that spelling, not the
-alias. `explain name` still reports it, under `shadows:`.
+handler. `explain name` still reports it, under `shadows:`.
 
 ### 15.6. Hook and keybinding events
 
@@ -5015,7 +5057,7 @@ binding that claims its keys first: an earlier unguarded binding on the same
 keys, or an unguarded binding on a proper prefix of its sequence.
 
 The minimal frontend does not dispatch buffer-change or complete hooks or
-editor keybindings and cannot display ghost text or highlights. Plugin aliases and
+editor keybindings and cannot display ghost text or highlights. Plugin handlers and
 the `pre-exec`, `post-exec`, `chpwd`, and `prompt` hooks remain session
 facilities and do not depend on raw-mode editing.
 
@@ -5073,7 +5115,7 @@ ral host:
 
 - persisted history, completion, terminal titles, and the three frontends;
 - startup profiles and RC discovery;
-- plugins, `_ed-*`, `load-plugin`, and `unload-plugin`;
+- startup plugins and `_ed-*`;
 - terminal signal handling and crash-time terminal restoration.
 
 Foreground terminal ownership depends on Unix process groups and a
@@ -5574,7 +5616,7 @@ atomic and never weak.
   join type that data `Unit` and admit a program whose supplied value then
   fails admission.
 - Other producers get fresh grades: `return`, primitives, `~`, `capture`,
-  `spawn`, `audit`, handled alias/unalias statements, ordinary builtin
+  `spawn`, `audit`, ordinary builtin
   results and stdout redirects. Command declarations, boundary results and
   already graded builtin results such as `fail` and `await` are exceptions.
   The ordinary decoders `from-bytes`, `from-string`, `from-line` and
@@ -5607,7 +5649,7 @@ unknown to a structure lowers all reachable unknowns to at most its rank.
 A suspended match likewise lowers everything it mentions to the rank of its
 scrutinee. In a region of rank r, an unknown of rank r is *young*; one of
 lower rank is *old*. A `let` right-hand side and its pattern form a region;
-so do an `alias` or `within` arm and a recursive group. A lambda's lexical
+so do a `within` arm and a recursive group. A lambda's lexical
 scope alone is not a region.
 
 **Weak means rank zero, not a propagated mark.** A *boundary* — a place where
@@ -5625,8 +5667,12 @@ Once the unit is solved, the boundary's type is frozen as a *site* on the
 call, which admits the value against each position's head, each free
 variable's kind, and, for one `comparable` variable, number or text agreed
 across the unit. A session data binding with weak residuals is admitted once
-per unit, before it runs, against its solved type there; every use shares
-that type. Residuals are re-seeded at rank zero in the next unit, preserving
+per unit, before its first phrase, against its solved type there; every use
+shares that type. A loaded file is a unit too, whether loaded by `use` or a
+host. Admission checks the environment supplied to that unit, not necessarily
+the session environment. A refusal runs no phrase and names the use that
+imposed the type, in the loaded file when that is where it was written.
+Residuals are re-seeded at rank zero in the next unit, preserving
 their kinds and sharing. An occurrence whose type reaches a thunk or a handle
 also retains recursive protection: a thunk's arguments and results are
 checked when it runs, and a handle's payload when exposed by `await`, ready
@@ -6019,7 +6065,7 @@ A grade disagreement elsewhere remains a mismatch of `Command` against
 `Returns A`.
 
 **A unit closes rank zero.** A unit is one `typecheck` session, or one of the
-one-shot sessions `alias_arm_scheme`, `catch_all_stands_in` and
+one-shot sessions `arm_stands_in` and
 `binding_value_scheme`. A top-level `Run` opens no region: its unknowns are
 rank zero, all its remaining matches default at unit closure, and its report
 is never captured. A REPL phrase is a unit whose predecessors are closed
@@ -6029,12 +6075,32 @@ REPL units admit (§17.3).
 A one-shot session seeds its environment at rank zero and enters a region
 before inferring or checking its body. It exits that region, generalizes any
 scheme to be stored at enclosing rank zero, then closes the unit. Only success
-settles and exports the scheme; `catch_all_stands_in` stores none.
+settles and exports the scheme; `arm_stands_in` stores none.
 `Site::scheme` likewise enters its scratch region before instantiation, exits,
 then generalizes. Opening a region around an already inferred type is too late.
-After rank-zero defaults, closure judges gates (§17.3), checks nested tables
-and attaches `()` notes. A return contract is ascribed only after successful
-closure, before readback.
+The unit's phases have this order:
+
+1. Generate equations and the pending tree on `Solver`.
+2. Settle rank zero (`Solver → Settled`), deciding every remaining binding
+   mode and call split. No suspended elaboration match remains.
+3. Hold the optional return contract live on `Settled`, unless settling
+   already reported errors. This phase can solve types but cannot open holes,
+   enter inference regions or select elaboration.
+4. Close gates (§17.3), queued nested tables and errors
+   (`Settled → Solution`), attaching `()` notes. Only an error-free unit
+   yields a solution.
+5. Freeze sites, schemes and readmissions by readback from that solution.
+
+Ascription holds fields key by key, re-reading each row's tail after each
+field. Unknown, missing and refused keys are judged on the final rows after
+the live walk. Each walked row is then re-read to its final tail; a field not
+held by the walk is judged on a scratch copy, without replaying live clashes.
+Contract equations introduce ground types apart from fresh variables used
+once, and every base frame has a ground result payload, so such a revealed
+field needs no further solving. There is no repeated inference or fixpoint.
+Nested tables are queued and checked on scratch only at close, after live
+holds have solved their inputs. The declared table itself is never unified
+as a record type.
 
 **Readback makes the chosen branch explicit.** A match records its decision
 on its hole when it is discharged or defaulted: a binding its mode (thunk,
@@ -6226,11 +6292,11 @@ is likewise checked in a region. `grant` types known capability fields.
 Unknown, spread, or dynamic option keys remain subject to runtime decoding.
 
 An arm stands in for the head it names, and is checked against what that head
-is. `standsFor(c)` is the scheme of the base frame or arm already in force under
-`c`, and `[String] -> F_w Unit` for anything else:
+is. `standsFor(c)` reads only Σ: the scheme of its base frame named `c`,
+and `[String] -> F_w Unit` for anything else:
 
 ```text
-standsFor(c) = σ                      c is a base frame, or already has an arm, of scheme σ
+standsFor(c) = σ                      Σ declares c as a base frame of scheme σ
              = [String] -> F_w Unit   otherwise
 
 Γ ⊢v V : U (standsFor(c))            Γ ⊢v V : U (String -> [String] -> F_w Unit)
@@ -6247,16 +6313,17 @@ is refused; handler arms do not coerce. An arm for `echo`, a base
 frame that writes, has `echo`'s own scheme. An arm for `detach`, a base frame
 that returns, has `detach`'s scheme and returns a receipt. A call through an arm
 types as its head does. The catch-all stands in for every command in its block,
-so `{ |name args| cd $name }` is valid. An arm installed at run time, by `alias` or from a bundle, is checked by
-the same rule when it is installed. Generation first equates the arm with a
-thunk taking the slot's parameters and producing a fresh result, then equates
+so `{ |name args| cd $name }` is valid. A host-installed persistent arm is
+checked by the same rule when it is installed. Generation first equates the
+arm with a thunk taking the slot's parameters and producing a fresh result, then equates
 that result with what the replaced head produces. It does not coerce the arm
 or inspect a partial solution. An equation's success flag only suppresses a
 second complaint when the slot shape has already failed. The constraint is on
 the arm's type, never its spelling: `{ forward 'git' }` is an arm when
 `forward 'git'` is a function of the argv, and `{ echo hi }`, whose type takes
-no parameter, is not. The install-time one-shot checks must also close
-successfully before any scheme is stored (§17.5).
+no parameter, is not. The install-time one-shot check must close successfully
+before installation (§17.5); it returns only a verdict, never a stored handler
+scheme. Session checking imports handled names for diagnostics alone.
 
 ### 17.8. Operational outcomes
 
@@ -6401,8 +6468,9 @@ at their inference rule and carry their result type. Imported residual
 execution heads force a protected variable; imported value occurrences carry
 their solved type as a membrane.
 
-Once closure, nested checks and return-contract ascription succeed, one fold
-reads the tree back in the checked phase. A binding hole becomes Let-fun, Let
+Once generation, settling, live return-contract ascription and closure
+(including gates and nested checks) succeed, one fold reads the tree back in
+the checked phase. A binding hole becomes Let-fun, Let
 or capture/decode (§17.5); a call hole becomes returned-thunk bind/force
 segments before the recorded arguments. Boundary types become site snapshots.
 A protected value's membrane is a checked tree's kept site, or an imported

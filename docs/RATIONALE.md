@@ -35,7 +35,7 @@ same abstraction awaiting an argument. Blocks therefore replace the several
 mechanisms conventional shells keep apart:
 
 - functions;
-- aliases;
+- command handlers;
 - `eval`;
 - subshell bodies;
 - handlers and callbacks.
@@ -195,7 +195,7 @@ success. A failing stage fails the pipeline, while `?` and `try` decide how to
 recover.
 
 The cost is isolation. A `ral` stage inside a byte pipeline is a subshell:
-its working-directory, environment, alias, and module changes do not flow back
+its working-directory, environment, handler, and module changes do not flow back
 to the parent, whether the stage ran on a thread or as a process. Only the
 pipeline's data and final value cross the boundary.
 
@@ -278,9 +278,16 @@ unsafe under currying: applying one argument to a binary lambda returns a
 closure, so a malformed handler could otherwise succeed with a plausible but
 nonsensical result.
 
-An alias is the interactive, persistent form of the same idea: a top-level
-per-name handler with the same one-list convention. Scripts do not see aliases,
-so their behaviour cannot depend on a user's interactive configuration.
+A handler changes interpretation, not typing. Σ and lexical bindings alone
+determine a head's type and argument gate: a base frame keeps its own scheme
+and in-shell gate; every other command name keeps the external gate and
+`Command` result. The stack contributes names only to diagnostics, never
+persisted arm schemes. Handling `ls` cannot make `ls [1, 2]` valid.
+
+Persistent handlers come from the host, between units, through the rc's and
+plugin manifest's `handlers:` field. Scoped handlers use
+`within [handlers: …]`. No statement or builtin value installs persistent
+handlers; an interactive helper is an ordinary `let`-bound function.
 
 The cost is expressiveness `ral` does not need: handlers cannot capture, discard,
 or invoke a continuation more than once. In return, their control flow matches

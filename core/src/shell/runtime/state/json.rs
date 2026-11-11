@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn frame(value: &serde_json::Value) -> serde_json::Value {
-        json!({"entries": [["handler", value, null]], "kind": "Within"})
+        json!({"entries": [["handler", value]], "kind": "Within"})
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
         );
         assert_eq!(*error.cause, DecodeCause::MissingField("kind".into()));
         let bytes = format!(
-            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[{{"entries":[],"kind":"Within","kind":"Alias"}}],"args":[],"modules":{{"stack":[]}}}}"#,
+            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[{{"entries":[],"kind":"Within","kind":"Handler"}}],"args":[],"modules":{{"stack":[]}}}}"#,
             serde_json::to_string(cwd()).unwrap()
         );
         assert_eq!(
@@ -380,7 +380,7 @@ mod tests {
                     .field("handlers")
             )
         );
-        assert!(decode(&envelope(&json!([[[], null, "Alias"]]))).is_ok());
+        assert!(decode(&envelope(&json!([[[], null, "Handler"]]))).is_ok());
     }
 
     #[test]

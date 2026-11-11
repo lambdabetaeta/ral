@@ -201,7 +201,7 @@ mod tests {
         )
         .expect("compile lambda");
         crate::shell::evaluator::run_phrases(
-            &top.phrases,
+            &top,
             shell.env.clone(),
             crate::shell::evaluator::Mode::Session,
             mooring,

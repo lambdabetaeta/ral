@@ -19,7 +19,7 @@ live shell) and lambdas do the latter (`with_child` → `child_of` →
 `Shell::new(Default::default())` + `inherit_from`). The copy-and-merge path is a
 manual allow-list of which session components reach the child; whatever is
 omitted is silently severed. The terminal lease was omitted, so every foreground
-external inside a function, alias, or handler body lost the controlling terminal
+external inside a function or handler body lost the controlling terminal
 ([[decisions/260619_terminal-lease|terminal-lease]], fixed as a way-station). The
 defect is not the missing line; it is that a same-thread β-step allocates a
 second session at all.
@@ -184,10 +184,10 @@ parameter bound in the pushed frame and `cwd` added to the fold-back set.
 
 ## Consequences
 
-- A foreground external inside a function, alias, or handler body foregrounds
+- A foreground external inside a function or handler body foregrounds
   because the body *is* the session, not because a manifest remembered to copy a
-  witness. [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
-  makes this the common case: every alias and handler is a lambda.
+  witness. [[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]
+  makes this the common case: every handler is a lambda.
 - Per-call cost drops — no `SessionState` allocation and no lease re-mint on each
   lambda application.
 - The flow matrix collapses from two asymmetric manifests to one fold-back set, so
@@ -229,7 +229,7 @@ next depends on it.
 
 ## Test plan
 
-- **The lease, structurally.** A function / alias / handler whose body runs a
+- **The lease, structurally.** A function or handler whose body runs a
   terminal-bound external foregrounds — the point being that no manifest is
   consulted: the body observes `terminal_lease().is_some()` because it shares the
   session. Subsumes the regression test added with the way-station fix.
@@ -250,8 +250,8 @@ next depends on it.
 
 [[decisions/260619_terminal-lease|terminal-lease]] (the fixed symptom and the
 way-station whose `inherit_from` move this retires),
-[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]
-(why the blast radius is every alias and handler),
+[[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]
+(why the blast radius is every handler),
 [[decisions/261102_the-checked-ir-is-the-calculus|the-checked-ir-is-the-calculus]] (force and
 application stay distinct forms, which this leaves intact),
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]]

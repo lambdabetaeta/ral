@@ -27,10 +27,7 @@ pub(super) mod router;
 pub(super) mod rustyline;
 
 use ral_core::error::Error;
-use ral_core::fact::{
-    HostFailure, PluginFailure, PluginFailureAlreadyLoaded, PluginFailureNotLoaded, RalFailure,
-    Reason,
-};
+use ral_core::fact::{HostFailure, PluginFailure, PluginFailureAlreadyLoaded, RalFailure, Reason};
 
 pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 
@@ -197,12 +194,8 @@ pub(super) fn pop_buffer_stack(runtime: &Arc<Mutex<PluginRuntime>>) -> Option<Ed
     lock(runtime).keybindings.buffers.pop()
 }
 
-/// A keybinding flagged by rustyline's event handler, identified by the
-/// owning plugin's name (unique and stable across loads/unloads) rather
-/// than its position in the runtime `Vec` — an index goes stale the
-/// moment an unload compacts the list.  `binding_idx` indexes into that
-/// one plugin's immutable keybinding list, so it stays valid for as long
-/// as the named plugin is loaded.
+/// A keybinding flagged by rustyline, identified by its plugin's name and
+/// index within that plugin's immutable keybinding list.
 pub(super) struct PendingKeybinding {
     pub(super) plugin: String,
     pub(super) binding_idx: usize,
@@ -448,10 +441,7 @@ impl PluginRuntime {
 
     /// Resolve a pending keybinding to its bound key notation.
     ///
-    /// Lookup is by the plugin's name, the only identity stable across an
-    /// unload's `Vec::remove`; `binding_idx` then indexes that one plugin's
-    /// immutable keybinding list.  Returns `None` when the named plugin is
-    /// no longer loaded — the unbind-and-ignore case.
+    /// `binding_idx` indexes the named plugin's immutable keybinding list.
     pub(super) fn resolve_keybinding(&self, plugin: &str, binding_idx: usize) -> Option<String> {
         let p = self.plugins.iter().find(|p| p.name == plugin)?;
         let kb = p.keybindings.get(binding_idx)?;
@@ -473,33 +463,17 @@ impl PluginRuntime {
         self.keybindings_dirty = true;
     }
 
-    /// Save a handler's (possibly mutated) state cell back into the named
-    /// plugin's record.  A no-op if the plugin was unloaded mid-dispatch.
+    /// Save a handler's state cell back into the named plugin's record.
     pub(super) fn write_back_state_cell(&mut self, name: &str, state_cell: Option<FOValue>) {
         if let Some(p) = self.plugins.iter_mut().find(|p| p.name == name) {
             p.state_cell = state_cell;
         }
     }
 
-    /// Take what a load builtin says: admit a manifest, re-validated, or let a
-    /// plugin go.  The engine's own admission checks do not excuse these.
+    /// Re-validate and admit a startup manifest reported by the engine.
     pub(super) fn note(&mut self, note: PluginNote) -> Result<(), Error> {
         match note {
             PluginNote::Loaded(manifest) => self.admit(manifest),
-            PluginNote::Unloaded(name) => {
-                let idx = self
-                    .plugins
-                    .iter()
-                    .position(|p| p.name == name)
-                    .ok_or_else(|| {
-                        refusal(PluginFailure::NotLoaded(PluginFailureNotLoaded {
-                            name: name.clone(),
-                        }))
-                    })?;
-                self.plugins.remove(idx);
-                self.keybindings_changed();
-                Ok(())
-            }
         }
     }
 

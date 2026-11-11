@@ -1,7 +1,3 @@
----
-generated_at_commit: d56977ff
----
-
 # Builtins: the structured primitive set
 
 **A builtin is a Rust atom the language keeps in-process precisely because the
@@ -84,7 +80,7 @@ The core entries group by what they compute:
   standard output at standard error, and this verb is what stands where the
   bash idiom did
   ([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
-- **Session & terminal** — `cd` `cwd` `alias` / `unalias` `use`
+- **Session & terminal** — `cd` `cwd` `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probe `_ansi-ok`.
 
@@ -94,9 +90,10 @@ fallback chains is [[design/failure|failure]].
 ## How a builtin is typed
 
 **A builtin is a function, and its type rule is a scheme.** There is one rule,
-`fn(&mut Unifier) -> Scheme`: an ordinary first-class polytype, allocated fresh
-per call, usable in command position *and* reifiable as a value (`$map`). A
-table entry has an arity and a value form, both by construction
+`fn(&mut Binders) -> Ty`, closed independently of inference by `Binders::close`.
+Its first-class polytype is instantiated fresh per use, in command position
+*or* as a value (`$map`). A table entry has an arity and a value form, both by
+construction
 ([[invariants/fixed-arity|fixed-arity]]).
 
 Nullary and divergent are shapes a scheme writes, not a second rule:
@@ -117,11 +114,6 @@ already graded results and boundary results keep their declared grades.
 Boundary results are `p`, since the run supplies data that a command join must
 not erase. See [[design/capture|grades and capture]] for the complete rule.
 
-One scheme closes a computation variable, which a written quantifier list
-cannot bind, so it generalises against the empty environment instead: `alias`,
-whose block argument is a thunk over an unconstrained computation
-([[invariants/schemes-leave-closed|schemes-leave-closed]]).
-
 **A builtin's argument diagnostics need no vocabulary of their own.** What a
 mismatched argument earns follows from the type that was expected, not from a
 tag naming who expected it: a `Ty::Thunk` parameter *is* the block case, a row
@@ -133,11 +125,19 @@ argument as readily as a builtin's, and one application path serves both
 `echo` and `detach` are not table entries. They are the two rows of the
 *base-frame manifest*, typed `List String -> Command` and
 `List String -> F [pid: Int, desc: String]` — the argv convention a handler and an external already
-share, `List String` inside and bytes at the OS call — and their schemes are
-seeded into the checker's env at boot, so a base frame is looked up as a handler
-is ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+share, `List String` inside and bytes at the OS call. The checker reads their
+schemes directly from Σ's manifest, not from the handler stack. A base-frame
+name keeps its in-shell argument gate; every other command name keeps the
+external gate even when handled. Handler names serve diagnostics only; no
+handler scheme is persisted
+([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 `detach` starts its command as a program, as `^command` would: a handler
 or base frame runs inside this session, so neither is consulted.
+
+No builtin value installs or removes a handler. Persistent handlers are
+host-installed between units from rc or manifest `handlers:`;
+scoped handlers use `within [handlers: …]`. Interactive helpers are
+`let`-bound functions.
 
 Each codec being its own entry rather than one polymorphic `decode` / `encode`
 is what lets `from-json < file` dispatch straight through the command arm with

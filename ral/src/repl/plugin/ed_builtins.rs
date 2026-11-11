@@ -436,7 +436,7 @@ fn highlight_req(index: usize, v: &Value) -> Settled<HighlightReq> {
 /// with the current value and its return becomes the new value, which the
 /// host keeps, so it must be data.
 ///
-/// A boundary: the cell lives until unload, so the value the host hands
+/// A boundary: the cell lives for the session, so the value the host hands
 /// back was decided by whichever run last wrote it, and is admitted against
 /// this call's type before the updater runs.  The updater's own result was
 /// produced by typed code and is stored as it is.
@@ -470,7 +470,7 @@ pub fn builtin_ed_state(
 //
 // Every facet that `ral_core::shell::builtins` exposes is carried by the entry
 // that owns the call function.  This is a static host extension: plugins
-// remain dynamic source/alias/hook loaders above this surface.
+// remain host source/handler/hook loaders above this surface.
 
 fn scheme_ed_get(_: &mut Binders) -> Ty {
     thunk(pure(EditorSnapshot::ty()))
@@ -642,7 +642,7 @@ mod tests {
     /// determines is a boundary, and `_ed-state` is the editor surface's one.
     #[test]
     fn a_result_only_variable_in_the_editor_surface_is_a_boundary() {
-        for entry in ED_BUILTINS.iter().chain(super::super::load::BUILTINS) {
+        for entry in ED_BUILTINS {
             let scheme = ral_core::test_access::builtin_scheme(entry);
             assert!(
                 !ral_core::test_access::has_result_only_var(scheme) || entry.decl.is_boundary(),

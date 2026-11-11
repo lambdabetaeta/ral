@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 status: 'active; who places the coercion is superseded by [[design/capture]] — the coercion is unchanged, but `⟦·⟧` on a `let` places it, not a demand walk.'
 ---
@@ -36,14 +36,14 @@ vouch for any of it. Four consequences, found together on 2026-08-11:
 
 | the surface mechanism inherited | what it cost |
 | --- | --- |
-| head resolution consults scope, then handler frames, then builtins | `alias __decode-captured { \|_\| return 42 }` made every captured `let` an `Int` the checker had typed `String` — unsoundness by rebinding; `{ \|_\| return "" }` blanked them all |
+| head resolution consults scope, then handler frames, then builtins | a dynamically installed handler named `__decode-captured` with arm `{ \|_\| return 42 }` made every captured `let` an `Int` the checker had typed `String` — unsoundness by rebinding; `{ \|_\| return "" }` blanked them all |
 | `Bind` installs its binder in the current scope | `let __captured = precious` was overwritten and read back as `Bytes`; every top-level byte-routed `let` left a live `$__captured` behind (scope reflection saw it, ~3× peak residency); the surface's PATH-shadow check fired on the synthesized binder, so an executable named `__captured` broke every capture with a baffling error |
 | a builtin is reachable with a spread argument list, which static arity cannot see | `__decode-captured ...$[]` indexed `args[0]` and panicked; the run died at the `catch_unwind` boundary with exit 101, not as a catchable ral error |
 | a value is looked up out of scope by cloning, and read as bytes by cloning again | two copies of the captured buffer on the shell's hottest path, where the inline decode had been zero-copy |
 
 They are one fact found four times: **a checker-synthesized term written in
 surface machinery inherits surface semantics, and the type system stands behind
-none of it.** Alias vetting does not close the hole — `pin_arm_to_head` pins an
+none of it.** Handler vetting does not close the hole — `pin_arm_to_head` pins an
 arm's *route*, never the value type a coercion promises.
 
 ## The line
@@ -52,7 +52,7 @@ arm's *route*, never the value type a coercion promises.
 is theirs to redefine.** `CompKind::Decode(Arc<Comp>)` is a term former, so its
 denotation is fixed where the annotator writes it:
 
-- there is no name, so scope bindings, aliases, and `within [handlers: …]`
+- there is no name, so scope bindings, persistent handlers, and `within [handlers: …]`
   frames have nothing to intercept;
 - there is no binder, so nothing leaks into a scope, nothing is observable after
   the `let`, and no surface check for shadowing or PATH collision applies to a
@@ -120,7 +120,7 @@ escaping bytes asks for a `Terminal` first. ral now drops the buffer
 
 ## The alternative that was refused
 
-Reserving the name — a blacklist forbidding `__decode-captured` as an alias,
+Reserving the name — a blacklist forbidding `__decode-captured` as a persistent handler,
 handler, or binding — was rejected. It is not compositional: the meaning of an
 elaborated program would still be a function of the ambient environment, merely
 one the environment is now forbidden to exercise. Every future coercion would
@@ -137,7 +137,7 @@ something they have no reason to know about.
   the reading lives in `eval_decode`, which owns
   `strip_trailing_newline` + `decode_utf8_strict` and returns a catchable error
   on invalid UTF-8, still naming `| from-bytes`.
-- `core/tests/capture_coercion.rs` is the regression suite: an alias, a handler
+- `core/tests/capture_coercion.rs` is the regression suite: a persistent handler, a scoped handler
   frame, and a user binding of each old name, and the once-panicking spread
   call.
 - `docs/SPEC.md` §17.5 gives the `Capture` and `Decode` rules.

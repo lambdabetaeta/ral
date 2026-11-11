@@ -384,7 +384,7 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
 /// sourced library installs.
 ///
 /// Every other site sweeps the documented registries, since a frame stacked
-/// over a native — a handler, an alias — inherits the native's doc.
+/// over a native inherits the native's doc.
 fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
     let manifest = || builtin_type_hint(shell.session.runtime.builtins.manifest(), name);
     let library_doc = || shell.session.runtime.library_docs.get(name).cloned();
@@ -442,7 +442,6 @@ fn matcher(pattern: &str) -> impl Fn(&str) -> bool {
 enum Where {
     Session,
     Prelude,
-    Alias,
     Handler,
     BaseFrame,
     Builtin,
@@ -456,7 +455,6 @@ impl fmt::Display for Where {
         match self {
             Self::Session => f.write_str("session"),
             Self::Prelude => f.write_str("prelude"),
-            Self::Alias => f.write_str("alias"),
             Self::Handler => f.write_str("handler"),
             // A base frame reads as the builtin it is: that it answers through
             // the stack rather than the manifest is what keeps it from
@@ -497,17 +495,10 @@ fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     {
         sites.push(Where::Builtin);
     }
-    // An alias is a handler frame too, so it must be named before a bare base
-    // frame answers generically; the stack's winner is `BaseFrame` only when
-    // nothing shadows it, which is what tells it from an arm stacked over one.
-    let stacked = if shell.has_alias(name) {
-        Some(Where::Alias)
-    } else {
-        shell.lookup_handler(name).map(|found| match found {
-            HandlerLookup::Frame(..) => Where::Handler,
-            HandlerLookup::Base(..) => Where::BaseFrame,
-        })
-    };
+    let stacked = shell.lookup_handler(name).map(|found| match found {
+        HandlerLookup::Frame(..) => Where::Handler,
+        HandlerLookup::Base(..) => Where::BaseFrame,
+    });
     let seen_as_frame = matches!(stacked, Some(Where::BaseFrame));
     sites.extend(stacked);
     // An arm stacked over a base frame shadows it in the stack's own lookup,

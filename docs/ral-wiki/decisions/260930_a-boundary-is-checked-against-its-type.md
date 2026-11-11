@@ -1,7 +1,30 @@
 ---
 status: accepted
-generated_at_commit: 9c8aa5d9
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 ---
+
+> **Amended 2026-11-11 — Return contracts.** A contract is a use of the
+> returned value. After all elaboration settles, its field, arm and factory
+> equations run live on `Settled`, before gates and nested checks close the
+> unit and readback freezes sites. It cannot select a `let` mode or call
+> split or open holes. Thus `let d = echo 5 | from-json; return [umask: $d]`
+> checks but refuses at the decode, naming the `umask:` use. The shared
+> `stands_in` relation likewise reaches decoder sites inside locally checked
+> rc and manifest arms. Arms received through `use` retain their module's
+> sites and remain an install-time check.
+
+> **Amended 2026-11-11 — Sessions.** Every checked `Toplevel`, including
+> a file loaded by `use` or `load::evaluate_source`, is readmitted before its
+> first phrase. `run_phrases` takes the whole checked unit and checks
+> `Toplevel.admits` against its supplied `Env`, not necessarily `shell.env`,
+> in every mode. A refusal preserves that environment, defines nothing and
+> runs no phrase; it names the use that imposed the type. A loaded file's
+> refusal points into that file; a `use` retains its loader context.
+>
+> **Perimeter correction.** `detach` has the concrete scheme
+> `[String] → F [pid: Int, desc: String]`
+> (`core/src/typecheck/builtins.rs`, `scheme::detach`), not a result-only
+> `∀α`; it is no exception to the perimeter rule.
 
 > **Amended 2026-11-02** by
 > [[decisions/261102_a-written-key-is-a-name|a written key is a name]]:
@@ -84,8 +107,7 @@ field and the line that needed it.
   a miss names the pointer prefix and the keys or the length.
 - **The perimeter is a test.** No builtin outside the boundary set and the
   divergent `fail`/`exit`/`quit` has a variable only its result mentions, and
-  no stored `Define` scheme quantifies what a boundary decides. `detach`'s
-  `∀α` is listed as the one known exception until it is typed.
+  no stored `Define` scheme quantifies what a boundary decides.
 
 ## Why
 

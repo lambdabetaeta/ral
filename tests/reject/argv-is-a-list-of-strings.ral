@@ -1,6 +1,6 @@
 # codes: T0011 T0010
 # status: 1
-# at: 6:9
+# at: 6:23
 # contains: couldn't match type String with type [String]
 # The arm returns a value and misuses its argv; no implicit capture is attempted.
-alias f { |a| return !{upper $a} }; f x
+within [handlers: [f: { |a| return !{upper $a} }]] { f x }

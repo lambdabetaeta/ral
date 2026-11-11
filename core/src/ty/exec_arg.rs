@@ -2,13 +2,14 @@
 //! for, and the idiom that lowers each.
 //!
 //! Rendering an argv *inside* the shell is total but for `()`: every value has
-//! a text form, so `echo [a: 1]` prints a map and a handler arm receives one as
-//! a word.  An operating-system argument is narrower: it is one word, and the
+//! a text form, so the base frame `echo [a: 1]` prints a record. An arm uses
+//! its head's gate: a base frame's, or the external gate for every other name.
+//! An operating-system argument is narrower: it is one word, and the
 //! shapes below have no single word to give.
 //!
 //! Stated once, as a verdict on a [`Head`], and read from both sides of that
 //! boundary.  The checker maps an argument's *type* into this set before the
-//! spawn (the argv rule in `typecheck::infer`) and `shell::exec::command::check_argv` maps
+//! spawn (the argv rule in `typecheck::generate`) and `shell::exec::command::check_argv` maps
 //! the *value* at the spawn, through `Value::heads`.  Both say the same
 //! [`RefusedArg::headline`] and [`RefusedArg::remedy`].  The one match is
 //! wildcard-free on purpose: a new head has to be given a verdict, so the

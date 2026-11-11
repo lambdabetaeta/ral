@@ -1,4 +1,4 @@
-//! The alias-frame lifecycle and the lexical scope doors.
+//! The persistent-handler lifecycle and the lexical scope doors.
 //!
 //! ral evaluation never unwinds for control flow, so each guard here is an
 //! inline save-modify-restore around the body rather than an RAII type.
@@ -10,45 +10,43 @@ use crate::shell::runtime::{
 };
 
 impl Shell {
-    /// Install `thunk` as the alias for `name`, replacing any existing one.
+    /// Install `thunk` as the persistent handler for `name`, replacing any existing one.
     /// Sibling of
     /// [`WithinScope::enter`](crate::shell::evaluator::scope::WithinScope::enter):
-    /// same handler stack, but an alias frame is never popped at scope exit,
-    /// only by [`Self::remove_alias`].
-    /// Since it outlives its installing run, [`HandlerEntry::vet`] closes the
-    /// arm's scheme against the live session and stores it on the frame to
-    /// seed the next run's check.
+    /// same handler stack, but a persistent frame is never popped at scope exit,
+    /// only by [`Self::remove_handler`].
+    /// [`HandlerEntry::vet`] checks the arm against its command before installation.
     ///
     /// # Errors
     /// `thunk` not an arm: a block of one parameter, the argv, producing what
     /// its head produces.
-    pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
-        self.vet_alias(name, thunk)
-            .map(|entry| self.commit_alias(entry))
+    pub fn install_handler(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
+        self.vet_handler(name, thunk)
+            .map(|entry| self.commit_handler(entry))
     }
 
-    /// The read-only half of [`Self::install_alias`]: the gate, nothing installed.
+    /// The read-only half of [`Self::install_handler`]: the gate, nothing installed.
     ///
     /// # Errors
-    /// As [`Self::install_alias`].
-    pub fn vet_alias(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
-        HandlerEntry::vet(name, thunk, self, HandlerRole::Alias)
+    /// As [`Self::install_handler`].
+    pub fn vet_handler(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
+        HandlerEntry::vet(name, thunk, self, HandlerRole::Handler)
     }
 
-    /// The committing half: install a vetted entry, replacing any alias of its name.
-    pub fn commit_alias(&mut self, entry: HandlerEntry) -> FrameHandle {
-        self.context.handlers.remove_alias(&entry.name);
-        self.context.handlers.push_alias(vec![entry])
+    /// The committing half: replace any persistent handler of the same name.
+    pub fn commit_handler(&mut self, entry: HandlerEntry) -> FrameHandle {
+        self.context.handlers.remove_handler(&entry.name);
+        self.context.handlers.push_handler(vec![entry])
     }
 
-    /// Remove the alias frame [`Self::install_alias`] minted, reporting whether
+    /// Remove the handler frame [`Self::install_handler`] minted, reporting whether
     /// it was still there: a frame the user replaced has a new handle.
-    pub fn remove_alias_frame(&mut self, handle: FrameHandle) -> bool {
+    pub fn remove_handler_frame(&mut self, handle: FrameHandle) -> bool {
         self.context.handlers.remove_by_handle(handle).is_some()
     }
 
     /// Install `value` as a lexical scope binding for `name` — the rc
-    /// `bindings:` path.  Where [`Self::install_alias`] pushes a handler
+    /// `bindings:` path.  Where [`Self::install_handler`] pushes a handler
     /// frame, this writes a scope entry: a function value gets its closed
     /// session scheme inferred and stored alongside, so the next run's check
     /// sees a type and the name is applyable at the prompt.  Other values
@@ -119,8 +117,8 @@ impl Shell {
         self.env.largest_shallow_size(&self.sig)
     }
 
-    /// The names of every installed handler entry — `within` arms and aliases
-    /// alike — for tab completion.  The handler-stack counterpart of
+    /// Every scoped and persistent handler name, for tab completion.
+    /// The handler-stack counterpart of
     /// [`Self::builtin_names`].
     pub fn handler_names(&self) -> impl Iterator<Item = &str> {
         self.context.handlers.entries().map(|e| e.name.as_ref())
@@ -140,14 +138,13 @@ impl Shell {
     }
 
     /// The next run's check seed, read off the live session: every scope
-    /// binding with its installed scheme, plus the alias arms' schemes off the
-    /// persistent handler frames.
+    /// binding with its installed scheme, plus installed handler names.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
         self.schemes_over(&self.env)
     }
 
     /// What a closure's body is checked against at an install door: what it
-    /// captured, then Σ's prelude, beside the aliases in force.
+    /// captured, then Σ's prelude, beside the handlers in force.
     pub(crate) fn closure_schemes(&self, closure: &Closure) -> crate::typecheck::SessionSchemes {
         self.schemes_over(closure.env())
     }
@@ -155,20 +152,20 @@ impl Shell {
     fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
             bindings: env.binding_schemes(&self.sig),
-            aliases: self.context.handlers.alias_schemes(),
+            handled: self.context.handlers.handled_names(),
             builtins: self.session.runtime.builtins.manifest().clone(),
         }
     }
 
-    /// Remove the alias for `name`, returning whether anything was removed.
-    pub fn remove_alias(&mut self, name: &str) -> bool {
-        self.context.handlers.remove_alias(name).is_some()
+    /// Remove the persistent handler for `name`, reporting whether it was present.
+    pub fn remove_handler(&mut self, name: &str) -> bool {
+        self.context.handlers.remove_handler(name).is_some()
     }
 
-    /// True if an alias frame is installed for `name`.  A scoped `within`
-    /// frame is not an alias even when it has the same one-entry shape.
-    pub fn has_alias(&self, name: &str) -> bool {
-        self.context.handlers.iter().any(|f| f.is_alias_for(name))
+    /// True if a persistent handler frame is installed for `name`.
+    /// Scoped `within` frames do not count, even with the same shape.
+    pub fn has_handler(&self, name: &str) -> bool {
+        self.context.handlers.iter().any(|f| f.is_handler_for(name))
     }
 
     /// The winning handler for `name` — a run frame (with its depth) or a

@@ -167,17 +167,20 @@ fn parse_handlers(arms: Vec<(String, Value)>, shell: &Shell) -> Settled<Vec<Hand
 /// value is its output.
 fn parse_catch_all(v: &Value, shell: &Shell) -> Settled<Value> {
     let closure = arm_closure(v, HandlerRole::CatchAll, "handler")?;
-    crate::typecheck::catch_all_stands_in(closure.comp(), shell.closure_schemes(closure)).map_err(
-        |errors| {
-            refused_arm(
-                HandlerRole::CatchAll,
-                "handler",
-                &errors,
-                closure.comp().span,
-                shell,
-            )
-        },
-    )?;
+    crate::typecheck::arm_stands_in(
+        crate::typecheck::Arm::CatchAll,
+        closure.comp(),
+        shell.closure_schemes(closure),
+    )
+    .map_err(|errors| {
+        refused_arm(
+            HandlerRole::CatchAll,
+            "handler",
+            &errors,
+            closure.comp().span,
+            shell,
+        )
+    })?;
     Ok(v.clone())
 }
 

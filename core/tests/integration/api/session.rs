@@ -16,8 +16,8 @@
 //! The ADR session-scheme-continuity Verify list is exercised end-to-end
 //! below: each run's static check is seeded from the live session, the schemes
 //! the checker inferred for run *N*'s top-level binds living on the runtime
-//! bindings (and the alias arms' schemes on the persistent handler frames), so
-//! run *N+1*'s check sees them.  Its harness mirrors the REPL loop in
+//! bindings, so run *N+1*'s check sees them. Installed handler names inform
+//! diagnostics, not command types. Its harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check_errors` seeds `compile_and_typecheck` from
 //! the live `session_schemes()`, and `top_level` drives the public `run` entry.
 
@@ -32,8 +32,9 @@ use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::HostSurface;
 use ral_core::shell::run::RunReport;
-use ral_core::shell::runtime::Settled;
+use ral_core::shell::runtime::{Mooring, Settled};
 use ral_core::source::{FileId, SourceOrigin};
+use ral_core::syntax::quote_word;
 use ral_core::test_access::{binding_scheme as scheme_of, has_weak_residuals};
 use ral_core::test_helper::{fresh_shell, layer};
 use ral_core::{Break, SessionSchemes, Shell, TypeError, Value};
@@ -400,20 +401,19 @@ fn pattern_binds_generalise_their_own_scheme() {
     );
 }
 
-// ─── (7) alias visibility ────────────────────────────────────────────────────
+// ─── (7) handler visibility ────────────────────────────────────────────────────
 
-/// `alias three { |args| echo 3 }` is visible to the next run's check: the
-/// arm's handler scheme persists, so `three` alone is clean and `$three`
-/// (first-classing a handler) is a static error.  After `unalias three` the name
-/// falls back to external typing, so `$three` is an unbound variable, refused
-/// as such rather than as a handler entry.
+/// A host-installed handler's name informs the next run's diagnostics, not
+/// its command type: `three` still takes only text. Removing its frame makes
+/// `$three` unbound rather than a non-first-class handler entry.
 #[test]
-fn alias_visible_to_next_run() {
+fn handler_visible_to_next_run() {
     let mut sh = shell();
-    top_level(&mut sh, "alias three { |args| echo 3 }").unwrap();
+    let arm = top_level(&mut sh, "return { |args| echo 3 }").unwrap();
+    let frame = sh.install_handler("three".into(), arm).unwrap();
     assert!(
         check_errors(&sh, "three").is_empty(),
-        "expected the alias used alone to be clean, got: {:?}",
+        "expected the handler used alone to be clean, got: {:?}",
         check_errors(&sh, "three")
             .iter()
             .map(|e| e.kind.render_message())
@@ -423,12 +423,19 @@ fn alias_visible_to_next_run() {
     assert!(
         errs.iter()
             .any(|e| e.kind.render_message().contains("handler entry")),
-        "expected the persisted alias scheme to reject `$three` as a handler entry, got: {:?}",
+        "expected the installed handler name to reject `$three` as a handler entry, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
-    top_level(&mut sh, "unalias three").unwrap();
+    let errs = check_errors(&sh, "three [1, 2]");
+    assert!(
+        errs.iter().filter_map(TypeError::hint).any(|hint| {
+            hint.contains("`three` has a handler here") && hint.contains("takes only text")
+        }),
+        "a handled external command must retain the text-only gate: {errs:?}"
+    );
+    assert!(sh.remove_handler_frame(frame));
     let codes: Vec<_> = check_errors(&sh, "return $three")
         .iter()
         .map(|e| e.kind.code())
@@ -436,7 +443,7 @@ fn alias_visible_to_next_run() {
     assert_eq!(
         codes,
         ["T0071"],
-        "after unalias `$three` is merely unbound, not a handler entry"
+        "after removing the frame `$three` is merely unbound, not a handler entry"
     );
 }
 
@@ -910,6 +917,81 @@ fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
         scheme_of(&sh, "marker").is_none(),
         "the line's first statement must not have run"
     );
+}
+
+#[test]
+fn a_module_readmits_session_data_before_its_first_phrase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = ral_core::test_helper::real(tmp.path());
+    let module = root.as_path().join("lib.ral");
+    let marker = root.as_path().join("ran");
+    let source = format!(
+        "to-string ran > {}\nlet y = $[$d + 1]",
+        quote_word(&shown(&marker))
+    );
+    std::fs::write(&module, &source).unwrap();
+    let mut sh = shell();
+    top_level(&mut sh, "let d = !{to-string '\"s\"' | from-json}").unwrap();
+    assert!(check_errors(&sh, &source).is_empty());
+
+    let load = format!("use {}", quote_word(&shown(&module)));
+    let Break::Error(error) = top_level(&mut sh, &load).expect_err("$d is not an integer") else {
+        panic!("expected a module admission error");
+    };
+    let message = error.describe();
+    assert!(
+        message.contains("$d: the value is the string \"s\""),
+        "{message}"
+    );
+    assert!(message.contains("uses it as an integer"), "{message}");
+    assert_eq!(error.context(), Some("use"));
+    let record = error.fact(&sh);
+    assert_eq!(record.site().script.as_ref(), shown(&module));
+    assert_eq!(record.site().line, 2);
+    assert!(!marker.exists(), "the module's first phrase must not run");
+
+    top_level(&mut sh, "let d = 1").unwrap();
+    top_level(&mut sh, &load).expect("the module runs with integer session data");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
+}
+
+#[test]
+fn evaluate_source_readmits_session_data_before_its_first_phrase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("ran");
+    let source = format!(
+        "to-string ran > {}\nlet y = $[$d + 1]",
+        quote_word(&shown(&marker))
+    );
+    let origin = SourceOrigin::named("lib.ral");
+    let mut sh = shell();
+    top_level(&mut sh, "let d = !{to-string '\"s\"' | from-json}").unwrap();
+    assert!(check_errors(&sh, &source).is_empty());
+
+    let Break::Error(error) =
+        ral_core::shell::load::evaluate_source(&Mooring::adrift(), &mut sh, &source, &origin, None)
+            .expect_err("$d is not an integer")
+    else {
+        panic!("expected a source admission error");
+    };
+    let message = error.describe();
+    assert!(
+        message.contains("$d: the value is the string \"s\""),
+        "{message}"
+    );
+    assert!(message.contains("uses it as an integer"), "{message}");
+    let record = error.fact(&sh);
+    assert_eq!(record.site().script.as_ref(), "lib.ral");
+    assert_eq!(record.site().line, 2);
+    assert!(!marker.exists(), "the source's first phrase must not run");
+    assert!(sh.scope_lookup("y").is_none());
+    assert_eq!(sh.scope_lookup("d"), Some(&Value::string("s")));
+
+    top_level(&mut sh, "let d = 1").unwrap();
+    ral_core::shell::load::evaluate_source(&Mooring::adrift(), &mut sh, &source, &origin, None)
+        .expect("the source runs with integer session data");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
+    assert_eq!(sh.scope_lookup("y"), Some(&Value::Int(2)));
 }
 
 /// What the defining unit's own uses fixed stays fixed: a residual stays weak

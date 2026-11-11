@@ -71,7 +71,7 @@ one that works.
 Every multi-stage pipeline is process-staged. Interior routes are operating-
 system byte pipes, and stages run as one process group. Only the pipe bytes,
 the final result, and recorded observations cross a process boundary; lexical
-bindings, cwd, environment, aliases, and modules stay in their child.
+bindings, cwd, environment, handlers, and modules stay in their child.
 [[internals/pipeline-execution|Pipeline execution]] resolves ground wires,
 launches the stages, and collects them without a parent-side value fold.
 

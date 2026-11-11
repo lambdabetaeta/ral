@@ -113,15 +113,13 @@ fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
     KeyEvent(code, mods)
 }
 
-/// Reconcile plugin keybindings with rustyline when `load` / `unload`
-/// has touched the plugin list.  The `keybindings_dirty` flag is set by
-/// those routines and cleared here; if it isn't set we skip the work.
+/// Reconcile startup plugin keybindings with rustyline. Admission sets
+/// `keybindings_dirty`; this sync clears it and otherwise skips the work.
 ///
 /// rustyline owns its binding table but the router owns precedence, so
 /// registration is one [`RouterKeyHandler`] per distinct bound sequence:
 /// every event in `bound` (the last sync's) is dropped, then the router's
-/// sequences are re-bound as `Event::KeySeq`.  A plugin removed by `unload`
-/// therefore loses its sequences here rather than leaving a handler behind.
+/// sequences are re-bound as `Event::KeySeq`.
 pub(in crate::repl) fn sync_plugins(
     runtime: &Arc<Mutex<PluginRuntime>>,
     rl: &mut Editor<RalHelper, DefaultHistory>,

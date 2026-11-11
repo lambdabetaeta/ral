@@ -84,14 +84,16 @@ within [handlers: [foo: { |args| echo handler }]] {
 
 # An argv is a list of text whatever was written, and a spread reaches the arm
 within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd hello 1 true }
-alias mycmd2 { |args| echo ...$args }
-mycmd2 hello 1 true
+within [handlers: [mycmd2: { |args| echo ...$args }]] {
+    mycmd2 hello 1 true
+}
 within [handlers: [spreader: { |args| echo ...$args }]] {
     let xs = [1]
     spreader ...$xs
 }
-alias spreader2 { |a| echo ...$a }
-let ys = [hi]
-spreader2 ...$ys
+within [handlers: [spreader2: { |a| echo ...$a }]] {
+    let ys = [hi]
+    spreader2 ...$ys
+}
 
 echo 'within handler tests done'

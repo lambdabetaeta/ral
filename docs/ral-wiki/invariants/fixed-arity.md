@@ -1,7 +1,3 @@
----
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
----
-
 # Fixed arity
 
 **Fixed arity binds *application*: every invocable with a first-class `$name`
@@ -71,12 +67,12 @@ manifest holds it.
 
 **A spread is the notation of an argv.** `...$xs` splices a list into an argv,
 so it may be written only where an argv exists: a command, an external, a base
-frame, or a handler or alias arm. A value takes its arguments by application at
+frame, or a handled command name. A value takes its arguments by application at
 a declared arity, so it has no argv and `...` has nothing to spread into. A
 spread in a value's argument position is refused before the run: at
 elaboration (P0001) when the head is written as a value or names a lexically
 bound one, and as **T0056** (`SpreadIntoApplication`) when a bare head resolves
-at check time to a builtin or a session binding (`infer.rs` `exec_comp_ty`). A list literal's spread (`[1, ...$xs, 2]`) and a
+at check time to a builtin or a session binding. A list literal's spread (`[1, ...$xs, 2]`) and a
 rest-pattern (`[first, ...rest]`) are a different construct, building and
 taking apart a list rather than an argument sequence, and this rule leaves them
 alone.
@@ -89,7 +85,10 @@ consumed by a block typed `[String] → B`
 ([[internals/handler-dispatch|handler-dispatch]],
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 Variable arity is a surface phenomenon; at the value level it is always a list
-of strings.
+of strings. The call's argument gate belongs to the head, not its handler:
+Σ supplies a base frame's in-shell gate; every other command name keeps the
+external gate, handled or not. Lexical bindings select application instead.
+No handler scheme is persisted, and installing a handler cannot change typing.
 
 Optionality is data too, never a hole in an argument list: an
 [[invariants/optionality-via-variants|open variant]] (`` `some v `` /

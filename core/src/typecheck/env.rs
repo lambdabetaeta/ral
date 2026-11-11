@@ -10,33 +10,20 @@ use std::sync::Arc;
 // Typing environment
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// What installed a handler: `unalias` removes only an [`Self::Alias`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HandlerOrigin {
-    Within,
-    Alias,
-}
-
-#[derive(Clone)]
-pub(crate) struct HandlerBinding {
-    pub(crate) scheme: Arc<Scheme>,
-    pub(crate) origin: HandlerOrigin,
-}
-
 #[derive(Clone, Default)]
 struct NameScope {
     bindings: HashMap<String, Arc<Scheme>>,
     recursive: HashSet<String>,
     /// For a binding `let` made of what a call returned, the callee.
     called: HashMap<String, String>,
-    handlers: HashMap<String, HandlerBinding>,
+    handled: HashSet<String>,
 }
 
 #[derive(Clone)]
 pub(super) struct TyEnv {
     scopes: Vec<NameScope>,
     /// The run's Σ, seeded once by `Solver::seed`.  A name resolves here after a
-    /// lexical binding and before a handler.
+    /// lexical binding; handlers do not affect typing.
     pub(crate) builtins: super::builtins::Manifest,
 }
 
@@ -85,11 +72,8 @@ impl TyEnv {
             .flat_map(|scope| scope.bindings.keys().map(String::as_str))
     }
 
-    pub(crate) fn lookup_handler(&self, name: &str) -> Option<&HandlerBinding> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.handlers.get(name))
+    pub(crate) fn is_handled(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.handled.contains(name))
     }
 
     /// Opened and closed only by `Generator::scope`.
@@ -126,32 +110,8 @@ impl TyEnv {
 
     /// # Panics
     /// Panics if the scope stack is empty (more `pop`s than `push`es).
-    pub(crate) fn bind_handler(
-        &mut self,
-        name: String,
-        scheme: impl Into<Arc<Scheme>>,
-        origin: HandlerOrigin,
-    ) {
-        self.scopes.last_mut().unwrap().handlers.insert(
-            name,
-            HandlerBinding {
-                scheme: scheme.into(),
-                origin,
-            },
-        );
-    }
-
-    pub(crate) fn unbind_removable_handler(&mut self, name: &str) -> bool {
-        for scope in self.scopes.iter_mut().rev() {
-            if matches!(
-                scope.handlers.get(name),
-                Some(binding) if binding.origin == HandlerOrigin::Alias
-            ) {
-                scope.handlers.remove(name);
-                return true;
-            }
-        }
-        false
+    pub(crate) fn bind_handler(&mut self, name: String) {
+        self.scopes.last_mut().unwrap().handled.insert(name);
     }
 }
 

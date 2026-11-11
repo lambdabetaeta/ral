@@ -17,11 +17,11 @@ const HOST: &str = "a test host resolves its baseline";
 // `machine::apply_handler` lifts the matched handler frame off the stack for the
 // dynamic extent of the body (so a same-name call from inside reaches
 // the next outer match), then re-inserts it via an RAII guard whose
-// `Drop` runs on any exit, panic or otherwise.  A stripped *alias* frame
-// is a permanently deleted user alias, the one piece of dynamic context
+// `Drop` runs on any exit, panic or otherwise.  A stripped persistent frame
+// is a permanently deleted user handler, the one piece of dynamic context
 // with no save elsewhere to rebuild from, and exarch `catch_unwind`s
 // evaluation and continues the session on the same `Shell`, so a caught
-// panic must not silently delete the user's alias.
+// panic must not silently delete the user's handler.
 
 /// A nullary host builtin whose reducer raises a Rust panic.  Registered
 /// only by the test below, it is the panic trigger the RAII guard needs:
@@ -44,7 +44,7 @@ static PANIC_BUILTIN_ARR: [ral_core::shell::runtime::BuiltinEntry; 1] =
     )];
 static PANIC_BUILTIN: &[ral_core::shell::runtime::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 
-/// A Rust panic raised inside an alias body must leave the alias
+/// A Rust panic raised inside a handler body must leave the handler
 /// still installed.  The body invokes `__test-panic`, a host builtin the
 /// test registers whose reducer panics unconditionally — any panic
 /// mid-handler-body would do, and a dedicated trigger keeps the test
@@ -63,27 +63,30 @@ fn handler_self_mask_survives_panic_mid_body() {
         ral_core::test_helper::process_cwd(),
     )
     .expect(HOST);
-    let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
-        .expect("installing the alias must succeed");
+    let arm = top_level(&mut shell, "return { |args| __test-panic }")
+        .expect("creating the handler arm must succeed");
+    shell
+        .install_handler("boom".into(), arm)
+        .expect("installing the handler must succeed");
     assert!(
-        shell.has_alias("boom"),
-        "alias must be installed before the call"
+        shell.has_handler("boom"),
+        "handler must be installed before the call"
     );
 
     // The dispatch of `boom` runs `machine::apply_handler`, whose `Unmask`
-    // frame strips the alias, then applies the body — which panics.
+    // frame strips the handler, then applies the body — which panics.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         top_level(&mut shell, "boom")
     }));
 
     assert!(
         outcome.is_err(),
-        "the alias body's `__test-panic` must raise; its reducer panics \
+        "the handler body's `__test-panic` must raise; its reducer panics \
          unconditionally"
     );
     assert!(
-        shell.has_alias("boom"),
-        "the alias `boom` must still be installed after a panic unwound \
+        shell.has_handler("boom"),
+        "the handler `boom` must still be installed after a panic unwound \
          through its body: the RAII guard restores the stripped frame from \
          `Drop`, where straight-line re-insertion would be skipped"
     );

@@ -46,7 +46,6 @@ pub(crate) use config::RcSettings;
 pub(crate) use config::source::source_rc_file;
 pub(crate) use frontend::Surface;
 pub(crate) use plugin::ed_builtins::ED_BUILTINS;
-pub(crate) use plugin::load::BUILTINS as PLUGIN_LOAD_BUILTINS;
 pub(crate) use prompt::install_default_prompt;
 use session::Session;
 use std::process::ExitCode;

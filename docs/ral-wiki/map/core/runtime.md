@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40af72fb
-generated_at_date: 2026-11-09
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -32,10 +32,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   admits it (`Command::lookup`, `Command::admit`) before its redirects open,
   refusing it outright, and carries the admitted `Command` to preparation; the
   env, base, and handler arms pass through.
-  Handler and alias thunks are lambdas — a unary `{ |args| … }` or a catch-all
-  `{ |name args| … }` — with the calling convention fixed by surface position,
-  not inferred from a value's runtime shape
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+  Handler arms have the unary argv or binary name-and-argv type —
+  written as `{ |args| … }` or `{ |name args| … }`, or computed.
+  The install position fixes the convention, checked by type rather than
+  inferred from a value's runtime shape
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
 - `redirect.rs` — `RedirectState`, the one interpreter of a redirect list:
   open every target (`open_targets`), install them over the shell's streams
   with `Io::swap`, and on leaving restore the streams and settle each

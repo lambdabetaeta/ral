@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a2d120d2
-verified_at_date: 2026-09-11
+verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+verified_at_date: 2026-11-11
 against: [design/effects-handlers, design/row-types, design/types, design/scoping]
 ---
 
@@ -32,7 +32,7 @@ type records and variants, never computations.
   effect row assigns them; a ral handler is one lambda per name, unary over
   the argv as a single `List String`, the catch-all binary over name and argv,
   its arity fixed by the install site
-  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]],
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]],
   [[decisions/260622_functions-and-handlers|functions-and-handlers]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 - **Equations are dropped on both sides.** "As with most other implementations

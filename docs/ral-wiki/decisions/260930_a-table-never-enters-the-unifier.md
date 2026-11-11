@@ -1,7 +1,31 @@
 ---
 status: accepted
-generated_at_commit: 8d868e18
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 ---
+
+> **Amended 2026-11-11 — Live return contracts.** Generate on `Solver`,
+> settle every remaining elaboration decision into `Settled`, hold the return
+> contract live, close gates, nested tables and errors into `Solution`, then
+> freeze by readback. Skip the hold if settling reported errors. A contract
+> is a use of the returned value: it can fix weak types, but cannot select a
+> `let` mode or call split, enter a region or open a hole.
+>
+> Fields use `equate_held`; factory equations propagate through the same live
+> solver. RC and manifest `handlers:` use `Holds::Arms`, with `stands_in` the
+> sole relation also used by scoped arms and the catch-all. Their equations
+> reach decoder admission sites before freezing. Computed-name maps hold
+> members to `[String] → Command`; installation still judges actual names.
+>
+> The walk re-reads row tails after each field. Afterwards, keysets are judged
+> on final types and only fields unseen by the walk are held on scratch,
+> without replaying live clashes. Contract equations introduce ground types
+> apart from fresh variables used once; base-frame result payloads are ground
+> (grades may quantify), so those revealed fields need no further solving.
+> There is no repeated inference or fixpoint. Nested tables remain queued
+> scratch judgements at close, after live holds. Variable returns and
+> unresolved field/member types retain runtime checks. The table itself
+> still never becomes a unified record type; the scratch-only return
+> ascription clause below is superseded.
 
 # A table never enters the unifier
 

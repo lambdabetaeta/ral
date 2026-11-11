@@ -165,7 +165,7 @@ fn raw_scope_table_bytes_keep_first_order_payload_path() {
 fn raw_handler_catch_all_keeps_context_and_first_order_paths() {
     let mut value = envelope();
     value["context"]["handlers"] = json!([{
-        "entries": [], "kind": "Alias",
+        "entries": [], "kind": "Handler",
         "catch_all": {"list": {"items": [{"float": {"value": f64::NAN.to_bits()}}]}}
     }]);
     let error = value_failure(&value);
@@ -359,9 +359,8 @@ fn raw_handler_partial_validation_and_decode_cleanup_are_stack_safe() {
         .spawn(|| {
             let deep = deep_value(10_000);
             for tail in [r#"{"bytes":{"value":"!"}}"#, r#"{"bytes":{"value":false}}"#] {
-                let bytes = format!(
-                    r#"{{"entries":[["deep",{deep},null],["bad",{tail},null]],"kind":"Within"}}"#
-                );
+                let bytes =
+                    format!(r#"{{"entries":[["deep",{deep}],["bad",{tail}]],"kind":"Within"}}"#);
                 let error = from_slice::<WireHandlerFrame>(bytes.as_bytes()).unwrap_err();
                 assert!(matches!(error, JsonInputFailure::Decode(_)));
             }
@@ -464,15 +463,15 @@ fn runtime_handler_prefix_cleanup_handles_later_frame_and_env_failures_on_a_smal
                 seed.env = SerialEnvSnapshot { bindings: 0 };
                 seed.context.handlers = vec![WireHandlerFrame {
                     entries: vec![
-                        ("deep".into(), deep_runtime_data(30_000), None),
-                        ("closure".into(), captured_row(0), None),
+                        ("deep".into(), deep_runtime_data(30_000)),
+                        ("closure".into(), captured_row(0)),
                     ],
                     catch_all: Some(deep_runtime_data(30_000)),
                     kind: FrameKind::Within,
                 }];
                 let expected = if later_handler {
                     seed.context.handlers.push(WireHandlerFrame {
-                        entries: vec![("bad".into(), unknown_native("missing-handler"), None)],
+                        entries: vec![("bad".into(), unknown_native("missing-handler"))],
                         catch_all: None,
                         kind: FrameKind::Within,
                     });
@@ -649,27 +648,6 @@ fn open_binding_scheme_is_refused_at_its_path() {
     assert!(matches!(*error.cause, DecodeCause::OpenScheme(_)));
 }
 
-#[test]
-fn open_handler_scheme_is_refused_at_its_tuple_slot() {
-    let mut value = envelope();
-    value["context"]["handlers"] = json!([{
-        "entries": [["open", "unit", open_scheme()]], "kind": "Alias"
-    }]);
-    let error = value_failure(&value);
-    assert_eq!(
-        error.path,
-        [
-            DataStep::Field("context".into()),
-            DataStep::Field("handlers".into()),
-            DataStep::Index(0usize.into()),
-            DataStep::Field("entries".into()),
-            DataStep::Index(0usize.into()),
-            DataStep::Index(2usize.into()),
-        ]
-    );
-    assert!(matches!(*error.cause, DecodeCause::OpenScheme(_)));
-}
-
 /// A partially applied builtin's code: a λ over a native call.
 fn native_comp() -> Arc<crate::ir::Comp> {
     Arc::new(Spanned::synthetic(CompKind::Lam {
@@ -717,7 +695,7 @@ fn raw_seed_native_computation_encoding_keeps_table_path_and_name() {
 #[test]
 fn raw_handler_native_computation_encoding_keeps_tuple_and_catch_all_paths() {
     let mut frame = WireHandlerFrame {
-        entries: vec![("named".into(), native_thunk(), None)],
+        entries: vec![("named".into(), native_thunk())],
         catch_all: None,
         kind: FrameKind::Within,
     };
@@ -730,7 +708,7 @@ fn raw_handler_native_computation_encoding_keeps_tuple_and_catch_all_paths() {
             DataStep::Index(1usize.into())
         ]
     );
-    for (_, value, _) in std::mem::take(&mut frame.entries) {
+    for (_, value) in std::mem::take(&mut frame.entries) {
         drop_value(value);
     }
     frame.catch_all = Some(native_thunk());

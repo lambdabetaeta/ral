@@ -15,8 +15,8 @@ use crate::fact::{
 };
 use crate::io::RunIo;
 use crate::process::RequestedTerminalAccess;
+use crate::shell::runtime::Binding;
 use crate::shell::runtime::Value;
-use crate::shell::runtime::{Binding, FrameHandle};
 use crate::shell::runtime::{Shell, ill_typed};
 
 use serde::{Deserialize, Serialize};
@@ -291,15 +291,7 @@ impl fmt::Display for RegisterError {
 #[derive(Debug, Default)]
 pub(crate) struct HookTable {
     hooks: HashMap<HookName, Hook>,
-    plugins: Vec<PluginEntry>,
-}
-
-/// What unload must undo beyond the plugin's hooks: the alias frames it
-/// installed, by handle, so an alias the user replaced survives.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginEntry {
-    pub name: String,
-    pub aliases: Vec<FrameHandle>,
+    plugins: Vec<String>,
 }
 
 impl Shell {
@@ -395,9 +387,7 @@ impl Shell {
         table.is_some_and(|t| t.hooks.remove(name).is_some())
     }
 
-    /// Drop every hook under a plugin's namespace, returning the count.  One
-    /// sweep at unload, so no dispatchable entry point outlives the plugin that
-    /// owned it; also the rollback path for a load that fails partway.
+    /// Roll back every hook under a failed plugin's namespace, returning the count.
     pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
         let Some(table) = self.session.hooks.as_mut() else {
             return 0;
@@ -419,27 +409,21 @@ impl Shell {
             .hooks
             .as_ref()
             .ok_or(RegisterError::NoSession)?;
-        Ok(table.plugins.iter().any(|p| p.name == name))
+        Ok(table.plugins.iter().any(|p| p == name))
     }
 
     /// Record a fully loaded plugin on the ledger.
     ///
     /// # Errors
     /// [`RegisterError::NoSession`] on a child shell.
-    pub fn commit_plugin(&mut self, entry: PluginEntry) -> Result<(), RegisterError> {
+    pub fn commit_plugin(&mut self, name: String) -> Result<(), RegisterError> {
         let table = self
             .session
             .hooks
             .as_mut()
             .ok_or(RegisterError::NoSession)?;
-        table.plugins.push(entry);
+        table.plugins.push(name);
         Ok(())
-    }
-
-    /// Take a plugin off the ledger, for unload to undo.
-    pub fn take_plugin(&mut self, name: &str) -> Option<PluginEntry> {
-        let plugins = &mut self.session.hooks.as_mut()?.plugins;
-        Some(plugins.remove(plugins.iter().position(|p| p.name == name)?))
     }
 }
 
@@ -455,13 +439,6 @@ mod tests {
     fn register(shell: &mut Shell, name: HookName) -> Result<(), RegisterError> {
         let body = block_over(&shell.env);
         shell.register_hook(name, body, HookSig::Block, DefaultPolicy::denied())
-    }
-
-    fn entry(name: &str) -> PluginEntry {
-        PluginEntry {
-            name: name.into(),
-            aliases: Vec::new(),
-        }
     }
 
     #[test]
@@ -501,9 +478,8 @@ mod tests {
             Err(RegisterError::NoSession)
         ));
         assert!(matches!(
-            aside.commit_plugin(entry("p")),
+            aside.commit_plugin("p".into()),
             Err(RegisterError::NoSession)
         ));
-        assert_eq!(aside.take_plugin("p"), None);
     }
 }

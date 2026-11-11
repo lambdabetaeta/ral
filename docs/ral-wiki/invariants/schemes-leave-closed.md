@@ -32,10 +32,12 @@ checked `Toplevel`, `SessionSchemes`, the build-time prelude bake (read back by
 - Generation harvests rank-generalised per-name schemes onto the pending
   `Phrase::Define`. Only after successful unit closure does `Readback::toplevel`
   settle them.
-- One-shot scheme builders (`alias_arm_scheme`, `binding_value_scheme`) enter a
-  region before checking the body, exit before generalising at rank zero, then
-  close the unit. Only success settles and exports the scheme; closure errors
-  export nothing. `catch_all_stands_in` stores no scheme.
+- The one-shot lexical binding scheme builder (`binding_value_scheme`) enters
+  a region before checking the body, exits before generalising at rank zero,
+  then closes the unit. Only success settles and exports the scheme; closure
+  errors export nothing. Install-time `arm_stands_in` instead returns only a
+  verdict: handler entries carry no schemes, and session checking imports
+  handled names for diagnostics alone.
 - `Site::scheme` enters its scratch region before instantiation, then exits,
   generalises and settles the contract.
 

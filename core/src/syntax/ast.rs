@@ -183,7 +183,7 @@ pub(crate) type Stmt = Spanned<Ast>;
 /// recover a head's meaning from a generic [`Ast`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Head {
-    /// Bare name, subject to value/alias/builtin/PATH lookup.
+    /// Bare name, subject to value/handler/builtin/PATH lookup.
     Bare(String),
     /// `^name` — external programs only, and exempt from the reserved-word
     /// ban, so `^try` runs the program of that name.

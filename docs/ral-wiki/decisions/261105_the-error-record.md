@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: c4856951
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 ---
 
 # The error record
@@ -212,11 +212,11 @@ BlockRole      = handler String | catch-all | hook String | binding String
 TypeDiagnostic = [code: String, message: String]                       -- "T0057", rendered
 ```
 
-- The vetted blocks are an alias or `within` handler, the `within` catch-all,
+- The vetted blocks are a persistent or `within` handler, the `within` catch-all,
   a hook registration and an rc `bindings:` entry. The wording is ``the `git`
   handler does not typecheck: T0057 <message>; …`` (`IllTyped::describe`,
   `core/src/fact/error/invalid.rs`).
-- The checker's runtime entry points (`alias_arm_scheme`, `catch_all_stands_in`,
+- The checker's runtime entry points (handler-arm checking, `catch_all_stands_in`,
   `binding_value_scheme`, `core/src/typecheck.rs`) return every error from
   close, not the first. `TypeError::diagnostic` is the one projection to
   `TypeDiagnostic`, and `ill_typed` (`core/src/shell/runtime/coerce.rs`) the

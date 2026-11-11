@@ -49,15 +49,16 @@ return [
         return "$red$lbracket !{user} $rbracket$reset $blue!{abbreviate-home !{cwd}}$reset $ "
     },
 
-    # Command aliases, expanded before external-command lookup.
+    # Command handlers, consulted before external-command lookup.
     # A block receives any trailing arguments as $args.
-    aliases: [
+    handlers: [
         ll: { |args| ls -lh ...$args },
         la: { |args| ls -lha ...$args },
         g:  { |args| git ...$args },
     ],
 
-    # Plugins loaded before the first prompt: name (or path) => its options.
+    # Plugins loaded at startup only: name (or path) => its options.
+    # Adding a plugin requires a new session.
     plugins: [
         zoxide:         [key: 'alt-z'],
         autosuggestion: [:],

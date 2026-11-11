@@ -24,7 +24,7 @@ use crate::shell::runtime::{
     Bequest, Context, Error, FrameKind, HandlerEntry, HandlerFrame, Image, Runtime, Terms,
 };
 use crate::source::SourceDb;
-use crate::ty::{Closed, Fixings};
+use crate::ty::Fixings;
 use serde::{Deserialize, Serialize};
 use table::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
 
@@ -38,7 +38,7 @@ mod table;
 /// thunk at install.
 #[derive(Debug, Clone)]
 pub(crate) struct WireHandlerFrame {
-    entries: Vec<(String, SerialValue, Option<Closed>)>,
+    entries: Vec<(String, SerialValue)>,
     catch_all: Option<SerialValue>,
     kind: FrameKind,
 }
@@ -77,7 +77,6 @@ impl WireHandlerFrame {
             wire.entries.push((
                 entry.name.as_ref().to_string(),
                 SerialValue::from_runtime(&entry.thunk, ctx)?,
-                entry.scheme.clone(),
             ));
         }
         wire.catch_all = frame
@@ -89,7 +88,7 @@ impl WireHandlerFrame {
     }
 
     fn into_runtime(mut self, dec: &WireDecoder) -> Result<HandlerFrame, Error> {
-        for (_, value, _) in &self.entries {
+        for (_, value) in &self.entries {
             value.validate_runtime(dec)?;
         }
         if let Some(value) = &self.catch_all {
@@ -101,10 +100,10 @@ impl WireHandlerFrame {
             kind: self.kind,
         }]);
         let frame = &mut frames.0[0];
-        for (name, value, scheme) in std::mem::take(&mut self.entries) {
-            let mut entry = HandlerEntry::ral_per_name(name, value.into_runtime(dec)?);
-            entry.scheme = scheme;
-            frame.entries.push(entry);
+        for (name, value) in std::mem::take(&mut self.entries) {
+            frame
+                .entries
+                .push(HandlerEntry::ral_per_name(name, value.into_runtime(dec)?));
         }
         frame.catch_all = self
             .catch_all
@@ -117,7 +116,7 @@ impl WireHandlerFrame {
 
 impl Drop for WireHandlerFrame {
     fn drop(&mut self) {
-        for (_, value, _) in std::mem::take(&mut self.entries) {
+        for (_, value) in std::mem::take(&mut self.entries) {
             crate::data::json::drop_value(value);
         }
         if let Some(value) = self.catch_all.take() {
@@ -351,7 +350,7 @@ mod tests {
 
     /// A booted parent with a binding of every shape the scrub and the codec
     /// must treat: kept, handle-carrying, block, partial application, a
-    /// frame with a catch-all, a per-name and an alias entry, a hook, an extra
+    /// frame with a catch-all and per-name handlers, a hook, an extra
     /// source, and a fixed unit.
     fn parent() -> Shell {
         let mut parent = booted();
@@ -366,13 +365,12 @@ mod tests {
         parent.set_var("blk".to_string(), blk.clone());
         parent.set_var("nat".to_string(), partial_over(idle_handle()));
         let catch_all = block_over(&parent.env);
-        let mut alias = HandlerEntry::ral_per_name("alias".into(), blk.clone());
-        alias.scheme = Some(crate::ty::Binders::close(|_| crate::ty::Ty::unit()));
+        let handler = HandlerEntry::ral_per_name("handler".into(), blk.clone());
         let named = HandlerEntry::ral_per_name("named".into(), blk.clone());
         parent
             .context
             .handlers
-            .push(vec![named, alias], Some(catch_all));
+            .push(vec![named, handler], Some(catch_all));
         parent
             .register_hook(
                 HookName::session("prompt"),
@@ -489,11 +487,7 @@ mod tests {
             frames
                 .iter()
                 .map(|f| {
-                    let entries: Vec<_> = f
-                        .entries
-                        .iter()
-                        .map(|e| (e.name.to_string(), e.scheme.is_some()))
-                        .collect();
+                    let entries: Vec<_> = f.entries.iter().map(|e| e.name.to_string()).collect();
                     (f.kind, entries, f.catch_all.is_some())
                 })
                 .collect::<Vec<_>>()
@@ -504,7 +498,7 @@ mod tests {
         );
         assert_eq!(
             shape(&d.image.context.handlers)[0].1,
-            [("named".to_string(), false), ("alias".to_string(), true)]
+            ["named".to_string(), "handler".to_string()]
         );
         assert_eq!(b.image.terms, d.image.terms);
         assert_eq!(d.image.terms.stack_limit, 12_345);

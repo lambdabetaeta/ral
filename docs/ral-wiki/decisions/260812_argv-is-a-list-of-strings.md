@@ -13,6 +13,20 @@ layer never committed to that split, so it is deleted — along with the
 machinery whose whole occupation was re-deriving which side of the split a name
 was on.
 
+> **Amended 2026-11-11.** An arm's argument gate, like its result, is its
+> head's meaning in Σ: a declared base frame's own gate and scheme, or the
+> external gate and `[String] → Command` otherwise. Lexical bindings select
+> value application. The dynamic handler stack never determines a head's type
+> or gate; the checker retains handled names only to word diagnostics.
+> Thus `ls [1, 2]` is refused even under a handler for `ls`; renderability
+> alone does not admit that argument. Rendering still packs the admitted argv
+> as `List String` for an arm. Install-time checking yields a verdict, not a
+> persisted scheme; handler schemes are neither seeded nor carried on the wire.
+> Persistent handlers come only from the host between units, under rc and
+> manifest `handlers:`. Scoped handlers use
+> `within [handlers: …]`; interactive helpers use `let`. The original account
+> below records the earlier implementation, not these current rules.
+
 ## Context
 
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]
@@ -69,7 +83,7 @@ one, with no case to exclude.
 ### 2. The wart dies by the coercion, not by weakening the check
 
 The one place argv elements crossed unrendered was the handler arm — §6.6's
-"remain ral values". `apply_alias_arm` (`core/src/typecheck/infer.rs`) unifies
+"remain ral values". The handler-arm checker (`core/src/typecheck/infer.rs`) unifies
 every element of a call's argv against a single `elem` variable, so a
 heterogeneous argv was a **T0010**:
 
@@ -86,7 +100,7 @@ typechecks.
 to confuse, and only one of them is sound. Weakening means unifying each
 element against a fresh variable, or against nothing: the arm then accepts an
 argv whose element type its own body contradicts, and the clash reappears at
-runtime — which is the failure `apply_alias_arm`'s unification exists to
+runtime — which is the failure handler-arm unification exists to
 prevent. Rendering keeps the unification and makes it *true*: the boundary
 converts, and `String` is what arrives. The conversion is the argv boundary's
 own act and not a name, so nothing in scope and no installed frame can
@@ -160,7 +174,7 @@ the templates hold and a scheme does not:
 | `OneOf` precision — **paid 2026-08-24** | `to-bytes 3` and `to-bytes [1.5]` would become statically legal |
 | per-argument spans | `unify_arg_template` underlines the offending argument; a scheme mismatch underlines the call |
 
-The templates are cruft, and their shape says so: `BlockOrLambda` (`alias`),
+The templates are cruft, and their shape says so: `BlockOrLambda` (dynamic handler installation),
 `OneOf` (`to-bytes`), and `ErrorRecord` (`fail`) now have exactly one user
 each. Read it as such — and then take it as the templates' own plan, with that
 price list as its agenda. Five diagnostics are not to be smuggled out under a

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::SessionSchemes;
 use crate::compile::{CompileError, compile_and_typecheck};
 use crate::source::FileId;
-use crate::ty::{Binders, Closed, Kind, Role, Scheme, Ty, TyVar};
+use crate::ty::{Closed, Kind, Role, Scheme, Ty, TyVar};
 
 /// `scheme` closed as a session would store it; its weak variables are residuals.
 fn stored(scheme: Scheme) -> Closed {
@@ -103,19 +103,11 @@ fn binding_value_scheme_quantifies_its_identity_parameter() {
 }
 
 #[test]
-fn alias_arm_scheme_retains_its_polymorphic_result() {
+fn an_installed_external_name_still_requires_a_command_arm() {
     use crate::ir::{CompKind, Val};
     use crate::source::Spanned;
-    use crate::ty::CompTy;
-    let head = Binders::close(|binders| {
-        let variable = Ty::var(binders.ty(Kind::ANY));
-        Ty::thunk(CompTy::arrows(
-            [Ty::argv()],
-            CompTy::pure(identity_ty(variable)),
-        ))
-    });
     let schemes = SessionSchemes {
-        aliases: vec![("identity-arm".into(), head)],
+        handled: vec!["identity-arm".into()],
         ..crate::test_helper::core_schemes()
     };
     let arm = Arc::new(Spanned::synthetic(CompKind::Lam {
@@ -124,18 +116,58 @@ fn alias_arm_scheme_retains_its_polymorphic_result() {
             identity_body(),
         )))),
     }));
-    let scheme = super::alias_arm_scheme("identity-arm", &arm, schemes).unwrap();
-    assert_eq!(quantified_tys(&scheme), 1);
-    assert!(!scheme.has_weak());
-    let mut u = super::Unifier::new();
-    for param in [Ty::int(), Ty::bool()] {
-        let instance = super::instantiate(&mut u, &scheme);
-        let wanted = Ty::thunk(CompTy::arrows(
-            [Ty::argv()],
-            CompTy::pure(identity_ty(param)),
-        ));
-        u.unify_ty(&instance, &wanted).unwrap();
+    let errors = super::arm_stands_in(super::Arm::Named("identity-arm"), &arm, schemes)
+        .expect_err("handled names carry no result scheme");
+    assert!(errors.iter().any(|error| matches!(
+        error.reason,
+        Some(super::Reason::StandsIn(super::Standing::Command(ref name))) if name == "identity-arm"
+    )));
+}
+
+#[test]
+fn a_named_arm_takes_its_result_from_the_manifest_base_frame() {
+    use super::builtins::Convention;
+    use crate::ir::{CompKind, Val};
+    use crate::source::Spanned;
+    use crate::ty::{Binders, CompTy};
+    use std::borrow::Cow;
+
+    fn frame(_: &mut Binders) -> Ty {
+        Ty::thunk(CompTy::arrows([Ty::argv()], CompTy::pure(Ty::int())))
     }
+    let mut schemes = crate::test_helper::core_schemes();
+    schemes.builtins.push(
+        vec![super::Decl::new(
+            Cow::Borrowed("frame"),
+            Convention::Argv,
+            frame,
+            "",
+            false,
+        )]
+        .into(),
+    );
+    schemes.handled.push("frame".into());
+    schemes
+        .bindings
+        .push(("frame".into(), Some(Binders::close(|_| Ty::string()))));
+    let arm = |value| {
+        Arc::new(Spanned::synthetic(CompKind::Lam {
+            param: "args".into(),
+            body: Arc::new(Spanned::synthetic(CompKind::Return(value))),
+        }))
+    };
+    super::arm_stands_in(
+        super::Arm::Named("frame"),
+        &arm(Val::Int(1)),
+        schemes.clone(),
+    )
+    .expect("the manifest result is accepted without exporting a scheme");
+    let errors = super::arm_stands_in(super::Arm::Named("frame"), &arm(Val::Bool(true)), schemes)
+        .expect_err("a lexical binding cannot change a base frame's stand-in");
+    assert!(errors.iter().any(|error| matches!(
+        error.reason,
+        Some(super::Reason::StandsIn(super::Standing::Own(ref name))) if name == "frame"
+    )));
 }
 
 fn command_with_unit_argument(params: &[&str]) -> Arc<crate::ir::Comp> {
@@ -163,14 +195,19 @@ fn closure_only_gate_refusal_exports_no_one_shot_scheme_or_checked_tree() {
     let body = command_with_unit_argument(&["args"]);
     let binding = super::binding_value_scheme(&body, crate::test_helper::core_schemes())
         .expect_err("the late argv gate must prevent scheme export");
-    let alias = super::alias_arm_scheme("echo", &body, crate::test_helper::core_schemes())
-        .expect_err("the late argv gate must prevent alias scheme export");
-    let catch_all = super::catch_all_stands_in(
+    let named = super::arm_stands_in(
+        super::Arm::Named("echo"),
+        &body,
+        crate::test_helper::core_schemes(),
+    )
+    .expect_err("the late argv gate must refuse a named arm");
+    let catch_all = super::arm_stands_in(
+        super::Arm::CatchAll,
         &command_with_unit_argument(&["name", "args"]),
         crate::test_helper::core_schemes(),
     )
     .expect_err("the late argv gate must refuse a catch-all");
-    for errors in [binding, alias, catch_all] {
+    for errors in [binding, named, catch_all] {
         assert!(errors.iter().any(|error| error.kind.code() == "T0057"));
     }
     let errors = super::typecheck(

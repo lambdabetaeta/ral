@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
 status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the arity partition (native vs. base frame), no-install-time-admission, and every consequence for natives and base frames stand. What resolves otherwise: `^name` no longer reaches an installed base-frame arm at all — it joins the path-head class, skipping the handler stack entirely, so `^echo` is `/bin/echo` and `^detach` is not found.'
 ---
@@ -100,7 +100,7 @@ explicit lambda. Runtime currying serves unchecked sites only.
 
 The handler stack keeps its run frames and grows a base layer *below* them,
 holding manifest rows rather than `HandlerFrame`s. Permanence is
-representational: `unalias` and `strip_matched` index run frames only, so no
+representational: frame removal and `strip_matched` index run frames only, so no
 operation's index space contains a base frame. Lookup keeps its two passes —
 per-name over run frames then the base layer, then catch-all — so "any per-name
 handler beats any catch-all, whatever their relative depth" survives verbatim,
@@ -112,7 +112,7 @@ native body never self-forwards (`run_base_frame`,
 
 ### 4. No name admission anywhere
 
-T0043 and T0044 die with no successor. A handler or alias under any taken name
+T0043 and T0044 die with no successor. A handler under any taken name
 installs; it is dead at bare heads wherever the env wins and live under
 `^name`, which skips the env by definition. The two sides agree by
 construction: `resolve` is env → handlers → external

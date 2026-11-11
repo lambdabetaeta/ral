@@ -11,9 +11,21 @@ in turn *N* enters turn *N+1*'s check as a bare name with a fresh type variable
 turn's check by living on the runtime binding itself, next to the value.**
 
 This is the first of four decisions whose end state is a single mode-inference
-engine: session-scheme-continuity (here) → handler-alias mode preservation →
+engine: session-scheme-continuity (here) → handler mode preservation →
 IR pipespec annotation → unconditional mode pass. The
 through-line is **net code removal**.
+
+> **Amended 2026-11-11.** Scheme continuity belongs to lexical bindings,
+> not handler entries. A command head's type and argument gate depend only
+> on Σ and lexical bindings: a base frame's own scheme and in-shell gate,
+> or the external gate and `Command` result for every other command name,
+> handled or not. Session checking imports handled names for diagnostics
+> alone. `arm_stands_in` checks installation and returns only a verdict;
+> no handler scheme is stored, seeded or carried on the wire. Persistent
+> handlers come only from the host between units through rc or manifest
+> `handlers:`, while scoped handlers use `within`.
+> Interactive helpers use `let`. This supersedes the handler-arm clause and
+> cross-turn handler-scheme assertion below; their historical reasoning remains.
 
 ## The discontinuity today
 
@@ -58,16 +70,12 @@ binding in the scope. There is no separate session ledger.
   plugin, or under `--no-typecheck` — is a bare name with a fresh variable,
   exactly as today. The two inputs of `compile_and_typecheck` (`bindings` name
   set, `prelude_schemes` list) collapse into this one name→scheme map.
-- **Alias arms get the same treatment.** An `alias` installs a persistent
-  handler frame (`core/src/types/shell/scope.rs::install_alias`); the arm's
-  scheme is computed *at install* by the checker's arm inference
-  (`typecheck::alias_arm_scheme`, the runtime handler calling convention seeded
-  from the live `session_schemes()` and closed against its own unifier) and
-  stored on the `HandlerEntry`, so the next turn's checker sees the alias as the
-  current turn's does. All three install paths — the `alias` statement, rc
-  `aliases:` maps, and plugin loads — go through it. Mode preservation for those
-  arms is
-  the handler-alias mode-preservation rule.
+- **Handler arms originally got the same treatment.** Persistent handler
+  installation computed the arm's scheme at install, seeded from the live
+  `session_schemes()` and closed against its own unifier, then stored it on
+  the `HandlerEntry`. The next turn's checker therefore saw the same handler
+  type. Dynamic installation, rc maps, and plugin loading shared this rule.
+  This is the historical handler mode-preservation rule, superseded above.
 
 ## What this decision removes
 
@@ -95,7 +103,8 @@ binding in the scope. There is no separate session ledger.
 - `let [a, b] = [1, 2]` then `$a + 1`: cross-turn use of a pattern-bound
   name neither errors spuriously nor poisons the unifier (no scheme, fresh
   variable).
-- An `alias` from turn *N* is visible to turn *N+1*'s check.
+- A persistent handler installed in turn *N* was visible to turn *N+1*'s
+  check under the original rule; the amendment limits this to diagnostic names.
 - The baked prelude schemes and the per-turn schemes come from the same
   `Bind`-node harvest.
 

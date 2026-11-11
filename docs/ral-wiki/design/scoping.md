@@ -80,7 +80,7 @@ A same-thread β-step bridges the two: applying a thunk puts its closure's
 store (`Shell` minus its lexical scope) is shared by identity rather than
 forked. A block and a lambda are one thunk value, and force treats them alike:
 an unbracketed store write in
-either body — `cd`, `alias`, a hook registration — persists past the force: a
+either body — `cd`, a hook registration — persists past the force: a
 plain block is not a boundary for the store. `within [dir:]` / `within
 [handlers:]` are the scoped forms, and `within [dir:]` undoes a `cd` made
 beneath it

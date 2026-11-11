@@ -1,8 +1,8 @@
 # zoxide — directory jump integration
 #
 # Provides:
-#   z alias      jump to a directory by keyword query
-#   zi alias     open zoxide's interactive fzf picker
+#   z handler   jump to a directory by keyword query
+#   zi handler  open zoxide's interactive fzf picker
 #   alt-z        open interactive picker from the editor (keybinding)
 #   chpwd hook   record each directory change in the zoxide database
 #
@@ -55,7 +55,7 @@ return { |options|
 
     return [
         name: "zoxide",
-        aliases: [z: $_z, zi: $_zi_cmd],
+        handlers: [z: $_z, zi: $_zi_cmd],
         hooks: [chpwd: $_chpwd],
         keybindings: [[key: $key, handler: $_zi]],
     ]

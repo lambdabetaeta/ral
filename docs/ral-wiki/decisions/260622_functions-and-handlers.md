@@ -1,16 +1,17 @@
 ---
-status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: an open-argv entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Still open from this ADR: §"Retiring alias" (`alias`/`unalias` still the surface, `install_alias` still the API). Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0. Done 2026-08-12: ArgSig::Optional deleted — `cd` and the REPL job verbs are natives, leaving `echo` and `detach` the only base frames.'
+status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: an open-argv entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Persistent installation now uses host-owned rc and manifest `handlers:` maps; the dynamic surface proposed here was not retained. Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0. Done 2026-08-12: ArgSig::Optional deleted — `cd` and the REPL job verbs are natives, leaving `echo` and `detach` the only base frames.'
 ---
 
-# Functions and handlers, and the end of "alias"
+# Functions and handlers
 
 **ral has the function and the handler, and no third. A *function* has fixed
 arity: it is a curried `Fun(A₁, … Fun(Aₙ, B))`, applied positionally. A *handler* takes a single
 argument — the argv collected into one `List α` — and is dispatched by name; its
 *surface* arity varies, but its *value* arity is one.** Every builtin is a function; no builtin is a handler.
 A handler is a user mechanism — a ral lambda installed for a scope by `within` or
-persistently by `handle`. With "handler" naming the variable-arity calling
-convention, the word "alias" is redundant and is retired everywhere.
+persistently by host installation. The original proposal also included
+separate dynamic installation and removal verbs; those are not part of the
+current language.
 
 ## Function and handler
 
@@ -39,11 +40,12 @@ A handler reaches the dispatch site from one of two places, differing only in
 lifetime:
 
 - **scoped** — `within [handlers: …, handler: …]`, popped at scope exit;
-- **persistent** — `handle NAME { |args| … }`, removed by `unhandle NAME`,
-  surviving across turns (the form formerly called an alias).
+- **persistent** — a host-installed frame surviving across turns. The
+  original proposal allowed dynamic installation and removal; today only
+  rc and manifest `handlers:` maps install these frames between units.
 
 No builtin is a handler — the core ships only functions, and the argv-as-list
-convention is reached only through `within` and `handle`.
+convention is reached only through scoped or persistent installation.
 
 ## Every builtin is a function
 
@@ -66,7 +68,7 @@ argv-as-list remains. The current `arity: _` entries were never one shape:
 
 Because every builtin is a function, no `Function | Handler` kind is recorded on
 the registry at all: the distinction lives entirely in the handler stack
-(`within` / `handle`), never in `CORE_BUILTINS`. The `Scheme`-versus-`Sig` split a
+(scoped or persistent), never in `CORE_BUILTINS`. The `Scheme`-versus-`Sig` split a
 type rule already carries
 ([`core/src/typecheck/builtins.rs`](../../../core/src/typecheck/builtins.rs)) is a
 representational choice in the checker, orthogonal to this and untouched — `range`
@@ -146,54 +148,31 @@ Cost: `$echo` has no value form (sugar does not reify); reify `to-line`, or bind
 prelude `echo` if the name is wanted as a value. With `echo` sugared and `help`
 split, nothing in `CORE_BUILTINS` is argv-as-list — the core ships only functions.
 
-## Retiring "alias"
+## One handler vocabulary
 
-An alias was only ever the *persistent* install form of a ral handler — the same
-`HandlerEntry`, distinguished from a `within` frame by lifetime alone
-(`removable_by_unalias` on the frame; `install_alias`,
-[`core/src/types/shell/scope.rs`](../../../core/src/shell/runtime/state/scope.rs)). Once
-"handler" is the single name for variable arity, "alias" carries no
-distinct meaning and is removed:
+A persistent handler is the same `HandlerEntry` as a scoped handler,
+with a different lifetime. This decision called for one vocabulary across
+installation APIs, rc and plugin maps, and documentation, rather than a
+second name for persistent interception.
 
-- **Surface.** `alias NAME { |args| … }` → `handle NAME { |args| … }`;
-  `unalias NAME` → `unhandle NAME`; the rc / plugin `aliases:` map key →
-  `handlers:` ([`ral/src/repl/config.rs`](../../../ral/src/repl/config.rs),
-  [`ral/src/repl/plugin/`](../../../ral/src/repl/plugin/)).
-- **Internals** (mechanical): `install_alias` → `install_handler`,
-  `remove_alias` → `remove_handler`, `push_alias` → `push_handler`,
-  `removable_by_unalias` → `removable_by_unhandle`; `apply_alias_arm` →
-  `apply_handler_arm`, `infer_alias_arm` → `infer_handler_arm`,
-  `alias_arm_scheme` → `handler_arm_scheme`, `alias_arm_body` →
-  `handler_arm_body`; `alias_statement_shape` / `unalias_statement_shape` →
-  `handle_statement_shape` / `unhandle_statement_shape`, with the AST, parser,
-  and elaborator nodes ([`core/src/syntax/`](../../../core/src/syntax/),
-  [`core/src/elaborator.rs`](../../../core/src/elaborator.rs)); the `Alias` /
-  `Unalias` registry entries → `Handle` / `Unhandle`.
-- **Docs.** `docs/SPEC.md` §15.3 and its §9.1 cross-references, `docs/PLUGINS.md`,
-  `docs/TUTORIAL.md`, `docs/RATIONALE.md`, `docs/rc.example`, and example scripts
-  (`kit/tasks.ral`).
+The proposed dynamic installation and removal surface was not retained.
+Persistent handlers now come from host installation through `handlers:` maps;
+scoped installation remains `within`. Neither form introduces a new calling
+convention. The arity argument in
+[[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]] stands,
+with its later amendment checking arity from the arm's type.
 
-This decision supersedes the *vocabulary* of
-[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]:
-its content stands unchanged — every handler is still a lambda whose arity is
-read off the surface form — but "alias" reads "persistent handler" throughout,
-and its title follows.
-
-Out of scope: `path_aliases`
-([`core/src/path/lex.rs`](../../../core/src/path/lex.rs)) is filesystem path
-aliasing, an unrelated sense of the word, untouched; the `exarch/` harness embeds
-ral and names the surface keyword in its data files — a separate tree, flagged
-but not changed here.
+Filesystem path aliasing is unrelated and unchanged.
 
 ## The hard rule
 
 There are functions and there are handlers, and nothing else. A function has
 fixed arity *n* and is applied positionally. A handler takes one argument — the argv as `List α` (a
 catch-all also takes the name) — is dispatched by name, and is installed by
-`within` (scoped) or `handle` (persistent). No builtin is a handler: the core
+`within` (scoped) or host installation (persistent). No builtin is a handler: the core
 ships only functions, and the two builtins that looked variadic resolve away —
 `echo` is surface sugar lowering to `to-line`, and `help` splits into the nullary
-`help` and the unary `explain`. There is no "alias," no variadic application, and
+`help` and the unary `explain`. There is no variadic application and
 no exception.
 
 ## Known weaknesses and open choices
@@ -251,7 +230,7 @@ confirm, not assume.
   first-class/second-class split stays.
 - **Not a `Scheme`/`Sig` merge.** The split is orthogonal to function-vs-handler
   (`range` is a `Sig` function) and is untouched.
-- **Not a smaller handler stack.** `run_handler`, `within` / `handle`, and
+- **Not a smaller handler stack.** `run_handler`, scoped and persistent installation, and
   `HandlerArity` are *user*-handler machinery; there was never a
   native-handler-in-stack path to remove. "No builtin is a handler" is conceptual
   clarity here, not code reduction.
@@ -263,5 +242,5 @@ which keeps the dichotomy and partitions the builtins across it by arity.
 Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],
 [[internals/handler-dispatch|handler-dispatch]],
-[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]];
+[[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]];
 `docs/SPEC.md` §9.1, §9.4, §14.

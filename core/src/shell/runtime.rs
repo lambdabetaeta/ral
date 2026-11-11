@@ -108,9 +108,7 @@ pub use mooring::{
 
 mod state;
 pub(crate) use state::Context;
-pub use state::hooks::{
-    DefaultPolicy, Hook, HookName, HookSig, Namespace, PluginEntry, RegisterError,
-};
+pub use state::hooks::{DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError};
 pub(crate) use state::json::RawContext;
 pub use state::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use state::{Image, Terms};

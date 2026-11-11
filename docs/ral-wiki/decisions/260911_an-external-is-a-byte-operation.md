@@ -1,6 +1,6 @@
 ---
 status: 'active; superseded in part by [[design/capture]] — the route, `head_pipe_route` and `PipeYield` go; `^name` and "an external writes" stand.'
-generated_at_commit: 1a02a2ed
+generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
 ---
 
 # An external is a byte operation
@@ -59,7 +59,7 @@ one, and is refused at install (`pin_arm_to_head`) if its body is not
 literal catch-all is pinned the same way, since it stands in for every
 external in its extent; a computed catch-all is vetted at its runtime install,
 as a computed per-name arm already was. Base frames' own routes (`echo`
-`Bytes`, `detach` `Value α`) and alias-over-alias pinning are unchanged: an arm
+`Bytes`, `detach` `Value α`) and handler-over-handler pinning are unchanged: an arm
 over a base frame is still reached at the bare head, and still pins to that
 frame's own scheme.
 
@@ -74,8 +74,8 @@ binary of that name — accepted": under this ruling **`^echo` is `/bin/echo`
 and `^detach` is not found**, everywhere. §4's first leg is untouched and
 restated here: resolution order is the only arbiter of interception, no
 install path admits or refuses a name, and this does not resurrect T0043
-(`CannotRedefineBuiltin`) or T0044 (`HandlerShadowedByBinding`) — a handler or
-alias under any taken name still installs; whether it is ever *reached* is
+(`CannotRedefineBuiltin`) or T0044 (`HandlerShadowedByBinding`) — a
+handler under any taken name still installs; whether it is ever *reached* is
 answered by the same order both sides already share, not by a second opinion
 at install. The checker's `Exec` arm and the runtime's `resolve_command_word`
 must move in lockstep for this: both now send every non-bare head —
@@ -102,9 +102,9 @@ A handler substitutes a new body for an external's operation, never a new
 type: every user handler arm — per-name or catch-all — now has exactly one
 type, `U(List String → F[Bytes] Unit)` (an arm installed over the name
 `detach` itself is the one exception, below). **A value-returning command of
-variable arity is therefore not expressible.** `alias three { |args| return
-3 }` is refused at install (`[T0012]`), and a binding of the same shape is
-refused too, for the unrelated reason that a binding is fixed-arity
+variable arity is therefore not expressible.** A handler arm
+`{ |args| return 3 }` is refused at install (`[T0012]`), and a binding of
+the same shape is refused too, for the unrelated reason that a binding is fixed-arity
 (`[T0011]`). This is the accepted cost of ruling 1: bindings are the value
 world — fixed arity, typed values; handlers are the command world — argv in,
 bytes out, the OS's own contract. A name is a value or it is handled; if it is
@@ -114,10 +114,9 @@ The replacement spellings all still work: a value function taking a list,
 `let three = { |xs| … }; three [a, b, c]`; a fixed-arity value function,
 unaffected; a variadic *command* — forwarder, byte mock, `fail`-bodied arm —
 unaffected. If a bash-style `f a b c` calling convention for value functions is
-ever wanted, the route back is recorded rather than built here: `alias` as a
-*lexical* argv-convention binding, distinct from `alias`-as-handler, which
-[[decisions/260622_functions-and-handlers|functions-and-handlers]] already
-wants to retire — out of scope for this decision.
+ever wanted, the route back is recorded rather than built here: a
+*lexical* argv-convention binding, distinct from an installed interceptor.
+That possibility is out of scope for this decision.
 
 ### `detach`'s two identities
 
@@ -266,7 +265,7 @@ reverses — `^cd` now reaches the `PATH` binary or nothing),
 part: the binding-lease ledger's three renewal seams narrow to two, `source`'s
 seam having no producer left),
 [[decisions/260622_functions-and-handlers|functions-and-handlers]] (the
-alias-as-lexical-argv-binding route back, still open there),
+lexical-argv-binding route back, still open there),
 [[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]
 (the byte-route encoding this decision leans on but does not change),
 [[design/types|types]] (WF-2 and the payload route),

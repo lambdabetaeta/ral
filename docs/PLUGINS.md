@@ -2,8 +2,8 @@
 
 A plugin extends an interactive `ral` session. It is an ordinary ral file
 whose result is a manifest: a record naming the hooks, keybindings, and
-aliases it contributes. `load-plugin` reads the manifest and registers
-what it names; `unload-plugin` takes it all back.
+handlers it contributes. The rc's `plugins:` map loads them at startup;
+they remain installed for the session. A new plugin requires a new session.
 
 This document is the design narrative. The [SPEC](SPEC.md) is the
 reference: §15.5 (manifest, loading), §15.6 (hooks, key notation,
@@ -28,10 +28,9 @@ registering. Four consequences follow.
   and cannot stand for a manifest.
 - **Load is atomic.** The manifest is validated whole, and registration
   is all or nothing: a rejected load leaves no hooks, keybindings, or
-  aliases behind, and unloading is the exact inverse of loading.
+  handlers behind.
 - **Registration is static.** A plugin cannot add a hook at run time. What
-  it contributes is what its manifest says at load, which is also all
-  that `unload-plugin` has to undo.
+  it contributes is what its manifest says at startup.
 - **No native ABI.** A plugin is ral source and nothing else: no shared
   object, no bytecode module, no guest interface. The interface it
   programs against is the set of hook events and `_ed-*` builtins below,
@@ -58,10 +57,25 @@ fields by name; there is no options schema.
 | `name` | required; unique among loaded plugins |
 | `hooks` | `[event: handler, …]` (section 4) |
 | `keybindings` | `[[key: Str, handler: block, guard?: Str], …]` (section 5) |
-| `aliases` | `[name: block, …]` (section 6) |
+| `handlers` | `[name: block, …]` (section 6) |
 
 The keyset is closed. In particular `capabilities:` is not an unknown key
 but a refused one, with its own message, for the reason in section 2.
+
+The checker generates the file, settles every remaining `let` mode and call
+split, holds the manifest contract live, closes gates, nested tables and
+errors, then freezes the checked tree. A contract solves types; it cannot
+change elaboration or open holes. Factory shape and result equations run in
+that same live phase. For example, `name:` can fix a decoded value's type to
+text, so incompatible data is refused at its decode, naming the field use.
+
+`handlers:` holds command arms by the same stand-in relation as `within`:
+a written name takes Σ's base-frame result, or `[String] → Command` for
+an external name. Computed-name maps require `[String] → Command` members;
+installation also checks each actual name. These live equations reach sites
+inside locally checked arms. Imported arms retain their module's sites.
+Hooks and keybindings retain host validation; their results do not enter
+typed code unchecked.
 
 ## 2 Authority
 
@@ -80,9 +94,9 @@ What a plugin may do is what the code that runs it may do.
   them. A plain `ral` withholds nothing; a session under a profile
   narrows every handler exactly as it narrows everything else. A handler
   may itself wrap risky work in `grant`.
-- **Aliases** run as commands in a user's line and push no grant of their
+- **Command handlers** run as commands in a user's line and push no grant of their
   own, so they run under whatever grant encloses the line that names
-  them. An alias that calls `cd` inside `grant [shell: [`detach]] { … }`
+  them. A handler that calls `cd` inside `grant [shell: [`detach]] { … }`
   is refused like any other `cd`.
 - **Loading** reads the plugin file through the current grant. Each
   candidate path the grant refuses is passed over for the next, and if
@@ -115,9 +129,9 @@ The `ral` executable is a host over an engine, and a plugin straddles the
 two. The split is chosen so that the engine keeps no editor state and the
 host keeps no ral values.
 
-- **Engine side.** Hooks, keybinding handlers, and aliases are ral values
-  and live in the shell: the hook table and alias frames, under a
-  per-plugin namespace so that unload and a failed load can remove
+- **Engine side.** Hooks, keybinding handlers, and command handlers are ral values
+  and live in the shell: the hook table and persistent handler frames, under a
+  per-plugin namespace so that a failed load can remove
   exactly what was added. Handlers never cross to the host.
 - **Host side.** The editor state, the keybinding router, the per-plugin
   state cells, and the first-order part of each manifest (name, which
@@ -136,9 +150,8 @@ host, is refused with a message saying so.
 
 ## 4 Loading
 
-`load-plugin` and `unload-plugin` are host builtins installed on the
-interactive session's table, not core builtins and not prelude wrappers.
-Both take a name. `load-plugin` resolves it in order (SPEC §15.5):
+The host loads plugins from the rc's `plugins:` map during startup.
+Each key is resolved in order (SPEC §15.5):
 
 1. `<config>/ral/plugins/NAME.ral`, `<config>` being the user
    configuration directory;
@@ -149,20 +162,21 @@ Both take a name. `load-plugin` resolves it in order (SPEC §15.5):
 The file is typechecked and evaluated in a fresh scope under the
 manifest's declared table, a factory is applied to its options, and the
 result is parsed: handler arity, hook names, key notation, guard
-regexes, and alias collisions are all checked before anything is
-installed. Hooks and aliases are then committed and the host told; if
+regexes, and handler collisions are all checked before anything is
+installed. Command arms already held statically are vetted again against
+their actual names at installation, yielding only a verdict, no stored
+scheme. Runtime parsing also covers wholly unresolved returns and unresolved
+field or member types. Hooks and handlers are then committed and the host told; if
 the host refuses the manifest, the whole namespace is rolled back. Errors are reported as
 `plugin 'NAME': …`, with source spans in the plugin file.
 
-`load-plugin` takes no options and so loads a factory with `[:]`. A
-plugin that wants other options is configured through the rc file's
-`plugins:` map (section 8). Handing a non-empty options map to a plugin
+The rc file's `plugins:` map supplies options (section 8); `[:]` supplies
+only the plugin's defaults. Handing a non-empty options map to a plugin
 that returns a manifest directly, as from an rc entry giving options to
 one, is an error, since they would be silently dropped.
 
-Loading needs a booted session: from an `aside` run, a worker, or a
-pipeline stage it fails at once. A duplicate name, and unloading a name
-that is not loaded, are errors.
+A duplicate plugin name is an error. There is no run-time loading or
+unloading command; changing the plugin set requires a new session.
 
 ## 5 Hooks
 
@@ -196,7 +210,7 @@ completion when none does.
 **No handler can wedge the shell.** A failing handler is reported with
 the label `plugin 'NAME' hook 'EVENT': ` and the others still run. A
 failing `pre-exec` leaves the line as it was, so no hook can stop every
-line, `unload-plugin` included. A line is refused by rewriting it to one
+line. A line is refused by rewriting it to one
 that fails, and its status reaches `post-exec` through the ordinary run:
 
 ```
@@ -248,7 +262,7 @@ hooks: [complete: { |[words: ws, current: i]|
 
 The minimal frontend, used on dumb terminals, dispatches no
 `buffer-change` or `complete` hooks and no editor keybindings, and shows
-no ghost text or highlights. Aliases and the other four events do not
+no ghost text or highlights. Command handlers and the other four events do not
 depend on raw-mode editing and work there (SPEC §15.6).
 
 ## 6 Keybindings
@@ -333,7 +347,7 @@ to know that the table does not say:
 - **`_ed-history`** returns entries most recent first, deduplicated;
   limit `0` means all.
 - **`_ed-state`** is the plugin's one persistent cell, held by the host
-  and cleared at unload. The first call runs the updater on the default,
+  for the session. The first call runs the updater on the default,
   later calls on the stored value; to read without changing, return the
   argument. The cell is a boundary: what it holds was written by an
   earlier run, so it is admitted against the type this call uses it at,
@@ -377,18 +391,15 @@ plugin that fails to load is reported and skipped, never fatal to the
 session. Plugins from `plugins:` load after the rest of the rc has taken
 effect, in alphabetical order of name (ral maps are ordered by key), so
 load order, and with it hook and keybinding precedence, does not depend
-on how the file was written. When order matters, load by hand.
-
-A `load-plugin` call in the rc body loads with default options and
-before the `plugins:` map. It is the way to load conditionally:
+on how the file was written. To load conditionally, compute the map:
 
 ```
-load-plugin 'autosuggestion'
-if !{succeeds { which fzf > /dev/null }} {
-    load-plugin 'fzf-files'
-    load-plugin 'fzf-history'
+let plugins = if !{succeeds { which fzf > /dev/null }} {
+    return [autosuggestion: [:], fzf-files: [:], fzf-history: [:]]
+} else {
+    return [autosuggestion: [:]]
 }
-return [env: [EDITOR: 'nvim']]
+return [env: [EDITOR: 'nvim'], plugins: $plugins]
 ```
 
 ## 9 Examples
@@ -398,7 +409,7 @@ loaded in CI (`just test`).
 
 - `autosuggestion.ral`: fish-style ghost text from history, one
   `buffer-change` hook over `_ed-get`, `_ed-history`, and `_ed-ghost`.
-- `zoxide.ral`: aliases (`z`, `zi`), a `chpwd` hook, and a keybinding
+- `zoxide.ral`: handlers (`z`, `zi`), a `chpwd` hook, and a keybinding
   with `_ed-tui`, with a configurable key.
 - `fzf-files.ral`, `fzf-cd.ral`, `fzf-history.ral`: fzf's `CTRL-T`,
   `ALT-C`, and `CTRL-R` widgets. They port fzf's own `key-bindings.zsh`,
@@ -447,16 +458,14 @@ Each of these is a choice, not a gap.
 
 - **A capability manifest.** See section 2. Confinement is `grant` and
   the session ceiling.
-- **Run-time registration.** Hooks, keybindings, and aliases come from
-  the manifest, so load and unload are inverses.
+- **Run-time registration.** Hooks, keybindings, and command handlers come
+  only from manifests loaded at startup.
 - **Return-value fallthrough in keybindings.** A guard claims a press
   before the handler runs.
-- **Options through `load-plugin`.** Configuration lives in the rc file,
-  as data, in one place.
 - **Non-first-order options.** A plugin that wants a block of its own
   writes it in the plugin.
 - **Plugins outside the interactive `ral`.** Batch hosts, exarch, and
-  synod install no `load-plugin` and no `_ed-*`; portable code must not
+  synod load no REPL plugins and install no `_ed-*`; portable code must not
   assume them (SPEC §15, §15.8).
 - **Key sequences not under `ctrl-x`, and a bindable `ctrl-c` or
   `ctrl-d`.** See section 6.

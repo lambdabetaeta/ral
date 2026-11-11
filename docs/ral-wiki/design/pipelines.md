@@ -98,7 +98,7 @@ carrying the stage's span, its own stack having none to attribute it to; a Rust
 stack overflow is not an unwind and still takes the whole shell.
 
 A stage is a subshell with respect to mutation regardless of whether it is a
-thread or a process: its `cd`, environment, alias, or module changes do not
+thread or a process: its `cd`, environment, handler, or module changes do not
 flow back to the parent, since a thread's cloned `Shell` is simply dropped at
 the stage's end. Only pipe contents, the final result, and recorded
 observations cross the boundary. This keeps terminal ownership coherent: a

@@ -95,7 +95,7 @@ fn fire(t: &dyn Transport, host: &Arc<ReplHost>, event: HookEvent, record: &FOVa
 
 /// Fold the plugins' `pre-exec` hooks over `src` in load order: a hook returns
 /// the line to run, or `()` to leave it.  A fault is reported and passed over,
-/// so no hook can stop every line, `unload-plugin` itself included.
+/// so a faulty hook cannot stop every line.
 fn pre_exec(t: &dyn Transport, host: &Arc<ReplHost>, src: String) -> String {
     let names = lock(&host.runtime).with_hook(HookEvent::PreExec);
     names.into_iter().fold(src, |src, name| {

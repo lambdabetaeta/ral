@@ -10,9 +10,8 @@ pub(crate) mod scope;
 pub(crate) mod val;
 
 use crate::fact::{ApplyFailure, CallOrForce, EvalFailure, Reason};
-use crate::ir::{Comp, Pattern, Phrase};
+use crate::ir::{Comp, Pattern, Phrase, Toplevel};
 use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
-use crate::source::Spanned;
 use crate::ty::Closed;
 use std::sync::Arc;
 
@@ -46,8 +45,8 @@ pub(crate) enum Mode {
     Prelude,
 }
 
-/// Thread `phrases` over a local `E`, starting from `env`: run each phrase
-/// in order as its own closed machine, and report `E` as it stood when the
+/// Admit `top` against `env`, then run its phrases over that local `E`, each
+/// as its own closed machine, and report `E` as it stood when the
 /// last phrase finished or the first one halted.  The one place
 /// `Phrase::Define` has meaning.
 ///
@@ -55,19 +54,26 @@ pub(crate) enum Mode {
 /// phrases that ran before the halt, never rolled back — the whole of "a
 /// `let` before a failing command still binds" (`docs/SPEC.md` §5.6).
 pub(crate) fn run_phrases(
-    phrases: &[Spanned<Phrase>],
+    top: &Toplevel,
     env: Env,
     mode: Mode,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Ran {
+    if let Err(error) = readmit(top, &env, shell) {
+        return Ran {
+            env,
+            defined: Vec::new(),
+            outcome: Err(error),
+        };
+    }
     let mut ran = Ran {
         env,
         defined: Vec::new(),
         outcome: Ok(Value::Unit),
     };
-    let last = phrases.len().saturating_sub(1);
-    for (i, phrase) in phrases.iter().enumerate() {
+    let last = top.phrases.len().saturating_sub(1);
+    for (i, phrase) in top.phrases.iter().enumerate() {
         let result = shell
             .poll()
             .map_err(|b| {
@@ -169,14 +175,18 @@ pub fn apply(
     }
 }
 
-/// Before a session unit runs, admit each stored datum it uses against the
+/// Before a unit runs, admit each stored datum it uses against the
 /// type the unit solved: a later line's misuse of decoded data is caught
 /// where it is written, not where the value finally fails.
-pub(crate) fn readmit(top: &crate::ir::Toplevel, shell: &Shell) -> Settled<()> {
+fn readmit(top: &Toplevel, env: &Env, shell: &Shell) -> Settled<()> {
     for (name, site) in &top.admits {
-        if let Some(value) = shell.env.get(name) {
-            site.admit(value, shell.fixings())
-                .map_err(|mismatch| mismatch.refusal(&format!("${name}")))?;
+        if let Some(value) = env.get(name) {
+            site.admit(value, shell.fixings()).map_err(|mismatch| {
+                let door = format!("${name}");
+                mismatch
+                    .refusal(&door)
+                    .locate(&door, mismatch.witness(), shell)
+            })?;
         }
     }
     Ok(())
@@ -193,9 +203,8 @@ pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
         None,
     )
     .expect("compile");
-    readmit(&top, shell)?;
     run_phrases(
-        &top.phrases,
+        &top,
         shell.env.clone(),
         Mode::Session,
         &Mooring::adrift(),
@@ -209,7 +218,7 @@ mod tests {
     use super::*;
 
     /// Real source text through the real front end, never hand-built IR.
-    fn toplevel(source: &str) -> Vec<Spanned<Phrase>> {
+    fn toplevel(source: &str) -> Toplevel {
         crate::compile::compile_and_typecheck(
             source,
             crate::test_helper::core_schemes(),
@@ -218,15 +227,14 @@ mod tests {
             None,
         )
         .expect("compile")
-        .phrases
     }
 
     #[test]
     fn run_phrases_installs_defines_into_scope_and_reports_them() {
-        let phrases = toplevel("let rp_a = 1\nlet rp_b = 2");
+        let top = toplevel("let rp_a = 1\nlet rp_b = 2");
         let mut shell = crate::test_helper::core_shell();
         let ran = run_phrases(
-            &phrases,
+            &top,
             shell.env.clone(),
             Mode::Session,
             &Mooring::adrift(),
@@ -241,10 +249,10 @@ mod tests {
 
     #[test]
     fn run_phrases_halts_but_keeps_defines_made_before_the_halt() {
-        let phrases = toplevel("let rp_before = 1\nexit 7\nlet rp_after = 2");
+        let top = toplevel("let rp_before = 1\nexit 7\nlet rp_after = 2");
         let mut shell = crate::test_helper::core_shell();
         let ran = run_phrases(
-            &phrases,
+            &top,
             shell.env.clone(),
             Mode::Session,
             &Mooring::adrift(),
@@ -258,7 +266,7 @@ mod tests {
 
     #[test]
     fn run_phrases_non_session_mode_defines_nothing_on_the_lease_ledger() {
-        let phrases = toplevel("let rp_local = 1");
+        let top = toplevel("let rp_local = 1");
         let mut shell = crate::test_helper::core_shell();
         shell.arm_binding_lease(crate::shell::runtime::BindingLease {
             idle_calls: 1,
@@ -266,7 +274,7 @@ mod tests {
         });
         let before = shell.leased_binding_count();
         let ran = run_phrases(
-            &phrases,
+            &top,
             shell.env.clone(),
             Mode::Local,
             &Mooring::adrift(),
@@ -281,15 +289,61 @@ mod tests {
     }
 
     #[test]
+    fn run_phrases_admits_the_supplied_env_not_the_session_env() {
+        let mut shell = crate::test_helper::core_shell();
+        run_source("let d = !{to-string '1' | from-json}", &mut shell)
+            .expect("store a residual datum");
+        let top = crate::compile::compile_and_typecheck(
+            "let before = 7\nlet result = $[$d + 1]",
+            shell.session_schemes(),
+            crate::source::FileId::DUMMY,
+            None,
+            None,
+        )
+        .expect("compile a later unit");
+
+        let mut env = shell.env.clone();
+        let mut binding = env.binding("d").expect("stored datum").clone();
+        binding.value = Value::string("bad");
+        env.bind("d".into(), binding);
+        let ran = run_phrases(
+            &top,
+            env.clone(),
+            Mode::Local,
+            &Mooring::adrift(),
+            &mut shell,
+        );
+        let error = ran.outcome.expect_err("the supplied datum must be refused");
+        assert!(error.to_string().contains("$d"), "{error}");
+        assert_eq!(ran.defined, [] as [String; 0]);
+        assert_eq!(ran.env.get("d"), Some(&Value::string("bad")));
+        assert!(ran.env.get("before").is_none());
+        assert!(ran.env.get("result").is_none());
+        assert_eq!(shell.env.get("d"), Some(&Value::Int(1)));
+        assert!(shell.env.get("before").is_none());
+
+        let valid_env = shell.env.clone();
+        shell.env = env;
+        let ran = run_phrases(&top, valid_env, Mode::Local, &Mooring::adrift(), &mut shell);
+        ran.outcome.expect("the supplied datum must be admitted");
+        assert_eq!(ran.defined, ["before", "result"]);
+        assert_eq!(ran.env.get("d"), Some(&Value::Int(1)));
+        assert_eq!(ran.env.get("before"), Some(&Value::Int(7)));
+        assert_eq!(ran.env.get("result"), Some(&Value::Int(2)));
+        assert_eq!(shell.env.get("d"), Some(&Value::string("bad")));
+        assert!(shell.env.get("before").is_none());
+    }
+
+    #[test]
     fn block_discards_let() {
         // A bare `{ … }` statement elaborates to `Run(Return(Thunk(body)))`;
         // unwrap it to reach the block's own body — real source text, never
         // hand-built IR.  Its `let` is a machine-local `Bind`, never a
         // `Phrase::Define`, so it can never reach `shell.env` regardless of
         // how the block is entered.
-        let phrases = toplevel("{ let leak_block = 1 }");
-        let [phrase] = phrases.as_slice() else {
-            panic!("expected one phrase, got {phrases:?}");
+        let top = toplevel("{ let leak_block = 1 }");
+        let [phrase] = top.phrases.as_slice() else {
+            panic!("expected one phrase, got {:?}", top.phrases);
         };
         let Phrase::Run(comp) = &phrase.item else {
             panic!("expected a Run phrase, got {:?}", phrase.item);

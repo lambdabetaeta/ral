@@ -100,10 +100,10 @@ same `Unit` return.
 ## The route pin loses its subject
 
 `head_pipe_route` (`core/src/typecheck/infer.rs`) falls back to a builtin's
-`Sig` route only when `fixed_arity().is_none()`, so after the flip an alias over
+`Sig` route only when `fixed_arity().is_none()`, so after the flip a handler over
 `cd` is no longer pinned to `cd`'s route: **T0012** `RouteMismatch` and its WF-2
 follow-up (`PinFailure::ByteHeadReturnsValue`) stop firing there, and
-`alias_arm_scheme` (`core/src/typecheck.rs`) stops refusing installs it refuses
+Handler-arm checking (`core/src/typecheck.rs`) stops refusing installs it refuses
 today.
 
 That loss is required, not merely acceptable. The pin exists so that an arm
@@ -123,7 +123,7 @@ reads as a choice rather than an oversight.
 
 - ***`ArgSig::Any` instead of `Exact`.*** This reaches the same endpoint —
   `Optional` gone, two variants left — with no classifier flip at all: `cd`
-  stays a base frame, `$cd` stays a **T0042** `BuiltinNotFirstClass`, an alias
+  stays a base frame, `$cd` stays a **T0042** `BuiltinNotFirstClass`, a handler
   over `cd` keeps its route pinning, and nothing a bash user types breaks. It
   loses twice. `cd 3` stops being a type error and becomes a runtime "expected a
   String path" from `builtin_chdir` (`core/src/builtins/shell.rs`), which is the

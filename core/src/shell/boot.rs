@@ -88,7 +88,7 @@ impl BakedPrelude {
         ));
         let mut shell = Shell::root(runtime.into(), cwd);
         let ran = run_phrases(
-            &self.comp().phrases,
+            self.comp(),
             Env::new(),
             Mode::Prelude,
             &Mooring::adrift(),
