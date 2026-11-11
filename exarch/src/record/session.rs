@@ -641,21 +641,23 @@ impl AgentLog {
         sessions_root.remove(&name).map_err(|error| {
             Error::io(
                 IoOperation::Write,
-                IoSubject::Path(ral_core::path::shown(&path)),
+                IoSubject::Path(ral_core::text::quote_native(path.as_os_str())),
                 &error.into(),
             )
         })?;
         let dir = sessions_root.make_dir(&name).map_err(|error| {
             Error::io(
                 IoOperation::CreateDirectory,
-                IoSubject::Path(ral_core::path::shown(&path)),
+                IoSubject::Path(ral_core::text::quote_native(path.as_os_str())),
                 &error.into(),
             )
         })?;
         sessions_root.sync().map_err(|error| {
             Error::io(
                 IoOperation::Sync,
-                IoSubject::Path(ral_core::path::shown(sessions_root.path())),
+                IoSubject::Path(ral_core::text::quote_native(
+                    sessions_root.path().as_os_str(),
+                )),
                 &error.into(),
             )
         })?;

@@ -170,7 +170,9 @@ pub(crate) enum Source {
 impl Found {
     pub(crate) fn failure_place(&self) -> SkillPlace {
         match &self.source {
-            Source::Disk { dir, .. } => SkillPlace::Disk(ral_core::path::shown(dir)),
+            Source::Disk { dir, .. } => {
+                SkillPlace::Disk(ral_core::text::quote_native(dir.as_os_str()))
+            }
             Source::Builtin(_) => SkillPlace::Builtin,
         }
     }

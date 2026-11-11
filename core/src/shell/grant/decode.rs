@@ -1026,7 +1026,7 @@ mod tests {
             ],
             InvalidCause::MissingPayload("dir".into()),
         );
-        assert!(e.describe().contains("tag `dir` needs a payload"), "{e}");
+        assert!(e.describe().contains("tag \"dir\" needs a value"), "{e}");
         assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.untagged)]);
         assert!(e.hints()[0].contains("place or a selector"));
     }
@@ -1050,7 +1050,7 @@ mod tests {
                 found: Found::Bool(true),
             }),
         );
-        assert!(e.to_string().contains("takes no payload"), "{e}");
+        assert!(e.to_string().contains("takes no value"), "{e}");
         assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.payload)]);
     }
 
@@ -1255,7 +1255,7 @@ mod tests {
             ],
             InvalidCause::MissingPayload("cwd".into()),
         );
-        assert!(e.describe().contains("tag `cwd` needs a payload"), "{e}");
+        assert!(e.describe().contains("tag \"cwd\" needs a value"), "{e}");
         assert_eq!(e.hints(), [Box::<str>::from(PLACE.payload)]);
     }
 
@@ -1488,7 +1488,7 @@ mod tests {
             Value::variant("offline", Some(Value::Bool(true))),
         )]))
         .to_string();
-        assert!(m.contains("takes no payload"), "{m}");
+        assert!(m.contains("takes no value"), "{m}");
     }
 
     #[test]
@@ -1516,7 +1516,7 @@ mod tests {
             Value::variant("withheld", Some(Value::Bool(true))),
         )]))
         .to_string();
-        assert!(m.contains("takes no payload"), "{m}");
+        assert!(m.contains("takes no value"), "{m}");
     }
 
     #[test]
@@ -1577,7 +1577,7 @@ mod tests {
             list(vec![Value::variant("read", Some(Value::Bool(true)))]),
         )]))
         .to_string();
-        assert!(m.contains("takes no payload"), "{m}");
+        assert!(m.contains("takes no value"), "{m}");
     }
 
     #[test]

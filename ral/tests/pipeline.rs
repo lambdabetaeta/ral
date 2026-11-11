@@ -935,7 +935,8 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
 
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(
-        !o.stderr.contains("fs write denied by grant"),
+        !o.stderr.contains("fs write denied by grant")
+            && !o.stderr.contains("grant does not allow write access"),
         "write was denied: {}",
         o.stderr,
     );

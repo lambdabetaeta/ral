@@ -187,7 +187,7 @@ mod failure_tests {
         let cause =
             crate::fact::JsonEncodeFailure::new(crate::fact::JsonEncodeCause::NonUnicodePath(
                 crate::fact::JsonEncodeCauseNonUnicodePath {
-                    shown: "file".into(),
+                    shown: crate::text::quote_native(std::ffi::OsStr::new("file")),
                 },
             ));
         assert_eq!(

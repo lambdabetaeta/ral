@@ -332,7 +332,7 @@ mod tests {
             ))),
             Error::io(
                 IoOperation::Read,
-                IoSubject::Path("input".into()),
+                IoSubject::Path(crate::text::quote_native(std::ffi::OsStr::new("input"))),
                 &std::io::ErrorKind::PermissionDenied.into(),
             )
             .reason,
@@ -487,7 +487,7 @@ mod tests {
         assert!(
             error
                 .render(&db, Some(file), shell.exit_hints())
-                .contains(", line 2")
+                .contains(", use at \"admission.ral\":2:1")
         );
         let record = error.fact(&shell);
         let raised = reraised(Value::failure(record.clone()));
@@ -498,7 +498,7 @@ mod tests {
         assert!(
             !raised
                 .render(&db, Some(file), shell.exit_hints())
-                .contains(", line ")
+                .contains(", use at ")
         );
     }
 }

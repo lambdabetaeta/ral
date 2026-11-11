@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: c485695114d984277a516d253ba847ad19ef185d
+generated_at_date: 2026-11-11
 covers_paths: [core/src/error.rs, core/src/fact/error.rs, core/src/fact/error/, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
@@ -42,7 +42,10 @@ and `Reason::advice` read those facts, not rendered messages.
 borrows the native error and projects its cause through `io::failure`, retaining
 custom path/owned-I/O facts. Fixed not-found and permission-denied wording is
 derived centrally; opaque OS/library detail remains beneath a typed foreign
-cause, not a general message fallback.
+cause, not a general message fallback. Native I/O subjects, path-error operands,
+non-Unicode refusals and environment-key subjects use `text::quote_native`
+before losing native units. Their portable strings include escaped quotes;
+renderers insert them once, without path normalization or re-quoting.
 
 **A block the checker refuses at install is one fact.** A handler, catch-all,
 hook or rc binding that the runtime vets and the checker refuses becomes
@@ -50,7 +53,9 @@ hook or rc binding that the runtime vets and the checker refuses becomes
 (`fact/error/invalid.rs`): each `TypeDiagnostic` is the stable code and
 rendered message of one checker error, projected by `TypeError::diagnostic`
 and gathered by `ill_typed` (`shell/runtime/coerce.rs`). The checker's runtime
-entry points return every close error, not the first.
+entry points return every close error, not the first. `IllTyped::new` and its
+`Datum` decoder reject an empty diagnostic list; callers read it through
+`diagnostics()`.
 
 **A failure carries one provenance: the failing frame's name and site.**
 `prov` is `None` until claimed. `Break::locate(name, span, shell)`
@@ -58,7 +63,10 @@ entry points return every close error, not the first.
 lies in a session source. `Prov::Live { name: FrameName, span }` draws a caret;
 `Prov::Resolved` holds a name and `CallSite`, drawing coordinates without a
 caret, and is what `Prov::leaving` makes of a live span the parent registry does
-not hold. An initial `_` does not hide a frame; the baked prelude is invisible
+not hold. `Error::leaving` also drops report-only witness spans outside the
+inherited registry prefix. A witness from another source is qualified by script,
+line and column; an equal display name alone does not establish source identity.
+An initial `_` does not hide a frame; the baked prelude is invisible
 because its spans are outside session sources. See
 [[decisions/261105_the-error-record|the error record]].
 

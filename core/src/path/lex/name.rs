@@ -79,7 +79,11 @@ pub struct NotUtf8(pub(super) PathBuf);
 
 impl std::fmt::Display for NotUtf8 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} is not UTF-8", crate::path::shown(&self.0))
+        write!(
+            f,
+            "{} is not UTF-8",
+            crate::text::quote_native(self.0.as_os_str())
+        )
     }
 }
 
@@ -88,7 +92,7 @@ impl std::error::Error for NotUtf8 {}
 impl From<&NotUtf8> for crate::fact::PathFailure {
     fn from(error: &NotUtf8) -> Self {
         Self::NotUnicode(crate::fact::PathFailureNotUnicode {
-            shown: crate::path::shown(&error.0),
+            shown: crate::text::quote_native(error.0.as_os_str()),
         })
     }
 }

@@ -6,9 +6,9 @@ final
 {"a":2,"b":3,"z":1}
 duplicate-value
 later-spread
-map literal: key 'a' given twice; which did you mean?
+map literal: key "a" given twice; which did you mean?
 duplicate-value
-map literal: key 'a' given twice; which did you mean?
+map literal: key "a" given twice; which did you mean?
 duplicate-value
 later-spread
 duplicate-value

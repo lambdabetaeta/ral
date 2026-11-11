@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-03
+generated_at_commit: c485695114d984277a516d253ba847ad19ef185d
+generated_at_date: 2026-11-11
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -662,13 +662,17 @@ The owner sheds context and retries once. Reopen retains a learned narrowing
 only for the same model name, bounded by the new catalog window; a via starts
 at the least window its upstreams hold.
 
-Each retryable and 4xx variant carries the parsed body (boxed at the error
-boundary) as an optional JSON value, so the renderer can print a
-labelled, structured error from the JSON rather than scraping the cause text.
-`record::fault::body_fields` keeps `type` and `code` as distinct fields, with
-`message` last; `summary` carries the message across agent boundaries. The
-complete body remains in the recorded error, including its stream envelope;
-the chrome lives in [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]].
+Retryable and 4xx variants retain portable typed causes, including original
+response bodies. `ProviderError::body` derives the parsed view;
+`record::fault::body_fields` keeps `type` and `code` distinct, with `message`
+last. Core's `ServiceFailure` response helpers
+(`core/src/fact/error/host/response.rs`) share relay extraction, one-line
+normalization and capped snippets between live summaries and typed failure
+messages. Helper settlements carry typed evidence, not a pre-rendered summary;
+their notices derive concise text without dumping the retained response.
+Credential readouts distinguish safe retry from uncertain rotation and
+reauthentication. The chrome lives in [[map/exarch/cards|cards]] /
+[[map/exarch/frontend|frontend]].
 `reset.rs`'s last-resort text scrape, `parse_retry_after`, slices the
 *lowercased* copy it searches, never indexing the original with an offset taken
 from it, so a length-changing lowercase (`İ`) cannot land mid-character and

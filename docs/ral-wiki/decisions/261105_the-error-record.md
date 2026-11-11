@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
+generated_at_commit: c4856951
 ---
 
 # The error record
@@ -105,8 +105,10 @@ raise : ∀ε α. ErrorRecord → F^ε α
   (`core/src/shell/runtime/map.rs`), which holds the `ErrorFact` it projects;
   `Map::witnessed` is the only constructor, so the map is exactly
   `fact.record()`. Reads, equality, printing and patterns cannot tell it from a
-  built map. `Value::failure` is the one door from an `Error` to a value:
-  `try`'s handler argument, `poll`, the report's `` `err `` and `done`.
+  built map. `Value::failure` constructs the witnessed runtime records in
+  `try`'s handler argument, `poll` and the audit report's `` `err `` outcome.
+  Done events and worker listings instead carry plain `ErrorRecord` data
+  through `FOValue`; raising those records makes a claim.
 - **`raise` of a witnessed map re-raises the exact reason**, at the fact's
   frame and site, with no validation: the reason was witnessed. Any change
   (insert, spread) builds a new map without the witness, and so does crossing a

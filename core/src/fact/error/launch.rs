@@ -1233,7 +1233,7 @@ impl NativeStatus {
 impl UnavailableFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::MissingBootPin(BinaryRole::Bwrap) => "bwrap was not found on PATH at startup; a grant confines every external command under bubblewrap, so nothing can start under this grant without it".into(),
+            Self::MissingBootPin(BinaryRole::Bwrap) => "ral could not find and pin bwrap at startup; a grant confines every external command under bubblewrap, so nothing can start under this grant without it".into(),
             Self::MissingBootPin(BinaryRole::Ral) => PinCause::Unavailable.describe(),
             Self::Unsupported(value) => value.describe(),
             Self::BwrapProbe(value) => value.describe(),
@@ -1297,9 +1297,9 @@ impl PrepareFailure {
             },
             PrepareStep::Application => format!("prepare {} for launch", self.subject.describe()),
             PrepareStep::Environment => match &self.subject {
-                PrepareSubject::EnvironmentKey(key) => format!("prepare environment key {key:?}"),
+                PrepareSubject::EnvironmentKey(key) => format!("prepare environment key {key}"),
                 PrepareSubject::EnvironmentValue(key) => {
-                    format!("prepare the value of environment key {key:?}")
+                    format!("prepare the value of environment key {key}")
                 }
                 _ => "prepare the child's environment".into(),
             },
@@ -1378,8 +1378,8 @@ impl PrepareSubject {
             Self::Program(value) => format!("program '{value}'"),
             Self::Stream(value) => value.describe(),
             Self::Argument(value) => format!("argv[{value}]"),
-            Self::EnvironmentKey(value) => format!("environment key {value:?}"),
-            Self::EnvironmentValue(value) => format!("the value of environment key {value:?}"),
+            Self::EnvironmentKey(value) => format!("environment key {value}"),
+            Self::EnvironmentValue(value) => format!("the value of environment key {value}"),
             Self::Path(value) | Self::Capability(value) => format!("'{value}'"),
             Self::Group(value) => format!("process group {value}"),
             Self::SessionLimit(value) => format!("the session's {} limit", value.describe()),
@@ -1501,7 +1501,7 @@ impl ProjectionFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::UnrenderablePath(path) => format!(
-                "sandbox grant path '{path}' is not valid Unicode; refusing to render a sandbox rule that could name the wrong path"
+                "sandbox grant path {path} is not valid Unicode; refusing to render a sandbox rule that could name the wrong path"
             ),
             Self::ChangedSymlink(value) => value.describe(),
             Self::PinnedDirectoryRedirected(value) => value.describe(),
@@ -1661,11 +1661,12 @@ impl WarrantFailure {
             Self::Size(value) => value.describe(),
             Self::Read(cause) => format!("cannot read the warrant: {}", cause.describe()),
             Self::SealProbe(cause) => {
-                format!("the warrant is not a sealed memfd: {}", cause.describe())
+                format!(
+                    "cannot inspect the warrant's memfd seals: {}",
+                    cause.describe()
+                )
             }
-            Self::MissingSeals => {
-                "the warrant's memfd is not sealed against writes; refusing it".into()
-            }
+            Self::MissingSeals => "the warrant's memfd lacks required seals; refusing it".into(),
             Self::Rewind(cause) => format!("cannot rewind the warrant: {}", cause.describe()),
             Self::NotSocket => "the warrant is not a socket; refusing it".into(),
             Self::SocketStat(cause) => format!("cannot stat the warrant: {}", cause.describe()),
@@ -1738,7 +1739,7 @@ impl DaclFailure {
                 "'{path}' is not on a local fixed volume; network shares, removable drives, and unnamed volumes cannot be granted"
             ),
             Self::NotUnicode(path) => format!(
-                "Windows grants name their objects by text, but '{path}' is not valid Unicode; refusing an unfaithful spelling rather than approximating it"
+                "Windows grants name their objects by text, but {path} is not valid Unicode; refusing an unfaithful spelling rather than approximating it"
             ),
             Self::Redirected(value) => value.describe(),
             Self::WriteDacDenied(value) => value.describe(),
@@ -1761,7 +1762,22 @@ impl RedirectedTargetKind {
 
 impl AccessCheckOperation {
     pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
+        match self {
+            Self::InitializeResourceManager => {
+                "initialize the Authz resource manager with AuthzInitializeResourceManager"
+            }
+            Self::OpenProcessToken => {
+                "open the process token for the Authz exclusion check with OpenProcessToken"
+            }
+            Self::InitializeContextFromToken => {
+                "initialize the Authz client context with AuthzInitializeContextFromToken"
+            }
+            Self::SetAppContainerInformation => {
+                "set the Authz context's AppContainer information with AuthzSetAppContainerInformation"
+            }
+            Self::Check => "verify the sandbox exclusion with AuthzAccessCheck",
+        }
+        .into()
     }
 }
 
@@ -1964,7 +1980,7 @@ impl LauncherFailure {
             Self::ChildFork(value) => value.describe(),
             Self::ChildSetup(value) => value.describe(),
             Self::ChildDiedBeforeSetup(image) => format!(
-                "{}'s child died without reporting completion of its setup",
+                "the child for {} died without reporting completion of its setup",
                 image.describe()
             ),
             Self::SpawnBeforeSetup(value) => value.describe(),
@@ -2216,7 +2232,7 @@ impl FilterFailureCompile {
 impl WarrantFailureUtf8 {
     pub fn describe(&self) -> String {
         let sequence = match self.error_len {
-            Some(length) => format!("invalid sequence of {length} bytes"),
+            Some(length) => format!("invalid {length}-byte sequence"),
             None => "the sequence is incomplete".into(),
         };
         format!(
@@ -2240,7 +2256,7 @@ impl WarrantFailureSlot {
 impl WarrantFailureSlotCount {
     pub fn describe(&self) -> String {
         format!(
-            "--warrant received {} descriptors; it takes warrant and report descriptors, plus three stream descriptors under a Linux envelope",
+            "--warrant descriptor-argument count is {}; expected 2 (warrant and report), or 5 under a Linux envelope",
             self.actual
         )
     }
@@ -2265,8 +2281,9 @@ impl WarrantFailureInvalidProgram {
 impl WarrantFailureArgumentCount {
     pub fn describe(&self) -> String {
         format!(
-            "the warrant counts {} arguments but carries {}",
-            self.declared, self.actual
+            "the warrant declares {} but carries {}",
+            crate::text::plural(self.declared.to_u64(), "argument"),
+            self.actual
         )
     }
 }
@@ -2314,8 +2331,13 @@ impl DescriptorSweepFailureSetReportCloexec {
 
 impl DescriptorSweepFailureBufferTooLarge {
     pub fn describe(&self) -> String {
+        let bytes = if self.bytes.to_u64() == 1 {
+            "byte is"
+        } else {
+            "bytes are"
+        };
         format!(
-            "cannot size the proc_pidinfo(PROC_PIDLISTFDS) buffer: {} bytes are not addressable by that API",
+            "cannot size the proc_pidinfo(PROC_PIDLISTFDS) buffer: {} {bytes} not addressable by that API",
             self.bytes
         )
     }
@@ -2324,8 +2346,9 @@ impl DescriptorSweepFailureBufferTooLarge {
 impl DescriptorSweepFailurePartialDescriptorRecord {
     pub fn describe(&self) -> String {
         format!(
-            "proc_pidinfo(PROC_PIDLISTFDS) returned {} bytes, not a whole number of {}-byte descriptor records",
-            self.bytes, self.width
+            "proc_pidinfo(PROC_PIDLISTFDS) returned {}, not a whole number of {}-byte descriptor records",
+            crate::text::plural(self.bytes.to_u64(), "byte"),
+            self.width
         )
     }
 }
@@ -2400,7 +2423,7 @@ impl DaclFailureReachable {
             format!(" (it lies inside the excluded '{}')", self.denied)
         };
         format!(
-            "sandbox confinement unavailable: '{}' is excluded{inside}, but a sandboxed program could still open it: its own permissions admit every Windows sandbox (as ALL APPLICATION PACKAGES does) or carry a folder this grant allows (as a hard link does), and Windows cannot take such access away",
+            "sandbox confinement unavailable: '{}' is excluded{inside}, but a sandboxed program could still open it: its permissions may admit every Windows sandbox (as ALL APPLICATION PACKAGES does), or it may retain access inherited from an allowed folder (for example, through a hard-linked file), and Windows cannot take such access away",
             self.at
         )
     }
@@ -2409,7 +2432,7 @@ impl DaclFailureReachable {
 impl DaclFailureAccessCheck {
     pub fn describe(&self) -> String {
         format!(
-            "cannot check what the sandbox could open ({}): {}",
+            "cannot {}: {}",
             self.operation.describe(),
             self.cause.describe()
         )
@@ -2966,12 +2989,12 @@ mod tests {
             ),
             (
                 PrepareStep::Environment,
-                PrepareSubject::EnvironmentKey("TOKEN".into()),
+                PrepareSubject::EnvironmentKey("\"TOKEN\"".into()),
                 "prepare environment key \"TOKEN\"",
             ),
             (
                 PrepareStep::Environment,
-                PrepareSubject::EnvironmentValue("TOKEN".into()),
+                PrepareSubject::EnvironmentValue("\"TOKEN\"".into()),
                 "prepare the value of environment key \"TOKEN\"",
             ),
             (
@@ -3157,7 +3180,7 @@ mod tests {
             observers(
                 &LaunchFailure::Prepare(PrepareFailure {
                     step: PrepareStep::Environment,
-                    subject: PrepareSubject::EnvironmentValue("TOKEN".into()),
+                    subject: PrepareSubject::EnvironmentValue("\"TOKEN\"".into()),
                     cause,
                 }),
                 &format!(
@@ -3223,7 +3246,7 @@ mod tests {
             (LauncherFailure::ChildPipe(LauncherFailureChildPipe { subject: LaunchImageSubject::File("/tool".into()), cause: os() }), "cannot create the child-setup channel for program '/tool': permission denied".into()),
             (LauncherFailure::ChildFork(LauncherFailureChildFork { subject: LaunchImageSubject::Bundled("rg".into()), cause: os() }), "cannot fork bundled tool 'rg': permission denied".into()),
             (LauncherFailure::ChildSetup(LauncherFailureChildSetup { subject: LaunchImageSubject::File("/tool".into()), cause: os() }), "ral's child setup failed before starting program '/tool': permission denied".into()),
-            (LauncherFailure::ChildDiedBeforeSetup(LaunchImageSubject::Bundled("rg".into())), "bundled tool 'rg''s child died without reporting completion of its setup".into()),
+            (LauncherFailure::ChildDiedBeforeSetup(LaunchImageSubject::Bundled("rg".into())), "the child for bundled tool 'rg' died without reporting completion of its setup".into()),
             (LauncherFailure::SpawnBeforeSetup(LauncherFailureSpawnBeforeSetup { subject: LaunchImageSubject::File("/tool".into()), cause: os() }), "ral could not spawn program '/tool' before setup completion was established: permission denied".into()),
             (LauncherFailure::NonNativeExecError(LauncherFailureNonNativeExecError { subject: LaunchImageSubject::File("/tool".into()), cause: io() }), "ral could not construct the execution request for program '/tool': permission denied".into()),
             (LauncherFailure::AnchorReadiness(AnchorReadinessFailure::Read(io())), "cannot read the pipeline anchor's readiness report: permission denied".into()),
@@ -3508,7 +3531,7 @@ mod tests {
         for (cause, description, advice) in [
             (
                 UnavailableFailure::MissingBootPin(BinaryRole::Bwrap),
-                "bwrap was not found on PATH at startup; a grant confines every external command under bubblewrap, so nothing can start under this grant without it",
+                "ral could not find and pin bwrap at startup; a grant confines every external command under bubblewrap, so nothing can start under this grant without it",
                 vec!["Is bubblewrap installed on this host and on the PATH ral was started with?"],
             ),
             (
@@ -3831,8 +3854,8 @@ mod tests {
     fn projection_descriptions_preserve_the_operation_and_refusal() {
         for (cause, description, advice) in [
             (
-                ProjectionFailure::UnrenderablePath("/bad".into()),
-                "sandbox grant path '/bad' is not valid Unicode; refusing to render a sandbox rule that could name the wrong path",
+                ProjectionFailure::UnrenderablePath("\"/bad\"".into()),
+                "sandbox grant path \"/bad\" is not valid Unicode; refusing to render a sandbox rule that could name the wrong path",
                 vec![],
             ),
             (
@@ -4066,7 +4089,7 @@ mod tests {
                     valid_up_to: 2_u64.into(),
                     error_len: Some(1_u64.into()),
                 }),
-                "the warrant's program is not UTF-8 at byte 2: invalid sequence of 1 bytes",
+                "the warrant's program is not UTF-8 at byte 2: invalid 1-byte sequence",
                 vec![],
             ),
             (
@@ -4095,7 +4118,7 @@ mod tests {
                 WarrantFailure::SlotCount(WarrantFailureSlotCount {
                     actual: 1_u64.into(),
                 }),
-                "--warrant received 1 descriptors; it takes warrant and report descriptors, plus three stream descriptors under a Linux envelope",
+                "--warrant descriptor-argument count is 1; expected 2 (warrant and report), or 5 under a Linux envelope",
                 vec![invocation],
             ),
             (
@@ -4144,7 +4167,7 @@ mod tests {
                     declared: 2_u64.into(),
                     actual: 1_u64.into(),
                 }),
-                "the warrant counts 2 arguments but carries 1",
+                "the warrant declares 2 arguments but carries 1",
                 vec![],
             ),
             (
@@ -4172,12 +4195,12 @@ mod tests {
             ),
             (
                 WarrantFailure::SealProbe(os()),
-                "the warrant is not a sealed memfd: permission denied",
+                "cannot inspect the warrant's memfd seals: permission denied",
                 vec![],
             ),
             (
                 WarrantFailure::MissingSeals,
-                "the warrant's memfd is not sealed against writes; refusing it",
+                "the warrant's memfd lacks required seals; refusing it",
                 vec![],
             ),
             (
@@ -4341,7 +4364,7 @@ mod tests {
                     at: at.into(),
                 })),
                 &format!(
-                    "sandbox confinement unavailable: '{at}' is excluded{inside}, but a sandboxed program could still open it: its own permissions admit every Windows sandbox (as ALL APPLICATION PACKAGES does) or carry a folder this grant allows (as a hard link does), and Windows cannot take such access away"
+                    "sandbox confinement unavailable: '{at}' is excluded{inside}, but a sandboxed program could still open it: its permissions may admit every Windows sandbox (as ALL APPLICATION PACKAGES does), or it may retain access inherited from an allowed folder (for example, through a hard-linked file), and Windows cannot take such access away"
                 ),
                 &["Remove that access from it, or drop the exclusion."],
             );
@@ -4357,8 +4380,8 @@ mod tests {
                 vec!["Grant a folder on a local disk."],
             ),
             (
-                DaclFailure::NotUnicode("C:\\p".into()),
-                "Windows grants name their objects by text, but 'C:\\p' is not valid Unicode; refusing an unfaithful spelling rather than approximating it",
+                DaclFailure::NotUnicode(r#""C:\\p""#.into()),
+                r#"Windows grants name their objects by text, but "C:\\p" is not valid Unicode; refusing an unfaithful spelling rather than approximating it"#,
                 vec![],
             ),
             (
@@ -4375,7 +4398,7 @@ mod tests {
                     operation: AccessCheckOperation::Check,
                     cause: os(),
                 }),
-                "cannot check what the sandbox could open (check): permission denied",
+                "cannot verify the sandbox exclusion with AuthzAccessCheck: permission denied",
                 vec![],
             ),
             (

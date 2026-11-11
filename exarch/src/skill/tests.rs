@@ -315,7 +315,7 @@ fn metadata_silently_drops_a_skill_whose_frontmatter_fails() {
 
 #[test]
 fn frontmatter_failures_keep_the_skill_place_field_and_actual_yaml_head() {
-    let place = SkillPlace::Disk("/skills/my-skill".into());
+    let place = SkillPlace::Disk("\"/skills/my-skill\"".into());
     for (raw, cause) in [
         ("plain body", FrontmatterFailure::Missing),
         (

@@ -15,20 +15,32 @@ use crate::shell::load::{ModuleLoad, check_source, module_phrases};
 use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
 use crate::source::{SourceFile, SourceOrigin};
+use crate::text::quote_native;
 use crate::ty::Site;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Read and normalise the module `located` holds, which the grant judged for
-/// reading; `shown` names it in errors.  The handle ends here, by signature.
-fn read_and_normalize(located: Located<Judged<Reading>>, shown: &str) -> Settled<String> {
+/// reading; `path` names it in errors.  The handle ends here, by signature.
+fn read_and_normalize(located: Located<Judged<Reading>>, path: &Path) -> Settled<String> {
     let read = located.read();
     drop(located);
     let mut file = read.map_err(|e| {
-        Error::io(IoOperation::Open, IoSubject::Path(shown.into()), &e).with_context("use")
+        Error::io(
+            IoOperation::Open,
+            IoSubject::Path(quote_native(path.as_os_str())),
+            &e,
+        )
+        .with_context("use")
     })?;
     let mut source = String::new();
     std::io::Read::read_to_string(&mut file, &mut source).map_err(|e| {
-        Error::io(IoOperation::Read, IoSubject::Path(shown.into()), &e).with_context("use")
+        Error::io(
+            IoOperation::Read,
+            IoSubject::Path(quote_native(path.as_os_str())),
+            &e,
+        )
+        .with_context("use")
     })?;
     Ok(crate::source::normalize_source_text(source))
 }
@@ -68,7 +80,7 @@ pub(crate) fn builtin_use(
 
     let file = SourceFile::new(located.real().as_path().to_path_buf())
         .map_err(|e| invalid("use", InvalidCause::Path((&e).into())))?;
-    let source = read_and_normalize(located, &crate::path::shown(file.path()))?;
+    let source = read_and_normalize(located, file.path())?;
     let origin = SourceOrigin::File(file);
     let top = check_source(&source, &origin, shell, None).map_err(tag_loader_error)?;
 
@@ -146,13 +158,12 @@ mod tests {
         std::fs::write(&path, [0xff]).unwrap();
         let mut shell = crate::test_helper::core_shell();
         let located = shell.locate::<Reading>(&shell.anchor(&path)).unwrap();
-        let shown = crate::path::shown(&path);
-        let Err(Break::Error(error)) = read_and_normalize(located, &shown) else {
+        let Err(Break::Error(error)) = read_and_normalize(located, &path) else {
             panic!("non-UTF-8 source")
         };
         assert_eq!(error.context(), Some("use"));
         assert!(
-            matches!(error.reason, Reason::Io(f) if f.operation == IoOperation::Read && f.subject == IoSubject::Path(shown))
+            matches!(error.reason, Reason::Io(f) if f.operation == IoOperation::Read && f.subject == IoSubject::Path(quote_native(path.as_os_str())))
         );
     }
 }

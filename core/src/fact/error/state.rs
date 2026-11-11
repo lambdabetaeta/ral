@@ -172,7 +172,10 @@ impl DepthKind {
 impl DepthFailure {
     pub fn describe(&self) -> String {
         match self.kind {
-            DepthKind::EvalStack => format!("recursion limit exceeded ({} frames)", self.limit),
+            DepthKind::EvalStack => format!(
+                "recursion limit exceeded ({})",
+                crate::text::plural(self.limit.to_u64(), "frame")
+            ),
             DepthKind::NativeReentry => format!("native re-entry depth exceeded ({})", self.limit),
             DepthKind::Source => format!(
                 "{} depth exceeded its limit {}",
@@ -186,23 +189,23 @@ impl DepthFailure {
 impl CaptureLimit {
     pub fn describe(&self) -> String {
         format!(
-            "capture exceeded {} bytes and nothing was kept: a prefix is not what the command wrote",
-            self.bytes
+            "capture exceeded {} and nothing was kept: a prefix is not what the command wrote",
+            crate::text::plural(self.bytes.to_u64(), "byte")
         )
     }
 }
 
 impl PluginHookRef {
     pub fn describe(&self) -> String {
-        format!("plugin: {}, hook: {}", self.plugin, self.hook)
+        format!("{:?} from plugin {:?}", self.hook, self.plugin)
     }
 }
 
 impl HookRef {
     pub fn describe(&self) -> String {
         match self {
-            Self::Session(value) => format!("session: {value}"),
-            Self::Plugin(value) => format!("plugin: {}", value.describe()),
+            Self::Session(value) => format!("{value:?}"),
+            Self::Plugin(value) => value.describe(),
         }
     }
 }
@@ -229,7 +232,7 @@ impl HookNotFunction {
 impl HookArity {
     pub fn describe(&self) -> String {
         format!(
-            "cannot register '{}' as a {}: expected {} parameter{}, got {}",
+            "cannot register {} as a {}: expected {} parameter{}, got {}",
             self.name.describe(),
             self.signature.describe(),
             self.expected,
@@ -242,9 +245,9 @@ impl HookArity {
 impl HookRegistrationFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::NotFunction(value) => format!("not function: {}", value.describe()),
+            Self::NotFunction(value) => value.describe(),
             Self::Arity(value) => value.describe(),
-            Self::AlreadyRegistered(value) => format!("already registered: {}", value.describe()),
+            Self::AlreadyRegistered(value) => format!("hook {} is already registered", value.describe()),
             Self::NoSession => "hooks and plugins belong to the session, but this shell runs beside it (an aside hook, a spawned worker, a pipeline stage)".to_owned(),
         }
     }
@@ -261,7 +264,11 @@ impl StateFailure {
                 state.operation
             ),
             Self::WorkerCap(cap) => {
-                format!("{} workers are still executing or stopping", cap.limit)
+                format!(
+                    "{} {} still executing or stopping",
+                    crate::text::plural(cap.limit.to_u64(), "worker"),
+                    if cap.limit.to_u64() == 1 { "is" } else { "are" }
+                )
             }
             Self::GatherClosed => "the gather scope is closed".into(),
             Self::MissingAmbient(AmbientSetting::Home) => {
@@ -334,7 +341,7 @@ mod tests {
         for (kind, description, advice) in [
             (
                 DepthKind::EvalStack,
-                "recursion limit exceeded (1 frames)",
+                "recursion limit exceeded (1 frame)",
                 vec![
                     "usually a runaway recursive function: raise via rc recursion-limit: or --recursion-limit",
                 ],
@@ -367,7 +374,8 @@ mod tests {
                     bytes: Count::from_u64(bytes),
                 }),
                 &format!(
-                    "capture exceeded {bytes} bytes and nothing was kept: a prefix is not what the command wrote"
+                    "capture exceeded {bytes} {} and nothing was kept: a prefix is not what the command wrote",
+                    if bytes == 1 { "byte" } else { "bytes" }
                 ),
                 &["did you mean to write this to a file? `cmd > out.txt` keeps every byte"],
             );
@@ -418,17 +426,17 @@ mod tests {
             (
                 1,
                 HookSignature::Hook("post-exec".into()),
-                "cannot register 'session: after' as a post-exec hook: expected 1 parameter, got 2",
+                "cannot register \"after\" as a post-exec hook: expected 1 parameter, got 2",
             ),
             (
                 0,
                 HookSignature::Block,
-                "cannot register 'session: after' as a block: expected 0 parameters, got 2",
+                "cannot register \"after\" as a block: expected 0 parameters, got 2",
             ),
             (
                 9_223_372_036_854_775_809,
                 HookSignature::Block,
-                "cannot register 'session: after' as a block: expected 9223372036854775809 parameters, got 2",
+                "cannot register \"after\" as a block: expected 9223372036854775809 parameters, got 2",
             ),
         ] {
             projection(

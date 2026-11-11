@@ -426,10 +426,9 @@ mod tests {
         assert_eq!(failure.operation, "alias");
         assert_eq!(
             failure.cause,
-            InvalidCause::IllTyped(IllTyped {
-                role: BlockRole::Handler("echo".into()),
-                diagnostics: vec![error.diagnostic()],
-            })
+            InvalidCause::IllTyped(
+                IllTyped::new(BlockRole::Handler("echo".into()), vec![error.diagnostic()]).unwrap(),
+            )
         );
         assert_eq!(
             refused.prov.as_ref().and_then(crate::error::Prov::span),

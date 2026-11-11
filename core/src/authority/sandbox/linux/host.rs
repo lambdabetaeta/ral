@@ -119,12 +119,12 @@ impl Builds {
         result: Result<Result<(), BwrapProbeFailure>, BwrapProbeFailure>,
     ) -> Self {
         match result {
-            Ok(Err(why @ (BwrapProbeFailure::Prepare(_) | BwrapProbeFailure::Lend(_)))) => {
-                Self::Nothing(why)
-            }
-            Ok(Err(_)) => Self::ByFd,
+            Ok(Err(BwrapProbeFailure::Exited(BwrapProbeFailureExited {
+                status: NativeStatus::Exited(code),
+                ..
+            }))) if code != 0 => Self::ByFd,
             Ok(Ok(())) => Self::Nothing(BwrapProbeFailure::RedirectedDestinationAccepted),
-            Err(why) => Self::Nothing(why),
+            Ok(Err(why)) | Err(why) => Self::Nothing(why),
         }
     }
 }

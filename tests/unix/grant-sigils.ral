@@ -14,7 +14,7 @@ to-string b-pos > "$dir-b/f"
 cd $dir-a
 echo !{grant [fs: [read: [`cwd .]]] { from-string < 'f' }}
 let widened = denial { grant [fs: [read: [`cwd .]]] { cd $dir-b; from-string < 'f' } }
-echo !{re-match '^fs read denied by grant: .*/b/f$' $widened}
+echo !{re-match '^grant does not allow read access to ".*/b/f"$' $widened}
 
 # `gitdir` follows a .git pointer only when the git directory claims the tree back
 let linked = "$root/main/.git/worktrees/wt"

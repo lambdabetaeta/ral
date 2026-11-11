@@ -371,8 +371,8 @@ impl FramePart {
 impl FrameEncodeFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::TooLarge(value) => format!("too large: {}", value.describe()),
-            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::TooLarge(value) => value.describe(),
+            Self::Json(value) => value.describe(),
         }
     }
 }
@@ -380,10 +380,10 @@ impl FrameEncodeFailure {
 impl FrameFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::TooLarge(value) => format!("too large: {}", value.describe()),
-            Self::Partial(value) => format!("partial: {}", value.describe()),
-            Self::Json(value) => format!("json: {}", value.describe()),
-            Self::Io(value) => format!("io: {}", value.describe()),
+            Self::TooLarge(value) => value.describe(),
+            Self::Partial(value) => value.describe(),
+            Self::Json(value) => format!("invalid frame JSON: {}", value.describe()),
+            Self::Io(value) => format!("could not read frame: {}", value.describe()),
         }
     }
 }
@@ -415,9 +415,9 @@ impl ProtocolWork {
 impl SeedFrameFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::Empty => "empty".to_owned(),
-            Self::Trailing(value) => format!("trailing: {}", value.describe()),
-            Self::Frame(value) => format!("frame: {}", value.describe()),
+            Self::Empty => "seed frame is empty".into(),
+            Self::Trailing(value) => value.describe(),
+            Self::Frame(value) => format!("invalid seed frame: {}", value.describe()),
         }
     }
 }
@@ -426,16 +426,16 @@ impl ProtocolFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::VersionMismatch(value) => value.describe(),
-            Self::UnknownInstaller(value) => format!("unknown installer: {value}"),
+            Self::UnknownInstaller(value) => format!("unknown installer {value:?}"),
             Self::RootMissingScratch => "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach".into(),
             Self::Decode(value) => value.describe(),
             Self::WrongForkKind(value) => value.describe(),
-            Self::SeedFrame(value) => format!("seed frame: {}", value.describe()),
+            Self::SeedFrame(value) => value.describe(),
             Self::UnresolvedScope(value) => format!("unresolved scope: {value}"),
             Self::CyclicScopes => "cyclic scopes".to_owned(),
-            Self::UnknownNative(value) => format!("unknown native: {value}"),
-            Self::Frame(value) => format!("frame: {}", value.describe()),
-            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
+            Self::UnknownNative(value) => format!("unknown native {value:?}"),
+            Self::Frame(value) => value.describe(),
+            Self::Unencodable(value) => value.describe(),
             Self::ConnectionLostDuringEnquiry => "connection lost during enquiry".to_owned(),
             Self::Busy(value) => format!("busy: {}", value.describe()),
         }
@@ -472,7 +472,7 @@ impl ProbeSubject {
             Self::BindingCount => "binding count".to_owned(),
             Self::LeasedBindingCount => "leased binding count".to_owned(),
             Self::LargestBindingBytes => "largest binding bytes".to_owned(),
-            Self::EnvVar(value) => format!("env var: {value}"),
+            Self::EnvVar(value) => format!("environment-variable {value:?}"),
             Self::Cwd => "cwd".to_owned(),
             Self::Home => "home".to_owned(),
             Self::BuiltinNames => "builtin names".to_owned(),
@@ -492,9 +492,11 @@ impl ProbeSubject {
 impl ProbeFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::Busy => "busy".to_owned(),
-            Self::WorkerPanicked => "worker panicked".to_owned(),
-            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
+            Self::Busy => "the engine is busy".into(),
+            Self::WorkerPanicked => "the probe worker panicked".into(),
+            Self::Unencodable(value) => {
+                format!("cannot encode the probe answer: {}", value.describe())
+            }
         }
     }
 }
@@ -503,10 +505,10 @@ impl ConnectionClosed {
     pub fn describe(&self) -> String {
         match self {
             Self::Eof(value) => format!("end of stream from the {}", value.describe()),
-            Self::ReaderThreadEnded => "reader thread ended".to_owned(),
-            Self::TransportDropped => "transport dropped".to_owned(),
-            Self::Io(value) => format!("io: {}", value.describe()),
-            Self::Frame(value) => format!("frame: {}", value.describe()),
+            Self::ReaderThreadEnded => "the reader thread ended".into(),
+            Self::TransportDropped => "the transport was dropped".into(),
+            Self::Io(value) => value.describe(),
+            Self::Frame(value) => value.describe(),
         }
     }
 }
@@ -515,11 +517,16 @@ impl ConnectionFault {
     pub fn describe(&self) -> String {
         match self {
             Self::UnexpectedFrame(value) => value.describe(),
-            Self::ReadingForDispatch => "reading for dispatch".to_owned(),
-            Self::ProbeAnswer(value) => format!("probe answer: {}", value.describe()),
-            Self::ProbeRejected(value) => format!("probe rejected: {}", value.describe()),
-            Self::Unencodable(value) => format!("unencodable: {}", value.describe()),
-            Self::WorkersSurvived(value) => format!("workers survived: {value}"),
+            Self::ReadingForDispatch => {
+                "received a probe reading while awaiting a dispatch report".into()
+            }
+            Self::ProbeAnswer(value) => value.describe(),
+            Self::ProbeRejected(value) => value.describe(),
+            Self::Unencodable(value) => value.describe(),
+            Self::WorkersSurvived(value) => format!(
+                "{} remained after session shutdown",
+                crate::text::plural(value.to_u64(), "worker thread")
+            ),
         }
     }
 }
@@ -527,9 +534,12 @@ impl ConnectionFault {
 impl ConnectionFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::Closed(value) => format!("closed: {}", value.describe()),
-            Self::Silent(value) => format!("silent: {}.{:09} seconds", value.seconds, value.nanos),
-            Self::Faulted(value) => format!("faulted: {}", value.describe()),
+            Self::Closed(value) => format!("connection closed: {}", value.describe()),
+            Self::Silent(value) => format!(
+                "no response from the engine for {}.{:09} seconds",
+                value.seconds, value.nanos
+            ),
+            Self::Faulted(value) => value.describe(),
         }
     }
 }
@@ -537,8 +547,9 @@ impl ConnectionFailure {
 impl FrameEncodeFailureTooLarge {
     pub fn describe(&self) -> String {
         format!(
-            "encoded frame has {} bytes, exceeding limit {}",
-            self.actual, self.limit
+            "encoded frame has {}, exceeding limit {}",
+            crate::text::plural(self.actual.to_u64(), "byte"),
+            self.limit
         )
     }
 }
@@ -546,8 +557,9 @@ impl FrameEncodeFailureTooLarge {
 impl FrameFailureTooLarge {
     pub fn describe(&self) -> String {
         format!(
-            "frame has {} bytes, exceeding limit {}",
-            self.actual, self.limit
+            "frame has {}, exceeding limit {}",
+            crate::text::plural(self.actual.to_u64(), "byte"),
+            self.limit
         )
     }
 }
@@ -555,9 +567,9 @@ impl FrameFailureTooLarge {
 impl FrameFailurePartial {
     pub fn describe(&self) -> String {
         format!(
-            "partial frame {}: got {} bytes, expected {}",
+            "partial frame {}: got {}, expected {}",
             self.part.describe(),
-            self.got,
+            crate::text::plural(self.got.to_u64(), "byte"),
             self.expected
         )
     }
@@ -565,7 +577,10 @@ impl FrameFailurePartial {
 
 impl SeedFrameFailureTrailing {
     pub fn describe(&self) -> String {
-        format!("bytes: {}", self.bytes)
+        format!(
+            "seed frame has {}",
+            crate::text::plural(self.bytes.to_u64(), "trailing byte")
+        )
     }
 }
 
@@ -638,8 +653,13 @@ impl ProtocolFailureUnencodable {
 impl ConnectionClosedIo {
     pub fn describe(&self) -> String {
         format!(
-            "operation: {}, cause: {}",
-            self.operation.describe(),
+            "could not {}: {}",
+            match self.operation {
+                ConnectionOperation::Adopt => "adopt the connection",
+                ConnectionOperation::Read => "read from the connection",
+                ConnectionOperation::Write => "write to the connection",
+                ConnectionOperation::SetWriteDeadline => "set the connection's write deadline",
+            },
             self.cause.describe()
         )
     }
@@ -662,7 +682,7 @@ impl ConnectionFaultUnexpectedFrame {
 impl ConnectionFaultProbeAnswer {
     pub fn describe(&self) -> String {
         format!(
-            "probe: {}, cause: {}",
+            "malformed answer to the {} probe: {}",
             self.probe.describe(),
             self.cause.describe()
         )
@@ -672,7 +692,7 @@ impl ConnectionFaultProbeAnswer {
 impl ConnectionFaultProbeRejected {
     pub fn describe(&self) -> String {
         format!(
-            "probe: {}, cause: {}",
+            "the {} probe was rejected: {}",
             self.probe.describe(),
             self.cause.describe()
         )
@@ -682,7 +702,7 @@ impl ConnectionFaultProbeRejected {
 impl ConnectionFaultUnencodable {
     pub fn describe(&self) -> String {
         format!(
-            "operation: {}, cause: {}",
+            "cannot encode {}: {}",
             self.operation.describe(),
             self.cause.describe()
         )

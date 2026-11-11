@@ -177,18 +177,18 @@ pub(crate) fn io_failure(error: &io::Error) -> Option<crate::fact::IoCause> {
             at: looped
                 .trace
                 .as_ref()
-                .map(|trace| crate::path::shown(trace.real().as_path())),
+                .map(|trace| crate::text::quote_native(trace.real().as_path().as_os_str())),
         })
     } else if let Some(dangling) = inner.downcast_ref::<Dangling>() {
         return Some(crate::io::failure(&dangling.error).at(IoContext::Path(
             PathIoContext::Dangling(PathIoContextDangling {
-                target: crate::path::shown(&dangling.target),
+                target: crate::text::quote_native(dangling.target.as_os_str()),
             }),
         )));
     } else if let Some(unsynced) = inner.downcast_ref::<Unsynced>() {
         return Some(crate::io::failure(&unsynced.error).at(IoContext::Path(
             PathIoContext::Unsynced(PathIoContextUnsynced {
-                at: crate::path::shown(unsynced.at.as_path()),
+                at: crate::text::quote_native(unsynced.at.as_path().as_os_str()),
             }),
         )));
     } else if inner.is::<DirectoryRefused>() {
@@ -196,7 +196,7 @@ pub(crate) fn io_failure(error: &io::Error) -> Option<crate::fact::IoCause> {
     } else {
         let name = inner.downcast_ref::<super::names::NotAnEntryName>()?;
         PathIoLeaf::EntryName(PathIoLeafEntryName {
-            name: crate::path::shown(name.name()),
+            name: crate::text::quote_native(name.name()),
             cause: name.into(),
         })
     };
@@ -217,7 +217,7 @@ mod projection_tests {
 
     #[test]
     fn intrinsic_path_leaves_do_not_become_os_sentences() {
-        let text = || "entry".to_owned();
+        let text = || r#""entry""#.to_owned();
         let leaves = [
             PathIoLeaf::DirectoryNotWritable,
             PathIoLeaf::NotHeld,
@@ -244,7 +244,7 @@ mod projection_tests {
             PathIoLeaf::EntryMoved(text()),
             PathIoLeaf::StoredNameUnheld(PathIoLeafStoredNameUnheld {
                 requested: text(),
-                answered: "other".into(),
+                answered: r#""other""#.into(),
             }),
             PathIoLeaf::StoredNameAmbiguous(PathIoLeafStoredNameAmbiguous {
                 name: text(),
@@ -299,10 +299,10 @@ mod projection_tests {
             cause.context,
             vec![
                 IoContext::Path(PathIoContext::Unsynced(PathIoContextUnsynced {
-                    at: crate::path::shown(at.as_path())
+                    at: crate::text::quote_native(at.as_path().as_os_str())
                 })),
                 IoContext::Path(PathIoContext::Dangling(PathIoContextDangling {
-                    target: "target".into()
+                    target: r#""target""#.into()
                 })),
             ]
         );

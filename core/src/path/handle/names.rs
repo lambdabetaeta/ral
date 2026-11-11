@@ -251,7 +251,7 @@ pub(super) fn rooted_lexical(path: &Path) -> Result<(), LexicalPathFailure> {
 }
 
 pub(super) fn lexical_error(raw: &OsStr, cause: &LexicalPathFailure) -> io::Error {
-    let shown = shown(raw);
+    let shown = crate::text::quote_native(raw);
     let leaf = match cause {
         LexicalPathFailure::Relative => PathIoLeaf::RelativeWalk,
         LexicalPathFailure::MalformedRoot => PathIoLeaf::MalformedRoot,

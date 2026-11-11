@@ -76,7 +76,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
     let source = read.map_err(|e| {
         Error::io(
             IoOperation::Read,
-            IoSubject::Path(ral_core::path::shown(file.path())),
+            IoSubject::Path(ral_core::text::quote_native(file.path().as_os_str())),
             &e,
         )
     })?;

@@ -39,6 +39,10 @@ impl Site {
                 let site = self.project(*elem);
                 Value::list(items.iter().map(|v| site.wrap(v.into_owned())).collect())
             }
+            // Witnessed records are first-order and have no delayed obligations.
+            (Shape::Map(_) | Shape::Record(_), Value::Map(items)) if items.witness().is_some() => {
+                Value::Map(items)
+            }
             (Shape::Map(elem), Value::Map(items)) => {
                 let site = self.project(*elem);
                 Value::map(

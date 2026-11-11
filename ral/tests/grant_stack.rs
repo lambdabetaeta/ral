@@ -84,7 +84,7 @@ fn an_inner_layers_deny_joins_the_stack() {
     assert!(!d.join("secrets").exists(), "the refused write landed");
     assert!(
         out.stderr.contains(&format!(
-            "the denied {} under another spelling",
+            "is excluded by {:?} after case or Unicode folding",
             ral_core::path::shown(d.join("Secrets"))
         )) && out.stderr.contains("a deny holds under every spelling"),
         "the refusal must name the deny and say why; stderr:\n{}",

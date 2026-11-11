@@ -86,7 +86,7 @@ pub(crate) fn reason_families() -> Vec<crate::fact::Reason> {
         ))),
         Reason::Io(Box::new(IoFailure {
             operation: IoOperation::Read,
-            subject: IoSubject::Path("input".into()),
+            subject: IoSubject::Path(crate::text::quote_native(std::ffi::OsStr::new("input"))),
             cause: IoCause::new(IoLeaf::Torn),
         })),
         Reason::Invalid(Box::new(InvalidFailure {

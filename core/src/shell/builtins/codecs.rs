@@ -291,7 +291,7 @@ fn json_syntax(error: &serde_json::Error) -> JsonSyntaxFailure {
         },
         line: error.line().into(),
         column: error.column().into(),
-        detail: error.to_string(),
+        detail: JsonSyntaxFailure::parser_detail(error),
     }
 }
 
@@ -831,7 +831,7 @@ mod tests {
         assert_eq!(
             failure.advice(),
             [
-                "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`"
+                "to decode a value in hand, pipe it through the matching encoder: `to-string $text | from-string`"
             ]
         );
         let mut shell = input(b"");

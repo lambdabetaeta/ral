@@ -1032,7 +1032,7 @@ fn an_unreadable_parent_refuses_the_link_and_changes_nothing() {
     assert!(
         matches!(error, ContextFailure::ReadBack(ref failure)
         if failure.turn == 1u64.into() && failure.source == source.get().into()
-            && failure.record == ral_core::path::shown(&named)
+            && failure.record == ral_core::text::quote_native(named.as_os_str())
             && matches!(failure.cause, ral_core::fact::RecordReadFailure::Io(_))),
         "{error:?}"
     );

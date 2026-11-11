@@ -1,6 +1,7 @@
 //! Portable compile failure facts.
 
 use super::shared::Count;
+use crate::text::plural;
 use crate::{record, variant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +32,9 @@ impl CompileFailure {
         match &self.phase {
             CompilePhase::Parse => format!("loaded source {:?} did not parse", self.source),
             CompilePhase::Types(errors) => format!(
-                "loaded source {:?} failed typechecking ({} errors)",
-                self.source, errors.count
+                "loaded source {:?} failed typechecking ({})",
+                self.source,
+                plural(errors.count.to_u64(), "error")
             ),
         }
     }

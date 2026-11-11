@@ -111,13 +111,16 @@ pub(crate) fn ill_typed(
 ) -> Error {
     invalid(
         operation,
-        InvalidCause::IllTyped(IllTyped {
-            role,
-            diagnostics: errors
-                .iter()
-                .map(crate::typecheck::TypeError::diagnostic)
-                .collect(),
-        }),
+        InvalidCause::IllTyped(
+            IllTyped::new(
+                role,
+                errors
+                    .iter()
+                    .map(crate::typecheck::TypeError::diagnostic)
+                    .collect(),
+            )
+            .expect("the checker refuses a block only with nonempty diagnostics"),
+        ),
     )
 }
 

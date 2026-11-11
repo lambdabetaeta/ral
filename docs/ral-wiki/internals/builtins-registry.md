@@ -1,6 +1,6 @@
 ---
-verified_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-verified_at_date: 2026-11-10
+verified_at_commit: c4856951
+verified_at_date: 2026-11-11
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke]
 ---
 
@@ -34,7 +34,9 @@ The diagnostic facet is deliberately not a typing rule. It says what a wrong
 call *means* for this verb, which no polytype can state — that an argument
 written to a decoder is a misreading of where the bytes come from.
 A caught record passed to `fail` instead earns generic shape guidance from
-`shape_hint`/`row_has_reason`, pointing to `raise $e` or `$e[message]`.
+`shape_hint`, recognising the closed `ErrorRecord` shape by field labels and
+types, including `site`, regardless of row order. It points to `raise $e` or
+`$e[message]`.
 Everything a type can state is in the scheme — including whether a row writes,
 which is its result grade (`Command`), not a facet ([[design/capture|grades and capture]]). `Decl::scheme` freshens
 ordinary result grades; command, boundary and already graded results retain

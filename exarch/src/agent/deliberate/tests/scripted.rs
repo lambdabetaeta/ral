@@ -236,7 +236,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         Err(Fault::Provider(ProviderError::Truncated { cause })) => match cause.as_ref() {
             CutShort::Stalled(cause) => assert_eq!(
                 cause.summary(),
-                "connection failed: service: scripted chat: stream timeout: read"
+                "connection failed: service \"scripted\" could not complete the chat request: timed out waiting for stream data"
             ),
             other @ CutShort::OutputCap { .. } => {
                 panic!("a stall must carry its own cut, got {other:?}")

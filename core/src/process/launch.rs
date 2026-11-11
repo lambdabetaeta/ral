@@ -345,7 +345,7 @@ impl Launch {
         let ChildEnv { cwd, set, unset } = env;
         self.current_dir(cwd);
         for (key, value) in set {
-            let name = || crate::path::shown(key);
+            let name = || crate::text::quote_native(key);
             nul_free(
                 key,
                 PrepareStep::Environment,
@@ -868,12 +868,17 @@ mod tests {
 
     #[test]
     fn situate_refuses_a_nul_value() {
-        situate_refuses("K", "a\0b", &PrepareSubject::EnvironmentValue("K".into()));
+        situate_refuses(
+            "K",
+            "a\0b",
+            &PrepareSubject::EnvironmentValue(crate::text::quote_native(std::ffi::OsStr::new("K"))),
+        );
     }
 
     #[test]
     fn situate_refuses_a_nul_key() {
-        let subject = PrepareSubject::EnvironmentKey(crate::path::shown("K\0"));
+        let subject =
+            PrepareSubject::EnvironmentKey(crate::text::quote_native(std::ffi::OsStr::new("K\0")));
         situate_refuses("K\0", "v", &subject);
     }
 
@@ -1913,14 +1918,12 @@ mod windows {
         for (k, v) in env {
             windows_args::ensure_no_nuls(&k.original).map_err(|cause| PrepareFailure {
                 step: PrepareStep::Environment,
-                subject: PrepareSubject::EnvironmentKey(k.original.to_string_lossy().into_owned()),
+                subject: PrepareSubject::EnvironmentKey(crate::text::quote_native(&k.original)),
                 cause: PrepareCause::Invalid(cause),
             })?;
             windows_args::ensure_no_nuls(&v).map_err(|cause| PrepareFailure {
                 step: PrepareStep::Environment,
-                subject: PrepareSubject::EnvironmentValue(
-                    k.original.to_string_lossy().into_owned(),
-                ),
+                subject: PrepareSubject::EnvironmentValue(crate::text::quote_native(&k.original)),
                 cause: PrepareCause::Invalid(cause),
             })?;
             block.extend(k.original.encode_wide());

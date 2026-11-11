@@ -53,7 +53,7 @@ impl<H> RawContext<H> {
         let cwd = crate::path::utf8(value.cwd.as_path()).map_err(|_| {
             JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
                 JsonEncodeCauseNonUnicodePath {
-                    shown: crate::path::shown(value.cwd.as_path()),
+                    shown: crate::text::quote_native(value.cwd.as_path().as_os_str()),
                 },
             ))
             .field("cwd")

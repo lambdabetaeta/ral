@@ -589,8 +589,8 @@ fn body_detail_preserves_ui_only_snippet_behavior() {
     ] {
         assert_eq!(body_detail(body), expected);
     }
-    let long = "x".repeat(BODY_DETAIL_CAP + 50);
-    let expected = format!("{}…", "x".repeat(BODY_DETAIL_CAP));
+    let long = "x".repeat(ServiceFailure::BODY_DETAIL_CAP + 50);
+    let expected = format!("{}…", "x".repeat(ServiceFailure::BODY_DETAIL_CAP));
     assert_eq!(body_detail(&long), expected);
     assert_eq!(
         body_detail(&json!({"error":{"message":long}}).to_string()),

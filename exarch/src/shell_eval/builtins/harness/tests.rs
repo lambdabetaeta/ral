@@ -488,7 +488,7 @@ fn a_reply_missing_a_projected_field_is_refused_at_the_read() {
         "let r = exarch-agents `read 'lazy'\necho $r[reply][verdict]",
     );
     assert!(
-        result.contains("exarch-agents: the value at `/reply` has no field `verdict`"),
+        result.contains("exarch-agents: the value at `/reply` has no field \"verdict\""),
         "{result}"
     );
 }

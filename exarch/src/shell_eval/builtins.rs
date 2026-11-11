@@ -19,12 +19,13 @@ use ral_core::fact::{
 use ral_core::path::tree::Walk;
 use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
 use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Observed, Settled};
-use ral_core::text::rank;
+use ral_core::text::{quote_native, rank};
 use ral_core::ty::{Binders, Ty, closed_record};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::Read as _;
 
 pub(crate) mod harness;
@@ -747,11 +748,21 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, St
     let rp = shell.resolve(path);
     let located = shell.locate::<Reading>(&rp)?;
     let mut file = located.read().map_err(|error| {
-        Error::io(IoOperation::Open, IoSubject::Path(path.into()), &error).with_context(tool)
+        Error::io(
+            IoOperation::Open,
+            IoSubject::Path(quote_native(OsStr::new(path))),
+            &error,
+        )
+        .with_context(tool)
     })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|error| {
-        Error::io(IoOperation::Read, IoSubject::Path(path.into()), &error).with_context(tool)
+        Error::io(
+            IoOperation::Read,
+            IoSubject::Path(quote_native(OsStr::new(path))),
+            &error,
+        )
+        .with_context(tool)
     })?;
     let eol = Eol::of(&bytes);
     let body = String::from_utf8(bytes).map_err(|error| {
@@ -941,7 +952,7 @@ fn walk_root(shell: &mut Shell, who: &str, path: &str) -> Settled<LexicalPath> {
     {
         return Err(Error::io(
             IoOperation::Walk,
-            IoSubject::Path(path.into()),
+            IoSubject::Path(quote_native(OsStr::new(path))),
             &std::io::ErrorKind::NotFound.into(),
         )
         .with_context(who)

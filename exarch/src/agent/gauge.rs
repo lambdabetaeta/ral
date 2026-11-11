@@ -247,7 +247,9 @@ impl Agent {
             return Ok(None);
         };
         let bytes = self.engine().read(
-            ral_core::fact::ProbeSubject::PathBytes(ral_core::path::shown(&scratch)),
+            ral_core::fact::ProbeSubject::PathBytes(ral_core::text::quote_native(
+                std::ffi::OsStr::new(&scratch),
+            )),
             |t| t.path_bytes(site!(Silent::ScratchPath, Path::new(&scratch))),
         )?;
         Ok(Some((scratch, bytes)))

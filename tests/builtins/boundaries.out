@@ -1,30 +1,30 @@
 3
-from-json: the value at `/items/1/size` is Str "12kB", but this script uses it as an Int
-from-json: the value has no field `b`, which this script reads
+from-json: the value at `/items/1/size` is the string "12kB", but this script uses it as an integer
+from-json: the value has no field "b", which this script reads
 x
-from-json: the value has a field `extra`, but this script uses it as a record with exactly the fields a
-from-json: the value at `/a` is Int 5, but this script uses it as kind string or bytes or list or map
+from-json: the value has a field "extra", but this script uses it as a record with exactly the fields "a"
+from-json: the value at `/a` is the integer 5, but this script uses it as a string, bytes, a list or a map
 true
-from-json: `/a` is number and `/c` is text, and this script compares them
+from-json: `/a` is a number and `/c` is text, and this script compares them
 1
 a
-from-json: the value at `/price` is Int 3, but this script uses it as a Float
+from-json: the value at `/price` is the integer 3, but this script uses it as a float
 4.5
-from-json: the value at `/a/b` is Int 1, but this script uses it as a record
+from-json: the value at `/a/b` is the integer 1, but this script uses it as a record
 2
 21
 from-json-at: `/a` has no member `z`; its keys are `b`
-from-json-at: the document has 2 elements, none of them numbered `5`
-from-json-at: the document has 2 elements, none of them numbered `01`
+from-json-at: the document has 2 elements, none numbered `5`
+from-json-at: the document has 2 elements, none numbered `01`
 from-json-at: `/a` is a number, which has nothing at `b`
 5
-from-json: the value at `/n` is Str "four", but this script uses it as an Int
+from-json: the value at `/n` is the string "four", but this script uses it as an integer
 3
 5
 lib
 use: the value at `/inc` is a block of type Integer → Returns Integer, but this script uses it as {String → Returns _}
-use: the value has no field `missing`, which this script reads
-use: the value at `/inc` is a function, but this script uses it as kind string or bytes or list or map
-use: the value at `/label` is Str "lib", but this script uses it as an Int
+use: the value has no field "missing", which this script reads
+use: the value at `/inc` is a function, but this script uses it as a string, bytes, a list or a map
+use: the value at `/label` is the string "lib", but this script uses it as an integer
 [1, 2]
 boundary tests done

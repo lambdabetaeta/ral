@@ -165,7 +165,9 @@ pub(crate) fn render_real(
     super::canon::twins(real.as_path())
         .map(|twin| {
             let text = site!(Silent::RuleText, &twin => to_str()).ok_or_else(|| {
-                crate::fact::ProjectionFailure::UnrenderablePath(super::shown(&twin))
+                crate::fact::ProjectionFailure::UnrenderablePath(crate::text::quote_native(
+                    twin.as_os_str(),
+                ))
             })?;
             Ok(Rendered(text.to_owned()))
         })

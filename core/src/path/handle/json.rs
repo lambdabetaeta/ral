@@ -95,7 +95,7 @@ fn platform(expected: OsStringPlatform, found: OsStringPlatform) -> DecodeFailur
 
 fn path_failure(raw: &OsStr, cause: crate::fact::LexicalPathFailure) -> DecodeFailure {
     DecodeFailure::new(DecodeCause::Path(PathDecodeFailure {
-        shown: shown(raw),
+        shown: crate::text::quote_native(raw),
         cause,
     }))
 }

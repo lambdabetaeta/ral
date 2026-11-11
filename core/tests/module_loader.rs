@@ -150,7 +150,10 @@ fn a_read_withheld_ral_path_candidate_is_refused_even_when_its_directory_is_abse
     let absent = top_level(&mut shell, &source)
         .expect_err("an absent RAL_PATH directory is still judged")
         .to_string();
-    assert!(absent.contains("fs read denied by grant"), "{absent}");
+    assert!(
+        absent.contains("grant does not allow read access"),
+        "{absent}"
+    );
     assert!(absent.contains(&shown(lib.join("m.ral"))), "{absent}");
 
     std::fs::create_dir(&lib).unwrap();

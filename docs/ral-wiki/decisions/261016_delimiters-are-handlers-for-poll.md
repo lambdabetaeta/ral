@@ -8,6 +8,14 @@ anchors: [Cancellation, Scope::poll, Escape::Stopped, Break::stopped, Break::can
 
 # Delimiters are handlers for `poll`
 
+> Amended 2026-11-11 by [[decisions/261105_the-error-record|the error record]]:
+> programs read `[frame, message, status, site]`; `$e[message]` replaces
+> `describe`. `raise` of an unchanged witnessed record preserves its typed
+> cause; a rebuilt record is a claim with status `1..=255` (0 and values above
+> 255 are refused). `try`, `poll` and audit retain runtime witnesses; done
+> events and worker listings carry plain data through `FOValue`. The earlier
+> amendments below retain their historical wording.
+
 > Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
 > the current failure payload is exactly `[reason, cmd, site]`; runtime
 > `Error` and data record share one `Reason`. `fail` takes text; faithful

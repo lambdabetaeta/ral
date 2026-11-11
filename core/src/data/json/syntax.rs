@@ -113,7 +113,7 @@ fn syntax_failure(error: &serde_json::Error, input: &[u8], offset: usize) -> Jso
                     0
                 },
         ),
-        detail: error.to_string(),
+        detail: JsonSyntaxFailure::parser_detail(error),
     }
 }
 

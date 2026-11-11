@@ -16,7 +16,7 @@ use crate::environ::EnvVars;
 pub fn spelled(path: &Path) -> Result<LexicalPath, crate::fact::PathFailure> {
     let cwd = crate::host::cwd().ok_or_else(|| {
         crate::fact::PathFailure::NoProcessCwd(crate::fact::PathFailureNoProcessCwd {
-            path: super::shown(path),
+            path: crate::text::quote_native(path.as_os_str()),
         })
     })?;
     Ok(Resolver::at(&EnvVars::new(), &cwd).anchor(path))

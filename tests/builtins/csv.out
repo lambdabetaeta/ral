@@ -4,7 +4,7 @@
 a,b
 1,2
 3,4
-from-csv: line 2 has 1 fields, but the header has 2 fields (byte 4, record 1)
+from-csv: line 2 has 1 field, but the header has 2 fields (byte 4, record 1)
 from-csv: line 2 has 3 fields, but the header has 2 fields (byte 4, record 1)
 1
 from-csv: duplicate header column "a"

@@ -352,7 +352,13 @@ fn a_loop_diagnostic_is_judged_at_the_failed_link() {
                 "grant [fs: [read: [`cwd allowed], write: [`cwd allowed]]] {{ {op} {path}/child }}"
             );
             let error = run_in(&dir, &body).expect_err("an admitted loop must remain an error");
-            assert!(error.to_string().contains("loop: at:"), "{body}: {error}");
+            assert!(
+                error.to_string().contains(&format!(
+                    "too many levels of symbolic links at {}",
+                    ral_core::text::quote_native(dir.join("allowed/loop").as_os_str())
+                )),
+                "{body}: {error}"
+            );
         }
     }
     assert_eq!(

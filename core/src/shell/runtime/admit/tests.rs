@@ -79,7 +79,7 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
     let open = open_record(&[("a", Ty::int())], tail);
     assert!(site(&u, &open).admit(&value, &Fixings::default()).is_ok());
     let closed = closed_record(&[("a", Ty::int())]);
-    assert!(refusal(&ground(&closed), &value).contains("has a field `extra`"));
+    assert!(refusal(&ground(&closed), &value).contains("has a field \"extra\""));
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn a_missing_field_is_named() {
     let message = refusal(&ground(&ty), &map(&[]));
     assert_eq!(
         message,
-        "the value has no field `verdict`, which this script reads"
+        "the value has no field \"verdict\", which this script reads"
     );
 }
 
@@ -214,7 +214,7 @@ fn a_recursive_type_admits_a_nested_document_and_refuses_a_scalar_leaf() {
 #[test]
 fn a_json_number_keeps_its_kind_at_a_ground_site() {
     let float = refusal(&ground(&Ty::float()), &Value::Int(3));
-    assert!(float.contains("Int 3") && float.contains("Float"));
+    assert!(float.contains("the integer 3") && float.contains("a float"));
     let int = ground(&Ty::int())
         .admit(
             &Value::Float(crate::data::Finite::new(2.5).expect("finite")),

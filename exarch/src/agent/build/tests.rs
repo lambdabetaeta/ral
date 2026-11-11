@@ -373,7 +373,9 @@ fn a_root_runs_under_its_launch_grants() {
             session
                 .engine()
                 .read(
-                    ral_core::fact::ProbeSubject::PathEntries(ral_core::path::shown(tmp.path())),
+                    ral_core::fact::ProbeSubject::PathEntries(ral_core::text::quote_native(
+                        tmp.path().as_os_str(),
+                    )),
                     |t| t.path_entries(tmp.path())
                 )
                 .unwrap(),
@@ -570,7 +572,7 @@ fn failed_inherited_opening_never_assembles_or_binds_a_child() {
     assert!(matches!(&error.reason, Reason::Host(host)
         if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
             if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
-                && failure.record == ral_core::path::shown(&source)
+                && failure.record == ral_core::text::quote_native(source.as_os_str())
                 && matches!(failure.cause, RecordReadFailure::Io(_)))));
     assert!(error.context().unwrap().contains("unopened"));
     assert_eq!(error.hints(), []);

@@ -137,12 +137,16 @@ impl Probe {
             Self::Cwd => ProbeSubject::Cwd,
             Self::Home => ProbeSubject::Home,
             Self::BuiltinNames => ProbeSubject::BuiltinNames,
-            Self::PathBytes(value) => ProbeSubject::PathBytes(crate::path::shown(value)),
+            Self::PathBytes(value) => {
+                ProbeSubject::PathBytes(crate::text::quote_native(value.as_os_str()))
+            }
             Self::Workers => ProbeSubject::Workers,
             Self::SessionEnded => ProbeSubject::SessionEnded,
             Self::CompletionNames => ProbeSubject::CompletionNames,
             Self::Bindings => ProbeSubject::Bindings,
-            Self::PathEntries(value) => ProbeSubject::PathEntries(crate::path::shown(value)),
+            Self::PathEntries(value) => {
+                ProbeSubject::PathEntries(crate::text::quote_native(value.as_os_str()))
+            }
             Self::Grants => ProbeSubject::Grants,
             #[cfg(feature = "test-util")]
             Self::WorkerCount => ProbeSubject::WorkerCount,

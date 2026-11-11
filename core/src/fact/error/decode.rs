@@ -57,12 +57,12 @@ impl DecodeFailure {
     }
 }
 
-fn write_path(path: &[DataStep], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+pub(super) fn write_path(path: &[DataStep], f: &mut impl fmt::Write) -> fmt::Result {
     for step in path {
         match step {
             DataStep::Field(key) => write!(f, "field {key:?}: ")?,
             DataStep::Index(index) => write!(f, "element {index}: ")?,
-            DataStep::Payload(tag) => write!(f, "payload `{tag}`: ")?,
+            DataStep::Payload(tag) => write!(f, "tag {tag:?}: ")?,
         }
     }
     Ok(())
@@ -222,10 +222,12 @@ record!(JsonNumberFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonMapKeyFailure {
     pub text: String,
+    pub lexeme: String,
     pub target: JsonNumberTarget,
 }
 record!(JsonMapKeyFailure {
     text: "text",
+    lexeme: "lexeme",
     target: "target"
 });
 
@@ -288,6 +290,15 @@ pub enum OsStringPlatform {
 }
 label!(OsStringPlatform);
 
+impl OsStringPlatform {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Unix => "Unix",
+            Self::Windows => "Windows",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsStringPlatformFailure {
     pub expected: OsStringPlatform,
@@ -322,6 +333,7 @@ variant!(LexicalPathFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathDecodeFailure {
+    /// Escaped native spelling, including quotes.
     pub shown: String,
     pub cause: LexicalPathFailure,
 }
@@ -483,22 +495,30 @@ impl DecodeCause {
                     None => format!(
                         "unknown field {:?}; expected {}",
                         u.field,
-                        u.offered.join(", ")
+                        u.offered
+                            .iter()
+                            .map(|name| format!("{name:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 }
             }
             Self::DuplicateField(field) => format!("field {field:?} given twice"),
-            Self::UnknownTag(u) => {
-                format!("unknown tag `{}`; expected {}", u.tag, u.offered.join(", "))
-            }
-            Self::MissingPayload(tag) => format!("tag `{tag}` requires a payload"),
-            Self::UnexpectedPayload(u) => format!(
-                "tag `{}` takes no payload, got {}",
+            Self::UnknownTag(u) => format!(
+                "unknown tag {:?}; expected {}",
                 u.tag,
-                u.found.describe()
+                u.offered
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
+            Self::MissingPayload(tag) => format!("tag {tag:?} requires a value"),
+            Self::UnexpectedPayload(u) => {
+                format!("tag {:?} takes no value, got {}", u.tag, u.found.describe())
+            }
             Self::IntegerRange(r) => format!("{} is not {}", r.value, r.target.describe()),
-            Self::Length(l) => format!("expected {} elements, got {}", l.expected, l.got),
+            Self::Length(l) => format!("expected a length of {}, got {}", l.expected, l.got),
             Self::CheckDecision(c) => format!(
                 "a `{}` check is never `{}`",
                 <&str>::from(c.resource),
@@ -533,8 +553,9 @@ impl DecodeCause {
                 }
             ),
             Self::JsonMapKey(c) => format!(
-                "JSON map key {:?} cannot decode as {}",
+                "JSON map key {:?} (token {:?}) cannot decode as {}: expected an unescaped numeric spelling valid for this type",
                 c.text,
+                c.lexeme,
                 <&str>::from(c.target)
             ),
             Self::JsonString(JsonStringFailure::BorrowedRequired) => {
@@ -544,14 +565,14 @@ impl DecodeCause {
             Self::Base64(c) => c.describe(),
             Self::FiniteBits(c) => format!("IEEE bits {} do not represent a finite float", c.bits),
             Self::OsStringPlatform(c) => format!(
-                "expected an {} OS string, got {}",
-                <&str>::from(c.expected),
-                <&str>::from(c.found)
+                "cannot decode a {} OS string on {}",
+                c.found.describe(),
+                c.expected.describe()
             ),
             Self::Path(c) => c.describe(),
             Self::Trace(c) => c.describe(),
             Self::SealSpelling(c) => format!(
-                "invalid seal {:?}: expected 16 lowercase hexadecimal bytes",
+                "invalid seal {:?}: expected exactly 16 lowercase hexadecimal digits",
                 c.text
             ),
             Self::ReservedEnvironment(c) => format!(
@@ -627,8 +648,8 @@ impl LexicalPathFailure {
             Self::ParentInPosition => "parent component is not a canonical position",
             Self::NonCanonicalPosition => "path position is not canonical",
             Self::NotWorkingDirectory(c) => match c.rules {
-                PathRules::Posix => "not a working directory under POSIX rules",
-                PathRules::Windows => "not a working directory under Windows rules",
+                PathRules::Posix => "working-directory path must be absolute",
+                PathRules::Windows => "working-directory path must be absolute on a drive or share",
             },
         }
     }
@@ -637,7 +658,7 @@ impl LexicalPathFailure {
 impl PathDecodeFailure {
     #[must_use]
     pub fn describe(&self) -> String {
-        format!("path {:?}: {}", self.shown, self.cause.describe())
+        format!("path {}: {}", self.shown, self.cause.describe())
     }
 }
 
@@ -691,6 +712,7 @@ impl std::error::Error for JsonInputFailure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonEncodeCauseNonUnicodePath {
+    /// Escaped native spelling, including quotes.
     pub shown: String,
 }
 record!(JsonEncodeCauseNonUnicodePath { shown: "shown" });
@@ -716,7 +738,7 @@ impl JsonEncodeCause {
     pub fn describe(&self) -> String {
         match self {
             Self::NonUnicodePath(c) => format!(
-                "path {:?} is not Unicode and cannot be encoded as JSON",
+                "path {} is not Unicode and cannot be encoded as JSON",
                 c.shown
             ),
             Self::NativeComputation(c) => {
@@ -972,6 +994,7 @@ mod tests {
                 "json-map-key",
                 DecodeCause::JsonMapKey(JsonMapKeyFailure {
                     text: "key".into(),
+                    lexeme: r#""key""#.into(),
                     target: JsonNumberTarget::I32,
                 }),
             ),
@@ -997,7 +1020,7 @@ mod tests {
             (
                 "path",
                 DecodeCause::Path(PathDecodeFailure {
-                    shown: "relative".into(),
+                    shown: crate::text::quote_native(std::ffi::OsStr::new("relative")),
                     cause: LexicalPathFailure::Relative,
                 }),
             ),
@@ -1062,7 +1085,7 @@ mod tests {
         }
         let failure = JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
             JsonEncodeCauseNonUnicodePath {
-                shown: "safe display spelling".into(),
+                shown: "\"safe display spelling\"".into(),
             },
         ));
         assert_eq!(
@@ -1108,22 +1131,22 @@ mod tests {
                 LexicalPathFailure::NotWorkingDirectory(LexicalPathFailureNotWorkingDirectory {
                     rules: PathRules::Posix,
                 }),
-                "not a working directory under POSIX rules",
+                "working-directory path must be absolute",
             ),
             (
                 LexicalPathFailure::NotWorkingDirectory(LexicalPathFailureNotWorkingDirectory {
                     rules: PathRules::Windows,
                 }),
-                "not a working directory under Windows rules",
+                "working-directory path must be absolute on a drive or share",
             ),
         ];
         for (cause, expected) in cases {
             assert_eq!(cause.describe(), expected);
             let failure = PathDecodeFailure {
-                shown: "recorded\\npath".into(),
+                shown: crate::text::quote_native(std::ffi::OsStr::new("recorded\\npath")),
                 cause,
             };
-            let description = format!("path {:?}: {expected}", failure.shown);
+            let description = format!("path {}: {expected}", failure.shown);
             assert_eq!(failure.describe(), description);
             let decoded = PathDecodeFailure::decode(&failure.clone().encode()).unwrap();
             assert_eq!(decoded, failure);

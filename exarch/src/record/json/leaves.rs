@@ -26,7 +26,7 @@ impl Mirror for RawPath {
             .map_err(|_| {
                 JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
                     JsonEncodeCauseNonUnicodePath {
-                        shown: ral_core::path::shown(v),
+                        shown: ral_core::text::quote_native(v.as_os_str()),
                     },
                 ))
             })

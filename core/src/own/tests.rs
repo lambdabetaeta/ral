@@ -987,7 +987,7 @@ fn an_error_says_what_to_do() {
     };
     let sentence = read_only.to_string();
     assert!(
-        sentence.contains("it is a link to /nix/store/x-config.ral")
+        sentence.contains("it is a link to \"/nix/store/x-config.ral\"")
             && sentence.contains("change it where it is generated"),
         "{sentence}"
     );
@@ -999,7 +999,7 @@ fn an_error_says_what_to_do() {
         error: io::ErrorKind::PermissionDenied.into(),
     };
     assert!(
-        plain.to_string().starts_with("could not read /s/x: "),
+        plain.to_string().starts_with("could not read \"/s/x\": "),
         "{plain}"
     );
 

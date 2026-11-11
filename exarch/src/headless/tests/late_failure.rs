@@ -210,7 +210,9 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
         "{failures:?}"
     );
     assert!(
-        failures[0].contains("the engine broke the protocol: workers survived: 1"),
+        failures[0].contains(
+            "the engine broke the protocol: 1 worker thread remained after session shutdown"
+        ),
         "{failures:?}"
     );
     let (_, _, commits) = child_recorder.reader().since(None).unwrap();

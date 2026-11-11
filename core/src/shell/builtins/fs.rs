@@ -15,6 +15,8 @@ use crate::path::{
 };
 use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Settled, Shell, Value};
+use crate::text::quote_native;
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -72,14 +74,14 @@ fn made_in(
         let name = EntryName::fresh("ral-tmp-").map_err(|e| {
             Error::io(
                 operation,
-                IoSubject::Path(shown(parent.real().as_path())),
+                IoSubject::Path(quote_native(parent.real().as_path().as_os_str())),
                 &e.into(),
             )
             .with_context(ctx)
         })?;
         let target = parent.absent(name);
         let target = shell.judge::<Writing>(target)?;
-        let subject = IoSubject::Path(shown(target.real().as_path()));
+        let subject = IoSubject::Path(quote_native(target.real().as_path().as_os_str()));
         match make(target) {
             Ok(made) => return Ok(Value::string(made)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -152,7 +154,12 @@ pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
 
 /// Label an `io::Error` with the operation and the path that provoked it.
 fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Error {
-    Error::io(IoOperation::List, IoSubject::Path(shown(path)), e).with_context(ctx)
+    Error::io(
+        IoOperation::List,
+        IoSubject::Path(quote_native(path.as_os_str())),
+        e,
+    )
+    .with_context(ctx)
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries
@@ -166,7 +173,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     let missing = || {
         Error::io(
             IoOperation::Stat,
-            IoSubject::Path(raw.into()),
+            IoSubject::Path(quote_native(OsStr::new(raw))),
             &io::ErrorKind::NotFound.into(),
         )
         .with_context("file-info")
@@ -191,7 +198,7 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
         .ok_or_else(|| {
             Error::io(
                 IoOperation::Stat,
-                IoSubject::Path(s.into()),
+                IoSubject::Path(quote_native(OsStr::new(s))),
                 &io::ErrorKind::NotFound.into(),
             )
             .with_context("resolve-path")
@@ -424,7 +431,7 @@ mod typed_failure_tests {
             };
             assert_eq!(error.context(), Some(operation));
             assert!(
-                matches!(error.reason, crate::fact::Reason::Io(f) if f.operation == IoOperation::Stat && f.subject == IoSubject::Path(path.clone()) && matches!(f.cause.leaf.as_ref(), crate::fact::IoLeaf::Os(os) if os.kind == crate::fact::IoKind::NotFound))
+                matches!(error.reason, crate::fact::Reason::Io(f) if f.operation == IoOperation::Stat && f.subject == IoSubject::Path(quote_native(OsStr::new(&path))) && matches!(f.cause.leaf.as_ref(), crate::fact::IoLeaf::Os(os) if os.kind == crate::fact::IoKind::NotFound))
             );
         }
         let Err(crate::shell::runtime::Break::Error(error)) =

@@ -11,6 +11,7 @@ use crate::fact::{InvalidCause, IoOperation, IoSubject};
 use crate::path::{CwdPath, walk_dir};
 use crate::shell::runtime::Error;
 use crate::shell::runtime::invalid;
+use crate::text::quote_native;
 use std::path::PathBuf;
 
 impl Shell {
@@ -49,8 +50,13 @@ impl Shell {
     /// working directory ([`CwdPath`]).
     pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(), Error> {
         let resolved = self.resolve(target).folded();
-        let dir = walk_dir(&resolved)
-            .map_err(|e| Error::io(IoOperation::Chdir, IoSubject::Path(resolved.shown()), &e))?;
+        let dir = walk_dir(&resolved).map_err(|e| {
+            Error::io(
+                IoOperation::Chdir,
+                IoSubject::Path(quote_native(resolved.as_path().as_os_str())),
+                &e,
+            )
+        })?;
         let cwd = CwdPath::new(dir.real().as_path().to_path_buf())
             .map_err(|e| invalid("cd", InvalidCause::Path((&e).into())))?;
         self.context.cwd = cwd;
@@ -93,7 +99,9 @@ mod tests {
             assert_eq!(failure.operation, IoOperation::Chdir);
             assert_eq!(
                 failure.subject,
-                IoSubject::Path(shell.resolve(target).folded().shown())
+                IoSubject::Path(quote_native(
+                    shell.resolve(target).folded().as_path().as_os_str()
+                ))
             );
             assert!(
                 matches!(failure.cause.leaf.as_ref(), IoLeaf::Os(os) if matches!(os.kind, IoKind::NotADirectory | IoKind::NotFound))

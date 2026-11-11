@@ -13,7 +13,7 @@
 
 use crate::path::lex::{anchor_on, fold_dots, parent_or_cwd};
 use crate::path::site::Silent;
-use crate::path::{CwdPath, LeafMode, LexicalPath, shown, walk};
+use crate::path::{CwdPath, LeafMode, LexicalPath, walk};
 use crate::site::site;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -134,7 +134,7 @@ fn read_at(
 fn not_absolute(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        crate::fact::PathIoLeaf::AbsoluteRequired(shown(path)),
+        crate::fact::PathIoLeaf::AbsoluteRequired(crate::text::quote_native(path.as_os_str())),
     )
 }
 

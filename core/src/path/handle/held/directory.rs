@@ -14,7 +14,7 @@ use super::{
     Dir, DirEntry, EntryName, Kind, Leaf, LeafMode, Listed, Listing, Lists, Located, Node, Peeks,
     RealPath, Seen, Sharing, Stat, Step, Trace, host, step_into,
 };
-use crate::path::shown;
+use crate::text::quote_native;
 
 impl<A: Peeks> Dir<A> {
     pub(crate) fn stat(&self) -> &Stat {
@@ -88,7 +88,7 @@ impl<A: Lists> Dir<A> {
             }
             Kind::Symlink => Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                crate::fact::PathIoLeaf::NotDirectory(shown(name.as_os_str())),
+                crate::fact::PathIoLeaf::NotDirectory(quote_native(name.as_os_str())),
             )),
             _ => Err(io::ErrorKind::NotADirectory.into()),
         }

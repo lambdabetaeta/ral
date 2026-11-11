@@ -94,7 +94,7 @@ impl std::fmt::Display for NotACwd {
         write!(
             f,
             "{} cannot be a working directory: it is not an absolute path{on}",
-            shown(&self.0)
+            crate::text::quote_native(self.0.as_os_str())
         )
     }
 }
@@ -104,7 +104,7 @@ impl std::error::Error for NotACwd {}
 impl From<&NotACwd> for crate::fact::PathFailure {
     fn from(error: &NotACwd) -> Self {
         Self::NotWorkingDirectory(crate::fact::PathFailureNotWorkingDirectory {
-            path: shown(&error.0),
+            path: crate::text::quote_native(error.0.as_os_str()),
             rules: PathRules::HOST,
         })
     }
@@ -113,7 +113,7 @@ impl From<&NotACwd> for crate::fact::PathFailure {
 impl From<&NotACwd> for crate::fact::PathDecodeFailure {
     fn from(error: &NotACwd) -> Self {
         Self {
-            shown: shown(&error.0),
+            shown: crate::text::quote_native(error.0.as_os_str()),
             cause: crate::fact::LexicalPathFailure::NotWorkingDirectory(
                 crate::fact::LexicalPathFailureNotWorkingDirectory {
                     rules: PathRules::HOST,
@@ -142,7 +142,7 @@ impl crate::data::json::JsonEncode for CwdPath {
         let text = utf8(&self.0).map_err(|_| {
             crate::fact::JsonEncodeFailure::new(crate::fact::JsonEncodeCause::NonUnicodePath(
                 crate::fact::JsonEncodeCauseNonUnicodePath {
-                    shown: shown(&self.0),
+                    shown: crate::text::quote_native(self.0.as_os_str()),
                 },
             ))
         })?;

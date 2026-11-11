@@ -85,6 +85,7 @@ fn remedies(e: &ProviderError) -> Vec<Remedy> {
             CutShort::Stalled(_) => vec![],
         },
         ProviderError::Api { .. } if matches!(e.status(), Some(401 | 403)) => vec![Remedy::SignIn],
+        ProviderError::Credential(cause) if cause.requires_sign_in() => vec![Remedy::SignIn],
         ProviderError::Cancelled(_)
         | ProviderError::Transient { .. }
         | ProviderError::Refused(_)
@@ -128,7 +129,13 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             }
             match e.body() {
                 Some(body) => fs.extend(body_fields(&body, &[])),
-                None => fs.push(text_field("message", cause.describe())),
+                None => fs.push(text_field(
+                    "message",
+                    cause.body().map_or_else(
+                        || cause.describe(),
+                        ral_core::fact::ServiceFailure::response_detail,
+                    ),
+                )),
             }
             fs
         }
@@ -172,7 +179,14 @@ fn error_fields(e: &ProviderError) -> Vec<Field> {
             CutShort::Stalled(error) => error_fields(error),
         },
         ProviderError::Terminal(cause) => vec![text_field("cause", prettify(&cause.describe()))],
-        ProviderError::Credential(cause) => vec![text_field("cause", cause.describe())],
+        ProviderError::Credential(cause) => std::iter::once(text_field("cause", cause.describe()))
+            .chain(
+                cause
+                    .advice()
+                    .into_iter()
+                    .map(|advice| text_field("advice", advice)),
+            )
+            .collect(),
         ProviderError::Unavailable(cause) => vec![text_field("cause", cause.describe())],
     }
 }

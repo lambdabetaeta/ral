@@ -2105,11 +2105,14 @@ status, and its own end is its own, a signal or an exit. A failure of the
 confinement itself, before the command could start, has status 1 and a message
 naming the failed step and its cause.
 
-Recovery reads `status` or `message`, never a parsed diagnostic:
+Status codes are not unique failure classes: status 1 also covers operational
+refusal, even when `frame` is `grep`. This handler diagnoses and re-raises the
+failure rather than assuming it means no matches:
 
 ```ral
 try { grep -q ERROR log.txt; echo found } { |e|
-  if $[$e[status] == 1] { echo missing } else { raise $e }
+  warn "grep failed (status $e[status]): $e[message]"
+  raise $e
 }
 ```
 
@@ -2625,7 +2628,7 @@ use: circular dependency: a.ral -> b.ral -> a.ral
 
 The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
 
-`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their cause and provenance; diagnostics are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the compile failure reads its plain description with `describe`, and its `site` is the `use`.
+`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their cause and provenance; diagnostics are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the compile failure reads its plain description in `$error[message]`, and its `site` is the `use`.
 
 ### 10.5. Persistent sessions
 

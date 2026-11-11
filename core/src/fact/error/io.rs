@@ -383,10 +383,13 @@ record!(PathIoLeafLoop { at: "at" });
 
 impl IoFailure {
     pub fn describe(&self) -> String {
+        let subject = match (&self.operation, &self.subject) {
+            (IoOperation::StartThread, IoSubject::Thread(name)) => format!("{name:?}"),
+            _ => self.subject.describe(),
+        };
         format!(
-            "could not {} {}: {}",
+            "could not {} {subject}: {}",
             self.operation.describe(),
-            self.subject.describe(),
             self.cause.describe()
         )
     }
@@ -401,7 +404,8 @@ impl IoOperation {
 impl IoSubject {
     pub fn describe(&self) -> String {
         match self {
-            Self::Path(path) | Self::HostFile(path) => format!("{path:?}"),
+            Self::Path(path) => path.clone(),
+            Self::HostFile(path) => format!("{path:?}"),
             Self::Stream(stream) => stream.describe(),
             Self::Terminal => "the terminal".into(),
             Self::Pipe => "a pipe".into(),
@@ -462,33 +466,47 @@ impl IoCause {
     pub fn describe(&self) -> String {
         self.context
             .iter()
+            .enumerate()
             .rev()
-            .fold(self.leaf.describe(), |inner, context| match context {
+            .fold(self.leaf.describe(), |inner, (index, context)| match context {
                 IoContext::Path(context) => match context {
                     PathIoContext::StoredNameRead(name) => {
-                        format!("could not read stored name {:?}: {inner}", name.name)
+                        format!("could not read stored name {}: {inner}", name.name)
                     }
                     PathIoContext::UnsafeScopedInheritance => {
                         format!("unsafe scoped inheritance: {inner}")
                     }
                     PathIoContext::Dangling(link) => {
-                        format!("dangling link to {:?}: {inner}", link.target)
+                        format!("dangling link to {}: {inner}", link.target)
                     }
                     PathIoContext::Unsynced(file) => {
-                        format!("change at {:?} was not synced: {inner}", file.at)
+                        format!("change at {} was not synced: {inner}", file.at)
                     }
                 },
-                IoContext::Owned(context) => match &context.to {
-                    Some(to) => format!(
-                        "could not {} owned file {:?} to {to:?}: {inner}",
-                        context.act.describe(),
-                        context.at
-                    ),
-                    None => format!(
-                        "could not {} owned file {:?}: {inner}",
-                        context.act.describe(),
-                        context.at
-                    ),
+                IoContext::Owned(context) => {
+                    let os = match self.leaf.as_ref() {
+                        IoLeaf::Os(cause) if index + 1 == self.context.len() => Some(cause.kind),
+                        _ => None,
+                    };
+                    match (context.act, &context.to, os) {
+                        (OwnAct::Make, _, Some(IoKind::AlreadyExists)) => format!(
+                            "{} already exists, and is never overwritten: choose another name",
+                            context.at
+                        ),
+                        (
+                            OwnAct::Write,
+                            Some(to),
+                            Some(IoKind::PermissionDenied | IoKind::ReadOnlyFilesystem),
+                        ) => format!(
+                            "could not write {}: it is a link to {to}, which cannot be changed ({inner}); change it where it is generated (home-manager, for one), or replace the link with a file",
+                            context.at
+                        ),
+                        _ => format!(
+                            "could not {} {}: {inner}",
+                            context.act.describe(),
+                            context.at
+                        ),
+                    }
                 },
             })
     }
@@ -544,12 +562,21 @@ impl IoLeaf {
 impl OwnLeaf {
     pub fn describe(&self) -> String {
         match self {
-            Self::NoBase(value) => format!("no base: {}", <&str>::from(*value).to_owned()),
-            Self::NoCwd(value) => format!("no cwd: {value}"),
-            Self::Linked(value) => format!("linked: {value}"),
-            Self::Dangling(value) => format!("dangling: {}", value.describe()),
-            Self::Outside(value) => format!("outside: {}", value.describe()),
-            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::NoBase(kind) => format!(
+                "no {} directory: {} is not an absolute path, and this process has no home directory; set HOME (or {}) and run it again",
+                <&str>::from(*kind),
+                kind.env_var(),
+                kind.env_var()
+            ),
+            Self::NoCwd(at) => format!(
+                "{at} is a relative path, and this process has no working directory to read it against: give an absolute path"
+            ),
+            Self::Linked(at) => format!(
+                "{at} is a link, and a program's own files are written through no link: remove the link, and it will be made again"
+            ),
+            Self::Dangling(value) => value.describe(),
+            Self::Outside(value) => value.describe(),
+            Self::Json(value) => value.describe(),
         }
     }
 }
@@ -568,41 +595,37 @@ impl PathIoLeaf {
     pub fn describe(&self) -> String {
         match self {
             Self::DirectoryNotWritable => "its directory is not writable".to_owned(),
-            Self::NotHeld => "not held".to_owned(),
-            Self::LinkHasNoData => "link has no data".to_owned(),
-            Self::RootHasNoEntry => "root has no entry".to_owned(),
-            Self::UpdateNeedsHeldFile => "update needs held file".to_owned(),
-            Self::SpecialFileNotReplaceable => "special file not replaceable".to_owned(),
-            Self::NotDirectory(value) => format!("not directory: {value}"),
-            Self::NotLink(value) => format!("not link: {value}"),
-            Self::RelativeWalk => "relative walk".to_owned(),
-            Self::MalformedRoot => "malformed root".to_owned(),
-            Self::MoreThanRoot(value) => format!("more than root: {value}"),
-            Self::ParentInPosition(value) => format!("parent in position: {value}"),
+            Self::NotHeld => "the file is not held open".to_owned(),
+            Self::LinkHasNoData => "a symbolic link has no file data of its own".to_owned(),
+            Self::RootHasNoEntry => "a filesystem root is not an entry in a parent directory".to_owned(),
+            Self::UpdateNeedsHeldFile => "updating requires a held regular file".to_owned(),
+            Self::SpecialFileNotReplaceable => "a special file must be written in place, not replaced".to_owned(),
+            Self::NotDirectory(value) => format!("{value} is not a directory"),
+            Self::NotLink(value) => format!("{value} is not a symbolic link"),
+            Self::RelativeWalk => "a path walk requires an absolute path".to_owned(),
+            Self::MalformedRoot => "the path's root could not be parsed".to_owned(),
+            Self::MoreThanRoot(value) => format!("{value} contains path components after its root; only a root is allowed"),
+            Self::ParentInPosition(value) => format!("{value} contains '..' where a canonical position is required"),
             Self::NonCanonicalPosition(value) => {
-                format!("non canonical position: {value}")
+                format!("{value} is not a canonical position")
             }
-            Self::EmptyLinkTarget => "empty link target".to_owned(),
-            Self::VettingRefused => "vetting refused".to_owned(),
-            Self::AbsoluteRequired(value) => format!("absolute required: {value}"),
+            Self::EmptyLinkTarget => "the symbolic link has an empty target".to_owned(),
+            Self::VettingRefused => "the path walk's vetting policy refused this step".to_owned(),
+            Self::AbsoluteRequired(value) => format!("{value} must be an absolute path"),
             Self::EntryName(value) => format!("entry name: {}", value.describe()),
-            Self::NoFileEntry => "no file entry".to_owned(),
-            Self::DirectoryChanged => "directory changed".to_owned(),
-            Self::EntryMoved(value) => format!("entry moved: {value}"),
-            Self::StoredNameUnheld(value) => format!("stored name unheld: {}", value.describe()),
-            Self::StoredNameAmbiguous(value) => {
-                format!("stored name ambiguous: {}", value.describe())
-            }
-            Self::Untraversable(value) => format!("untraversable: {value}"),
-            Self::PrivateAncestorOwnerOrMode => "private ancestor owner or mode".to_owned(),
-            Self::PrivateDirectoryOwnerOrMode => "private directory owner or mode".to_owned(),
-            Self::ExtendedAcl => "extended acl".to_owned(),
-            Self::NoProtectedBoundary(value) => {
-                format!("no protected boundary: {}", value.describe())
-            }
-            Self::ScopedDirectoryReparse => "scoped directory reparse".to_owned(),
-            Self::OwnerOnlyDaclMismatch => "owner only dacl mismatch".to_owned(),
-            Self::UnsafeAncestorDacl => "unsafe ancestor dacl".to_owned(),
+            Self::NoFileEntry => "the path must name a file entry in a parent directory".to_owned(),
+            Self::DirectoryChanged => "the directory changed during resolution; the replacement was refused; retry".to_owned(),
+            Self::EntryMoved(value) => format!("entry {value} changed during resolution; retry"),
+            Self::StoredNameUnheld(value) => value.describe(),
+            Self::StoredNameAmbiguous(value) => value.describe(),
+            Self::Untraversable(value) => format!("permission to traverse directory {value} was denied"),
+            Self::PrivateAncestorOwnerOrMode => "private workspace ancestors must be owned by the current user or root, with no group/other write permission unless sticky".to_owned(),
+            Self::PrivateDirectoryOwnerOrMode => "the private workspace must be owned by the current user with no group/other permissions".to_owned(),
+            Self::ExtendedAcl => "the private workspace and its ancestors must have no extended ACL entries".to_owned(),
+            Self::NoProtectedBoundary(value) => value.describe(),
+            Self::ScopedDirectoryReparse => "the private workspace and its ancestors must be directories, not reparse points".to_owned(),
+            Self::OwnerOnlyDaclMismatch => "the private workspace must be owned by the current user with a protected DACL granting only that user full control, inheritable by files and directories".to_owned(),
+            Self::UnsafeAncestorDacl => "private workspace ancestors must be owned by the current user, SYSTEM or Administrators and have a non-null DACL; only those principals may be granted DELETE, FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER or GENERIC_ALL; effective ACEs must be ordinary allow or deny entries".to_owned(),
             Self::KernelReplyShort(value) => format!("kernel reply short: {}", value.describe()),
             Self::VolumeAttributesUnsupported(value) => {
                 format!("volume attributes unsupported: {}", value.describe())
@@ -614,7 +637,7 @@ impl PathIoLeaf {
             Self::RequiredInformationClass(value) => {
                 format!("required information class: {}", value.describe())
             }
-            Self::Loop(value) => format!("loop: {}", value.describe()),
+            Self::Loop(value) => value.describe(),
         }
     }
 }
@@ -639,20 +662,26 @@ impl PathIoContextUnsynced {
 
 impl OwnLeafDangling {
     pub fn describe(&self) -> String {
-        format!("at: {}, to: {}", self.at, self.to)
+        format!(
+            "{} is a link to {}, which is not there: restore it (is the dotfiles checkout present?) or remove the link",
+            self.at, self.to
+        )
     }
 }
 
 impl OwnLeafOutside {
     pub fn describe(&self) -> String {
-        format!("at: {}, root: {}", self.at, self.root)
+        format!(
+            "{} is not under {}, where this program keeps its own: move it there to use it",
+            self.at, self.root
+        )
     }
 }
 
 impl OwnLeafJson {
     pub fn describe(&self) -> String {
         format!(
-            "act: {}, at: {}, cause: {}",
+            "could not {} {} as JSON: {}",
             self.act.describe(),
             self.at,
             self.cause.describe()
@@ -668,19 +697,29 @@ impl PathIoLeafEntryName {
 
 impl PathIoLeafStoredNameUnheld {
     pub fn describe(&self) -> String {
-        format!("requested: {}, answered: {}", self.requested, self.answered)
+        format!(
+            "requested {}, but the filesystem answered {} and no held identity can verify its stored name",
+            self.requested, self.answered
+        )
     }
 }
 
 impl PathIoLeafStoredNameAmbiguous {
     pub fn describe(&self) -> String {
-        format!("name: {}, spellings: {}", self.name, self.spellings)
+        format!(
+            "cannot determine the stored name for {}: {} reach the same object",
+            self.name,
+            crate::text::plural(self.spellings.to_u64(), "spelling")
+        )
     }
 }
 
 impl PathIoLeafNoProtectedBoundary {
     pub fn describe(&self) -> String {
-        format!("limit: {}", self.limit)
+        format!(
+            "no protected ACL inheritance boundary was found within {}",
+            crate::text::plural(self.limit.to_u64(), "ancestor")
+        )
     }
 }
 
@@ -703,7 +742,10 @@ impl PathIoLeafRequiredInformationClass {
 
 impl PathIoLeafLoop {
     pub fn describe(&self) -> String {
-        format!("at: {}", self.at.as_deref().unwrap_or("none"))
+        self.at.as_ref().map_or_else(
+            || "too many levels of symbolic links".to_owned(),
+            |at| format!("too many levels of symbolic links at {at}"),
+        )
     }
 }
 
@@ -734,7 +776,7 @@ mod tests {
         let inner = IoContext::Path(PathIoContext::UnsafeScopedInheritance);
         let outer = IoContext::Owned(OwnIoContext {
             act: OwnAct::Read,
-            at: "/owned".into(),
+            at: r#""/owned""#.into(),
             to: None,
         });
         let cause = IoCause::new(leaf.clone())

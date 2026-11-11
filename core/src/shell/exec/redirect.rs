@@ -20,6 +20,8 @@ use crate::path::{
 };
 use crate::shell::runtime::{Bytes, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 use crate::source::Span;
+use crate::text::quote_native;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -482,5 +484,11 @@ impl Shell {
 
 /// An I/O failure on `name`, as an error.
 fn io_error(operation: IoOperation, name: &str) -> impl Fn(io::Error) -> Error + '_ {
-    move |e| Error::io(operation, IoSubject::Path(name.into()), &e)
+    move |e| {
+        Error::io(
+            operation,
+            IoSubject::Path(quote_native(OsStr::new(name))),
+            &e,
+        )
+    }
 }

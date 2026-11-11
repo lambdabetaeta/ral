@@ -551,6 +551,9 @@ macro_rules! numeric_key {
                 serde_json::from_slice(&bytes).map_err(|_| {
                     Error::ready(DecodeCause::JsonMapKey(JsonMapKeyFailure {
                         text: self.text.to_string(),
+                        lexeme: std::str::from_utf8(self.source)
+                            .expect("validated JSON map key")
+                            .into(),
                         target: JsonNumberTarget::$target,
                     }))
                 })?;

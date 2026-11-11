@@ -4,6 +4,14 @@ status: active
 
 # A finished handle has one settle; the eliminators project it
 
+> Amended 2026-11-11 by [[decisions/261105_the-error-record|the error record]]:
+> programs read `[frame, message, status, site]`; `$e[message]` replaces
+> `describe`. `try`, `poll` and audit retain runtime witnesses, so re-raising
+> an unchanged record preserves its typed cause. Done events and worker
+> listings carry plain `ErrorRecord` data through `FOValue`; raising those
+> records, or a rebuilt record, makes a claim. The earlier amendments below
+> retain their historical wording.
+
 > Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
 > the current `ErrorRecord` is exactly `[reason, cmd, site]`, with a total
 > site and no status or derived message field. `describe` derives its text;

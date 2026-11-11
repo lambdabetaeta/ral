@@ -1975,7 +1975,9 @@ mod process {
             );
             assert_eq!(
                 error.describe(),
-                format!("run: {found}: its interpreter /no/such/interpreter does not exist")
+                format!(
+                    "run: {found}: its interpreter /no/such/interpreter or its loader was not found"
+                )
             );
         }
     }

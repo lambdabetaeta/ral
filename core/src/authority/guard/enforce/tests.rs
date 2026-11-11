@@ -177,8 +177,10 @@ fn a_deny_holding_a_hard_link_cites_the_object_under_another_name() {
         "{refused:?}"
     );
     assert!(
-        refused.to_string().contains("is the denied object")
-            && refused.to_string().contains("under another name"),
+        refused.to_string().contains("is excluded by")
+            && refused
+                .to_string()
+                .contains("through a filesystem object reached under another name"),
         "{refused}"
     );
 }
@@ -453,7 +455,7 @@ mod words {
             panic!("an fs exclusion over ral's binary refuses a bundled tool");
         };
         assert!(
-            denial.describe().contains("'ls' is built into ral"),
+            denial.describe().contains(r#""ls" is built into ral"#),
             "{}",
             denial.describe()
         );
@@ -477,14 +479,11 @@ mod words {
         for op in [FsOp::Read, FsOp::Write] {
             let refused =
                 (grants.refusal_fs(&baseline, op, &nowhere)).expect_err("no allowance covers it");
-            assert_eq!(
-                refused.to_string(),
-                "no allowance of the active grant covers it"
-            );
+            assert_eq!(refused.to_string(), "the grant does not allow it");
             assert_eq!(
                 fs_denial(&grants, refused, op, &path).describe(),
                 format!(
-                    "fs {} denied by grant: no allowance of the active grant covers {}",
+                    "grant does not allow {} access to {:?}",
                     <&str>::from(&op),
                     path.shown()
                 )

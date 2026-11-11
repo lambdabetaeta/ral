@@ -46,7 +46,7 @@ fn refused_host_blocks_install_neither_bindings_nor_hooks() {
             panic!("the cause is the checker's refusal")
         };
         assert_eq!(refusal.role, role);
-        assert!(refusal.diagnostics.iter().any(|d| d.code == "T0057"));
+        assert!(refusal.diagnostics().iter().any(|d| d.code == "T0057"));
     };
     let mut shell = crate::test_helper::core_shell();
     let body = Spanned::synthetic(CompKind::Exec(Exec {

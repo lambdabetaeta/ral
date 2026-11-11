@@ -234,7 +234,7 @@ mod linux {
         assert!(
             extra
                 .stderr
-                .contains("takes warrant and report descriptors"),
+                .contains("expected 2 (warrant and report), or 5 under a Linux envelope"),
             "{extra:?}"
         );
         assert!(extra.stdout.is_empty(), "{extra:?}");

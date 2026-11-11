@@ -223,7 +223,9 @@ impl DaclError {
     pub(super) fn failure(&self) -> Result<DaclFailure, &Cancellation> {
         Ok(match self {
             Self::NotLocal(p) => DaclFailure::NotLocal(shown(p)),
-            Self::NotUnicode(p) => DaclFailure::NotUnicode(shown(p)),
+            Self::NotUnicode(p) => {
+                DaclFailure::NotUnicode(crate::text::quote_native(p.as_os_str()))
+            }
             Self::Redirected {
                 granted,
                 at,

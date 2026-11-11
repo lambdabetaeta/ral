@@ -67,12 +67,12 @@ fn environment_nul_facts_name_the_key_not_the_secret_value() {
         (
             "BAD\0KEY",
             "value",
-            PrepareSubject::EnvironmentKey("BAD\0KEY".into()),
+            PrepareSubject::EnvironmentKey(crate::text::quote_native(OsStr::new("BAD\0KEY"))),
         ),
         (
             "RAL_NUL_TEST",
             "secret\0value",
-            PrepareSubject::EnvironmentValue("RAL_NUL_TEST".into()),
+            PrepareSubject::EnvironmentValue(crate::text::quote_native(OsStr::new("RAL_NUL_TEST"))),
         ),
     ] {
         let edits = [(

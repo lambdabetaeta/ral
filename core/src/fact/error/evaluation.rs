@@ -2,6 +2,7 @@
 
 use super::shared::{Count, CountRule, Found, ValueShape};
 use crate::data::Finite;
+use crate::text::plural;
 use crate::{label, record, variant};
 use strum::{IntoStaticStr, VariantArray};
 
@@ -214,7 +215,7 @@ impl KeyOrField {
 
 impl MissingEntry {
     pub fn describe(&self) -> String {
-        format!("{} '{}' not found", self.kind.describe(), self.key)
+        format!("{} {:?} not found", self.kind.describe(), self.key)
     }
 }
 
@@ -230,8 +231,8 @@ impl IndexBounds {
 impl Access {
     pub fn describe(&self) -> String {
         match self {
-            Self::Field(value) => format!("the field `{value}`"),
-            Self::Key(value) => format!("the key '{value}'"),
+            Self::Field(value) => format!("the field {value:?}"),
+            Self::Key(value) => format!("the key {value:?}"),
             Self::Position(value) => format!("the position {value}"),
         }
     }
@@ -267,8 +268,14 @@ impl ApplyFailure {
 impl PatternLength {
     pub fn describe(&self) -> String {
         match self.expected {
-            CountRule::Exactly(n) => format!("need {n} values, got {}", self.got),
-            CountRule::AtLeast(n) => format!("need at least {n} values, got {}", self.got),
+            CountRule::Exactly(n) => {
+                format!("need {}, got {}", plural(n.to_u64(), "value"), self.got)
+            }
+            CountRule::AtLeast(n) => format!(
+                "need at least {}, got {}",
+                plural(n.to_u64(), "value"),
+                self.got
+            ),
         }
     }
 }
@@ -355,7 +362,7 @@ impl FloatOverflow {
 impl RoundUnrepresentable {
     pub fn describe(&self) -> String {
         format!(
-            "rounding {} to {} places is not representable as a Float",
+            "rounding {} to {} places overflows while scaling; use fewer places",
             self.value, self.places
         )
     }
@@ -382,7 +389,7 @@ impl EvalFailure {
             Self::IndexBounds(cause) => cause.describe(),
             Self::Unreadable(cause) => cause.describe(),
             Self::DuplicateMapKey(key) => {
-                format!("map literal: key '{key}' given twice; which did you mean?")
+                format!("map literal: key {key:?} given twice; which did you mean?")
             }
             Self::Apply(cause) => cause.describe(),
             Self::Interpolate(shape) => {
@@ -397,44 +404,74 @@ impl EvalFailure {
 }
 
 impl EvalFailure {
+    pub(crate) const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
+        error record: catch it with `try` and read `$e[status]` and `$e[message]` from \
+        the handler's argument";
+
     pub fn advice(&self) -> Vec<String> {
         match self {
-            Self::MissingBinding(name) if name == "STATUS" => vec![
-                "there is no status register: a failure raises an error record: catch it with `try` and read `$e[status]` and `$e[message]` from the handler's argument".into(),
-            ],
-            Self::MissingBinding(_) => vec!["check spelling, or ensure the variable is defined before this line".into()],
+            Self::MissingBinding(name) if name == "STATUS" => vec![Self::NO_STATUS_REGISTER.into()],
+            Self::MissingBinding(_) => {
+                vec!["check spelling, or ensure the variable is defined before this line".into()]
+            }
             Self::MissingEntry(cause) => vec![if cause.available.is_empty() {
                 match cause.kind {
                     KeyOrField::Key => "the map is empty".into(),
                     KeyOrField::Field => "the record is empty".into(),
                 }
             } else {
-                format!("available: {}", cause.available.join(", "))
+                format!(
+                    "available: {}",
+                    cause
+                        .available
+                        .iter()
+                        .map(|key| format!("{key:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }],
             Self::IndexBounds(cause) => vec![match cause.length.to_u64() {
                 0 => "the list is empty".into(),
                 n => format!("valid indices: 0..{}", n - 1),
             }],
-            Self::Unreadable(cause) => vec![match cause.access {
-                Access::Field(_) => "a field is read from a record",
-                Access::Key(_) => "a computed key reads a map",
-                Access::Position(_) => "a position is read from a list",
-            }.into()],
-            Self::Apply(cause) => vec![match cause.operation {
-                CallOrForce::Call => "only Blocks, Lambdas, and natives can be called",
-                CallOrForce::Force => "wrap in a block: !{ expr }",
-            }.into()],
-            Self::Interpolate(shape) => vec![match shape {
-                ValueShape::Unit => "`()` is nothing to print; to print the text, write '()'",
-                ValueShape::Bytes => "render with str (lossy UTF-8), or decode with from-string",
-                _ => "use str to convert, or index into the value",
-            }.into()],
-            Self::Compare(cause) => vec![match cause.relation {
-                EqualityOrOrder::Equality => "equality is defined on scalars, strings, bytes, lists, maps, and variants",
-                EqualityOrOrder::Order => "ordering is defined on numbers and strings",
-            }.into()],
+            Self::Unreadable(cause) => vec![
+                match cause.access {
+                    Access::Field(_) => "a field is read from a record",
+                    Access::Key(_) => "a computed key reads a map",
+                    Access::Position(_) => "a position is read from a list",
+                }
+                .into(),
+            ],
+            Self::Apply(cause) => vec![
+                match cause.operation {
+                    CallOrForce::Call => "only Blocks, Lambdas, and natives can be called",
+                    CallOrForce::Force => "wrap in a block: !{ expr }",
+                }
+                .into(),
+            ],
+            Self::Interpolate(shape) => vec![
+                match shape {
+                    ValueShape::Unit => "`()` is nothing to print; to print the text, write '()'",
+                    ValueShape::Bytes => {
+                        "render with `str $b` (lossy UTF-8), or decode with `bytes-to-string $b`"
+                    }
+                    _ => "use str to convert, or index into the value",
+                }
+                .into(),
+            ],
+            Self::Compare(cause) => vec![
+                match cause.relation {
+                    EqualityOrOrder::Equality => {
+                        "equality is defined on scalars, strings, bytes, lists, maps, and variants"
+                    }
+                    EqualityOrOrder::Order => "ordering is defined on numbers and strings",
+                }
+                .into(),
+            ],
             Self::PatternLength(cause) => cause.advice(),
-            Self::Arithmetic(ArithmeticFailure::ModuloNeedsIntegers) => vec!["use int to convert".into()],
+            Self::Arithmetic(ArithmeticFailure::ModuloNeedsIntegers) => {
+                vec!["use int to convert".into()]
+            }
             _ => Vec::new(),
         }
     }
@@ -445,7 +482,7 @@ impl PatternLength {
         let got = self.got.to_u64();
         match self.expected {
             CountRule::Exactly(n) if got < n.to_u64() => {
-                vec!["use [..., ...rest] to capture remaining elements".into()]
+                vec!["the list has too few elements for the named bindings; use fewer bindings or supply more elements".into()]
             }
             CountRule::Exactly(n) if got > n.to_u64() => {
                 vec!["there are more elements; use [..., ...rest] to capture them".into()]
@@ -505,16 +542,16 @@ mod tests {
     #[test]
     fn missing_entry_and_unreadable_keep_the_access_kind() {
         for (kind, description, empty) in [
-            (KeyOrField::Key, "key 'x' not found", "the map is empty"),
+            (KeyOrField::Key, "key \"x\" not found", "the map is empty"),
             (
                 KeyOrField::Field,
-                "field 'x' not found",
+                "field \"x\" not found",
                 "the record is empty",
             ),
         ] {
             for (available, advice) in [
                 (vec![], empty),
-                (vec!["z".into(), "a".into()], "available: z, a"),
+                (vec!["z".into(), "a".into()], "available: \"z\", \"a\""),
             ] {
                 projection(
                     &EvalFailure::MissingEntry(MissingEntry {
@@ -530,17 +567,17 @@ mod tests {
         for (access, description, advice) in [
             (
                 Access::Field("x".into()),
-                "cannot read the field `x` from Int 4",
+                "cannot read the field \"x\" from the integer 4",
                 "a field is read from a record",
             ),
             (
                 Access::Key("x".into()),
-                "cannot read the key 'x' from Int 4",
+                "cannot read the key \"x\" from the integer 4",
                 "a computed key reads a map",
             ),
             (
                 Access::Position(Count::from_u64(2)),
-                "cannot read the position 2 from Int 4",
+                "cannot read the position 2 from the integer 4",
                 "a position is read from a list",
             ),
         ] {
@@ -573,7 +610,9 @@ mod tests {
         ] {
             let advice = match shape {
                 ValueShape::Unit => "`()` is nothing to print; to print the text, write '()'",
-                ValueShape::Bytes => "render with str (lossy UTF-8), or decode with from-string",
+                ValueShape::Bytes => {
+                    "render with `str $b` (lossy UTF-8), or decode with `bytes-to-string $b`"
+                }
                 _ => "use str to convert, or index into the value",
             };
             projection(
@@ -591,18 +630,20 @@ mod tests {
                 CountRule::Exactly(Count::from_u64(2)),
                 1,
                 "need 2 values, got 1",
-                vec!["use [..., ...rest] to capture remaining elements"],
+                vec![
+                    "the list has too few elements for the named bindings; use fewer bindings or supply more elements",
+                ],
             ),
             (
                 CountRule::Exactly(Count::from_u64(1)),
                 2,
-                "need 1 values, got 2",
+                "need 1 value, got 2",
                 vec!["there are more elements; use [..., ...rest] to capture them"],
             ),
             (
                 CountRule::Exactly(Count::from_u64(1)),
                 1,
-                "need 1 values, got 1",
+                "need 1 value, got 1",
                 vec![],
             ),
             (
@@ -614,7 +655,7 @@ mod tests {
             (
                 CountRule::AtLeast(Count::from_u64(1)),
                 1,
-                "need at least 1 values, got 1",
+                "need at least 1 value, got 1",
                 vec![],
             ),
             (
@@ -642,7 +683,7 @@ mod tests {
                 operation: CallOrForce::Call,
                 found: Found::Int(3),
             }),
-            "cannot call Int 3",
+            "cannot call the integer 3",
             &["only Blocks, Lambdas, and natives can be called"],
         );
         projection(
@@ -650,7 +691,7 @@ mod tests {
                 operation: CallOrForce::Force,
                 found: Found::Int(3),
             }),
-            "cannot force Int 3: ! requires a Block",
+            "cannot force the integer 3: ! requires a Block",
             &["wrap in a block: !{ expr }"],
         );
         for (relation, advice) in [
@@ -676,7 +717,7 @@ mod tests {
         }
         projection(
             &EvalFailure::DuplicateMapKey("x".into()),
-            "map literal: key 'x' given twice; which did you mean?",
+            "map literal: key \"x\" given twice; which did you mean?",
             &[],
         );
         projection(
@@ -735,7 +776,7 @@ mod tests {
                     value: Finite::new(1.5).unwrap(),
                     places: 308,
                 }),
-                "rounding 1.5 to 308 places is not representable as a Float",
+                "rounding 1.5 to 308 places overflows while scaling; use fewer places",
                 vec![],
             ),
         ] {

@@ -43,10 +43,7 @@ fn drop_owned(root: Owned) {
                 Value::Variant { payload, .. } => {
                     pending.extend(payload.map(|value| Owned::Value(*value)));
                 }
-                Value::Thunk(closure) => {
-                    let (_, env) = closure.into_parts();
-                    pending.push(Owned::Env(env));
-                }
+                Value::Thunk(closure) => pending.push(Owned::Env(closure.into_env())),
                 Value::Unit
                 | Value::Bool(_)
                 | Value::Int(_)

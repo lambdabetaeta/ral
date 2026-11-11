@@ -48,7 +48,7 @@ fn an_absent_deny_refuses_a_case_variant_create() {
     assert!(!d.join("secrets").exists(), "the refused create landed");
     assert!(
         out.stderr.contains(&format!(
-            "the denied {}",
+            "is excluded by {:?} after case or Unicode folding",
             ral_core::path::shown(d.join("Secrets"))
         )) && out.stderr.contains("a deny holds under every spelling"),
         "the denial must name the deny and say why; stderr:\n{}",
@@ -91,7 +91,7 @@ fn a_deny_holding_the_stored_name_refuses_plainly() {
         let out = under(&d.0, &d.0, denies, &write(&secrets));
         denied_by_grant(&proof, &control, &out, "key");
         assert!(
-            !out.stderr.contains("another spelling"),
+            !out.stderr.contains("after case or Unicode folding"),
             "a deny holding the stored name must not claim a respelling; stderr:\n{}",
             out.stderr
         );

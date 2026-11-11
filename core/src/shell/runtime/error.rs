@@ -252,8 +252,24 @@ impl Diagnosis<'_> {
     /// The words of a diagnosis before layout: the message under its context
     /// and resolved site, and the notes under it.
     fn compose(&self, db: Option<&SourceDb>) -> (String, Vec<String>) {
-        let intrinsic = match self.witness.and_then(|witness| db?.site(witness)) {
-            Some(site) => Cow::Owned(format!("{}, line {}", self.message, site.line)),
+        let intrinsic = match self
+            .witness
+            .and_then(|witness| Some((witness, db?.site(witness)?)))
+        {
+            Some((witness, site)) => {
+                let same_source = match self.at {
+                    Some(Prov::Live { span, .. }) => span.file == witness.file,
+                    Some(Prov::Resolved(_)) | None => false,
+                };
+                Cow::Owned(if same_source {
+                    format!("{}, line {}", self.message, site.line)
+                } else {
+                    format!(
+                        "{}, use at {:?}:{}:{}",
+                        self.message, site.script, site.line, site.col
+                    )
+                })
+            }
             None => self.message.clone(),
         };
         let message = under_context(self.context, &intrinsic);
@@ -270,8 +286,13 @@ impl Diagnosis<'_> {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         if self.unwound.discarded > 0 {
+            let (bytes, were, them) = if self.unwound.discarded == 1 {
+                ("byte", "was", "it")
+            } else {
+                ("bytes", "were", "them")
+            };
             notes.push(format!(
-                "{} bytes written to stdout before the failure were discarded with the value; run the command without `let` to see them, or use `audit` to keep its output",
+                "{} {bytes} written to stdout before the failure {were} discarded with the value; run the command without `let` to see {them}, or use `audit` to keep its output",
                 self.unwound.discarded,
             ));
         }
@@ -695,7 +716,9 @@ mod tests {
         let resolved =
             crate::io::ansi::strip(&error.render(&db, Some(file), &ExitHints::default()));
         assert!(
-            resolved.contains(&format!("admission.ral:1:1: context: {intrinsic}, line 2")),
+            resolved.contains(&format!(
+                "admission.ral:1:1: context: {intrinsic}, use at \"admission.ral\":2:1"
+            )),
             "{resolved}"
         );
         let record = error.fact(&crate::test_helper::core_shell());
@@ -718,7 +741,10 @@ mod tests {
             span: Span::new(file, 6, 12),
         });
         let rendered = crate::io::ansi::strip(&error.render(&db, None, &ExitHints::default()));
-        assert!(rendered.contains("boom, line 3"), "{rendered}");
+        assert!(
+            rendered.contains("boom, use at \"witness.ral\":3:1"),
+            "{rendered}"
+        );
         assert!(
             !rendered.contains("the use this script makes of it"),
             "{rendered}"
@@ -895,7 +921,7 @@ mod report_context_tests {
         ] {
             let io = IoFailure {
                 operation,
-                subject: IoSubject::Path("nope".into()),
+                subject: IoSubject::Path(r#""nope""#.into()),
                 cause: IoCause::new(IoLeaf::Os(OsFailure {
                     kind: IoKind::NotFound,
                     raw: None,
@@ -913,10 +939,10 @@ mod report_context_tests {
             for tool in tools {
                 let hint = if operation == IoOperation::Open {
                     format!(
-                        "nope does not exist; {tool} never creates a file; `to-string BODY > path` writes a new one"
+                        "\"nope\" does not exist; {tool} never creates a file; `to-string BODY > path` writes a new one"
                     )
                 } else {
-                    "nope does not exist; the path is a file or directory, relative to the cwd or absolute".into()
+                    "\"nope\" does not exist; the path is a file or directory, relative to the cwd or absolute".into()
                 };
                 check(&reason, Some(tool), &[&hint]);
                 for context in [

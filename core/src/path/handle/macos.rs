@@ -7,9 +7,9 @@
 use super::unix::{self, oflags};
 use super::{Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step};
 use crate::path::identity::collision_key;
-use crate::path::shown;
 use crate::path::site::{Silent, Surface};
 use crate::site::site;
+use crate::text::quote_native;
 use rustix::fs::{FileType, Mode, OFlags};
 use rustix::io::Errno;
 use std::ffi::{CString, OsStr, OsString};
@@ -59,7 +59,9 @@ thread_local! {
 
 /// A walk's refusal of an entry that is no longer the one it opened.
 fn moved(name: &EntryName) -> io::Error {
-    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(shown(name.as_os_str())))
+    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(quote_native(
+        name.as_os_str(),
+    )))
 }
 
 /// `/`, held as a search handle.
@@ -154,8 +156,8 @@ pub(super) fn settle(
     let Some(id) = held else {
         return Err(io::Error::other(crate::fact::PathIoLeaf::StoredNameUnheld(
             crate::fact::PathIoLeafStoredNameUnheld {
-                requested: shown(name.as_os_str()),
-                answered: shown(answered),
+                requested: quote_native(name.as_os_str()),
+                answered: quote_native(answered),
             },
         )));
     };
@@ -174,7 +176,7 @@ fn stored_entry(dir: &File, id: ObjectId, name: &EntryName) -> io::Result<EntryN
             crate::io::failure(&error).at(crate::fact::IoContext::Path(
                 crate::fact::PathIoContext::StoredNameRead(
                     crate::fact::PathIoContextStoredNameRead {
-                        name: shown(name.as_os_str()),
+                        name: quote_native(name.as_os_str()),
                     },
                 ),
             )),
@@ -216,7 +218,7 @@ pub(super) fn pick(entries: &[EntryName], name: &EntryName) -> io::Result<EntryN
         several => Err(io::Error::other(
             crate::fact::PathIoLeaf::StoredNameAmbiguous(
                 crate::fact::PathIoLeafStoredNameAmbiguous {
-                    name: shown(name.as_os_str()),
+                    name: quote_native(name.as_os_str()),
                     spellings: several.len().into(),
                 },
             ),

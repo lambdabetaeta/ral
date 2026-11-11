@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: c4856951
+generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -45,8 +45,10 @@ plain scheme ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. Beside it sits an optional diagnostic facet,
 which is not a typing rule: it diagnoses a decoder handed an argument
 ([[internals/builtins-registry|builtins-registry]]). A caught record handed to
-`fail` instead earns generic shape guidance from `shape_hint`/`row_has_reason`
-in `typecheck/explain.rs`, pointing to `raise $e` or `$e[message]`.
+`fail` instead earns generic shape guidance from `shape_hint` in
+`typecheck/explain.rs`: it recognises the closed `ErrorRecord::ty()` shape by
+field labels and types, including `site`, regardless of row order, and points
+to `raise $e` or `$e[message]`.
 An entry's first-class
 form is its scheme, so it has one by construction, every entry in the table
 having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).

@@ -2459,7 +2459,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         .expect_err("a line the read cannot follow stops the lineage");
     assert!(
         matches!(refusal, ContextFailure::ReadBack(ref failure)
-        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+        if failure.turn == 1u64.into() && failure.record == ral_core::text::quote_native(source.as_os_str())
             && matches!(failure.cause, RecordReadFailure::LocusSealMismatch(_))),
         "{refusal:?}"
     );
@@ -2471,7 +2471,7 @@ fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         .expect_err("a deleted ancestor's log stops the lineage");
     assert!(
         matches!(refusal, ContextFailure::ReadBack(ref failure)
-        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+        if failure.turn == 1u64.into() && failure.record == ral_core::text::quote_native(source.as_os_str())
             && matches!(failure.cause, RecordReadFailure::Io(_))),
         "{refusal:?}"
     );
@@ -2767,7 +2767,7 @@ fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
         .expect_err("a read that names an unreadable turn is refused");
     assert!(
         matches!(refusal, ContextFailure::ReadBack(ref failure)
-        if failure.turn == 1u64.into() && failure.record == ral_core::path::shown(&source)
+        if failure.turn == 1u64.into() && failure.record == ral_core::text::quote_native(source.as_os_str())
             && matches!(failure.cause, RecordReadFailure::Io(_))),
         "{refusal:?}"
     );
@@ -2960,7 +2960,7 @@ fn an_unreadable_parent_refuses_the_fork_by_file() {
         matches!(&error.reason, Reason::Host(host)
         if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
             if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
-                && failure.record == ral_core::path::shown(&source)
+                && failure.record == ral_core::text::quote_native(source.as_os_str())
                 && matches!(failure.cause, RecordReadFailure::Io(_)))),
         "{error:?}"
     );
@@ -3074,7 +3074,7 @@ fn a_corrupt_inherited_ancestor_fails_opening_as_context_not_recording() {
         matches!(&error.reason, Reason::Host(host)
         if matches!(&**host, HostFailure::Exarch(ExarchFailure::Context(ContextFailure::ReadBack(failure)))
             if failure.turn == 1u64.into() && failure.source == parent.id().get().into()
-                && failure.record == ral_core::path::shown(&source)
+                && failure.record == ral_core::text::quote_native(source.as_os_str())
                 && matches!(failure.cause, RecordReadFailure::LocusSealMismatch(_)))),
         "{error:?}"
     );

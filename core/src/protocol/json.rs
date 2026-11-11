@@ -169,7 +169,7 @@ pub(crate) fn path_text(path: &Path) -> Result<String, JsonEncodeFailure> {
     crate::path::utf8(path).map(str::to_owned).map_err(|_| {
         JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
             JsonEncodeCauseNonUnicodePath {
-                shown: crate::path::shown(path),
+                shown: crate::text::quote_native(path.as_os_str()),
             },
         ))
     })

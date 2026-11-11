@@ -53,6 +53,10 @@ impl Closure {
         &self.env
     }
 
+    pub(crate) fn into_env(mut self) -> Env {
+        std::mem::take(&mut self.env)
+    }
+
     /// Both halves, leaving `self.env` empty so `Drop` below has nothing to dismantle.
     pub(crate) fn into_parts(mut self) -> (Arc<Comp>, Env) {
         let comp = Arc::clone(&self.comp);

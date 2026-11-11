@@ -1,18 +1,20 @@
 ---
-generated_at_commit: 49399cfc
+generated_at_commit: c485695114d984277a516d253ba847ad19ef185d
 ---
 # Paths are shown with a forward slash
 
-**Every path string ral produces, a value a builtin returns or text a person or the model reads, is `/`-separated on every host: `C:/blah/bleh`, `//server/share/x`, `src/x/f`.** `core::path::show::shown` is the one place that shows a path; `fold_for` is its separator fold.
+**Path values and ordinary path displays are `/`-separated on every host: `C:/blah/bleh`, `//server/share/x`, `src/x/f`. Native diagnostic operands preserve the original units instead.** `core::path::show::shown` owns ordinary display; `fold_for` is its separator fold.
 
 - **One value on every host.** A script's `glob` or `cwd` yields the same string on Windows as on Unix, so a test or a model prompt need not know the host.
 - **Escapes cannot eat it.** In a `"…"` literal `\n` is a newline; a `C:\new` printed back and pasted would be corrupted. `/` is inert there.
 - **Input already reads either.** The resolver accepts both separators, so showing with `/` loses nothing.
 - **The verbatim exception.** A `\\?\C:\…` head is dropped (`dunce::simplified`) where the path means the same without it. A path only the OS can read literally (`\\?\UNC\…`, `\\.\pipe\…`, a long or reserved-name verbatim path) is shown exactly as given, since `/` is not a separator there: `show` asks `lex::parse_bytes` under Windows rules (`Parsed::has_os_namespace_head`), the backslash-only `HeadSpelling` reading of a namespace head the OS hands back.
-- **The echo exception.** A command head written as a path (`.\build.cmd`, `C:\tools\x`) is shown as the user typed it, not folded: `Command.shown` in `core/src/shell/exec/command.rs` echoes the word the user wrote, since the refusal answers that word. It is the one shown path not produced by `shown`; a `~` head is still shown through `TildePath::shown`.
-- **The native boundary.** A path ral hands to the OS (`PWD`, sandbox rules, DACL calls, internal identity and matching) stays native. Only the text ral shows is folded.
+- **The echo exception.** A command head written as a path (`.\build.cmd`, `C:\tools\x`) is shown as the user typed it, not folded: `Command.shown` in `core/src/shell/exec/command.rs` echoes the word the user wrote, since the refusal answers that word. This echo does not use `shown`; a `~` head is still shown through `TildePath::shown`.
+- **The diagnostic exception.** Native error operands use `text::quote_native` before any lossy conversion or separator folding. The portable string includes its quotes and escapes; the reason renders it exactly once. Invalid bytes or code units remain distinct from a literal replacement character or escape-looking filename.
+- **The native boundary.** A path ral hands to the OS (`PWD`, sandbox rules, DACL calls, internal identity and matching) stays native.
 
-On Unix `shown` is the identity.
+On Unicode Unix paths `shown` is the identity; on non-Unicode paths it is lossy
+and cannot supply native diagnostic evidence.
 
 ## Enforcement
 

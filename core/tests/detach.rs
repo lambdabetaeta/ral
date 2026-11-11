@@ -288,7 +288,9 @@ fn a_launch_whose_interpreter_is_missing_says_so() {
         &format!("detach #'never born'# {}", no_interpreter.display()),
     );
     assert!(
-        message.contains("its interpreter /nonexistent/ral-test-interpreter does not exist"),
+        message.contains(
+            "its interpreter /nonexistent/ral-test-interpreter or its loader was not found"
+        ),
         "the refusal must name the missing interpreter, got {message:?}"
     );
 }

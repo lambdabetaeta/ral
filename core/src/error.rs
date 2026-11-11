@@ -232,6 +232,13 @@ impl Error {
         self
     }
 
+    /// Resolve local provenance and drop witnesses the parent cannot read.
+    pub(crate) fn leaving(mut self, sources: &SourceDb) -> Self {
+        self.prov = self.prov.map(|prov| prov.leaving(sources));
+        self.witness = self.witness.filter(|span| sources.inherits(span.file));
+        self
+    }
+
     pub(crate) fn with_witness(mut self, witness: Option<Span>) -> Self {
         self.witness = witness.map(Box::new);
         self
@@ -283,7 +290,7 @@ mod tests {
     use std::io::ErrorKind;
 
     fn said(e: &io::Error) -> String {
-        Error::io(IoOperation::Read, IoSubject::Path("f".into()), e)
+        Error::io(IoOperation::Read, IoSubject::Path("\"f\"".into()), e)
             .describe()
             .into_owned()
     }

@@ -149,10 +149,10 @@ impl ValueShape {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Unit => "()",
-            Self::Bool => "a Bool",
-            Self::Int => "an Int",
-            Self::Float => "a Float",
-            Self::String => "a Str",
+            Self::Bool => "a boolean",
+            Self::Int => "an integer",
+            Self::Float => "a float",
+            Self::String => "a string",
             Self::Bytes => "bytes",
             Self::List => "a list",
             Self::Map => "a record",
@@ -232,14 +232,18 @@ impl Found {
     pub fn describe(&self) -> String {
         match self {
             Self::Unit => "()".into(),
-            Self::Bool(b) => format!("Bool {b}"),
-            Self::Int(n) => format!("Int {n}"),
-            Self::Float(n) => format!("Float {n}"),
-            Self::Text(p) => format!("Str {:?}{}", p.preview, if p.truncated { "…" } else { "" }),
+            Self::Bool(b) => format!("the boolean {b}"),
+            Self::Int(n) => format!("the integer {n}"),
+            Self::Float(n) => format!("the float {n}"),
+            Self::Text(p) => format!(
+                "the string {:?}{}",
+                p.preview,
+                if p.truncated { "…" } else { "" }
+            ),
             Self::Bytes => "bytes".into(),
             Self::List => "a list".into(),
             Self::Map => "a record".into(),
-            Self::Variant(tag) => format!("tag `{tag}`"),
+            Self::Variant(tag) => format!("the tag {tag:?}"),
             Self::Block => "a block".into(),
             Self::Function => "a function".into(),
             Self::Handle => "a handle".into(),
@@ -265,6 +269,34 @@ pub enum DataHead {
 }
 label!(DataHead);
 
+impl DataHead {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Unit => "()",
+            Self::Bool => "a boolean",
+            Self::Int => "an integer",
+            Self::Float => "a float",
+            Self::String => "a string",
+            Self::Bytes => "bytes",
+            Self::List => "a list",
+            Self::Map => "a map",
+            Self::Record => "a record",
+            Self::Variant => "a tag",
+            Self::Thunk => "a block or a function",
+            Self::Handle => "a handle",
+        }
+    }
+}
+
+fn alternatives(items: &[&str]) -> String {
+    match items {
+        [] => "no value".into(),
+        [only] => (*only).into(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataKind {
     pub heads: Vec<DataHead>,
@@ -274,6 +306,24 @@ record!(DataKind {
     heads: "heads",
     deep: "deep"
 });
+
+impl DataKind {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let heads = alternatives(
+            &self
+                .heads
+                .iter()
+                .map(|head| head.describe())
+                .collect::<Vec<_>>(),
+        );
+        if self.deep {
+            format!("{heads}, with no blocks, functions or handles at any depth")
+        } else {
+            heads
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expected {
@@ -297,13 +347,28 @@ impl Expected {
     pub fn describe(&self) -> String {
         match self {
             Self::Shape(shape) => shape.describe().into(),
-            Self::AnyOf(shapes) => shapes
-                .iter()
-                .map(|s| s.describe())
-                .collect::<Vec<_>>()
-                .join(" or "),
-            Self::Record(fields) => format!("a record with fields {}", fields.join(", ")),
-            Self::Tags(tags) => format!("one of the tags {}", tags.join(", ")),
+            Self::AnyOf(shapes) => alternatives(
+                &shapes
+                    .iter()
+                    .map(|shape| shape.describe())
+                    .collect::<Vec<_>>(),
+            ),
+            Self::Record(fields) if fields.is_empty() => "a record with no fields".into(),
+            Self::Record(fields) => format!(
+                "a record with fields {}",
+                fields
+                    .iter()
+                    .map(|field| format!("{field:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Tags(tags) => format!(
+                "one of the tags {}",
+                tags.iter()
+                    .map(|tag| format!("{tag:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::StringLiterals(texts) => format!(
                 "one of {}",
                 texts
@@ -312,19 +377,7 @@ impl Expected {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Self::Kind(kind) => format!(
-                "{}{}",
-                if kind.deep {
-                    "deep data of kind "
-                } else {
-                    "kind "
-                },
-                kind.heads
-                    .iter()
-                    .map(|h| <&str>::from(*h))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
+            Self::Kind(kind) => kind.describe(),
             Self::Type(ty) => ty.clone(),
             Self::Closure => "a closure (not a native function)".into(),
         }
@@ -710,8 +763,9 @@ impl Utf8Failure {
     pub fn describe(&self) -> String {
         match self.error_len {
             Some(n) => format!(
-                "invalid UTF-8 at byte {} ({n} invalid bytes)",
-                self.valid_up_to
+                "invalid UTF-8 at byte {} ({})",
+                self.valid_up_to,
+                crate::text::plural(n.to_u64(), "invalid byte")
             ),
             None => format!("incomplete UTF-8 at byte {}", self.valid_up_to),
         }
@@ -786,6 +840,12 @@ record!(JsonSyntaxFailure {
 });
 
 impl JsonSyntaxFailure {
+    pub(crate) fn parser_detail(error: &serde_json::Error) -> String {
+        let detail = error.to_string();
+        let suffix = format!(" at line {} column {}", error.line(), error.column());
+        detail.strip_suffix(&suffix).unwrap_or(&detail).into()
+    }
+
     #[must_use]
     pub fn describe(&self) -> String {
         format!(

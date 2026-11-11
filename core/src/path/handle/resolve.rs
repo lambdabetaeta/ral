@@ -23,8 +23,9 @@ use super::{
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::authority::sandbox::InstallToken;
+use crate::path::LexicalPath;
 use crate::path::lex::{is_absolute, names_a_dir};
-use crate::path::{LexicalPath, shown};
+use crate::text::quote_native;
 
 /// `SYMLOOP_MAX`'s customary value: a name still splicing past this is a cycle.
 pub(super) const MAX_HOPS: usize = 40;
@@ -209,7 +210,7 @@ impl<A: Lists> Dir<A> {
         if step.kind != Kind::Symlink {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                crate::fact::PathIoLeaf::NotLink(shown(name.as_os_str())),
+                crate::fact::PathIoLeaf::NotLink(quote_native(name.as_os_str())),
             ));
         }
         let target = host::read_link(&link.file)?;

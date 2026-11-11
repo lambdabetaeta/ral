@@ -14,7 +14,9 @@ fn read_rejection_keeps_its_actual_probe_subject_and_cause() {
     for subject in [
         ProbeSubject::Workers,
         ProbeSubject::EnvVar("EXARCH_SCRATCH".into()),
-        ProbeSubject::PathBytes("/scratch".into()),
+        ProbeSubject::PathBytes(ral_core::text::quote_native(std::ffi::OsStr::new(
+            "/scratch",
+        ))),
     ] {
         let engine = Engine::adopted(crate::boot::test_transport());
         let failure = engine

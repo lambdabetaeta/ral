@@ -95,6 +95,15 @@ pub fn rank_by<T>(needle: &str, items: Vec<T>, haystack: impl Fn(&T) -> &str) ->
     scored.into_iter().map(|(item, _)| item).collect()
 }
 
+/// A quoted diagnostic spelling, preserving native units without path normalization.
+#[allow(
+    clippy::unnecessary_debug_formatting,
+    reason = "native names need lossless escaping, not lossy Display"
+)]
+pub fn quote_native(name: &std::ffi::OsStr) -> String {
+    format!("{name:?}")
+}
+
 /// `src` as a code span that pastes back as ral: doubled around a tag's backtick.
 pub fn code(src: &str) -> String {
     if src.contains(crate::ty::TAG_PREFIX) {

@@ -294,25 +294,25 @@ impl Denial {
                         "some layer's exec `allow` list does not let it run".into()
                     }
                     Withholding::Excluded(exclusion) => exclusion.describe(
-                        &format!("'{}'", request.requested),
+                        &format!("{:?}", request.requested),
                         &crate::text::code(&exclusion.scope.to_string()),
                     ),
                 };
                 format!(
-                    "command '{}' denied by active grant: {cause}",
+                    "command {:?} denied by active grant: {cause}",
                     request.requested
                 )
             }
             Self::ExecRead(request) => {
                 let (lead, subject) = match &request.subject {
                     ExecReadSubject::Executable => {
-                        (String::new(), format!("'{}'", request.requested))
+                        (String::new(), format!("{:?}", request.requested))
                     }
                     ExecReadSubject::Bundled(tool) => (
-                        format!("'{}' is built into ral, and ", tool.tool),
+                        format!("{:?} is built into ral, and ", tool.tool),
                         tool.binary.as_ref().map_or_else(
                             || "ral's binary".into(),
-                            |binary| format!("ral's binary '{binary}'"),
+                            |binary| format!("ral's binary {binary:?}"),
                         ),
                     ),
                 };
@@ -321,11 +321,11 @@ impl Denial {
                         format!("{subject} may run, but it is not readable under the active grant")
                     }
                     Withholding::Excluded(exclusion) => {
-                        exclusion.describe(&subject, &format!("the fs deny '{}'", exclusion.scope))
+                        exclusion.describe(&subject, &format!("the fs deny {:?}", exclusion.scope))
                     }
                 };
                 format!(
-                    "command '{}' denied by active grant: {lead}{cause}",
+                    "command {:?} denied by active grant: {lead}{cause}",
                     request.requested
                 )
             }
@@ -333,15 +333,18 @@ impl Denial {
                 let op = <&str>::from(request.op);
                 match &request.cause {
                     FsRefusal::Withheld(Withholding::MissingAllowance(_)) => format!(
-                        "fs {op} denied by grant: no allowance of the active grant covers {}",
+                        "grant does not allow {op} access to {:?}",
                         request.requested
                     ),
                     FsRefusal::Withheld(Withholding::Excluded(exclusion)) => format!(
                         "fs {op} denied by grant: {}",
-                        exclusion.describe(&request.requested, &exclusion.scope)
+                        exclusion.describe(
+                            &format!("{:?}", request.requested),
+                            &format!("{:?}", exclusion.scope),
+                        )
                     ),
                     FsRefusal::Pinned(binary) => format!(
-                        "fs {op} refused: {} is the {} binary ral pinned at startup, which confines every command run under a grant",
+                        "fs {op} refused: {:?} is the {} binary ral pinned at startup, which confines every command run under a grant",
                         request.requested,
                         <&str>::from(*binary)
                     ),
@@ -414,10 +417,12 @@ impl<T> WithholdingExcluded<T> {
         match self.matched_by {
             ExclusionMatch::Name => format!("{subject} is excluded by {scope}"),
             ExclusionMatch::FoldedName => format!(
-                "{subject} is the denied {scope} under another spelling (case or Unicode form); a deny holds under every spelling"
+                "{subject} is excluded by {scope} after case or Unicode folding; a deny holds under every spelling"
             ),
             ExclusionMatch::Identity => {
-                format!("{subject} is the denied object {scope} under another name")
+                format!(
+                    "{subject} is excluded by {scope} through a filesystem object reached under another name"
+                )
             }
         }
     }
@@ -454,10 +459,12 @@ mod tests {
         match matched_by {
             ExclusionMatch::Name => format!("{subject} is excluded by {scope}"),
             ExclusionMatch::FoldedName => format!(
-                "{subject} is the denied {scope} under another spelling (case or Unicode form); a deny holds under every spelling"
+                "{subject} is excluded by {scope} after case or Unicode folding; a deny holds under every spelling"
             ),
             ExclusionMatch::Identity => {
-                format!("{subject} is the denied object {scope} under another name")
+                format!(
+                    "{subject} is excluded by {scope} through a filesystem object reached under another name"
+                )
             }
         }
     }
@@ -488,8 +495,8 @@ mod tests {
                     }),
                 ),
                 &format!(
-                    "command 'tool' denied by active grant: {}",
-                    matched_description(matched_by, "'tool'", &code(&target.to_string()))
+                    "command \"tool\" denied by active grant: {}",
+                    matched_description(matched_by, "\"tool\"", &code(&target.to_string()))
                 ),
             );
             assert_projection(
@@ -501,8 +508,8 @@ mod tests {
                     }),
                 ),
                 &format!(
-                    "command 'tool' denied by active grant: {}",
-                    matched_description(matched_by, "'tool'", "the fs deny '/safe/tool'")
+                    "command \"tool\" denied by active grant: {}",
+                    matched_description(matched_by, "\"tool\"", "the fs deny \"/safe/tool\"")
                 ),
             );
             assert_projection(
@@ -516,7 +523,7 @@ mod tests {
                 ),
                 &format!(
                     "fs read denied by grant: {}",
-                    matched_description(matched_by, "/requested", "/safe/tool")
+                    matched_description(matched_by, "\"/requested\"", "\"/safe/tool\"")
                 ),
             );
         }
@@ -526,7 +533,7 @@ mod tests {
     fn denial_bundled_exec_read_names_the_fs_exclusion_and_safe_binary() {
         for (binary, subject) in [
             (None, "ral's binary"),
-            (Some("/safe/ral".into()), "ral's binary '/safe/ral'"),
+            (Some("/safe/ral".into()), "ral's binary \"/safe/ral\""),
         ] {
             assert_projection(
                 &Denial::bundled_read(
@@ -539,7 +546,7 @@ mod tests {
                     },
                 ),
                 &format!(
-                    "command 'ls' denied by active grant: 'ls' is built into ral, and {subject} is excluded by the fs deny '/safe'"
+                    "command \"ls\" denied by active grant: \"ls\" is built into ral, and {subject} is excluded by the fs deny \"/safe\""
                 ),
             );
         }

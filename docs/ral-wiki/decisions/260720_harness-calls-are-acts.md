@@ -139,7 +139,7 @@ it once.
 refused desk verb also draws an error chrome row. It does not. Every
 `Kind::Error` emit site in exarch was enumerated, and none lies on the
 agent-cancel / message / schedule / unschedule / reply refusal path. A refusal
-*raises*; the raise leaves through `ExarchDesk::handle` as an `Error`, crossing as a `WireError` (typed reason, report context and ordered hints),
+*raises*; the raise leaves through `ExarchDesk::handle` as an `Error`, crossing as a `WireError` (message and hints),
 fails the builtin body, aborts the ral program, and is written by
 `End::render` as an ariadne report into the **captured stderr**, which
 `digest::render` folds into the model-facing `STDERR:` / `EXIT: 1` sections. That
@@ -304,6 +304,15 @@ context". With the compound gone `ACT_VERB` falls from 14 to 11 — `unschedule`
 plus a space — so every act row in the session gets three columns back, which
 is the drift this decision warned about, caught from the other side: a column
 sized against a vocabulary must move when the vocabulary does.
+
+## Amendment (2026-11-11): refusals retain their typed cause
+
+The [[decisions/261105_the-error-record|typed-errors port]] (`c4856951`)
+changes the refusal envelope, not the act-row distinction above. `WireError`
+carries the typed reason, optional report context and ordered stored hints;
+its message is derived, and the receiving engine reconstructs the same reason
+rather than raising the rendered text as a claim. The historical refusal
+passage above retains its original wording.
 
 ## Out of scope
 

@@ -16,6 +16,7 @@ use ral_core::path::{Dir, EntryName, Kind, LeafMode, Reading, ScopedDir, Visibil
 use ral_core::shell::runtime::{
     Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
 };
+use ral_core::text::quote_native;
 use ral_core::{RegisterError, Shell, Value};
 
 const NAME: &str = "_external-editor";
@@ -103,14 +104,14 @@ impl Workspace {
                 cause: e.failure(),
             }))
         })?;
-        let temp = ral_core::host::temp_dir();
-        let temp = ral_core::path::utf8(&temp).map_err(|e| path_failure(&e))?;
+        let temp_path = ral_core::host::temp_dir();
+        let temp = ral_core::path::utf8(&temp_path).map_err(|e| path_failure(&e))?;
         let parent = shell.locate_dir::<Writing>(&shell.resolve(temp))?;
         let cleanup = loop {
             let name = EntryName::fresh(".ral-editor-").map_err(|e| {
                 workspace_io(
                     EditorWorkspaceStep::TemporaryDirectory,
-                    Some(temp.into()),
+                    Some(quote_native(temp_path.as_os_str())),
                     &io::Error::from(e),
                 )
             })?;
@@ -121,7 +122,7 @@ impl Workspace {
                 Err(e) => {
                     return Err(workspace_io(
                         EditorWorkspaceStep::CreateDirectory,
-                        Some(temp.into()),
+                        Some(quote_native(temp_path.as_os_str())),
                         &e,
                     ));
                 }
@@ -133,7 +134,7 @@ impl Workspace {
             file: EntryName::parse(OsStr::new("buffer.ral")).map_err(|e| {
                 workspace_io(
                     EditorWorkspaceStep::BufferPath,
-                    Some("buffer.ral".into()),
+                    Some(quote_native(OsStr::new("buffer.ral"))),
                     &io::Error::from(e),
                 )
             })?,
@@ -152,8 +153,12 @@ impl Workspace {
             .map_err(|e| {
                 workspace_io(
                     EditorWorkspaceStep::CreateBuffer,
-                    Some(ral_core::path::shown(
-                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    Some(quote_native(
+                        self.directory
+                            .real()
+                            .as_path()
+                            .join(self.file.as_os_str())
+                            .as_os_str(),
                     )),
                     &e,
                 )
@@ -162,8 +167,12 @@ impl Workspace {
             .map_err(|e| {
                 workspace_io(
                     EditorWorkspaceStep::WriteBuffer,
-                    Some(ral_core::path::shown(
-                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    Some(quote_native(
+                        self.directory
+                            .real()
+                            .as_path()
+                            .join(self.file.as_os_str())
+                            .as_os_str(),
                     )),
                     &e,
                 )
@@ -179,7 +188,7 @@ impl Workspace {
                 target.remove().map_err(|e| {
                     workspace_io(
                         EditorWorkspaceStep::RemoveWorkspace,
-                        Some(ral_core::path::shown(self.directory.real().as_path())),
+                        Some(quote_native(self.directory.real().as_path().as_os_str())),
                         &e,
                     )
                 })
@@ -219,7 +228,7 @@ impl Workspace {
             .judge::<Reading>(self.cleanup.cleanup_target())?
             .into_dir()
             .map_err(|target| {
-                let path = ral_core::path::shown(target.real().as_path());
+                let path = quote_native(target.real().as_path().as_os_str());
                 failure(EditorFailure::Workspace(EditorFailureWorkspace {
                     step: EditorWorkspaceStep::InspectBuffer,
                     path: Some(path.clone()),
@@ -233,8 +242,12 @@ impl Workspace {
             .map_err(|e| {
                 workspace_io(
                     EditorWorkspaceStep::LocateBuffer,
-                    Some(ral_core::path::shown(
-                        self.directory.real().as_path().join(self.file.as_os_str()),
+                    Some(quote_native(
+                        self.directory
+                            .real()
+                            .as_path()
+                            .join(self.file.as_os_str())
+                            .as_os_str(),
                     )),
                     &e,
                 )
@@ -243,7 +256,7 @@ impl Workspace {
         if target.stat().is_none_or(|stat| stat.kind != Kind::File) {
             return Err(failure(EditorFailure::Workspace(EditorFailureWorkspace {
                 step: EditorWorkspaceStep::InspectBuffer,
-                path: Some(ral_core::path::shown(target.real().as_path())),
+                path: Some(quote_native(target.real().as_path().as_os_str())),
                 cause: EditorWorkspaceFailure::ExpectedRegularFile(
                     EditorWorkspaceFailureExpectedRegularFile {
                         found: target.stat().map(|stat| stat.kind),
@@ -254,7 +267,7 @@ impl Workspace {
         let file = target.read().map_err(|e| {
             workspace_io(
                 EditorWorkspaceStep::OpenBuffer,
-                Some(ral_core::path::shown(target.real().as_path())),
+                Some(quote_native(target.real().as_path().as_os_str())),
                 &e,
             )
         })?;
@@ -351,7 +364,9 @@ mod tests {
                 .err()
                 .expect("write must be refused");
             assert!(
-                error.to_string().contains("fs write denied by grant"),
+                error
+                    .to_string()
+                    .contains("grant does not allow write access"),
                 "{error}"
             );
         });
@@ -369,7 +384,9 @@ mod tests {
         shell.with_layer(layer, |shell| {
             let error = workspace.readback(shell).unwrap_err();
             assert!(
-                error.to_string().contains("fs read denied by grant"),
+                error
+                    .to_string()
+                    .contains("grant does not allow read access"),
                 "{error}"
             );
         });
@@ -472,7 +489,10 @@ mod tests {
         assert_eq!(error.hints(), []);
         assert_eq!(error.context(), Some("failed-editor"));
         let cleanup = String::from_utf8(captured.stderr.bytes).unwrap();
-        assert!(cleanup.contains("fs write denied by grant"), "{cleanup}");
+        assert!(
+            cleanup.contains("grant does not allow write access"),
+            "{cleanup}"
+        );
         assert!(!cleanup.contains("editor exited"), "{cleanup}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

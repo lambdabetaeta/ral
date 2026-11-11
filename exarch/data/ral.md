@@ -267,7 +267,7 @@ Choose how to handle a failure: `try` runs a recovery handler, `audit` records t
         "sort failed: $err[message]"
       }
 
-`$err[status]` is the failure's exit status, from 1 to 255: a program's own `n`, `128+n` when signal `n` killed it, 127 when the command was not found, 126 when it is not runnable, 124 for a timeout, 143 for a cancellation, and 1 for anything else, including `fail`. Compare it, as the `audit` example below does.
+`$err[status]` is the failure's exit status, from 1 to 255: a program's own `n`, `128+n` when signal `n` killed it, 127 when the command was not found, 126 when it is not runnable, 124 for a timeout, 143 for a cancellation, and 1 for anything else, including `fail`. Status codes are not unique failure classes: status 1 also covers operational refusal, even when `frame` is `grep`.
 
 The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is the failure's text; to see the failing command's output, wrap the call in `audit`.
 
@@ -286,13 +286,14 @@ Raise a fresh error with `fail #'failure caused by x'#` (status 1). Re-raise a c
 
 `audit { … }` evaluates its body and returns a report with two fields: `outcome`, which is `` `ok `` of the value the body returned or `` `err `` of an error record, and `trail`, a flat list of everything the body did. `audit` turns recoverable runtime failures into data; `exit`, Ctrl-C, and the tool timeout stop the run instead. It keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr.
 
-Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, one record per call. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
+Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, one record per call. Inspect the outcome without assuming that a failure means no matches; diagnose and re-raise it:
 
     let r = audit { grep -c ERROR app.log }
     case $r[outcome] [
       `ok:  { |_| bytes-to-string !{commands $r}[0][stdout] },
       `err: { |e|
-        if $[$e[frame] == grep && $e[status] == 1] { #'no matches'# } else { raise $e }
+        warn "grep failed (status $e[status]): $e[message]"
+        raise $e
       }
     ]
 

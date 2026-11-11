@@ -93,8 +93,7 @@ pub enum Act {
     List,
 }
 
-/// Why an operation failed: one sentence naming the place by
-/// [`shown`] and, where the user can act, what to do.
+/// Why an operation failed, naming its native spelling and what to do.
 #[derive(Debug)]
 pub enum OwnError {
     /// No base for `kind`: no absolute `XDG_<KIND>_HOME`, no home bound, and
@@ -147,39 +146,6 @@ impl OwnError {
 impl fmt::Display for OwnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoBase(kind) => {
-                let (name, var) = (<&str>::from(*kind), kind.env_var());
-                write!(
-                    f,
-                    "no {name} directory: {var} is not an absolute path, and this process has no \
-                     home directory; set HOME (or {var}) and run it again"
-                )
-            }
-            Self::NoCwd(at) => write!(
-                f,
-                "{} is a relative path, and this process has no working directory to read it \
-                 against: give an absolute path",
-                shown(at)
-            ),
-            Self::Linked(at) => write!(
-                f,
-                "{} is a link, and a program's own files are written through no link: remove the \
-                 link, and it will be made again",
-                shown(at)
-            ),
-            Self::Dangling { at, to } => write!(
-                f,
-                "{} is a link to {}, which is not there: restore it (is the dotfiles checkout \
-                 present?) or remove the link",
-                shown(at),
-                shown(to)
-            ),
-            Self::Outside { at, root } => write!(
-                f,
-                "{} is not under {}, where this program keeps its own: move it there to use it",
-                shown(at),
-                shown(root)
-            ),
             Self::Io {
                 act: Act::Make,
                 at,
@@ -188,7 +154,7 @@ impl fmt::Display for OwnError {
             } if error.kind() == io::ErrorKind::AlreadyExists => write!(
                 f,
                 "{} already exists, and is never overwritten: choose another name",
-                shown(at)
+                crate::text::quote_native(at.as_os_str())
             ),
             Self::Io {
                 act: Act::Write,
@@ -205,20 +171,19 @@ impl fmt::Display for OwnError {
                     "could not write {}: it is a link to {}, which cannot be changed ({error}); \
                      change it where it is generated (home-manager, for one), or replace the \
                      link with a file",
-                    shown(at),
-                    shown(to)
+                    crate::text::quote_native(at.as_os_str()),
+                    crate::text::quote_native(to.as_os_str())
                 )
             }
             Self::Io { act, at, error, .. } => {
-                write!(f, "could not {} {}: {error}", <&str>::from(*act), shown(at))
+                write!(
+                    f,
+                    "could not {} {}: {error}",
+                    <&str>::from(*act),
+                    crate::text::quote_native(at.as_os_str())
+                )
             }
-            Self::Json { act, at, cause } => write!(
-                f,
-                "could not {} {} as JSON: {}",
-                <&str>::from(*act),
-                shown(at),
-                cause.describe()
-            ),
+            _ => f.write_str(&IoCause::from(self).describe()),
         }
     }
 }
@@ -263,26 +228,28 @@ impl From<&OwnError> for IoCause {
     fn from(error: &OwnError) -> Self {
         let leaf = match error {
             OwnError::NoBase(kind) => OwnLeaf::NoBase(*kind),
-            OwnError::NoCwd(path) => OwnLeaf::NoCwd(shown(path)),
-            OwnError::Linked(path) => OwnLeaf::Linked(shown(path)),
+            OwnError::NoCwd(path) => OwnLeaf::NoCwd(crate::text::quote_native(path.as_os_str())),
+            OwnError::Linked(path) => OwnLeaf::Linked(crate::text::quote_native(path.as_os_str())),
             OwnError::Dangling { at, to } => OwnLeaf::Dangling(OwnLeafDangling {
-                at: shown(at),
-                to: shown(to),
+                at: crate::text::quote_native(at.as_os_str()),
+                to: crate::text::quote_native(to.as_os_str()),
             }),
             OwnError::Outside { at, root } => OwnLeaf::Outside(OwnLeafOutside {
-                at: shown(at),
-                root: shown(root),
+                at: crate::text::quote_native(at.as_os_str()),
+                root: crate::text::quote_native(root.as_os_str()),
             }),
             OwnError::Io { act, at, to, error } => {
                 return crate::io::failure(error).at(IoContext::Owned(OwnIoContext {
                     act: (*act).into(),
-                    at: shown(at),
-                    to: to.as_ref().map(shown),
+                    at: crate::text::quote_native(at.as_os_str()),
+                    to: to
+                        .as_ref()
+                        .map(|to| crate::text::quote_native(to.as_os_str())),
                 }));
             }
             OwnError::Json { act, at, cause } => OwnLeaf::Json(OwnLeafJson {
                 act: (*act).into(),
-                at: shown(at),
+                at: crate::text::quote_native(at.as_os_str()),
                 cause: cause.clone(),
             }),
         };
@@ -1240,8 +1207,8 @@ mod typed_failure_tests {
             cause.context,
             vec![IoContext::Owned(OwnIoContext {
                 act: OwnAct::Write,
-                at: "link".into(),
-                to: Some("target".into())
+                at: crate::text::quote_native(OsStr::new("link")),
+                to: Some(crate::text::quote_native(OsStr::new("target")))
             })]
         );
     }

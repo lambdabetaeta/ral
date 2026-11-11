@@ -172,7 +172,7 @@ mod tests {
         };
         assert!(
             matches!(error.reason, crate::fact::Reason::Invalid(f) if f.operation == "glob" && matches!(&f.cause,
-            InvalidCause::Path(crate::fact::PathFailure::NotUnicode(crate::fact::PathFailureNotUnicode { shown })) if shown.ends_with("bad-\u{FFFD}")))
+            InvalidCause::Path(crate::fact::PathFailure::NotUnicode(crate::fact::PathFailureNotUnicode { shown })) if shown == &crate::text::quote_native(entry.shown.as_path().as_os_str())))
         );
     }
 }

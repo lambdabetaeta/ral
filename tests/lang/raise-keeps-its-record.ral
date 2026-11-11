@@ -8,7 +8,11 @@ let assert_eq = { |name expected actual|
     }
 }
 let caught = { |body|
-    try { !$body; fail 'ran' } { |e| return $e }
+    let result = try { !$body; return `ok } { |e| return `err $e }
+    case $result [
+        `ok: { |_| fail 'expected failure' },
+        `err: { |e| return $e },
+    ]
 }
 
 # A caught record re-raises equal: frame, message, status and site

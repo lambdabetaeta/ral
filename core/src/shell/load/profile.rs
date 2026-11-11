@@ -17,6 +17,7 @@ use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Error, Mooring, Settled, Shell};
 use crate::source::{SourceFile, SourceOrigin};
+use crate::text::quote_native;
 
 /// Evaluate `source` and decode its terminal value into a resolved
 /// [`GrantLayer`], walking places against `ctx`.
@@ -67,12 +68,20 @@ pub fn load_capabilities_from_path(
             .with_context("capability file")
     })?;
     let reader = located.read().map_err(|e| {
-        Error::io(IoOperation::Open, IoSubject::Path(rp.shown()), &e)
-            .with_context("capability file")
+        Error::io(
+            IoOperation::Open,
+            IoSubject::Path(quote_native(rp.as_path().as_os_str())),
+            &e,
+        )
+        .with_context("capability file")
     })?;
     let source = std::io::read_to_string(reader).map_err(|e| {
-        Error::io(IoOperation::Read, IoSubject::Path(rp.shown()), &e)
-            .with_context("capability file")
+        Error::io(
+            IoOperation::Read,
+            IoSubject::Path(quote_native(rp.as_path().as_os_str())),
+            &e,
+        )
+        .with_context("capability file")
     })?;
     let source = crate::source::normalize_source_text(source);
     load_capabilities_from_str(mooring, shell, &source, &SourceOrigin::File(file), ctx)

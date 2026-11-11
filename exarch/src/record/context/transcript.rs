@@ -568,7 +568,7 @@ fn read_back_refusal(
     ContextFailure::ReadBack(ContextFailureReadBack {
         turn: turn.into(),
         source: source.get().into(),
-        record: ral_core::path::shown(path),
+        record: ral_core::text::quote_native(path.as_os_str()),
         cause,
     })
 }

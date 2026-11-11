@@ -306,6 +306,7 @@ fn numeric_map_keys_preserve_the_original_escaped_token_rules() {
         *error.cause,
         DecodeCause::JsonMapKey(JsonMapKeyFailure {
             text: "256".into(),
+            lexeme: r#""256""#.into(),
             target: JsonNumberTarget::U8
         })
     );

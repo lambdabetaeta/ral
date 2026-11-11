@@ -836,7 +836,7 @@ fn reqwest_sources_do_not_duplicate_consumed_io_context_spine() {
     }))
     .at(IoContext::Owned(OwnIoContext {
         act: OwnAct::Read,
-        at: "owned".into(),
+        at: ral_core::text::quote_native(std::ffi::OsStr::new("owned")),
         to: None,
     }));
     let error = io::Error::other(cause.clone());

@@ -11,9 +11,9 @@
 use super::{
     Access, Child, EntryName, Held, Kind, ObjectId, RootName, Seen, Sharing, Stat, Step, Visibility,
 };
-use crate::path::shown;
 use crate::path::site::{Silent, Surface};
 use crate::site::site;
+use crate::text::quote_native;
 use cap_fs_ext::OpenOptionsFollowExt;
 use cap_primitives::fs::{FollowSymlinks, OpenOptions, OpenOptionsExt};
 use std::ffi::{OsStr, OsString, c_void};
@@ -76,7 +76,9 @@ const SEPARATOR: u16 = 0x5c;
 /// A walk's refusal of an entry that is no longer one of the directory it
 /// was opened in.
 fn moved(name: &EntryName) -> io::Error {
-    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(shown(name.as_os_str())))
+    io::Error::other(crate::fact::PathIoLeaf::EntryMoved(quote_native(
+        name.as_os_str(),
+    )))
 }
 
 /// A zeroed buffer aligned for any struct the kernel fills in it, read back
@@ -306,7 +308,7 @@ fn open_entry(dir: &File, name: &OsStr, sharing: Sharing) -> io::Result<File> {
                 if kind_of(basic.FileAttributes, tag) == Kind::Dir {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        crate::fact::PathIoLeaf::Untraversable(shown(name)),
+                        crate::fact::PathIoLeaf::Untraversable(quote_native(name)),
                     ));
                 }
                 Ok(file)

@@ -8,6 +8,15 @@ anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, Completi
 
 # `await` is the block run here, and a worker ends with its children
 
+> Amended 2026-11-11 by [[decisions/261105_the-error-record|the error record]]:
+> programs read `[frame, message, status, site]`; `$e[message]` replaces
+> `describe`. `try`, `poll` and audit retain runtime witnesses, so re-raising
+> an unchanged record preserves its typed cause. Done events and worker
+> listings carry the same projection as plain data through `FOValue`; raising
+> those records, or a rebuilt record, makes a claim. `await` still propagates
+> the live error and its report facts. The earlier amendments below retain
+> their historical wording.
+
 > Amended 2026-11-05 by [[decisions/261105_the-error-record|the error record]]:
 > worker failures carry the one `Reason` and completed provenance before
 > publication. `done`, `poll` and `try` around `await` receive the same closed

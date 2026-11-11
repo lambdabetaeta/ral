@@ -1176,8 +1176,8 @@ fn meets_as_peers(reason: &Reason) -> bool {
 }
 
 /// Help for a value mismatch derived from the types' own shapes, not from which
-/// reason raised it — a `TyNode::Thunk` parameter, an error-record `[status: Int |
-/// r]`, and a byte/list confusion each name what the mismatch *is*, whether it
+/// reason raised it — a `TyNode::Thunk` parameter, an error record, and a byte/list
+/// confusion each name what the mismatch *is*, whether it
 /// arose at an argument, a spread, or a branch join. Which side lands in
 /// `expected` is an accident of the call site, so every test here considers
 /// both orders.
@@ -1212,7 +1212,9 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         );
     }
     let error_record = ErrorRecord::ty();
-    if *expected == error_record || *actual == error_record {
+    if closed_record_shape_matches(expected, &error_record)
+        || closed_record_shape_matches(actual, &error_record)
+    {
         return Some(
             "`fail` takes a String; use `raise $e` to re-raise an error record, \
              or `$e[message]` for its text"
@@ -1220,6 +1222,23 @@ fn shape_hint(kind: &TypeErrorKind) -> Option<String> {
         );
     }
     byte_writer_hint(expected, actual)
+}
+
+/// Record updates may permute rows, including nested record payloads.
+fn closed_record_shape_matches(found: &Ty, shape: &Ty) -> bool {
+    match (found.node(), shape.node()) {
+        (TyNode::Record(found), TyNode::Record(shape)) => {
+            !found.is_open()
+                && !shape.is_open()
+                && found.fields().count() == shape.fields().count()
+                && shape.fields().all(|(label, ty)| {
+                    found.fields().any(|(other, payload)| {
+                        label == other && closed_record_shape_matches(payload, ty)
+                    })
+                })
+        }
+        _ => found == shape,
+    }
 }
 
 /// A read refusal, by its written key and the head found.
@@ -1305,11 +1324,6 @@ fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
     })
 }
 
-/// Why `$STATUS` names nothing.
-const NO_STATUS_REGISTER: &str = "there is no status register: a failure raises an \
-    error record: catch it with `try` and read `$e[status]` and `$e[message]` from \
-    the handler's argument";
-
 /// The message and hint refusing `...` in a value's application, which the
 /// elaborator raises for a head it knows to be a value: the checker's words.
 pub(crate) fn spread_into_application() -> (String, String) {
@@ -1335,7 +1349,7 @@ pub(crate) fn hyphen_boundary_hint(prefix: &str) -> String {
 /// What an unbound `$name` most likely meant, most specific first.
 fn unbound_variable_hint(name: &str, suggestions: &[String]) -> String {
     if name == "STATUS" {
-        return NO_STATUS_REGISTER.into();
+        return crate::fact::EvalFailure::NO_STATUS_REGISTER.into();
     }
     let names: Vec<_> = suggestions.iter().map(|s| format!("`${s}`")).collect();
     if let Some((last, init)) = names.split_last() {

@@ -149,7 +149,7 @@ impl RawEnginePath {
                     crate::fact::JsonEncodeFailure::new(
                         crate::fact::JsonEncodeCause::NonUnicodePath(
                             crate::fact::JsonEncodeCauseNonUnicodePath {
-                                shown: super::shown(path),
+                                shown: crate::text::quote_native(path.as_os_str()),
                             },
                         ),
                     )

@@ -1,5 +1,7 @@
 //! Portable host failure facts.
 
+mod response;
+
 use super::decode::{DecodeFailure, JsonInputFailure};
 use super::io::{IoCause, IoKind};
 use super::protocol::ConnectionFailure;
@@ -2214,16 +2216,67 @@ impl KeyNotationFailure {
             Self::UnknownKey(_) => vec!["a key is one character, f1 to f12, or one of tab, enter, escape, up, down, left, right, home, end, delete, backspace".into()],
             Self::ControlCharacter(_) => vec!["name the key that sends it, e.g. 'ctrl-c' or 'escape'".into()],
             Self::ShiftedCharacter(value) => {
-                if !value.character.chars().all(char::is_alphabetic) || value.character.is_empty() {
+                let mut chars = value.character.chars();
+                let Some(character) = chars.next().filter(|c| c.is_alphabetic()) else {
+                    return Vec::new();
+                };
+                if chars.next().is_some() {
                     return Vec::new();
                 }
-                let character = if value.control { value.character.to_lowercase() } else { value.character.to_uppercase() };
-                vec![format!("did you mean '{}{}{character}'?", if value.control { "ctrl-" } else { "" }, if value.alt { "alt-" } else { "" })]
+                let converted = if value.control { character.to_lowercase().collect::<String>() } else { character.to_uppercase().collect() };
+                let mut chars = converted.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(character), None) => {
+                        let key = control_key_suggestion(character, value.control, value.alt);
+                        vec![format!("did you mean '{key}'?")]
+                    },
+                    _ => Vec::new(),
+                }
             }
-            Self::UppercaseControl(value) => vec![format!("did you mean '{}'?", value.chord.to_ascii_lowercase().escape_debug())],
+            Self::UppercaseControl(value) => {
+                let mut rest = value.chord.as_str();
+                let (mut control, mut alt) = (false, false);
+                while let Some(tail) = rest.strip_prefix("ctrl-").or_else(|| rest.strip_prefix("alt-")) {
+                    control |= rest.starts_with("ctrl-");
+                    alt |= rest.starts_with("alt-");
+                    rest = tail;
+                }
+                let mut chars = rest.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(character), None) if control && character.is_ascii_uppercase() => {
+                        let key = control_key_suggestion(character.to_ascii_lowercase(), true, alt);
+                        vec![format!("did you mean '{key}'?")]
+                    },
+                    _ => Vec::new(),
+                }
+            }
             Self::TerminalAlias(value) => vec![format!("did you mean '{}{}'?", if value.alt { "alt-" } else { "" }, value.alias.describe())],
         }
     }
+}
+
+fn control_key_suggestion(character: char, control: bool, alt: bool) -> String {
+    let alias = if control {
+        match character {
+            'h' => Some("backspace"),
+            'i' => Some("tab"),
+            'm' => Some("enter"),
+            '[' => Some("escape"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    format!(
+        "{}{}{}",
+        if control && alias.is_none() {
+            "ctrl-"
+        } else {
+            ""
+        },
+        if alt { "alt-" } else { "" },
+        alias.map_or_else(|| character.to_string(), str::to_owned)
+    )
 }
 
 impl KeyModifier {
@@ -2605,13 +2658,13 @@ impl ProviderLeaf {
         match self {
             Self::Unavailable(value) => format!("unavailable: {}", value.describe()),
             Self::Cancelled(value) => format!("cancelled: {}", value.describe()),
-            Self::Transient(value) => format!("transient: {}", value.describe()),
-            Self::Refused(value) => format!("refused: {}", value.describe()),
-            Self::Api(value) => format!("api: {}", value.describe()),
-            Self::Overflow(value) => format!("overflow: {}", value.describe()),
-            Self::OutputCap(value) => format!("output cap: {}", value.describe()),
-            Self::Terminal(value) => format!("terminal: {}", value.describe()),
-            Self::Credential(value) => format!("credential: {}", value.describe()),
+            Self::Transient(value) => value.describe(),
+            Self::Refused(value) => value.describe(),
+            Self::Api(value) => value.describe(),
+            Self::Overflow(value) => value.describe(),
+            Self::OutputCap(value) => value.describe(),
+            Self::Terminal(value) => value.describe(),
+            Self::Credential(value) => value.describe(),
         }
     }
 }
@@ -2625,23 +2678,31 @@ impl ProviderCancelSite {
 impl RetryableProviderCause {
     pub fn describe(&self) -> String {
         match self {
-            Self::Service(value) => format!("service: {}", value.describe()),
-            Self::StreamEndedWithoutEnd(value) => {
-                format!("stream ended without end: {}", value.describe())
-            }
+            Self::Service(value) => value.describe(),
+            Self::StreamEndedWithoutEnd(value) => value.describe(),
         }
     }
 }
 
 impl ProviderRefusal {
     pub fn describe(&self) -> String {
+        let reset = self.resets_at.as_ref().map_or_else(
+            || "no reset time was supplied".to_owned(),
+            |at| {
+                let nanos = |at: &ProviderInstant| {
+                    i128::from(at.seconds) * 1_000_000_000 + i128::from(at.subsec_nanoseconds)
+                };
+                let wait = (nanos(at) - nanos(&self.received)).max(0);
+                format!(
+                    "retry after {}.{:09} seconds",
+                    wait / 1_000_000_000,
+                    wait % 1_000_000_000
+                )
+            },
+        );
         format!(
-            "limit: {}, resets at: {}, received: {}, cause: {}",
+            "{}; {reset}: {}",
             self.limit.describe(),
-            self.resets_at
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), ProviderInstant::describe),
-            self.received.describe(),
             self.cause.describe()
         )
     }
@@ -2649,15 +2710,19 @@ impl ProviderRefusal {
 
 impl ProviderLimit {
     pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
+        match self {
+            Self::Rate => "rate limit reached",
+            Self::Allowance => "usage allowance exhausted",
+        }
+        .into()
     }
 }
 
 impl ProviderRefusalCause {
     pub fn describe(&self) -> String {
         match self {
-            Self::Service(value) => format!("service: {}", value.describe()),
-            Self::Held(value) => format!("held: {}", value.describe()),
+            Self::Service(value) => value.describe(),
+            Self::Held(value) => value.describe(),
         }
     }
 }
@@ -2680,13 +2745,23 @@ impl ServiceFailure {
             .fold(self.cause.describe(), |inner, context| {
                 format!("{}: {inner}", context.describe())
             });
-        format!("{} {}: {cause}", self.service, self.operation.describe())
+        format!(
+            "service {:?} could not {}: {cause}",
+            self.service,
+            self.operation.describe()
+        )
     }
 }
 
 impl ServiceOperation {
     pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
+        match self {
+            Self::Chat => "complete the chat request",
+            Self::BuildRefreshClient => "build the credential refresh client",
+            Self::RefreshRequest => "send the credential refresh request",
+            Self::RefreshResponse => "read the credential refresh response",
+        }
+        .into()
     }
 }
 
@@ -2694,10 +2769,10 @@ impl ServiceContext {
     pub fn describe(&self) -> String {
         match self {
             Self::GenaiWebAdapterCall(value) => {
-                format!("genai web adapter call: {}", value.describe())
+                format!("calling the {} adapter", value.describe())
             }
-            Self::GenaiWebModelCall(value) => format!("genai web model call: {}", value.describe()),
-            Self::GenaiWebStream(value) => format!("genai web stream: {}", value.describe()),
+            Self::GenaiWebModelCall(value) => format!("calling {}", value.describe()),
+            Self::GenaiWebStream(value) => format!("streaming from {}", value.describe()),
             Self::UnknownWebStreamSource(value) => {
                 format!("unknown web stream source: {}", value.describe())
             }
@@ -2708,19 +2783,19 @@ impl ServiceContext {
 impl ServiceCause {
     pub fn describe(&self) -> String {
         match self {
-            Self::Genai(value) => format!("genai: {}", value.describe()),
-            Self::Webc(value) => format!("webc: {}", value.describe()),
-            Self::Reqwest(value) => format!("reqwest: {}", value.describe()),
-            Self::StreamTimeout(value) => format!("stream timeout: {}", value.describe()),
-            Self::Utf8(value) => format!("utf8: {}", value.describe()),
-            Self::Io(value) => format!("io: {}", value.describe()),
-            Self::Url(value) => format!("url: {}", value.describe()),
-            Self::ValueExt(value) => format!("value ext: {}", value.describe()),
-            Self::Json(value) => format!("json: {}", value.describe()),
+            Self::Genai(value) => value.describe(),
+            Self::Webc(value) => value.describe(),
+            Self::Reqwest(value) => value.describe(),
+            Self::StreamTimeout(value) => format!("timed out {}", value.describe()),
+            Self::Utf8(value) => format!("the response is not UTF-8: {}", value.describe()),
+            Self::Io(value) => value.describe(),
+            Self::Url(value) => format!("invalid provider URL: {}", value.describe()),
+            Self::ValueExt(value) => value.describe(),
+            Self::Json(value) => format!("invalid provider JSON: {}", value.describe()),
             Self::UnknownWebStreamSource(value) => {
                 format!("unknown web stream source: {}", value.describe())
             }
-            Self::RefreshResponse(value) => format!("refresh response: {}", value.describe()),
+            Self::RefreshResponse(value) => value.describe(),
         }
     }
 }
@@ -2739,7 +2814,11 @@ impl ProviderMessageRole {
 
 impl StreamTimeoutKind {
     pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
+        match self {
+            Self::Headers => "waiting for response headers",
+            Self::Read => "waiting for stream data",
+        }
+        .into()
     }
 }
 
@@ -2747,65 +2826,60 @@ impl GenaiFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::ChatReqHasNoMessages(value) => {
-                format!("chat req has no messages: {}", value.describe())
+                format!("the chat request for {} has no messages", value.describe())
             }
-            Self::LastChatMessageIsNotUser(value) => {
-                format!("last chat message is not user: {}", value.describe())
+            Self::LastChatMessageIsNotUser(value) => value.describe(),
+            Self::MessageRoleNotSupported(value) => value.describe(),
+            Self::MessageContentTypeNotSupported(value) => value.describe(),
+            Self::JsonModeWithoutInstruction => {
+                "JSON response mode requires an instruction or prompt".to_owned()
             }
-            Self::MessageRoleNotSupported(value) => {
-                format!("message role not supported: {}", value.describe())
+            Self::VerbosityParsing(value) => value.describe(),
+            Self::ReasoningParsing(value) => value.describe(),
+            Self::ServiceTierParsing(value) => value.describe(),
+            Self::PromptCacheRetentionParsing(value) => value.describe(),
+            Self::NoChatResponse(value) => {
+                format!("{} returned no chat response", value.describe())
             }
-            Self::MessageContentTypeNotSupported(value) => {
-                format!("message content type not supported: {}", value.describe())
-            }
-            Self::JsonModeWithoutInstruction => "json mode without instruction".to_owned(),
-            Self::VerbosityParsing(value) => format!("verbosity parsing: {}", value.describe()),
-            Self::ReasoningParsing(value) => format!("reasoning parsing: {}", value.describe()),
-            Self::ServiceTierParsing(value) => {
-                format!("service tier parsing: {}", value.describe())
-            }
-            Self::PromptCacheRetentionParsing(value) => {
-                format!("prompt cache retention parsing: {}", value.describe())
-            }
-            Self::NoChatResponse(value) => format!("no chat response: {}", value.describe()),
             Self::InvalidJsonResponseElement(value) => {
-                format!("invalid json response element: {}", value.describe())
+                format!("invalid JSON response element: {}", value.describe())
             }
-            Self::RequiresApiKey(value) => format!("requires api key: {}", value.describe()),
-            Self::NoAuthResolver(value) => format!("no auth resolver: {}", value.describe()),
-            Self::NoAuthData(value) => format!("no auth data: {}", value.describe()),
-            Self::ModelMapperFailed(value) => format!("model mapper failed: {}", value.describe()),
-            Self::ChatResponseGeneration(value) => {
-                format!("chat response generation: {}", value.describe())
-            }
-            Self::ChatResponse(value) => format!("chat response: {}", value.describe()),
-            Self::StreamParse(value) => format!("stream parse: {}", value.describe()),
-            Self::HttpError(value) => format!("http error: {}", value.describe()),
-            Self::Resolver(value) => format!("resolver: {}", value.describe()),
-            Self::AdapterNotSupported(value) => {
-                format!("adapter not supported: {}", value.describe())
-            }
-            Self::CacheBreakpointNoEligibleContent(value) => {
-                format!("cache breakpoint no eligible content: {}", value.describe())
-            }
-            Self::AdapterKindMismatch(value) => {
-                format!("adapter kind mismatch: {}", value.describe())
-            }
-            Self::Internal(value) => format!("internal: {}", value.describe()),
-            Self::ClientBuildFail(value) => format!("client build fail: {}", value.describe()),
-            Self::JsonValueExt(value) => format!("json value ext: {}", value.describe()),
-            Self::SerdeJson(value) => format!("serde json: {}", value.describe()),
+            Self::RequiresApiKey(value) => format!("{} requires an API key", value.describe()),
+            Self::NoAuthResolver(value) => format!(
+                "no authentication resolver is configured for {}",
+                value.describe()
+            ),
+            Self::NoAuthData(value) => format!(
+                "no authentication data is available for {}",
+                value.describe()
+            ),
+            Self::ModelMapperFailed(value) => value.describe(),
+            Self::ChatResponseGeneration(value) => value.describe(),
+            Self::ChatResponse(value) => value.describe(),
+            Self::StreamParse(value) => value.describe(),
+            Self::HttpError(value) => value.describe(),
+            Self::Resolver(value) => value.describe(),
+            Self::AdapterNotSupported(value) => value.describe(),
+            Self::CacheBreakpointNoEligibleContent(value) => value.describe(),
+            Self::AdapterKindMismatch(value) => value.describe(),
+            Self::Internal(value) => format!("provider library failed: {}", value.describe()),
+            Self::ClientBuildFail(value) => value.describe(),
+            Self::JsonValueExt(value) => value.describe(),
+            Self::SerdeJson(value) => format!("invalid JSON: {}", value.describe()),
         }
     }
 }
 
 impl ProviderResponseHeader {
     pub fn describe(&self) -> String {
-        format!(
-            "name: {}, value: {} bytes",
-            self.name,
-            self.value.as_slice().len()
-        )
+        let bytes: String = self
+            .value
+            .as_slice()
+            .iter()
+            .flat_map(|byte| std::ascii::escape_default(*byte))
+            .map(char::from)
+            .collect();
+        format!("{}: \"{bytes}\"", self.name.escape_debug())
     }
 }
 
@@ -2858,16 +2932,10 @@ impl ProviderAdapter {
 impl WebcFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::ResponseFailedNotJson(value) => {
-                format!("response failed not json: {}", value.describe())
-            }
-            Self::ResponseFailedInvalidJson(value) => {
-                format!("response failed invalid json: {}", value.describe())
-            }
-            Self::ResponseFailedStatus(value) => {
-                format!("response failed status: {}", value.describe())
-            }
-            Self::JsonValueExt(value) => format!("json value ext: {}", value.describe()),
+            Self::ResponseFailedNotJson(value) => value.describe(),
+            Self::ResponseFailedInvalidJson(value) => value.describe(),
+            Self::ResponseFailedStatus(value) => value.describe(),
+            Self::JsonValueExt(value) => value.describe(),
         }
     }
 }
@@ -2875,11 +2943,9 @@ impl WebcFailure {
 impl ResolverFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::ApiKeyEnvNotFound(value) => {
-                format!("api key env not found: {}", value.describe())
-            }
-            Self::AuthDataNotSingleValue => "auth data not single value".to_owned(),
-            Self::Custom(value) => format!("custom: {}", value.describe()),
+            Self::ApiKeyEnvNotFound(value) => value.describe(),
+            Self::AuthDataNotSingleValue => "authentication data must be a single value".to_owned(),
+            Self::Custom(value) => value.describe(),
         }
     }
 }
@@ -2887,29 +2953,18 @@ impl ResolverFailure {
 impl ValueExtFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::Custom(value) => format!("custom: {}", value.describe()),
-            Self::PropertyNotFound(value) => format!("property not found: {}", value.describe()),
-            Self::PropertyValueNotOfType(value) => {
-                format!("property value not of type: {}", value.describe())
-            }
-            Self::ValueNotOfType(value) => format!("value not of type: {}", value.describe()),
-            Self::SerdeJson(value) => format!("serde json: {}", value.describe()),
+            Self::Custom(value) => value.describe(),
+            Self::PropertyNotFound(value) => value.describe(),
+            Self::PropertyValueNotOfType(value) => value.describe(),
+            Self::ValueNotOfType(value) => value.describe(),
+            Self::SerdeJson(value) => format!("invalid JSON: {}", value.describe()),
         }
     }
 }
 
 impl ForeignJsonFailure {
     pub fn describe(&self) -> String {
-        format!(
-            "category: {}, line: {}, column: {}, io kind: {}, detail: {}",
-            self.category.describe(),
-            self.line,
-            self.column,
-            self.io_kind
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), super::io::IoKind::describe),
-            self.detail
-        )
+        self.detail.clone()
     }
 }
 
@@ -2921,41 +2976,46 @@ impl ForeignJsonCategory {
 
 impl ReqwestFailure {
     pub fn describe(&self) -> String {
-        format!(
-            "summary: {}, sources: {}",
-            self.summary.describe(),
-            self.sources
-                .iter()
-                .map(ReqwestSource::describe)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        std::iter::once(self.summary.describe())
+            .chain(self.sources.iter().map(ReqwestSource::describe))
+            .collect::<Vec<_>>()
+            .join(": ")
     }
 }
 
 impl ReqwestSummary {
     pub fn describe(&self) -> String {
-        format!(
-            "class: {}, timeout: {}, connect: {}, dns: {}, url: {}",
-            self.class.describe(),
-            self.timeout,
-            self.connect,
-            self.dns,
-            self.url.as_deref().unwrap_or("none")
-        )
+        let url = self
+            .url
+            .as_ref()
+            .map_or_else(String::new, |url| format!(" for {url:?}"));
+        let observations = [
+            (self.timeout, "timed out"),
+            (self.connect, "connection failed"),
+            (self.dns, "DNS lookup failed"),
+        ]
+        .into_iter()
+        .filter_map(|(present, text)| present.then_some(text))
+        .collect::<Vec<_>>();
+        let detail = if observations.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", observations.join(", "))
+        };
+        format!("{}{url}{detail}", self.class.describe())
     }
 }
 
 impl ReqwestClass {
     pub fn describe(&self) -> String {
         match self {
-            Self::Builder => "builder".to_owned(),
-            Self::Redirect => "redirect".to_owned(),
-            Self::Status(value) => format!("status: {value}"),
-            Self::Request => "request".to_owned(),
-            Self::Body => "body".to_owned(),
-            Self::Decode => "decode".to_owned(),
-            Self::Upgrade => "upgrade".to_owned(),
+            Self::Builder => "could not build the HTTP request".to_owned(),
+            Self::Redirect => "HTTP redirect failed".to_owned(),
+            Self::Status(value) => format!("HTTP request failed with status {value}"),
+            Self::Request => "HTTP request failed".to_owned(),
+            Self::Body => "could not read the HTTP body".to_owned(),
+            Self::Decode => "could not decode the HTTP response".to_owned(),
+            Self::Upgrade => "HTTP connection upgrade failed".to_owned(),
             Self::Unclassified(value) => format!("unclassified: {}", value.describe()),
         }
     }
@@ -2964,12 +3024,12 @@ impl ReqwestClass {
 impl ReqwestSource {
     pub fn describe(&self) -> String {
         match self {
-            Self::Reqwest(value) => format!("reqwest: {}", value.describe()),
-            Self::Io(value) => format!("io: {}", value.describe()),
-            Self::Json(value) => format!("json: {}", value.describe()),
-            Self::Url(value) => format!("url: {}", value.describe()),
-            Self::Utf8(value) => format!("utf8: {}", value.describe()),
-            Self::Foreign(value) => format!("foreign: {}", value.describe()),
+            Self::Reqwest(value) => value.describe(),
+            Self::Io(value) => value.describe(),
+            Self::Json(value) => format!("invalid JSON: {}", value.describe()),
+            Self::Url(value) => value.describe(),
+            Self::Utf8(value) => value.describe(),
+            Self::Foreign(value) => value.describe(),
         }
     }
 }
@@ -2977,16 +3037,20 @@ impl ReqwestSource {
 impl ProviderUrlFailure {
     pub fn describe(&self) -> String {
         match self {
-            Self::EmptyHost => "empty host".to_owned(),
-            Self::Idna => "idna".to_owned(),
-            Self::InvalidPort => "invalid port".to_owned(),
-            Self::InvalidIpv4Address => "invalid ipv4 address".to_owned(),
-            Self::InvalidIpv6Address => "invalid ipv6 address".to_owned(),
-            Self::InvalidDomainCharacter => "invalid domain character".to_owned(),
-            Self::RelativeWithoutBase => "relative without base".to_owned(),
-            Self::RelativeWithCannotBeABaseBase => "relative with cannot be a base base".to_owned(),
-            Self::SetHostOnCannotBeABaseUrl => "set host on cannot be a base url".to_owned(),
-            Self::Overflow => "overflow".to_owned(),
+            Self::EmptyHost => "URL host is empty".to_owned(),
+            Self::Idna => "invalid international domain name".to_owned(),
+            Self::InvalidPort => "invalid URL port: expected an integer from 0 to 65535".to_owned(),
+            Self::InvalidIpv4Address => "invalid IPv4 address".to_owned(),
+            Self::InvalidIpv6Address => "invalid IPv6 address".to_owned(),
+            Self::InvalidDomainCharacter => "URL domain contains an invalid character".to_owned(),
+            Self::RelativeWithoutBase => "a relative URL requires a base URL".to_owned(),
+            Self::RelativeWithCannotBeABaseBase => {
+                "cannot resolve a relative URL against this base".to_owned()
+            }
+            Self::SetHostOnCannotBeABaseUrl => {
+                "cannot set a host on a URL that cannot be a base".to_owned()
+            }
+            Self::Overflow => "URLs larger than 4 GB are not supported".to_owned(),
             Self::Unclassified(value) => format!("unclassified: {}", value.describe()),
         }
     }
@@ -3012,14 +3076,14 @@ impl CredentialService {
 impl CredentialCause {
     pub fn describe(&self) -> String {
         match self {
-            Self::OwnerPanicked => "owner panicked".to_owned(),
-            Self::OwnerStopped => "owner stopped".to_owned(),
-            Self::Removed => "removed".to_owned(),
-            Self::UnresolvedRotation => "unresolved rotation".to_owned(),
-            Self::Store(value) => format!("store: {}", value.describe()),
-            Self::LeaseTimedOut => "lease timed out".to_owned(),
-            Self::PreparationDeadline => "preparation deadline".to_owned(),
-            Self::Refresh(value) => format!("refresh: {}", value.describe()),
+            Self::OwnerPanicked => "the credential owner panicked; a refresh may have rotated the credential; sign in again".to_owned(),
+            Self::OwnerStopped => "the credential owner stopped before reporting; the refresh outcome is unknown; sign in again".to_owned(),
+            Self::Removed => "the credential was removed from the store; sign in again".to_owned(),
+            Self::UnresolvedRotation => "a previous refresh may have rotated this credential; sign in again".to_owned(),
+            Self::Store(value) => value.describe(),
+            Self::LeaseTimedOut => "timed out waiting for the credential store; another process may be holding it".to_owned(),
+            Self::PreparationDeadline => "credential preparation timed out before sending a refresh request; retrying is safe".to_owned(),
+            Self::Refresh(value) => value.describe(),
         }
     }
 }
@@ -3042,8 +3106,8 @@ impl RefreshFailure {
             Self::TimedOut(value) => {
                 format!("timed out: {}.{:09} seconds", value.seconds, value.nanos)
             }
-            Self::Service(value) => format!("service: {}", value.describe()),
-            Self::Response(value) => format!("response: {}", value.describe()),
+            Self::Service(value) => value.describe(),
+            Self::Response(value) => value.describe(),
             Self::MissingToken(value) => format!("missing token: {}", value.describe()),
             Self::EmptyToken(value) => format!("empty token: {}", value.describe()),
             Self::InvalidExpiry(value) => format!("invalid expiry: {}", value.describe()),
@@ -3060,15 +3124,19 @@ impl RefreshTokenField {
 
 impl RefreshServiceResponse {
     pub fn describe(&self) -> String {
-        format!("status: {}, body: {}", self.status, self.body.describe())
+        format!(
+            "credential refresh returned HTTP {}: {}",
+            self.status,
+            self.body.describe()
+        )
     }
 }
 
 impl RefreshResponseBody {
     pub fn describe(&self) -> String {
         match self {
-            Self::Detail(value) => format!("detail: {}", value.describe()),
-            Self::ReadFailed(value) => format!("read failed: {}", value.describe()),
+            Self::Detail(value) => value.describe(),
+            Self::ReadFailed(value) => format!("could not read the response: {}", value.describe()),
         }
     }
 }
@@ -3076,9 +3144,7 @@ impl RefreshResponseBody {
 impl RefreshResponseDetail {
     pub fn describe(&self) -> String {
         match self {
-            Self::Text(text) => {
-                format!("{}{}", text.preview, if text.truncated { "…" } else { "" })
-            }
+            Self::Text(text) => text.describe(),
             Self::Html => "HTML response".into(),
             Self::Empty => "empty response".into(),
         }
@@ -3104,12 +3170,25 @@ impl HelperFailure {
 impl ProviderStop {
     pub fn describe(&self) -> String {
         match self {
-            Self::Completed(value) => format!("completed: {value}"),
-            Self::MaxTokens(value) => format!("max tokens: {value}"),
-            Self::ToolCall(value) => format!("tool call: {value}"),
-            Self::ContentFilter(value) => format!("content filter: {value}"),
-            Self::StopSequence(value) => format!("stop sequence: {value}"),
-            Self::Unclassified(value) => format!("unclassified: {value}"),
+            Self::Completed(value) => {
+                format!("completed: {}", ServiceFailure::response_summary(value))
+            }
+            Self::MaxTokens(value) => {
+                format!("max tokens: {}", ServiceFailure::response_summary(value))
+            }
+            Self::ToolCall(value) => {
+                format!("tool call: {}", ServiceFailure::response_summary(value))
+            }
+            Self::ContentFilter(value) => format!(
+                "content filter: {}",
+                ServiceFailure::response_summary(value)
+            ),
+            Self::StopSequence(value) => {
+                format!("stop sequence: {}", ServiceFailure::response_summary(value))
+            }
+            Self::Unclassified(value) => {
+                format!("unclassified: {}", ServiceFailure::response_summary(value))
+            }
         }
     }
 }
@@ -3126,7 +3205,7 @@ impl WithdrawalEvidence {
 
 impl BootFailureProfileNotAbsolute {
     pub fn describe(&self) -> String {
-        format!("the --capabilities profile {} is not absolute", self.path)
+        format!("the --capabilities profile {:?} is not absolute", self.path)
     }
 }
 
@@ -3134,8 +3213,12 @@ impl EditorFailureUnknownStyle {
     pub fn describe(&self) -> String {
         format!(
             "unknown style '{}'; available styles: {}",
-            self.style,
-            self.offered.join(", ")
+            self.style.escape_debug(),
+            self.offered
+                .iter()
+                .map(|style| format!("'{}'", style.escape_debug()))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -3170,7 +3253,7 @@ impl EditorFailureWorkspace {
         let path = self
             .path
             .as_ref()
-            .map_or_else(String::new, |path| format!(" {path:?}"));
+            .map_or_else(String::new, |path| format!(" {path}"));
         format!(
             "could not {}{path}: {}",
             self.step.describe(),
@@ -3206,37 +3289,43 @@ impl EditorWorkspaceFailureExpectedRegularFile {
 
 impl PluginFailureAlreadyLoaded {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' is already loaded", self.name)
+        format!("plugin '{}' is already loaded", self.name.escape_debug())
     }
 }
 
 impl PluginFailureNotLoaded {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' is not loaded", self.name)
+        format!("plugin '{}' is not loaded", self.name.escape_debug())
     }
 }
 
 impl PluginFailureNotFound {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' was not found", self.requested)
+        format!("plugin '{}' was not found", self.requested.escape_debug())
     }
 }
 
 impl PluginFailureOptionsWithoutFactory {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' takes no configuration", self.plugin)
+        format!(
+            "plugin '{}' takes no configuration",
+            self.plugin.escape_debug()
+        )
     }
 }
 
 impl PluginFailureFactoryReturnedBlock {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' returned a Block as its manifest", self.plugin)
+        format!(
+            "plugin '{}' returned a Block as its manifest",
+            self.plugin.escape_debug()
+        )
     }
 }
 
 impl PluginFailureUnknownHookEvent {
     pub fn describe(&self) -> String {
-        format!("unknown hook event '{}'", self.event)
+        format!("unknown hook event '{}'", self.event.escape_debug())
     }
 }
 
@@ -3244,7 +3333,7 @@ impl PluginFailureAliasInstallationEscaped {
     pub fn describe(&self) -> String {
         format!(
             "installation of alias '{}' escaped: {}",
-            self.alias,
+            self.alias.escape_debug(),
             self.cause.describe()
         )
     }
@@ -3629,9 +3718,15 @@ impl ContextFailureMutation {
             ContextOperation::AcceptUser => {
                 format!("cannot accept a new user prompt while the session is {state}")
             }
-            ContextOperation::AcceptSteering => format!(
-                "tool results must be complete before accepting a steering prompt; the session is {state}"
-            ),
+            ContextOperation::AcceptSteering => match &self.state {
+                ContextState::ReadyForUser => format!(
+                    "cannot accept a steering prompt while the session is {state}; send a new user prompt"
+                ),
+                ContextState::AwaitingToolResults(_) => format!(
+                    "tool results must be complete before accepting a steering prompt; the session is {state}"
+                ),
+                _ => format!("cannot accept a steering prompt while the session is {state}"),
+            },
             ContextOperation::AppendAssistant => {
                 format!("assistant message is not expected while the session is {state}")
             }
@@ -3723,14 +3818,14 @@ impl ScheduleFailureRecording {
 
 impl EditFailureHashAbsent {
     pub fn describe(&self) -> String {
-        format!("no line in {} hashes to {}", self.path, self.hash)
+        format!("no line in {:?} hashes to {:?}", self.path, self.hash)
     }
 }
 
 impl EditFailureHashAmbiguous {
     pub fn describe(&self) -> String {
         format!(
-            "hash {} matches multiple lines in {}: {}",
+            "hash {:?} matches multiple lines in {:?}: {}",
             self.hash,
             self.path,
             self.lines
@@ -3744,14 +3839,14 @@ impl EditFailureHashAmbiguous {
 
 impl EditFailureDuplicateTargetLine {
     pub fn describe(&self) -> String {
-        format!("two edits name line {} in {}", self.line, self.path)
+        format!("two edits name line {} in {:?}", self.line, self.path)
     }
 }
 
 impl EditFailureMultipleLiteralMatches {
     pub fn describe(&self) -> String {
         format!(
-            "FROM matches {} times in {}, on {} {}; must match exactly once",
+            "FROM matches {} times in {:?}, on {} {}; must match exactly once",
             self.matches,
             self.path,
             if self.lines.len() == 1 {
@@ -3770,7 +3865,7 @@ impl EditFailureMultipleLiteralMatches {
 
 impl EditFailureNoLiteralMatch {
     pub fn describe(&self) -> String {
-        let path = &self.path;
+        let path = format!("{:?}", self.path);
         match &self.evidence {
             LiteralMiss::Escapes => {
                 format!("FROM was not found in {path}, and FROM carries a literal backslash escape")
@@ -3936,7 +4031,7 @@ impl RecordReadFailureLine {
 impl RecordLineFailureSealMismatch {
     pub fn describe(&self) -> String {
         format!(
-            "is corrupt: its commit hashes to {} but was sealed as {:?}, so the file changed after it was written (edited by hand, or damaged on disk); the lines before it are intact, and nothing from it on can be read.",
+            "is corrupt: its commit hashes to {:?} but was sealed as {:?}, so the file changed after it was written (edited by hand, or damaged on disk); the lines before it are intact, and nothing from it on can be read.",
             self.actual, self.sealed
         )
     }
@@ -3945,73 +4040,88 @@ impl RecordLineFailureSealMismatch {
 impl ProviderLeafTransient {
     pub fn describe(&self) -> String {
         format!(
-            "cause: {}, attempts: {}",
-            self.cause.describe(),
-            self.attempts
+            "provider request failed after {}: {}",
+            crate::text::plural(self.attempts.to_u64(), "attempt"),
+            self.cause.describe()
         )
     }
 }
 
 impl ProviderLeafApi {
     pub fn describe(&self) -> String {
-        format!("model: {}, cause: {}", self.model, self.cause.describe())
-    }
-}
-
-impl ProviderLeafOverflow {
-    pub fn describe(&self) -> String {
         format!(
-            "model: {}, provider: {}, sent: {}, limit: {}, listed: {}, cause: {}",
+            "API request for model {:?} failed: {}",
             self.model,
-            self.provider.as_deref().unwrap_or("none"),
-            self.sent
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), ToString::to_string),
-            self.limit
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), ToString::to_string),
-            self.listed
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), ToString::to_string),
             self.cause.describe()
         )
     }
 }
 
+impl ProviderLeafOverflow {
+    pub fn describe(&self) -> String {
+        let mut message = format!("context too long for model {:?}", self.model);
+        if let Some(provider) = &self.provider {
+            let _ = write!(message, " on {provider:?}");
+        }
+        if let Some(sent) = self.sent {
+            let _ = write!(message, "; {sent} tokens sent");
+        }
+        if let Some(limit) = self.limit {
+            let _ = write!(message, "; {limit} tokens allowed");
+        }
+        if let Some(listed) = self.listed.filter(|listed| Some(*listed) != self.limit) {
+            let _ = write!(
+                message,
+                "; previously listed context window: {listed} tokens"
+            );
+        }
+        format!("{message}: {}", self.cause.describe())
+    }
+}
+
 impl ProviderLeafOutputCap {
     pub fn describe(&self) -> String {
-        format!("stop reason: {}", self.stop_reason)
+        format!(
+            "output cap ({})",
+            ServiceFailure::response_summary(&self.stop_reason)
+        )
     }
 }
 
 impl RetryableProviderCauseStreamEndedWithoutEnd {
     pub fn describe(&self) -> String {
-        format!("service: {}, model: {}", self.service, self.model)
+        format!(
+            "service {:?} ended the stream for model {:?} without a completion event",
+            self.service, self.model
+        )
     }
 }
 
 impl ProviderRefusalCauseHeld {
     pub fn describe(&self) -> String {
-        format!("service: {}, model: {}", self.service, self.model)
+        format!(
+            "request to service {:?} for model {:?} was not sent because of an earlier limit",
+            self.service, self.model
+        )
     }
 }
 
 impl ServiceContextUnknownWebStreamSource {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        ServiceFailure::response_summary(&self.detail)
     }
 }
 
 impl ServiceCauseUnknownWebStreamSource {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        ServiceFailure::response_summary(&self.detail)
     }
 }
 
 impl GenaiFailureLastChatMessageIsNotUser {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, actual role: {}",
+            "{} requires a final user message, but the final message has role {}",
             self.model.describe(),
             self.actual_role.describe()
         )
@@ -4021,7 +4131,7 @@ impl GenaiFailureLastChatMessageIsNotUser {
 impl GenaiFailureMessageRoleNotSupported {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, role: {}",
+            "{} does not support the {} message role",
             self.model.describe(),
             self.role.describe()
         )
@@ -4030,44 +4140,57 @@ impl GenaiFailureMessageRoleNotSupported {
 
 impl GenaiFailureMessageContentTypeNotSupported {
     pub fn describe(&self) -> String {
-        format!("model: {}, detail: {}", self.model.describe(), self.detail)
+        format!(
+            "{} does not support this message content: {}",
+            self.model.describe(),
+            self.detail
+        )
     }
 }
 
 impl GenaiFailureVerbosityParsing {
     pub fn describe(&self) -> String {
-        format!("actual: {}", self.actual)
+        format!(
+            "invalid verbosity {:?}; expected low, medium, or high",
+            self.actual
+        )
     }
 }
 
 impl GenaiFailureReasoningParsing {
     pub fn describe(&self) -> String {
-        format!("actual: {}", self.actual)
+        format!(
+            "invalid reasoning setting {:?}; expected zero, none, low, medium, high, xhigh, max, minimal, or a token budget from 0 to 4294967295",
+            self.actual
+        )
     }
 }
 
 impl GenaiFailureServiceTierParsing {
     pub fn describe(&self) -> String {
-        format!("actual: {}", self.actual)
+        format!(
+            "invalid service tier {:?}; expected flex, auto, or default",
+            self.actual
+        )
     }
 }
 
 impl GenaiFailurePromptCacheRetentionParsing {
     pub fn describe(&self) -> String {
-        format!("actual: {}", self.actual)
+        format!("invalid prompt-cache retention {:?}", self.actual)
     }
 }
 
 impl GenaiFailureInvalidJsonResponseElement {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl GenaiFailureModelMapperFailed {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, cause: {}",
+            "could not map {}: {}",
             self.model.describe(),
             self.cause.describe()
         )
@@ -4077,24 +4200,28 @@ impl GenaiFailureModelMapperFailed {
 impl GenaiFailureChatResponseGeneration {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, response body: {}, detail: {}",
+            "could not generate a chat response for {}: {}; {}",
             self.model.describe(),
-            self.response_body,
-            self.detail
+            ServiceFailure::response_summary(&self.detail),
+            ServiceFailure::response_detail(&self.response_body)
         )
     }
 }
 
 impl GenaiFailureChatResponse {
     pub fn describe(&self) -> String {
-        format!("model: {}, body: {}", self.model.describe(), self.body)
+        format!(
+            "{} returned an error: {}",
+            self.model.describe(),
+            ServiceFailure::response_detail(&self.body)
+        )
     }
 }
 
 impl GenaiFailureStreamParse {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, cause: {}",
+            "could not parse the stream from {}: {}",
             self.model.describe(),
             self.cause.describe()
         )
@@ -4103,24 +4230,14 @@ impl GenaiFailureStreamParse {
 
 impl GenaiFailureHttpError {
     pub fn describe(&self) -> String {
-        format!(
-            "status: {}, canonical reason: {}, body: {}, headers: {}",
-            self.status,
-            self.canonical_reason,
-            self.body,
-            self.headers
-                .iter()
-                .map(ProviderResponseHeader::describe)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        describe_http_response(self.status, &self.body, &self.headers)
     }
 }
 
 impl GenaiFailureResolver {
     pub fn describe(&self) -> String {
         format!(
-            "model: {}, cause: {}",
+            "could not resolve authentication for {}: {}",
             self.model.describe(),
             self.cause.describe()
         )
@@ -4130,7 +4247,7 @@ impl GenaiFailureResolver {
 impl GenaiFailureAdapterNotSupported {
     pub fn describe(&self) -> String {
         format!(
-            "adapter: {}, feature: {}",
+            "the {} adapter does not support {:?}",
             self.adapter.describe(),
             self.feature
         )
@@ -4139,17 +4256,21 @@ impl GenaiFailureAdapterNotSupported {
 
 impl GenaiFailureCacheBreakpointNoEligibleContent {
     pub fn describe(&self) -> String {
-        format!("model: {}, scope: {}", self.model.describe(), self.scope)
+        format!(
+            "{} has no eligible content for a cache breakpoint in {:?}",
+            self.model.describe(),
+            self.scope
+        )
     }
 }
 
 impl GenaiFailureAdapterKindMismatch {
     pub fn describe(&self) -> String {
         format!(
-            "bound: {}, requested: {}, model: {}",
+            "the client is bound to {}, but model {:?} resolved to {}; remove the model's adapter namespace or use a client without a fixed adapter",
             self.bound.describe(),
-            self.requested.describe(),
-            self.model
+            self.model,
+            self.requested.describe()
         )
     }
 }
@@ -4162,65 +4283,86 @@ impl GenaiFailureInternal {
 
 impl GenaiFailureClientBuildFail {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        format!("could not build the provider client: {}", self.detail)
     }
 }
 
 impl WebcFailureResponseFailedNotJson {
     pub fn describe(&self) -> String {
-        format!("content type: {}, body: {}", self.content_type, self.body)
+        format!(
+            "expected a JSON response, got content type {:?}: {}",
+            self.content_type,
+            ServiceFailure::response_detail(&self.body)
+        )
     }
 }
 
 impl WebcFailureResponseFailedInvalidJson {
     pub fn describe(&self) -> String {
-        format!("body: {}, detail: {}", self.body, self.detail)
+        format!(
+            "the response is not valid JSON: {}; {}",
+            ServiceFailure::response_summary(&self.detail),
+            ServiceFailure::response_detail(&self.body)
+        )
     }
 }
 
 impl WebcFailureResponseFailedStatus {
     pub fn describe(&self) -> String {
+        describe_http_response(self.status, &self.body, &self.headers)
+    }
+}
+
+fn describe_http_response(status: u32, body: &str, headers: &[ProviderResponseHeader]) -> String {
+    let headers = if headers.is_empty() {
+        String::new()
+    } else {
         format!(
-            "status: {}, body: {}, headers: {}",
-            self.status,
-            self.body,
-            self.headers
+            "; response headers: {}",
+            headers
                 .iter()
                 .map(ProviderResponseHeader::describe)
                 .collect::<Vec<_>>()
                 .join(", ")
         )
-    }
+    };
+    format!(
+        "HTTP {status}: {}{headers}",
+        ServiceFailure::response_detail(body)
+    )
 }
 
 impl ResolverFailureApiKeyEnvNotFound {
     pub fn describe(&self) -> String {
-        format!("env name: {}", self.env_name)
+        format!(
+            "API key environment variable {:?} is not set",
+            self.env_name
+        )
     }
 }
 
 impl ResolverFailureCustom {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl ValueExtFailureCustom {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl ValueExtFailurePropertyNotFound {
     pub fn describe(&self) -> String {
-        format!("name: {}", self.name)
+        format!("JSON property {:?} was not found", self.name)
     }
 }
 
 impl ValueExtFailurePropertyValueNotOfType {
     pub fn describe(&self) -> String {
         format!(
-            "name: {}, required library type: {}",
+            "JSON property {:?} must be {}",
             self.name, self.required_library_type
         )
     }
@@ -4228,79 +4370,98 @@ impl ValueExtFailurePropertyValueNotOfType {
 
 impl ValueExtFailureValueNotOfType {
     pub fn describe(&self) -> String {
-        format!("required library type: {}", self.required_library_type)
+        format!("JSON value must be {}", self.required_library_type)
     }
 }
 
 impl ReqwestClassUnclassified {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl ReqwestSourceForeign {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl ProviderUrlFailureUnclassified {
     pub fn describe(&self) -> String {
-        format!("detail: {}", self.detail)
+        self.detail.clone()
     }
 }
 
 impl CredentialCauseStore {
     pub fn describe(&self) -> String {
-        format!(
-            "operation: {}, cause: {}",
-            self.operation.describe(),
-            self.cause.describe()
-        )
+        let step = match self.operation {
+            CredentialStoreOperation::OpenLease => "could not open the credential store lease",
+            CredentialStoreOperation::LockLease => "could not lock the credential store lease",
+            CredentialStoreOperation::Read => "could not read the credential store",
+            CredentialStoreOperation::PersistSuccessor
+            | CredentialStoreOperation::PersistFreshRotation => {
+                "the credential rotated, but could not be saved"
+            }
+        };
+        format!("{step}: {}", self.cause.describe())
     }
 }
 
 impl CredentialCauseRefresh {
     pub fn describe(&self) -> String {
-        format!(
-            "outcome: {}, cause: {}",
-            self.outcome.describe(),
-            self.cause.describe()
-        )
+        let outcome = match self.outcome {
+            RefreshOutcome::NotSubmitted => "refresh request was not sent; retrying is safe",
+            RefreshOutcome::Rejected => {
+                "the issuer rejected the refresh request without rotating the credential"
+            }
+            RefreshOutcome::Ambiguous => {
+                "could not confirm the refresh; the issuer may have rotated the credential; sign in again"
+            }
+        };
+        format!("{outcome}: {}", self.cause.describe())
     }
 }
 
 impl RefreshFailureResponse {
     pub fn describe(&self) -> String {
-        format!("status: {}, cause: {}", self.status, self.cause.describe())
+        format!(
+            "invalid credential refresh response (HTTP {}): {}",
+            self.status,
+            self.cause.describe()
+        )
     }
 }
 
 impl RefreshFailureInvalidExpiry {
     pub fn describe(&self) -> String {
-        format!("seconds: {}", self.seconds)
+        format!(
+            "credential lifetime must be positive, got {} seconds",
+            self.seconds
+        )
     }
 }
 
 impl RefreshFailureExpiryOverflow {
     pub fn describe(&self) -> String {
-        format!("now: {}, seconds: {}", self.now, self.seconds)
+        format!(
+            "credential lifetime of {} seconds overflows the expiry timestamp from {} seconds since the Unix epoch",
+            self.seconds, self.now
+        )
     }
 }
 
 impl RefreshResponseBodyDetail {
     pub fn describe(&self) -> String {
-        format!(
-            "code: {}, detail: {}",
-            self.code.as_deref().unwrap_or("none"),
-            self.detail.describe()
-        )
+        match &self.code {
+            Some(code) => format!("{} (code {code:?})", self.detail.describe()),
+            None => self.detail.describe(),
+        }
     }
 }
 
 impl RefreshResponseDetailText {
     pub fn describe(&self) -> String {
-        format!("preview: {}, truncated: {}", self.preview, self.truncated)
+        format!("{}{}", self.preview, if self.truncated { "…" } else { "" })
     }
 }
 
@@ -4436,24 +4597,49 @@ impl RefreshServiceResponse {
 }
 
 impl CredentialFailure {
-    pub fn advice(&self) -> Vec<String> {
+    fn expired_or_revoked(&self) -> bool {
         match &self.cause {
-            CredentialCause::Refresh(refresh) => match &refresh.cause {
-                RefreshFailure::Service(service) => match service.cause.as_ref() {
-                    ServiceCause::RefreshResponse(response) if response.expired_or_revoked() => {
-                        vec![format!(
-                            "the {} login for {:?} has expired or been revoked; use account {:?} on {} to sign in again",
-                            self.service.describe(),
-                            self.account,
-                            self.account,
-                            self.service.describe(),
-                        )]
-                    }
-                    _ => Vec::new(),
-                },
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
+            CredentialCause::Refresh(CredentialCauseRefresh {
+                cause: RefreshFailure::Service(service),
+                ..
+            }) => {
+                matches!(service.cause.as_ref(), ServiceCause::RefreshResponse(response) if response.expired_or_revoked())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn requires_sign_in(&self) -> bool {
+        self.expired_or_revoked()
+            || match &self.cause {
+                CredentialCause::OwnerPanicked
+                | CredentialCause::OwnerStopped
+                | CredentialCause::Removed
+                | CredentialCause::UnresolvedRotation => true,
+                CredentialCause::Refresh(refresh) => refresh.outcome == RefreshOutcome::Ambiguous,
+                CredentialCause::Store(_)
+                | CredentialCause::LeaseTimedOut
+                | CredentialCause::PreparationDeadline => false,
+            }
+    }
+
+    pub fn advice(&self) -> Vec<String> {
+        if self.expired_or_revoked() {
+            vec![format!(
+                "the {} login for {:?} has expired or been revoked; use account {:?} on {} to sign in again",
+                self.service.describe(),
+                self.account,
+                self.account,
+                self.service.describe(),
+            )]
+        } else if self.requires_sign_in() {
+            vec![format!(
+                "use account {:?} on {} to sign in again",
+                self.account,
+                self.service.describe()
+            )]
+        } else {
+            Vec::new()
         }
     }
 }
@@ -4489,7 +4675,7 @@ impl EditFailure {
                 "re-read with view-hash/view-hash-around before editing; the witness may be stale"
             }
             Self::MultipleLiteralMatches(_) => {
-                "widen FROM with a neighbouring line to make it unique, or change every occurrence by composing string-replace / re-replace-all over from-string and to-string"
+                "widen FROM with a neighbouring line to make it unique; to replace every match, use re-replace-all between from-string and to-string, noting that its pattern is a regex"
             }
             Self::NoLiteralMatch(miss) => match &miss.evidence {
                 LiteralMiss::Escapes => {
@@ -4517,10 +4703,18 @@ impl PluginFailure {
                 vec!["its entry in the rc's plugins map wants the empty options map `[:]`".into()]
             }
             Self::FactoryReturnedBlock(_) => {
-                vec!["expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])".into()]
+                vec!["expected a manifest Map, e.g. [name: 'my-plugin', hooks: [:], keybindings: []]".into()]
             }
             Self::UnknownHookEvent(value) => {
-                vec![format!("Valid events: {}", value.offered.join(", "))]
+                vec![format!(
+                    "Valid events: {}",
+                    value
+                        .offered
+                        .iter()
+                        .map(|event| format!("'{}'", event.escape_debug()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )]
             }
             Self::AlreadyLoaded(_) | Self::NotLoaded(_) | Self::AliasInstallationEscaped(_) => {
                 Vec::new()
@@ -4648,14 +4842,8 @@ mod presentation_tests {
     fn shifted_character_suggestions_preserve_modifiers_and_unicode_case_expansion() {
         for (chord, character, control, alt, suggestion) in [
             ("shift-a", "a", false, false, Some("A")),
-            ("shift-alt-ß", "ß", false, true, Some("alt-SS")),
-            (
-                "shift-ctrl-alt-İ",
-                "İ",
-                true,
-                true,
-                Some("ctrl-alt-i\u{307}"),
-            ),
+            ("shift-alt-ß", "ß", false, true, None),
+            ("shift-ctrl-alt-İ", "İ", true, true, None),
             ("shift-ctrl-A", "A", true, false, Some("ctrl-a")),
             ("shift-1", "1", false, false, None),
         ] {
@@ -4796,7 +4984,7 @@ mod presentation_tests {
                 PluginFailureFactoryReturnedBlock { plugin: "p".into() },
             )),
             "plugin 'p' returned a Block as its manifest",
-            &["expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])"],
+            &["expected a manifest Map, e.g. [name: 'my-plugin', hooks: [:], keybindings: []]"],
         );
         projection(
             RalFailure::Plugin(PluginFailure::UnknownHookEvent(
@@ -4806,7 +4994,7 @@ mod presentation_tests {
                 },
             )),
             "unknown hook event 'before'",
-            &["Valid events: pre-exec, post-exec"],
+            &["Valid events: 'pre-exec', 'post-exec'"],
         );
         projection(
             RalFailure::Plugin(PluginFailure::AliasInstallationEscaped(
@@ -4843,7 +5031,7 @@ mod presentation_tests {
                     path: "relative.ral".into(),
                 },
             )),
-            "the --capabilities profile relative.ral is not absolute",
+            "the --capabilities profile \"relative.ral\" is not absolute",
             &[],
         );
         projection(
@@ -4856,7 +5044,7 @@ mod presentation_tests {
                 style: "unknown".into(),
                 offered: vec!["bold".into(), "red".into()],
             })),
-            "unknown style 'unknown'; available styles: bold, red",
+            "unknown style 'unknown'; available styles: 'bold', 'red'",
             &[],
         );
     }
@@ -4996,7 +5184,7 @@ mod presentation_tests {
             projection(
                 RalFailure::Editor(EditorFailure::Workspace(EditorFailureWorkspace {
                     step: EditorWorkspaceStep::InspectBuffer,
-                    path: Some("/tmp/draft".into()),
+                    path: Some("\"/tmp/draft\"".into()),
                     cause: EditorWorkspaceFailure::ExpectedRegularFile(
                         EditorWorkspaceFailureExpectedRegularFile { found },
                     ),
@@ -5025,7 +5213,7 @@ mod presentation_tests {
                 "remove the editor workspace",
             ),
         ] {
-            for path in [None, Some("/tmp/draft")] {
+            for path in [None, Some("\"/tmp/draft\"")] {
                 let at = if path.is_some() {
                     " \"/tmp/draft\""
                 } else {
@@ -5117,8 +5305,8 @@ mod policy_edit_skill_presentation_tests {
         let cause = product(cause, FrontmatterFailure::describe, description);
         for (place, shown) in [
             (
-                SkillPlace::Disk("./skills/../skills/demo".into()),
-                "./skills/../skills/demo",
+                SkillPlace::Disk("\"./skills/../skills/demo\"".into()),
+                "\"./skills/../skills/demo\"",
             ),
             (SkillPlace::Builtin, "built into exarch"),
         ] {
@@ -5217,7 +5405,7 @@ mod policy_edit_skill_presentation_tests {
         edit(EditFailure::EmptyFrom, "FROM must be non-empty", &[]);
         let stale =
             &["re-read with view-hash/view-hash-around before editing; the witness may be stale"];
-        let description = "no line in ./f.txt hashes to deadbeef";
+        let description = "no line in \"./f.txt\" hashes to \"deadbeef\"";
         let absent = product(
             EditFailureHashAbsent {
                 path: "./f.txt".into(),
@@ -5228,7 +5416,7 @@ mod policy_edit_skill_presentation_tests {
         );
         edit(EditFailure::HashAbsent(absent), description, stale);
         let description =
-            "hash deadbeef matches multiple lines in ./f.txt: 8, 2, 18446744073709551615";
+            "hash \"deadbeef\" matches multiple lines in \"./f.txt\": 8, 2, 18446744073709551615";
         let ambiguous = product(
             EditFailureHashAmbiguous {
                 path: "./f.txt".into(),
@@ -5243,7 +5431,7 @@ mod policy_edit_skill_presentation_tests {
             description,
         );
         edit(EditFailure::HashAmbiguous(ambiguous), description, stale);
-        let description = "two edits name line 18446744073709551615 in ./f.txt";
+        let description = "two edits name line 18446744073709551615 in \"./f.txt\"";
         let duplicate = product(
             EditFailureDuplicateTargetLine {
                 path: "./f.txt".into(),
@@ -5265,17 +5453,17 @@ mod policy_edit_skill_presentation_tests {
             (
                 3,
                 vec![8, 2],
-                "FROM matches 3 times in f.txt, on lines 8, 2; must match exactly once",
+                "FROM matches 3 times in \"f.txt\", on lines 8, 2; must match exactly once",
             ),
             (
                 3,
                 vec![2],
-                "FROM matches 3 times in f.txt, on line 2; must match exactly once",
+                "FROM matches 3 times in \"f.txt\", on line 2; must match exactly once",
             ),
             (
                 u64::MAX,
                 vec![2],
-                "FROM matches 18446744073709551615 times in f.txt, on line 2; must match exactly once",
+                "FROM matches 18446744073709551615 times in \"f.txt\", on line 2; must match exactly once",
             ),
         ] {
             let payload = product(
@@ -5291,7 +5479,7 @@ mod policy_edit_skill_presentation_tests {
                 EditFailure::MultipleLiteralMatches(payload),
                 description,
                 &[
-                    "widen FROM with a neighbouring line to make it unique, or change every occurrence by composing string-replace / re-replace-all over from-string and to-string",
+                    "widen FROM with a neighbouring line to make it unique; to replace every match, use re-replace-all between from-string and to-string, noting that its pattern is a regex",
                 ],
             );
         }
@@ -5302,17 +5490,17 @@ mod policy_edit_skill_presentation_tests {
         for (evidence, description, advice) in [
             (
                 LiteralMiss::Escapes,
-                "FROM was not found in f.txt, and FROM carries a literal backslash escape",
+                "FROM was not found in \"f.txt\", and FROM carries a literal backslash escape",
                 "ral strings are verbatim: write real newlines inside a raw #'…'# string, not literal backslash escapes",
             ),
             (
                 LiteralMiss::Indentation(Count::from_u64(u64::MAX)),
-                "FROM was not found in f.txt, but line 18446744073709551615 matches FROM's first non-empty line apart from leading whitespace",
+                "FROM was not found in \"f.txt\", but line 18446744073709551615 matches FROM's first non-empty line apart from leading whitespace",
                 "copy the exact text, indentation included, from view-text-around",
             ),
             (
                 LiteralMiss::Absent,
-                "FROM was not found in f.txt",
+                "FROM was not found in \"f.txt\"",
                 "re-read the file with view-text-around before editing; it may already contain the intended text",
             ),
         ] {
@@ -5378,8 +5566,8 @@ mod policy_edit_skill_presentation_tests {
     fn skill_read_and_yaml_keep_name_recorded_place_and_nested_cause_or_detail() {
         for (place, shown) in [
             (
-                SkillPlace::Disk("./a/../skills/demo".into()),
-                "./a/../skills/demo",
+                SkillPlace::Disk("\"./a/../skills/demo\"".into()),
+                "\"./a/../skills/demo\"",
             ),
             (SkillPlace::Builtin, "built into exarch"),
         ] {
@@ -5840,7 +6028,19 @@ mod recording_context_presentation_tests {
                     "cannot rewind while the session is",
                 ),
             ] {
-                let description = format!("{prefix} {shown}");
+                let description = if operation == ContextOperation::AcceptSteering {
+                    match &state {
+                        ContextState::ReadyForUser => format!(
+                            "cannot accept a steering prompt while the session is {shown}; send a new user prompt"
+                        ),
+                        ContextState::AwaitingToolResults(_) => format!("{prefix} {shown}"),
+                        _ => {
+                            format!("cannot accept a steering prompt while the session is {shown}")
+                        }
+                    }
+                } else {
+                    format!("{prefix} {shown}")
+                };
                 let payload = product(
                     ContextFailureMutation {
                         operation,
@@ -5954,13 +6154,13 @@ mod recording_context_presentation_tests {
     fn read_back(cause: RecordReadFailure, description: &str) {
         let cause = product(cause, RecordReadFailure::describe, description);
         let description = format!(
-            "turn 18446744073709551615 could not be read back from ./old/../session (source agent 9223372036854775808): {description}"
+            "turn 18446744073709551615 could not be read back from \"./old/../session\" (source agent 9223372036854775808): {description}"
         );
         let payload = product(
             ContextFailureReadBack {
                 turn: u64::MAX.into(),
                 source: (1_u64 << 63).into(),
-                record: "./old/../session".into(),
+                record: "\"./old/../session\"".into(),
                 cause,
             },
             ContextFailureReadBack::describe,
@@ -6044,7 +6244,7 @@ mod recording_context_presentation_tests {
             .field("a\n")
             .index(u64::MAX.into())
             .payload("commit");
-        let cause = "payload `commit`: element 18446744073709551615: field \"a\\n\": missing field \"required\"";
+        let cause = "tag \"commit\": element 18446744073709551615: field \"a\\n\": missing field \"required\"";
         assert_eq!(decode.describe(), cause);
         read_line(
             RecordLineFailure::InvalidEnvelope(decode.clone()),
@@ -6055,7 +6255,7 @@ mod recording_context_presentation_tests {
             &format!("holds records this exarch does not read ({cause}); {OLDER}"),
         );
         let predicate = format!(
-            "is corrupt: its commit hashes to actual-sum but was sealed as \"bad\\\"\\n\\t\\\\\", so the file changed after it was written (edited by hand, or damaged on disk); {INTACT}"
+            "is corrupt: its commit hashes to \"actual-sum\" but was sealed as \"bad\\\"\\n\\t\\\\\", so the file changed after it was written (edited by hand, or damaged on disk); {INTACT}"
         );
         let payload = product(
             RecordLineFailureSealMismatch {

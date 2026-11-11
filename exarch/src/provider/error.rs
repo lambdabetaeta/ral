@@ -377,7 +377,7 @@ impl ProviderError {
     }
 
     pub fn summary(&self) -> String {
-        match self {
+        let summary = match self {
             Self::Cancelled(site) => format!("cancelled {site}"),
             Self::Transient { cause, .. } if self.status().is_none() => {
                 format!("connection failed: {}", first_line(&cause.describe()))
@@ -387,11 +387,10 @@ impl ProviderError {
             }
             Self::Refused(r) => with_body_message(&r.headline(), self.body().as_deref()),
             Self::Api { cause, .. } => {
-                let detail = self
-                    .body()
-                    .as_deref()
-                    .and_then(body_message)
-                    .unwrap_or_else(|| first_line(&cause.describe()).to_owned());
+                let detail = cause.body().map_or_else(
+                    || ServiceFailure::response_summary(&cause.describe()),
+                    body_detail,
+                );
                 match self.status() {
                     Some(status) => format!("api error {status}: {detail}"),
                     None => format!("api error: {detail}"),
@@ -418,14 +417,23 @@ impl ProviderError {
             Self::Terminal(cause) => first_line(&cause.describe()).to_owned(),
             Self::Credential(cause) => first_line(&cause.describe()).to_owned(),
             Self::Unavailable(cause) => first_line(&cause.describe()).to_owned(),
-        }
+        };
+        summary
+            .split(['\r', '\n'])
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
 impl CutShort {
     pub fn summary(&self) -> String {
         match self {
-            Self::OutputCap { stop_reason } => format!("output cap ({stop_reason})"),
+            Self::OutputCap { stop_reason } => format!(
+                "output cap ({})",
+                ServiceFailure::response_summary(stop_reason)
+            ),
             Self::Stalled(cause) => format!("stream stalled ({})", cause.summary()),
         }
     }
@@ -590,22 +598,7 @@ fn overflow(body: Option<&serde_json::Value>, msg: &str) -> Option<(Option<u64>,
 pub(crate) fn error_object(
     body: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    body.get("error")
-        .and_then(serde_json::Value::as_object)
-        .or_else(|| body.as_object())
-}
-
-/// The error-detail object of a body being rewritten, found by the same
-/// nest-or-flat convention [`error_object`] reads.
-fn error_object_mut(
-    body: &mut serde_json::Value,
-) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
-    if body.get("error").is_some_and(serde_json::Value::is_object) {
-        return body
-            .get_mut("error")
-            .and_then(serde_json::Value::as_object_mut);
-    }
-    body.as_object_mut()
+    ServiceFailure::response_error_object(body)
 }
 
 /// A gateway's relay envelope, replaced by the upstream body it carries.
@@ -615,23 +608,7 @@ fn error_object_mut(
 /// view carries the upstream provider's name as `provider`; the service cause
 /// retains the original envelope.
 fn unwrap_relay(body: serde_json::Value) -> serde_json::Value {
-    let Some(metadata) = error_object(&body).and_then(|o| o.get("metadata")) else {
-        return body;
-    };
-    let Some(inner) = metadata
-        .get("raw")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .filter(serde_json::Value::is_object)
-    else {
-        return body;
-    };
-    let provider = metadata.get("provider_name").cloned();
-    let mut inner = unwrap_relay(inner);
-    if let (Some(name), Some(obj)) = (provider, error_object_mut(&mut inner)) {
-        obj.insert("provider".to_string(), name);
-    }
-    inner
+    ServiceFailure::response_body(body)
 }
 
 /// The status code in a provider JSON error body, nested or flat.
@@ -656,22 +633,19 @@ pub(crate) fn transient_label(status: Option<u16>) -> &'static str {
 /// The kind label, suffixed with the provider's own JSON message when the body
 /// carries one: `rate limited: Weekly usage limit reached…`.
 fn with_body_message(kind: &str, body: Option<&serde_json::Value>) -> String {
-    match body.and_then(body_message) {
-        Some(m) => format!("{kind}: {m}"),
+    match body
+        .and_then(body_message)
+        .map(|message| ServiceFailure::response_summary(&message))
+        .filter(|message| !message.is_empty())
+    {
+        Some(message) => format!("{kind}: {message}"),
         None => kind.to_string(),
     }
 }
 
 fn body_message(body: &serde_json::Value) -> Option<String> {
-    error_object(body)?
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+    ServiceFailure::response_message(body).map(str::to_owned)
 }
-
-/// Long enough to identify the problem, short enough not to wall-of-text a
-/// sign-in or model-list error.
-const BODY_DETAIL_CAP: usize = 200;
 
 /// The readable detail inside a raw response body: the provider's own JSON
 /// error message when there is one, else the body's first line.  A body that
@@ -682,29 +656,7 @@ const BODY_DETAIL_CAP: usize = 200;
 /// reaches both the screen and the log, so no backend's prose is trusted past
 /// a snippet.
 pub(crate) fn body_detail(body: &str) -> String {
-    let trimmed = body.trim();
-    let detail = match serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .as_ref()
-        .and_then(body_message)
-    {
-        Some(message) => message,
-        None if trimmed.starts_with('<') => {
-            "the endpoint returned a web page, not an error message".to_string()
-        }
-        None => match trimmed.lines().find(|l| !l.trim().is_empty()) {
-            Some(line) => line.trim().to_string(),
-            None => "the endpoint sent no detail".to_string(),
-        },
-    };
-    if detail.chars().count() > BODY_DETAIL_CAP {
-        format!(
-            "{}…",
-            detail.chars().take(BODY_DETAIL_CAP).collect::<String>()
-        )
-    } else {
-        detail
-    }
+    ServiceFailure::response_detail(body)
 }
 
 /// Presentation stays on one line; stored evidence remains whole.

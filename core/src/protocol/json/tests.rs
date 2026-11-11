@@ -82,7 +82,7 @@ fn reasons() -> Vec<Reason> {
         ))),
         Reason::Io(Box::new(IoFailure {
             operation: IoOperation::Read,
-            subject: IoSubject::Path("input".into()),
+            subject: IoSubject::Path(crate::text::quote_native(std::ffi::OsStr::new("input"))),
             cause: IoCause::new(IoLeaf::Torn),
         })),
         Reason::Invalid(Box::new(InvalidFailure {
@@ -943,7 +943,7 @@ fn every_protocol_cause_round_trips_without_turning_into_a_raise() {
     let encoding = FrameEncodeFailure::Json(
         JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
             JsonEncodeCauseNonUnicodePath {
-                shown: "unrepresentable path".into(),
+                shown: crate::text::quote_native(std::ffi::OsStr::new("unrepresentable path")),
             },
         ))
         .field("home"),
@@ -1042,12 +1042,12 @@ fn all_portable_probe_subjects_exist_independently_of_producer_gates() {
         ProbeSubject::Cwd,
         ProbeSubject::Home,
         ProbeSubject::BuiltinNames,
-        ProbeSubject::PathBytes("a/b".into()),
+        ProbeSubject::PathBytes(crate::text::quote_native(std::ffi::OsStr::new("a/b"))),
         ProbeSubject::Workers,
         ProbeSubject::SessionEnded,
         ProbeSubject::CompletionNames,
         ProbeSubject::Bindings,
-        ProbeSubject::PathEntries("a/b".into()),
+        ProbeSubject::PathEntries(crate::text::quote_native(std::ffi::OsStr::new("a/b"))),
         ProbeSubject::Grants,
         ProbeSubject::WorkerCount,
         ProbeSubject::GrantDepth,

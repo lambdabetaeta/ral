@@ -454,10 +454,10 @@ impl Process {
                     Unrunnable::Directory => format!("{at} is a directory, not a command"),
                     Unrunnable::NotExecutable => format!("{at} is a file, not an executable"),
                     Unrunnable::MissingInterpreter(Some(interpreter)) => {
-                        format!("{at}: its interpreter {interpreter} does not exist")
+                        format!("{at}: its interpreter {interpreter} or its loader was not found")
                     }
                     Unrunnable::MissingInterpreter(None) => {
-                        format!("{at}: the interpreter or loader it names does not exist")
+                        format!("{at}: its interpreter or loader was not found")
                     }
                     Unrunnable::Io(cause) => format!("{at}: {}", cause.describe()),
                 }
@@ -558,7 +558,7 @@ mod tests {
             ))),
             Reason::Io(Box::new(IoFailure {
                 operation: IoOperation::Read,
-                subject: IoSubject::Path("f".into()),
+                subject: IoSubject::Path("\"f\"".into()),
                 cause: IoCause::new(IoLeaf::Torn),
             })),
             Reason::Invalid(Box::new(InvalidFailure {

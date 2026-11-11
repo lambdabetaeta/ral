@@ -1,6 +1,6 @@
 //! Portable invalid failure facts.
 
-use super::decode::{DecodeCause, DecodeFailure, JsonShape};
+use super::decode::{DecodeCause, DecodeFailure, DecodeLength, JsonShape};
 use super::io::IoCause;
 use super::shared::{
     Count, CountRule, DataStep, Expected, Found, IntOrFloat, IntegerParseCause, JsonSyntaxFailure,
@@ -13,9 +13,10 @@ use crate::data::Finite;
 use crate::path::XdgKind;
 use crate::path::{PathRules, relative_suffix};
 use crate::syntax::quote::quote_word;
-use crate::text::{code, indefinite, near_names};
+use crate::text::{code, indefinite, near_names, plural};
 use crate::ty::{RefusedArg, TAG_PREFIX};
 use crate::{label, record, variant};
+#[cfg(test)]
 use std::fmt::Write as _;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -207,13 +208,43 @@ label!(AdmissionAdvice);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IllTyped {
     pub role: BlockRole,
-    /// Non-empty: every error the checker closed with.
-    pub diagnostics: Vec<TypeDiagnostic>,
+    diagnostics: Vec<TypeDiagnostic>,
 }
-record!(IllTyped {
-    role: "role",
-    diagnostics: "diagnostics"
-});
+
+impl IllTyped {
+    pub fn new(role: BlockRole, diagnostics: Vec<TypeDiagnostic>) -> Option<Self> {
+        (!diagnostics.is_empty()).then_some(Self { role, diagnostics })
+    }
+
+    pub fn diagnostics(&self) -> &[TypeDiagnostic] {
+        &self.diagnostics
+    }
+}
+
+impl crate::data::datum::Datum for IllTyped {
+    fn encode(self) -> crate::data::FOValue {
+        crate::data::FOValue::Map {
+            entries: vec![
+                ("diagnostics".into(), self.diagnostics.encode()),
+                ("role".into(), self.role.encode()),
+            ],
+        }
+    }
+
+    fn decode(value: &crate::data::FOValue) -> Result<Self, DecodeFailure> {
+        use crate::data::datum::{exact_keys, field};
+        exact_keys(value, &["role", "diagnostics"])?;
+        let role = field(value, "role")?;
+        let diagnostics = field(value, "diagnostics")?;
+        Self::new(role, diagnostics).ok_or_else(|| {
+            DecodeFailure::new(DecodeCause::Length(DecodeLength {
+                expected: CountRule::AtLeast(1usize.into()),
+                got: 0usize.into(),
+            }))
+            .field("diagnostics")
+        })
+    }
+}
 
 /// What a vetted block was to stand in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,6 +535,7 @@ record!(PathFailureNotUnicode { shown: "shown" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathFailureNotWorkingDirectory {
+    /// Escaped native spelling, including quotes.
     pub path: String,
     pub rules: PathRules,
 }
@@ -514,6 +546,7 @@ record!(PathFailureNotWorkingDirectory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathFailureNoProcessCwd {
+    /// Escaped native spelling, including quotes.
     pub path: String,
 }
 record!(PathFailureNoProcessCwd { path: "path" });
@@ -778,19 +811,7 @@ impl InvalidFailure {
             );
         }
         let mut context = format!("{}: ", self.operation);
-        for step in &self.path {
-            match step {
-                DataStep::Field(name) => {
-                    let _ = write!(context, "field {name:?}: ");
-                }
-                DataStep::Index(index) => {
-                    let _ = write!(context, "element {index}: ");
-                }
-                DataStep::Payload(tag) => {
-                    let _ = write!(context, "payload `{tag}`: ");
-                }
-            }
-        }
+        let _ = super::decode::write_path(&self.path, &mut context);
         context.push_str(&self.intrinsic_description());
         context
     }
@@ -798,7 +819,15 @@ impl InvalidFailure {
 
 impl ArityFailure {
     pub fn describe(&self) -> String {
-        format!("expected {} arguments, got {}", self.expected, self.got)
+        let (rule, count) = match self.expected {
+            CountRule::Exactly(count) => ("exactly", count),
+            CountRule::AtLeast(count) => ("at least", count),
+        };
+        format!(
+            "expected {rule} {}, got {}",
+            plural(count.to_u64(), "argument"),
+            self.got
+        )
     }
 }
 
@@ -849,19 +878,20 @@ impl Multiline {
 
 impl NumberFailure {
     pub fn describe(&self) -> String {
+        let text = self.text.escape_debug();
         match (self.target, self.why) {
             (IntOrFloat::Int, NumberFault::Syntax) => {
-                format!("'{}' is not a valid integer", self.text)
+                format!("'{text}' is not a valid integer")
             }
             (IntOrFloat::Int, NumberFault::OutOfRange) => {
-                format!("integer '{}' is outside the integer range", self.text)
+                format!("integer '{text}' is outside the integer range")
             }
             (IntOrFloat::Float, NumberFault::Syntax) => {
-                format!("'{}' is not a valid number", self.text)
+                format!("'{text}' is not a valid number")
             }
-            (_, NumberFault::NonFinite) => format!("'{}' is not a finite number", self.text),
+            (_, NumberFault::NonFinite) => format!("'{text}' is not a finite number"),
             (IntOrFloat::Float, NumberFault::OutOfRange) => {
-                format!("number '{}' is outside the Float range", self.text)
+                format!("number '{text}' is outside the Float range")
             }
         }
     }
@@ -903,9 +933,9 @@ impl InvalidCause {
                 tag.tag,
                 tag.offered.join(", ")
             ),
-            Self::MissingPayload(tag) => format!("tag `{tag}` needs a payload"),
+            Self::MissingPayload(tag) => format!("tag {tag:?} needs a value"),
             Self::UnexpectedPayload(payload) => format!(
-                "tag `{}` takes no payload; got {}",
+                "tag {:?} takes no value; got {}",
                 payload.tag,
                 payload.found.describe()
             ),
@@ -952,20 +982,47 @@ impl AdmissionFailure {
                 uses.expected.describe()
             ),
             AdmissionCause::NoField(name) => {
-                format!("{place} has no field `{name}`, which this script reads")
+                format!("{place} has no field {name:?}, which this script reads")
             }
-            AdmissionCause::ExtraField(extra) => format!(
-                "{place} has a field `{}`, but this script uses it as a record with exactly the fields {}",
-                extra.field,
-                extra.fields.join(", ")
-            ),
-            AdmissionCause::Shares(shares) => format!(
-                "`{}` is {} and `{}` is {}, and this script compares them",
-                shares.other,
-                <&str>::from(shares.other_side),
-                self.pointer,
-                <&str>::from(shares.side)
-            ),
+            AdmissionCause::ExtraField(extra) => {
+                let fields = if extra.fields.is_empty() {
+                    "no fields".into()
+                } else {
+                    format!(
+                        "exactly the fields {}",
+                        extra
+                            .fields
+                            .iter()
+                            .map(|field| format!("{field:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                format!(
+                    "{place} has a field {:?}, but this script uses it as a record with {fields}",
+                    extra.field
+                )
+            }
+            AdmissionCause::Shares(shares) => {
+                let at = |pointer: &str| {
+                    if pointer.is_empty() {
+                        "the whole value".to_owned()
+                    } else {
+                        code(pointer)
+                    }
+                };
+                let side = |side| match side {
+                    NumberOrText::Number => "a number",
+                    NumberOrText::Text => "text",
+                };
+                format!(
+                    "{} is {} and {} is {}, and this script compares them",
+                    at(&shares.other),
+                    side(shares.other_side),
+                    at(&self.pointer),
+                    side(shares.side)
+                )
+            }
             AdmissionCause::Export(export) => format!(
                 "{place} is a block of type {}, but this script uses it as {}",
                 export.found, export.expected
@@ -1196,10 +1253,8 @@ impl PathFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::NotUnicode(value) => value.describe(),
-            Self::NotWorkingDirectory(value) => {
-                format!("not working directory: {}", value.describe())
-            }
-            Self::NoProcessCwd(value) => format!("no process cwd: {}", value.describe()),
+            Self::NotWorkingDirectory(value) => value.describe(),
+            Self::NoProcessCwd(value) => value.describe(),
             Self::Glob(value) => value.describe(),
         }
     }
@@ -1220,7 +1275,7 @@ impl GrantFailure {
     pub fn describe(&self) -> String {
         match self {
             Self::UnknownVocabulary(value) => value.describe(),
-            Self::RefusedKey(value) => format!("refused key: {}", value.describe()),
+            Self::RefusedKey(value) => value.describe(),
             Self::BareNameRequired(name) => format!(
                 "{} takes a bare command name, not {}", code("`name"), quote_word(name)
             ),
@@ -1426,11 +1481,11 @@ impl PathFailureNotUnicode {
 impl PathFailureNotWorkingDirectory {
     pub fn describe(&self) -> String {
         format!(
-            "path: {}, rules: {}",
+            "{} cannot be a working directory: it is not an absolute path{}",
             self.path,
             match self.rules {
-                PathRules::Posix => "POSIX",
-                PathRules::Windows => "Windows",
+                PathRules::Posix => "",
+                PathRules::Windows => " on a drive or a share",
             }
         )
     }
@@ -1438,7 +1493,10 @@ impl PathFailureNotWorkingDirectory {
 
 impl PathFailureNoProcessCwd {
     pub fn describe(&self) -> String {
-        format!("path: {}", self.path)
+        format!(
+            "cannot resolve {}: the process has no working directory",
+            self.path
+        )
     }
 }
 
@@ -1504,10 +1562,14 @@ impl GrantFailureUnknownVocabulary {
 impl GrantFailureRefusedKey {
     pub fn describe(&self) -> String {
         format!(
-            "form: {}, key: {}, cause: {}",
+            "the {} field {:?} is not supported: {}",
             self.form.describe(),
             self.key,
-            self.cause.describe()
+            match self.cause {
+                RefusedGrantKey::DetachMovedToShell => "detach is a shell verb, not a field",
+                RefusedGrantKey::ManifestCapabilitiesUnenforced =>
+                    "plugins run with host authority, so manifest capabilities are not enforced",
+            }
         )
     }
 }
@@ -1550,24 +1612,29 @@ impl GrantFailureOutsideHome {
         };
         let clause = match &self.xdg {
             None => format!(
-                "{var} is unset, so the default ({}) was used. Is HOME ({}) set correctly?",
-                self.written, self.home
+                "{var} is unset, so the default base was used. Is HOME ({:?}) set correctly?",
+                self.home
             ),
             Some(value) => format!(
-                "{var}={value}: set it to a subpath of HOME ({}), unset it to use the default, or replace {anchor} in the policy with an {} path.",
-                self.home,
+                "{var}={value:?}: set it to a subpath of an absolute HOME, unset it to use the default base, or replace {anchor} in the policy with an {} path.",
                 code("`absolute")
             ),
         };
         let via = if self.written == self.resolved {
             String::new()
         } else {
-            format!(" (written '{}', which is a symbolic link)", self.written)
+            format!(" (written {:?})", self.written)
         };
-        format!(
-            "{anchor} resolves to '{}'{via}, outside HOME; refusing to widen the grant.  {clause}",
-            self.resolved
-        )
+        match self.classification {
+            HomeClassification::Absolute => format!(
+                "{anchor} resolves to {:?}{via}, outside HOME ({:?}); refusing to widen the grant.  {clause}",
+                self.resolved, self.home
+            ),
+            HomeClassification::Relative => format!(
+                "{anchor} resolves to {:?}{via}, but HOME ({:?}) is relative, so containment cannot be established; refusing to widen the grant. Set HOME to an absolute path.  {clause}",
+                self.resolved, self.home
+            ),
+        }
     }
 }
 
@@ -1700,7 +1767,10 @@ impl CodecFailureJsonPointer {
                 }
             ),
             JsonPointerCause::NoElement(count) => {
-                format!("{here} has {count} elements, none of them numbered `{token}`")
+                format!(
+                    "{here} has {}, none numbered `{token}`",
+                    plural(count.to_u64(), "element")
+                )
             }
             JsonPointerCause::Scalar(shape) => format!(
                 "{here} is {}, which has nothing at `{token}`",
@@ -1729,8 +1799,9 @@ impl CodecFailureCsvWidth {
             .line
             .map_or_else(|| "a CSV record".into(), |line| format!("line {line}"));
         format!(
-            "{subject} has {} fields, but the header has {} fields",
-            self.got, self.expected
+            "{subject} has {}, but the header has {}",
+            plural(self.got.to_u64(), "field"),
+            plural(self.expected.to_u64(), "field")
         )
     }
 }
@@ -1758,10 +1829,10 @@ impl CodecFailureCsvCell {
 impl CodecFailureMatchCount {
     pub fn describe(&self) -> String {
         format!(
-            "{} pattern {:?} matches {} times",
+            "{} pattern {:?} matches {}",
             self.kind.describe(),
             self.pattern,
-            self.matches
+            plural(self.matches.to_u64(), "time")
         )
     }
 }
@@ -1788,8 +1859,9 @@ impl CsvReadFailureUnequalLengths {
             format!(" (byte {}, record {})", position.byte, position.record)
         });
         format!(
-            "{subject} has {} fields, but the header has {} fields{position}",
-            self.got, self.expected
+            "{subject} has {}, but the header has {}{position}",
+            plural(self.got.to_u64(), "field"),
+            plural(self.expected.to_u64(), "field")
         )
     }
 }
@@ -2013,10 +2085,7 @@ impl InvalidFailure {
                 indefinite(<&str>::from(cause.leaf)),
             ),
             ("_external-editor", [], InvalidCause::Path(PathFailure::NotUnicode(cause))) => {
-                format!(
-                    "the editor workspace path is not UTF-8 (displayed as {:?}; this may not faithfully name the native path)",
-                    cause.shown,
-                )
+                format!("the editor workspace path {} is not UTF-8", cause.shown)
             }
             (
                 "map" | "lookup",
@@ -2100,15 +2169,17 @@ impl InvalidFailure {
                         format!("pattern {:?} not found in input", cause.pattern)
                     }
                     ("re-replace", LiteralOrRegex::Regex, n) if n > 1 => format!(
-                        "pattern {:?} matches {n} times; must match exactly once",
-                        cause.pattern
+                        "pattern {:?} matches {}; must match exactly once",
+                        cause.pattern,
+                        plural(n, "time")
                     ),
                     ("string-replace", LiteralOrRegex::Literal, 0) => {
                         format!("'from' {:?} not found in input", cause.pattern)
                     }
                     ("string-replace", LiteralOrRegex::Literal, n) if n > 1 => format!(
-                        "'from' {:?} matches {n} times; must match exactly once",
-                        cause.pattern
+                        "'from' {:?} matches {}; must match exactly once",
+                        cause.pattern,
+                        plural(n, "time")
                     ),
                     ("re-find-match", LiteralOrRegex::Regex, 0) => {
                         format!("no match for pattern {:?}", cause.pattern)
@@ -2249,7 +2320,15 @@ impl InvalidFailure {
             return vec![RefusedArg::Unit.remedy("echo")];
         }
         if self.byte_decoder_arity() {
-            return vec!["to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`".into()];
+            let encoder = if self.operation == "from-bytes" {
+                "to-bytes $bytes"
+            } else {
+                "to-string $text"
+            };
+            return vec![format!(
+                "to decode a value in hand, pipe it through the matching encoder: `{encoder} | {}`",
+                self.operation
+            )];
         }
         if matches!(
             (&*self.operation, self.path.as_slice(), &self.cause),
@@ -2341,7 +2420,7 @@ impl GrantFailure {
                 GitPointerFailure::NoGitdirLine => format!(
                     "A worktree's or submodule's `.git` file holds one line, `gitdir: <path>`.  Is this file something else?  If the tree is not a repository, drop {} from the policy or replace it with an explicit path.", code("`gitdir")
                 ),
-                GitPointerFailure::Unreadable(_) => "The freeze reads the pointer as the user launching the session.  Check the file's permissions, or replace `gitdir in the policy with an explicit path.".into(),
+                GitPointerFailure::Unreadable(_) => format!("The freeze reads the pointer as the user launching the session.  Check the file's permissions, or replace {} in the policy with an explicit path.", code("`gitdir")),
             }],
             Self::AbsolutePath(value) => value.advice().into_iter().collect(),
             Self::RootExclusion(_) => vec![
@@ -2789,7 +2868,7 @@ mod tests {
             (
                 GitPointerFailure::Unreadable(Box::new(unreadable.clone())),
                 format!("the .git file at '/tree/.git' cannot be read ({}), so `` `gitdir `` cannot say which git directory the grant covers.", unreadable.describe()),
-                "The freeze reads the pointer as the user launching the session.  Check the file's permissions, or replace `gitdir in the policy with an explicit path.",
+                "The freeze reads the pointer as the user launching the session.  Check the file's permissions, or replace `` `gitdir `` in the policy with an explicit path.",
             ),
         ] {
             assert_grant_projection(&GrantFailure::GitPointer(GrantFailureGitPointer { path: "/tree/.git".into(), cause }), &description, &[advice]);
@@ -2889,18 +2968,18 @@ mod tests {
             for (xdg, clause) in [
                 (
                     None,
-                    "XDG_CONFIG_HOME is unset, so the default (/h/.config) was used. Is HOME (/h) set correctly?",
+                    "XDG_CONFIG_HOME is unset, so the default base was used. Is HOME (\"/h\") set correctly?",
                 ),
                 (
                     Some("/elsewhere".into()),
-                    "XDG_CONFIG_HOME=/elsewhere: set it to a subpath of HOME (/h), unset it to use the default, or replace `` `xdg-config `` in the policy with an `` `absolute `` path.",
+                    "XDG_CONFIG_HOME=\"/elsewhere\": set it to a subpath of an absolute HOME, unset it to use the default base, or replace `` `xdg-config `` in the policy with an `` `absolute `` path.",
                 ),
             ] {
                 for resolved in ["/h/.config", "/outside"] {
                     let via = if resolved == "/h/.config" {
                         ""
                     } else {
-                        " (written '/h/.config', which is a symbolic link)"
+                        " (written \"/h/.config\")"
                     };
                     assert_grant_projection(
                         &GrantFailure::OutsideHome(GrantFailureOutsideHome {
@@ -2912,7 +2991,13 @@ mod tests {
                             classification,
                         }),
                         &format!(
-                            "`` `xdg-config `` resolves to '{resolved}'{via}, outside HOME; refusing to widen the grant.  {clause}"
+                            "`` `xdg-config `` resolves to {resolved:?}{via}, {}  {clause}",
+                            match classification {
+                                HomeClassification::Absolute =>
+                                    "outside HOME (\"/h\"); refusing to widen the grant.",
+                                HomeClassification::Relative =>
+                                    "but HOME (\"/h\") is relative, so containment cannot be established; refusing to widen the grant. Set HOME to an absolute path.",
+                            }
                         ),
                         &[],
                     );
@@ -3001,9 +3086,9 @@ mod tests {
     #[test]
     fn path_not_unicode_describes_only_the_recorded_spelling() {
         let failure = PathFailure::NotUnicode(PathFailureNotUnicode {
-            shown: "/lossy�".into(),
+            shown: "\"/lossy�\"".into(),
         });
-        assert_eq!(failure.describe(), "/lossy� is not UTF-8");
+        assert_eq!(failure.describe(), "\"/lossy�\" is not UTF-8");
         let decoded = PathFailure::decode(&failure.clone().encode()).unwrap();
         assert_eq!(decoded, failure);
         assert_eq!(decoded.describe(), failure.describe());
@@ -3131,7 +3216,7 @@ mod presentation_tests {
                     found: Found::Int(7),
                 }),
             },
-            "load-plugin: field \"zoxide\": the value under a plugin name is its options map; got Int 7",
+            "load-plugin: field \"zoxide\": the value under a plugin name is its options map; got the integer 7",
             &["Write `zoxide: [:]` if it takes no options."],
         );
     }
@@ -3160,15 +3245,15 @@ mod presentation_tests {
     }
 
     #[test]
-    fn external_editor_non_unicode_path_keeps_display_caveat_and_ordered_remedies() {
+    fn external_editor_non_unicode_path_keeps_spelling_and_ordered_remedies() {
         ral_projection(
             InvalidFailure::new(
                 "_external-editor".into(),
                 InvalidCause::Path(PathFailure::NotUnicode(PathFailureNotUnicode {
-                    shown: "/tmp/�".into(),
+                    shown: "\"/tmp/�\"".into(),
                 })),
             ),
-            "_external-editor: the editor workspace path is not UTF-8 (displayed as \"/tmp/�\"; this may not faithfully name the native path)",
+            "_external-editor: the editor workspace path \"/tmp/�\" is not UTF-8",
             &[
                 "use a temporary directory whose path is valid UTF-8",
                 "the input buffer was not changed",
@@ -3222,14 +3307,14 @@ mod presentation_tests {
                 "other",
                 vec![],
                 InvalidCause::Path(PathFailure::NotUnicode(PathFailureNotUnicode {
-                    shown: "shown".into(),
+                    shown: "\"shown\"".into(),
                 })),
             ),
             (
                 "_external-editor",
                 vec![DataStep::Field("p".into())],
                 InvalidCause::Path(PathFailure::NotUnicode(PathFailureNotUnicode {
-                    shown: "shown".into(),
+                    shown: "\"shown\"".into(),
                 })),
             ),
         ] {
@@ -3300,7 +3385,7 @@ mod presentation_tests {
             (
                 "not",
                 Expected::Shape(ValueShape::Bool),
-                "not: expected a Bool, got ()",
+                "not: expected a boolean, got ()",
                 "use a comparison or explicit Bool",
             ),
             (
@@ -3336,43 +3421,43 @@ mod presentation_tests {
             (
                 "round",
                 Expected::Shape(ValueShape::Float),
-                "round: expected a Float, got ()",
+                "round: expected a float, got ()",
                 "e.g. round 3.7 0",
             ),
             (
                 "floor",
                 Expected::Shape(ValueShape::Float),
-                "floor: expected a Float, got ()",
+                "floor: expected a float, got ()",
                 "e.g. round 3.7 0",
             ),
             (
                 "ceil",
                 Expected::Shape(ValueShape::Float),
-                "ceil: expected a Float, got ()",
+                "ceil: expected a float, got ()",
                 "e.g. round 3.7 0",
             ),
             (
                 "trunc",
                 Expected::Shape(ValueShape::Float),
-                "trunc: expected a Float, got ()",
+                "trunc: expected a float, got ()",
                 "e.g. round 3.7 0",
             ),
             (
                 "int",
                 Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
-                "int: expected a Str or an Int or a Float, got ()",
+                "int: expected a string, an integer or a float, got ()",
                 "e.g. int '42'",
             ),
             (
                 "float",
                 Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
-                "float: expected a Str or an Int or a Float, got ()",
+                "float: expected a string, an integer or a float, got ()",
                 "e.g. float '3.14'",
             ),
             (
                 "fail",
                 Expected::Shape(ValueShape::String),
-                "fail: expected a Str, got ()",
+                "fail: expected a string, got ()",
                 "use `raise $e` to re-raise an error record",
             ),
         ] {
@@ -3426,7 +3511,7 @@ mod presentation_tests {
             (
                 "ints-to-bytes",
                 7,
-                "ints-to-bytes: element 7: expected an Int, got ()",
+                "ints-to-bytes: element 7: expected an integer, got ()",
                 "bytes must be Int values in range 0..255",
             ),
         ] {
@@ -3618,9 +3703,14 @@ mod presentation_tests {
                     projection(
                         &failure,
                         &format!("{operation}: takes no arguments; it reads the byte channel"),
-                        &[
-                            "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
-                        ],
+                        &[&format!(
+                            "to decode a value in hand, pipe it through the matching encoder: `{} | {operation}`",
+                            if operation == "from-bytes" {
+                                "to-bytes $bytes"
+                            } else {
+                                "to-string $text"
+                            }
+                        )],
                     );
                 } else {
                     projection(
@@ -3679,7 +3769,7 @@ mod presentation_tests {
                     got: Count::from_u64(0),
                 }),
             ),
-            "fail: expected exactly 1 arguments, got 0",
+            "fail: expected exactly 1 argument, got 0",
             &["use `raise $e` to re-raise an error record"],
         );
         projection(
@@ -3690,13 +3780,16 @@ mod presentation_tests {
         projection(
             &InvalidFailure::new(
                 "within".into(),
-                InvalidCause::IllTyped(IllTyped {
-                    role: BlockRole::Handler("git".into()),
-                    diagnostics: vec![TypeDiagnostic {
-                        code: "T0057".into(),
-                        message: "a block cannot be passed".into(),
-                    }],
-                }),
+                InvalidCause::IllTyped(
+                    IllTyped::new(
+                        BlockRole::Handler("git".into()),
+                        vec![TypeDiagnostic {
+                            code: "T0057".into(),
+                            message: "a block cannot be passed".into(),
+                        }],
+                    )
+                    .unwrap(),
+                ),
             ),
             "within: the `git` handler does not typecheck: T0057 a block cannot be passed",
             &[],
@@ -3761,7 +3854,7 @@ mod presentation_tests {
                 "other",
                 LiteralOrRegex::Regex,
                 1,
-                "other: regex pattern \"x\" matches 1 times",
+                "other: regex pattern \"x\" matches 1 time",
                 vec![],
             ),
         ] {
@@ -3834,7 +3927,7 @@ mod presentation_tests {
                     },
                 }),
             ),
-            "read: input is not valid UTF-8: invalid UTF-8 at byte 0 (1 invalid bytes)",
+            "read: input is not valid UTF-8: invalid UTF-8 at byte 0 (1 invalid byte)",
             &["use from-bytes to keep raw bytes"],
         );
     }
@@ -3858,7 +3951,7 @@ mod presentation_tests {
                 "",
                 "04",
                 JsonPointerCause::NoElement(Count::from_u64(1)),
-                "from-json-at: the document has 1 elements, none of them numbered `04`",
+                "from-json-at: the document has 1 element, none numbered `04`",
             ),
             (
                 "/a",
@@ -3958,7 +4051,7 @@ mod presentation_tests {
         for (position, description) in [
             (
                 None,
-                "from-csv: a CSV record has 1 fields, but the header has 2 fields",
+                "from-csv: a CSV record has 1 field, but the header has 2 fields",
             ),
             (
                 Some(CsvPosition {
@@ -3966,7 +4059,7 @@ mod presentation_tests {
                     line: Count::from_u64(3),
                     record: Count::from_u64(2),
                 }),
-                "from-csv: line 3 has 1 fields, but the header has 2 fields (byte 12, record 2)",
+                "from-csv: line 3 has 1 field, but the header has 2 fields (byte 12, record 2)",
             ),
         ] {
             projection(

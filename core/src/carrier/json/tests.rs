@@ -43,7 +43,9 @@ fn severances() -> Vec<Severed> {
         }),
         ConnectionFault::ReadingForDispatch,
         ConnectionFault::ProbeAnswer(ConnectionFaultProbeAnswer {
-            probe: ProbeSubject::PathEntries("/safe".into()),
+            probe: ProbeSubject::PathEntries(crate::text::quote_native(std::ffi::OsStr::new(
+                "/safe",
+            ))),
             cause: DecodeFailure::new(DecodeCause::MissingField("name".into()))
                 .index(u64::MAX.into()),
         }),

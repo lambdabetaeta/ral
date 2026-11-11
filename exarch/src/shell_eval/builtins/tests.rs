@@ -570,7 +570,10 @@ fn file_read_and_walk_keep_io_subjects_and_utf8_offsets() {
         panic!("I/O failure")
     };
     assert_eq!(failure.operation, IoOperation::Walk);
-    assert_eq!(failure.subject, IoSubject::Path(missing));
+    assert_eq!(
+        failure.subject,
+        IoSubject::Path(quote_native(OsStr::new(&missing)))
+    );
     assert!(matches!(
         *failure.cause.leaf,
         ral_core::fact::IoLeaf::Os(ral_core::fact::OsFailure {
@@ -647,7 +650,7 @@ fn edit_and_skill_facts_keep_lossless_evidence_through_datum() {
         })),
         skill::refusal(SkillFailure::Read(ral_core::fact::SkillFailureRead {
             name: "unreadable".into(),
-            place: ral_core::fact::SkillPlace::Disk("skills/unreadable".into()),
+            place: ral_core::fact::SkillPlace::Disk("\"skills/unreadable\"".into()),
             cause: ral_core::io::failure(&std::io::ErrorKind::PermissionDenied.into()),
         })),
     ];

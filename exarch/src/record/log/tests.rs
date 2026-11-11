@@ -384,7 +384,7 @@ fn an_empty_commit_is_refused() {
             &read(&path).unwrap().next().unwrap().unwrap_err(),
             &path,
             1,
-            "expected at least 1 elements, got 0",
+            "expected a length of at least 1, got 0",
         );
     }
 }

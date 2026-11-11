@@ -402,7 +402,7 @@ fn edit_batch_rejects_two_edits_naming_one_line() {
     assert_ne!(clash.exit, 0, "two edits on one line must fail the batch");
     let stderr = String::from_utf8_lossy(&clash.stderr);
     assert!(
-        stderr.contains(&format!("two edits name line 2 in {path}")),
+        stderr.contains(&format!("two edits name line 2 in {path:?}")),
         "the diagnostic names the colliding line and the file, got: {stderr}"
     );
     assert_eq!(
@@ -1086,7 +1086,7 @@ fn grep_files_scopes_to_a_file_or_a_subtree() {
     let r = run_once(&engine, &format!("cd '{root}'\ngrep-files 'NEEDLE' nope"));
     assert_ne!(r.exit, 0, "a missing path must fail");
     assert!(
-        String::from_utf8_lossy(&r.stderr).contains("nope does not exist"),
+        String::from_utf8_lossy(&r.stderr).contains("\"nope\" does not exist"),
         "the error names the missing path; stderr was {:?}",
         String::from_utf8_lossy(&r.stderr)
     );

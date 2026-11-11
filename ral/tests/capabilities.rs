@@ -659,14 +659,13 @@ fn under_exec_deny(bin: &std::path::Path, deny: &str, body: &str) -> common::Out
 }
 
 #[cfg(unix)]
-const RESPELLED: &str =
-    "under another spelling (case or Unicode form); a deny holds under every spelling";
+const RESPELLED: &str = "after case or Unicode folding; a deny holds under every spelling";
 
 /// An absent exclusion keeps its frozen spelling on every volume.
 #[cfg(unix)]
 fn assert_names_the_absent_deny(out: &common::Output, kind: &str, denied: &std::path::Path) {
     let said = format!(
-        "is the denied `` {kind}'{}' `` {RESPELLED}",
+        "is excluded by `` {kind}'{}' `` {RESPELLED}",
         denied.display()
     );
     assert!(

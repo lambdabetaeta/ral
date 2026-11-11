@@ -85,7 +85,12 @@ impl Shell {
     }
 
     fn walk_failure(path: &LexicalPath, e: &io::Error) -> Break {
-        Error::io(IoOperation::Walk, IoSubject::Path(path.shown()), e).into()
+        Error::io(
+            IoOperation::Walk,
+            IoSubject::Path(crate::text::quote_native(path.as_path().as_os_str())),
+            e,
+        )
+        .into()
     }
 
     /// The fs door: walk `path` to the object it names, symlink-free, and
@@ -302,7 +307,7 @@ mod tests {
             assert_eq!(
                 fs.describe(),
                 format!(
-                    "fs read denied by grant: no allowance of the active grant covers {}",
+                    "grant does not allow read access to {:?}",
                     crate::path::shown(&file)
                 )
             );

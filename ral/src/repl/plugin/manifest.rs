@@ -614,7 +614,7 @@ mod tests {
     fn non_map_manifest_is_load_error() {
         let err = parse(&Value::Int(42)).expect_err("non-map must be rejected");
         assert!(
-            err.describe().contains("manifest") && err.describe().contains("Int"),
+            err.describe().contains("manifest") && err.describe().contains("integer"),
             "error should name the manifest shape, got: {}",
             err.describe()
         );
@@ -670,7 +670,7 @@ mod tests {
         ]);
         let err = parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
         assert!(
-            err.describe().contains("guard") && err.describe().contains("Int"),
+            err.describe().contains("guard") && err.describe().contains("integer"),
             "error should name the guard and its type, got: {}",
             err.describe()
         );

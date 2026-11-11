@@ -21,11 +21,11 @@ in one vocabulary: exactly `[frame, message, status, site]`, with a total
 site. `message` and `status` are derived from the typed reason, never stored
 beside it; diagnostic text is not the failure value. A reader that can read
 one can read all three. `trail`
-is the list of observations. Nothing else: no status field duplicating the
-process exit status the host already owns and `audit` never changes, and no
-hint or advice in the error record, because both are for a person and a
-report is data. An ordinary failure settles into `` `err ``; an
-`exit` escape and a stop are not failures and walk past the report entirely
+is the list of observations. Nothing else: no additional report-level status
+or message fields beyond the outcome's error record, and no hint or advice
+in that record, because both are for a person and a report is data. An ordinary
+failure settles into `` `err ``; an `exit` escape and a stop are not failures
+and walk past the report entirely
 ([[design/failure|failure]]).
 
 **The kind is the tag.** An observation is an envelope — a total `site`,

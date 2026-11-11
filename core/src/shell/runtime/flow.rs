@@ -260,17 +260,16 @@ impl End {
         self
     }
 
-    /// The ending leaves the shell `sources` belongs to: every provenance
-    /// into a file the parent registry lacks is resolved first, so no span
-    /// crosses to a registry that cannot read it.
-    pub(crate) fn leaving(mut self, sources: &SourceDb) -> Self {
-        let slot = match &mut self {
-            Self::Err(error) => &mut error.prov,
-            Self::Stopped(stop) => &mut stop.at,
-            Self::Ok(_) | Self::Exited(_) | Self::Panic(_) => return self,
-        };
-        *slot = slot.take().map(|prov| prov.leaving(sources));
-        self
+    /// Resolve local provenance and drop local witnesses before leaving.
+    pub(crate) fn leaving(self, sources: &SourceDb) -> Self {
+        match self {
+            Self::Err(error) => Self::Err(error.leaving(sources)),
+            Self::Stopped(mut stop) => {
+                stop.at = stop.at.map(|prov| prov.leaving(sources));
+                Self::Stopped(stop)
+            }
+            end => end,
+        }
     }
 
     /// Back into the machine's currency, a panic resumed.

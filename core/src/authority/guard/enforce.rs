@@ -62,11 +62,13 @@ fn excluded(subject: impl Display, scope: impl Display, matched_by: MatchedBy) -
     match matched_by {
         MatchedBy::Name => format!("{subject} is excluded by {scope}"),
         MatchedBy::FoldedName => format!(
-            "{subject} is the denied {scope} under another spelling \
-             (case or Unicode form); a deny holds under every spelling"
+            "{subject} is excluded by {scope} after case or Unicode folding; \
+             a deny holds under every spelling"
         ),
         MatchedBy::Identity => {
-            format!("{subject} is the denied object {scope} under another name")
+            format!(
+                "{subject} is excluded by {scope} through a filesystem object reached under another name"
+            )
         }
     }
 }
@@ -80,10 +82,10 @@ fn says(refused: &Refused, subject: impl Display) -> String {
             <&str>::from(*pinned)
         ),
         Refused::Withheld(Withheld::MissingAllowance) => {
-            format!("no allowance of the active grant covers {subject}")
+            format!("the grant does not allow {subject}")
         }
         Refused::Withheld(Withheld::Excluded { scope, matched_by }) => {
-            excluded(subject, scope, *matched_by)
+            excluded(subject, format!("{:?}", scope.to_string()), *matched_by)
         }
     }
 }
