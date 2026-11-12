@@ -596,7 +596,8 @@ fn run_framed(
             ending.into_settled(),
             captured.map(|c| c.stdout.bytes).unwrap_or_default(),
         ),
-        RunReport::Static { diagnostics } => panic!(
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {src}"),
+        RunReport::Static { diagnostics, .. } => panic!(
             "well-formed source must run, not fail statically: {src}\n{}",
             diagnostics
                 .render(&crate::shell::runtime::ExitHints::default())
@@ -700,7 +701,7 @@ fn cap_refused_spawn_observes_no_birth() {
 #[test]
 fn a_worker_explains_against_its_creators_session() {
     let mut shell = crate::test_helper::core_shell();
-    shell.set_var("sess_name".into(), Value::Int(1));
+    crate::test_access::bind_untyped(&mut shell, "sess_name", Value::Int(1));
     let (direct, printed) = run_captured(&mut shell, "!{ explain sess_name }", None);
     direct.expect("explain must run");
     assert!(String::from_utf8_lossy(&printed).contains("sess_name · session"));
@@ -713,15 +714,15 @@ fn a_worker_explains_against_its_creators_session() {
     assert_eq!(replayed, printed);
 }
 
-/// A worker's `use` runs the module under its creator's session.
+/// A worker's linked module uses its own definitions, not its creator's.
 #[test]
-fn a_worker_uses_a_module_against_its_creators_session() {
+fn a_worker_uses_a_closed_module() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let module = dir.path().join("m.ral");
-    std::fs::write(&module, "let v = $sess_cfg\n").expect("write the module");
+    std::fs::write(&module, "let sess_cfg = 7\nlet v = $sess_cfg\n").expect("write the module");
     let mut shell = crate::test_helper::core_shell();
     let src = format!(
-        "let sess_cfg = 7\nlet h = !{{spawn {{ use '{}' }}}}\nawait $h",
+        "let sess_cfg = 99\nlet h = !{{spawn {{ use '{}' }}}}\nawait $h",
         module.display()
     );
     let awaited = run_captured(&mut shell, &src, None)
@@ -731,6 +732,34 @@ fn a_worker_uses_a_module_against_its_creators_session() {
         expect_map(&awaited).get("v").as_deref(),
         Some(&Value::Int(7))
     );
+}
+
+/// A free session reference in a worker's module refuses the entire run statically.
+#[test]
+fn a_workers_module_cannot_read_its_creators_session() {
+    use crate::shell::run::RunReport;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let module = dir.path().join("m.ral");
+    std::fs::write(&module, "let v = $sess_cfg\n").expect("write the module");
+    let mut shell = crate::test_helper::core_shell();
+    let src = format!(
+        "let sess_cfg = 7\nlet h = !{{spawn {{ use '{}' }}}}\nawait $h",
+        module.display()
+    );
+    let RunReport::Static { diagnostics, .. } = shell.run(crate::protocol::Run::captured(
+        src,
+        crate::source::SourceOrigin::named("<test>"),
+    )) else {
+        panic!("a module's free session reference must be refused before evaluation");
+    };
+    let rendered = diagnostics.render(shell.exit_hints()).0;
+    assert!(
+        rendered.contains("undefined variable: $sess_cfg"),
+        "unexpected diagnostic: {rendered}"
+    );
+    assert_eq!(shell.local.workers.count(), 0, "no worker may start");
+    assert!(shell.scope_lookup("sess_cfg").is_none(), "no evaluation");
 }
 
 // ── `await` is the block run here ────────────────────────────────────

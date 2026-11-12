@@ -32,12 +32,17 @@ impl RunReport {
     /// diagnostics render to strings.
     pub(crate) fn into_report(self, shell: &Shell) -> Report {
         match self {
-            // Not the shell's sources: a static failure carries the text its
-            // carets point into, so nothing about it was ever registered.
-            Self::Static { diagnostics } => {
+            Self::Static { diagnostics, trail } => {
                 let (rendered, status) = diagnostics.render(shell.exit_hints());
-                Report::Static { rendered, status }
+                Report::Static {
+                    rendered,
+                    status,
+                    trail: trail.into_iter().map(Datum::encode).collect(),
+                }
             }
+            Self::Checked { trail } => Report::Checked {
+                trail: trail.into_iter().map(Datum::encode).collect(),
+            },
             Self::Ran {
                 ending,
                 base,
@@ -82,7 +87,11 @@ impl Report {
             &Error::new(reason),
             &crate::shell::runtime::ExitHints::default(),
         );
-        Self::Static { rendered, status }
+        Self::Static {
+            rendered,
+            status,
+            trail: Vec::new(),
+        }
     }
 
     /// A fault outside the run's own report (a panicked engine worker, a
@@ -194,8 +203,7 @@ mod runtime_error_seam_tests {
 // ── The static seam ──────────────────────────────────────────────────
 //
 // The counterpart law for a run that never reached evaluation: the caret, the
-// code and the hint survive the projection, and the registry never learns of
-// text no live span can index.
+// code and the hint survive the projection, and the root retains its registry id.
 #[cfg(test)]
 mod static_diagnostic_seam_tests {
     use super::*;
@@ -214,7 +222,10 @@ mod static_diagnostic_seam_tests {
             "{src:?} must fail before evaluation"
         );
         let minted = shell.sources().next_id().0 - before;
-        let Report::Static { rendered, status } = report.into_report(&shell) else {
+        let Report::Static {
+            rendered, status, ..
+        } = report.into_report(&shell)
+        else {
             panic!("a static run must project to Report::Static");
         };
         (rendered, status.get(), minted)
@@ -261,12 +272,11 @@ mod static_diagnostic_seam_tests {
         );
     }
 
-    /// A failed compile leaves no live span, so its text has no slot.
     #[test]
-    fn a_static_failure_registers_no_source() {
+    fn a_static_failure_registers_its_root_once() {
         for src in ["let = ", "$[1 + true]"] {
             let (_, _, minted) = project(src);
-            assert_eq!(minted, 0, "{src:?} must not grow the registry");
+            assert_eq!(minted, 1, "{src:?} must retain its registered root");
         }
     }
 

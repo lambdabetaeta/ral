@@ -1,0 +1,5 @@
+let _private = 41
+let _decode = { |text| to-string $text | from-json }
+let answer = identity $[$_private + 1]
+let id = { |value| return $value }
+let inc = { |value| return $[$value + 1] }

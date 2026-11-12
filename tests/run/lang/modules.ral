@@ -1,67 +1,43 @@
-# Use (§8)
+# Modules are linked when their importer is checked.
 
-# Create a module
-let tmpdir = temp-dir
-echo "let version = 1\nlet _private = 42" > "$tmpdir/lib.ral"
-
-# use returns a record of the module's bindings, excluding _ names; a
-# record is reached by name, and `use` checks it against the names the script
-# reads, so a read of an absent one fails at the `use`.
-let m = use "$tmpdir/lib.ral"
+# Only public bindings come back; missing and private fields are static errors.
+let m = use '../../lib/modules/values.ral'
 echo $m[version]
-let private = try { let probe = use "$tmpdir/lib.ral"; return $probe[_private] } { |_| return -1 }
-echo $[$private == -1]
-
-# re-using an unchanged file yields a structurally equal record
-let m2 = use "$tmpdir/lib.ral"
+let m2 = use '../../lib/modules/values.ral'
 echo $[$m == $m2]
 
-# caller-file-relative module loading
-mkdir -p "$tmpdir/sub"
-echo "let x = 9" > "$tmpdir/sub/inner.ral"
-echo #'let m = !{use 'sub/inner.ral'}
-let via_use = $m[x]'# > "$tmpdir/entry.ral"
-let entry = use "$tmpdir/entry.ral"
-if $[$entry[via_use] != 9] { fail "module: caller-relative use did not resolve sub/inner.ral" }
+# A nested path is relative to the module that writes it.
+let entry = use '../../lib/modules/entry.ral'
+echo $entry[via_use]
 
-# use is cacheless: each call re-reads the file, so rewriting a module
-# between two `use` calls surfaces the new bindings.
-echo "let version = 1" > "$tmpdir/reload.ral"
-let m1 = use "$tmpdir/reload.ral"
-echo "let version = 2" > "$tmpdir/reload.ral"
-let mfresh = use "$tmpdir/reload.ral"
-if $[$mfresh[version] != 2] { fail "module: reload did not pick up the rewritten file" }
+# Each export is instantiated in the importer, then generalised by this let.
+let poly = use '../../lib/modules/functions.ral'
+echo !{$poly[id] 1}
+echo !{$poly[id] 'a'}
+echo !{$poly[inc] 4}
+echo $poly[label]
 
-# A module that uses itself is a cycle
-echo "let _ = use '$tmpdir/cycle.ral'" > "$tmpdir/cycle.ral"
-echo !{try { let _ = use "$tmpdir/cycle.ral"; return false } { |e| return !{re-match 'module cycle' $e[message]} }}
+# The importer cannot shadow the module's own bindings or its prelude.
+let version = 99
+let length = { |_| return 99 }
+let closed = use '../../lib/modules/values.ral'
+echo "$closed[version] $closed[count]"
 
-# A failing module keeps its own message, without report-only loader context.
-echo "fail 'boom'" > "$tmpdir/failing.ral"
-echo !{try { let _ = use "$tmpdir/failing.ral"; return 'module unexpectedly succeeded' } { |e| return $e[message] }}
-
-# A module sees the session, earlier definitions included, but not a
-# block's local `let`; only its own non-underscore names come back
-echo 'let reads_local = $local' > "$tmpdir/block-local.ral"
-let outer_define = 41
-echo #'let visible = 1
-let _hidden = 2
-let reads_earlier = $[$outer_define + 1]'# > "$tmpdir/session.ral"
-echo !{try { let _ = !{ let local = 1; use "$tmpdir/block-local.ral" }; return false } { |e| return !{re-match 'failed typechecking' $e[message]} }}
-let sess = use "$tmpdir/session.ral"
-let hidden = try { let probe = use "$tmpdir/session.ral"; return $probe[_hidden] } { |_| return hidden }
-echo "$sess[visible] $sess[reads_earlier] $hidden"
-
-# A RAL_PATH hit still answers to the fs read grant
-mkdir -p "$tmpdir/lib" "$tmpdir/other"
-echo "let answer = 42" > "$tmpdir/lib/g.ral"
-try {
-    grant [fs: [read: [`absolute "$tmpdir/other"]]] {
-        within [dir: "$tmpdir/other", env: [RAL_PATH: "$tmpdir/lib"]] { let _ = use 'g.ral' }
+# Runtime cwd and read grants do not resolve or read a linked module.
+let dir = temp-dir
+within [dir: $dir] {
+    grant [fs: [read: []]] {
+        let linked = use '../../lib/modules/values.ral'
+        echo $linked[version]
     }
-} { |e| echo !{re-match 'grant does not allow' $e[message]} }
+}
+rm -rf $dir
 
-# Cleanup
-rm -rf $tmpdir
+# A use inside a function is linked at check, but runs its body on every call.
+let load = { use '../../lib/modules/body-effect.ral' }
+grant [fs: [read: []]] {
+    let _ = load
+    let _ = load
+}
 
 echo 'module tests done'

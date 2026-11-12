@@ -10,7 +10,10 @@
 
 use super::clip::clip;
 use super::{ToolResult, ral_value_to_text};
-use ral_core::fact::{ExitCode as _, Failure};
+use ral_core::carrier::Host;
+use ral_core::data::FOValue;
+use ral_core::data::datum::tag;
+use ral_core::fact::{ExitCode as _, Failure, Observation};
 use ral_core::process::CancelCause;
 use ral_core::protocol::probe::WorkerRow;
 use ral_core::protocol::{Ending, Ran};
@@ -130,6 +133,13 @@ fn render(
         out.push_str(&orphans);
     }
     (out, ending.code())
+}
+
+/// Check-time observations have no live surface delivery.
+pub(crate) fn record_trail(trail: &[FOValue], host: &dyn Host) {
+    for observation in trail {
+        host.surface(&tag(Observation::SURFACE_TAG, Some(observation.clone())));
+    }
 }
 
 /// A call refused before evaluation: the diagnostic, clipped, then

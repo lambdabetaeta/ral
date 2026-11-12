@@ -1,8 +1,62 @@
 ---
 status: accepted
-generated_at_commit: c4bd558f
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 ---
+
+> **Amended 2026-11-12 — Sessions: undecided delayed shapes stay in their unit.**
+> This supersedes the delayed half of the original Sessions clause below;
+> the pre-execution readmission rule of the 2026-11-11 amendment stands.
+> A stored name is statically unusable in a later unit if its scheme reaches
+> a weak type, computation or row residual beneath a thunk or handle. This
+> includes function arguments as well as results and handle payloads. The
+> rule follows reachable μ-equations in both data and delayed contexts; a
+> shared recursive root must be judged in both. Unreachable equations do
+> not affect this use rule.
+>
+> Existing first-order data is readmitted against the later unit's solved
+> type before its first phrase. A decided function beside undecided data is
+> allowed; a universal parameter is not a weak residual. No delayed value is
+> forced or handle consumed at import, and no runtime wrapper postpones
+> admission to its use. Define and use a decoder helper in one unit, or
+> return text and decode it where the shape is used. Boundaries still return
+> data, and modules still export only decided schemes, as amended below.
+> Hook and persistent-handler installation still infer closures; captured
+> block locals without schemes retain `WeakSource::Host` provenance.
+
+> **Amended 2026-11-12 — Boundaries return data.** Every registered
+> boundary's declared result constrains every type variable to `data` and
+> every row variable to be deep: all fields and payloads it may acquire
+> must also be data. Functions and handles are excluded at every depth.
+> Thus `from-json` and `env` have `∀α:data. Returns α`, and `from-jsonl`
+> and `from-csv` have `∀α:data. Returns [α]`. The same constraint holds for
+> `from-json-at`, exarch's boundary answers and `_ed-state`.
+>
+> Using a boundary result as a function or handle is a kind error at the
+> use, before execution, not an admission refusal at decoding or readmission.
+> Weakness (one type per unit) and admission against the solved data shape
+> still stand. Each host's acceptance test walks its whole manifest—core,
+> ral's REPL and batch surfaces, and exarch—and checks every
+> `BuiltinBody::Boundary` result for data type variables and deep row
+> variables, without a hand-written boundary list. This amends the
+> unconstrained result variables below; the linked-module amendment and
+> session admission rules are unchanged.
+
+> **Amended 2026-11-12 — Linked modules are not boundaries.** This amendment
+> supersedes every module-admission clause and handlers-through-`use`
+> exception below. `use` links a closed module at check time, checked and
+> run under Σ. Its public schemes contain no weak variables; the importer
+> instantiates those schemes rather than admitting an export record at a
+> boundary site. An undecided public type, data included, is a static
+> refusal of the module after successful solver closure and before readback.
+> Imported handler maps therefore meet `Map(U([String] → Command))`
+> statically like any bound map. Persistent handlers are still vetted
+> against that same constant type at installation.
+>
+> The closed boundary set is `from-json`, `from-jsonl`, `from-json-at`,
+> `from-csv`, `env`, `exarch-agents`, `exarch-pins`, `exarch-transcript`
+> and `_ed-state`. Boundary and session admission otherwise stand.
+> See [[decisions/260606_cacheless-module-loader|cacheless module loader]].
 
 > **Amended 2026-11-11 — Written host options.** Host-file fields are
 > ordinary uses during generation (SPEC §15.3), not equations held after

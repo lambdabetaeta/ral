@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
 
@@ -46,7 +46,10 @@ carries them; the engine installs them once at boot. Every call runs under that
 stack, and external commands route through ral's OS sandbox
 ([[map/core/capabilities|capabilities]]). The eval runs in `Mode::Session`, so
 each landed `Define` writes into `shell.env` and the run's `Context` is the
-session's own: `let`, `cd`, and env persist across tool calls.
+session's own: `let`, `cd`, and env persist across tool calls. Session bindings
+carry checked schemes. `app::seed_vars` overlays environment variables only:
+`EXARCH_SCRATCH`, `TMPDIR`, `CARGO_HOME` and the other seeded names are read
+through `env`, not lexical `$NAME` bindings.
 
 The request supplies:
 

@@ -286,6 +286,7 @@ mod tests {
             RunReport::Static { .. } | RunReport::Ran { .. } => {
                 panic!("a panicking body must report a panic ending")
             }
+            RunReport::Checked { .. } => panic!("a source run must not report check-only success"),
         }
         assert_eq!(
             shell.local.audit.active_policy(),
@@ -325,6 +326,7 @@ mod tests {
             RunReport::Static { .. } | RunReport::Ran { .. } => {
                 panic!("a panicking body must report a panic ending")
             }
+            RunReport::Checked { .. } => panic!("a source run must not report check-only success"),
         }
 
         assert!(

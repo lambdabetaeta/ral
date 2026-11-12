@@ -23,7 +23,6 @@ pub(crate) mod hooks;
 mod host;
 mod inherit;
 pub(crate) mod json;
-pub(crate) mod modules;
 pub(crate) mod notice;
 mod scope;
 mod scrub;
@@ -32,7 +31,6 @@ pub(crate) mod workers;
 use self::bindings::BindingLedger;
 pub use self::construct::{Bequest, Runtime};
 pub(crate) use self::construct::{Image, Terms};
-use self::modules::Modules;
 use self::workers::Roster;
 use super::audit::{Audit, DisplacedSite};
 use super::env::Env;
@@ -84,7 +82,6 @@ pub(crate) struct Context<H = HandlerStack> {
     // ── dynamic context, not attenuable ─────────────────────────────────
     /// Invocation positionals (`args`), from the command line or `source`.
     pub(crate) args: Vec<String>,
-    pub(crate) modules: Modules,
 }
 
 // The `authority::guard::check_*(&Context, …)` decisions fold the whole stack from
@@ -103,9 +100,8 @@ pub struct SessionState {
     /// its runtime errors.  Append-only for the whole session, so a nested
     /// run's spans can never alias an outer run's [`FileId`].
     pub(crate) sources: SourceDb,
-    /// The current run's root source, which a child inherits, so a bare `use`
-    /// in a worker or a stage falls back to it.  `None` between runs: the
-    /// fallback is then `""`, i.e. cwd-relative.
+    /// The current run's root source, inherited by its children.
+    /// `None` between runs.
     pub(crate) root_file: Option<FileId>,
     pub(crate) exit_hints: Arc<crate::shell::runtime::ExitHints>,
     /// The spelling of the directory the front end that booted the session
@@ -358,21 +354,6 @@ impl Shell {
                 Err(Error::io(IoOperation::Write, IoSubject::Stream(stream), &e).into())
             }
         }
-    }
-
-    /// The closed session scheme for a value binding — `None` for anything
-    /// but a block. Shared by [`Self::bind_value`] and
-    /// [`Self::register_hook`], which differ only in what they do with it.
-    /// A refused block returns every diagnostic and exports no scheme.
-    pub(crate) fn value_scheme(
-        &self,
-        value: &crate::shell::runtime::Value,
-    ) -> Result<Option<crate::ty::Closed>, Vec<crate::typecheck::TypeError>> {
-        let crate::shell::runtime::Value::Thunk(closure) = value else {
-            return Ok(None);
-        };
-        crate::typecheck::binding_value_scheme(closure.comp(), self.closure_schemes(closure))
-            .map(Some)
     }
 }
 

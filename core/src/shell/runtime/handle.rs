@@ -121,8 +121,6 @@ pub(crate) struct Snapshot<R, L = ()> {
 pub struct HandleInner {
     /// Lock order: registry or brood membership -> handle state -> stdout/stderr buffers.
     state: Arc<Mutex<HandleState>>,
-    /// Payload contracts, applied when the result is exposed.
-    protections: Vec<Arc<crate::ty::Site>>,
     /// Drained when the worker publishes its terminal state.  Empty for a
     /// watched handle, whose lines surface live through `Sink::Watch`.
     buffers: Streams<ByteBuffer>,
@@ -144,21 +142,6 @@ impl PartialEq for HandleInner {
 }
 
 impl HandleInner {
-    pub(crate) fn guard_payload(&mut self, site: Arc<crate::ty::Site>) {
-        self.protections.push(site);
-    }
-
-    pub(crate) fn protect_value(
-        &self,
-        mut value: super::Value,
-        shell: &super::Shell,
-    ) -> super::Settled<super::Value> {
-        for site in &self.protections {
-            value = site.protect(value, shell)?;
-        }
-        Ok(value)
-    }
-
     /// A running handle, born now over the buffers its worker writes, and the
     /// sole [`CompletionPermit`] that publishes its terminal state.
     pub(crate) fn new(
@@ -169,7 +152,6 @@ impl HandleInner {
     ) -> (Self, CompletionPermit) {
         let handle = Self {
             state: Arc::new(Mutex::new(HandleState::Running)),
-            protections: Vec::new(),
             buffers,
             id,
             title: title.into(),

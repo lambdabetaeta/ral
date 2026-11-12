@@ -124,7 +124,12 @@ fn a_family_builtin_refuses_a_block_in_its_argument_statically() {
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
             None,
-            None,
+            ral_core::typecheck::Unit::Script,
+            &mut |_, _, _| {
+                Err(ral_core::compile::UseRefusal::Unavailable {
+                    reason: "this builtin type-checking test has no module loader".into(),
+                })
+            },
         ) {
             Ok(_) => Vec::new(),
             Err(ral_core::compile::CompileError::Parse(e)) => {
@@ -132,6 +137,9 @@ fn a_family_builtin_refuses_a_block_in_its_argument_statically() {
             }
             Err(ral_core::compile::CompileError::Types(errs)) => {
                 errs.iter().map(|e| e.kind.code()).collect()
+            }
+            Err(ral_core::compile::CompileError::Use { refusal, .. }) => {
+                panic!("{src:?} must not load a module, got: {refusal}")
             }
         }
     };
@@ -173,6 +181,24 @@ fn a_result_only_variable_in_the_exarch_tables_is_a_boundary() {
         boundaries,
         ["exarch-agents", "exarch-pins", "exarch-transcript"]
     );
+}
+
+#[test]
+fn every_boundary_in_the_exarch_manifest_returns_data() {
+    let shell = dressed_shell(&[]);
+    for name in shell.builtin_names() {
+        let entry = shell
+            .lookup_builtin(name)
+            .expect("every manifest name has a builtin entry");
+        if entry.decl.is_boundary() {
+            assert!(
+                ral_core::test_access::boundary_result_is_data(
+                    ral_core::test_access::builtin_scheme(&entry)
+                ),
+                "{name}: a boundary must return data with deep rows"
+            );
+        }
+    }
 }
 
 /// The generic host surface omits `detach`; exarch's engine runtime installs it.
@@ -241,6 +267,7 @@ fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
                 .expect("help output is UTF-8")
             }
             RunReport::Static { .. } => panic!("`help` must compile"),
+            RunReport::Checked { .. } => panic!("`help` must evaluate, not only check"),
         }
     };
 

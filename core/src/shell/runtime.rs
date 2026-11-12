@@ -39,7 +39,6 @@ pub(crate) use handle::{CompletionPermit, Snapshot, pins_live_work};
 
 // A boundary's checked type, and what a door admits against it.
 mod admit;
-mod protect;
 pub use admit::Mismatch;
 pub(crate) use admit::pointer_token;
 
@@ -78,8 +77,6 @@ pub use walk::AdmittedWalk;
 // capability layer, which reach them without importing each other.
 mod coerce;
 pub(crate) use coerce::{decode_utf8_strict, ill_typed, invalid};
-
-pub use state::modules::Modules;
 
 pub mod audit;
 pub(crate) use audit::DisplacedSite;

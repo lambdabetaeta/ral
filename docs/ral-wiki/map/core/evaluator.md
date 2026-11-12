@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
 
@@ -20,7 +20,7 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   readmits `top.admits` against the supplied `env` before the first phrase,
   in every mode, including loaded files. Private `readmit` uses that `Env`
   and `shell.fixings()`, not `shell.env`. A refusal returns `Ran` with the
-  supplied environment, no defined names and the error; no phrase runs.
+  supplied environment and the error; no phrase runs.
   Readmission claims provenance at the mismatch witness, naming the use
   that imposed the type; loaded-file errors retain the file's own location
   and, for `use`, its loader context.
@@ -28,6 +28,10 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   immediately extends the environment; under `Mode::Session` it also updates
   `shell.env` and the lease ledger. Earlier definitions survive a later
   phrase's failure.
+- `Mode::Session` leases and writes back; `Mode::Local` does neither.
+  `shell::load::run_module` and `evaluate_closed` share execution under
+  `Env::new()` with Σ lookup. `extend_session` is the rc and agent-library
+  door. A linked module has no session imports to readmit.
 - Higher-order natives re-enter through `machine::apply`; session hooks
   through `evaluator::apply`. `NESTED_MACHINE_LIMIT` bounds host-stack
   nesting independently of the machine's frame cap.
@@ -90,8 +94,12 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 - `Frame::CallSite` restores a visible call's register on return, halt or
   panic. Adjacent tail-call restorations coalesce, and these provenance-only
   frames do not count toward the computational stack cap. Synchronous
-  operations use `at_site`; delayed eliminations locate their own refusals.
+  operations use `at_site`.
   See [[decisions/261105_the-error-record|the error record]].
+- `Use(module)` calls `shell::load::run_module` on the already checked tree
+  under Σ and returns its public bindings as a record. Each evaluation runs
+  the body again; none resolves, reads or checks a module. Runtime failures
+  retain the `use` context. Its operation name is `use`.
 - Shell rules dispatch `Exec`, launch and join a `PipeNode` for `Pipeline`,
   and birth workers for `Spawn`. `Frame::Gather` owns a `BroodGuard`, captures
   the current scope in its new cradle and restores the displaced cradle
@@ -140,10 +148,12 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
   [[map/core/runtime|shell/exec]] (`RedirectState`, `with_redirects`,
   `with_capture`). `STAGE_EVAL` supplies `evaluate` and `close_argv` to
   pipeline execution; a ral stage starts a fresh machine on its thread.
-- `Val::Protected` wraps delayed obligations through `Site::wrap` without
-  admitting data at import. `CompKind::Protect` pushes `Frame::Protect`;
-  its return admits and wraps. Handle guards apply at exposure, never by
-  consuming a handle at import ([[map/core/typecheck|typecheck]]).
+- Residual data is readmitted before execution, never by forcing a thunk or
+  consuming a handle. The checker refuses a later unit's use of a stored name
+  whose scheme delays a weak residual; no frame checks a returned value
+  against a contract. A decided function beside undecided data needs only
+  head admission, since its defining unit checked its body and registered
+  boundaries return first-order data ([[map/core/typecheck|typecheck]]).
 - `Tilde` reads live `HOME` through `Context::require_home`. Ambient reads
   are natives; `$SCRIPT` is a literal baked by elaboration.
 

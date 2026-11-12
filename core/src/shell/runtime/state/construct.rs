@@ -4,7 +4,6 @@
 
 use super::bindings::{BindingLease, BindingLedger};
 use super::hooks::HookTable;
-use super::modules::Modules;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::authority::policy::{Baseline, GrantStack};
@@ -284,7 +283,6 @@ impl Image {
                 grants: GrantStack::root(),
                 handlers: Vec::new(),
                 args: Vec::new(),
-                modules: Modules::default(),
             },
             sources: SourceDb::default(),
             terms: Terms::root(),

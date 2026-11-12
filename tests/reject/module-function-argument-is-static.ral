@@ -1,0 +1,6 @@
+# status: 1
+# contains: couldn't match
+# contains: Integer
+# contains: String
+let m = use '../lib/modules/functions.ral'
+return !{$m[inc] 'text'}

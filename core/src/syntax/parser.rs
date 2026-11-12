@@ -702,6 +702,18 @@ impl Parser {
                 self.no_more_operands(form)?;
                 ScopeAst::Gather { body }
             }
+            "use" => {
+                let mut form = Form::new("use", "a written path", 1);
+                self.operand_slot(&mut form)?;
+                if matches!(self.peek(), Token::Expr(_)) {
+                    return Err(self.error(crate::syntax::USE_WRITTEN_PATH));
+                }
+                let (span, path) = self.capture_span(Self::parse_atom)?;
+                self.no_more_operands(form)?;
+                ScopeAst::Use {
+                    path: Spanned::boxed(span, path),
+                }
+            }
             _ => unreachable!("parse_stage admits only CONTROL_OPERATORS"),
         };
         Ok(Ast::Scope(op))

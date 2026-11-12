@@ -8,6 +8,8 @@ use super::{
     CompTy, CompTyNode, CompTyVar, Grade, GradeVar, RowNode, RowVar, Term, Ty, TyNode, TyVar, Var,
 };
 use crate::fact::OpenScheme;
+#[cfg(any(test, feature = "test-util"))]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Deref;
@@ -101,6 +103,117 @@ impl Scheme {
 
     pub(crate) fn has_weak(&self) -> bool {
         self.weak().next().is_some()
+    }
+
+    /// A weak variable is reachable beneath a thunk or handle.
+    pub(crate) fn delays_weak(&self) -> bool {
+        let mut pending = vec![(Term::Ty(&self.ty), false)];
+        let mut seen = BTreeSet::new();
+        while let Some((term, delayed)) = pending.pop() {
+            if term.is_ground() {
+                continue;
+            }
+            let variable = match term {
+                Term::Ty(ty) => match ty.node() {
+                    TyNode::Var(v) => Some(Var::Ty(*v)),
+                    _ => None,
+                },
+                Term::Comp(comp) => match comp.node() {
+                    CompTyNode::Var(v) => Some(Var::Comp(*v)),
+                    _ => None,
+                },
+                Term::Row(row) => match row.node() {
+                    RowNode::Var(v) => Some(Var::Row(*v)),
+                    _ => None,
+                },
+            };
+            if let Some(variable) = variable {
+                if !seen.insert((variable, delayed)) {
+                    continue;
+                }
+                match variable {
+                    Var::Ty(v) => match self.tys.get(&v) {
+                        Some(Role::Weak(_)) if delayed => return true,
+                        Some(Role::Mu(body)) => pending.push((Term::Ty(body), delayed)),
+                        _ => {}
+                    },
+                    Var::Comp(v) => match self.comps.get(&v) {
+                        Some(Role::Weak(())) if delayed => return true,
+                        Some(Role::Mu(body)) => pending.push((Term::Comp(body), delayed)),
+                        _ => {}
+                    },
+                    Var::Row(v) => {
+                        if delayed && matches!(self.rows.get(&v), Some(Role::Weak(_))) {
+                            return true;
+                        }
+                    }
+                    Var::Grade(_) => {}
+                }
+                continue;
+            }
+            let delayed = delayed
+                || matches!(term, Term::Ty(ty) if matches!(ty.node(), TyNode::Thunk(_) | TyNode::Handle(..)));
+            pending.extend(term.children().map(|child| (child, delayed)));
+        }
+        false
+    }
+
+    /// Whether the declared final result is first-order data, including its open
+    /// variables and μ-equations. Does not check the outer thunk or its arguments.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn boundary_result_is_data(&self) -> bool {
+        fn data(ty: &Ty, scheme: &Scheme, seen: &mut HashSet<TyVar>) -> bool {
+            match ty.node() {
+                TyNode::Unit
+                | TyNode::Bytes
+                | TyNode::Bool
+                | TyNode::Int
+                | TyNode::Float
+                | TyNode::String => true,
+                TyNode::List(elem) | TyNode::Map(elem) => data(elem, scheme, seen),
+                TyNode::Record(fields) | TyNode::Variant(fields) => row(fields, scheme, seen),
+                TyNode::Thunk(_) | TyNode::Handle(..) => false,
+                TyNode::Var(v) => match scheme.tys.get(v) {
+                    Some(Role::Forall(kind) | Role::Weak(kind)) => {
+                        kind.meet(Kind::DATA) == Some(*kind)
+                    }
+                    Some(Role::Mu(binding)) => !seen.insert(*v) || data(binding, scheme, seen),
+                    None => false,
+                },
+            }
+        }
+
+        fn row(fields: &super::Row, scheme: &Scheme, seen: &mut HashSet<TyVar>) -> bool {
+            match fields.node() {
+                RowNode::Empty => true,
+                RowNode::Extend(_, ty, rest) => data(ty, scheme, seen) && row(rest, scheme, seen),
+                RowNode::Var(v) => matches!(
+                    scheme.rows.get(v),
+                    Some(Role::Forall(true) | Role::Weak(true))
+                ),
+            }
+        }
+
+        let TyNode::Thunk(body) = self.ty.node() else {
+            return false;
+        };
+        let mut body = body;
+        let mut seen = HashSet::new();
+        loop {
+            match body.node() {
+                CompTyNode::Fun(_, rest) => body = rest,
+                CompTyNode::Return(_, ty) => return data(ty, self, &mut HashSet::new()),
+                CompTyNode::Var(v) => {
+                    if !seen.insert(*v) {
+                        return false;
+                    }
+                    let Some(Role::Mu(binding)) = self.comps.get(v) else {
+                        return false;
+                    };
+                    body = binding;
+                }
+            }
+        }
     }
 
     /// The weak residuals, in sort order.
@@ -306,4 +419,183 @@ fn draw<V: Ord + Copy, R>(vars: &mut BTreeMap<V, R>, id: fn(u32) -> V, role: R) 
 /// Binders are drawn in order from zero, so their count is the next id.
 fn next_id(drawn: usize) -> u32 {
     u32::try_from(drawn).expect("fewer than 2^32 binders")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ty::{Label, Row, closed_record};
+
+    fn result(ty: Ty) -> Scheme {
+        Scheme::mono(Ty::thunk(CompTy::pure(ty)))
+    }
+
+    #[test]
+    fn boundary_data_check_ignores_arguments_and_unreachable_roles() {
+        let scheme = Binders::close(|binders| {
+            let any = Ty::var(binders.ty(Kind::ANY));
+            let shallow = Ty::record(Row::var(binders.row(false)));
+            let computation = Ty::thunk(CompTy::var(binders.comp()));
+            let _unused = binders.ty(Kind::ANY);
+            Ty::thunk(CompTy::arrows(
+                [any, shallow, computation],
+                CompTy::pure(Ty::int()),
+            ))
+        });
+        assert!(scheme.boundary_result_is_data());
+    }
+
+    #[test]
+    fn boundary_data_check_requires_data_kinds_for_all_result_variables() {
+        let v = TyVar(0);
+        for (kind, expected) in [
+            (Kind::DATA, true),
+            (Kind::SCALAR, true),
+            (Kind::NUMBER, true),
+            (Kind::ANY, false),
+            (Kind::SIZED, false),
+        ] {
+            for role in [Role::Forall(kind), Role::Weak(kind)] {
+                let mut scheme = result(Ty::map(Ty::list(Ty::var(v))));
+                scheme.tys.insert(v, role);
+                assert_eq!(scheme.boundary_result_is_data(), expected, "{scheme:?}");
+            }
+        }
+        assert!(!result(Ty::var(v)).boundary_result_is_data());
+    }
+
+    #[test]
+    fn boundary_data_check_requires_deep_rows_and_checks_their_fields() {
+        let v = RowVar(0);
+        for deep in [false, true] {
+            for role in [Role::Forall(deep), Role::Weak(deep)] {
+                for ty in [Ty::record(Row::var(v)), Ty::variant(Row::var(v))] {
+                    let mut scheme = result(ty);
+                    scheme.rows.insert(v, role.clone());
+                    assert_eq!(scheme.boundary_result_is_data(), deep, "{scheme:?}");
+                }
+            }
+        }
+        for delayed in [
+            Ty::thunk(CompTy::pure(Ty::int())),
+            Ty::handle(Grade::Value, Ty::int()),
+        ] {
+            let record = Ty::record(Row::extend(
+                Label::Field("value".into()),
+                delayed.clone(),
+                Row::empty(),
+            ));
+            let variant = Ty::variant(Row::extend(
+                Label::Case("value".into()),
+                delayed.clone(),
+                Row::empty(),
+            ));
+            for ty in [
+                delayed.clone(),
+                Ty::list(delayed.clone()),
+                Ty::map(delayed),
+                record,
+                variant,
+            ] {
+                assert!(!result(ty).boundary_result_is_data());
+            }
+        }
+        assert!(!result(Ty::record(Row::var(v))).boundary_result_is_data());
+    }
+
+    #[test]
+    fn boundary_data_check_follows_recursive_results_without_looping() {
+        let v = TyVar(0);
+        let mut scheme = result(Ty::var(v));
+        scheme.tys.insert(v, Role::Mu(Ty::list(Ty::var(v))));
+        assert!(scheme.boundary_result_is_data());
+        scheme
+            .tys
+            .insert(v, Role::Mu(Ty::handle(Grade::Value, Ty::var(v))));
+        assert!(!scheme.boundary_result_is_data());
+    }
+
+    #[test]
+    fn boundary_data_check_follows_computation_equations_to_a_final_result() {
+        let v = CompTyVar(0);
+        let mut scheme = Scheme::mono(Ty::thunk(CompTy::var(v)));
+        scheme.comps.insert(
+            v,
+            Role::Mu(CompTy::fun(Ty::int(), CompTy::pure(Ty::string()))),
+        );
+        assert!(scheme.boundary_result_is_data());
+        scheme
+            .comps
+            .insert(v, Role::Mu(CompTy::fun(Ty::int(), CompTy::var(v))));
+        assert!(!scheme.boundary_result_is_data());
+    }
+
+    fn recursive(ty: Ty) -> Scheme {
+        let mut scheme = Scheme::mono(ty);
+        scheme.tys.insert(
+            TyVar(0),
+            Role::Mu(closed_record(&[
+                ("item", Ty::var(TyVar(1))),
+                ("next", Ty::var(TyVar(0))),
+            ])),
+        );
+        scheme.tys.insert(TyVar(1), Role::Weak(Kind::DATA));
+        scheme
+    }
+
+    #[test]
+    fn delays_weak_follows_mu_equations_in_each_context() {
+        let a = Ty::var(TyVar(0));
+        let delayed = Ty::thunk(CompTy::pure(a.clone()));
+        for (ty, expected) in [
+            (delayed.clone(), true),
+            (
+                closed_record(&[("d", a.clone()), ("f", delayed.clone())]),
+                true,
+            ),
+            (closed_record(&[("f", delayed), ("d", a.clone())]), true),
+            (closed_record(&[("d", a)]), false),
+            (Ty::int(), false),
+        ] {
+            let scheme = recursive(ty);
+            assert_eq!(scheme.delays_weak(), expected, "{scheme}");
+        }
+    }
+
+    #[test]
+    fn delays_weak_checks_arguments_and_payloads_but_not_adjacent_data() {
+        let weak = Ty::var(TyVar(1));
+        for (ty, expected) in [
+            (
+                Ty::thunk(CompTy::fun(weak.clone(), CompTy::pure(Ty::unit()))),
+                true,
+            ),
+            (Ty::handle(Grade::Value, weak.clone()), true),
+            (
+                closed_record(&[("x", weak), ("f", Ty::thunk(CompTy::pure(Ty::int())))]),
+                false,
+            ),
+        ] {
+            let mut scheme = Scheme::mono(ty);
+            scheme.tys.insert(TyVar(1), Role::Weak(Kind::DATA));
+            assert_eq!(scheme.delays_weak(), expected, "{scheme}");
+        }
+    }
+
+    #[test]
+    fn delays_weak_includes_row_and_computation_residuals() {
+        let mut row = Scheme::mono(Ty::thunk(CompTy::pure(Ty::record(Row::var(RowVar(0))))));
+        row.rows.insert(RowVar(0), Role::Weak(true));
+        assert!(row.delays_weak());
+        row.ty = Ty::record(Row::var(RowVar(0)));
+        assert!(!row.delays_weak());
+
+        let mut comp = Scheme::mono(Ty::thunk(CompTy::var(CompTyVar(0))));
+        comp.comps
+            .insert(CompTyVar(0), Role::Mu(CompTy::var(CompTyVar(1))));
+        comp.comps.insert(CompTyVar(1), Role::Weak(()));
+        assert!(comp.delays_weak());
+        comp.ty = Ty::int();
+        assert!(!comp.delays_weak());
+    }
 }

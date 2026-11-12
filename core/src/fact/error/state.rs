@@ -27,18 +27,11 @@ pub enum AmbientSetting {
 }
 label!(AmbientSetting);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleCycle {
-    pub chain: Vec<String>,
-}
-record!(ModuleCycle { chain: "chain" });
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
 pub enum DepthKind {
     EvalStack,
     NativeReentry,
-    Source,
 }
 label!(DepthKind);
 
@@ -122,7 +115,6 @@ pub enum StateFailure {
     WorkerCap(WorkerCap),
     GatherClosed,
     MissingAmbient(AmbientSetting),
-    ModuleCycle(ModuleCycle),
     Depth(DepthFailure),
     CaptureLimit(CaptureLimit),
     NoByteInput(OperationState),
@@ -136,7 +128,7 @@ pub enum StateFailure {
     NoChildEngines,
     NurseryMissing(Count),
 }
-variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", ModuleCycle(ModuleCycle): "module-cycle", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", HandlerConflict(String): "handler-conflict", NoDesk: "no-desk", NoForks: "no-forks", NoChildEngines: "no-child-engines", NurseryMissing(Count): "nursery-missing" });
+variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", HandlerConflict(String): "handler-conflict", NoDesk: "no-desk", NoForks: "no-forks", NoChildEngines: "no-child-engines", NurseryMissing(Count): "nursery-missing" });
 
 impl OperationState {
     pub fn describe(&self) -> String {
@@ -156,12 +148,6 @@ impl AmbientSetting {
     }
 }
 
-impl ModuleCycle {
-    pub fn describe(&self) -> String {
-        format!("chain: {}", self.chain.join(", "))
-    }
-}
-
 impl DepthKind {
     pub fn describe(&self) -> String {
         <&str>::from(*self).replace('-', " ")
@@ -176,11 +162,6 @@ impl DepthFailure {
                 crate::text::plural(self.limit.to_u64(), "frame")
             ),
             DepthKind::NativeReentry => format!("native re-entry depth exceeded ({})", self.limit),
-            DepthKind::Source => format!(
-                "{} depth exceeded its limit {}",
-                self.kind.describe(),
-                self.limit
-            ),
         }
     }
 }
@@ -279,7 +260,6 @@ impl StateFailure {
             Self::MissingAmbient(setting) => {
                 format!("no ambient {} is available", setting.describe())
             }
-            Self::ModuleCycle(cycle) => format!("module cycle: {}", cycle.chain.join(" → ")),
             Self::Depth(cause) => cause.describe(),
             Self::CaptureLimit(cause) => cause.describe(),
             Self::NoByteInput(state) => format!(
@@ -350,11 +330,6 @@ mod tests {
                 vec![
                     "a builtin such as `map` applied a function that itself applied `map`, too deep: restructure with a tail-recursive loop",
                 ],
-            ),
-            (
-                DepthKind::Source,
-                "source depth exceeded its limit 1",
-                vec![],
             ),
         ] {
             projection(

@@ -1,0 +1,4 @@
+let bare = use ../lib/modules/values.ral
+let quoted = use "../lib/modules/values.ral"
+let single = use '../lib/modules/values.ral'
+return $[$bare == $quoted && $quoted == $single]

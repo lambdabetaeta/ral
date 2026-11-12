@@ -272,6 +272,7 @@ mod enquiry_tests {
         }) {
             RunReport::Ran { .. } => {}
             RunReport::Static { .. } => panic!("`ask-desk` must reach evaluation"),
+            RunReport::Checked { .. } => panic!("a source run must not report check-only success"),
         }
 
         let answer = answer
@@ -418,6 +419,7 @@ mod durability_tests {
         let report = crate::carrier::testkit::eval(&transport, "$[1 + 1]");
         match report {
             Report::Ran(Ran { ending, .. }) => assert!(matches!(ending, Ending::Ok(_))),
+            Report::Checked { .. } => panic!("a source run must not report check-only success"),
             Report::Static { .. } | Report::Faulted { .. } => {
                 panic!("the healed session must evaluate")
             }

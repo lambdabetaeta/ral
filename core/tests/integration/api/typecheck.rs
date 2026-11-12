@@ -17,7 +17,7 @@ use ral_core::ir::{CompKind, GroupNode, Phrase, Toplevel, Unchecked, Val};
 use ral_core::test_helper::rc_source;
 use ral_core::ty::{CompTyNode, Grade, Ty, TyNode};
 use ral_core::typecheck::table::declared;
-use ral_core::typecheck::{Form, OptionsContext, TypeErrorKind};
+use ral_core::typecheck::{Form, OptionsContext, TypeErrorKind, Unit};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 use std::sync::Arc;
 
@@ -31,9 +31,9 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
 /// reads it as an external and answers about something else.
 fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp =
-        elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
-    typecheck(&comp, crate::common::schemes_for(surface), None)
+    let comp = elaborate(&ast, [], None, &mut crate::common::no_modules)
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    typecheck(&comp, crate::common::schemes_for(surface), Unit::Script)
         .err()
         .unwrap_or_default()
 }
@@ -213,7 +213,7 @@ fn detach_is_a_first_class_value() {
     let top = typecheck(
         &toplevel("let f = $detach; let bg = detach 'docs'; return ()"),
         crate::common::schemes_for(&surface),
-        None,
+        Unit::Script,
     )
     .expect("detach can be bound and partially applied");
     assert_eq!(
@@ -271,14 +271,15 @@ fn an_over_applied_detach_explains_its_last_list() {
 
 fn toplevel(src: &str) -> Unchecked {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
+    elaborate(&ast, [], None, &mut crate::common::no_modules)
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
 }
 
 fn toplevel_ok(src: &str) -> Toplevel {
     typecheck(
         &toplevel(src),
         crate::common::schemes_for(&ral_core::HostSurface::default()),
-        None,
+        Unit::Script,
     )
     .unwrap_or_else(|errs| {
         let msgs: Vec<String> = errs.iter().map(|e| e.kind.render_message()).collect();
@@ -620,12 +621,12 @@ static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
 
 fn table_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let top =
-        elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    let top = elaborate(&ast, [], None, &mut crate::common::no_modules)
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &top,
         crate::common::schemes_for(&ral_core::HostSurface::default()),
-        Some(table),
+        Unit::Host(table),
     )
     .err()
     .unwrap_or_default()
@@ -978,7 +979,6 @@ fn rc_empty_options_list_every_missing_key_with_a_pasteable_hint() {
         "env",
         "prompt",
         "handlers",
-        "bindings",
         "edit-mode",
         "bell",
         "surface",
@@ -2292,7 +2292,8 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let top = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let top = ral_core::elaborator::elaborate(&ast, [], None, &mut crate::common::no_modules)
+            .expect("elaborate");
         let mut saw = false;
         for phrase in &top {
             let comp: &ral_core::ir::Comp = match &phrase.item {

@@ -16,7 +16,7 @@ fn no_base(
 #[test]
 fn nursery_round_trips_a_forked_session() {
     let mut shell = crate::test_helper::core_shell();
-    shell.set_var("parent_binding".to_string(), Value::Int(42));
+    crate::test_access::bind_untyped(&mut shell, "parent_binding", Value::Int(42));
     let nursery = Nursery::default();
     let id = nursery.park(shell.bequeath(SpawnGrant::Inherit));
     let adopted = nursery
@@ -33,7 +33,24 @@ fn nursery_round_trips_a_forked_session() {
 }
 
 #[test]
-fn refused_host_blocks_install_neither_bindings_nor_hooks() {
+fn host_bindings_keep_the_declared_closed_scheme() {
+    let mut shell = crate::test_helper::core_shell();
+    let value = Value::from(&crate::io::terminal::TerminalState::default());
+    let scheme = Value::terminal_scheme();
+    shell.set_var("TERMINAL".into(), value.clone(), scheme.clone());
+    assert_eq!(shell.scope_lookup("TERMINAL"), Some(&value));
+    assert_eq!(
+        shell
+            .session_schemes()
+            .bindings
+            .into_iter()
+            .find(|(name, _)| name == "TERMINAL"),
+        Some(("TERMINAL".into(), Some(scheme))),
+    );
+}
+
+#[test]
+fn refused_host_blocks_install_no_hook() {
     use crate::fact::{BlockRole, InvalidCause, Reason};
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, Val, ValListElem};
     use crate::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig};
@@ -56,10 +73,6 @@ fn refused_host_blocks_install_neither_bindings_nor_hooks() {
         site: None,
     }));
     let value = Value::Thunk(Closure::closed(body));
-    shell.bind_value("host".into(), Value::Int(7)).unwrap();
-    let error = shell.bind_value("host".into(), value.clone()).unwrap_err();
-    refused_as(error, BlockRole::Binding("host".into()));
-    assert_eq!(shell.scope_lookup("host"), Some(&Value::Int(7)));
     let name = HookName::session("refused");
     let error = shell
         .register_hook(name.clone(), value, HookSig::Block, DefaultPolicy::denied())

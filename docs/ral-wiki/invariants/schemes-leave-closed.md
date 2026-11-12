@@ -25,9 +25,12 @@ constructors, each checking `Scheme::foreign` is empty:
 - deserialisation, which refuses a scheme that is not closed.
 
 Every carrier past a unit holds `Closed`: `Phrase::Define`'s schemes in a
-checked `Toplevel`, `SessionSchemes`, the build-time prelude bake (read back by
-`SessionSchemes::from_prelude`) and the seed's scope tables
-(`seed::table::SerialBinding`). Live schemes exist only inside a unit:
+checked `Toplevel`, the present schemes in `SessionSchemes`, the build-time
+prelude bake and the seed's scope tables (`seed::table::SerialBinding`).
+Every session binding has a scheme; captured block locals may lack one and
+receive a fresh rank-zero monomorphic type (`WeakSource::Host`) when a hook
+or handler closure is inferred at installation. Live schemes exist only
+inside a unit:
 
 - Generation harvests rank-generalised per-name schemes onto the pending
   `Phrase::Define`. Only after successful unit closure does `Readback::toplevel`
@@ -38,8 +41,6 @@ checked `Toplevel`, `SessionSchemes`, the build-time prelude bake (read back by
   errors export nothing. Install-time `arm_stands_in` instead returns only a
   verdict: handler entries carry no schemes, and session checking imports
   handled names for diagnostics alone.
-- `Site::scheme` enters its scratch region before instantiation, then exits,
-  generalises and settles the contract.
 
 **Sortedness is structural.** A scheme keeps one map per sort, so a role is
 always of its variable's sort. A type role's metadata is its `Kind`, a row's
@@ -59,6 +60,21 @@ rank-zero unknown of the next unifier, preserving kinds and row deep bits so a
 residual retains its restrictions. A `Define` scheme is settled before it is
 stored, so no foreign id is ever read
 ([[decisions/260930_a-let-generalises-what-is-not-weak|a-let-generalises-what-is-not-weak]]).
+
+**Closed does not mean decided, or importable.** A scheme may be closed while
+listing weak residuals. A stored name is unusable in a later unit if any weak
+type, computation or row residual is reachable beneath a thunk or handle,
+including a function's arguments as well as its results. Reachability follows
+μ-equations from the scheme's body, preserving whether a path is delayed.
+A recursive root shared between data and delayed positions must be judged in
+both contexts; unreachable equations do not affect this use rule.
+
+A weak residual only in existing data is instead readmitted at the later
+unit's solved type before execution. A decided function beside that data is
+allowed; a universal parameter is not a weak residual. Thus recursive data
+can be readmitted without deferring a check to a call or handle exposure.
+Module public schemes are stricter: they contain no weak residual at all
+([[decisions/260606_cacheless-module-loader|closed linked modules]]).
 
 Closure is syntactic over the **whole scheme graph**: the body and every
 value/computation μ-binding. It must not follow the checking unifier's slots,

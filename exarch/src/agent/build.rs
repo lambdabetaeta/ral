@@ -59,8 +59,9 @@ fn with_teardown_failures(error: io::Error, failures: &[String]) -> io::Error {
 }
 pub(crate) const FIRST_NAME: &str = "main";
 const RESUME_NOTE: &str = "session resumed from disk; the shell is fresh: bindings, workers, and \
-    cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths \
-    in the old context are dead), pinned state and scheduled events are gone (exarch-pins `list \
+    cwd from before are gone, the scratch dir is new (read the environment variable EXARCH_SCRATCH \
+    with env; scratch paths in the old context are dead), pinned state and scheduled events are \
+    gone (exarch-pins `list \
     and exarch-schedules `list to confirm), and any sub-agents from before have ended.";
 
 /// Whom a new agent answers. Every other difference is in [`Parent::terms`].
@@ -220,7 +221,11 @@ impl Fleet {
                 |t| t.env_var(SCRATCH_VAR),
             )
             .map_err(lost)?
-            .ok_or_else(|| io::Error::other(format!("the engine names no ${SCRATCH_VAR}")))?;
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "the engine has no {SCRATCH_VAR} environment variable"
+                ))
+            })?;
         let fleet = Self::new(Launch {
             returns,
             admission,

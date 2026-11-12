@@ -22,8 +22,8 @@
 # The files a program touches on its own account, outside any shell, go through
 # `ral_core::own`: what it keeps for itself, what the user writes at the places
 # it chooses, and what the user names to it.  Every `std::fs` ban points there.
-# The four calls that take a name the user gave (`read_named`, `open_named`,
-# `kind_named`, `create_named`) are banned in turn: each caller is a typed site
+# Calls that take a name the user gave (`read_named`, `read_named_source`,
+# `open_named`, `kind_named`, `create_named`) are banned: each caller is a typed site
 # that says whose name it is.
 # A name a model gives is opened only by the walk, `crate::path::walk`.  The
 # host's environment is read only through `ral_core::host::{var, var_os,
@@ -100,6 +100,7 @@ disallowed-methods = [
     { path = "ral_core::host::home", reason = "Host-only HOME read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::home instead." },
     { path = "ral_core::host::user", reason = "Host-only USER read — a `within [env: …]` overlay does not apply. In language semantics thread the shell's overlay through EnvVars::user instead." },
     { path = "ral_core::own::read_named", reason = "Reads a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
+    { path = "ral_core::own::read_named_source", reason = "Reads source named by the user and its real identity: a typed site, never a model's name." },
     { path = "ral_core::own::open_named", reason = "Opens a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
     { path = "ral_core::own::kind_named", reason = "Stats a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },
     { path = "ral_core::own::create_named", reason = "Makes a name the user gave (an argument, a command typed at a front end) or the program's install tree: a typed site that says which, never a model's name." },

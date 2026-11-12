@@ -27,22 +27,15 @@ pub(crate) struct Ran {
     /// first one halted — written into `shell.env` only under
     /// `Mode::Session`.
     pub env: Env,
-    /// Every name a `Define` bound, in order — what `use` collects.
-    pub(crate) defined: Vec<String>,
     pub(crate) outcome: Settled<Value>,
 }
 
-/// Whose phrases these are.  Leases belong to `Session` alone; the host loading door (`evaluate_source` — rc, a
-/// plugin, a capability file) and a `use` body run under a mode that leases
-/// nothing.  Only `Session` writes each landed `Define` back into
-/// `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run
-/// threads its own `E` and never touches the session environment at all.
+/// Only `Session` leases bindings and writes each landed `Define` back to
+/// `shell.env`. `Local` threads its own lexical environment.
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
     Session,
     Local,
-    Module,
-    Prelude,
 }
 
 /// Admit `top` against `env`, then run its phrases over that local `E`, each
@@ -63,13 +56,11 @@ pub(crate) fn run_phrases(
     if let Err(error) = readmit(top, &env, shell) {
         return Ran {
             env,
-            defined: Vec::new(),
             outcome: Err(error),
         };
     }
     let mut ran = Ran {
         env,
-        defined: Vec::new(),
         outcome: Ok(Value::Unit),
     };
     let last = top.phrases.len().saturating_sub(1);
@@ -140,7 +131,6 @@ impl Ran {
             if session {
                 shell.note_define(&name, &binding);
             }
-            self.defined.push(name.to_string());
             self.env.bind(name, binding);
         }
         if session {
@@ -200,7 +190,8 @@ pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
         shell.session_schemes(),
         crate::source::FileId::DUMMY,
         None,
-        None,
+        crate::typecheck::Unit::Script,
+        &mut |at, written, script| crate::shell::load::load_module(at, written, script, &[], shell),
     )
     .expect("compile");
     run_phrases(
@@ -224,13 +215,14 @@ mod tests {
             crate::test_helper::core_schemes(),
             crate::source::FileId::DUMMY,
             None,
-            None,
+            crate::typecheck::Unit::Script,
+            &mut crate::compile::no_modules,
         )
         .expect("compile")
     }
 
     #[test]
-    fn run_phrases_installs_defines_into_scope_and_reports_them() {
+    fn run_phrases_installs_defines_into_scope() {
         let top = toplevel("let rp_a = 1\nlet rp_b = 2");
         let mut shell = crate::test_helper::core_shell();
         let ran = run_phrases(
@@ -241,7 +233,6 @@ mod tests {
             &mut shell,
         );
         ran.outcome.expect("both defines must succeed");
-        assert_eq!(ran.defined, vec!["rp_a".to_string(), "rp_b".to_string()]);
         assert_eq!(ran.env.get("rp_a"), Some(&Value::Int(1)));
         assert_eq!(ran.env.get("rp_b"), Some(&Value::Int(2)));
         assert_eq!(shell.env.get("rp_a"), Some(&Value::Int(1)));
@@ -259,7 +250,6 @@ mod tests {
             &mut shell,
         );
         assert!(ran.outcome.is_err(), "the run must halt at `exit 7`");
-        assert_eq!(ran.defined, vec!["rp_before".to_string()]);
         assert_eq!(ran.env.get("rp_before"), Some(&Value::Int(1)));
         assert!(ran.env.get("rp_after").is_none());
     }
@@ -298,7 +288,8 @@ mod tests {
             shell.session_schemes(),
             crate::source::FileId::DUMMY,
             None,
-            None,
+            crate::typecheck::Unit::Script,
+            &mut crate::compile::no_modules,
         )
         .expect("compile a later unit");
 
@@ -315,7 +306,6 @@ mod tests {
         );
         let error = ran.outcome.expect_err("the supplied datum must be refused");
         assert!(error.to_string().contains("$d"), "{error}");
-        assert_eq!(ran.defined, [] as [String; 0]);
         assert_eq!(ran.env.get("d"), Some(&Value::string("bad")));
         assert!(ran.env.get("before").is_none());
         assert!(ran.env.get("result").is_none());
@@ -326,7 +316,6 @@ mod tests {
         shell.env = env;
         let ran = run_phrases(&top, valid_env, Mode::Local, &Mooring::adrift(), &mut shell);
         ran.outcome.expect("the supplied datum must be admitted");
-        assert_eq!(ran.defined, ["before", "result"]);
         assert_eq!(ran.env.get("d"), Some(&Value::Int(1)));
         assert_eq!(ran.env.get("before"), Some(&Value::Int(7)));
         assert_eq!(ran.env.get("result"), Some(&Value::Int(2)));

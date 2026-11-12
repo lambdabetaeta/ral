@@ -109,7 +109,21 @@ impl Agent {
                 }
                 Err(cause) => (lost(cause), true),
             },
-            Ok(Report::Static { rendered, .. }) => (shell_eval::report::rejection(&rendered), true),
+            Ok(Report::Static {
+                rendered, trail, ..
+            }) => {
+                shell_eval::report::record_trail(&trail, &host.apply);
+                (shell_eval::report::rejection(&rendered), true)
+            }
+            Ok(Report::Checked { trail }) => {
+                shell_eval::report::record_trail(&trail, &host.apply);
+                (
+                    "ral: the engine returned a check-only report for a source run; the call \
+                     was not evaluated. This is an engine bug; report it before retrying.\n"
+                        .to_string(),
+                    true,
+                )
+            }
             Ok(Report::Faulted { rendered, .. }) => (
                 shell_eval::report::fault(&rendered, host.desk.call.audit().as_deref()),
                 true,

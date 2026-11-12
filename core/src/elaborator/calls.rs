@@ -3,7 +3,7 @@ use super::{
     Pattern, Redirects, Spanned, Val, ValListElem, WithSpan,
 };
 
-impl Elaborator {
+impl Elaborator<'_> {
     /// Every name-dispatched head (`bare`, `^name`, `./path`, `~/path`) funnels
     /// through here.
     fn exec(&self, head: CommandWord, argv: Argv, redirects: Redirects<Val>) -> Comp {

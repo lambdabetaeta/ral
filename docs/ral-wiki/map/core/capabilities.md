@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/load/profile.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
@@ -123,7 +123,9 @@ Submodules:
 
 The `shell::load` module holds `shell/load/profile.rs` —
 `load_capabilities_from_path` / `_from_str` for `.ral` capability profiles,
-compiled under `typecheck::table::declared(Form::Grant)`. A profile ends in
+checked against Σ and run under Σ through `evaluate_closed`, with
+`typecheck::table::declared(Form::Grant)`. It sees no session bindings and
+its helper `let`s never enter the session. A profile ends in
 `grant`'s options written out (SPEC §15.3): `check_options` checks each key
 during generation, recursing immediately into written `exec:` and `fs:`
 records. A bound or computed tail is T0077; an unwritten nested table is
@@ -174,8 +176,8 @@ authority and returns domain data, never runtime values or control flow.
   refusal against its call's `Mooring` and mints its `Break`.
   `GrantStack::judge_failure` judges `failure_trace` for the requested
   operation before an error is disclosed; `GrantStack::locate` applies it for
-  every caller and either handle kind, and `locate_existing` and `locate_first` judge
-  failed walks through it.
+  every caller and either handle kind, and `locate_existing` judges failed
+  walks through it.
 
 ## Construction — `core/src/authority/grant/`
 
@@ -427,10 +429,15 @@ of it, anchored as `anchor` takes it, so a script under a directory named
 `~` stays there. A virtual source has no directory,
 and its paths resolve against the cwd.
 
-(`which::ral_path_entries` lists `RAL_PATH`; `use` searches it through the
-shell's resolver, and the plugin loader folds it into its own candidates.  The
-name beside the script is `use`'s first candidate; each candidate is judged
-before its kind is asked, a denied one passed over.)
+**A module read has one candidate: the path written at `use`.** The loader
+resolves and judges it with `shell.locate` at check time, using the containing
+file as anchor (the session cwd for a virtual source), check-time environment
+for sigil heads, and the grant then in force. No surrounding `within` or
+`grant`, or earlier `cd` in the unit, changes that read. The lexical grant
+still governs the module's runtime effects. A denial is stamped at `use` and
+survives in the dispatch trail on static refusal. `--check` boots and applies
+profiles before taking this same compile path. ral reads no `RAL_PATH`;
+plugins likewise name one file ([[map/repl/plugins|plugins]]).
 
 `tree.rs` is the one directory-tree walk, `tree::Walk`: ral enumerates, with
 `Dir::read_dir` and `Dir::open_dir`, depth first in name order, and `ignore` only
@@ -531,8 +538,10 @@ The files a program touches on its own account, outside any shell, are
 - `UserFile` — a file the user writes at a place the program chooses (the rc,
   `config.ral`, house rules): links followed, a replace staged beside the link's
   target so the link survives, `seed` writing only where nothing stands;
-- `read_named`, `open_named`, `kind_named`, `create_named` — a file the user
-  names, the one write being a new file. They take any path, so `clippy.toml`
+- `read_named`, `read_named_source`, `open_named`, `kind_named`, `create_named` —
+  a file the user names, the one write being a new file. `read_named_source`
+  returns text and the real path of the same held object, fixing a script's
+  identity before boot can change cwd. They take any path, so `clippy.toml`
   bans them, and each caller is a typed site that says why the name is the
   user's: a CLI argument, a TUI command, the install tree.
 

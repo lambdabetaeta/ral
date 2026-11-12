@@ -13,8 +13,8 @@ mod report;
 pub use quote::{is_bare_word, quote_word};
 
 /// The control operators: the stage heads `parse_control_op` reads.
-pub(crate) const CONTROL_OPERATORS: [&str; 7] = [
-    "try", "guard", "within", "grant", "audit", "spawn", "gather",
+pub(crate) const CONTROL_OPERATORS: [&str; 8] = [
+    "try", "guard", "within", "grant", "audit", "spawn", "gather", "use",
 ];
 
 /// The reserved flow and binding words, beside [`CONTROL_OPERATORS`].
@@ -52,6 +52,12 @@ pub(crate) fn nesting_too_deep_message() -> String {
 /// when the payload is glued to `<<`, and the parser, when it is a bare word.
 pub(crate) const NO_HEREDOCS: &str = "ral has no heredocs: `<<` feeds a string to stdin. \
      Use a raw string: `cmd << #\' ... \'#`, which may use newlines";
+
+/// Shared refusal: the parser rejects `Token::Expr` before `parse_atom`
+/// erases `$[...]` provenance; the elaborator validates all other operands.
+pub(crate) const USE_WRITTEN_PATH: &str = "`use` takes a written path: the module is read \
+     when this script is checked, before it runs. Write the path out: relative to this file, \
+     or headed by `~` or `xdg:`.";
 
 /// One wording for both binding positions that refuse a keyword: a plain
 /// binder and a `...rest` name.

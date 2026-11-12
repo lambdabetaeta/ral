@@ -1,6 +1,7 @@
 //! The apps and their scratch and XDG directories, and the time/slug helpers
 //! those share.
 
+#[cfg(any(test, feature = "test-util"))]
 use ral_core::Shell;
 use ral_core::environ::EnvVars;
 #[cfg(any(test, feature = "test-util"))]
@@ -287,11 +288,11 @@ impl Scratch {
     /// [`CONFINED_TOOL_SETTINGS`] into `shell`, overriding whatever was
     /// inherited: a `CARGO_HOME` under `~/.cargo` lands outside reasonable's
     /// write set, so the sandbox is the trust boundary, not the environment
-    /// exarch was launched in.  One seeder for all three, because the engine's
-    /// test double mirrors this call and a second site would drift from it.
+    /// exarch was launched in. Uses the same environment table as the root's
+    /// attach.
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_into(&self, shell: &mut Shell) {
-        seed_vars(shell, &self.env);
+        shell.overlay_env(&self.env);
     }
 
     /// What this scratch names to the agent: [`SCRATCH_VAR`], the
@@ -618,19 +619,6 @@ fn stamp_from_secs(secs: u64) -> String {
     )
 }
 
-/// Seed `vars` into `shell` twice over: as environment variables, so spawned
-/// children inherit them, and as scope bindings, so `$name` resolves in ral
-/// source.
-pub(crate) fn seed_vars(shell: &mut Shell, vars: &EnvVars) {
-    shell.overlay_env(vars);
-    for (name, value) in vars {
-        shell.set_var(
-            name.clone(),
-            ral_core::shell::runtime::Value::string(value.as_str()),
-        );
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
@@ -657,6 +645,24 @@ mod tests {
         assert_eq!(get("XDG_CACHE_HOME"), Some("/tmp/xdg-cache"));
         assert_eq!(get("GOMODCACHE"), Some("/tmp/go/pkg/mod"));
         assert_eq!(get("MAVEN_ARGS"), Some("-Dmaven.repo.local=/tmp/maven"));
+    }
+
+    #[test]
+    fn scratch_variables_are_environment_only() {
+        let scratch = Scratch::for_test(EXARCH, "scratch-env").expect("test scratch");
+        let mut shell = crate::boot::test_shell();
+        scratch.install_into(&mut shell);
+        for (name, value) in scratch.env() {
+            assert_eq!(
+                shell.env_var(name).as_deref(),
+                Some(value.as_str()),
+                "{name}"
+            );
+            assert!(
+                shell.scope_lookup(name).is_none(),
+                "{name} is not a binding"
+            );
+        }
     }
 
     #[test]

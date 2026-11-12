@@ -15,7 +15,7 @@ use crate::data::Finite;
 use crate::data::Str;
 use crate::fact::{Found, TextPreview, ValueShape};
 use crate::io::terminal::{InteractiveMode, TerminalState};
-use crate::ty::{Head, TAG_PREFIX};
+use crate::ty::{Binders, Closed, Head, TAG_PREFIX, Ty, closed_record};
 use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -400,39 +400,88 @@ fn fmt_lambda(param: &crate::ir::Name, body: &crate::ir::Comp) -> String {
     format!("<|{}| block>", params.join(" "))
 }
 
-/// The `$TERMINAL` map bound for RC files and plugins.  Scripts pattern-match
-/// these keys: adding one is safe, renaming or removing one breaks them.
+enum TerminalField {
+    Flag(fn(&TerminalState) -> bool),
+    Mode,
+}
+
+impl TerminalField {
+    fn value(&self, terminal: &TerminalState) -> Value {
+        match self {
+            Self::Flag(read) => Value::Bool(read(terminal)),
+            Self::Mode => Value::string(match terminal.mode {
+                InteractiveMode::Auto => "auto",
+                InteractiveMode::Minimal => "minimal",
+                InteractiveMode::Full => "full",
+            }),
+        }
+    }
+
+    fn ty(&self) -> Ty {
+        match self {
+            Self::Flag(_) => Ty::bool(),
+            Self::Mode => Ty::string(),
+        }
+    }
+}
+
+const TERMINAL_FIELDS: &[(&str, TerminalField)] = &[
+    ("stdin-tty", TerminalField::Flag(|t| t.startup_stdin_tty)),
+    ("stdout-tty", TerminalField::Flag(|t| t.startup_stdout_tty)),
+    ("stderr-tty", TerminalField::Flag(|t| t.startup_stderr_tty)),
+    ("supports-ansi", TerminalField::Flag(|t| t.supports_ansi)),
+    ("no-color", TerminalField::Flag(|t| t.no_color)),
+    ("is-tmux", TerminalField::Flag(|t| t.is_tmux)),
+    ("is-asciinema", TerminalField::Flag(|t| t.is_asciinema)),
+    ("is-ci", TerminalField::Flag(|t| t.is_ci)),
+    ("truecolor", TerminalField::Flag(|t| t.truecolor)),
+    ("hyperlinks", TerminalField::Flag(TerminalState::hyperlinks)),
+    (
+        "clipboard-write",
+        TerminalField::Flag(TerminalState::clipboard_write),
+    ),
+    (
+        "bracketed-paste",
+        TerminalField::Flag(TerminalState::bracketed_paste),
+    ),
+    ("ui-ansi-ok", TerminalField::Flag(TerminalState::ui_ansi_ok)),
+    (
+        "ui-truecolor-ok",
+        TerminalField::Flag(TerminalState::ui_truecolor_ok),
+    ),
+    (
+        "ui-hyperlinks-ok",
+        TerminalField::Flag(TerminalState::ui_hyperlinks_ok),
+    ),
+    (
+        "ui-clipboard-write-ok",
+        TerminalField::Flag(TerminalState::ui_clipboard_write_ok),
+    ),
+    (
+        "ui-bracketed-paste-ok",
+        TerminalField::Flag(TerminalState::ui_bracketed_paste_ok),
+    ),
+    ("mode", TerminalField::Mode),
+];
+
+impl Value {
+    /// The closed record scheme for [`Value::from`] a [`TerminalState`].
+    pub fn terminal_scheme() -> Closed {
+        let fields = TERMINAL_FIELDS
+            .iter()
+            .map(|(name, field)| (*name, field.ty()))
+            .collect::<Vec<_>>();
+        Binders::close(|_| closed_record(&fields))
+    }
+}
+
+/// The `$TERMINAL` record bound for rc files and plugins.
 impl From<&TerminalState> for Value {
-    fn from(t: &TerminalState) -> Self {
-        let mode = match t.mode {
-            InteractiveMode::Auto => "auto",
-            InteractiveMode::Minimal => "minimal",
-            InteractiveMode::Full => "full",
-        };
-        let flags = [
-            ("stdin-tty", t.startup_stdin_tty),
-            ("stdout-tty", t.startup_stdout_tty),
-            ("stderr-tty", t.startup_stderr_tty),
-            ("supports-ansi", t.supports_ansi),
-            ("no-color", t.no_color),
-            ("is-tmux", t.is_tmux),
-            ("is-asciinema", t.is_asciinema),
-            ("is-ci", t.is_ci),
-            ("truecolor", t.truecolor),
-            ("hyperlinks", t.hyperlinks()),
-            ("clipboard-write", t.clipboard_write()),
-            ("bracketed-paste", t.bracketed_paste()),
-            ("ui-ansi-ok", t.ui_ansi_ok()),
-            ("ui-truecolor-ok", t.ui_truecolor_ok()),
-            ("ui-hyperlinks-ok", t.ui_hyperlinks_ok()),
-            ("ui-clipboard-write-ok", t.ui_clipboard_write_ok()),
-            ("ui-bracketed-paste-ok", t.ui_bracketed_paste_ok()),
-        ];
+    fn from(terminal: &TerminalState) -> Self {
         Self::map(
-            flags
-                .into_iter()
-                .map(|(k, b)| (k.into(), Self::Bool(b)))
-                .chain([("mode".into(), Self::string(mode))])
+            TERMINAL_FIELDS
+                .iter()
+                .map(|(name, field)| ((*name).into(), field.value(terminal)))
                 .collect(),
         )
     }
@@ -514,6 +563,33 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_records_match_their_closed_scheme_in_every_mode() {
+        let scheme = Value::terminal_scheme();
+        let site = crate::ty::Site::snapshot(
+            &crate::typecheck::Unifier::new(),
+            &scheme.ty,
+            crate::ty::UnitId::fresh(),
+        );
+        for (mode, text) in [
+            (InteractiveMode::Auto, "auto"),
+            (InteractiveMode::Minimal, "minimal"),
+            (InteractiveMode::Full, "full"),
+        ] {
+            let terminal = TerminalState {
+                mode,
+                ..TerminalState::default()
+            };
+            let value = Value::from(&terminal);
+            site.admit(&value, &crate::ty::Fixings::default())
+                .expect("TERMINAL matches its scheme");
+            let Value::Map(fields) = value else {
+                panic!("TERMINAL is a record")
+            };
+            assert_eq!(fields.get("mode").as_deref(), Some(&Value::string(text)));
+        }
+    }
 
     #[test]
     fn native_display_reports_held_arguments() {

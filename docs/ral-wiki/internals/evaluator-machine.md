@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
-verified_at_date: 2026-11-11
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
 anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
 ---
 
@@ -59,7 +59,7 @@ Computations      M, N ::= return V | force V | λx. M | M · (V₁,…,Vₙ)
 - `c` is a literal; `x` is a lexical name, with no surface `$` here. `p` is a
   pattern (wildcard, name, list with optional rest, or record). `G` is a shared
   group `[(x₀,M₀), …, (xₙ₋₁,Mₙ₋₁)]`. Static labels and primitive metadata are
-  implicit in `q`; protection sites and spans are omitted from this grammar.
+  implicit in `q`; admission sites and spans are omitted from this grammar.
 - Arms of `if` are values of type `U C`; a `case` arm is a thunk of a
   payload-taking function. `try` and `guard` likewise take suspended bodies.
   `capture`, `Bind`, `Seq`, `App` and redirects instead contain computation
@@ -125,10 +125,9 @@ an undefined name.
   distributes their saved environment one layer at a time. A directly
   mentioned name answered only by `Σ` requires eager formation, because
   literal inspection reads `ρ` alone. `Σ` lookup prefers prelude to natives.
-- `Val::Protected` wraps a formed value with a delayed obligation; admission
-  belongs at its boundary. `Prim` computes on values whose operand computations
-  have already run in surrounding binds. Neither mechanism forces arbitrary
-  thunks as part of ordinary value formation.
+- `Prim` computes on values whose operand computations have already run in
+  surrounding binds. Ordinary value formation forces no arbitrary thunk;
+  data admission belongs at a boundary or before a unit's first phrase.
 - Sinks, cwd, handlers, worker ownership and leases never enter a closure.
   Forcing restores lexical bindings, **not shell state**
   ([[design/scoping|scoping]]).
@@ -248,7 +247,7 @@ match(p,box(t)) = Error(e)
 - `To` binds `box(t)`; `Seq` discards it. Checked sequences demand producers,
   so they do not receive residual functions. A written `let _` remains `Bind`
   and therefore has the normal binding capture rule at checking time.
-- On an incoming halt, `Arg` and `Protect` simply propagate it; `To` and
+- On an incoming halt, `Arg` simply propagates it; `To` and
   `Seq` abandon the rest. Only written lets and sequences mark the
   error's abandoned-tail fact; compiler-generated binds do not. Escapes have
   no such report-only facts.
@@ -428,7 +427,6 @@ directly after installing nonempty redirects.
 | --- | --- | --- |
 | `Redirect` | Settle with commit; pass `t` if settlement succeeds | Settle with abort; ignore settlement failure and preserve `b` |
 | `Within`, `Grant`, `Unmask` | Apply undo; pass `t` | Apply undo; preserve `b` |
-| `Protect` | Admit/wrap `box(t)` at the site | Preserve `b` |
 | `Audit` | Close trail; return report of `box(t)` | Close trail; turn error into report, propagate escape |
 | `Gather` | Restore cradle; join `box(t)` through `exit_brood` | Restore cradle; end brood; preserve `b` |
 | `CallSite` | Restore provenance; pass `t` | Locate break if needed, restore provenance; preserve break |
@@ -506,6 +504,14 @@ its eventual return/halt decides whether the bytes become a value or vanish.
 Each landed `Define` is installed immediately; a later failure keeps earlier
 definitions. A block instead nests `Bind` and `Seq`, whose lexical bindings
 do not escape.
+
+Before the first phrase, the whole unit readmits imported residual data at
+its solved type. A stored name whose scheme reaches a weak residual beneath
+a thunk or handle is statically unusable in a later unit; reachability follows
+μ-equations in both data and delayed contexts. Thus admission need not run
+code or consume a handle, and no frame checks a returned value against a
+contract. A decided function beside undecided data needs only a head check:
+its defining unit checked its body, and boundaries return first-order data.
 
 ```text
 evaluate(M,ρ) starts at ⟨E(M,ρ), ε; σ⟩

@@ -122,8 +122,9 @@ the project tree. Writes are limited to scratch.
 
 Git is available for `log`, `show`, and `diff`; commands such as `commit` fail
 at the filesystem boundary. Tools that insist on writing into the project may
-also fail and should be pointed at `$EXARCH_SCRATCH` where possible — which is
-writable but not exec-admitted, so a binary written there cannot then be run.
+also fail and should be pointed at the directory named by the environment
+variable `EXARCH_SCRATCH` where possible — writable but not exec-admitted, so a
+binary written there cannot then be run.
 
 The profile still has network access and broad reads of config and toolchain
 caches. “Read-only” describes project mutation, not confidentiality or
@@ -317,10 +318,12 @@ hostile agent while the project and `.git` stay writable: the sandbox bounds
 what a session does while it runs, not code it leaves in the project, such as
 `.git/config`, hooks or build outputs, that you later run unconfined. Only
 reviewing its work, or confining your own builds, closes that (wiki:
-`design/grant` §Concessions). So every cache a session writes lives in
-`$EXARCH_SCRATCH`, which is deleted when the session ends, and builds start
-cold. `reasonable`, `edit-only` and `read-only` still read `` `xdg-cache `` and
-`~/Library/Caches`; `reasonable` and `minimal` no longer write `` `xdg-cache ``.
+`design/grant` §Concessions). So every cache a session writes lives in the
+directory named by the environment variable `EXARCH_SCRATCH`, which is deleted
+when the session ends, and builds start cold. Read the variable in ral with
+`env`. `reasonable`, `edit-only` and `read-only` still read `` `xdg-cache ``
+and `~/Library/Caches`; `reasonable` and `minimal` no longer write
+`` `xdg-cache ``.
 
 When the session starts, exarch replaces these variables, whatever was
 inherited, with a value under the scratch:

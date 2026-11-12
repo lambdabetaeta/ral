@@ -1,0 +1,4 @@
+# status: 1
+# contains: but a number (Int or Float) is needed
+let m = use '../lib/modules/functions.ral'
+return $[$m[label] + 1]

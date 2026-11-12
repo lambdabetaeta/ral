@@ -161,7 +161,8 @@ mod tests {
 
     fn compile_one(source: &str) -> Arc<Comp> {
         let ast = crate::syntax::parser::parse(source).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
         let [phrase] = top.as_slice() else {
             panic!("expected one phrase, got {top:?}");
         };

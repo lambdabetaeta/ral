@@ -1,0 +1,4 @@
+# status: 1
+# contains: module load cycle
+# contains: cycle.ral
+try { let _ = use '../lib/modules/cycle.ral' } { |_| return () }

@@ -48,6 +48,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
                 String::from_utf8(stdout).expect("captured stdout is UTF-8"),
             )
         }
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {src:?}"),
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
             diagnostics
@@ -82,6 +83,7 @@ fn static_codes(src: &str) -> Vec<String> {
         } => panic!("{src:?}: expected type diagnostics, got host {e:?}"),
 
         RunReport::Ran { .. } => Vec::new(),
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {src:?}"),
     }
 }
 

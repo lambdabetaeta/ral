@@ -73,11 +73,11 @@ each in its own region, with duplicate names refused. A bound or computed
 map is checked against `Map(U([String] → Command))`. Its keys are data,
 not table keys. A record such as `[hi: …]` is refused; write
 `[:, hi: { |args| … }]`, or `[:]` for none. Checks reach sites inside
-locally checked handlers; imported handlers retain their module's sites.
+locally checked handlers. A module's exports have decided schemes, so an
+imported handler is held to the same command type statically.
 Persistent handlers are also vetted by actual name at installation.
-Unlike `within`, persistent installation must cover unresolved returns and
-member types. Hooks and keybindings retain host validation; their results do
-not enter typed code unchecked.
+Hooks and keybindings retain host validation; their results do not enter
+typed code unchecked.
 
 ## 2 Authority
 
@@ -100,11 +100,10 @@ What a plugin may do is what the code that runs it may do.
   own, so they run under whatever grant encloses the line that names
   them. A handler that calls `cd` inside `grant [shell: [`detach]] { … }`
   is refused like any other `cd`.
-- **Loading** reads the plugin file through the current grant. Each
-  candidate path the grant refuses is passed over for the next, and if
-  all are refused the error names the first. Plugins named in the rc are
-  loaded during bootstrap, before the command-line ceiling narrows the
-  session (SPEC §15.3): the rc is trusted.
+- **Loading** reads the one named plugin file through the current grant.
+  A denied read refuses that file; no alternative is tried. Plugins named
+  in the rc are loaded during bootstrap, before the command-line ceiling
+  narrows the session (SPEC §15.3): the rc is trusted.
 
 Two grant fields exist for plugin machinery (SPEC §12.8). `editor` lists
 verbs gating the `_ed-*` builtins, `shell` lists verbs gating `cd` and
@@ -153,24 +152,29 @@ host, is refused with a message saying so.
 ## 4 Loading
 
 The host loads plugins from the rc's `plugins:` map during startup.
-Each key is resolved in order (SPEC §15.5):
+Each key names exactly one file (SPEC §15.5):
 
-1. `<config>/ral/plugins/NAME.ral`, `<config>` being the user
-   configuration directory;
-2. `DIR/NAME.ral` for each `DIR` in `RAL_PATH`;
-3. the literal path, then the literal path with `.ral` appended, read as
-   any written path is (live working directory, `~`).
+- a key without a path separator, `NAME`, names
+  `<config>/ral/plugins/NAME.ral`, `<config>` being the user configuration
+  directory;
+- any other key is a written path, resolved exactly as `use` resolves one
+  (SPEC §10.3), including `~` and `xdg:` heads.
 
-The file is typechecked and evaluated in a fresh scope under the
-manifest's declared table, a factory is applied to its options, and the
-result is parsed: handler arity, hook names, key notation, guard
-regexes, and handler collisions are all checked before anything is
-installed. Persistent command handlers already checked statically are
+There is no search list, literal-path fallback, or implicit `.ral` added to
+written paths.
+
+The file is checked against Σ (natives and the prelude) and evaluated under
+Σ, like a module, with its written manifest checked against the declared
+table. It sees neither rc helpers nor session bindings, and its own
+helper `let`s never reach the session. A helper shared with the rc belongs
+in a module; either file may `use` it. The plugin's value is its tail.
+A factory is applied to its options, and the result is parsed: handler
+arity, hook names, key notation, guard regexes, and handler collisions are
+all checked before anything is installed. Persistent command handlers already checked statically are
 vetted again against their actual names at installation, yielding only a
-verdict, no stored scheme. Runtime parsing also covers those handlers'
-unresolved returns and unresolved field or member types. Hooks and handlers
-are then committed and the host told; if the host refuses the manifest, the
-whole namespace is rolled back. Errors are reported as `plugin 'NAME': …`,
+verdict, no stored scheme. Hooks and handlers are then committed and the
+host told; if the host refuses the manifest, the whole namespace is rolled
+back. Errors are reported as `plugin 'NAME': …`,
 with source spans in the plugin file.
 
 The rc file's `plugins:` map supplies options (section 8); `[:]` supplies

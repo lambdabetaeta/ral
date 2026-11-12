@@ -25,13 +25,24 @@ use std::sync::Arc;
 
 /// What made a variable weak, so a mismatch on it can say which use shares it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WeakSource {
+pub enum WeakSource {
     /// The result of a boundary, named as the program spells it.
-    Boundary(Arc<str>),
+    Boundary { name: Arc<str>, span: Option<Span> },
     /// A host binding without a scheme.
     Host(Arc<str>),
     /// A residual an earlier unit stored, whose own source is gone.
     Residual,
+}
+
+impl WeakSource {
+    /// A spanless boundary for inference fixtures, not source calls.
+    #[cfg(test)]
+    pub(crate) fn boundary(name: impl Into<Arc<str>>) -> Self {
+        Self::Boundary {
+            name: name.into(),
+            span: None,
+        }
+    }
 }
 
 /// Cycle-tracking state, threaded through `apply_*` and `reach`.  `tys`/`comps`
@@ -880,6 +891,19 @@ impl Unifier {
     /// What made the first weak variable in `ty` weak, bound ones included.
     pub(crate) fn weak_source_in_ty(&self, ty: &Ty) -> Option<WeakSource> {
         self.weak_source_in(Term::Ty(ty))
+    }
+
+    /// Provenance only for weak variables the solved store still leaves open.
+    pub(super) fn undecided_source_in_ty(&self, ty: &Ty) -> Option<WeakSource> {
+        self.reach(Term::Ty(ty), &mut Visited::default(), &mut |var| {
+            if self.is_unbound(var)
+                && let Some(source) = self.weak_source_of(var)
+            {
+                return ControlFlow::Break(source.clone());
+            }
+            ControlFlow::Continue(())
+        })
+        .break_value()
     }
 
     pub(crate) fn weak_source_in_comp(&self, cty: &CompTy) -> Option<WeakSource> {
@@ -2147,7 +2171,7 @@ mod tests {
         ] {
             assert_eq!(u.rank_of(var), 1);
         }
-        let source = WeakSource::Boundary("from-json".into());
+        let source = WeakSource::boundary("from-json");
         u.mark_weak(&old, &source);
         for var in [
             Var::Ty(ty),
@@ -2991,9 +3015,8 @@ mod tests {
     }
 
     #[test]
-    fn cycle_through_field_type_keeps_a_finite_row_and_round_trips() {
+    fn cycle_through_field_type_keeps_a_finite_row_across_generalization() {
         use super::super::generalize::{generalize, instantiate, settle_weak};
-        use crate::ty::{Site, UnitId};
 
         for with_n in [false, true] {
             let mut u = Unifier::new();
@@ -3026,10 +3049,7 @@ mod tests {
             assert!(scheme.to_string().contains('μ'));
             let mut next = Unifier::new();
             let imported = instantiate(&mut next, &scheme);
-            let site = Site::snapshot(&next, &imported, UnitId::fresh());
-            let round_trip = site.instantiate(&mut next);
-            next.unify_ty(&imported, &round_trip).unwrap();
-            assert_ne!(next.cyclic_roots_in_ty(&round_trip).1, []);
+            assert_ne!(next.cyclic_roots_in_ty(&imported).1, []);
         }
     }
 
@@ -3264,7 +3284,7 @@ mod tests {
                     u.enter();
                 }
                 let rho = u.fresh_row_var();
-                let source = WeakSource::Boundary("from-json".into());
+                let source = WeakSource::boundary("from-json");
                 if weak {
                     u.mark_weak(&Ty::record(Row::var(rho)), &source);
                 }

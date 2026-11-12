@@ -1,7 +1,7 @@
 ---
-verified_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-verified_at_date: 2026-11-11
-anchors: [Solver, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, table::Table, file_options, check_options, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
+anchors: [Solver, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, table::Table, Unit, Module, UseRefusal, file_options, check_options, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
 ---
 
 # The compilation ladder: source to typed IR
@@ -9,7 +9,7 @@ anchors: [Solver, Solution, compile, compile_and_typecheck, CompileError, Sessio
 Source text descends a fixed ladder, and each rung hands the next a different
 artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile`
 (parse → elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck,
-a `Result` whose `CompileError` is `Parse` or `Types`).
+a `Result` whose `CompileError` is `Parse`, `Types` or `Use`).
 
 - **Text → tokens.** The lexer reads characters into tokens with no
   context-dependent rules — there is one lexer, not the several a POSIX shell
@@ -34,6 +34,14 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   its arguments and runs before their hoists, whatever its type.
   Elaboration refuses a spread into a written value head or lexically bound
   head; checking refuses one into a builtin or session binding.
+  `use` takes one written path (a constant word or uninterpolated quoted
+  string). The elaborator's loader resolves that exact path at check time:
+  sigil heads expand, relative paths anchor at the containing file, or the
+  session cwd for a source with no file. The session's check-time environment
+  and grant decide the read, not a surrounding form or an earlier command.
+  The loader recursively checks the module against Σ alone and links its
+  `Toplevel` and origin into `Use(Arc<Module>)`. A check-time chain bounds
+  depth and refuses cycles; no runtime module stack is involved.
   What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → checked IR.** Each Hindley–Milner inference rule returns its type
@@ -52,8 +60,8 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
     allocated from position, so there is nothing to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   - Boundary calls carry their solved type; readback snapshots it as a
-    `Site`. These graphs can retain weak variables and delayed obligations,
-    not just ground types.
+    `Site`. These graphs can retain weak variables, not just ground types;
+    every registered boundary's declared result is deep first-order data.
   - A binding whose mode is `Mode::Capture` is read back as
     `cap M to d. decode d` (`CompKind::Capture`, `Prim::Decode`, built by
     `captured_string`)
@@ -80,8 +88,8 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   evaluated path. The evaluator executes the explicit capture/decode terms;
   it does not decide where capture belongs. ([[map/core/typecheck|typecheck]])
 
-A host loader may supply an `Option<&'static typecheck::table::Table>`.
-**Its file's tail is checked as options during generation**, by the same
+`Unit::{Script, Host(&'static Table), Module}` states what a text is.
+**A host file's tail is checked as options during generation**, by the same
 `check_options` and `check_option` that check `within` and `grant`.
 `file_options` descends elaborated binds and sequences in their lexical
 environment to find the written tail (SPEC §15.3).
@@ -89,7 +97,7 @@ environment to find the written tail (SPEC §15.3).
 - The tail is a record literal with arbitrary field values. A bound record,
   spread, map or computed result is not written options (T0077). Nested
   tables must also be record literals (T0079).
-- All thirteen rc keys are required, as are every key of its nested `limits:`
+- All twelve rc keys are required, as are every key of its nested `limits:`
   and `theme:` tables. `Setting(T)` is ``[`inherit, `set T]``: keep the
   existing setting or override it. A manifest requires only `name`; grant
   profiles have no required keys, so `()` and an empty file set nothing.
@@ -99,18 +107,27 @@ environment to find the written tail (SPEC §15.3).
 - Only a manifest admits a written one-parameter factory, one level deep;
   its body's tail is checked as the manifest's options, not as another factory,
   and refusal advice names the factory body.
-- Collection keys (`handlers:`, `env:`, `bindings:`, `plugins:`) are data,
+- Collection keys (`handlers:`, `env:`, `plugins:`) are data,
   not nested tables. A written handler map is checked arm by arm.
 - Field equations are ordinary uses during generation and reach decoder
   admission sites before readback. Syntax establishes the host result's
   shape and keyset; rc and manifest decoders retain value-shape, domain and
   installation checks. Grant's decoder also validates grants received as data.
 
-After generation and `Solver::close` succeed,
-`Readback::toplevel` maps the pending tree to the checked `Toplevel`. One
+After generation and `Solver::close` succeed, a module's public definitions
+are judged over `&Solution` and pending IR **before readback settles schemes**.
+A public type reaching any weak variable, data included, is refused at its
+definition, with the boundary call's provenance. Failed closure returns its
+own errors without export judgment. The importer instantiates each accepted
+public scheme into a closed record; an importing `let` generalises normally.
+
+`Readback::toplevel` then maps the pending tree to the checked `Toplevel`. One
 `UnitId` identifies all site snapshots and the first-use readmissions in
-`Toplevel.admits`. Imported value membranes survive only when their solved
-contract has delayed parts; existing checked sites are kept unchanged.
+`Toplevel.admits`. A stored name whose scheme reaches a weak residual beneath
+a thunk or handle is refused at use in a later unit; accepted residual
+occurrences remain plain variables. The rule follows reachable μ-equations
+in both data and delayed contexts, so a shared recursive root cannot hide
+a delayed residual. A decided function beside undecided data is allowed.
 Inference and readback each memoise recursive groups by `Arc` identity, so
 projections share one group through both phases. An erroneous unit is refused
 whole and its pending IR discarded; one-shot inference sessions also discard
@@ -118,17 +135,23 @@ their pending IR.
 
 Before any phrase runs, `run_phrases` readmits the whole checked `Toplevel`
 against the `Env` supplied for its execution, using the session's fixings.
-This holds in every mode: a loaded file is a unit, whether entered by `use`
-or `load::evaluate_source`. A refusal returns the supplied environment
-unchanged and no defined names; no phrase runs. It names the use that imposed
+Only existing data needs readmission; no future argument, result or handle
+payload owes a later check, and the runtime builds no contract IR.
+This holds in every mode. `run_module` and `evaluate_closed` run under
+`Env::new()` with Σ lookup in `Mode::Local`; they import no session names.
+Only the rc and exarch's agent library use `extend_session`, whose definitions
+join the session. A refusal returns the supplied environment
+unchanged; no phrase runs. It names the use that imposed
 the type, with the loaded file's own location and, for `use`, its loader context.
 See [[map/core/evaluator|evaluator]].
 
-Each run's check is seeded from the live session — one `SessionSchemes`, the
+A script's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map, handled names for diagnostics and the host's manifest.
 A binding made in one run enters the next run's check at its inferred scheme
 rather than a fresh variable. The evaluator installs each top-level bind's
-scheme next to its value. Handler entries carry no schemes: head typing and
+scheme next to its value; rc `let`s above the options `return` use this same
+path. A host installs a session value with `set_var` and an explicit `Closed`
+scheme. Handler entries carry no schemes: head typing and
 argument gates depend only on Σ and lexical bindings, not the dynamic stack.
 
 The prelude is baked once at build time as a schema-less `postcard` blob of this
@@ -140,13 +163,20 @@ which reruns the host's build script, whose one call to `shell::boot::bake_prelu
 seam ([[decisions/260610_host-embedding-api|host-embedding-api]]). The bake runs
 the checker: it parses, elaborates, and hands the comp to `bake_prelude`
 (`core/src/typecheck.rs`), which checks it against core's manifest and returns
-the *annotated* prelude; each `Define` already carries its schemes, and
-`SessionSchemes::from_prelude` reads them back, so there is no second list. The
+the *annotated* prelude; each `Define` already carries its schemes, so there
+is no second list. The
 one blob — annotated IR — is returned as bytes, which the host's build script
 writes to `OUT_DIR`; a host embeds it through the
 `baked_prelude!` macro into a `BakedPrelude`, decoded lazily on first use. The typed IR is then handed to the
 [[internals/evaluator-machine|evaluator]], which a host reaches only through the
 synchronous framed run entries ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
+
+`--check` follows the run's full engine boot, including profiles and recursion
+limit, then dispatches `Program::Check` through the same compilation path
+without evaluation. Root text registers before compilation because linking
+registers nested sources. A static refusal retains its dispatch trail,
+including filesystem denials stamped at their `use`; hosts render the rejection
+at the protocol seam ([[map/core/diagnostics|diagnostics]]).
 
 See also [[design/cbpv|cbpv]], [[design/types|types]]; map hub
 [[map/core|core]]. The formal account is `docs/SPEC.md`.

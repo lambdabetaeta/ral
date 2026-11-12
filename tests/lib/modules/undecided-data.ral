@@ -1,0 +1,1 @@
+let config = !{to-string '{"port": 8080}' | from-json}

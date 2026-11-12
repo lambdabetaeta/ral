@@ -1,0 +1,4 @@
+# status: 2
+# contains: `use` takes a written path
+let name = values
+let _ = use "../lib/modules/$name.ral"

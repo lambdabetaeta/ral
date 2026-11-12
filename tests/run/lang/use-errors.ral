@@ -1,4 +1,4 @@
-# Use refuses what it cannot load, as a plain runtime error naming `use`
+# Linking failures are static; a checked module's body can still fail at runtime.
 
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
@@ -7,31 +7,15 @@ let assert_eq = { |name expected actual|
     }
 }
 
-# What `use` failed with, whatever the cause
-let error-of = { |body| try { !$body; fail 'ran' } { |e| return $e } }
-let d = temp-dir
-
-# A module file that is not there, a directory, and source that does not parse
-let missing = error-of { let _ = use "$d/missing.ral" }
-assert_eq 'missing frame' use $missing[frame]
-assert_eq 'missing status' 1 $missing[status]
-assert_eq 'missing caller source' true !{re-match '(^|/)use-errors\.ral$' $missing[site][script]}
-let directory = error-of { let _ = use $d }
-assert_eq 'directory frame' use $directory[frame]
-echo '$[' > "$d/unparsed.ral"
-let unparsed = error-of { let _ = use "$d/unparsed.ral" }
-assert_eq 'unparsed frame' use $unparsed[frame]
-
-# A failure inside the module keeps its own message and source provenance.
-echo "fail 'boom'" > "$d/failing.ral"
-let failing = error-of { let _ = use "$d/failing.ral" }
+let failing = try {
+    let _ = use '../../lib/modules/failing.ral'
+    fail 'ran'
+} { |e| return $e }
 assert_eq 'module message' boom $failing[message]
 assert_eq 'module status' 1 $failing[status]
 assert_eq 'module operation' fail $failing[frame]
-assert_eq 'module source' "$d/failing.ral" $failing[site][script]
+assert_eq 'module source' true !{re-match '(^|/)lib/modules/failing\.ral$' $failing[site][script]}
 assert_eq 'module line' 1 $failing[site][line]
 assert_eq 'module column' 1 $failing[site][col]
-assert_eq 'missing is not a module failure' true $[$missing[site][script] != $failing[site][script]]
 
-rm -rf $d
 echo 'use error tests done'

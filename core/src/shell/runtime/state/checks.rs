@@ -7,8 +7,8 @@ use crate::authority::guard::{Denial, check_device_name, check_flag, fs_denial};
 use crate::authority::policy::{Baseline, Flag, FsOp, GrantLayer, LocateError};
 use crate::authority::sandbox::SandboxProjection;
 use crate::fact::{IoOperation, IoSubject, Reason};
+use crate::path::is_loop;
 use crate::path::{Dir, Judged, LeafMode, LexicalPath, Located, Op, Trace, walk};
-use crate::path::{Kind, is_loop};
 use crate::shell::runtime::{Break, Check, Error, Mooring, Resource, Settled, Shell};
 use std::collections::BTreeMap;
 use std::io;
@@ -153,50 +153,6 @@ impl Shell {
         };
         let held = self.judge_named::<O>(located, path)?;
         Ok(held.stat().is_some().then_some(held))
-    }
-
-    /// The first of `candidates` that is a regular file the live stack admits
-    /// for `O`, held. Each candidate is judged before its kind is asked, as
-    /// what its walk reached or, where the walk failed, as its name. A denied
-    /// candidate is passed over, as `execvp` does, and the first denial is the
-    /// error where none is admitted; `Ok(None)` where none is refused and none
-    /// is an admitted file.
-    ///
-    /// # Errors
-    /// The first refused candidate, where none was admitted; or the refusal
-    /// of a reserved device name.
-    pub fn locate_first<O: Op>(
-        &mut self,
-        candidates: impl IntoIterator<Item = LexicalPath>,
-    ) -> Settled<Option<Located<Judged<O>>>> {
-        let mut first = None;
-        for cand in candidates {
-            check_device_name(&cand)
-                .map_err(|denial| Error::new(Reason::Denied(Box::new(denial))))?;
-            let located = match walk(&cand, LeafMode::Follow) {
-                Ok(located) => located,
-                Err(e) => {
-                    let verdict =
-                        (self.context.grants).judge_failure(self.baseline(), O::FS, &cand, &e);
-                    if let Err(LocateError::Refused(refused)) = verdict {
-                        first.get_or_insert_with(|| {
-                            fs_denial(&self.context.grants, refused, O::FS, &cand)
-                        });
-                    }
-                    continue;
-                }
-            };
-            match (self.context.grants).judge::<O, _>(self.baseline(), located) {
-                Ok(found) if found.trace().kind() == Some(Kind::File) => return Ok(Some(found)),
-                Ok(_) => {}
-                Err(refused) => {
-                    first.get_or_insert_with(|| {
-                        fs_denial(&self.context.grants, refused, O::FS, &cand)
-                    });
-                }
-            }
-        }
-        first.map_or(Ok(None), |denial| Err(self.refused(denial)))
     }
 
     /// [`locate`](Self::locate) as a predicate: `None` where the walk fails

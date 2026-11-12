@@ -1,0 +1,6 @@
+# status: 1
+# contains: couldn't match
+# contains: Command
+# contains: Returns Integer
+let m = use '../lib/modules/value-handlers.ral'
+within [handlers: $m[handlers]] { greet }

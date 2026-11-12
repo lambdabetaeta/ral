@@ -331,10 +331,9 @@ mod tests {
 /// Run-level tests for the install chokepoint and the use-observation
 /// harvest: every persistent top-level install routes through
 /// `Shell::note_define` and gets leased while deeper-scope writes
-/// are recorded nowhere, and a committed run's referenced names renew at both
-/// harvest seams — `run`'s own compiled program, and `check_source`'s
-/// runtime-compiled loads. Driven through the public
-/// `run`, no exarch involved: the same harness shape as
+/// are recorded nowhere. A committed run's session references renew leases;
+/// closed module references do not. Driven through the public `run`, no
+/// exarch involved: the same harness shape as
 /// `core/tests/integration/api/session.rs`.
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, reason = "test code")]
@@ -391,6 +390,9 @@ mod chokepoint_tests {
             RunReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
                 String::from_utf8_lossy(&captured.stderr.bytes).into_owned()
+            }
+            RunReport::Checked { .. } => {
+                panic!("source fixture must run, not only check: {source:?}")
             }
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
@@ -495,9 +497,8 @@ mod chokepoint_tests {
         assert!(!is_baseline(&shell, "use_internal"));
     }
 
-    /// A prelude name and a host-seeded one (a host verb call preceding
-    /// arming, as exarch's `seed_var` and rc `bindings:` make) are alike
-    /// visible at arm time, so alike baseline.
+    /// A prelude name and a host-seeded one are both baseline when visible
+    /// at arm time.
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
         let mut shell = crate::shell::boot::boot_shell(
@@ -512,7 +513,7 @@ mod chokepoint_tests {
             .into_iter()
             .next()
             .expect("the prelude seeds at least one binding");
-        shell.set_var("host_seed".into(), Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "host_seed", Value::Int(1));
         shell.arm_binding_lease(BindingLease {
             idle_calls: 64,
             large_binding_bytes: u64::MAX,
@@ -557,6 +558,7 @@ mod chokepoint_tests {
             SourceOrigin::named("<test>"),
         )) {
             RunReport::Static { .. } => {}
+            RunReport::Checked { .. } => panic!("source fixture must run, not only check"),
             RunReport::Ran { .. } => {
                 panic!("ill-typed source must be refused statically")
             }
@@ -655,11 +657,9 @@ mod chokepoint_tests {
         assert!(shell.has_hook(&HookName::session("startup")));
     }
 
-    /// A `use`d file's reference to a caller-scope name the outer run's own
-    /// program never mentions still renews — the `check_source` harvest
-    /// seam, not the run's-own-program seam, catches this one.
+    /// A closed module's local reference never renews a same-named session lease.
     #[test]
-    fn used_module_reference_renews() {
+    fn used_module_reference_does_not_renew_session_lease() {
         let mut shell = armed_shell(64);
         top_level(&mut shell, "let used_ref_x = 1").expect("define");
         idle_spin(&mut shell, 3);
@@ -668,14 +668,21 @@ mod chokepoint_tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("module.ral");
-        std::fs::write(&path, "let used_helper = $used_ref_x\n").expect("write temp module");
+        std::fs::write(&path, "let used_ref_x = 7\nlet used_helper = $used_ref_x\n")
+            .expect("write temp module");
         let p = path.to_string_lossy().into_owned();
-        top_level(&mut shell, &format!("use '{p}'")).expect("use");
-
+        let epoch_before = epoch(&shell);
+        let module = top_level(&mut shell, &format!("use '{p}'")).expect("use");
+        let Value::Map(exports) = module else {
+            panic!("use must return the module's exports");
+        };
+        assert_eq!(exports.get("used_helper").as_deref(), Some(&Value::Int(7)));
+        assert_eq!(shell.scope_lookup("used_ref_x"), Some(&Value::Int(1)));
+        assert_eq!(epoch(&shell), epoch_before + 1, "use still ages leases");
         assert_eq!(
             last_used_of(&shell, "used_ref_x"),
-            epoch(&shell),
-            "a used file's own reference must renew via check_source's harvest"
+            stale,
+            "a module-local reference must not renew a session lease"
         );
     }
 
@@ -717,7 +724,8 @@ mod chokepoint_tests {
             "return $prune_x",
             SourceOrigin::named("<test>"),
         )) {
-            RunReport::Static { diagnostics } => {
+            RunReport::Checked { .. } => panic!("source fixture must run, not only check"),
+            RunReport::Static { diagnostics, .. } => {
                 let msg = diagnostics.render(shell.exit_hints()).0;
                 assert!(
                     msg.contains("undefined variable: $prune_x"),
@@ -777,7 +785,11 @@ mod chokepoint_tests {
         handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Stopping);
 
-        shell.set_var("h_stopping".into(), Value::Handle(Box::new(handle.clone())));
+        crate::test_access::bind_untyped(
+            &mut shell,
+            "h_stopping",
+            Value::Handle(Box::new(handle.clone())),
+        );
         shell.local.bindings.note_install("h_stopping");
         idle_spin(&mut shell, 2);
 
@@ -853,7 +865,7 @@ mod chokepoint_tests {
     #[test]
     fn stray_untracked_name_is_adopted_not_pruned() {
         let mut shell = armed_shell(2);
-        shell.set_var("stray_y".into(), Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "stray_y", Value::Int(1));
         assert!(!is_leased(&shell, "stray_y"));
         assert!(!is_baseline(&shell, "stray_y"));
 

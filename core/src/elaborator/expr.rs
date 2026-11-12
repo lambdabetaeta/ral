@@ -4,11 +4,38 @@ use super::{
     RecordEntry, Redirects, ScopeAst, Span, Spanned, Val, ValListElem, WithSpan, Word, word_val,
 };
 
+use crate::compile::CompileError;
 use crate::ir::{FieldsNode, Key, Prim};
 use crate::syntax::ast::{IndexKey, Options, Stmt};
+use crate::syntax::parser::ParseError;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
-impl Elaborator {
+impl Elaborator<'_> {
+    fn elab_use(&mut self, path: &Spanned<Box<Ast>>) -> Comp {
+        if self.error.is_some() {
+            return comp!(self, CompKind::Return(Val::Unit));
+        }
+        let written = match path.item.as_ref() {
+            Ast::Word(Word::Plain(path) | Word::Path(path)) | Ast::Literal(path) => {
+                Cow::Borrowed(path.as_str())
+            }
+            Ast::Word(Word::Tilde(path)) => Cow::Owned(path.to_literal()),
+            _ => {
+                self.refuse(ParseError::new(path.span, crate::syntax::USE_WRITTEN_PATH));
+                return comp!(self, CompKind::Return(Val::Unit));
+            }
+        };
+        let at = path.span.expect("the parser retains a use path's span");
+        match (self.loader)(at, &written, self.script) {
+            Ok(module) => comp!(self, CompKind::Use(module)),
+            Err(refusal) => {
+                self.error.get_or_insert(CompileError::Use { at, refusal });
+                comp!(self, CompKind::Return(Val::Unit))
+            }
+        }
+    }
+
     fn lambda_param(
         &mut self,
         pattern: &Pattern,
@@ -126,6 +153,7 @@ impl Elaborator {
             },
 
             Ast::Scope(op) => match op {
+                ScopeAst::Use { path } => self.elab_use(path),
                 ScopeAst::Try { body, handler } => comp!(
                     self,
                     CompKind::Try {

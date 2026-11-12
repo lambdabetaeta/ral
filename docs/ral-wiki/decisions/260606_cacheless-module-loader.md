@@ -2,6 +2,46 @@
 status: active
 ---
 
+> **Amended 2026-11-12 — Static linking and closed units.** This amendment
+> is authoritative over the loading, scope and path mechanisms below.
+> `use` takes one written path and is linked when its importer is checked.
+> Every check reads the module again; every evaluation runs the linked body
+> again. There is no module cache or runtime file read.
+>
+> The exact written path is the sole candidate: `~` and `xdg:` heads expand,
+> absolute paths remain absolute, and relative paths anchor at the containing
+> file (the session cwd for a source without a file). ral reads no `RAL_PATH`.
+> Check-time session environment and grant govern resolution and reading;
+> an earlier `cd` or surrounding `within`/`grant` in the unit cannot alter
+> the read. The runtime lexical grant still governs the module's effects.
+>
+> A module is checked against Σ (natives and prelude) and run under Σ,
+> without session or importer bindings. Its public definitions must have
+> decided schemes: after successful `solver.close()`, export judgment reads
+> `&Solution` and pending IR before readback settles schemes, retaining each
+> boundary's call span. Any public type reaching a weak variable, data
+> included, is refused. Accepted public schemes instantiate in the importer;
+> an importing `let` generalises normally.
+>
+> Elaboration's loader links `Use(Arc<Module>)`, carrying checked `Toplevel`
+> and origin. A recursive check-time origin chain detects cycles and bounds
+> depth to 100; it is an argument, not shell state or seed data. Missing,
+> denied, ill-typed, cyclic and too-deep modules refuse the importer before
+> evaluation and cannot be caught by `try`. Read denials remain in the
+> dispatch trail at the `use`, including on static refusal.
+>
+> Host loading has two doors: only the rc and exarch's agent library use
+> `extend_session`; plugins, profiles, exarch's config and net policy use
+> `evaluate_closed`, checked and run under Σ with local helper definitions.
+> `run_module` shares that closed execution and projects public names.
+> A plugin key without a separator names `<config>/ral/plugins/NAME.ral`;
+> any other key names one written path, with no search or extension fallback.
+> `--check` performs the run's full engine boot, applies profiles and the
+> recursion limit, then checks without evaluating through `Program::Check`.
+>
+> See [[map/core/ir|IR]], [[internals/compilation-ladder|compilation ladder]],
+> [[map/core/diagnostics|diagnostics]] and [[map/repl/plugins|plugins]].
+
 # Module loads carry no cache; share `evaluate_source`
 
 `use` once kept a per-process result map keyed by canonical absolute path,

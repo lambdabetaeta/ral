@@ -1,7 +1,6 @@
 //! Startup plugin loading, engine-side.
 //!
-//! A load resolves a plugin file under `~/.config/ral/plugins/` or
-//! `RAL_PATH`, evaluates it under its own registered source, applies
+//! A load resolves one plugin file, checks and evaluates it under Σ, applies
 //! options, and validates the result as a manifest; then commits the
 //! plugin's hooks and handlers, and tells the host the manifest's first-order
 //! part.  The host may refuse it, and any failure past the commit rolls the
@@ -11,11 +10,11 @@
 use ral_core::data::datum::Datum as _;
 use ral_core::error::Error;
 use ral_core::fact::{
-    EscapedLoad, InvalidCause, InvalidFailure, IoOperation, IoSubject, PathFailure, PluginFailure,
-    PluginFailureAlreadyLoaded, PluginFailureHandlerInstallationEscaped, PluginFailureNotFound,
-    PluginFailureOptionsWithoutFactory, Reason, StateFailure,
+    EscapedLoad, InvalidCause, InvalidFailure, IoKind, IoLeaf, IoOperation, IoSubject, PathFailure,
+    PluginFailure, PluginFailureAlreadyLoaded, PluginFailureHandlerInstallationEscaped,
+    PluginFailureNotFound, PluginFailureOptionsWithoutFactory, Reason, StateFailure,
 };
-use ral_core::path::{Judged, Located, Reading};
+use ral_core::path::{EntryName, Judged, Kind, Located, Reading};
 use ral_core::shell::runtime::{
     Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Map, Mooring, Settled,
 };
@@ -55,22 +54,16 @@ pub(crate) fn load_plugin(
     shell: &mut Shell,
 ) -> Settled<()> {
     let (file, source) = read_source(resolve_plugin_path(name_or_path, shell)?)?;
-    // Core's module loader owns cycle detection, the recursion guard, and the
-    // source registration; the plugin policy adds only the fresh frame —
-    // top-level helper bindings are discarded, since the manifest is the
-    // file's *return value*, not its bindings.
     let origin = SourceOrigin::File(file);
-    let value = shell.in_fresh_scope(|shell| {
-        ral_core::shell::load::evaluate_source(
-            mooring,
-            shell,
-            &source,
-            &origin,
-            Some(ral_core::typecheck::table::declared(
-                ral_core::typecheck::Form::Manifest,
-            )),
-        )
-    })?;
+    let value = ral_core::shell::load::evaluate_closed(
+        mooring,
+        shell,
+        &source,
+        &origin,
+        Some(ral_core::typecheck::table::declared(
+            ral_core::typecheck::Form::Manifest,
+        )),
+    )?;
     let Value::Map(module) = instantiate(name_or_path, value, options, mooring, shell)? else {
         unreachable!("a manifest ends in its fields written out (SPEC §15.5)")
     };
@@ -227,40 +220,60 @@ fn instantiate(
     }
 }
 
-/// Locate a plugin name or path: the first of these that is a file and the
-/// grant lets be read, held.  Searches:
-/// 1. `<config>/ral/plugins/<name>.ral`
-/// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
-/// 3. The literal path, then `<name>.ral`
+/// Locate the one file a plugin name or written path names.
 ///
 /// # Errors
-/// The first refused candidate, where none was admitted; else `not found`.
+/// The grant's refusal, a walk failure, a nonregular plugin candidate,
+/// or `not found` naming that one path.
 fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located<Judged<Reading>>> {
-    let plugin_file = format!("{name_or_path}.ral");
-    let config_candidate = ral_core::path::app_dir(ral_core::path::XdgKind::Config, "ral")
-        .map(|dir| dir.join("plugins").join(&plugin_file));
-    let ral_path_candidates = ral_core::path::ral_path_entries(shell.env_overrides())
-        .into_iter()
-        .map(|dir| dir.join(&plugin_file));
-    // The directories above are the host's, so their candidates are taken as
-    // they are.  Final fallbacks: the identifier verbatim, then with `.ral`;
-    // these are written in ral, so the live cwd and `~` apply, as to any
-    // other written path.
-    let written = [name_or_path, &plugin_file]
-        .into_iter()
-        .map(|cand| shell.resolve(cand));
-    let candidates: Vec<_> = config_candidate
-        .into_iter()
-        .chain(ral_path_candidates)
-        .map(|cand| shell.anchor(&cand))
-        .chain(written)
-        .collect();
-    shell.locate_first(candidates)?.ok_or_else(|| {
-        super::refusal(PluginFailure::NotFound(PluginFailureNotFound {
-            requested: name_or_path.into(),
-        }))
-        .into()
-    })
+    let candidate = if name_or_path.contains(std::path::is_separator) {
+        shell.resolve(name_or_path)
+    } else {
+        let base = shell.resolve("xdg:config/ral/plugins");
+        let name = EntryName::parse(std::ffi::OsStr::new(&format!("{name_or_path}.ral"))).map_err(
+            |error| {
+                Error::io(
+                    IoOperation::Read,
+                    IoSubject::Path(ral_core::text::quote_native(error.name())),
+                    &error.into(),
+                )
+            },
+        )?;
+        shell.anchor(&base.as_path().join(name.as_os_str()))
+    };
+    let missing = || {
+        Break::from(super::refusal(PluginFailure::NotFound(
+            PluginFailureNotFound {
+                path: ral_core::text::quote_native(candidate.as_path().as_os_str()),
+            },
+        )))
+    };
+    match shell.locate::<Reading>(&candidate) {
+        Ok(located) => match located.stat().map(|stat| stat.kind) {
+            Some(Kind::File) => Ok(located),
+            Some(Kind::Dir) => Err(Error::io(
+                IoOperation::Read,
+                IoSubject::Path(ral_core::text::quote_native(
+                    candidate.as_path().as_os_str(),
+                )),
+                &std::io::ErrorKind::IsADirectory.into(),
+            )
+            .into()),
+            Some(Kind::Symlink | Kind::Other) => Err(super::refusal(PluginFailure::NotFile(
+                ral_core::text::quote_native(candidate.as_path().as_os_str()),
+            ))
+            .into()),
+            None => Err(missing()),
+        },
+        Err(Break::Error(error))
+            if matches!(&error.reason, Reason::Io(failure)
+                if matches!(failure.cause.leaf.as_ref(), IoLeaf::Os(cause)
+                    if cause.kind == IoKind::NotFound)) =>
+        {
+            Err(missing())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -336,11 +349,9 @@ mod tests {
         );
     }
 
-    /// The candidate search takes the first candidate the grant lets be read:
-    /// one it refuses is passed over for the next, and where every one is
-    /// refused the plugin is not found.
+    /// A written path has no suffixed or denial fallback.
     #[test]
-    fn the_candidate_search_passes_over_what_the_grant_refuses() {
+    fn a_written_path_names_only_itself() {
         use ral_core::authority::policy::{Capabilities, FsPolicy};
         use ral_core::path::{FrozenPath, utf8};
         let tmp = tempfile::tempdir().unwrap();
@@ -364,24 +375,149 @@ mod tests {
                 .map(|located| located.real().as_path().to_path_buf())
         };
         assert_eq!(found(&["p.ral"]).unwrap(), root.join("p"));
-        assert_eq!(found(&["p"]).unwrap(), root.join("p.ral"));
-        let refused = found(&["p", "p.ral"]).unwrap_err().to_string();
+        let refused = found(&["p"]).unwrap_err().to_string();
         assert!(!refused.contains("not found"), "{refused}");
         assert!(
             refused.contains(&ral_core::path::shown(root.join("p"))),
             "{refused}"
         );
-        let absent = ral_core::test_helper::core_shell()
-            .with_layer(
-                ral_core::test_helper::layer(Capabilities::default()),
-                |sh| resolve_plugin_path(&format!("{name}-missing"), sh),
-            )
-            .map(|located| located.real().as_path().to_path_buf());
-        assert!(absent.unwrap_err().to_string().contains("not found"));
+        let missing = root.join("missing");
+        std::fs::write(missing.with_extension("ral"), "no implicit extension").unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        let error = resolve_plugin_path(utf8(&missing).unwrap(), &mut shell)
+            .err()
+            .expect("no implicit extension");
+        let Break::Error(error) = error else {
+            panic!("an absent plugin is a typed refusal")
+        };
+        assert_eq!(
+            error.reason,
+            super::super::refusal(PluginFailure::NotFound(PluginFailureNotFound {
+                path: format!("{missing:?}"),
+            }))
+            .reason,
+        );
+        let missing_parent = root.join("absent").join("p.ral");
+        let error = resolve_plugin_path(utf8(&missing_parent).unwrap(), &mut shell)
+            .err()
+            .expect("the parent does not exist");
+        let Break::Error(error) = error else {
+            panic!("an absent directory is a typed refusal")
+        };
+        assert_eq!(
+            error.reason,
+            super::super::refusal(PluginFailure::NotFound(PluginFailureNotFound {
+                path: format!("{missing_parent:?}"),
+            }))
+            .reason,
+        );
     }
 
-    /// Every shipped plugin loads, alone, on the REPL's surface: `ral --check`
-    /// lacks the `_ed-*` builtins they call.
+    /// A separatorless name names only `<config>/ral/plugins/NAME.ral`.
+    #[test]
+    fn a_name_names_one_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let plugins = root.join("ral/plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(root.join("p.ral"), "not the named plugin").unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        shell
+            .set_env_var("XDG_CONFIG_HOME", ral_core::path::utf8(&root).unwrap())
+            .unwrap();
+        shell
+            .set_env_var("RAL_PATH", ral_core::path::utf8(&root).unwrap())
+            .unwrap();
+        for name in ["p", "~", "a.b", "plugin name"] {
+            let candidate = plugins.join(format!("{name}.ral"));
+            std::fs::write(&candidate, "named").unwrap();
+            let found = resolve_plugin_path(name, &mut shell).unwrap();
+            assert_eq!(found.real().as_path(), candidate);
+        }
+        assert!(resolve_plugin_path("p.ral", &mut shell).is_err());
+        std::fs::write(root.join("missing.ral"), "not searched").unwrap();
+        assert!(resolve_plugin_path("missing", &mut shell).is_err());
+    }
+
+    #[test]
+    fn a_directory_is_not_a_missing_plugin_under_any_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let plugins = root.join("ral/plugins");
+        let candidate = plugins.join("p.ral");
+        std::fs::create_dir_all(&candidate).unwrap();
+        std::fs::write(plugins.join("p.ral.ral"), "not a fallback").unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        for variable in ["HOME", "XDG_CONFIG_HOME"] {
+            shell
+                .set_env_var(variable, ral_core::path::utf8(&root).unwrap())
+                .unwrap();
+        }
+        for spelling in [
+            ral_core::path::utf8(&candidate).unwrap(),
+            "~/ral/plugins/p.ral",
+            "xdg:config/ral/plugins/p.ral",
+            "p",
+        ] {
+            let error = resolve_plugin_path(spelling, &mut shell)
+                .err()
+                .expect("a directory is not a plugin file");
+            let Break::Error(error) = error else {
+                panic!("a directory must produce a typed error: {spelling}")
+            };
+            let Reason::Io(failure) = &error.reason else {
+                panic!("a directory must not become not-found: {error}")
+            };
+            assert_eq!(failure.operation, IoOperation::Read);
+            assert_eq!(
+                failure.subject,
+                IoSubject::Path(ral_core::text::quote_native(candidate.as_os_str()))
+            );
+            assert!(matches!(failure.cause.leaf.as_ref(), IoLeaf::Os(cause)
+                if cause.kind == IoKind::IsADirectory));
+            assert!(error.to_string().contains("is a directory"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_is_not_a_missing_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let plugins = root.join("ral/plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let candidate = plugins.join("p.ral");
+        let _socket = std::os::unix::net::UnixListener::bind(&candidate).unwrap();
+        std::fs::write(plugins.join("p.ral.ral"), "not a fallback").unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        shell
+            .set_env_var("XDG_CONFIG_HOME", ral_core::path::utf8(&root).unwrap())
+            .unwrap();
+        let path = ral_core::text::quote_native(candidate.as_os_str());
+        let failure = PluginFailure::NotFile(path.clone());
+        assert_eq!(
+            failure.describe(),
+            format!("plugin path {path} is not a regular file")
+        );
+        assert_eq!(
+            failure.clone().encode(),
+            ral_core::data::FOValue::Variant {
+                label: "not-file".into(),
+                payload: Some(Box::new(path.encode())),
+            }
+        );
+        for spelling in [ral_core::path::utf8(&candidate).unwrap(), "p"] {
+            let error = resolve_plugin_path(spelling, &mut shell)
+                .err()
+                .expect("a socket is not a plugin file");
+            let Break::Error(error) = error else {
+                panic!("a socket must produce a typed refusal: {spelling}")
+            };
+            assert_eq!(error.reason, super::super::refusal(failure.clone()).reason);
+        }
+    }
+
+    /// Every shipped plugin loads, alone, on the REPL's editor surface.
     #[test]
     fn every_shipped_plugin_loads() {
         use crate::repl::host::ReplHost;
@@ -465,6 +601,29 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_cannot_read_a_session_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin.ral");
+        std::fs::write(&path, "return [name: $rc-only]").unwrap();
+        let mut runtime = ral_core::test_helper::core_runtime();
+        runtime.install_captured_builtins(&vec![loader(ral_core::path::shown(&path))].into());
+        let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+        let ral_core::shell::run::RunReport::Ran { ending, .. } =
+            shell.run(crate::repl::exec::line_run("let rc-only = 'p'; _test-load"))
+        else {
+            panic!("the loader call must check")
+        };
+        let Err(Break::Error(error)) = ending.into_settled() else {
+            panic!("the plugin must be refused")
+        };
+        assert!(matches!(error.reason, Reason::Compile(_)));
+        let rendered = error.rejection().expect("a static plugin refusal").render();
+        assert!(rendered.contains("rc-only"), "{rendered}");
+        assert!(shell.scope_lookup("rc-only").is_some());
+        assert!(!shell.plugin_loaded("p").unwrap());
+    }
+
+    #[test]
     fn a_host_refusal_rolls_back_hooks_and_handlers_without_reclassifying() {
         struct Refuse(ral_core::error::Error);
         impl ral_core::shell::runtime::EnquiryDesk for Refuse {
@@ -480,7 +639,7 @@ mod tests {
         let path = dir.path().join("plugin.ral");
         std::fs::write(
             &path,
-            "return [name: p, hooks: [post-exec: { |_ev| return () }], handlers: [:, xx: { |_args| echo hi }]]",
+            "let private-helper = 'private'\nreturn [name: p, hooks: [post-exec: { |_ev| return () }], handlers: [:, xx: { |_args| echo hi }]]",
         )
         .unwrap();
         let original =
@@ -506,6 +665,7 @@ mod tests {
         assert_eq!(error.hints(), original.hints());
         assert_eq!(error.context(), original.context());
         assert!(error.rejection().is_none());
+        assert!(shell.scope_lookup("private-helper").is_none());
         assert!(!shell.plugin_loaded("p").unwrap());
         assert!(!shell.has_handler("xx"));
         assert!(!shell.has_hook(&HookName::plugin("p", "post-exec")));

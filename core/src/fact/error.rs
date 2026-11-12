@@ -105,11 +105,11 @@ pub use host::{
     WebcFailureResponseFailedStatus, WithdrawalEvidence,
 };
 pub use invalid::{
-    AbsolutePathRefusal, AddressableRange, AdmissionAdvice, AdmissionCause, AdmissionExport,
-    AdmissionExtraField, AdmissionFailure, AdmissionShares, AdmissionUses, ArityFailure, BlockRole,
-    CodecFailure, CodecFailureCsvCell, CodecFailureCsvKeys, CodecFailureCsvWidth,
-    CodecFailureJsonLine, CodecFailureJsonPointer, CodecFailureMatchCount, CodecFailureNotJson,
-    CodecFailureUtf8, CodecJsonNumberFailure, CsvDeserializeCause, CsvPosition, CsvReadFailure,
+    AbsolutePathRefusal, AddressableRange, AdmissionAdvice, AdmissionCause, AdmissionExtraField,
+    AdmissionFailure, AdmissionShares, AdmissionUses, ArityFailure, BlockRole, CodecFailure,
+    CodecFailureCsvCell, CodecFailureCsvKeys, CodecFailureCsvWidth, CodecFailureJsonLine,
+    CodecFailureJsonPointer, CodecFailureMatchCount, CodecFailureNotJson, CodecFailureUtf8,
+    CodecJsonNumberFailure, CsvDeserializeCause, CsvPosition, CsvReadFailure,
     CsvReadFailureDeserialize, CsvReadFailureUnequalLengths, CsvReadFailureUtf8, GitPointerFailure,
     GlobFailure, GlobFailureHiddenOnly, GlobFailureSyntax, GrantFailure, GrantFailureAbsolutePath,
     GrantFailureGitPointer, GrantFailureOutsideHome, GrantFailureRefusedKey,
@@ -187,8 +187,7 @@ pub use shared::{
 };
 pub use state::{
     AmbientSetting, CaptureLimit, DepthFailure, DepthKind, HookArity, HookNotFunction, HookRef,
-    HookRegistrationFailure, HookSignature, ModuleCycle, OperationState, PluginHookRef,
-    StateFailure, WorkerCap,
+    HookRegistrationFailure, HookSignature, OperationState, PluginHookRef, StateFailure, WorkerCap,
 };
 
 use super::FailureCode as _;

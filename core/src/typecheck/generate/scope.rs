@@ -1,9 +1,9 @@
-//! Scope forms, options and retained protection contracts.
+//! Scope forms and options.
 
 use super::Generator;
 use crate::ir::{Comp, CompKind, FieldsNode, Pattern, Prim, Val, is_synthetic};
 use crate::source::{Span, Spanned, WithSpan};
-use crate::ty::{CompTy, Site, Ty};
+use crate::ty::{CompTy, Ty};
 use crate::typecheck::builtins::{Arm, audit_record, handlers_ty};
 use crate::typecheck::env::Inferring;
 use crate::typecheck::error::{OptionsContext, Reason, TypeErrorKind, Unwritten};
@@ -347,24 +347,6 @@ impl Generator {
         self.extract_return(&cty);
         (cty, node)
     }
-
-    pub(in crate::typecheck) fn protected_comp(
-        &mut self,
-        body: &Comp,
-        site: &Arc<Site>,
-    ) -> (CompTy, CompKind<Inferring>) {
-        let (have, body) = self.comp(body);
-        let result = self.force_return_shape(&have, Reason::ProtectContract).ty;
-        let want = self.solver.contract(site);
-        self.solver.equate(&result, &want, Reason::ProtectContract);
-        (
-            have,
-            CompKind::Protect {
-                body: Arc::new(body),
-                site: Arc::clone(site),
-            },
-        )
-    }
 }
 
 #[cfg(test)]
@@ -375,9 +357,9 @@ mod tests {
     use crate::ty::{CompTyNode, Grade, Scheme, UnitId};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::error::Unwritten;
-    use crate::typecheck::generate::tests::{assert_solved_comp, assert_solved_type, solved};
+    use crate::typecheck::generate::tests::{assert_solved_type, solved};
     use crate::typecheck::readback::{Readback, exec_node, lambda_comp};
-    use crate::typecheck::solve::{Mode, Solver};
+    use crate::typecheck::solve::Solver;
 
     static OPTIONAL: Table = Table {
         form: "custom",
@@ -421,7 +403,8 @@ mod tests {
             crate::test_helper::core_schemes(),
             FileId::DUMMY,
             None,
-            Some(table),
+            crate::typecheck::Unit::Host(table),
+            &mut crate::compile::no_modules,
         ) {
             Ok(_) => Vec::new(),
             Err(crate::compile::CompileError::Types(errors)) => errors,
@@ -786,7 +769,8 @@ mod tests {
                 crate::test_helper::core_schemes(),
                 FileId::DUMMY,
                 None,
-                None,
+                crate::typecheck::Unit::Script,
+                &mut crate::compile::no_modules,
             )
             .expect_err("unit is not a command argument");
             let crate::compile::CompileError::Types(errors) = errors else {
@@ -839,89 +823,6 @@ mod tests {
             ));
             assert_eq!(error.pos, Some(pos));
         }
-    }
-
-    #[test]
-    fn retained_protection_is_kept_beside_the_bind_and_call_holes_inside_scopes() {
-        let closed = solved(Solver::new());
-        let site = Arc::new(closed.site(&Ty::int(), UnitId::fresh()));
-        let app = node(
-            3,
-            CompKind::App {
-                head: Arc::new(node(
-                    4,
-                    CompKind::Lam {
-                        param: "x".into(),
-                        body: Arc::new(node(5, CompKind::Return(Val::Variable("x".into())))),
-                    },
-                )),
-                args: vec![Spanned::new(at(6), Val::Int(1))].into(),
-                hole: (),
-            },
-        );
-        let protected = node(
-            2,
-            CompKind::Protect {
-                body: Arc::new(app),
-                site: Arc::clone(&site),
-            },
-        );
-        let body = block(node(
-            1,
-            CompKind::bind(
-                Pattern::Name("result".into()),
-                protected,
-                node(7, CompKind::Return(Val::Variable("result".into()))),
-            ),
-        ));
-        let mut generator = generator();
-        let (cty, item) = generator.gather(&body);
-        let CompKind::Gather {
-            body: Val::Thunk(body),
-        } = &item
-        else {
-            panic!("gather body preserved")
-        };
-        let CompKind::Bind {
-            comp: retained,
-            hole: bound,
-            ..
-        } = &body.shape().item
-        else {
-            panic!("bind preserved")
-        };
-        let CompKind::Protect {
-            body: app,
-            site: kept,
-        } = &retained.item
-        else {
-            panic!("retained protection")
-        };
-        assert!(Arc::ptr_eq(kept, &site));
-        assert_eq!(retained.span, Some(at(2)));
-        let CompKind::App { head, hole, .. } = &app.item else {
-            panic!("application preserved")
-        };
-        assert!(matches!(head.item, CompKind::Lam { .. }));
-        let (bound, call) = (*bound, *hole);
-        let solution = solved(generator.solver);
-        assert_solved_comp(&solution.scratch(), &cty, &CompTy::pure(Ty::int()));
-        assert_eq!(solution.mode(bound), Mode::Run);
-        assert_eq!(solution.splits(call), Vec::<usize>::new());
-        let checked = Readback::new(&solution, UnitId::fresh(), 0).comp(&Spanned::new(at(0), item));
-        let CompKind::Gather {
-            body: Val::Thunk(body),
-        } = checked.item
-        else {
-            panic!("checked gather")
-        };
-        let CompKind::Bind { comp: rhs, .. } = &body.shape().item else {
-            panic!("checked bind")
-        };
-        let CompKind::Protect { site: kept, .. } = &rhs.item else {
-            panic!("actual protection survives readback")
-        };
-        assert!(Arc::ptr_eq(kept, &site));
     }
 
     #[test]
@@ -1552,28 +1453,6 @@ mod tests {
                     ", or `return ()` to set nothing"
                 };
                 assert_eq!(error.hint(), Some(format!("{advice}{unit}")));
-            }
-        }
-    }
-
-    #[test]
-    fn protected_comp_checks_only_the_result_not_the_producer_grade() {
-        for (want, accepted) in [(Ty::unit(), true), (Ty::string(), false)] {
-            let closed = solved(Solver::new());
-            let site = Arc::new(closed.site(&want, UnitId::fresh()));
-            let mut generator = generator();
-            let (cty, _) = generator.protected_comp(&command(1, "emit"), &site);
-            if accepted {
-                assert_eq!(
-                    solved(generator.solver).resolve_comp(&cty),
-                    CompTy::command()
-                );
-            } else {
-                let (store, errors) = generator.solver.refused();
-                assert_eq!(errors.len(), 1, "{errors:?}");
-                assert!(matches!(errors[0].reason, Some(Reason::ProtectContract)));
-                assert_eq!(errors[0].pos, Some(at(1)));
-                assert_eq!(store.resolve_comp_ty_graded(&cty), CompTy::command());
             }
         }
     }

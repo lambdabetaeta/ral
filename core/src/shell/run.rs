@@ -11,7 +11,6 @@
 //! on loan through [`IoLoan`], which restores on `Drop` even on unwind, since a
 //! host may catch a worker panic and carry the same `Shell` on.
 
-use crate::compile::compile_and_typecheck;
 use crate::diagnostic::Rejection;
 use crate::fact::{FailureCode as _, IoOperation, IoSubject, Reason, StandardStream, StateFailure};
 use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer};
@@ -22,6 +21,7 @@ use crate::shell::runtime::{
     Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, panic_text,
 };
 use crate::source::FileId;
+use crate::typecheck::Unit;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -94,12 +94,17 @@ impl From<Run> for RunRequest {
     }
 }
 
-/// One report the host matches once — a `Static` run never ran.
+/// One report the host matches once; only `Ran` reached evaluation.
 pub enum RunReport {
     /// The run never reached evaluation, so no command ran and nothing was
     /// bound; the host renders the diagnostics and exits on the status they
     /// carry.
-    Static { diagnostics: StaticDiagnostics },
+    Static {
+        diagnostics: StaticDiagnostics,
+        trail: Vec<Observation>,
+    },
+    /// The source checked successfully, without evaluation or lease renewal.
+    Checked { trail: Vec<Observation> },
     Ran {
         ending: End,
         /// The run's origin at 1:1, siting the wire's data-boundary refusal.
@@ -118,12 +123,13 @@ impl RunReport {
     /// a static rejection panics, naming its diagnostic.
     ///
     /// # Panics
-    /// On [`Self::Static`].
+    /// On [`Self::Static`] or [`Self::Checked`].
     #[track_caller]
     pub fn expect_ran(self) -> End {
         match self {
             Self::Ran { ending, .. } => ending,
-            Self::Static { diagnostics } => panic!(
+            Self::Checked { .. } => panic!("a check does not reach evaluation"),
+            Self::Static { diagnostics, .. } => panic!(
                 "the run must reach evaluation, but was refused:\n{}",
                 diagnostics
                     .render(&crate::shell::runtime::ExitHints::default())
@@ -170,9 +176,8 @@ impl Shell {
         let base = resolved_base(&req.run);
         let scope: Option<TrailScope> = req.run.trail.map(|policy| self.local.audit.open(policy));
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.dispatch(under, req, &base)
-        }));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req)));
 
         let trail = scope.map(|scope| self.local.audit.close(scope));
 
@@ -182,7 +187,10 @@ impl Shell {
                 ..
             }) => text,
             Ok(mut report) => {
-                if let (Some(trail), RunReport::Ran { trail: field, .. }) = (trail, &mut report) {
+                if let Some(trail) = trail {
+                    let (RunReport::Static { trail: field, .. }
+                    | RunReport::Checked { trail: field }
+                    | RunReport::Ran { trail: field, .. }) = &mut report;
                     *field = trail;
                 }
                 return report;
@@ -201,7 +209,7 @@ impl Shell {
 
     /// Resolve the run's [`Program`] and hand it to the framed scaffold, with
     /// this run's foreground frame minted under `under`.
-    fn dispatch(&mut self, under: &Scope, mut req: RunRequest, base: &Prov) -> RunReport {
+    fn dispatch(&mut self, under: &Scope, mut req: RunRequest) -> RunReport {
         // Armed *before* compiling, so the limit bounds compile and typecheck
         // too: `compile_run`'s `process::clear` touches only the signal
         // escalation count, never the reaper. The guard disarms on drop, so
@@ -212,21 +220,32 @@ impl Shell {
         let wall = req.run.wall.map(|d| arm_lifetime(foreground.clone(), d));
 
         match req.run.program {
-            Program::Source(ref src) => {
+            Program::Source(ref src) | Program::Check(ref src) => {
                 // The two session ledgers' clock: one tick per source dispatch
                 // whether or not it goes on to compile, so a failed run ages
                 // their scratch without renewing it. Both no-op when unarmed.
-                self.local.bindings.tick();
-                self.local.workers.tick_epoch();
+                if matches!(req.run.program, Program::Source(_)) {
+                    self.local.bindings.tick();
+                    self.local.workers.tick_epoch();
+                }
 
-                let (top, compact) = match compile_run(self, src, &req.run.origin) {
+                let (top, root) = match compile_run(self, src, &req.run.origin) {
                     Ok(parts) => parts,
                     Err(diagnostics) => {
                         return RunReport::Static {
                             diagnostics: *diagnostics,
+                            trail: Vec::new(),
                         };
                     }
                 };
+
+                if matches!(req.run.program, Program::Check(_)) {
+                    return RunReport::Checked { trail: Vec::new() };
+                }
+                let compact = root
+                    .span()
+                    .filter(|_| top.is_single_command())
+                    .map(|span| span.file);
 
                 // Reaching evaluation is what renews a lease. Gated so an
                 // unarmed host skips the walk over referenced names.
@@ -234,7 +253,7 @@ impl Shell {
                     self.local.bindings.renew(top.referenced_names());
                 }
 
-                self.run_built(req, foreground, wall, compact, base, |m, s| {
+                self.run_built(req, foreground, wall, Some(root), compact, |m, s| {
                     crate::shell::evaluator::run_phrases(
                         &top,
                         s.env.clone(),
@@ -251,6 +270,7 @@ impl Shell {
                         diagnostics: StaticDiagnostics::Host(Error::new(Reason::State(Box::new(
                             StateFailure::MissingHook(name.into()),
                         )))),
+                        trail: Vec::new(),
                     };
                 };
 
@@ -272,9 +292,9 @@ impl Shell {
                 };
                 if hook.policy.aside {
                     let mut aside = self.join_session();
-                    return aside.run_built(req, foreground, wall, None, base, body);
+                    return aside.run_built(req, foreground, wall, None, None, body);
                 }
-                self.run_built(req, foreground, wall, None, base, body)
+                self.run_built(req, foreground, wall, None, None, body)
             }
         }
     }
@@ -291,10 +311,12 @@ impl Shell {
         req: RunRequest,
         foreground: ScopeNode,
         wall: Option<Deadline>,
+        root: Option<Prov>,
         compact: Option<FileId>,
-        base: &Prov,
         body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
     ) -> RunReport {
+        let base = resolved_base(&req.run);
+        let site = root.unwrap_or_else(|| base.clone());
         let RunRequest {
             run,
             surface,
@@ -317,6 +339,7 @@ impl Shell {
                             IoSubject::Stream(StandardStream::Stdin),
                             &e,
                         )),
+                        trail: Vec::new(),
                     };
                 }
             },
@@ -336,11 +359,11 @@ impl Shell {
             terminal_access: run.terminal.into(),
         };
         let next = build_run(self, sinks, stdin);
-        let ending = run_framed(&mooring, self, next, &run, wall, base, body);
+        let ending = run_framed(&mooring, self, next, &run, wall, site, body);
 
         RunReport::Ran {
             ending,
-            base: base.clone(),
+            base,
             compact,
             captured: buffers.map(|buffers| buffers.map(|buf| buf.take())),
             // Filled in by `enter`, which holds this dispatch's scope.
@@ -419,21 +442,16 @@ pub(crate) fn build_run(shell: &Shell, sinks: Option<Streams<Sink>>, stdin: Sour
 /// Clear signal state, then compile and typecheck `src` against the live
 /// session.
 ///
-/// The root [`FileId`], when the program is one command, comes back here
-/// because the host needs it to render runtime errors once `comp` is
-/// consumed, and it cannot be read back later: [`IoLoan`] restores
-/// `session.root_file` on drop. The id is *peeked* before compiling so the
-/// program's spans carry this run's file identity, while
-/// [`Shell::register_root`] registers for real from [`run_framed`] — sound
-/// only because nothing in between registers a source and the registry never
-/// shrinks.
+/// Return the root's live provenance with its checked program, so evaluation
+/// installs the same file identity. Register before compiling: a nested module
+/// load may register another source before the root's check finishes.
 pub(crate) fn compile_run(
-    shell: &Shell,
+    shell: &mut Shell,
     src: &str,
     origin: &crate::source::SourceOrigin,
-) -> Result<(Arc<crate::ir::Toplevel>, Option<FileId>), Box<StaticDiagnostics>> {
+) -> Result<(Arc<crate::ir::Toplevel>, Prov), Box<StaticDiagnostics>> {
     crate::process::clear();
-    let file = shell.session.sources.next_id();
+    let (file, root) = shell.register_root(origin, src);
 
     #[cfg(debug_assertions)]
     let t_seed = std::time::Instant::now();
@@ -449,7 +467,8 @@ pub(crate) fn compile_run(
 
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
-    let outcome = compile_and_typecheck(src, schemes, file, origin.file(), None);
+    let outcome =
+        crate::shell::load::compile_source(src, origin, file, schemes, Unit::Script, shell);
     #[cfg(debug_assertions)]
     crate::dbg_trace!(
         "shell",
@@ -457,23 +476,21 @@ pub(crate) fn compile_run(
         src.len(),
         t_tc.elapsed()
     );
-    // The text is copied only here, on the failure path, and dies with the
-    // report: `file` was peeked, never minted, so the registry is untouched.
+    // A refusal owns its diagnostic text; the registry keeps the root too.
     let top = Arc::new(outcome.map_err(|error| {
         Box::new(StaticDiagnostics::Compile(
             error.reject(crate::source::Source::from_text(origin.clone(), src)),
         ))
     })?);
 
-    let compact = top.is_single_command().then_some(file);
-    Ok((top, compact))
+    Ok((top, root))
 }
 
 /// A run's root register: its origin at 1:1.
 fn resolved_base(run: &Run) -> Prov {
     Prov::Resolved(Box::new((
         match &run.program {
-            Program::Source(_) => run.origin.to_string(),
+            Program::Source(_) | Program::Check(_) => run.origin.to_string(),
             Program::Hook { name, .. } => name.fault_label(),
         },
         crate::source::CallSite {
@@ -493,19 +510,10 @@ pub(crate) fn run_framed(
     next: Io,
     run: &Run,
     wall: Option<Deadline>,
-    base: &Prov,
+    site: Prov,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> End {
-    // Only a source run registers: a hook's spans point into the file the hook
-    // was defined in, so an entry for its absent text would name nothing and
-    // never be reclaimed — the registry is append-only for the session's life.
-    let (root, site) = match &run.program {
-        Program::Source(src) => {
-            let (file, site) = shell.register_root(&run.origin, src);
-            (Some(file), site)
-        }
-        Program::Hook { .. } => (None, base.clone()),
-    };
+    let root = site.span().map(|span| span.file);
     let boundary = root.is_some();
     let guard = IoLoan::install(shell, next, Scope::clone(&mooring.home), root, site);
     let shell = &mut *guard.shell;

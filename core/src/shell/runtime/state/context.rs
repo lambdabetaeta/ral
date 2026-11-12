@@ -90,7 +90,6 @@ impl Context {
             grants,
             handlers: super::HandlerStack::default(),
             args: Vec::new(),
-            modules: super::Modules::default(),
         }
     }
 }
@@ -104,7 +103,6 @@ impl<H> Context<H> {
             grants,
             handlers,
             args,
-            modules,
         } = self;
         Context {
             env_overrides,
@@ -112,7 +110,6 @@ impl<H> Context<H> {
             grants,
             handlers: f(handlers),
             args,
-            modules,
         }
     }
 
@@ -124,7 +121,6 @@ impl<H> Context<H> {
             grants: self.grants.clone(),
             handlers,
             args: self.args.clone(),
-            modules: self.modules.clone(),
         }
     }
 
@@ -139,7 +135,6 @@ impl<H> Context<H> {
             grants,
             handlers,
             args,
-            modules,
         } = self;
         Ok(Context {
             env_overrides,
@@ -147,7 +142,6 @@ impl<H> Context<H> {
             grants,
             handlers: f(handlers)?,
             args,
-            modules,
         })
     }
 }

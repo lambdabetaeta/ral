@@ -6,6 +6,14 @@ amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calcu
 
 # A written key is a name
 
+> **Amended 2026-11-12 — Linked modules.** The boundary set below loses
+> `use`: a written module path is linked at check time, and its decided public
+> schemes instantiate in the importer. It is not an undecided-shape boundary.
+> The closed set is `from-json`, `from-jsonl`, `from-json-at`, `from-csv`,
+> `env`, `exarch-agents`, `exarch-pins`, `exarch-transcript` and `_ed-state`.
+> `env` and `from-csv` remain checked boundaries; the key-form rules stand.
+> See [[decisions/260606_cacheless-module-loader|cacheless module loader]].
+
 > **Amended 2026-11-02:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
 > expresses the three reads as primitive `index (fld ℓ)`, `index (pos k)`

@@ -709,7 +709,7 @@ mod tests {
     fn cleanup_preserves_original_error_report_facts_and_escape_precedence() {
         let mut shell = shell();
         let origin = ral_core::source::SourceOrigin::named("editor-source");
-        let Err(Break::Error(original)) = ral_core::shell::load::evaluate_source(
+        let Err(Break::Error(original)) = ral_core::shell::load::evaluate_closed(
             &Mooring::adrift(),
             &mut shell,
             "let [",

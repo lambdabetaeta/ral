@@ -78,8 +78,8 @@ pub enum Ast {
         stage: Spanned<Box<Self>>,
         redirects: Box<Redirects<Self>>,
     },
-    /// `try`/`guard`/`within`/`grant`/`audit`. Operand shape is fixed per
-    /// [`ScopeAst`] variant; the parser checks arity.
+    /// A control operator. Operand shape is fixed per [`ScopeAst`] variant;
+    /// the parser checks arity.
     Scope(ScopeAst),
     /// `cmd1 | cmd2 | cmd3`
     Pipeline(Vec<Stmt>),
@@ -255,6 +255,8 @@ pub enum ScopeAst {
     },
     /// `gather BODY` — run `body`, owning the workers spawned inside it.
     Gather { body: Box<Ast> },
+    /// `use PATH` — link a written path when the containing unit is checked.
+    Use { path: Spanned<Box<Ast>> },
 }
 
 /// A form's written options: each label is syntax, each value a term.

@@ -159,8 +159,7 @@ pub(crate) trait WithSpan {
 
 // ── Loaded source text ───────────────────────────────────────────────
 
-/// Where a source's text came from: its identity as a load, the key of the
-/// module stack's cycle check.
+/// Where a source's text came from: its identity in a check-time load chain.
 ///
 /// A file is held by the native path it was read from, so the directory a
 /// script-relative path resolves beside and the `$SCRIPT` it bakes are read
@@ -178,8 +177,8 @@ pub enum SourceOrigin {
 
 /// The native path of a source file, UTF-8 by construction.
 ///
-/// An origin travels serialized — in a run sent across the wire, on the
-/// module stack, in the [`SourceDb`] — and serde holds a path only as text,
+/// An origin travels serialized — in a run, linked module, or [`SourceDb`] —
+/// and serde holds a path only as text,
 /// so a file whose path is not UTF-8 is refused here, before it is read,
 /// rather than failing late at serialization.  Deserialization is no second
 /// door: serde lifts a `PathBuf` only from UTF-8.

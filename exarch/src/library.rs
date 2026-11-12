@@ -14,7 +14,7 @@ const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 /// If sourcing raises a ral error (re-surfaced as a signal) or escapes.
 pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let origin = SourceOrigin::named("<exarch:agent>");
-    ral_core::shell::load::evaluate_source(mooring, shell, AGENT_SOURCE, &origin, None)
+    ral_core::shell::load::extend_session(mooring, shell, AGENT_SOURCE, &origin, None)
         .map_err(|b| b.map_error(|e| e.with_context("exarch agent library")))
 }
 

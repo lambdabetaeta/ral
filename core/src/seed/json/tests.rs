@@ -55,8 +55,9 @@ fn table_path() -> Vec<DataStep> {
 #[test]
 fn raw_engine_seed_preserves_successful_json_and_safe_metadata() {
     let mut shell = crate::test_helper::core_shell();
-    shell.set_var(
-        "finite".into(),
+    crate::test_access::bind_untyped(
+        &mut shell,
+        "finite",
         crate::Value::Float(crate::data::Finite::new(-0.0).unwrap()),
     );
     shell.install_script_context(

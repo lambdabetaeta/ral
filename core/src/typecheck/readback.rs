@@ -1,6 +1,6 @@
 //! Fill elaboration holes using a closed solution; shared CBPV node builders.
 
-use super::env::{Inferring, Membrane};
+use super::env::Inferring;
 use super::generate::LiveSchemes;
 use super::solve::{BindHole, Mode, Solution};
 use crate::ir::{
@@ -155,10 +155,6 @@ impl<'a> Readback<'a> {
                     &mut self.synth_counter,
                 )
             }
-            CompKind::Protect { body, site } => CompKind::Protect {
-                body: Arc::new(self.comp(body)),
-                site: Arc::clone(site),
-            },
             CompKind::Force(value) => CompKind::Force(self.val(value)),
             CompKind::Return(value) => CompKind::Return(self.val(value)),
             CompKind::Exec(e) => exec_node(
@@ -173,6 +169,7 @@ impl<'a> Readback<'a> {
                 index: *index,
             },
             CompKind::Tilde(path) => CompKind::Tilde(path.clone()),
+            CompKind::Use(module) => CompKind::Use(Arc::clone(module)),
             CompKind::If { cond, then, else_ } => CompKind::If {
                 cond: self.spanned_val(cond),
                 then: self.spanned_val(then),
@@ -230,23 +227,6 @@ impl<'a> Readback<'a> {
 
     pub(super) fn val(&mut self, val: &Val<Inferring>) -> Val {
         match val {
-            Val::Protected { value, site } => {
-                let value = self.val(value);
-                let site = match site {
-                    Membrane::Kept(site) => Arc::clone(site),
-                    Membrane::Imported(ty) => {
-                        let site = self.site(ty);
-                        if !site.has_delayed() {
-                            return value;
-                        }
-                        site
-                    }
-                };
-                Val::Protected {
-                    value: Box::new(value),
-                    site,
-                }
-            }
             Val::Thunk(comp) => Val::thunk(Arc::new(self.comp(comp.shape()))),
             Val::List(elems) => Val::list(
                 elems
@@ -666,7 +646,7 @@ mod tests {
                     Phrase::Run(Arc::clone(body)),
                 )],
                 crate::test_helper::core_schemes(),
-                None,
+                crate::typecheck::Unit::Script,
             )
             .expect("elaboration must re-infer without further changes");
             assert_eq!(rechecked, checked);
@@ -674,34 +654,10 @@ mod tests {
     }
 
     #[test]
-    fn sites_keep_identity_and_imports_keep_only_delayed_protection() {
+    fn boundary_sites_belong_to_the_checked_unit() {
         let solution = success(Solver::new());
         let unit = UnitId::fresh();
-        let kept = Arc::new(solution.site(&Ty::int(), UnitId::fresh()));
         let mut walk = Readback::new(&solution, unit, 0);
-        for membrane in [
-            Membrane::Kept(Arc::clone(&kept)),
-            Membrane::Imported(Ty::int()),
-            Membrane::Imported(thunk(command())),
-        ] {
-            let imported = matches!(&membrane, Membrane::Imported(_));
-            let value = walk.val(&Val::Protected {
-                value: Box::new(Val::Variable("x".into())),
-                site: membrane,
-            });
-            match value {
-                Val::Variable(_) => assert!(imported),
-                Val::Protected { site, .. } => {
-                    if site.unit == kept.unit {
-                        assert!(Arc::ptr_eq(&kept, &site));
-                    } else {
-                        assert_eq!(site.unit, unit);
-                        assert!(!imported || site.has_delayed());
-                    }
-                }
-                _ => panic!("unexpected protected value"),
-            }
-        }
         let boundary = walk.comp(&node(exec_node(
             &CommandWord::Name(CommandName::Bare("decode".into())),
             Argv::default(),

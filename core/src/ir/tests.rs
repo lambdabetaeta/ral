@@ -220,6 +220,10 @@ fn every_variant() -> Vec<Arc<Comp>> {
     )))));
     let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
     let decode = Spanned::synthetic(CompKind::Prim(Prim::Decode(var("r_decode_body"))));
+    let use_module = Spanned::synthetic(CompKind::Use(Arc::new(Module {
+        top: toplevel(vec![run(ret("module_own_reference"))]),
+        origin: SourceOrigin::named("linked module"),
+    })));
 
     // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
     // wrap all of the above in one tree, so each is walked on its own
@@ -265,6 +269,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Arc::new(val_thunk),
         Arc::new(capture),
         Arc::new(decode),
+        Arc::new(use_module),
     ]
 }
 

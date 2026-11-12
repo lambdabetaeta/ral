@@ -1,9 +1,10 @@
-# Control flow is library; seven operators are syntax
+# Control flow is library; eight operators are syntax
 
-**A control operator is a named form whose meaning needs a machine frame or
-worker over its operand's whole dynamic extent.** ral reserves seven:
-`within`, `grant`, `try`, `guard`, `audit`, `spawn`, `gather`. Ordinary
-Hindley–Milner typing is no criterion: `try`, `guard` and `gather` have HM types.
+**ral reserves eight named operators: seven scope a runtime extent; `use`
+links a module at check time.** The seven are `within`, `grant`, `try`,
+`guard`, `audit`, `spawn`, and `gather`: each needs a machine frame or worker
+across an operand's whole dynamic extent. Ordinary Hindley–Milner typing is
+no criterion: `try`, `guard` and `gather` have HM types.
 
 - `try` intercepts errors and passes a witnessed record to its handler.
 - `guard ACQUIRE BODY RELEASE` shields acquisition, installs release before
@@ -17,11 +18,13 @@ Hindley–Milner typing is no criterion: `try`, `guard` and `gather` have HM typ
   ([[invariants/fixed-arity|fixed-arity]]).
 - `gather` owns births over its body's extent: join on return, cancel and
   drain on halt ([[decisions/261020_gather|gather]]).
+- `use` links a written path under Σ during checking; its linked body runs
+  when evaluated ([[decisions/260606_cacheless-module-loader|module linking]]).
 
 **Functions over thunks remain functions.** `map`, `for`, `retry`, `attempt`
 and `with-temp-*` compose the existing operators without needing a frame of
-their own. A native attempting to implement an operator must instead enter
-`machine::apply`: a nested machine loses tail position and meets
+their own. A native attempting to implement a runtime-extent operator must
+instead enter `machine::apply`: a nested machine loses tail position and meets
 `NESTED_MACHINE_LIMIT`.
 
 Capture `!{…}` and redirection scope `Frame::Capture` and `Frame::Redirect`,

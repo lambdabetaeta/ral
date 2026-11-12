@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b1ba0713
+generated_at_commit: ed1b37eb
 ---
 
 # Term depth
@@ -7,9 +7,8 @@ generated_at_commit: b1ba0713
 **A term's depth is not bounded by its syntax, and the language puts no limit
 on it. Every walk that recurses over a term, parse to typecheck and the
 printers, runs on the compile stack: `compile::on_compile_stack`, a thread
-with a 64 MiB reservation, through which `compile_and_typecheck` and the
-static halts run. A new recursive pass over the AST or the IR runs under that
-door, or it is a stack overflow waiting for a long enough program.**
+with a 64 MiB reservation, through which `compile_and_typecheck` runs.
+A new recursive pass over the AST or the IR runs under that door, or it is a stack overflow waiting for a long enough program.**
 
 - **Why syntax does not bound it.** The parser's `NESTING_DEPTH_LIMIT = 64`
   caps delimiter and prefix nesting, which is the parser's own recursion. A
@@ -46,5 +45,7 @@ door, or it is a stack overflow waiting for a long enough program.**
   `apply_ty`, `free_ty` and `generalize` carry none, and `row_occurs` spends
   the caller's budget.
 - **Where.** `compile::on_compile_stack` and `COMPILE_STACK`
-  (`core/src/compile.rs`); `ral/src/batch.rs::halted` for `--dump-ast` and
-  `--dump-ir`; `syntax::NESTING_DEPTH_LIMIT`; `typecheck::unify::MAX_UNIFY_DEPTH`.
+  (`core/src/compile.rs`), including engine `Program::Check` dispatches;
+  `syntax::NESTING_DEPTH_LIMIT`; `typecheck::unify::MAX_UNIFY_DEPTH`.
+  Each recursively linked module compiles on its own compile thread;
+  the check-time load chain bounds module nesting to 100.

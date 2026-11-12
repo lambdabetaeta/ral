@@ -1,0 +1,2 @@
+let _inner = use 'sub/inner.ral'
+let via_use = $_inner[x]

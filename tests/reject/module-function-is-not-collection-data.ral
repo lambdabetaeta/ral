@@ -1,0 +1,4 @@
+# status: 1
+# contains: but text, bytes, a list or a map is needed
+let m = use '../lib/modules/functions.ral'
+return !{length $m[inc]}

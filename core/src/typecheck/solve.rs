@@ -176,7 +176,7 @@ impl Solver {
         })
     }
 
-    /// Neither instantiation nor contract import exposes its resulting head.
+    /// Instantiation does not expose its resulting head.
     fn opaque(&mut self, ty: &Ty) -> Ty {
         self.unifier.fresh_alias(ty)
     }
@@ -194,13 +194,6 @@ impl Solver {
             let ty = instantiate(&mut this.unifier, decl.scheme());
             this.unifier.remember_producers(Term::Ty(&ty));
             ty
-        })
-    }
-
-    pub(super) fn contract(&mut self, site: &Site) -> Ty {
-        self.constrain(|this| {
-            let ty = site.instantiate(&mut this.unifier);
-            this.opaque(&ty)
         })
     }
 
@@ -650,6 +643,11 @@ impl Solver {
 }
 
 impl Solution {
+    pub(super) fn undecided_export(&self, scheme: &Scheme) -> Option<(Closed, WeakSource)> {
+        let source = self.unifier.undecided_source_in_ty(&scheme.ty)?;
+        Some((self.settle(Arc::new(scheme.clone())), source))
+    }
+
     pub(super) fn mode(&self, hole: BindHole) -> Mode {
         self.modes[hole.0 as usize]
     }
@@ -702,6 +700,52 @@ mod tests {
     use super::*;
     use crate::source::FileId;
     use crate::ty::{Role, TyVar};
+
+    #[test]
+    fn export_judgment_follows_open_weak_variables_through_mu_equations() {
+        for recursive in [false, true] {
+            for decided in [false, true] {
+                let mut solver = Solver::new();
+                solver.enter();
+                let payload = solver.fresh_ty();
+                solver.weak(&payload, WeakSource::Residual);
+                let root = if recursive {
+                    let root = solver.fresh_ty();
+                    solver.equate(
+                        &root,
+                        &crate::ty::closed_record(&[
+                            ("next", root.clone()),
+                            ("payload", payload.clone()),
+                        ]),
+                        Reason::Argument,
+                    );
+                    root
+                } else {
+                    payload.clone()
+                };
+                solver.exit();
+                let scheme = solver.generalise(&root);
+                if decided {
+                    solver.equate(&payload, &Ty::int(), Reason::Argument);
+                }
+                let solution = solver.close().unwrap();
+                assert_eq!(solution.undecided_export(&scheme).is_some(), !decided);
+            }
+        }
+    }
+
+    #[test]
+    fn export_judgment_ignores_provenance_on_closed_recursive_roots() {
+        let mut solver = Solver::new();
+        solver.enter();
+        let root = solver.fresh_ty();
+        solver.weak(&root, WeakSource::Residual);
+        solver.exit();
+        let scheme = solver.generalise(&root);
+        solver.equate(&root, &Ty::list(root.clone()), Reason::Argument);
+        let solution = solver.close().unwrap();
+        assert!(solution.undecided_export(&scheme).is_none());
+    }
 
     fn forall_tys(scheme: &Scheme) -> Vec<TyVar> {
         scheme
@@ -831,7 +875,7 @@ mod tests {
             for output_first in [false, true] {
                 let mut solver = Solver::new();
                 let payload = solver.fresh_kinded(Kind::ANY);
-                let source = WeakSource::Boundary("door".into());
+                let source = WeakSource::boundary("door");
                 solver.weak(&payload, source.clone());
                 solver.enter();
                 let grade = solver.fresh_grade();
@@ -906,7 +950,7 @@ mod tests {
         for handles in [false, true] {
             let mut solver = Solver::new();
             let root = solver.fresh_ty();
-            let source = WeakSource::Boundary("door".into());
+            let source = WeakSource::boundary("door");
             solver.weak(&root, source.clone());
             solver.enter();
             let grade = solver.fresh_grade();
@@ -961,7 +1005,8 @@ mod tests {
             crate::test_helper::core_schemes(),
             FileId::DUMMY,
             None,
-            None,
+            crate::typecheck::Unit::Script,
+            &mut crate::compile::no_modules,
         );
         let Err(CompileError::Types(errors)) = result else {
             panic!("doubling must report a type error, got {result:?}");
@@ -1696,7 +1741,7 @@ mod tests {
         let mut solver = Solver::new();
         solver.enter();
         let value = solver.fresh_ty();
-        let source = WeakSource::Boundary(Arc::from("door"));
+        let source = WeakSource::boundary("door");
         solver.weak(&value, source.clone());
         exit(&mut solver);
         let scheme = solver.generalise(&value);
@@ -1714,13 +1759,19 @@ mod tests {
     fn a_mismatch_with_what_a_weak_variable_was_fixed_to_carries_the_note() {
         let mut ctx = Solver::new();
         let weak = ctx.fresh_ty();
-        ctx.weak(&weak, WeakSource::Boundary("from-json".into()));
+        let source = WeakSource::Boundary {
+            name: "from-json".into(),
+            span: Some(at(1)),
+        };
+        ctx.weak(&weak, source.clone());
         ctx.equate(&weak, &Ty::int(), Reason::Argument);
+        ctx.unifier.at = Some(at(4));
         ctx.equate(&weak, &Ty::string(), Reason::Argument);
         let [err] = &ctx.errors[..] else {
             panic!("one mismatch expected: {:?}", ctx.errors);
         };
-        assert_eq!(err.weak, Some(WeakSource::Boundary("from-json".into())));
+        assert_eq!(err.weak, Some(source));
+        assert_eq!(err.report().also.unwrap().span, Some(at(1)));
         assert!(
             err.hint()
                 .is_some_and(|h| h.contains("another use fixed it"))

@@ -3,7 +3,7 @@ use super::{
     Stmt, StretchGraph, Val, WithSpan, group, wrap_binds,
 };
 
-impl Elaborator {
+impl Elaborator<'_> {
     /// A non-`let` statement's own `Comp`: the hoisting boundary, folding
     /// whatever the subtree pushed into `binds` into a `Comp::Bind` chain.
     fn stmt(&mut self, ast: &Ast) -> Comp {

@@ -5,9 +5,9 @@ use crate::ir::{
     ArithOp, BinaryOp, FieldsNode, Key, MapEntryV, Name, Prim, Val, ValListElem, is_synthetic,
 };
 use crate::source::{Span, Spanned, WithSpan};
-use crate::ty::{CompTy, Kind, Label, Row, Site, Ty};
+use crate::ty::{CompTy, Kind, Label, Row, Ty};
 use crate::typecheck::builtins::{Decl, LANGUAGE_CONSTANTS};
-use crate::typecheck::env::{Inferring, Membrane};
+use crate::typecheck::env::Inferring;
 use crate::typecheck::error::{Reason, TypeErrorKind, UnitCall};
 use crate::typecheck::readback;
 use std::sync::Arc;
@@ -274,19 +274,6 @@ impl Generator {
         }
     }
 
-    fn protected_val(&mut self, value: &Val, site: &Arc<Site>) -> (Ty, Val<Inferring>) {
-        let (have, value) = self.val(value, None);
-        let want = self.solver.contract(site);
-        self.solver.equate(&have, &want, Reason::ProtectContract);
-        (
-            want,
-            Val::Protected {
-                value: Box::new(value),
-                site: Membrane::Kept(Arc::clone(site)),
-            },
-        )
-    }
-
     /// `at` places boundary blocks without changing the diagnostic span.
     pub(in crate::typecheck) fn val(
         &mut self,
@@ -294,7 +281,6 @@ impl Generator {
         at: Option<Span>,
     ) -> (Ty, Val<Inferring>) {
         match val {
-            Val::Protected { value, site } => self.protected_val(value, site),
             Val::Unit => (Ty::unit(), Val::Unit),
             Val::String(v) => (Ty::string(), Val::String(v.clone())),
             Val::Int(v) => (Ty::int(), Val::Int(*v)),
@@ -310,18 +296,9 @@ impl Generator {
                     match self.env.lookup_binding(name).cloned() {
                         Some(scheme) => {
                             let ty = self.solver.instantiate(&scheme);
-                            let imported = self.note_residual_use(name, &scheme, &ty);
+                            self.note_residual_use(name, &scheme, &ty);
                             self.note_unit_read(name, &ty);
-                            let value = Val::Variable(name.clone());
-                            let value = if imported {
-                                Val::Protected {
-                                    value: Box::new(value),
-                                    site: Membrane::Imported(ty.clone()),
-                                }
-                            } else {
-                                value
-                            };
-                            (ty, value)
+                            (ty, Val::Variable(name.clone()))
                         }
                         // Rows are borrowed, not cloned: a cloned row's scheme cache dies with it.
                         None => match self.env.builtins.clone().value(name) {
@@ -523,7 +500,7 @@ impl Generator {
 mod tests {
     use super::*;
     use crate::source::FileId;
-    use crate::ty::{Scheme, UnitId};
+    use crate::ty::Scheme;
     use crate::typecheck::builtins::{Convention, scheme};
     use crate::typecheck::env::TyEnv;
     use crate::typecheck::generate::tests::{assert_solved_type, solved};
@@ -554,13 +531,7 @@ mod tests {
         );
         generator.env.bind("imported".into(), Arc::clone(&stored));
         let (first, node) = generator.val(&Val::Variable("imported".into()), None);
-        assert!(matches!(
-            node,
-            Val::Protected {
-                site: Membrane::Imported(_),
-                ..
-            }
-        ));
+        assert_eq!(node, Val::Variable("imported".into()));
         let (second, _) = generator.val(&Val::Variable("imported".into()), None);
         assert_eq!(generator.residual_uses.len(), 1);
         generator
@@ -575,28 +546,6 @@ mod tests {
         assert_eq!(solution.resolve_ty(&second), Ty::string());
         assert_eq!(solution.resolve_ty(&residual), Ty::string());
         assert_eq!(solution.resolve_ty(&shadow), Ty::bool());
-    }
-
-    #[test]
-    fn protected_values_import_the_contract_and_keep_the_original_site() {
-        let solution = solved(Solver::new());
-        let site = Arc::new(solution.site(&Ty::string(), UnitId::fresh()));
-        let mut generator = generator();
-        let source = Val::Protected {
-            value: Box::new(Val::String("text".into())),
-            site: Arc::clone(&site),
-        };
-        let (ty, node) = generator.val(&source, None);
-        let Val::Protected {
-            site: Membrane::Kept(kept),
-            ..
-        } = node
-        else {
-            panic!("retained contract must stay on the value")
-        };
-        assert!(Arc::ptr_eq(&site, &kept));
-        let solution = solved(generator.solver);
-        assert_eq!(solution.resolve_ty(&ty), Ty::string());
     }
 
     #[test]

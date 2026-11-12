@@ -121,8 +121,7 @@ fn a_run_that_is_not_last_does_not_wait() {
     assert_eq!(captured.stderr.bytes.as_slice(), b"");
 }
 
-/// A hook's program is an already-compiled value, so `run_framed` has no
-/// text to register. The registry never shrinks, so an entry naming the
+/// A hook's program is an already-compiled value, so it has no text to register. The registry never shrinks, so an entry naming the
 /// empty string would stand for the session's whole life — one per prompt
 /// draw, and one per keystroke under a `buffer-change` hook.
 #[test]
@@ -157,6 +156,231 @@ fn a_hook_run_registers_no_source() {
         before,
         "a hook run must mint no source id"
     );
+}
+
+#[test]
+fn a_check_registers_once_without_evaluating_or_binding() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = called.clone();
+    let mut runtime = crate::test_helper::core_runtime();
+    install_act(&mut runtime, "mark-evaluated", move |_, _| {
+        observed.store(true, Ordering::Relaxed);
+    });
+    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
+    let before = shell.sources().next_id().0;
+    let site = shell.local.audit.call_site().clone();
+    let report = shell.run(Run::captured(
+        Program::Check("let checked_only = 1; mark-evaluated".into()),
+        test_origin(),
+    ));
+    assert!(matches!(report, RunReport::Checked { .. }));
+    assert!(!called.load(Ordering::Relaxed));
+    assert!(shell.scope_lookup("checked_only").is_none());
+    assert_eq!(shell.sources().next_id().0, before + 1);
+    assert_eq!(shell.session.root_file, None);
+    assert_eq!(shell.local.audit.call_site(), &site);
+    assert_eq!(report.into_report(&shell).code(), 0);
+}
+
+#[test]
+fn checks_neither_age_nor_renew_binding_leases() {
+    let mut shell = crate::test_helper::core_shell();
+    shell.arm_binding_lease(crate::shell::runtime::BindingLease {
+        idle_calls: 2,
+        large_binding_bytes: u64::MAX,
+    });
+    shell
+        .run(Run::captured("let aging = 1", test_origin()))
+        .expect_ran();
+    shell
+        .run(Run::captured("return 1", test_origin()))
+        .expect_ran();
+    for _ in 0..2 {
+        assert!(matches!(
+            shell.run(Run::captured(
+                Program::Check("return $aging".into()),
+                test_origin()
+            )),
+            RunReport::Checked { .. }
+        ));
+    }
+    assert!(matches!(
+        shell.run(Run::captured(
+            Program::Check("let = ".into()),
+            test_origin()
+        )),
+        RunReport::Static { .. }
+    ));
+    assert_eq!(shell.local.bindings.prune(&mut shell.env), []);
+    assert!(shell.env.get("aging").is_some());
+    shell
+        .run(Run::captured("return 1", test_origin()))
+        .expect_ran();
+    let pruned = shell.local.bindings.prune(&mut shell.env);
+    assert_eq!(pruned.len(), 1, "checks must not renew the lease");
+    assert_eq!(pruned[0].name, "aging");
+    assert_eq!(pruned[0].idle_calls, 2);
+    assert!(shell.env.get("aging").is_none());
+}
+
+#[test]
+fn checks_do_not_age_or_prune_ready_workers() {
+    let mut shell = crate::test_helper::core_shell();
+    shell.arm_worker_retention(2);
+    shell
+        .run(Run::captured("spawn { return 1 }", test_origin()))
+        .expect_ran();
+    crate::test_helper::eventually(std::time::Duration::from_secs(2), || {
+        shell
+            .workers()
+            .iter()
+            .all(|entry| entry.handle.sample().has_ended())
+            .then_some(())
+    })
+    .expect("worker settles");
+    shell.local.workers.sweep_retention();
+    let entries = shell.workers();
+    assert_eq!(entries.len(), 1);
+    let stamped = entries[0].settled_epoch;
+    assert!(stamped.is_some());
+    shell
+        .run(Run::captured("return 1", test_origin()))
+        .expect_ran();
+    let before = shell.local.workers.retention_left(stamped);
+    assert_eq!(before, Some(1));
+    for source in ["return 1", "let = "] {
+        let report = shell.run(Run::captured(Program::Check(source.into()), test_origin()));
+        assert!(matches!(
+            report,
+            RunReport::Checked { .. } | RunReport::Static { .. }
+        ));
+        shell.local.workers.sweep_retention();
+        assert_eq!(shell.local.workers.retention_left(stamped), before);
+        assert_eq!(shell.workers().len(), 1);
+        assert_eq!(shell.take_worker_reap_notices(), []);
+    }
+    shell
+        .run(Run::captured("return 1", test_origin()))
+        .expect_ran();
+    assert!(shell.workers().is_empty());
+}
+
+#[test]
+fn source_and_check_share_static_diagnostics() {
+    for src in ["let = ", "$[1 + true]"] {
+        let mut shell = crate::test_helper::core_shell();
+        let reports = [Program::Source(src.into()), Program::Check(src.into())].map(|program| {
+            let crate::protocol::Report::Static {
+                rendered, status, ..
+            } = shell
+                .run(Run::captured(program, test_origin()))
+                .into_report(&shell)
+            else {
+                panic!("{src:?} must be refused statically")
+            };
+            (rendered, status)
+        });
+        assert_eq!(reports[0], reports[1]);
+    }
+}
+
+#[test]
+fn a_root_is_registered_before_its_modules_and_never_registered_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("module.ral");
+    let module_text = "let answer = 7";
+    std::fs::write(&module, module_text).unwrap();
+    let src = format!("let m = use '{}'; return $m[answer]", module.display());
+    for program in [Program::Source(src.clone()), Program::Check(src.clone())] {
+        let mut shell = crate::test_helper::core_shell();
+        let root = shell.sources().next_id();
+        let report = shell.run(Run::captured(program, test_origin()));
+        match report {
+            RunReport::Ran {
+                ending: End::Ok(Value::Int(7)),
+                ..
+            }
+            | RunReport::Checked { .. } => {}
+            _ => panic!("the linked program must succeed"),
+        }
+        assert_eq!(shell.sources().next_id().0, root.0 + 2);
+        assert_eq!(shell.sources().get(root).unwrap().as_str(), src);
+        assert_eq!(
+            shell.sources().get(FileId(root.0 + 1)).unwrap().as_str(),
+            module_text
+        );
+    }
+}
+
+#[test]
+fn compile_time_refusals_keep_their_site_and_trail_on_both_programs() {
+    use crate::authority::policy::{Capabilities, FsPolicy};
+    use crate::fact::Observed;
+    use crate::path::FrozenPath;
+    use crate::protocol::Report;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = crate::test_helper::real(dir.path())
+        .as_path()
+        .join("denied.ral");
+    std::fs::write(&path, "let secret = 1").unwrap();
+    let src = format!("\nuse '{}'", path.display());
+    for program in [Program::Source(src.clone()), Program::Check(src)] {
+        let mut shell = crate::test_helper::core_shell();
+        shell.push_session_capabilities(crate::test_helper::layer(Capabilities {
+            fs: Some(FsPolicy {
+                deny_paths: vec![FrozenPath::freeze(&path).unwrap()],
+                ..FsPolicy::default()
+            }),
+            ..Capabilities::default()
+        }));
+        let report = shell.run(Run {
+            trail: Some(crate::shell::runtime::CapturePolicy::Off),
+            ..Run::captured(program, test_origin())
+        });
+        let RunReport::Static { trail, .. } = &report else {
+            panic!("a denied module must fail before evaluation")
+        };
+        assert!(
+            trail.iter().any(|observation| {
+                matches!(observation.what, Observed::Check(_))
+                    && observation.site.script.as_ref() == "<test>"
+                    && observation.site.line == 2
+            }),
+            "the refusal must be stamped at use: {trail:?}"
+        );
+        let expected: Vec<_> = trail
+            .iter()
+            .cloned()
+            .map(crate::data::datum::Datum::encode)
+            .collect();
+        for projected in [
+            RunReport::Checked {
+                trail: trail.clone(),
+            }
+            .into_report(&shell),
+            report.into_report(&shell),
+        ] {
+            let bytes = crate::data::json::to_vec(&projected).unwrap();
+            let decoded: Report = crate::data::json::from_slice(&bytes).unwrap();
+            assert_eq!(decoded, projected);
+            match decoded {
+                Report::Static { trail, .. } | Report::Checked { trail } => {
+                    assert_eq!(trail, expected);
+                }
+                _ => panic!("the projection must not claim evaluation"),
+            }
+        }
+        let RunReport::Checked { trail } = shell.run(Run {
+            trail: Some(crate::shell::runtime::CapturePolicy::Off),
+            ..Run::captured(Program::Check("return 1".into()), test_origin())
+        }) else {
+            panic!("the next check must succeed")
+        };
+        assert_eq!(trail, []);
+    }
 }
 
 /// Register the block `src` as hook `name` under `policy`, and run it.
@@ -1109,7 +1333,9 @@ fn single_command_still_reports_the_input_shape() {
                 assert_eq!(compact.is_some(), shape, "{src:?} misreports its shape");
             }
             RunReport::Ran { ending, .. } => panic!("{src:?} must fault, got {ending:?}"),
-            RunReport::Static { .. } => panic!("{src:?} must reach evaluation"),
+            RunReport::Static { .. } | RunReport::Checked { .. } => {
+                panic!("{src:?} must reach evaluation")
+            }
         }
     }
 }
@@ -1217,7 +1443,9 @@ fn a_panicked_dispatch_reports_panic_and_leaves_the_next_trail_empty() {
             trail.is_empty(),
             "the panicked dispatch's scope must not leak into the next one"
         ),
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        RunReport::Static { .. } | RunReport::Checked { .. } => {
+            panic!("valid source must reach evaluation")
+        }
     }
 }
 
@@ -1232,7 +1460,9 @@ fn ran(runtime: crate::Runtime, run: Run) -> (End, String) {
             let stdout = captured.map(|c| c.stdout.bytes).unwrap_or_default();
             (ending, String::from_utf8_lossy(&stdout).into_owned())
         }
-        RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        RunReport::Static { .. } | RunReport::Checked { .. } => {
+            panic!("valid source must reach evaluation")
+        }
     }
 }
 
@@ -2052,6 +2282,7 @@ fn missing_hook_dispatch_retains_its_namespace_as_a_state_fact() {
         });
         let RunReport::Static {
             diagnostics: StaticDiagnostics::Host(error),
+            ..
         } = report
         else {
             panic!("missing hook must refuse before evaluation")

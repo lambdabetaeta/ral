@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
 
@@ -236,10 +236,15 @@ earlier, or on a proper prefix wherever loaded.
   its external argument gate. `handlers:` installs persistent handlers;
   scoped handlers use `within`, and interactive functions use `let`.
 - `plugin/load.rs` — startup-only `load_plugin`, called by the rc plan with
-  an options `Map`. It resolves a plugin under `~/.config/ral/plugins/` or
-  `RAL_PATH`, then typechecks and evaluates it through
-  `shell::load::evaluate_source` in a fresh scope under
-  `table::declared(Form::Manifest)`. The file must end in a written record
+  an options `Map`. A key without a path separator names exactly
+  `<config>/ral/plugins/NAME.ral`; any other key is a written path, with
+  sigil expansion and anchoring as for `use`. `resolve_plugin_path` judges
+  that one candidate with `shell.locate`, without fallback or extension
+  inference. The file is checked against Σ and run under Σ through
+  `shell::load::evaluate_closed` with `table::declared(Form::Manifest)`.
+  It sees no rc or session bindings, and its helper `let`s stay local;
+  shared helpers are modules. Its check and run use the session's grant.
+  The file must end in a written record
   or a written block of exactly one parameter whose body's tail is that
   record; factory recursion is disabled inside the body. A bound factory,
   spread or computed tail is T0077. `instantiate` applies the factory to its
@@ -250,8 +255,8 @@ earlier, or on a proper prefix wherever loaded.
   Hooks and handlers are installed before the host enquiry
   `` `repl-plugin `loaded ``. Any failure, including host refusal, removes the
   hooks and the locally retained `FrameHandle`s. Only committed names enter
-  the session's `HookTable` ledger, for duplicate checks. A relative path uses
-  `shell.resolve` (live cwd, `~`). Plugins live for the session; there is no
+  the session's `HookTable` ledger, for duplicate checks. Plugins live for
+  the session; there is no
   load or unload command. A new plugin requires a new session. Loading also runs the
   shadow lint host-side (`PluginRuntime::admit`): a binding the router's
   `dead_entries` flags is warned about, not rejected, when either it or its

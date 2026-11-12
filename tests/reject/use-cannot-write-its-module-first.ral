@@ -1,0 +1,5 @@
+# status: 1
+# contains: U0001
+# contains: written-at-runtime.ral
+to-string 'let version = 1' > 'written-at-runtime.ral'
+let _ = use 'written-at-runtime.ral'

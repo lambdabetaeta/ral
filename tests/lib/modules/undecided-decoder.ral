@@ -1,0 +1,1 @@
+let decode = { |text| to-string $text | from-json }

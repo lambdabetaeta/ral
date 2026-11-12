@@ -6,8 +6,6 @@ let outside = "$dir/outside"
 mkdir -p $inside $outside
 to-string secret > "$outside/secret.txt"
 to-string original > "$outside/log.txt"
-to-string 'let answer = 42' > "$outside/lib.ral"
-to-string 'to-string ran > "$inside/witness.txt"' > "$inside/mod.ral"
 let root = !{absolute-path "$dir/.."}
 let denied = { |body|
     try { !$body; echo 'ALLOWED' } { |e| echo "denied: !{re-match 'grant does not allow' $e[message]}" }
@@ -37,10 +35,17 @@ grant [fs: [write: [`absolute $inside]]] {
 }
 echo !{from-string < "$inside/kept.txt"}
 
-# Module loading is a read
-denied { grant [fs: [read: [`absolute $inside]]] { use "$outside/lib.ral" } }
-grant [fs: [read: [`absolute $inside], write: [`absolute $inside]]] { use "$inside/mod.ral" }
+# Linking precedes lexical grants; the module's effects still obey them.
+let linked = grant [fs: [read: [`absolute $inside]]] { use '../../lib/modules/values.ral' }
+echo $linked[version]
+grant [fs: [read: [`absolute $inside], write: [`absolute $inside]]] {
+    within [env: [MODULE_WITNESS: "$inside/witness.txt"]] { use '../../lib/modules/write-witness.ral' }
+}
 echo !{from-string < "$inside/witness.txt"}
+denied { grant [fs: [write: [`absolute $inside]]] {
+    within [env: [MODULE_WITNESS: "$outside/witness.txt"]] { use '../../lib/modules/write-witness.ral' }
+} }
+echo !{exists "$outside/witness.txt"}
 
 # Read-gated queries and write-gated temp builtins
 denied { grant [fs: [read: [`absolute $inside]]] { file-info "$outside/secret.txt" } }

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
-verified_at_date: 2026-11-11
-anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate_first, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
+anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
 ---
 
 # Path judgment: what ral checks when it touches a file
@@ -117,9 +117,9 @@ working regardless of the readability of intermediate links.
   too (`locate_refuses_a_denied_name_that_names_nothing` pins both kinds);
   heads judge it for running through `check_exec_name`.
   A denied absent name reads as denied, just as a present object there would.
-- **`locate_first` judges every candidate before asking its kind**, including
-  a candidate whose walk failed. It passes over refusals and retains the first
-  if no admitted candidate has the requested kind.
+- **A module or plugin names one file.** Its `locate` judges that path before
+  disclosing its kind or reading it. There is no candidate search that can
+  pass over a refusal.
 - **Admission authorizes disclosure only**, preserving the walk's error,
   including for probes; it permits no operation through an unresolved name.
   Successful accesses still judge the final object, not each hop.

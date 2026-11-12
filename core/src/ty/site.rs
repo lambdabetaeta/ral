@@ -7,7 +7,7 @@ use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::Kind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -147,35 +147,4 @@ pub struct Site {
     pub(crate) nodes: std::sync::Arc<[Node]>,
     pub(crate) root: Id,
     pub(crate) unit: UnitId,
-}
-
-impl Site {
-    /// Whether the contract reaches a thunk or a handle: the only places a
-    /// membrane has an obligation to install.
-    pub(crate) fn has_delayed(&self) -> bool {
-        let mut seen = HashSet::new();
-        let mut todo = vec![self.root];
-        while let Some(id) = todo.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            match &self.nodes[id].shape {
-                Shape::Thunk(_) | Shape::Handle(..) => return true,
-                Shape::List(a) | Shape::Map(a) | Shape::Return(_, a) => todo.push(*a),
-                Shape::Fun(a, b) => todo.extend([*a, *b]),
-                Shape::Record(fields) | Shape::Variant(fields) => {
-                    todo.extend(fields.labels.iter().map(|&(_, id)| id));
-                }
-                Shape::Unit
-                | Shape::Bytes
-                | Shape::Bool
-                | Shape::Int
-                | Shape::Float
-                | Shape::String
-                | Shape::Free { .. }
-                | Shape::FreeComp { .. } => {}
-            }
-        }
-        false
-    }
 }

@@ -206,7 +206,7 @@ static WITHIN: Table = Table {
     factory: false,
 };
 
-/// The rc file's thirteen required keys. `RcPlan::decode` applies their values.
+/// The rc file's twelve required keys. `RcPlan::decode` applies their values.
 static RC: Table = Table {
     form: "rc",
     keys: &[
@@ -244,13 +244,6 @@ static RC: Table = Table {
             required: true,
             blank: Some("[:]"),
             reason: Some(Reason::Handlers),
-        },
-        Key {
-            label: "bindings",
-            holds: Holds::Decoded,
-            required: true,
-            blank: Some("[:]"),
-            reason: None,
         },
         Key {
             label: "edit-mode",
@@ -517,12 +510,12 @@ mod tests {
 
     fn table_errors(form: Form, src: &str) -> Vec<TypeError> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-        let top = elaborate(&ast, [], None)
+        let top = elaborate(&ast, [], None, &mut crate::compile::no_modules)
             .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
         typecheck(
             &top,
             crate::test_helper::core_schemes(),
-            Some(declared(form)),
+            crate::typecheck::Unit::Host(declared(form)),
         )
         .err()
         .unwrap_or_default()
@@ -565,11 +558,11 @@ mod tests {
     }
     fn checked(form: Form, src: &str) -> crate::ir::Toplevel {
         let ast = parse(src).expect("parse");
-        let top = elaborate(&ast, [], None).expect("elaborate");
+        let top = elaborate(&ast, [], None, &mut crate::compile::no_modules).expect("elaborate");
         typecheck(
             &top,
             crate::test_helper::core_schemes(),
-            Some(declared(form)),
+            crate::typecheck::Unit::Host(declared(form)),
         )
         .unwrap_or_else(|errors| panic!("{src}: {errors:?}"))
     }
@@ -807,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_map_constrains_an_unresolved_value_before_a_later_field() {
+    fn decoded_data_is_rejected_as_handlers_before_a_later_field() {
         let src = format!(
             "let d = echo '\"x\"' | from-json; {}",
             rc_source(&[("handlers", "$d"), ("surface", "$d")])
@@ -816,12 +809,19 @@ mod tests {
         let [error] = &errors[..] else {
             panic!("{errors:?}")
         };
-        assert!(
-            matches!(&error.kind, TypeErrorKind::TyMismatch { expected, actual }
-                if *expected == crate::ty::Ty::string() && *actual == crate::typecheck::builtins::handlers_ty())
+        let TypeErrorKind::KindMismatch { kind, witness, .. } = &error.kind else {
+            panic!("{error:?}")
+        };
+        assert_eq!(*kind, crate::ty::Kind::DATA);
+        let witness = witness.expect("the decoder call imposes DATA");
+        assert_eq!(
+            &src[witness.start as usize..witness.end as usize],
+            "from-json"
         );
-        assert!(matches!(&error.reason, Some(Reason::OptionField { key, .. }) if key == "surface"));
-        assert_eq!(error.pos.unwrap().start as usize, src.rfind("$d").unwrap());
+        assert!(matches!(error.reason, Some(Reason::Handlers)));
+        let pos = error.pos.expect("the handlers use");
+        assert_eq!(pos.start as usize, src.find("$d").unwrap());
+        assert_eq!(&src[pos.start as usize..pos.end as usize], "$d");
     }
 
     #[test]
@@ -849,9 +849,13 @@ mod tests {
         };
         let src = "let x = echo true | from-json; return [a: $x, b: $x]";
         let ast = parse(src).expect("parse");
-        let top = elaborate(&ast, [], None).expect("elaborate");
-        let errors = typecheck(&top, crate::test_helper::core_schemes(), Some(&TABLE))
-            .expect_err("the shared payload cannot be both Bool and String");
+        let top = elaborate(&ast, [], None, &mut crate::compile::no_modules).expect("elaborate");
+        let errors = typecheck(
+            &top,
+            crate::test_helper::core_schemes(),
+            crate::typecheck::Unit::Host(&TABLE),
+        )
+        .expect_err("the shared payload cannot be both Bool and String");
         let [error] = &errors[..] else {
             panic!("{errors:?}")
         };

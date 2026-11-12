@@ -1,6 +1,6 @@
 ---
-verified_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-verified_at_date: 2026-11-11
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
 anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, file_options, check_options, check_option, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
 
@@ -19,8 +19,9 @@ architecture is fixed by
 The generator writes equations and builds a *pending tree*, not an elaborated
 verdict from a partially solved type.
 
-- The solver owns the private unifier. Instantiation and contract import
-  return unknowns; a scheme is an opaque token to generation. Syntax and
+- The solver owns the private unifier. Instantiation returns unknowns;
+  generation does not inspect their solved structure.
+  Stored schemes are inspected only for cross-unit admissibility. Syntax and
   builtin declarations may supply known structure.
 - `Solver::binding(rhs, forced)` returns a fresh binder and a `BindHole`;
   `Solver::call()` returns a `CallHole`, and `argument(call, head, callee,
@@ -142,6 +143,15 @@ This is the rank formulation of
 - A new unit re-seeds stored weak residuals at zero and simultaneously
   alpha-renames local binders into disjoint names. No foreign live id is read
   ([[invariants/schemes-leave-closed|schemes leave closed]]).
+- **A stored name is unusable in a later unit if a weak residual is reachable
+  beneath a thunk or handle in its scheme.** This covers arguments as well as
+  results, and type, computation and row residuals. Existing first-order data
+  is instead readmitted against the later unit's solved type before it runs.
+  A decided function beside such data is allowed; a quantified parameter is
+  not an undecided shape.
+- This reachability follows μ-equations from the scheme's body, preserving
+  data or delayed context. A recursive root shared between the two contexts
+  must be judged in both; an unreachable equation is irrelevant to this rule.
 - There is no value restriction and no environment free-variable scan.
 
 ## Unit closure precedes every export
@@ -155,14 +165,15 @@ predecessors' closed schemes.
   is persisted or seeded. A builtin declaration caches one closed
   scheme and its curry spine; it never receives the live unifier. An argv row
   has no type rule: its scheme is always `U([String] → Command)`.
-- A host binding without a stored scheme receives one fresh rank-zero
-  monomorphic type. It is never omitted or generalised to `∀α. α`; every use
-  in the unit shares that one type.
+- Every session binding has a `Closed` scheme: a checked top-level `let`
+  stores it with the value, and a host's `set_var` requires it explicitly.
+  Captured block locals may lack schemes; closure re-inference at hook or
+  handler installation gives each a fresh rank-zero monomorphic type, shared
+  by all its uses in that unit, with provenance `WeakSource::Host`.
 - A one-shot enters a region before checking its body and closes the unit
   before returning. A lexical binding's scheme is generalised after region
   exit and settled only after successful closure. An install-time arm check
   exports only a verdict, never a scheme.
-  `Site::scheme` likewise enters its scratch region before instantiating the site.
 - A top-level `Run` introduces no region. After generation, `Solver::close`
   closes rank zero and retires every elaboration match, including on refusal.
   It judges final-head argv gates, attaches `()` notes and returns a `Solution`
@@ -196,7 +207,7 @@ consulted key by written key, never unified as a record type (SPEC §15.3).
 - `Holds::Table` recurses immediately on a record literal. Any other value,
   including `()`, is T0079. These equations constrain the nested field values
   in the same solver as their parent.
-- All thirteen rc keys are required, and its `limits:` and `theme:` tables
+- All twelve rc keys are required, and its `limits:` and `theme:` tables
   are total too. `` `inherit `` and `` `set v `` make retention or override
   explicit. Missing nested settings have pasteable `` `inherit `` hints,
   just as missing top-level keys have declared empty values.
@@ -217,11 +228,17 @@ consulted key by written key, never unified as a record type (SPEC §15.3).
   fresh result with `Command`, independently of the name and Σ.
   `Holds::CatchAll` uses the catch-all arm rule without a second equation.
   Scoped handlers need no runtime vet; persistent handlers retain installation
-  checks, and imported arms retain their module's checked sites.
+  checks. Imported maps meet the same arm type through their closed module
+  schemes.
 - Syntax guarantees rc and manifest result shape and keyset. Their decoders
   retain value-shape and domain checks, plus installation vetting. Grant's
   decoder also accepts grants received as data, so its runtime shape and
   keyset checks remain.
+- Rc `prompt:` and `startup:` and manifest `hooks:` and `keybindings:` are
+  decoded options, not static hook-type obligations. Installation still
+  infers closures and checks hook arity; even the host's default prompt is
+  a thunk, not a declared native. Handler installation retains its inference
+  check too, including for arbitrary values supplied by a host.
 
 ## Readback fixes terms and sites
 
@@ -235,15 +252,15 @@ wraps the whole RHS. See
 [[invariants/ir-pure-cbpv|the checked IR invariant]].
 
 - A boundary's solved type (`Exec.site`, a `Ty` while inferring) is
-  snapshotted under the unit's `UnitId`. On a protected value,
-  `Membrane::Kept(site)` preserves a checked tree's site and unit;
-  `Membrane::Imported(ty)` keeps the membrane only when the contract has
-  delayed parts. `CompKind::Protect.site` is `Arc<Site>` in every phase: only
-  runtime membranes build it, and the checker re-checks it as kept.
+  snapshotted under the unit's `UnitId`. Every registered boundary result
+  constrains type variables to `data` and row variables to be deep, excluding
+  functions and handles at every depth.
 - Sites preserve sharing, cycles, kinds and canonical free identities in all
-  four sorts, not necessarily ground types. A membrane admits nothing by
-  itself; `Toplevel.admits` records imported residual names' first-use types
-  for readmission before execution.
+  four sorts, not necessarily ground types. `Toplevel.admits` records imported
+  residual names' first-use types for readmission before execution. Such a
+  site may contain a decided function beside undecided data; checking that
+  function's head suffices because its own unit checked its body. Residual
+  occurrences remain plain variables, with no delayed runtime contract.
 - Readback settles each definition's schemes into `Closed`. The prelude bake,
   live scope and sealed seed transport those same schemes.
 - Re-checking a checked tree accepts it and inserts no further elaboration

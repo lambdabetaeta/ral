@@ -41,6 +41,7 @@ fn printed(src: &str) -> String {
             String::from_utf8(captured.map(|c| c.stdout.bytes).unwrap_or_default())
                 .expect("captured stdout is UTF-8")
         }
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {src:?}"),
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
             diagnostics

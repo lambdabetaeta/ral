@@ -90,7 +90,7 @@ impl BakedPrelude {
         let ran = run_phrases(
             self.comp(),
             Env::new(),
-            Mode::Prelude,
+            Mode::Local,
             &Mooring::adrift(),
             &mut shell,
         );
@@ -127,7 +127,7 @@ impl BakedPrelude {
 fn bake() -> Toplevel {
     let ast = crate::syntax::parser::parse(include_str!("prelude.ral"))
         .unwrap_or_else(|e| panic!("prelude parse error: {e}"));
-    let top = crate::elaborator::elaborate(&ast, [], None)
+    let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
         .unwrap_or_else(|e| panic!("prelude elaborate error: {e}"));
     let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
     validate_prelude_shape(&annotated);
@@ -240,9 +240,7 @@ impl HostSurface {
         table
     }
 
-    /// The checker's Σ for this surface: what [`bake_prelude`](crate::bake_prelude)
-    /// and [`SessionSchemes::from_prelude`](crate::typecheck::SessionSchemes)
-    /// read where there is no live shell (`--check`).
+    /// The checker's Σ for this surface, including a shell-free prelude bake.
     pub fn manifest(&self) -> Manifest {
         self.builtin_table().manifest().clone()
     }
@@ -440,7 +438,8 @@ mod tests {
     /// test can hand `seat` a prelude the real bake would refuse.
     fn baked(src: &str) -> BakedPrelude {
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
         let this = BakedPrelude::from_blob(&[]);
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         let _ = this.comp.set(Arc::new(annotated));
@@ -479,7 +478,8 @@ mod tests {
         let ast =
             crate::syntax::parser::parse("let x = if !{_ansi-ok} { return 1 } else { return 2 }")
                 .expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         validate_prelude_shape(&annotated);
     }
@@ -490,7 +490,8 @@ mod tests {
     fn return_prelude_binding_passes_the_bake() {
         let ast =
             crate::syntax::parser::parse("let x = 1\nlet f = { |y| return $y }").expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
         let annotated = crate::bake_prelude(&top, &HostSurface::default().manifest());
         validate_prelude_shape(&annotated);
     }

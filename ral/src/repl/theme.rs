@@ -81,7 +81,7 @@ mod tests {
     fn theme_source(value: &str) -> Map {
         let source = ral_core::test_helper::rc_source(&[("theme", value)]);
         let mut shell = ral_core::test_helper::core_shell();
-        let Value::Map(rc) = ral_core::shell::load::evaluate_source(
+        let Value::Map(rc) = ral_core::shell::load::evaluate_closed(
             &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             &source,

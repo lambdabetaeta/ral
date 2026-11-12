@@ -1,7 +1,186 @@
 use super::*;
+use crate::compile::no_modules;
 use crate::ir::Prim;
 use crate::path::TildePath;
 use crate::syntax::parser::parse;
+use std::path::PathBuf;
+
+fn linked_module() -> Arc<Module> {
+    Arc::new(Module {
+        top: crate::ir::Toplevel {
+            phrases: Vec::new(),
+            admits: Vec::new(),
+        },
+        origin: crate::source::SourceOrigin::named("linked module"),
+    })
+}
+
+#[test]
+fn use_links_written_paths_at_their_own_spans() {
+    let script = PathBuf::from("/repo/main.ral");
+    for (written, expected) in [
+        ("lib.ral", "lib.ral"),
+        ("./lib.ral", "./lib.ral"),
+        ("007", "007"),
+        ("'lib with spaces.ral'", "lib with spaces.ral"),
+        ("\"lib.ral\"", "lib.ral"),
+        ("~/lib.ral", "~/lib.ral"),
+        ("'~/lib.ral'", "~/lib.ral"),
+        ("xdg:config/ral/lib.ral", "xdg:config/ral/lib.ral"),
+    ] {
+        for script in [None, Some(script.as_path())] {
+            let src = format!("use {written}");
+            let ast = parse(&src).expect("parse");
+            let module = linked_module();
+            let mut calls = Vec::new();
+            let top = elaborate(&ast, [], script, &mut |at, path, anchor| {
+                calls.push((at, path.to_owned(), anchor.map(Path::to_path_buf)));
+                Ok(module.clone())
+            })
+            .expect("elaborate");
+            let [(at, path, anchor)] = &calls[..] else {
+                panic!("expected exactly one load: {calls:?}");
+            };
+            assert_eq!(&src[at.range()], written);
+            assert_eq!(path, expected);
+            assert_eq!(anchor.as_deref(), script);
+            let [phrase] = &top[..] else {
+                panic!("expected one phrase: {top:?}");
+            };
+            let Phrase::Run(comp) = &phrase.item else {
+                panic!("expected a run: {phrase:?}");
+            };
+            let CompKind::Use(linked) = &comp.item else {
+                panic!("expected linked use: {comp:?}");
+            };
+            assert!(Arc::ptr_eq(linked, &module));
+        }
+    }
+}
+
+#[test]
+fn use_in_a_block_is_linked_during_elaboration() {
+    let ast = parse("let f = { use 'lib.ral' }").expect("parse");
+    let module = linked_module();
+    let mut calls = 0;
+    let top = elaborate(&ast, [], None, &mut |_, path, _| {
+        assert_eq!(path, "lib.ral");
+        calls += 1;
+        Ok(module.clone())
+    })
+    .expect("elaborate");
+    assert_eq!(calls, 1);
+    let Phrase::Define { comp, .. } = &top[0].item else {
+        panic!("expected a definition: {top:?}");
+    };
+    let CompKind::Return(Val::Thunk(body)) = &comp.item else {
+        panic!("expected a block: {comp:?}");
+    };
+    assert!(matches!(&body.shape().item, CompKind::Use(linked) if Arc::ptr_eq(linked, &module)));
+}
+
+#[test]
+fn computed_use_operands_are_refused_without_loading() {
+    for written in ["$path", "\"lib/$name.ral\"", "!{return 'lib.ral'}", "[]"] {
+        let src = format!("use {written}");
+        let ast = parse(&src).expect("parse");
+        let mut calls = 0;
+        let error = elaborate(&ast, [], None, &mut |at, path, script| {
+            calls += 1;
+            no_modules(at, path, script)
+        })
+        .expect_err(&src);
+        assert_eq!(calls, 0, "{src}");
+        let CompileError::Parse(error) = error else {
+            panic!("expected an operand refusal: {error:?}");
+        };
+        assert_eq!(&src[error.span.expect("operand span").range()], written);
+        assert_eq!(
+            error.message,
+            "`use` takes a written path: the module is read when this script is checked, \
+             before it runs. Write the path out: relative to this file, or headed by `~` or `xdg:`."
+        );
+    }
+}
+
+#[test]
+fn expression_use_is_refused_before_compilation_can_load_a_module() {
+    for written in ["$['lib.ral']", "$[1]", "$[1 + 1]"] {
+        let src = format!("use {written}");
+        let mut calls = 0;
+        let error = crate::compile::compile_and_typecheck(
+            &src,
+            crate::test_helper::core_schemes(),
+            crate::source::FileId::DUMMY,
+            None,
+            crate::typecheck::Unit::Script,
+            &mut |at, path, script| {
+                calls += 1;
+                no_modules(at, path, script)
+            },
+        )
+        .expect_err(&src);
+        assert_eq!(calls, 0, "{src}");
+        let CompileError::Parse(error) = error else {
+            panic!("expected a syntax refusal: {error:?}");
+        };
+        assert_eq!(error.message, crate::syntax::USE_WRITTEN_PATH);
+    }
+}
+
+#[test]
+fn the_first_elaboration_error_stands_and_stops_further_loads() {
+    let ast = parse("use 'first.ral'; use 'second.ral'; let SCRIPT = 1").expect("parse");
+    let mut calls = 0;
+    let error = elaborate(&ast, [], None, &mut |_, path, _| {
+        calls += 1;
+        assert_eq!(path, "first.ral");
+        Err(UseRefusal::Unavailable {
+            reason: "this elaborator test has no module loader".into(),
+        })
+    })
+    .expect_err("loader refusal");
+    assert_eq!(calls, 1);
+    let CompileError::Use {
+        at,
+        refusal: UseRefusal::Unavailable { reason },
+    } = error
+    else {
+        panic!("expected the first loader refusal: {error:?}");
+    };
+    assert_eq!(at.range(), 4..15);
+    assert_eq!(reason, "this elaborator test has no module loader");
+
+    let ast = parse("return $SCRIPT; use 'later.ral'").expect("parse");
+    let error = elaborate(&ast, [], None, &mut |_, _, _| {
+        panic!("no module should be loaded after an elaboration failure")
+    })
+    .expect_err("missing script");
+    assert!(matches!(error, CompileError::Parse(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_loader_receives_the_native_script_while_script_is_shown() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let script = PathBuf::from(OsStr::from_bytes(b"/repo/\xff/main.ral"));
+    let script = script.as_path();
+    let ast = parse("use 'lib.ral'; return $SCRIPT").expect("parse");
+    let top = elaborate(&ast, [], Some(script), &mut |_, _, anchor| {
+        assert_eq!(anchor, Some(script));
+        Ok(linked_module())
+    })
+    .expect("elaborate");
+    let Phrase::Run(comp) = &top[1].item else {
+        panic!("expected a run: {top:?}");
+    };
+    assert_eq!(
+        comp.item,
+        CompKind::Return(Val::String(crate::path::shown(script).into()))
+    );
+}
 
 /// Head name, argv, and whether the head was written `^name`.
 fn expect_exec_name(comp: &Comp) -> (&CommandName, &Argv, bool) {
@@ -60,7 +239,7 @@ fn elaborate_one(
     bindings: impl IntoIterator<Item = Name>,
     script: Option<&Path>,
 ) -> Arc<Comp> {
-    let top = elaborate(ast, bindings, script).expect("elaborate");
+    let top = elaborate(ast, bindings, script, &mut no_modules).expect("elaborate");
     let [phrase] = top.as_slice() else {
         panic!("expected one phrase, got {top:?}");
     };
@@ -226,7 +405,7 @@ fn explicit_value_head_elaborates_to_app() {
 #[test]
 fn command_use_before_non_thunk_let_is_exec() {
     let ast = parse("date\nlet date = 5").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -240,7 +419,7 @@ fn command_use_before_non_thunk_let_is_exec() {
 #[test]
 fn command_use_before_acyclic_thunk_let_is_exec() {
     let ast = parse("f\nlet f = { return 1 }").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -255,7 +434,7 @@ fn command_use_before_acyclic_thunk_let_is_exec() {
 #[test]
 fn command_use_before_recursive_thunk_let_is_exec() {
     let ast = parse("g 3\nlet g = { |n| g $[$n - 1] }").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Run(comp) = &top[0].item else {
         panic!("expected a Run phrase, got {:?}", top[0].item);
@@ -284,7 +463,7 @@ fn command_use_before_recursive_thunk_let_is_exec() {
 #[test]
 fn intra_group_recursion_resolves_to_binding() {
     let ast = parse("let f = { |n| f $n }\nf 5").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     assert_eq!(top.len(), 2);
     let Phrase::Define { comp: rhs, .. } = &top[0].item else {
         panic!("expected a Define, got {:?}", top[0].item);
@@ -358,7 +537,10 @@ fn script_bakes_to_a_string_literal() {
 #[test]
 fn script_with_no_identity_is_an_elaboration_error() {
     let ast = parse("return $SCRIPT").expect("parse");
-    assert!(elaborate(&ast, [], None).is_err());
+    assert!(matches!(
+        elaborate(&ast, [], None, &mut no_modules),
+        Err(CompileError::Parse(_))
+    ));
 }
 
 // ── phrases and right-nested binders ─────────────────────────────────
@@ -366,7 +548,10 @@ fn script_with_no_identity_is_an_elaboration_error() {
 #[test]
 fn script_cannot_be_bound_through_a_rest_pattern() {
     let ast = parse("let [a, ...SCRIPT] = [1, 2]").expect("parse");
-    assert!(elaborate(&ast, [], Some("main.ral".as_ref())).is_err());
+    assert!(matches!(
+        elaborate(&ast, [], Some("main.ral".as_ref()), &mut no_modules),
+        Err(CompileError::Parse(_))
+    ));
 }
 
 #[test]
@@ -377,7 +562,10 @@ fn script_cannot_be_bound_by_a_block_definition() {
         "let f = { SCRIPT }\nlet SCRIPT = { f }",
     ] {
         let ast = parse(src).expect("parse");
-        let err = elaborate(&ast, [], Some("main.ral".as_ref())).expect_err(src);
+        let err = elaborate(&ast, [], Some("main.ral".as_ref()), &mut no_modules).expect_err(src);
+        let CompileError::Parse(err) = err else {
+            panic!("expected an elaboration refusal: {err:?}");
+        };
         let span = err.span.expect("the refusal carries the binder's span");
         let (start, end) = (span.start as usize, span.end as usize);
         assert_eq!(&src[start..end], "SCRIPT", "{src}");
@@ -388,7 +576,8 @@ fn script_cannot_be_bound_by_a_block_definition() {
 #[test]
 fn nested_block_ending_in_let_has_unit_tail() {
     let stmts = parse("let x = 1").expect("parse");
-    let mut elaborator = Elaborator::new_with_bindings([], None);
+    let mut loader = no_modules;
+    let mut elaborator = Elaborator::new_with_bindings([], None, &mut loader);
     let seq = elaborator.stmts_nested(&stmts);
     let CompKind::Bind { rest, .. } = &seq.item else {
         panic!("expected a Bind, got {:?}", seq.item);
@@ -399,7 +588,7 @@ fn nested_block_ending_in_let_has_unit_tail() {
 #[test]
 fn toplevel_mutual_recursion_shares_one_group_arc() {
     let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     assert_eq!(top.len(), 2);
     fn group_arc(phrase: &Phrase<()>) -> Arc<GroupNode> {
         let Phrase::Define { comp, .. } = phrase else {
@@ -428,7 +617,7 @@ fn toplevel_mutual_recursion_shares_one_group_arc() {
 fn phrases_in(session: &[&str], src: &str) -> Vec<String> {
     let ast = parse(src).expect("parse");
     let session = session.iter().map(|&name| Name::from(name));
-    let top = elaborate(&ast, session, None).expect("elaborate");
+    let top = elaborate(&ast, session, None, &mut no_modules).expect("elaborate");
     top.iter()
         .map(|phrase| match &phrase.item {
             Phrase::Run(_) => "run".to_string(),
@@ -566,7 +755,10 @@ fn a_block_naming_a_block_past_its_stretch_is_refused() {
         ),
     ] {
         let ast = parse(src).expect("parse");
-        let err = elaborate(&ast, [], None).expect_err(src);
+        let err = elaborate(&ast, [], None, &mut no_modules).expect_err(src);
+        let CompileError::Parse(err) = err else {
+            panic!("expected an elaboration refusal: {err:?}");
+        };
         let span = err.span.expect("the refusal carries the reference's span");
         assert!(src[span.start as usize..].starts_with(at), "{src}");
     }
@@ -577,7 +769,7 @@ fn a_block_naming_a_block_past_its_stretch_is_refused() {
 fn a_session_binding_does_not_lift_the_refusal() {
     let src = "let main = { helper }\necho ready\nlet helper = { echo help }";
     let ast = parse(src).expect("parse");
-    assert!(elaborate(&ast, [Name::from("helper")], None).is_err());
+    assert!(elaborate(&ast, [Name::from("helper")], None, &mut no_modules).is_err());
 }
 
 /// Bound above in the same body, the name is that binding: a `let` of the
@@ -784,7 +976,7 @@ fn a_single_interpolation_part_still_concatenates() {
 #[test]
 fn let_of_lone_tilde_reads_rather_than_runs() {
     let ast = parse("let h = ~").expect("parse");
-    let top = elaborate(&ast, [], None).expect("elaborate");
+    let top = elaborate(&ast, [], None, &mut no_modules).expect("elaborate");
     let Phrase::Define { comp, .. } = &top[0].item else {
         panic!("expected a Define, got {:?}", top[0].item);
     };
@@ -837,7 +1029,10 @@ fn an_arm_that_would_hoist_is_refused() {
         "case `a () [`a: !{mk}]",
     ] {
         let ast = parse(src).expect("parse");
-        let err = elaborate(&ast, [], None).expect_err(src);
+        let err = elaborate(&ast, [], None, &mut no_modules).expect_err(src);
+        let CompileError::Parse(err) = err else {
+            panic!("expected an elaboration refusal: {err:?}");
+        };
         assert!(
             err.message.contains("an arm is a block"),
             "{src}: {}",
@@ -846,7 +1041,7 @@ fn an_arm_that_would_hoist_is_refused() {
     }
     let ast = parse("let h = { return 1 }; if true $h else { return 2 }").expect("parse");
     assert!(
-        elaborate(&ast, [], None).is_ok(),
+        elaborate(&ast, [], None, &mut no_modules).is_ok(),
         "a name holding a block is an arm"
     );
 }

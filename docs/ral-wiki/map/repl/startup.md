@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -111,8 +111,8 @@ set, removed variables unset, with `SHLVL`, `PWD`, `OLDPWD`, `_` ignored.
 Failure warns and leaves the starting environment intact. This occurs before
 any thread exists; signal setup and the engine follow. Windows adopts nothing
 ([[decisions/261027_the-login-environment-is-the-posix-profiles|login environment]]). `RunOpts` (`--recursion-limit`, `--capabilities`)
-rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `halt: Option<Halt>`
-(`--check` / `--dump-ast` / `--dump-ir`, one clap group); `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
+rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `check: bool`
+(`--check`); `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
 `--surface`.
 
 - **Argv boundaries.** Clap's `trailing_var_arg` preserves everything after
@@ -145,10 +145,6 @@ through `dispatch_to_report` with its output host, so it shares the REPL's
 one ending law and one typecheck
 ([[design/engine-protocol|engine-protocol]]).
 
-- **Static work.** `--dump-ast` and `--dump-ir` parse and elaborate, printing
-  the tree or the elaborated phrases; `--check` is `compile_and_typecheck`
-  against `PRELUDE`'s schemes plus the batch surface's builtin table, rendered
-  and exited through `StaticDiagnostics::render`. None boots anything.
 - **Boot, stage one.** `IdentityTransport::boot` with the `batch` installer
   (the table is not `cfg(unix)`-gated, only `run_engine` is), whose recipe
   decodes `Root.config` — `{args}` — strictly, boots the batch surface, sets
@@ -166,6 +162,12 @@ one ending law and one typecheck
   profile's `cd` can redirect a later one. `boot_builtin::settle` reads
   its `Ending`: a load failure is `Err` status 2, an `exit N` is
   `Exited(N)`, and either stops batch there, exactly as it stops the REPL.
+- **Check or run.** After the same full boot, `--check` dispatches
+  `Program::Check` instead of `Program::Source`. Both compile in the engine
+  under the booted session's environment and grant; `Check` stops before
+  evaluation. Profiles and `--recursion-limit` apply equally. Module reads
+  therefore have one resolution and authority rule. The CLI has no static
+  dump flags or `-n` alias.
 - **The run.** The script is a `Program::Source` dispatch under
   `GrantStack::root()` with `Run.last: true`, inheriting IO and stdin; the engine
   typechecks it once against the live session. The terminal is `Leased` only
@@ -183,7 +185,9 @@ one ending law and one typecheck
   `` `err record ``, `` `exited n ``, `` `stopped cause `` or `` `panic text ``.
   Unit's payload is absent, so a unit result reads `{"tag":"ok"}`; no
   record re-decoding or fallback is needed
-  ([[design/endings|endings]]).
+  ([[design/endings|endings]]). Static refusals also carry a trail envelope,
+  including check-time module-read denials stamped at `use`; their diagnostics
+  retain their static status and rendering.
 
 ## Embedding and the baked prelude
 
@@ -228,9 +232,8 @@ prelude.
 Builtins are shell-scoped: each mode declares its surface as one
 `HostSurface` value and hands it to `boot_shell`, so the checker surface and
 the runtime surface cannot drift. Batch's surface is core plus
-`WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot builtin, and the same value seeds `--check`'s builtin table
-(`HostSurface::manifest`, the checker's Σ with no live shell); the REPL's
-adds the [[map/repl/plugins|`_ed-*` editor builtins]] and
+`WATCH_BUILTIN`, `SURFACE_BUILTIN` and the boot builtin; `--check` uses that
+booted engine, not a shell-less manifest. The REPL surface adds the [[map/repl/plugins|`_ed-*` editor builtins]] and
 `_external-editor`, all static. Both ral front-ends print a watched worker's lines, so `watch` is the
 ral hosts' to install
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).

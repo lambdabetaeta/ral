@@ -112,6 +112,14 @@ static LANGUAGE_DOCS: &[(&str, &str)] = &[
          Example:\n  try { from-string < config.txt } { |error|\n    warn \"config: $error[message]\"\n    return #'{}'#\n  }",
     ),
     (
+        "use",
+        "use <written-path>  — link a module and return a record of its public definitions.\n\n\
+         Write one literal path, bare or quoted; variables, interpolation, expressions, and spreads are refused. Relative paths start at the containing file's directory, or the session cwd for source without a file. `~` and `xdg:` heads expand; there is no module search path or extension fallback.\n\n\
+         The module is read and checked when its importer is checked, before any code in the importer runs. Missing, denied, ill-typed, or cyclic modules are static errors, not failures that `try` can catch. Each check reads the file again; each evaluation runs the linked body again.\n\n\
+         Modules see only natives, the prelude, and their own definitions, never session or importer bindings. Public definitions must have fully decided types; names starting with `_` stay private. Runtime effects obey the active grant, but a surrounding `within` or `grant` cannot change the earlier check-time read.\n\n\
+         Example:\n  let math = use './math.ral'\n  $math[twice] 21",
+    ),
+    (
         "within",
         "within [options] { body }  — run a block with temporary shell context.\n\n\
          Options are `dir: path`, `env: [NAME: value, ...]`, `handlers: [:, name: handler, ...]`, and `handler: catch-all`. `dir` changes the logical working directory; `env` overlays variables, with `unset removing one. Named handlers receive the command's argument list. The catch-all receives the unresolved command name and then its argument list. Options compose, and the previous context returns when the body finishes.\n\n\

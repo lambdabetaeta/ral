@@ -6,14 +6,14 @@
 //! source says, and admission only says whether the program may have it.
 
 use crate::fact::{
-    AdmissionCause, AdmissionExport, AdmissionExtraField, AdmissionFailure, AdmissionShares,
-    AdmissionUses, Expected, Found, InvalidCause, ValueShape,
+    AdmissionCause, AdmissionExtraField, AdmissionFailure, AdmissionShares, AdmissionUses,
+    Expected, Found, InvalidCause, ValueShape,
 };
 use crate::shell::runtime::invalid;
 use crate::shell::runtime::{Break, Map, Settled, Shell, Value};
 use crate::source::Span;
 use crate::sync::LockExt as _;
-use crate::ty::{Closed, Fields, Fixed, Fixings, Id, Kind, Shape, Side, Site, Tail, UnitId};
+use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Shape, Side, Site, Tail, UnitId};
 use std::fmt;
 
 // ── Fixings ─────────────────────────────────────────────────────────────
@@ -134,35 +134,6 @@ impl Site {
         self.admit(&value, shell.fixings())
             .map_err(|mismatch| mismatch.refusal(door))?;
         Ok(value)
-    }
-
-    /// [`Self::admit`] for a module's export record, also checking each used
-    /// export's complete scheme, including nested closures, against its use.
-    /// One scratch unifier covers the whole record, since field types share
-    /// variables.
-    ///
-    /// # Errors
-    /// As [`Self::admit`], or an export whose scheme cannot be that type.
-    pub fn admit_module(
-        &self,
-        record: &Value,
-        schemes: &[(String, Closed)],
-        fixings: &Fixings,
-    ) -> Result<(), Mismatch> {
-        self.admit(record, fixings)?;
-        let mut exports = self.exports();
-        for (name, scheme) in schemes {
-            if let Some(Err((found, expected))) = exports.fits(name, scheme) {
-                return Err(Mismatch {
-                    failure: AdmissionFailure {
-                        pointer: pointer_of(&[Step::Key(name.clone())]),
-                        cause: AdmissionCause::Export(AdmissionExport { found, expected }),
-                    },
-                    witness: self.nodes[self.root].witness,
-                });
-            }
-        }
-        Ok(())
     }
 
     fn walk(&self, id: Id, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {

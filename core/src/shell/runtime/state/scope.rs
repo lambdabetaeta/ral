@@ -4,10 +4,8 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::fact::BlockRole;
-use crate::shell::runtime::{
-    Binding, Closure, Env, FrameHandle, HandlerEntry, Settled, Value, ill_typed,
-};
+use crate::shell::runtime::{Binding, Closure, Env, FrameHandle, HandlerEntry, Settled, Value};
+use crate::ty::Closed;
 
 impl Shell {
     /// Install `thunk` as the persistent handler for `name`, replacing any existing one.
@@ -45,36 +43,14 @@ impl Shell {
         self.context.handlers.remove_by_handle(handle).is_some()
     }
 
-    /// Install `value` as a lexical scope binding for `name` — the rc
-    /// `bindings:` path.  Where [`Self::install_handler`] pushes a handler
-    /// frame, this writes a scope entry: a function value gets its closed
-    /// session scheme inferred and stored alongside, so the next run's check
-    /// sees a type and the name is applyable at the prompt.  Other values
-    /// carry no scheme.
-    ///
-    /// # Errors
-    /// A block fails type checking, including obligations checked at closure.
-    /// Nothing is installed on refusal.
-    pub fn bind_value(&mut self, name: String, value: Value) -> Result<(), crate::error::Error> {
-        let scheme = self
-            .value_scheme(&value)
-            .map_err(|errors| ill_typed("bindings", BlockRole::Binding(name.clone()), &errors))?;
-        self.env.bind(name.into(), Binding { value, scheme });
-        Ok(())
-    }
-
-    /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
-    /// The scheme-less sibling of [`Self::bind_value`], for data that is
-    /// *resolved* but never applied — env mirrors like `USER` / `CWD`, the
-    /// `RAL_PROMPT` thunk the renderer reads, host seed vars.  The two verbs
-    /// stay distinct to hold the line an rc draws between its typed
-    /// `bindings:` and its untyped `env:` / `prompt:` keys.
-    pub fn set_var(&mut self, name: String, value: Value) {
+    /// Bind `name` to `value` with its host-declared closed scheme.
+    /// The host must supply the scheme that describes `value`.
+    pub fn set_var(&mut self, name: String, value: Value, scheme: Closed) {
         self.env.bind(
             name.into(),
             Binding {
                 value,
-                scheme: None,
+                scheme: Some(scheme),
             },
         );
     }
@@ -98,7 +74,7 @@ impl Shell {
     }
 
     /// Look `name` up in the lexical scope chain, natives included.  The read
-    /// dual of [`Self::set_var`] / [`Self::bind_value`].
+    /// dual of [`Self::set_var`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
         crate::shell::runtime::lookup(name, &self.env, &self.sig)
     }
@@ -124,19 +100,6 @@ impl Shell {
         self.context.handlers.entries().map(|e| e.name.as_ref())
     }
 
-    /// Run `f` under a fresh innermost lexical scope, popped on return — the
-    /// isolation `use` and the REPL plugin loader share, so a loaded file's
-    /// top-level helpers die with the frame instead of leaking into the
-    /// caller's scope.  [`crate::shell::load::evaluate_source`] owns the
-    /// cycle and depth guards and the source registration; this owns only the
-    /// scope frame.
-    pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = self.env.clone();
-        let r = f(self);
-        self.env = saved;
-        r
-    }
-
     /// The next run's check seed, read off the live session: every scope
     /// binding with its installed scheme, plus installed handler names.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
@@ -149,7 +112,7 @@ impl Shell {
         self.schemes_over(closure.env())
     }
 
-    fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
+    pub(crate) fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
             bindings: env.binding_schemes(&self.sig),
             handled: self.context.handlers.handled_names(),

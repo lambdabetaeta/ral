@@ -74,6 +74,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
         RunReport::Ran { ending, .. } => {
             panic!("{call} must return a receipt record, got {ending:?}")
         }
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {call}"),
         RunReport::Static { .. } => panic!("{call} must compile"),
     }
 }
@@ -92,6 +93,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
             ..
         } => error.to_string(),
         RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check: {source}"),
         RunReport::Static { .. } => panic!("{source} must compile"),
     }
 }

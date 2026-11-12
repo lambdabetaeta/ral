@@ -1,5 +1,5 @@
 # Text helpers of the prelude at their edges: padding, repetition,
-# indentation, stdin words and lines, and quoting that reads back
+# indentation, stdin words and lines
 
 let assert_eq = { |name expected actual|
     if $[$expected != $actual] {
@@ -46,16 +46,5 @@ assert_eq 'each-line' ['<a>', '<b>', '<c>'] !{from-lines < $seen}
 printf '' | each-line { |l| echo "never" >> $seen }
 assert_eq 'each-line empty input' 3 !{line-count $seen}
 rm $seen
-
-# ral-quote output reads back as the same string
-let d = temp-dir
-let roundtrips = { |s|
-    let q = ral-quote $s
-    echo "let v = return $q" > "$d/m.ral"
-    let m = use "$d/m.ral"
-    return $[$m[v] == $s]
-}
-each { |s| assert_eq "ral-quote $s" true !{roundtrips $s} } ['', 'hello', 'a b', '#hash', "it's", "a'#b", "two\nlines", '$x', '[a]', 'é', '1.5', 'true', '-x', '...', '@x', 'a,b', 'a:b']
-rm -rf $d
 
 echo 'prelude text tests done'

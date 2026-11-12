@@ -6,14 +6,22 @@
 use ral_core::HostSurface;
 use ral_core::compile::{CompileError, compile_and_typecheck};
 use ral_core::source::FileId;
+use ral_core::typecheck::Unit;
 
 const N: usize = 2_000;
 
 fn survives(src: &str) {
     let schemes = crate::common::schemes_for(&HostSurface::default());
     drop(
-        compile_and_typecheck(src, schemes, FileId::DUMMY, None, None)
-            .unwrap_or_else(|e| panic!("depth {N} must compile: {e}")),
+        compile_and_typecheck(
+            src,
+            schemes,
+            FileId::DUMMY,
+            None,
+            Unit::Script,
+            &mut crate::common::no_modules,
+        )
+        .unwrap_or_else(|e| panic!("depth {N} must compile: {e}")),
     );
 }
 
@@ -50,7 +58,14 @@ fn deep_block() {
 fn deep_block_reports_an_arithmetic_type_error() {
     let src = format!("{{\n{}return $['x' + 1]\n}}", "let x = 1\n".repeat(N));
     let schemes = crate::common::schemes_for(&HostSurface::default());
-    let result = compile_and_typecheck(&src, schemes, FileId::DUMMY, None, None);
+    let result = compile_and_typecheck(
+        &src,
+        schemes,
+        FileId::DUMMY,
+        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
+    );
     let Err(CompileError::Types(errors)) = result else {
         panic!("invalid arithmetic at depth {N} must report type errors, got {result:?}");
     };

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -15,20 +15,27 @@ reads back checked CBPV IR.** The algorithm is
 
 `core/src/typecheck.rs` owns the inference sessions and their export checks.
 
-- `typecheck(phrases, SessionSchemes, options: Option<&'static Table>)`
-  generates pending phrases, checking a host file's tail as written options
-  when a table is supplied (SPEC §15.3). `Solver::close` returns a `Solution`,
-  then readback builds a `Toplevel` whose sites and readmissions name one fresh
-  `UnitId`. Errors are sorted by span and no checked tree escapes. Re-checking
+- `typecheck(phrases, SessionSchemes, Unit)` generates pending phrases.
+  `Unit::{Script, Host(&'static Table), Module}` states the unit's purpose;
+  `Host` checks its tail as written options (SPEC §15.3). After successful
+  `Solver::close`, `Module` judges public definitions over `&Solution` and
+  the pending IR, before readback settles schemes. Each public type still
+  reaching a weak variable earns `UndecidedExport { name, ty, source }`,
+  naming the boundary call that left it undecided. Closure errors take
+  precedence; export errors are sorted by span and refuse readback.
+  Successful readback builds a `Toplevel` whose sites and readmissions name
+  one fresh `UnitId`. No checked tree escapes a refused unit. Re-checking
   a checked tree accepts it and inserts no further elaboration; raw variable
   ids are not canonical, so the two trees need not be `==`.
 - `SessionSchemes` carries bindings, `handled: Vec<String>` for diagnostics
   only, and the host's `Manifest`.
-  `Solver::seed` imports them at rank zero, re-seeding residuals once per unit;
-  host bindings without schemes receive one weak monomorphic unknown.
-- `bake_prelude` checks against the manifest and returns the annotated prelude;
-  `SessionSchemes::from_prelude` reads its exported definition schemes, with
-  no separate scheme blob.
+  `Solver::seed` imports them at rank zero, re-seeding residuals once per unit.
+  Every session binding has a `Closed` scheme. Scheme-less captured block
+  locals receive one weak monomorphic unknown (`WeakSource::Host`) during
+  closure re-inference at hook or handler installation. `bindings` therefore
+  remains `Vec<(String, Option<Closed>)>`.
+- `bake_prelude` checks against the manifest and returns the annotated prelude,
+  whose definitions carry their schemes; there is no separate scheme blob.
 - `arm_stands_in(name, comp, schemes)` enters a region to check a persistent
   handler against `U([String] → Command)` and closes the unit before returning
   an install verdict. `within` needs no runtime vet. It stores no scheme.
@@ -40,7 +47,8 @@ reads back checked CBPV IR.** The algorithm is
 
 ## Constraint generation
 
-`generate.rs` and `generate/` never resolve a solved type or inspect a scheme.
+`generate.rs` and `generate/` never resolve a live solved type. Stored schemes
+are inspected only for cross-unit admissibility.
 
 - `generate.rs`: `Generator`, phrases, `let_`, patterns, lambdas,
   force/return, recursive groups, `check`, `region` and lexical scopes. Input
@@ -49,6 +57,13 @@ reads back checked CBPV IR.** The algorithm is
   lambda's arrow equation before checking its body. `rec_group` checks a
   group once in its own region and caches the members' generalised schemes
   with the pending group; every projection instantiates its member's scheme.
+  `note_residual_use` refuses a stored name once per unit if its scheme's
+  `delays_weak` reaches a weak residual beneath a thunk or handle. The rule
+  includes function arguments and follows μ-equations in both data and
+  delayed contexts; a shared recursive root must be judged in both.
+  Existing residual data instead enters `Toplevel.admits` for readmission
+  before execution. A decided function beside that data is allowed
+  ([[invariants/schemes-leave-closed|scheme invariants]]).
 - `generate/call.rs`: application chains, head lookup, builtin calls,
   boundary saturation, argv and handler arms. `head_class` follows
   binding → value builtin → base frame → external, consulting Σ and lexical
@@ -67,7 +82,10 @@ reads back checked CBPV IR.** The algorithm is
   string-keyed map. There is no deferred read or index-made weakness
   ([[decisions/261102_a-written-key-is-a-name|a written key is a name]]).
 - `generate/control.rs`: joins, `if`, `case`, `try`, `guard`, pipelines,
-  redirects and capture. Arms meet fresh results, then equate with the join.
+  redirects, capture and linked `Use`. `Use` instantiates every public scheme
+  in the module's checked `Toplevel`, returning `F` of their closed record;
+  an importing `let` generalises normally. The module is checked against Σ,
+  never the importer's bindings. Arms meet fresh results, then equate with the join.
   `Generator::guard` gets the resource type through `scope_body`, checks
   body against one resource argument and a producer tail, and release against
   resource plus `ExitCase::<ErrorRecord>::ty()` and a discarded producer tail.
@@ -77,7 +95,7 @@ reads back checked CBPV IR.** The algorithm is
   are refused there. `stage_root_stdin_feed` rejects an overridden pipe edge.
   Stdout redirects retain the payload at a fresh result grade.
 - `generate/scope.rs`: `within`, `grant`, options, audit, spawn,
-  gather and protection. `file_options` follows elaborated binds and sequences
+  and gather. `file_options` follows elaborated binds and sequences
   to a written tail; only a manifest admits a written one-parameter factory,
   one level deep. `check_options` checks keys with `check_option`, diagnosing
   unknown, refused, duplicate and missing keys during generation.
@@ -88,6 +106,10 @@ reads back checked CBPV IR.** The algorithm is
   value uses the ordinary map equation. Only a written `within` map supplies
   handled names to the body's diagnostics.
   `Holds::CatchAll` checks the catch-all by the arm rule alone.
+  Rc `prompt`/`startup` and manifest `hooks`/`keybindings` remain
+  `Holds::Decoded`, with no static hook-type obligation. Installation infers
+  thunk closures and checks arity, including the host-made default prompt;
+  handler installation retains its inference check too.
 
 ## Solver and readback
 
@@ -118,10 +140,9 @@ reads back checked CBPV IR.** The algorithm is
   settles definition schemes into `Closed`, builds `Toplevel.admits`, and
   memoises rebuilt recursive groups.
 - `env.rs`: `TyEnv`, handled-name sets for diagnostics only, and the `Inferring` phase
-  (`Bind = BindHole`, `Call = BindingCall = CallHole`, `Boundary = Ty`,
-  `Membrane`). `Membrane::{Kept, Imported}` is a protected value's contract
-  while inferring: a checked tree's site, or a session binding's solved type
-  ([[map/core/ir|IR]]).
+  (`Bind = BindHole`, `Call = BindingCall = CallHole`, `Boundary = Ty`)
+  ([[map/core/ir|IR]]). Accepted residual occurrences remain plain variables;
+  no runtime contract IR is generated.
 
 ## Types, tables and diagnostics
 
@@ -130,7 +151,11 @@ reads back checked CBPV IR.** The algorithm is
   even when bound; unions keep the minimum, bindings lower reachable unknowns,
   weakness is rank zero. A free row's meta is `Depth::{Shallow, Deep(witness)}`.
   `take_touched` reports the roots changed since it was last called.
-  `WeakSource` records provenance. Data-guarded recursive types, `Pairs`,
+  `WeakSource` records provenance; a boundary source includes its call span,
+  retained by `Solution` for export refusals and weak-mismatch notes.
+  `WeakSource::Host` identifies scheme-less captured locals during closure
+  re-inference, not ordinary session bindings.
+  Data-guarded recursive types, `Pairs`,
   Rémy row rewrite and kind admission remain here. `bind_row` enforces finite
   tail spines and type-rooted field payloads ([[design/row-types|row types]]).
   `unify_producers` checks grade/payload pairing for returners and handles;
@@ -149,23 +174,21 @@ reads back checked CBPV IR.** The algorithm is
   also supplies the member type of `handlers_ty()`. No name or manifest lookup
   selects a handler's type. `Manifest` clones share declaration rows and caches
   ([[invariants/fixed-arity|fixed arity]], [[map/core/builtins|builtins]]).
-- `site.rs`: `Site::{snapshot, instantiate, scheme, exports}`. Free identities
-  in every sort retain sharing; `Site::scheme` enters a scratch region before
-  instantiation, exits, generalises and settles. `Exports::fits` compares each
-  used module export's complete scheme against its use, including functions
-  nested in records, lists, maps or variants. Exports share one scratch unifier
-  across the record. Known incompatible nested schemes fail at `use`; unresolved
-  re-exported shapes additionally carry recursive delayed contracts from
-  `Site::wrap`, guarding exactly the caller-required arrows and results when
-  reached, without inferring function bodies at handler installation. The graph
-  data is in [[map/core/ty|ty]]; runtime admission is `shell/runtime/admit.rs`
-  and delayed wrapping is `shell/runtime/protect.rs`.
+  Every registered boundary's declared result has data-constrained type
+  variables and deep row variables; a decoded function or handle is a kind
+  error at the use, not a runtime contract.
+- `site.rs`: `Site::snapshot` preserves free identities and
+  sharing in every sort. Module exports use their checked schemes directly,
+  not boundary admission. The graph data is in [[map/core/ty|ty]]; runtime
+  admission is `shell/runtime/admit.rs`. A readmission site may contain a
+  decided function beside undecided data; only its head needs checking,
+  because no weak residual beneath it can be imported.
 - `table.rs` and `table/`: `Table`, `Key`, `Holds`, `Vocab`, `declared(Form)`
   and enum-derived vocabulary shapes. `Key::required` is independent of
   `Holds`; `Key::blank` supplies declared empty values for diagnostics and the
   rc skeleton, including `` `inherit `` for nested `LIMITS` and `THEME` keys.
   `setting_table!` derives each nested table and its parent's blank from one
-  label list. `RC` requires all thirteen keys, `LIMITS` all three child-limit
+  label list. `RC` requires all twelve keys, `LIMITS` all three child-limit
   keys, and `THEME` both display keys. `setting_row` supplies the closed
   ``[`inherit, `set T]`` vocabulary; `Vocabulary::Setting` identifies its
   diagnostic vocabulary. `MANIFEST` requires only `name` and admits a

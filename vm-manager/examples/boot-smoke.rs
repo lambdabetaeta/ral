@@ -220,6 +220,9 @@ fn prove_the_host_can_dial_in(
                     }
                 }
             }
+            Ok(Ok(Report::Checked { .. })) => {
+                eprintln!("the guest only checked the program; the listener never ran");
+            }
             Ok(Ok(Report::Static { rendered, .. })) => {
                 eprint!("the guest never ran the listener: {rendered}");
             }

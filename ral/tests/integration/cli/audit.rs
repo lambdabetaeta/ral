@@ -124,16 +124,19 @@ fn audit_reports_a_stopped_run_as_stopped() {
 }
 
 #[test]
-fn audit_of_a_static_error_is_rendered_text_not_a_report() {
+fn audit_of_a_static_error_keeps_the_diagnostic_and_trail() {
     let o = run_c(&["--audit"], "let = ");
     assert_ne!(o.status, 0);
+    let report = report(&o);
+    assert_eq!(report["outcome"]["tag"], "static");
+    assert_eq!(report["outcome"]["payload"]["status"], o.status);
     assert!(
-        !o.stderr
-            .lines()
-            .any(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v.get("outcome").is_some())),
-        "stderr: {}",
-        o.stderr
+        report["outcome"]["payload"]["rendered"]
+            .as_str()
+            .unwrap()
+            .contains("P0001")
     );
+    assert_eq!(report["trail"], serde_json::json!([]));
 }
 
 #[test]

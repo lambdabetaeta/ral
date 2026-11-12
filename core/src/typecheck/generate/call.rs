@@ -7,7 +7,7 @@ use crate::ir::{
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, CompTyNode, Scheme, Ty, TyNode};
 use crate::typecheck::builtins::{Arm, BuiltinDiagnostic, Decl, Manifest};
-use crate::typecheck::env::{Inferring, Membrane};
+use crate::typecheck::env::Inferring;
 use crate::typecheck::error::{Reason, SpreadHead, TypeErrorKind};
 use crate::typecheck::readback::{self, exec_node};
 use crate::typecheck::solve::{ArgvBoundary, CallHole};
@@ -235,8 +235,14 @@ impl Generator {
         let CompTyNode::Return(_, ty) = declared_tail.node() else {
             return None;
         };
-        self.solver
-            .weak(ty, WeakSource::Boundary(entry.name.as_ref().into()));
+        let span = *self.span_slot();
+        self.solver.weak(
+            ty,
+            WeakSource::Boundary {
+                name: entry.name.as_ref().into(),
+                span,
+            },
+        );
         Some((ty.clone(), missing))
     }
 
@@ -292,7 +298,7 @@ impl Generator {
         match self.head_class(&builtins, name) {
             HeadClass::Binding(scheme) => {
                 let ty = self.solver.instantiate(&scheme);
-                let imported = self.note_residual_use(name, &scheme, &ty);
+                self.note_residual_use(name, &scheme, &ty);
                 let head_ty = self.forced(
                     &Val::Variable(name.into()),
                     &ty,
@@ -306,24 +312,11 @@ impl Generator {
                     return (self.solver.fresh_comp(), CompKind::Return(Val::Unit));
                 };
                 let (cty, call, args) = self.apply_args(head_ty, Some(name), args);
-                let node = if imported {
-                    let head = Spanned::with_span(
-                        comp.span,
-                        CompKind::Force(Val::Protected {
-                            value: Box::new(Val::Variable(name.into())),
-                            // A forced head is a thunk, so readback keeps this membrane.
-                            site: Membrane::Imported(ty),
-                        }),
-                    );
-                    let call = Self::pending_app(head, call, args);
-                    readback::redirected(Spanned::with_span(comp.span, call), redirects)
-                } else {
-                    CompKind::BindingCall {
-                        head: name.into(),
-                        args: args.into(),
-                        redirects,
-                        hole: call,
-                    }
+                let node = CompKind::BindingCall {
+                    head: name.into(),
+                    args: args.into(),
+                    redirects,
+                    hole: call,
                 };
                 (cty, node)
             }
@@ -605,16 +598,10 @@ mod tests {
         generator.env.bind("f".into(), stored);
         let source = bare("f", vec![ValListElem::Single(block(1))].into());
         let (_, node) = generator.comp(&source);
-        let CompKind::App { head, .. } = node.item else {
-            panic!("imported binding is forced under admission")
+        let CompKind::BindingCall { head, .. } = node.item else {
+            panic!("imported binding keeps its call")
         };
-        assert!(matches!(
-            head.item,
-            CompKind::Force(Val::Protected {
-                site: Membrane::Imported(_),
-                ..
-            })
-        ));
+        assert_eq!(head.as_ref(), "f");
         assert_eq!(generator.residual_uses.len(), 1);
         solved(generator.solver);
     }
@@ -627,7 +614,8 @@ mod tests {
                 crate::test_helper::core_schemes(),
                 FileId::DUMMY,
                 None,
-                None,
+                crate::typecheck::Unit::Script,
+                &mut crate::compile::no_modules,
             )
             .expect_err("overapplied builtin");
             let crate::compile::CompileError::Types(errors) = errors else {
@@ -650,6 +638,32 @@ mod tests {
                 "{source}: {errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn boundary_provenance_preserves_owned_names_and_call_spans() {
+        let mut generator = generator();
+        let name = String::from("host-decoder");
+        let entry = Decl::new(
+            Cow::Owned(name.clone()),
+            Convention::Value(scheme::from_json),
+            "",
+            true,
+        );
+        generator.env.builtins.push(vec![entry].into());
+        let (cty, _) = generator.region(|this| this.comp(&bare(&name, Argv::default())));
+        let scheme = generator.solver.generalise(&Ty::thunk(cty));
+        let solution = generator.solver.close().unwrap();
+        let (_, source) = solution
+            .undecided_export(&scheme)
+            .expect("an undecided boundary result");
+        assert_eq!(
+            source,
+            WeakSource::Boundary {
+                name: name.into(),
+                span: Some(at(0))
+            }
+        );
     }
 
     #[test]
@@ -832,7 +846,8 @@ mod tests {
                 crate::test_helper::core_schemes(),
                 FileId::DUMMY,
                 None,
-                None,
+                crate::typecheck::Unit::Script,
+                &mut crate::compile::no_modules,
             )
             .unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
         }
@@ -851,7 +866,8 @@ mod tests {
                     crate::test_helper::core_schemes(),
                     FileId::DUMMY,
                     None,
-                    None,
+                    crate::typecheck::Unit::Script,
+                    &mut crate::compile::no_modules,
                 )
                 .expect_err("command output remains text, not an integer");
                 let crate::compile::CompileError::Types(errors) = errors else {

@@ -26,7 +26,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -250,7 +250,7 @@ pub struct Run {
     pub terminal: RequestedTerminalAccess,
     pub stdin: RunStdin,
     /// `Some` delimits this dispatch's own trail, at the given capture
-    /// policy, and carries it home on [`Report::Ran`]; `None` neither opens a
+    /// policy, and carries it home on the report; `None` neither opens a
     /// scope nor collects one. exarch's tool calls ask with
     /// [`CapturePolicy::Off`]; the REPL never asks.
     pub trail: Option<CapturePolicy>,
@@ -290,11 +290,13 @@ impl Run {
     }
 }
 
-/// What a run runs: source text compiled and typechecked against the live
-/// session, or a registered hook applied to first-order arguments.
+/// Source text to run or check against the live session, or a registered
+/// hook applied to first-order arguments.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Program {
     Source(String),
+    /// Compile as a source run, but do not evaluate or renew binding leases.
+    Check(String),
     Hook {
         name: crate::shell::runtime::HookName,
         args: Vec<FOValue>,
@@ -419,7 +421,13 @@ pub enum Report {
     /// Parse/type/host refusal: the run never reached evaluation, so no
     /// command ran and nothing was bound. `rendered` is the whole report —
     /// prefix, code, caret, hint — so the host prints it and exits on `status`.
-    Static { rendered: String, status: NonZeroU8 },
+    Static {
+        rendered: String,
+        status: NonZeroU8,
+        trail: Vec<FOValue>,
+    },
+    /// The source checked successfully, without evaluation.
+    Checked { trail: Vec<FOValue> },
     /// The run ran to a settled result.
     Ran(Ran),
     /// The engine could not report the run: a panic in the
@@ -454,6 +462,7 @@ impl Report {
     pub fn code(&self) -> u8 {
         match self {
             Self::Static { status, .. } | Self::Faulted { status, .. } => status.get(),
+            Self::Checked { .. } => 0,
             Self::Ran(ran) => ran.ending.code(),
         }
     }
@@ -511,7 +520,26 @@ mod ending_wire_round_trip_tests {
         round_trips(&Report::Static {
             rendered: "Error: boom\n".into(),
             status: NonZeroU8::MIN,
+            trail: vec![FOValue::Int { value: 3 }],
         });
+    }
+
+    #[test]
+    fn checked_round_trips_and_exits_zero() {
+        let report = Report::Checked {
+            trail: vec![FOValue::Int { value: 3 }],
+        };
+        assert_eq!(report.code(), 0);
+        round_trips(&report);
+    }
+
+    #[test]
+    fn check_program_round_trips() {
+        let program = Program::Check("return 1".into());
+        let encoded = crate::data::json::to_vec(&program).expect("Program must encode");
+        let decoded: Program =
+            crate::data::json::from_slice(&encoded).expect("Program must decode");
+        assert_eq!(decoded, program);
     }
 
     #[test]

@@ -307,12 +307,19 @@ impl Shell {
         sig: HookSig,
         policy: DefaultPolicy,
     ) -> Result<Hook, RegisterError> {
-        let scheme = self
-            .value_scheme(&value)
-            .map_err(|errors| RegisterError::Typecheck {
-                name: name.clone(),
-                errors,
-            })?;
+        let scheme = match &value {
+            Value::Thunk(closure) => Some(
+                crate::typecheck::binding_value_scheme(
+                    closure.comp(),
+                    self.closure_schemes(closure),
+                )
+                .map_err(|errors| RegisterError::Typecheck {
+                    name: name.clone(),
+                    errors,
+                })?,
+            ),
+            _ => None,
+        };
         let hook = Hook {
             binding: Binding { value, scheme },
             sig,

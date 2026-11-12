@@ -126,6 +126,6 @@ pub(crate) use which::locate_in;
 #[cfg(windows)]
 pub(crate) use which::with_exec_extensions;
 pub(crate) use which::{Candidate, search};
-pub use which::{forget_located_commands, locate, path_dirs, path_entries, ral_path_entries};
+pub use which::{forget_located_commands, locate, path_dirs, path_entries};
 
 pub(crate) use handle::json::{RawExcluded, RawOsString};

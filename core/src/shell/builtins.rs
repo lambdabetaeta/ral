@@ -24,7 +24,6 @@ pub mod help;
 mod math;
 mod misc;
 pub use misc::builtin_surface;
-pub mod modules;
 mod predicates;
 mod print;
 mod shell;
@@ -404,7 +403,7 @@ pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 /// [`Site`](crate::ty::Site) the checker solved at its call and admits what
 /// it lets in against it; they sit apart from [`CORE_BUILTINS`] because their
 /// bodies take that site.
-static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 6] = [
+static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 5] = [
     BuiltinEntry::boundary(
         Cow::Borrowed("from-json"),
         scheme::from_json,
@@ -438,12 +437,6 @@ static BOUNDARY_BUILTINS_ARR: [BuiltinEntry; 6] = [
         scheme::from_json,
         "env: read the host environment under the `within [env: …]` overlay as a record or map checked against its use at each call; PWD and OLDPWD are absent, and `cwd` reads the working directory.",
         ambient::builtin_env,
-    ),
-    BuiltinEntry::boundary(
-        Cow::Borrowed("use"),
-        scheme::use_op,
-        "use <file>  — load a .ral module, returning its bindings as a record; its functions are checked against the types the script uses them at.",
-        modules::builtin_use,
     ),
 ];
 pub static BOUNDARY_BUILTINS: &[BuiltinEntry] = &BOUNDARY_BUILTINS_ARR;

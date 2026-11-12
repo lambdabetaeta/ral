@@ -1,0 +1,3 @@
+# Existing data must also have a decided export type.
+
+let config = to-string '{"port": 42}' | from-json

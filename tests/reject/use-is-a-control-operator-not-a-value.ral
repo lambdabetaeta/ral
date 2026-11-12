@@ -1,0 +1,4 @@
+# codes: T0040
+# status: 1
+# contains: 'use' is a control operator
+let load = $use

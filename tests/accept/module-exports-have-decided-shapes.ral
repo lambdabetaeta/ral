@@ -1,0 +1,3 @@
+let m = use '../lib/modules/decided-data.ral'
+let port = $m[decode-port] '{"port": 8080}'
+return $[$m[config][port] + $port]

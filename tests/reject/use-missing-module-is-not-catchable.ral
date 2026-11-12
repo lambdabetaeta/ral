@@ -1,0 +1,4 @@
+# status: 1
+# contains: U0001
+# contains: no-such-module.ral
+try { let _ = use '../lib/modules/no-such-module.ral' } { |_| return () }

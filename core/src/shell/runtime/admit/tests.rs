@@ -269,45 +269,6 @@ fn a_site_round_trips_with_its_unit() {
 }
 
 #[test]
-fn a_module_closure_is_held_to_its_scheme() {
-    use crate::ty::Binders;
-    use crate::typecheck::builtins::{fun, pure, thunk};
-    let mut u = Unifier::new();
-    let block = |param: Ty, result: Ty| thunk(fun(param, pure(result)));
-    let ty = closed_record(&[("f", block(Ty::int(), Ty::int()))]);
-    let site = site(&u, &ty);
-    let record = map(&[(
-        "f",
-        crate::shell::runtime::block_over(&crate::shell::runtime::Env::new()),
-    )]);
-    let scheme_of =
-        |param: Ty, result: Ty| vec![("f".to_owned(), Binders::close(|_| block(param, result)))];
-    assert!(
-        site.admit_module(
-            &record,
-            &scheme_of(Ty::int(), Ty::int()),
-            &Fixings::default()
-        )
-        .is_ok()
-    );
-    let err = site
-        .admit_module(
-            &record,
-            &scheme_of(Ty::string(), Ty::int()),
-            &Fixings::default(),
-        )
-        .expect_err("a block over text is no block over Int");
-    assert!(
-        err.to_string()
-            .starts_with("the value at `/f` is a block of type")
-    );
-    assert!(
-        matches!(&err.failure.cause, AdmissionCause::Export(AdmissionExport { found, expected }) if found != expected)
-    );
-    let _ = &mut u;
-}
-
-#[test]
 fn admission_reasons_keep_structured_causes_and_witnesses_outside_records() {
     use crate::data::datum::Datum as _;
     use crate::fact::Reason;

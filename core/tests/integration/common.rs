@@ -46,6 +46,17 @@ pub fn schemes_for(surface: &HostSurface) -> ral_core::SessionSchemes {
     ral_core::SessionSchemes::from_prelude(prelude().comp(), surface.manifest())
 }
 
+/// Refuse module loading in compile-only fixtures that have no shell.
+pub fn no_modules(
+    _: ral_core::source::Span,
+    _: &str,
+    _: Option<&std::path::Path>,
+) -> Result<Arc<ral_core::ir::Module>, ral_core::compile::UseRefusal> {
+    Err(ral_core::compile::UseRefusal::Unavailable {
+        reason: "compile-only fixture has no shell".into(),
+    })
+}
+
 /// Visit every `Comp` in a tree, descending past the top-level spine into
 /// thunk bodies, lambda bodies, branches, call arguments, and pipeline
 /// stages — so checker-built nodes at any depth, such as `Capture`, are
@@ -144,9 +155,7 @@ fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
                 walk_val(&value.item, visit);
             }
         }
-        Val::Variant { payload, .. } | Val::Protected { value: payload, .. } => {
-            walk_val(payload, visit);
-        }
+        Val::Variant { payload, .. } => walk_val(payload, visit),
         Val::Unit
         | Val::String(_)
         | Val::Int(_)
@@ -238,7 +247,8 @@ pub fn under_grant(body: &str) -> String {
 pub fn run_on(shell: &mut Shell, input: &str) -> Settled<Value> {
     match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
         RunReport::Ran { ending, .. } => ending.into_settled(),
-        RunReport::Static { diagnostics } => {
+        RunReport::Checked { .. } => panic!("source fixture must run, not only check"),
+        RunReport::Static { diagnostics, .. } => {
             panic!(
                 "expected a valid runtime fixture:\n{}",
                 diagnostics.render(shell.exit_hints()).0

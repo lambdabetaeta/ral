@@ -463,7 +463,7 @@ mod tests {
             );
             let mut shell = ral_core::test_helper::core_shell();
             let mooring = Mooring::adrift();
-            let factory = ral_core::shell::load::evaluate_source(
+            let factory = ral_core::shell::load::evaluate_closed(
                 &mooring,
                 &mut shell,
                 &source,
@@ -514,7 +514,7 @@ mod tests {
 
         let mut shell = ral_core::test_helper::core_shell();
         let mooring = Mooring::adrift();
-        let factory = ral_core::shell::load::evaluate_source(
+        let factory = ral_core::shell::load::evaluate_closed(
             &mooring,
             &mut shell,
             "return { |options| let name = from-json << '\"p\"'; return [name: $name] }",

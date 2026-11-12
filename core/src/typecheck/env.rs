@@ -2,7 +2,7 @@
 
 use super::solve::{BindHole, CallHole};
 use crate::ir::Phase;
-use crate::ty::{Scheme, Site, Ty};
+use crate::ty::{Scheme, Ty};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -129,17 +129,6 @@ impl Phase for Inferring {
     type Call = CallHole;
     type BindingCall = CallHole;
     type Boundary = Ty;
-    type Membrane = Membrane;
-}
-
-/// A protected value's contract while inferring.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum Membrane {
-    /// A checked tree's site, its unit identity included.
-    Kept(Arc<Site>),
-    /// A session binding's solved type, kept only where it reaches a thunk or
-    /// a handle.
-    Imported(Ty),
 }
 
 #[cfg(test)]

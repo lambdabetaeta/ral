@@ -356,12 +356,12 @@ mod tests {
             .fixings()
             .fix(crate::ty::UnitId::fresh(), 0, crate::ty::Side::Number, "/n")
             .expect("a fresh variable is fixed");
-        parent.set_var("kept".to_string(), Value::Int(7));
-        parent.set_var("live".to_string(), idle_handle());
+        crate::test_access::bind_untyped(&mut parent, "kept", Value::Int(7));
+        crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
         let blk = block_over(&parent.env);
-        parent.set_var("blk".to_string(), blk.clone());
+        crate::test_access::bind_untyped(&mut parent, "blk", blk.clone());
         let native = partial_over(&parent, idle_handle());
-        parent.set_var("nat".to_string(), native);
+        crate::test_access::bind_untyped(&mut parent, "nat", native);
         let catch_all = block_over(&parent.env);
         let handler = HandlerEntry::ral_per_name("handler".into(), blk.clone());
         let named = HandlerEntry::ral_per_name("named".into(), blk.clone());
@@ -398,6 +398,46 @@ mod tests {
     fn through_the_wire(bequest: &Bequest, runtime: &Runtime) -> Bequest {
         let seed = seal(bequest).expect("seal").unseal().expect("unseal");
         seed.decode(runtime).expect("decode")
+    }
+
+    #[test]
+    fn a_linked_module_closure_survives_a_seed_without_reading_again() {
+        use crate::protocol::Run;
+        use crate::source::SourceOrigin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("linked.ral");
+        std::fs::write(&module, "let n = 7").unwrap();
+        let mut parent = booted();
+        let baseline = seal(&parent.bequeath(SpawnGrant::Inherit)).unwrap().0.len();
+        let source = format!(
+            "let linked = {{ use {} }}",
+            crate::syntax::quote_word(module.to_str().unwrap())
+        );
+        parent
+            .run(Run::captured(source, SourceOrigin::named("<linked-seed>")))
+            .expect_ran()
+            .into_settled()
+            .unwrap();
+        let sealed = seal(&parent.bequeath(SpawnGrant::Inherit)).unwrap();
+        eprintln!(
+            "linked-module seed: {} bytes (baseline {baseline}, added {})",
+            sealed.0.len(),
+            sealed.0.len() - baseline
+        );
+        std::fs::write(&module, "fail 'must not read this source'").unwrap();
+        let runtime = runtime();
+        let bequest = sealed.unseal().unwrap().decode(&runtime).unwrap();
+        let mut child = Shell::child_of(runtime.into(), bequest, no_base).unwrap();
+        let value = child
+            .run(Run::captured(
+                "let m = linked; return $m[n]",
+                SourceOrigin::named("<linked-child>"),
+            ))
+            .expect_ran()
+            .into_settled()
+            .unwrap();
+        assert_eq!(value, Value::Int(7));
     }
 
     fn opaque(v: Option<&Value>) -> bool {

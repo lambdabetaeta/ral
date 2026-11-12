@@ -1,6 +1,6 @@
 //! RC file discovery, parsing, and application.
 //!
-//! An rc file ends in a written record of all thirteen keys, checked against
+//! An rc file ends in a written record of all twelve keys, checked against
 //! `Form::Rc`'s table during generation. Nested tables are written too.
 //! [`RcPlan::decode`] checks value shapes, domains and installation gates;
 //! the checker has already guaranteed the keysets.
@@ -95,7 +95,6 @@ return [
     env: [:], # Export variables, e.g. [EDITOR: vim].
     prompt: `inherit, # Set a block returning prompt text.
     handlers: [:], # Command handlers, e.g. [:, ll: { |args| ls -lh ...$args }].
-    bindings: [:], # Lexical values and functions available at the prompt.
     edit-mode: emacs, # emacs or vi.
     bell: false, # Ring on readline errors.
     surface: readline, # readline or minimal; the command-line flag wins.
@@ -144,7 +143,6 @@ pub(crate) struct RcPlan {
     umask: Option<rustix::fs::Mode>,
     child_limits: ral_core::process::ChildLimits,
     env: Map,
-    bindings: Map,
     plugins: Map,
     handlers: Vec<HandlerEntry>,
     hooks: Vec<(HookName, Hook)>,
@@ -173,7 +171,6 @@ impl RcPlan {
                 ("umask", Value::String(s)) => plan.umask = Some(decode_umask(&s)?),
                 ("limits", Value::Map(m)) => plan.child_limits = decode_limits(&m)?,
                 ("env", Value::Map(m)) => plan.env = m,
-                ("bindings", Value::Map(m)) => plan.bindings = m,
                 ("plugins", Value::Map(m)) => plan.plugins = m,
                 ("theme", Value::Map(m)) => {
                     plan.settings.theme = OutputTheme::from_map(&m).map_err(refuse)?;
@@ -189,7 +186,7 @@ impl RcPlan {
                                 })
                             }),
                             other => Err(refuse(format!(
-                                "handler '{name}' is {}, not a function; did you mean to put it under `bindings:`?",
+                                "handler '{name}' is {}, not a function; bind it with `let {name} = …` above the rc's `return` instead",
                                 other.type_name()
                             ))),
                         })
@@ -236,7 +233,7 @@ impl RcPlan {
                         "limits" | "theme" => {
                             unreachable!("nested rc tables are written records (SPEC §15.3)")
                         }
-                        "env" | "bindings" | "handlers" => "a map",
+                        "env" | "handlers" => "a map",
                         "plugins" => {
                             "a map from plugin name to its options, e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]"
                         }
@@ -275,10 +272,6 @@ impl RcPlan {
                 // Ignored: an rc copying a parent's environment carries both.
                 Ok(()) | Err(Reserved::Pwd | Reserved::Oldpwd) => {}
             }
-        }
-        // Bindings, functions included, are lexical: applyable at the prompt.
-        for (k, v) in &self.bindings {
-            shell.bind_value(k.to_string(), v.into_owned())?;
         }
         for entry in self.handlers {
             shell.commit_handler(entry);
@@ -455,7 +448,7 @@ mod tests {
     }
 
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
-        match ral_core::shell::load::evaluate_source(
+        match ral_core::shell::load::extend_session(
             &Mooring::adrift(),
             shell,
             rc_src,
@@ -724,7 +717,7 @@ mod tests {
         assert!(err.contains("recursion-limit") && err.contains("not applied"));
     }
 
-    // ── RcPlan: bindings / handlers routing ───────────────────────
+    // ── RcPlan: values and handlers ───────────────────────────────
 
     /// A checked rc can still fail value validation without changing the shell.
     fn apply_to_fresh_env_rejected(overrides: &[(&str, &str)]) -> (Shell, String) {
@@ -869,7 +862,7 @@ mod tests {
             rc_source(&[("handlers", "[ll: { |args| echo hi }]")])
         );
         let mut shell = prelude_shell();
-        let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+        let Err(Break::Error(error)) = ral_core::shell::load::extend_session(
             &Mooring::adrift(),
             &mut shell,
             &source,
@@ -892,7 +885,7 @@ mod tests {
     #[test]
     fn refused_rc_installs_no_handlers() {
         let mut shell = prelude_shell();
-        let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+        let Err(Break::Error(error)) = ral_core::shell::load::extend_session(
             &Mooring::adrift(),
             &mut shell,
             &rc_source(&[("handlers", "[:, ll: { |args| ls ...$args }, bad: 3]")]),
@@ -910,36 +903,37 @@ mod tests {
         assert!(!shell.has_handler("ll") && !shell.has_handler("bad"));
     }
 
-    /// A malformed decoded field refuses the whole rc.
-    #[test]
-    fn rc_bad_value_fails_the_whole_map() {
-        let (shell, err) =
-            apply_to_fresh_env_rejected(&[("bindings", "42"), ("recursion-limit", "`set 256")]);
-        assert_eq!(
-            shell.stack_limit(),
-            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
-        );
-        assert!(err.contains("bindings") && err.contains("not applied"));
-    }
-
     /// Typecheck `src` against `shell`'s live session schemes — the same
     /// seed a real prompt run uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
-        let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, [], None).expect("elaborate");
-        ral_core::typecheck(&comp, shell.session_schemes(), None)
-            .err()
-            .unwrap_or_default()
+        use ral_core::compile::{CompileError, UseRefusal, compile_and_typecheck};
+
+        match compile_and_typecheck(
+            src,
+            shell.session_schemes(),
+            ral_core::source::FileId::DUMMY,
+            None,
+            ral_core::typecheck::Unit::Script,
+            &mut |_, _, _| {
+                Err(UseRefusal::Unavailable {
+                    reason: "this typechecking helper has no module loader".into(),
+                })
+            },
+        ) {
+            Ok(_) => Vec::new(),
+            Err(CompileError::Types(errors)) => errors,
+            Err(error) => panic!("expected valid test syntax: {error}"),
+        }
     }
 
-    /// A function under `bindings:` is a lexical binding, not a handler: it
-    /// lands in scope and carries a session scheme, so a heterogeneous
-    /// call `ws 'x' { ... }` (a String and a Block — two independently
-    /// typed parameters) typechecks at the prompt. A handler for the external
-    /// command `ws` would instead refuse the block argument.
+    /// An rc `let` carries its checked scheme into the session: a function
+    /// takes independently typed arguments, unlike an external handler.
     #[test]
-    fn rc_bindings_function_typechecks_heterogeneous_call() {
-        let src = rc_source(&[("bindings", "[ws: { |name body| echo $name; !$body }]")]);
+    fn rc_let_function_typechecks_heterogeneous_call() {
+        let src = format!(
+            "let ws = {{ |name body| echo $name; !$body }}\n{}",
+            rc_source(&[])
+        );
         let (shell, _) = apply_rc_inner(&src);
         // Lexical binding, not a persistent handler frame.
         assert!(shell.scope_lookup("ws").is_some());
@@ -947,7 +941,7 @@ mod tests {
         let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
         assert!(
             errs.is_empty(),
-            "heterogeneous call to a `bindings:` function should typecheck: {errs:?}"
+            "heterogeneous call to an rc `let` function should typecheck: {errs:?}"
         );
     }
 
@@ -1000,7 +994,7 @@ mod tests {
                 rc_source(&[(key, value)])
             );
             let mut shell = prelude_shell();
-            let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
+            let Err(Break::Error(error)) = ral_core::shell::load::extend_session(
                 &Mooring::adrift(),
                 &mut shell,
                 &source,

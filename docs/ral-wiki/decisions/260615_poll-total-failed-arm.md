@@ -76,7 +76,7 @@ The settled surface:
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]; see
   the note below on how that re-scopes this decision's consistency guarantee.
 - **`await h → F {value: α, stdout, stderr}`** — blocks, unwraps `ok` to the value
-  (re-raising `err`), so the happy path stays `let r = await $h; use $r[value]` and
+  (re-raising `err`), so the happy path stays `let r = await $h; consume $r[value]` and
   failure propagates by default. The dead `status` field is gone; a failed block's
   bytes are recovered with `poll $h` after a caught `await`.
 - **`race`** projects the first finisher the same way; **`is-done`** is now total

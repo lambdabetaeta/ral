@@ -123,6 +123,10 @@ impl ReplHost {
         let (report, ctx) = self.dispatch(t, hook_run(Program::Hook { name, args }, wall), ctx);
         let (mut outcome, captured) = match report {
             Err(severed) => (Outcome::Faulted(format!("ral: {severed}")), None),
+            Ok(Report::Checked { .. }) => (
+                Outcome::Faulted("ral: expected a hook result, received a check report".into()),
+                None,
+            ),
             Ok(Report::Static { rendered, .. } | Report::Faulted { rendered, .. }) => {
                 (Outcome::Faulted(rendered), None)
             }

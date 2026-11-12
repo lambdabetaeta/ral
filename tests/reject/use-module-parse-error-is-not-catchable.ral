@@ -1,0 +1,4 @@
+# status: 2
+# contains: could not be checked
+# contains: unparsed.ral
+try { let _ = use '../lib/modules/unparsed.ral' } { |_| return () }

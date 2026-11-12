@@ -26,6 +26,17 @@ impl TypeErrorKind {
     /// an accident of the call site, so no message may claim one side is right.
     pub fn render_message(&self) -> String {
         match self {
+            Self::UndecidedExport { name, scheme, source } => {
+                let origin = match source {
+                    WeakSource::Boundary { name, .. } => format!("`{name}`"),
+                    WeakSource::Host(name) => format!("the host binding `${name}`"),
+                    WeakSource::Residual => "an earlier unit".into(),
+                };
+                format!("`{name}` is exported with the type {scheme}, whose shape {origin} left undecided, and no use in this module decides it")
+            }
+            Self::DelayedResidual { name, scheme } => format!(
+                "`{name} : {scheme}` comes from an earlier unit, and its type still holds a shape that unit never decided, beneath a function or handle"
+            ),
             Self::ConflictingDefaults { .. } =>
                 "the same computation is run for its value by a binding and called as a function by an application".into(),
             Self::RecursiveRow => {
@@ -173,6 +184,10 @@ impl TypeErrorKind {
     /// from the same types in the same order, so the `α` here is the `α` there.
     pub fn render_label(&self) -> String {
         match self {
+            Self::UndecidedExport { .. } => "this export still has an undecided shape".into(),
+            Self::DelayedResidual { .. } => {
+                "this delayed shape was not decided in its defining unit".into()
+            }
             Self::ConflictingDefaults { .. } => "both run and called as a function".into(),
             Self::RecursiveRow => "the type loops back into itself here".into(),
             Self::TypeTooDeep => "the type nests too deeply here".into(),
@@ -244,6 +259,9 @@ impl TypeErrorKind {
 impl TypeErrorKind {
     /// A related use, unless the error already stands there.
     pub(crate) fn witness(&self, at: Option<Span>) -> Option<(Span, String)> {
+        if let Self::UndecidedExport { source, .. } = self {
+            return weak_witness(source, at);
+        }
         if let Self::ConflictingDefaults { binding, call, .. } = self {
             return conflicting_uses(*binding, *call)
                 .into_iter()
@@ -636,13 +654,23 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
     format!("case is not exhaustive: {}", parts.join("; "))
 }
 
+fn weak_witness(source: &WeakSource, at: Option<Span>) -> Option<(Span, String)> {
+    match source {
+        WeakSource::Boundary {
+            name,
+            span: Some(span),
+        } if Some(*span) != at => Some((*span, format!("`{name}` left this shape undecided here"))),
+        _ => None,
+    }
+}
+
 /// What a mismatch on a weak variable adds: the one thing the types do not
 /// show, that another use in the unit already fixed this one, and what makes
 /// the type one per unit.
 fn weak_note(source: &WeakSource) -> String {
     const SHARED: &str = "this type is shared by every use in its unit, and another use fixed it: ";
     match source {
-        WeakSource::Boundary(name) => format!(
+        WeakSource::Boundary { name, .. } => format!(
             "{SHARED}what `{name}` reads has one type for the whole unit, which its door checks \
              every use of. Write one function per shape, or decode once and bind the result"
         ),
@@ -668,11 +696,18 @@ impl TypeError {
             code: Some(self.kind.code()),
             message: self.message(),
             at: self.pos.map(|sp| at(sp, self.label())),
-            also: self
-                .pos
-                .zip(self.kind.witness(self.pos))
-                .filter(|(sp, (w, _))| w.file == sp.file)
-                .map(|(_, (w, text))| at(w, text)),
+            also: self.pos.and_then(|pos| {
+                self.kind
+                    .witness(Some(pos))
+                    .into_iter()
+                    .chain(
+                        self.weak
+                            .as_ref()
+                            .and_then(|source| weak_witness(source, Some(pos))),
+                    )
+                    .find(|(span, _)| span.file == pos.file)
+                    .map(|(span, text)| at(span, text))
+            }),
             hint: self.hint(),
         }
     }
@@ -793,6 +828,12 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         }
     }
     let from_kind = match kind {
+        TypeErrorKind::DelayedResidual { name, .. } => Some(format!(
+            "a shape is decided in the unit that uses it: define `{name}` in this unit, or have it return text and decode where the shape is used"
+        )),
+        TypeErrorKind::UndecidedExport { .. } => Some(
+            "a shape is decided in the unit that uses it: use it here at the type you mean, or export the text and decode it where it is used".into(),
+        ),
         TypeErrorKind::TypeTooDeep => Some(
             "reduce the type's nesting; composing functions that repeatedly wrap their input can exceed the supported depth".into(),
         ),
@@ -1161,7 +1202,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
         | Reason::CaseCoverage { .. }
         | Reason::Negation
         | Reason::Interpolation
-        | Reason::ProtectContract
         | Reason::Vocabulary(_)
         | Reason::Capture => None,
     }
@@ -1644,6 +1684,52 @@ impl TypeError {
 mod tests {
     use super::*;
     use crate::ty::CompTy;
+
+    #[test]
+    fn boundary_labels_require_a_distinct_call_in_the_primary_source() {
+        use crate::source::FileId;
+
+        let primary = Span::new(FileId(1), 10, 20);
+        let call = Span::new(FileId(1), 1, 5);
+        let foreign = Span::new(FileId(2), 1, 5);
+        for exported in [false, true] {
+            for pos in [None, Some(primary)] {
+                for span in [None, Some(primary), Some(call), Some(foreign)] {
+                    let source = WeakSource::Boundary {
+                        name: "from-json".into(),
+                        span,
+                    };
+                    let kind = if exported {
+                        TypeErrorKind::UndecidedExport {
+                            name: "config".into(),
+                            scheme: crate::ty::Binders::close(|_| Ty::int()),
+                            source: source.clone(),
+                        }
+                    } else {
+                        TypeErrorKind::TyMismatch {
+                            expected: Ty::int(),
+                            actual: Ty::string(),
+                        }
+                    };
+                    let error = TypeError {
+                        pos,
+                        kind,
+                        reason: None,
+                        weak: (!exported).then_some(source),
+                        unit: None,
+                    };
+                    let report = error.report();
+                    assert_eq!(
+                        report.also.as_ref().and_then(|label| label.span),
+                        (pos.is_some() && span == Some(call)).then_some(call)
+                    );
+                    if let Some(label) = report.also {
+                        assert!(label.text.contains("from-json"));
+                    }
+                }
+            }
+        }
+    }
 
     fn options(
         found: Unwritten,

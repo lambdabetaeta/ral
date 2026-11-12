@@ -499,7 +499,7 @@ mod tests {
         u.enter();
         let rho = u.fresh_row_var();
         let ty = Ty::record(Row::var(rho));
-        u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&ty, &WeakSource::boundary("from-json"));
         let harvested = Arc::new(generalized(&mut u, &ty));
         assert_eq!(
             *harvested,
@@ -570,7 +570,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (bound, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         let ty = arrow(Ty::var(bound), Ty::var(weak));
         let scheme = generalized(&mut u, &ty);
         assert_eq!(
@@ -593,8 +593,8 @@ mod tests {
         let (row, comp) = (u.fresh_row_var(), u.fresh_comp_ty());
         let ty = Ty::list(Ty::record(Row::var(row)));
         let body = Ty::thunk(comp.clone());
-        u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
-        u.mark_weak(&body, &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&ty, &WeakSource::boundary("from-json"));
+        u.mark_weak(&body, &WeakSource::boundary("from-json"));
         let &CompTyNode::Var(comp) = comp.node() else {
             unreachable!("fresh_comp_ty yields a Var")
         };
@@ -616,7 +616,7 @@ mod tests {
             let mut u = Unifier::new();
             u.enter();
             let (weak, other) = (u.fresh_tyvar(), u.fresh_tyvar());
-            u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+            u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
             let (a, b) = (Ty::var(weak), Ty::var(other));
             let result = if weak_first {
                 u.unify_ty(&a, &b)
@@ -635,7 +635,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (weak, inner) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         u.unify_ty(&Ty::var(weak), &Ty::list(Ty::var(inner)))
             .expect("a free variable binds");
         let scheme = generalized(&mut u, &arrow(Ty::var(weak), Ty::unit()));
@@ -655,7 +655,7 @@ mod tests {
         let (weak, other) = (u.fresh_row_var(), u.fresh_row_var());
         u.mark_weak(
             &Ty::record(Row::var(weak)),
-            &WeakSource::Boundary("from-json".into()),
+            &WeakSource::boundary("from-json"),
         );
         let spine = Row::extend(Label::Field("a".into()), Ty::int(), Row::empty());
         u.unify_row(&Row::var(weak), &spine)
@@ -673,10 +673,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (weak, other) = (u.fresh_comp_ty(), u.fresh_comp_ty());
-        u.mark_weak(
-            &Ty::thunk(weak.clone()),
-            &WeakSource::Boundary("from-json".into()),
-        );
+        u.mark_weak(&Ty::thunk(weak.clone()), &WeakSource::boundary("from-json"));
         u.unify_comp_ty(&weak, &CompTy::pure(Ty::int()))
             .expect("a free computation binds");
         u.unify_comp_ty(&other, &weak)
@@ -696,7 +693,7 @@ mod tests {
             first.fresh_tyvar();
         }
         let (bound, weak) = (first.fresh_tyvar(), first.fresh_tyvar());
-        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        first.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         let scheme = Arc::new(generalized(
             &mut first,
             &arrow(Ty::var(bound), Ty::var(weak)),
@@ -806,7 +803,7 @@ mod tests {
             // Ids are reseeded in order, so the residual's lands on `bound`'s.
             let _ = first.fresh_tyvar();
             let (bound, weak) = (first.fresh_tyvar(), first.fresh_tyvar());
-            first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+            first.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
             if recursive {
                 first.bind_ty_root(bound, Ty::list(Ty::var(bound)));
             }
@@ -858,7 +855,7 @@ mod tests {
         let CompTyNode::Return(_, result) = rest.node() else {
             unreachable!()
         };
-        first.mark_weak(result, &WeakSource::Boundary("from-json".into()));
+        first.mark_weak(result, &WeakSource::boundary("from-json"));
         let scheme = Arc::new(generalized(&mut first, &ty));
         let scheme = settle_weak(&first, scheme);
         let mut next = Unifier::new();
@@ -890,7 +887,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let weak = u.fresh_ty();
-        u.mark_weak(&weak, &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&weak, &WeakSource::boundary("from-json"));
         let scheme = Arc::new(generalized(&mut u, &weak));
         let grade = u.fresh_grade_var();
         let block = Ty::thunk(CompTy::ret(Grade::Var(grade), Ty::unit()));
@@ -1034,7 +1031,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (root, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         u.bind_ty_root(root, Ty::list(arrow(Ty::var(weak), Ty::var(root))));
         let scheme = Arc::new(generalized(&mut u, &Ty::var(root)));
         u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
@@ -1055,7 +1052,7 @@ mod tests {
         first.enter();
         let weak = first.fresh_tyvar();
         let root = first.fresh_comp_root();
-        first.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        first.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         let body = CompTy::pure(Ty::list(arrow(Ty::var(weak), Ty::thunk(CompTy::var(root)))));
         let scheme = Closed::new(Arc::new(Scheme {
             tys: [(weak, Role::Weak(Kind::ANY))].into(),
@@ -1116,7 +1113,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let (local, weak) = (u.fresh_tyvar(), u.fresh_tyvar());
-        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         let scheme = Arc::new(generalized(&mut u, &arrow(Ty::var(local), Ty::var(weak))));
         u.bind_ty_root(local, Ty::list(Ty::var(local)));
         u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
@@ -1131,7 +1128,7 @@ mod tests {
         let mut u = Unifier::new();
         u.enter();
         let weak = u.fresh_tyvar();
-        u.mark_weak(&Ty::var(weak), &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         u.unify_ty(&Ty::var(weak), &Ty::int()).unwrap();
         let scheme = Arc::new(generalized(&mut u, &Ty::var(weak)));
         let settled = settle_weak(&u, scheme);
@@ -1145,7 +1142,7 @@ mod tests {
         u.enter();
         let (fixed, open) = (u.fresh_tyvar(), u.fresh_tyvar());
         let ty = arrow(Ty::var(fixed), Ty::var(open));
-        u.mark_weak(&ty, &WeakSource::Boundary("from-json".into()));
+        u.mark_weak(&ty, &WeakSource::boundary("from-json"));
         let scheme = Arc::new(generalized(&mut u, &ty));
         u.unify_ty(&Ty::var(fixed), &Ty::int())
             .expect("a free variable binds");

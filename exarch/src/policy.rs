@@ -428,7 +428,7 @@ mod tests {
     #[cfg(unix)]
     fn names(profile: &str) -> Vec<String> {
         let mut shell = ral_core::test_helper::core_shell();
-        let value = ral_core::shell::load::evaluate_source(
+        let value = ral_core::shell::load::evaluate_closed(
             &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             profile,

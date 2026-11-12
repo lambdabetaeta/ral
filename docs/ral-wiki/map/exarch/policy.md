@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -179,7 +179,15 @@ recover `ls`. `minimal` is such a base, and is offered by `--base` only —
 `Base::spawnable` withholds it from `` exarch-agents `start ``,
 as it does `dangerous` ([[design/agents|agents]]).
 
-Each is a ral script ending in `grant`'s options written out (SPEC §15.3),
+**Profiles, exarch's config and its net policy are closed lexical units.**
+`evaluate_closed` checks them against Σ and runs them under Σ; they see
+neither session bindings nor rc helpers, and their helper `let`s never reach
+the session. Config and net policy retain their no-authority evaluation.
+Shared helpers are explicit modules linked at check time under the authority
+then in force. Only exarch's agent library and the rc extend the session
+through `extend_session`.
+
+Each profile is a ral script ending in `grant`'s options written out (SPEC §15.3),
 loaded through `ral_core::shell::load::profile::load_capabilities_from_str` —
 the same surface `--capabilities <path>.ral` consumes at the ral CLI.
 `typecheck::table::declared(Form::Grant)` checks keys during generation,
@@ -236,8 +244,8 @@ can't silently widen a jail, reading each layer as the grant it writes
   and scratch dirs without exarch injecting them dynamically: the scratch is
   made before the policy freezes, and `FreezeCtx::with_scratch` carries its spelling.
   The five restrictive bases write only `cwd`, `gitdir` and `scratch`;
-  `$TMPDIR` points to the scratch's `tmp` directory. They grant neither `/tmp`
-  nor `tempdir`; `dangerous` leaves fs unrestricted.
+  the environment variable `TMPDIR` points to the scratch's `tmp` directory.
+  They grant neither `/tmp` nor `tempdir`; `dangerous` leaves fs unrestricted.
 
 `exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
 `minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds

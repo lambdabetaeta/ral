@@ -18,7 +18,7 @@ pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 use crate::data::Finite;
 use crate::data::Str;
 use crate::path::TildePath;
-use crate::source::{Span, Spanned};
+use crate::source::{SourceOrigin, Span, Spanned};
 use crate::ty::Site;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -39,29 +39,17 @@ pub trait Phase: Debug + Clone + PartialEq {
     type BindingCall: Debug + Clone + PartialEq;
     /// The type an [`Exec`]'s door admits a value against.
     type Boundary: Debug + Clone + PartialEq;
-    /// A [`Val::Protected`]'s contract.
-    type Membrane: Debug + Clone + PartialEq;
 }
 
 /// A phase whose trees serialise: bind and call notes are skipped and read
-/// back as their defaults, while boundary and membrane sites are written out.
+/// back as their defaults, while boundary sites are written out.
 pub trait Serial:
-    Phase<
-        Bind: Default,
-        Call: Default,
-        Boundary: Serialize + DeserializeOwned,
-        Membrane: Serialize + DeserializeOwned,
-    >
+    Phase<Bind: Default, Call: Default, Boundary: Serialize + DeserializeOwned>
 {
 }
 
 impl<P> Serial for P where
-    P: Phase<
-            Bind: Default,
-            Call: Default,
-            Boundary: Serialize + DeserializeOwned,
-            Membrane: Serialize + DeserializeOwned,
-        >
+    P: Phase<Bind: Default, Call: Default, Boundary: Serialize + DeserializeOwned>
 {
 }
 
@@ -75,7 +63,6 @@ impl Phase for Checked {
     type Call = ();
     type BindingCall = Infallible;
     type Boundary = Arc<Site>;
-    type Membrane = Arc<Site>;
 }
 
 // ── Values ──────────────────────────────────────────────────────────────
@@ -289,11 +276,6 @@ pub enum Val<P: Phase = Checked> {
         label: Name,
         payload: Box<Self>,
     },
-    /// Checker-inserted protection at an instantiation site.
-    Protected {
-        value: Box<Self>,
-        site: P::Membrane,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -435,8 +417,15 @@ pub struct Toplevel {
     pub admits: Vec<(String, Arc<crate::ty::Site>)>,
 }
 
+/// A checked module and where it was read from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Module {
+    pub top: Toplevel,
+    pub origin: SourceOrigin,
+}
+
 /// A `Phrase::Define`'s names, each with its checker-closed scheme.
-pub type DefineSchemes = Vec<(String, crate::ty::Closed)>;
+pub type DefineSchemes<S = crate::ty::Closed> = Vec<(String, S)>;
 
 /// One top-level statement, checked unless `D` says it is not: the schemes
 /// are the checker's, so elaboration holds none.
@@ -459,6 +448,25 @@ pub enum Phrase<D = DefineSchemes, P: Phase = Checked> {
     },
     /// Any other statement.
     Run(Arc<Comp<P>>),
+}
+
+/// Public bindings in the final environment, with their winning definition spans.
+pub(crate) fn public_exports<S, P: Phase>(
+    phrases: &[Spanned<Phrase<DefineSchemes<S>, P>>],
+) -> std::collections::BTreeMap<&str, (&S, Option<Span>)> {
+    phrases
+        .iter()
+        .filter_map(|phrase| match &phrase.item {
+            Phrase::Define { schemes, .. } => Some((schemes, phrase.span)),
+            Phrase::Run(_) => None,
+        })
+        .flat_map(|(schemes, span)| {
+            schemes
+                .iter()
+                .filter(|(name, _)| !name.starts_with('_'))
+                .map(move |(name, scheme)| (name.as_str(), (scheme, span)))
+        })
+        .collect()
 }
 
 /// What elaboration yields, and the checker alone turns into a [`Toplevel`].
@@ -547,9 +555,7 @@ impl<P: Phase> Comp<P> {
 impl<P: Phase> Mentions for Comp<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
-            CompKind::Lam { param: _, body }
-            | CompKind::Capture(body)
-            | CompKind::Protect { body, .. } => body.mentions(out),
+            CompKind::Lam { param: _, body } | CompKind::Capture(body) => body.mentions(out),
             CompKind::Bind {
                 comp,
                 hole: _,
@@ -598,7 +604,8 @@ impl<P: Phase> Mentions for Comp<P> {
             }
             // The group is a nested node: its own occ, not a walk.
             CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
-            CompKind::Tilde(_) => {}
+            // A linked module is closed under the prelude, not the importer.
+            CompKind::Tilde(_) | CompKind::Use(_) => {}
             CompKind::If { cond, then, else_ } => {
                 cond.item.mentions(out);
                 then.item.mentions(out);
@@ -651,7 +658,6 @@ impl<P: Phase> Mentions for Val<P> {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
             Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
             Self::Variable(name) => out.push(name),
-            Self::Protected { value, .. } => value.mentions(out),
             Self::Thunk(node) => out.extend(node.occ().names()),
             Self::List(node) => out.extend(node.occ().names()),
             Self::Record(node) | Self::Map(node) => out.extend(node.occ().names()),
@@ -812,11 +818,8 @@ pub enum CompKind<P: Phase = Checked> {
     /// A `~` or `~/x` in value position: the home directory with the suffix
     /// appended. Never a value, since reading the store is an effect.
     Tilde(TildePath),
-    /// A runtime membrane's check of what `body` returns.
-    Protect {
-        body: Arc<Comp<P>>,
-        site: Arc<Site>,
-    },
+    /// A module linked at check time, run under the prelude alone.
+    Use(Arc<Module>),
     /// A bare head bound in scope, called with `args` while the checker
     /// decides its splits; readback makes it an [`Exec`]. The only skipped
     /// variant, kept last so it does not shift any wire index.

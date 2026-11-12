@@ -109,11 +109,13 @@ variant!(EditorWorkspaceFailure { Io(IoCause): "io", ExpectedRegularFile(EditorW
 pub enum PluginFailure {
     AlreadyLoaded(PluginFailureAlreadyLoaded),
     NotFound(PluginFailureNotFound),
+    /// Escaped native spelling, including quotes.
+    NotFile(String),
     OptionsWithoutFactory(PluginFailureOptionsWithoutFactory),
     UnknownHookEvent(PluginFailureUnknownHookEvent),
     HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped),
 }
-variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped): "handler-installation-escaped" });
+variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotFound(PluginFailureNotFound): "not-found", NotFile(String): "not-file", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped): "handler-installation-escaped" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeybindingFailure {
@@ -1017,11 +1019,10 @@ record!(PluginFailureAlreadyLoaded { name: "name" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginFailureNotFound {
-    pub requested: String,
+    /// Escaped native spelling, including quotes.
+    pub path: String,
 }
-record!(PluginFailureNotFound {
-    requested: "requested"
-});
+record!(PluginFailureNotFound { path: "path" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginFailureOptionsWithoutFactory {
@@ -2161,6 +2162,7 @@ impl PluginFailure {
         match self {
             Self::AlreadyLoaded(value) => value.describe(),
             Self::NotFound(value) => value.describe(),
+            Self::NotFile(path) => format!("plugin path {path} is not a regular file"),
             Self::OptionsWithoutFactory(value) => value.describe(),
             Self::UnknownHookEvent(value) => value.describe(),
             Self::HandlerInstallationEscaped(value) => value.describe(),
@@ -3279,7 +3281,7 @@ impl PluginFailureAlreadyLoaded {
 
 impl PluginFailureNotFound {
     pub fn describe(&self) -> String {
-        format!("plugin '{}' was not found", self.requested.escape_debug())
+        format!("plugin file {} was not found", self.path)
     }
 }
 
@@ -4667,7 +4669,6 @@ impl EditFailure {
 impl PluginFailure {
     pub fn advice(&self) -> Vec<String> {
         match self {
-            Self::NotFound(_) => vec!["is it in <config>/ral/plugins or RAL_PATH?".into()],
             Self::OptionsWithoutFactory(_) => {
                 vec!["its entry in the rc's plugins map wants the empty options map `[:]`".into()]
             }
@@ -4682,7 +4683,10 @@ impl PluginFailure {
                         .join(", ")
                 )]
             }
-            Self::AlreadyLoaded(_) | Self::HandlerInstallationEscaped(_) => Vec::new(),
+            Self::NotFound(_)
+            | Self::NotFile(_)
+            | Self::AlreadyLoaded(_)
+            | Self::HandlerInstallationEscaped(_) => Vec::new(),
         }
     }
 }

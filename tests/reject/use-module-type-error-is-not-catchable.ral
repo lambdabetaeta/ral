@@ -1,0 +1,7 @@
+# status: 1
+# contains: could not be checked
+# contains: ill-typed.ral
+# contains: [T0010]
+# contains: couldn't match type Integer with type Bool
+# contains: the two sides of a `+` / `-` / `*` / `/` must have the same numeric type
+try { let _ = use '../lib/modules/ill-typed.ral' } { |_| return () }

@@ -45,10 +45,6 @@ impl<'a> JoinArm<'a> {
     pub(super) fn result_span(&self) -> Option<Span> {
         match self.value {
             Val::Thunk(comp) => Generator::result_span(comp.shape()),
-            Val::Protected { value, .. } => match value.as_ref() {
-                Val::Thunk(comp) => Generator::result_span(comp.shape()),
-                _ => self.span,
-            },
             _ => self.span,
         }
     }

@@ -1,0 +1,7 @@
+# status: 1
+# contains: decode
+# contains: from-json
+# contains: undecided
+let m = use '../lib/modules/undecided-decoder.ral'
+let n = $m[decode] '"bad"'
+return $[$n + 1]

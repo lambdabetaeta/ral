@@ -5,19 +5,33 @@ use ral_core::ir::{CompKind, Pattern, Phrase, Toplevel};
 use ral_core::source::FileId;
 use ral_core::test_access::{quantified, weak_residuals};
 use ral_core::ty::Var;
-use ral_core::typecheck::{Reason, TypeError, TypeErrorKind};
+use ral_core::typecheck::{Reason, TypeError, TypeErrorKind, Unit};
 
 fn schemes() -> ral_core::SessionSchemes {
     crate::common::schemes_for(&ral_core::HostSurface::default())
 }
 
 fn checked(source: &str) -> Toplevel {
-    compile_and_typecheck(source, schemes(), FileId::DUMMY, None, None)
-        .unwrap_or_else(|error| panic!("{source}: {error:?}"))
+    compile_and_typecheck(
+        source,
+        schemes(),
+        FileId::DUMMY,
+        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
+    )
+    .unwrap_or_else(|error| panic!("{source}: {error:?}"))
 }
 
 fn refusal(source: &str) -> Vec<TypeError> {
-    match compile_and_typecheck(source, schemes(), FileId::DUMMY, None, None) {
+    match compile_and_typecheck(
+        source,
+        schemes(),
+        FileId::DUMMY,
+        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
+    ) {
         Err(CompileError::Types(errors)) => errors,
         other => panic!("{source}: expected a type refusal, got {other:?}"),
     }
@@ -505,6 +519,7 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
             units(),
         ),
     ];
+    let out_scheme = defined_scheme(&checked("let out = 'fixture'"), "out").clone();
     for (source, stdout, stderr, value) in cases {
         let mut shell = ral_core::test_helper::fresh_shell();
         let dir = tempfile::tempdir().unwrap();
@@ -512,6 +527,7 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
         shell.set_var(
             "out".into(),
             Value::string(out.to_str().expect("UTF-8 test path")),
+            out_scheme.clone(),
         );
         match shell.run(Run::captured(
             source,
@@ -534,7 +550,10 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
                     assert_eq!(std::fs::read(out).unwrap(), b"fetched\n");
                 }
             }
-            RunReport::Static { diagnostics } => {
+            RunReport::Checked { .. } => {
+                panic!("source fixture must run, not only check: {source}")
+            }
+            RunReport::Static { diagnostics, .. } => {
                 panic!("{source}: {}", diagnostics.render(shell.exit_hints()).0)
             }
         }

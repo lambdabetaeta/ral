@@ -1,0 +1,4 @@
+# status: 1
+# contains: this record has no field named 'missing'
+let m = use '../lib/modules/functions.ral'
+return $m[missing]

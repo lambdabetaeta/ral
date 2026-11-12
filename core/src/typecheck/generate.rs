@@ -56,7 +56,6 @@ impl Generator {
             *self.span_slot() = Some(span);
         }
         let (cty, item) = match &comp.item {
-            CompKind::Protect { body, site } => self.protected_comp(body, site),
             CompKind::Return(value) => {
                 let (ty, value) = self.val(value, None);
                 (self.produces(ty), CompKind::Return(value))
@@ -93,6 +92,22 @@ impl Generator {
             }
             CompKind::Rec { group, index } => self.rec(group, *index),
             CompKind::Tilde(path) => (self.produces(Ty::string()), CompKind::Tilde(path.clone())),
+            CompKind::Use(module) => {
+                let row = crate::ir::public_exports(&module.top.phrases)
+                    .into_iter()
+                    .rev()
+                    .fold(Row::empty(), |row, (name, (scheme, _))| {
+                        Row::extend(
+                            Label::Field(name.into()),
+                            self.solver.instantiate(scheme),
+                            row,
+                        )
+                    });
+                (
+                    self.produces(Ty::record(row)),
+                    CompKind::Use(Arc::clone(module)),
+                )
+            }
             CompKind::If { cond, then, else_ } => self.if_(cond, then, else_),
             CompKind::Case { scrutinee, arms } => self.case(scrutinee, arms),
             CompKind::Within { opts, body } => self.within(opts, body),
@@ -496,15 +511,20 @@ impl Generator {
         result
     }
 
-    fn note_residual_use(&mut self, name: &str, scheme: &Arc<Scheme>, ty: &Ty) -> bool {
+    fn note_residual_use(&mut self, name: &str, scheme: &Arc<Scheme>, ty: &Ty) {
         let residual = self
             .residuals
             .iter()
             .any(|(n, stored)| n == name && Arc::ptr_eq(stored, scheme));
         if residual && !self.residual_uses.iter().any(|(n, _)| n == name) {
             self.residual_uses.push((name.to_owned(), ty.clone()));
+            if scheme.delays_weak() {
+                self.solver.diagnose(super::TypeErrorKind::DelayedResidual {
+                    name: name.to_owned(),
+                    scheme: Arc::clone(scheme),
+                });
+            }
         }
-        residual
     }
 }
 
@@ -525,13 +545,13 @@ mod tests {
         bindings: Vec<(String, Option<crate::ty::Closed>)>,
     ) -> Vec<&'static str> {
         let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-        let comp = elaborate(&ast, [], None)
+        let comp = elaborate(&ast, [], None, &mut crate::compile::no_modules)
             .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
         let schemes = SessionSchemes {
             bindings,
             ..crate::test_helper::core_schemes()
         };
-        typecheck(&comp, schemes, None)
+        typecheck(&comp, schemes, crate::typecheck::Unit::Script)
             .err()
             .unwrap_or_default()
             .iter()
@@ -846,8 +866,8 @@ mod tests {
             &stored
         ));
         let ty = generator.solver.instantiate(&stored);
-        assert!(generator.note_residual_use("imported", &stored, &ty));
-        assert!(generator.note_residual_use("imported", &stored, &ty));
+        generator.note_residual_use("imported", &stored, &ty);
+        generator.note_residual_use("imported", &stored, &ty);
         assert_eq!(generator.residual_uses.len(), 1);
         assert_eq!(generator.synth_counter, 2);
     }

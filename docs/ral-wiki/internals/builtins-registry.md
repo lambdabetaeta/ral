@@ -1,6 +1,6 @@
 ---
-verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-verified_at_date: 2026-11-11
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke, Convention, Arm::ty, handlers_ty, Decl::scheme]
 ---
 
@@ -44,8 +44,14 @@ ordinary result grades; command, boundary and already graded results retain
 their declared grades. Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
 `concurrency/` for the eliminators, `first-settled`, `workers`, `worker` and
-`watch` (`spawn` and `gather` are control operators, `par` prelude code), `modules.rs` for `use`, `misc.rs` for
+`watch` (`spawn` and `gather` are control operators, `par` prelude code), `misc.rs` for
 the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).
+
+**The core boundary table has five entries:** `from-json`, `from-jsonl`,
+`from-json-at`, `from-csv` and `env`. Their bodies receive the checked call's
+site. `use` belongs to syntax and the shell IR: elaboration links a checked
+module, whose public schemes type the import. No manifest entry, boundary
+site or runtime builtin implements it.
 
 **The two halves are the two argument conventions, and the choice is visible in
 the surface.** `echo` is a base frame because a diagnostic-or-payload line takes

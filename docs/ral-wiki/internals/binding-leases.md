@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 61c288f
-verified_at_date: 2026-10-21
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
 anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
@@ -36,24 +36,27 @@ harmless redundancy over a name the ledger could never reach.
 Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
 are invisible to the ledger, since its one chokepoint, `note_define`, is
 reached from `run_phrases`'s `Define` arm alone, under `Mode::Session`: they
-die with their frame anyway.
+are not session names, even when a returned closure keeps their values.
 
 ## The clock, and what counts as use
 
-The ledger ticks once per committed source-door run — in exarch, exactly once
-per `ral` tool call. No wall clock anywhere: a quiet weekend ages nothing.
+The ledger ticks once per `Program::Source` dispatch, even when checking
+refuses it — in exarch, exactly once per `ral` tool call. `Program::Check`
+neither ticks nor renews leases. No wall clock anywhere: a quiet weekend ages
+nothing.
 
-Use is read off the program text, never off the running lookup path. When a
-run compiles, `Toplevel::referenced_names` collects every variable occurrence
-and command-head name and renews those entries; the same harvest runs when
-`use` (or a host loader) compiles code mid-run. It is the same `Mentions`
-walk a node's own occ is built from ([[map/core/ir|ir]]): a nested `Thunk`,
+Use is read off the program text, never off the running lookup path. Before
+a successfully compiled source runs, `Toplevel::referenced_names` collects its
+variable occurrences and command heads and renews those entries. A linked
+module sees Σ alone, so its names contribute no session references. There is
+no mid-run module compilation. This is the same `Mentions` walk a node's own
+occ is built from ([[map/core/ir|ir]]): a nested `Thunk`,
 list, record, map, or `Rec` group contributes its own already-computed occ
 rather than being walked again, so the harvest, like occ itself, is linear in
 the program's size and a stored body's names are counted once, at the run
 that compiled it, not on every later call. `Closure::new` keeps exactly what
 that occ names
-([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Nothing renews at dispatch: a bare head can only resolve to a
+([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Lookup during evaluation renews nothing: a bare head can only resolve to a
 binding the elaborator already saw — prelude, session, and lexical names are
 all in its bound set, and nothing installs into a running environment behind
 its back — so the harvest is complete by construction. Writing a name is

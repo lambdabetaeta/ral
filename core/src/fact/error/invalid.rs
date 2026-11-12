@@ -177,24 +177,13 @@ record!(AdmissionShares {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdmissionExport {
-    pub found: String,
-    pub expected: String,
-}
-record!(AdmissionExport {
-    found: "found",
-    expected: "expected"
-});
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionCause {
     Uses(AdmissionUses),
     NoField(String),
     ExtraField(AdmissionExtraField),
     Shares(AdmissionShares),
-    Export(AdmissionExport),
 }
-variant!(AdmissionCause { Uses(AdmissionUses): "uses", NoField(String): "no-field", ExtraField(AdmissionExtraField): "extra-field", Shares(AdmissionShares): "shares", Export(AdmissionExport): "export" });
+variant!(AdmissionCause { Uses(AdmissionUses): "uses", NoField(String): "no-field", ExtraField(AdmissionExtraField): "extra-field", Shares(AdmissionShares): "shares" });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -1012,10 +1001,6 @@ impl AdmissionFailure {
                     side(shares.side)
                 )
             }
-            AdmissionCause::Export(export) => format!(
-                "{place} is a block of type {}, but this script uses it as {}",
-                export.found, export.expected
-            ),
         }
     }
 }
@@ -1047,12 +1032,6 @@ impl AdmissionShares {
     }
 }
 
-impl AdmissionExport {
-    pub fn describe(&self) -> String {
-        format!("found: {}, expected: {}", self.found, self.expected)
-    }
-}
-
 impl AdmissionCause {
     pub fn describe(&self) -> String {
         match self {
@@ -1060,7 +1039,6 @@ impl AdmissionCause {
             Self::NoField(value) => format!("no field: {value}"),
             Self::ExtraField(value) => format!("extra field: {}", value.describe()),
             Self::Shares(value) => format!("shares: {}", value.describe()),
-            Self::Export(value) => format!("export: {}", value.describe()),
         }
     }
 }
@@ -1901,8 +1879,7 @@ impl AdmissionFailure {
             }
             AdmissionCause::NoField(_)
             | AdmissionCause::ExtraField(_)
-            | AdmissionCause::Shares(_)
-            | AdmissionCause::Export(_) => None,
+            | AdmissionCause::Shares(_) => None,
         }
     }
 }

@@ -31,12 +31,13 @@ use ral_core::ir::Phrase;
 use ral_core::path::shown;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::HostSurface;
-use ral_core::shell::run::RunReport;
+use ral_core::shell::run::{RunReport, StaticDiagnostics};
 use ral_core::shell::runtime::{Mooring, Settled};
 use ral_core::source::{FileId, SourceOrigin};
 use ral_core::syntax::quote_word;
-use ral_core::test_access::{binding_scheme as scheme_of, has_weak_residuals};
+use ral_core::test_access::{bind_untyped, binding_scheme as scheme_of, has_weak_residuals};
 use ral_core::test_helper::{fresh_shell, layer};
+use ral_core::typecheck::{TypeErrorKind, Unit};
 use ral_core::{Break, SessionSchemes, Shell, TypeError, Value};
 use std::path::{Path, PathBuf};
 
@@ -210,7 +211,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
 #[test]
 fn status_is_an_unbound_variable_that_names_its_replacement() {
     let mut shell = prelude_shell();
-    let RunReport::Static { diagnostics } = shell.run(Run::foreground(
+    let RunReport::Static { diagnostics, .. } = shell.run(Run::foreground(
         "return $STATUS",
         SourceOrigin::named("<test>"),
     )) else {
@@ -254,9 +255,18 @@ fn shell() -> Shell {
 /// Check `src` against the live session without evaluating it — the
 /// errors a run would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
-    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, None, None) {
+    match compile_and_typecheck(
+        src,
+        shell.session_schemes(),
+        FileId::DUMMY,
+        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
+    ) {
         Ok(_) => Vec::new(),
-        Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
+        Err(error @ (CompileError::Parse(_) | CompileError::Use { .. })) => {
+            panic!("front end: {src:?}: {error}")
+        }
         Err(CompileError::Types(errs)) => errs,
     }
 }
@@ -511,15 +521,10 @@ fn recursive_binding_is_usable_next_run() {
     );
 }
 
-// ─── (10) a scheme-less `set_var` binding is bound, not dropped ─────────────
+// ─── (10) `set_var` preserves a command head's closed scheme ────────────────
 
-/// `set_var` installs a binding with no scheme at all — the untyped sibling
-/// of `bind_value`, the way a host seeds `RAL_PROMPT` and other raw vars.
-/// Seeded into the next check at a fresh monomorphic variable rather than
-/// dropped, the name still resolves at a command head through the ordinary
-/// binding path (`exec_comp_ty`'s first arm), so it can take a lambda
-/// argument no external command could — proof the call is a value
-/// application, not argv rendering of an unresolved external name.
+/// A host-bound block keeps its supplied scheme and resolves as a value
+/// application: it takes a lambda argument no external command could.
 #[test]
 fn set_var_block_is_bound_and_usable_as_a_command_head() {
     let mut sh = shell();
@@ -528,15 +533,13 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
         .scope_lookup("sv_source")
         .cloned()
         .expect("sv_source must be bound");
-    sh.set_var("sv_head".into(), block);
-    assert!(
-        scheme_of(&sh, "sv_head").is_none(),
-        "set_var must install no scheme"
-    );
+    let scheme = scheme_of(&sh, "sv_source").expect("sv_source must carry a closed scheme");
+    sh.set_var("sv_head".into(), block, scheme.clone());
+    assert_eq!(scheme_of(&sh, "sv_head"), Some(scheme));
     let errs = check_errors(&sh, "sv_head $sv_source");
     assert!(
         errs.is_empty(),
-        "expected a scheme-less binding to resolve at a command head, taking \
+        "expected a typed binding to resolve at a command head, taking \
          a lambda argument no external command could, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
@@ -545,40 +548,29 @@ fn set_var_block_is_bound_and_usable_as_a_command_head() {
 }
 
 #[test]
-fn settled_weak_block_instantiates_at_both_grades_next_unit() {
-    let surface = HostSurface::default();
-    let first = compile_and_typecheck(
-        "let f = from-json; each $f [1]",
-        crate::common::schemes_for(&surface),
-        FileId::DUMMY,
-        None,
-        None,
-    )
-    .unwrap();
-    let Phrase::Define { schemes, .. } = &first.phrases[0].item else {
-        panic!("expected a Define for f");
+fn decoder_output_is_rejected_as_a_function_at_its_use_in_the_same_unit() {
+    let src = "let f = from-json; each $f [1]";
+    let errors = check_errors(&shell(), src);
+    let [error] = &errors[..] else {
+        panic!("{errors:?}")
     };
-    assert!(schemes.iter().any(|(name, _)| name == "f"));
-    compile_and_typecheck(
-        "if true { f 1 } else { echo a }; let y = f 1",
-        SessionSchemes::from_prelude(&first, surface.manifest()),
-        FileId::DUMMY,
-        None,
-        None,
-    )
-    .unwrap();
+    assert_eq!(error.kind.code(), "T0074");
+    let pos = error.pos.expect("the decoded value's function use");
+    assert_eq!(pos.start as usize, src.find("$f").unwrap());
+    assert_eq!(&src[pos.start as usize..pos.end as usize], "$f");
 }
 
 #[test]
 fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
     let mut sh = shell();
-    sh.set_var("sv".into(), Value::Int(1));
+    bind_untyped(&mut sh, "sv", Value::Int(1));
     let checked = compile_and_typecheck(
         "let y = $sv",
         sh.session_schemes(),
         FileId::DUMMY,
         None,
-        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
     )
     .unwrap();
     let Phrase::Define { schemes, .. } = &checked.phrases[0].item else {
@@ -592,7 +584,7 @@ fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
 #[test]
 fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
     let mut sh = shell();
-    sh.set_var("sv".into(), Value::Int(1));
+    bind_untyped(&mut sh, "sv", Value::Int(1));
     let first = compile_and_typecheck(
         "let take_step = { |f| fold $f () [()] }\n\
          take_step $sv\n\
@@ -600,7 +592,8 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
         sh.session_schemes(),
         FileId::DUMMY,
         None,
-        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
     )
     .unwrap();
     let Phrase::Define { schemes, .. } = &first.phrases[2].item else {
@@ -616,7 +609,8 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
         SessionSchemes::from_prelude(&first, HostSurface::default().manifest()),
         FileId::DUMMY,
         None,
-        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
     )
     .unwrap();
     let Phrase::Define { schemes, .. } = &next.phrases[1].item else {
@@ -629,8 +623,8 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
 #[test]
 fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
     let mut sh = shell();
-    sh.set_var("sv".into(), Value::Int(1));
-    sh.set_var("sv_data".into(), Value::Int(1));
+    bind_untyped(&mut sh, "sv", Value::Int(1));
+    bind_untyped(&mut sh, "sv_data", Value::Int(1));
     let first = compile_and_typecheck(
         "let take_step = { |f| fold $f () [()] }\n\
          take_step $sv\n\
@@ -639,7 +633,8 @@ fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
         sh.session_schemes(),
         FileId::DUMMY,
         None,
-        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
     )
     .unwrap();
     let Phrase::Define { schemes, .. } = &first.phrases[2].item else {
@@ -655,7 +650,8 @@ fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
         SessionSchemes::from_prelude(&first, HostSurface::default().manifest()),
         FileId::DUMMY,
         None,
-        None,
+        Unit::Script,
+        &mut crate::common::no_modules,
     )
     .unwrap();
     let Phrase::Define { schemes, .. } = &next.phrases[1].item else {
@@ -747,103 +743,172 @@ fn refusal(result: Settled<Value>) -> String {
 
 const WEAK_DECODER: &str = "let decode = { |s| to-string $s | from-json }";
 
+#[track_caller]
+fn assert_delayed_refusal(sh: &mut Shell, source: &str, expected_names: &[&str]) {
+    let errors = check_errors(sh, source);
+    let mut names: Vec<_> = errors
+        .iter()
+        .map(|error| {
+            let TypeErrorKind::DelayedResidual { name, .. } = &error.kind else {
+                panic!("expected a delayed-residual refusal: {source}: {errors:?}");
+            };
+            let pos = error.pos.expect("the stored name's use must be located");
+            let used = &source[pos.start as usize..pos.end as usize];
+            assert!(used.contains(name), "{source}: {used:?} must locate {name}");
+            name.as_str()
+        })
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names, expected_names,
+        "one refusal per stored name: {source}"
+    );
+
+    let source = format!("let refusal_marker = 1\n{source}");
+    let RunReport::Static {
+        diagnostics: StaticDiagnostics::Compile(rejection),
+        ..
+    } = sh.run(Run::captured(source, SourceOrigin::named("<test>")))
+    else {
+        panic!("a delayed residual must be refused before evaluation");
+    };
+    assert!(rejection.render().contains("T0083"));
+    assert!(sh.scope_lookup("refusal_marker").is_none());
+}
+
 #[test]
-fn imported_weak_functions_protect_every_higher_order_route() {
+fn delayed_functions_are_refused_at_every_use_route_but_work_in_their_unit() {
     let cases = [
-        ("", "let n = decode '\"bad\"'; let result = $[$n + 1]"),
+        ("", "decode", "let n = decode '1'; return $[$n + 1]"),
+        ("", "decode", "let n = $decode '1'; return $[$n + 1]"),
         (
             "let apply = { |f x| f $x }",
-            "let n = apply $decode '\"bad\"'; let result = $[$n + 1]",
+            "decode",
+            "let n = apply $decode '1'; return $[$n + 1]",
         ),
         (
             "let get = { return $decode }",
-            "let f = get; let n = f '\"bad\"'; let result = $[$n + 1]",
+            "get",
+            "let f = get; let n = f '1'; return $[$n + 1]",
         ),
         (
             "let box = [f: $decode]",
-            "let n = !{$box[f] '\"bad\"'}; let result = $[$n + 1]",
+            "box",
+            "let n = !{$box[f] '1'}; return $[$n + 1]",
         ),
         (
             "let decode2 = { |ignored s| decode $s }",
-            "let partial = decode2 () ; let n = partial '\"bad\"'; let result = $[$n + 1]",
+            "decode2",
+            "let partial = decode2 (); let n = partial '1'; return $[$n + 1]",
         ),
     ];
-    for (setup, later) in cases {
+    for (setup, name, later) in cases {
         let mut sh = shell();
         top_level(&mut sh, &format!("{WEAK_DECODER}\n{setup}")).unwrap();
-        assert!(check_errors(&sh, later).is_empty(), "{later}");
-        let message = refusal(top_level(&mut sh, later));
-        assert!(message.contains("imported value"), "{later}: {message}");
-        assert!(message.contains("the string \"bad\""), "{message}");
+        assert_delayed_refusal(&mut sh, later, &[name]);
+
+        let mut same_unit = shell();
+        assert_eq!(
+            top_level(&mut same_unit, &format!("{WEAK_DECODER}\n{setup}\n{later}")).unwrap(),
+            Value::Int(2),
+            "{later}"
+        );
     }
 }
 
 #[test]
-fn imported_weak_occurrences_keep_their_own_quantified_instances() {
+fn delayed_residual_diagnostics_are_per_name_per_unit() {
     let mut sh = shell();
-    top_level(
-        &mut sh,
-        "let f = { |x| let d = !{to-string '\"ok\"' | from-json}; return [item: $x, data: $d] }",
-    )
-    .unwrap();
-    top_level(
-        &mut sh,
-        "let a = f true; let b = f 1; let n = $[$b[item] + 1]",
-    )
-    .unwrap();
+    top_level(&mut sh, &format!("{WEAK_DECODER}\nlet other = $decode")).unwrap();
+    for later in [
+        "let a = $decode; let b = $decode; let c = $other; let d = $other",
+        "let a = $other; let b = $decode; let c = $other; let d = $decode",
+    ] {
+        assert_delayed_refusal(&mut sh, later, &["decode", "other"]);
+    }
+    let [error] = &check_errors(&sh, "return $decode")[..] else {
+        panic!("a value-only use must also be refused");
+    };
+    let message = error.kind.render_message();
+    assert!(message.contains("decode :"), "{message}");
+    assert!(message.contains("earlier unit"), "{message}");
+    assert!(
+        message.contains("beneath a function or handle"),
+        "{message}"
+    );
+    let hint = error.hint().expect("explain how to decide the shape");
+    assert!(hint.contains("define `decode` in this unit"), "{hint}");
+    assert!(hint.contains("return text and decode"), "{hint}");
 }
 
 #[test]
-fn imported_comparable_parameters_stay_polymorphic_inside_closures() {
+fn decided_decoder_functions_keep_their_quantified_instances_across_units() {
     let mut sh = shell();
     top_level(
         &mut sh,
-        "let f = { |x| let d = !{to-string '0' | from-json}; return [less: $[$x < $x], data: $d] }",
+        "let f = { |x| let d = !{to-string '1' | from-json}; return [item: $x, data: $[$d + 1]] }",
     )
     .unwrap();
-    top_level(
-        &mut sh,
-        "let g = { |x| f $x }; let a = g 1; let b = g hello",
-    )
-    .unwrap();
+    assert_eq!(
+        top_level(
+            &mut sh,
+            "let a = f true; let b = f 1; let flag = $[not $a[item]]; return $[$b[item] + $b[data]]",
+        )
+        .unwrap(),
+        Value::Int(3)
+    );
+    assert_eq!(sh.scope_lookup("flag"), Some(&Value::Bool(false)));
 }
 
 #[test]
-fn returned_protected_decoders_retain_their_contract_when_host_bound() {
-    let mut sh = shell();
-    top_level(&mut sh, WEAK_DECODER).unwrap();
-    let decoder = top_level(&mut sh, "return $decode").unwrap();
-    sh.bind_value("host_decode".into(), decoder).unwrap();
-    let scheme = scheme_of(&sh, "host_decode")
-        .expect("a re-inferred scheme")
-        .to_string();
-    assert!(scheme.contains("→ Returns _"), "{scheme}");
-    let later = "let n = host_decode '\"bad\"'; let result = $[$n + 1]";
-    assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(top_level(&mut sh, later));
-    assert!(message.contains("imported value"), "{message}");
-}
-
-#[test]
-fn imported_weak_callbacks_are_protected_at_the_argument() {
+fn decided_comparable_parameters_stay_polymorphic_inside_imported_closures() {
     let mut sh = shell();
     top_level(
         &mut sh,
-        "let invoke = { |f| let x = !{to-string '\"bad\"' | from-json}; f $x }",
+        "let f = { |x| let d = !{to-string '0' | from-json}; return [less: $[$x < $x], data: $[$d + 1]] }",
     )
     .unwrap();
+    assert_eq!(
+        top_level(
+            &mut sh,
+            "let g = { |x| f $x }; let a = g 1; let b = g hello; return $[$a[data] + $b[data]]",
+        )
+        .unwrap(),
+        Value::Int(2)
+    );
+    assert!(
+        check_errors(&sh, "g [1]")
+            .iter()
+            .any(|error| error.kind.code() == "T0074"),
+        "the comparable kind must survive the wrapper and the unit boundary"
+    );
+}
+
+#[test]
+fn delayed_callback_arguments_are_refused_across_units_but_checked_in_their_unit() {
+    let setup = "let invoke = { |f| let x = !{to-string '1' | from-json}; f $x }";
     let later = "invoke { |x| return $[$x + 1] }";
-    assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(top_level(&mut sh, later));
-    assert!(message.contains("imported value"), "{message}");
+    let mut sh = shell();
+    top_level(&mut sh, setup).unwrap();
+    assert_delayed_refusal(&mut sh, later, &["invoke"]);
+
+    let mut same_unit = shell();
+    assert_eq!(
+        top_level(&mut same_unit, &format!("{setup}\n{later}")).unwrap(),
+        Value::Int(2)
+    );
+    let mut bad_data = shell();
+    let setup = setup.replace("'1'", "'\"bad\"'");
+    let message = refusal(top_level(&mut bad_data, &format!("{setup}\n{later}")));
+    assert!(message.contains("the string \"bad\""), "{message}");
 }
 
 #[test]
-fn imported_weak_handles_protect_every_payload_observation() {
+fn delayed_handles_are_refused_at_every_payload_observation() {
     let cases = [
-        "let n = await $h; let result = $[$n + 1]",
-        "let n = race [$h]; let result = $[$n + 1]",
-        "let n = case !{poll $h} [\
+        "let n = await $h; return $[$n + 1]",
+        "let n = race [$h]; return $[$n + 1]",
+        "case !{poll $h} [\
             `running: { |_| return 0 }, `stopping: { |_| return 0 },\
             `consumed: { |_| return 0 },\
             `ready: { |d| case $d[outcome] [\
@@ -851,52 +916,86 @@ fn imported_weak_handles_protect_every_payload_observation() {
             ] }\
         ]",
     ];
+    let setup = "let h = spawn { to-string '1' | from-json }; let _ = first-settled [$h]";
     for later in cases {
         let mut sh = shell();
-        top_level(
-            &mut sh,
-            "let h = spawn { to-string '\"bad\"' | from-json }; let _ = first-settled [$h]",
-        )
-        .unwrap();
-        assert!(check_errors(&sh, later).is_empty(), "{later}");
-        let message = refusal(top_level(&mut sh, later));
-        assert!(message.contains("imported value"), "{later}: {message}");
+        top_level(&mut sh, setup).unwrap();
+        assert_delayed_refusal(&mut sh, later, &["h"]);
+
+        let mut same_unit = shell();
+        assert_eq!(
+            top_level(&mut same_unit, &format!("{setup}\n{later}")).unwrap(),
+            Value::Int(2),
+            "{later}"
+        );
     }
 }
 
 #[test]
-fn imported_handle_views_share_claims_without_claiming_at_wrap() {
+fn decided_handle_aliases_share_claims_and_poll_does_not_claim() {
     let mut sh = shell();
     top_level(
         &mut sh,
-        "let h = spawn { to-string '1' | from-json }; let _ = first-settled [$h]",
+        "let h = spawn { let n = !{to-string '1' | from-json}; return $[$n + 1] }; let _ = first-settled [$h]",
     )
     .unwrap();
     top_level(&mut sh, "let alias = $h").unwrap();
-    top_level(&mut sh, "let n = await $alias; let result = $[$n + 1]").unwrap();
+    assert_eq!(
+        top_level(
+            &mut sh,
+            "case !{poll $alias} [\
+                `running: { |_| return -1 }, `stopping: { |_| return -1 },\
+                `consumed: { |_| return -1 },\
+                `ready: { |d| case $d[outcome] [\
+                    `ok: { |n| return $n }, `err: { |_| return -1 }\
+                ] }\
+            ]",
+        )
+        .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(top_level(&mut sh, "await $alias").unwrap(), Value::Int(2));
     let message = refusal(top_level(&mut sh, "await $h"));
     assert!(message.contains("already claimed"), "{message}");
 }
 
 #[test]
-fn imported_weak_handle_payloads_keep_delayed_obligations() {
+fn a_decided_handle_payload_preserves_function_polymorphism_across_units() {
     let mut sh = shell();
-    top_level(&mut sh, "let h = spawn { return [f: { |s| to-string $s | from-json }] }; let _ = first-settled [$h]").unwrap();
-    let later = "let box = await $h; let n = $box[f] '\"bad\"'; let result = $[$n + 1]";
-    assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(top_level(&mut sh, later));
-    assert!(message.contains("imported value"), "{message}");
+    top_level(
+        &mut sh,
+        "let h = spawn { return [f: { |x| return $x }] }; let _ = first-settled [$h]",
+    )
+    .unwrap();
+    assert_eq!(
+        top_level(
+            &mut sh,
+            "let box = await $h; let flag = $box[f] true; let n = $box[f] 1; return $[$n + 1]",
+        )
+        .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(sh.scope_lookup("flag"), Some(&Value::Bool(true)));
 }
 
 #[test]
-fn imported_weak_protection_survives_a_third_run() {
+fn a_handle_with_a_delayed_function_in_its_payload_is_not_importable() {
+    let mut sh = shell();
+    top_level(&mut sh, "let h = spawn { return [f: { |s| to-string $s | from-json }] }; let _ = first-settled [$h]").unwrap();
+    assert_delayed_refusal(
+        &mut sh,
+        "let box = await $h; let n = $box[f] '1'; return $[$n + 1]",
+        &["h"],
+    );
+}
+
+#[test]
+fn a_delayed_function_cannot_be_carried_into_a_third_unit_by_an_alias() {
     let mut sh = shell();
     top_level(&mut sh, WEAK_DECODER).unwrap();
-    top_level(&mut sh, "let next = [f: $decode]").unwrap();
-    let later = "let n = !{$next[f] '\"bad\"'}; let result = $[$n + 1]";
-    assert!(check_errors(&sh, later).is_empty());
-    let message = refusal(top_level(&mut sh, later));
-    assert!(message.contains("imported value"), "{message}");
+    assert_delayed_refusal(&mut sh, "let next = [f: $decode]", &["decode"]);
+    assert!(sh.scope_lookup("next").is_none());
+    assert_delayed_refusal(&mut sh, "decode '1'", &["decode"]);
 }
 
 const DECODE_A: &str = r#"let m = !{to-string '{"a": "x"}' | from-json}"#;
@@ -920,7 +1019,7 @@ fn a_later_line_that_misuses_decoded_data_is_refused_before_it_runs() {
 }
 
 #[test]
-fn a_module_readmits_session_data_before_its_first_phrase() {
+fn a_module_refuses_session_data_statically_before_either_unit_runs() {
     let tmp = tempfile::tempdir().unwrap();
     let root = ral_core::test_helper::real(tmp.path());
     let module = root.as_path().join("lib.ral");
@@ -931,32 +1030,40 @@ fn a_module_readmits_session_data_before_its_first_phrase() {
     );
     std::fs::write(&module, &source).unwrap();
     let mut sh = shell();
-    top_level(&mut sh, "let d = !{to-string '\"s\"' | from-json}").unwrap();
-    assert!(check_errors(&sh, &source).is_empty());
-
-    let load = format!("use {}", quote_word(&shown(&module)));
-    let Break::Error(error) = top_level(&mut sh, &load).expect_err("$d is not an integer") else {
-        panic!("expected a module admission error");
-    };
-    let message = error.describe();
-    assert!(
-        message.contains("$d: the value is the string \"s\""),
-        "{message}"
+    let load = format!(
+        "let importer_marker = 1; use {}",
+        quote_word(&shown(&module))
     );
-    assert!(message.contains("uses it as an integer"), "{message}");
-    assert_eq!(error.context(), Some("use"));
-    let record = error.fact(&sh);
-    assert_eq!(record.site().script.as_ref(), shown(&module));
-    assert_eq!(record.site().line, 2);
-    assert!(!marker.exists(), "the module's first phrase must not run");
+    for (seed, expected) in [
+        (
+            "let d = !{to-string '\"s\"' | from-json}",
+            Value::string("s"),
+        ),
+        ("let d = 1", Value::Int(1)),
+    ] {
+        top_level(&mut sh, seed).unwrap();
+        assert!(check_errors(&sh, &source).is_empty());
 
-    top_level(&mut sh, "let d = 1").unwrap();
-    top_level(&mut sh, &load).expect("the module runs with integer session data");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
+        let RunReport::Static {
+            diagnostics: StaticDiagnostics::Compile(rejection),
+            ..
+        } = sh.run(Run::captured(load.clone(), SourceOrigin::named("<test>")))
+        else {
+            panic!("a closed module must not read session data");
+        };
+        let nested = rejection.nested.as_deref().expect("the module is refused");
+        assert_eq!(nested.source.origin().file(), Some(module.as_path()));
+        let rendered = nested.render();
+        assert!(rendered.contains("undefined variable: $d"), "{rendered}");
+        assert!(!marker.exists(), "the module's first phrase must not run");
+        assert!(sh.scope_lookup("importer_marker").is_none());
+        assert!(sh.scope_lookup("y").is_none());
+        assert_eq!(sh.scope_lookup("d"), Some(&expected));
+    }
 }
 
 #[test]
-fn evaluate_source_readmits_session_data_before_its_first_phrase() {
+fn extend_session_readmits_session_data_before_its_first_phrase() {
     let tmp = tempfile::tempdir().unwrap();
     let marker = tmp.path().join("ran");
     let source = format!(
@@ -969,7 +1076,7 @@ fn evaluate_source_readmits_session_data_before_its_first_phrase() {
     assert!(check_errors(&sh, &source).is_empty());
 
     let Break::Error(error) =
-        ral_core::shell::load::evaluate_source(&Mooring::adrift(), &mut sh, &source, &origin, None)
+        ral_core::shell::load::extend_session(&Mooring::adrift(), &mut sh, &source, &origin, None)
             .expect_err("$d is not an integer")
     else {
         panic!("expected a source admission error");
@@ -988,7 +1095,7 @@ fn evaluate_source_readmits_session_data_before_its_first_phrase() {
     assert_eq!(sh.scope_lookup("d"), Some(&Value::string("s")));
 
     top_level(&mut sh, "let d = 1").unwrap();
-    ral_core::shell::load::evaluate_source(&Mooring::adrift(), &mut sh, &source, &origin, None)
+    ral_core::shell::load::extend_session(&Mooring::adrift(), &mut sh, &source, &origin, None)
         .expect("the source runs with integer session data");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
     assert_eq!(sh.scope_lookup("y"), Some(&Value::Int(2)));
@@ -1008,34 +1115,30 @@ fn a_later_line_cannot_use_decoded_data_at_a_type_its_unit_did_not() {
     assert!(!check_errors(&sh, "let s = upper $m[a]").is_empty());
 }
 
-/// A session function that returns decoded data keeps the sites in its own IR:
-/// each later line checks statically, and the function's `Fixings` make the
-/// second call agree with the first on what a compared pair is (cost 11).
+/// A decoder's comparable residual has one shape throughout its defining unit.
 #[test]
-fn a_session_function_returning_decoded_data_is_checked_by_its_own_site() {
+fn a_decoder_function_checks_comparison_consistency_within_its_unit() {
     let mut sh = shell();
-    top_level(
-        &mut sh,
-        "let f = { |s| let d = !{to-string $s | from-json}; let _ = $[$d[a] < $d[c]]; return $d }",
-    )
-    .unwrap();
-    let first = r#"let x = f '{"a": 1, "c": 2}'"#;
-    let second = r#"let y = f '{"a": "p", "c": "q"}'"#;
-    assert!(check_errors(&sh, first).is_empty());
-    assert!(check_errors(&sh, second).is_empty());
-    top_level(&mut sh, first).unwrap();
-    let message = refusal(top_level(&mut sh, second));
+    let source = r#"
+        let f = { |s| let d = !{to-string $s | from-json}; let _ = $[$d[a] < $d[c]]; return $d }
+        let x = f '{"a": 1, "c": 2}'
+        let y = f '{"a": "p", "c": "q"}'
+    "#;
+    assert!(check_errors(&sh, source).is_empty());
+    let message = refusal(top_level(&mut sh, source));
     assert!(message.contains("is a number and"), "{message}");
     assert!(
         message.contains("is text, and this script compares them"),
         "{message}"
     );
+    assert!(
+        sh.scope_lookup("x").is_some(),
+        "the first call must succeed"
+    );
+    assert!(sh.scope_lookup("y").is_none(), "the second call must fail");
 }
 
-/// A document its own unit fixed to a cycle — json-get's walk is `μα. Map α` —
-/// keeps the cycle across units and has no residual left, so the later unit
-/// uses it at that type and re-admits nothing: the site that decoded it already
-/// held the value to exactly this type.
+/// A recursively shaped document keeps its decided type across units.
 #[test]
 fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
     let mut sh = shell();
@@ -1045,48 +1148,55 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
          let first = fold { |node key| return $node[$key] } $doc ['a']",
     )
     .unwrap();
-    let stored = scheme_of(&sh, "doc")
-        .expect("doc must carry a scheme")
-        .to_string();
-    assert!(stored.starts_with("μ"), "{stored}");
-    let later = "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']";
-    assert!(check_errors(&sh, later).is_empty());
-    let top = compile_and_typecheck(later, sh.session_schemes(), FileId::DUMMY, None, None)
-        .expect("the later line checks");
-    assert!(top.admits.is_empty(), "nothing is left to admit again");
-    top_level(&mut sh, later).unwrap();
+    assert_eq!(
+        top_level(
+            &mut sh,
+            "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']; length $second",
+        )
+        .unwrap(),
+        Value::Int(0)
+    );
+    assert!(
+        check_errors(&sh, "return $[$doc + 1]")
+            .iter()
+            .any(|error| error.kind.code() == "T0074"),
+        "the recursive map must not become a scalar in a later unit"
+    );
 }
 
-/// What a unit leaves undecided is admitted again by each unit that uses it,
-/// once, before it runs.
+/// Repeated uses agree within a unit; a later unit must still readmit the data.
 #[test]
 fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
     let mut sh = shell();
     top_level(&mut sh, DECODE_A).unwrap();
-    let admits = |src: &str| {
-        compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
-            .expect("the line checks")
-            .admits
-            .len()
-    };
-    assert_eq!(admits("let k = length $m"), 1);
-    assert_eq!(admits("let k = length $m\nlet j = length $m"), 1);
-    assert_eq!(admits("let k = 1"), 0);
+    assert_eq!(
+        top_level(&mut sh, "let text = upper $m[a]; return !{upper $m[a]}").unwrap(),
+        Value::string("X")
+    );
+    let later = "let readmission_marker = 1; return $[$m[a] + 1]";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(top_level(&mut sh, later));
+    assert!(message.contains("the string \"x\""), "{message}");
+    assert!(sh.scope_lookup("readmission_marker").is_none());
 }
 
-/// An imported weak value is given a membrane only where a thunk or handle
-/// hides in its contract: pure data was admitted whole, once, and costs
-/// nothing per occurrence.
 #[test]
-fn only_imported_values_with_delayed_parts_are_given_a_membrane() {
+fn weak_data_beside_a_decided_function_is_legal_and_readmitted_before_use() {
     let mut sh = shell();
-    top_level(&mut sh, "let d = !{to-string '[1,2]' | from-json}").unwrap();
-    top_level(&mut sh, WEAK_DECODER).unwrap();
-    let membrane = |src: &str| {
-        let top = compile_and_typecheck(src, sh.session_schemes(), FileId::DUMMY, None, None)
-            .expect("the line checks");
-        format!("{:?}", top.phrases).contains("Protected {")
-    };
-    assert!(!membrane("let k = length $d"));
-    assert!(membrane("let box = [f: $decode]"));
+    top_level(
+        &mut sh,
+        "let d = !{to-string '\"x\"' | from-json}; let bundle = [data: $d, inc: { |x| return $[$x + 1] }]",
+    )
+    .unwrap();
+    assert_eq!(
+        top_level(&mut sh, "let text = upper $bundle[data]; $bundle[inc] 1").unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(sh.scope_lookup("text"), Some(&Value::string("X")));
+
+    let later = "let adjacent_marker = 1; return $[$bundle[data] + 1]";
+    assert!(check_errors(&sh, later).is_empty());
+    let message = refusal(top_level(&mut sh, later));
+    assert!(message.contains("the string \"x\""), "{message}");
+    assert!(sh.scope_lookup("adjacent_marker").is_none());
 }

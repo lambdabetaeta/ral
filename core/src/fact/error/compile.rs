@@ -24,8 +24,9 @@ record!(TypeErrorCount { count: "count" });
 pub enum CompilePhase {
     Parse,
     Types(TypeErrorCount),
+    Use,
 }
-variant!(CompilePhase { Parse: "parse", Types(TypeErrorCount): "types" });
+variant!(CompilePhase { Parse: "parse", Types(TypeErrorCount): "types", Use: "use" });
 
 impl CompileFailure {
     pub fn describe(&self) -> String {
@@ -36,6 +37,7 @@ impl CompileFailure {
                 self.source,
                 plural(errors.count.to_u64(), "error")
             ),
+            CompilePhase::Use => format!("loaded source {:?} could not link a module", self.source),
         }
     }
 }
@@ -51,6 +53,7 @@ impl CompilePhase {
         match self {
             Self::Parse => "parse".to_owned(),
             Self::Types(value) => format!("types: {}", value.describe()),
+            Self::Use => "use".to_owned(),
         }
     }
 }

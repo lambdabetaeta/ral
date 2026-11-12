@@ -134,13 +134,13 @@ fn fork_then_enquire(
 
 /// A row a family's argument mentions.  `first_order` refuses a block or
 /// handle at any depth of the argument, so its rows are deep and its type
-/// variables `Kind::DATA`; an answer's are any type, which the boundary admits
-/// against what it sent.
+/// variables `Kind::DATA`. Answers are first-order data too; the boundary
+/// admits them against the shape the script uses.
 fn argument_row(binders: &mut Binders) -> RowVar {
     binders.row(true)
 }
 
-/// `exarch-agents :: ∀β:data α ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | stop Str | dismiss Str | reply β | read Str | ρ4> → F α`
+/// `exarch-agents :: ∀β:data α:data ρ1^d ρ2^d ρ3^d ρ4^d. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, model: Variant ρ3] | message [to: Str, text: Str] | stop Str | dismiss Str | reply β | read Str | ρ4> → F α`
 ///
 /// The outer tag row is open (`ρ4`) so an unrecognised tag reaches the
 /// runtime decoder that names the legal ones, rather than dying as a
@@ -150,8 +150,8 @@ fn argument_row(binders: &mut Binders) -> RowVar {
 /// `[[name, spawner, state, idle-s, elapsed-s, log-dir]]`, the acting tags the
 /// summary `[live, replied]`,
 /// and `` `read `` the value a
-/// descendant handed up, whose shape this call cannot know — so `α` is left
-/// free rather than fixed to one of these. This is the
+/// descendant handed up, whose shape this call cannot know — so `α` ranges
+/// over data rather than being fixed to one of these. This is the
 /// `` `exarch-pins `read `` / `from-json` move ([`scheme_pins`]): the boundary
 /// admits whichever shape [`Request::owed`] names for the tag it sent.
 ///
@@ -170,7 +170,7 @@ fn scheme_agents(binders: &mut Binders) -> Ty {
     let model_row = argument_row(binders);
     let tag_row = argument_row(binders);
     let reply_ty = binders.ty(Kind::DATA);
-    let answer_ty = binders.ty(Kind::ANY);
+    let answer_ty = binders.ty(Kind::DATA);
     thunk(fun(
         open_variant(
             &[
@@ -231,21 +231,20 @@ fn scheme_schedules(binders: &mut Binders) -> Ty {
     ))
 }
 
-/// `exarch-pins :: ∀α ρ1^d ρ2^d. <set [key: Str, body: <| ρ1>] | clear Str | read Str | list | ρ2> → F α`
+/// `exarch-pins :: ∀α:data ρ1^d ρ2^d. <set [key: Str, body: <| ρ1>] | clear Str | read Str | list | ρ2> → F α`
 ///
 /// Same shape as [`scheme_agents`]: the outer tag row is open (`ρ2`) so an
 /// unrecognised tag reaches the decoder, and `set`'s record row is closed since
 /// a record literal infers an exact one. `body` is an open variant, the card
 /// type `surface_op` takes, with a deep row: the label check stays
 /// `Card::decode`'s, so one decoder owns it. `` `read ``'s
-/// answer is `α`, the `from-json`/`` `read `` precedent
-/// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
-/// checked, since only the desk's own decoder can judge whether the card
-/// read back matches the shape it expects.
+/// answer is `α:data`, as with `from-json`
+/// ([`ral_core::typecheck::builtins::scheme::from_json`]): the boundary admits
+/// the returned card against the shape the script uses.
 fn scheme_pins(binders: &mut Binders) -> Ty {
     let card_row = argument_row(binders);
     let tag_row = argument_row(binders);
-    let answer_ty = binders.ty(Kind::ANY);
+    let answer_ty = binders.ty(Kind::DATA);
     thunk(fun(
         open_variant(
             &[
@@ -288,15 +287,15 @@ fn scheme_context(binders: &mut Binders) -> Ty {
     ))
 }
 
-/// `exarch-transcript :: ∀α ρ. <index | read [turns: [Int]] | grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`
+/// `exarch-transcript :: ∀α:data ρ^d. <index | read [turns: [Int]] | grep [pattern: Str, turns: <all | only [Int]>] | ρ> → F α`
 ///
 /// The outer tag row is open (`ρ`) so an unrecognised tag reaches the
 /// runtime decoder that names the three legal ones, rather than dying as a
 /// row-unification mismatch.
 ///
 /// Each tag answers its own shape — a listing, one record per turn a read
-/// named, a hit table — so `α` is left free rather than fixed to any one of
-/// them, exactly as [`scheme_agents`] leaves it free for `` `read ``. The
+/// named, a hit table — so `α` ranges over data rather than being fixed to
+/// any one of them, as in [`scheme_agents`]'s `` `read ``. The
 /// answer's shape is then [`Request::owed`]'s to check and the docstring's to
 /// state.
 ///
@@ -306,7 +305,7 @@ fn scheme_context(binders: &mut Binders) -> Ty {
 /// absence is data.
 fn scheme_transcript(binders: &mut Binders) -> Ty {
     let tag_row = argument_row(binders);
-    let answer_ty = binders.ty(Kind::ANY);
+    let answer_ty = binders.ty(Kind::DATA);
     thunk(fun(
         open_variant(
             &[

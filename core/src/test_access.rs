@@ -31,7 +31,7 @@ use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
-use crate::shell::runtime::{BuiltinEntry, Mooring, Settled, Shell};
+use crate::shell::runtime::{Binding, BuiltinEntry, Mooring, Settled, Shell, Value};
 use crate::ty::{Closed, Scheme, Ty, Var};
 use crate::typecheck::Unifier;
 use std::sync::Arc;
@@ -60,6 +60,12 @@ pub fn exec_has_redirects(exec: &Exec) -> bool {
 /// The builtin's cached closed scheme.
 pub fn builtin_scheme(entry: &BuiltinEntry) -> &Closed {
     entry.decl.scheme()
+}
+
+/// Whether the declared final result is first-order data, including its open
+/// variables and μ-equations. Does not check the outer thunk or its arguments.
+pub fn boundary_result_is_data(scheme: &Scheme) -> bool {
+    scheme.boundary_result_is_data()
 }
 
 /// The real paths the fs projection reads, baseline, run places and support
@@ -181,6 +187,17 @@ pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
     check_exec(&shell.context.grants, shell.baseline(), real, file(real))
         .map(drop)
         .map_err(|denial| shell.exec_refused(*denial, &Mooring::adrift()))
+}
+
+/// Bind a test value without a scheme, bypassing the host binding door.
+pub fn bind_untyped(shell: &mut Shell, name: &str, value: Value) {
+    shell.env.bind(
+        name.into(),
+        Binding {
+            value,
+            scheme: None,
+        },
+    );
 }
 
 /// The scheme `name` carries on the live scope: `None` when it is unbound or

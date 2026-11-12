@@ -1,6 +1,6 @@
 //! The serialized context, with validation outside serde's error channel.
 
-use super::{Context, Modules};
+use super::Context;
 use crate::authority::policy::json::RawGrantStack;
 use crate::data::json::{
     JsonDecode, JsonEncode, JsonFormat, JsonRef, decode_structural, serialize_structural,
@@ -21,7 +21,6 @@ pub(crate) struct RawContext<H> {
     grants: RawGrantStack,
     handlers: H,
     args: Vec<String>,
-    modules: Modules,
 }
 
 impl<H> RawContext<H> {
@@ -42,7 +41,6 @@ impl<H> RawContext<H> {
                 .map_err(|error| error.field("grants"))?,
             handlers: handlers(self.handlers).map_err(|error| error.field("handlers"))?,
             args: self.args,
-            modules: self.modules,
         })
     }
 
@@ -68,7 +66,6 @@ impl<H> RawContext<H> {
             grants: RawGrantStack::from(&value.grants),
             handlers: handlers(&value.handlers).map_err(|error| error.field("handlers"))?,
             args: value.args.clone(),
-            modules: value.modules.clone(),
         })
     }
 }
@@ -127,7 +124,6 @@ mod tests {
             grants: GrantStack::root(),
             handlers: Vec::new(),
             args: vec!["first".into(), String::new()],
-            modules: Modules::default(),
         }
     }
 
@@ -137,8 +133,7 @@ mod tests {
             "cwd": cwd(),
             "grants": [],
             "handlers": handlers,
-            "args": [],
-            "modules": {"stack": []}
+            "args": []
         })
     }
 
@@ -159,13 +154,7 @@ mod tests {
 
     #[test]
     fn raw_context_preserves_compact_pretty_and_field_spelling() {
-        let mut context = context();
-        context.modules.stack = vec![
-            crate::source::SourceOrigin::File(
-                crate::source::SourceFile::new("module.ral").unwrap(),
-            ),
-            crate::source::SourceOrigin::Virtual("<module>".into()),
-        ];
+        let context = context();
         let semantic = context.with_handlers(Vec::<()>::new());
         for (bytes, expected) in [
             (
@@ -184,13 +173,12 @@ mod tests {
             assert_eq!(decoded.grants, context.grants);
             assert_eq!(decoded.args, context.args);
             assert!(decoded.handlers.is_empty());
-            assert_eq!(decoded.modules.stack, context.modules.stack);
         }
     }
 
     #[test]
     fn raw_context_keeps_positional_forms_without_adding_defaults() {
-        let positional = json!([{}, cwd(), [], [], [], [[]]]);
+        let positional = json!([{}, cwd(), [], [], []]);
         assert!(decode(&positional).is_ok());
         let mut object = envelope(&json!([]));
         object.as_object_mut().unwrap().remove("args");
@@ -208,7 +196,7 @@ mod tests {
     #[test]
     fn raw_context_rejects_duplicate_known_fields_and_ignores_unknown_fields() {
         let bytes = format!(
-            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[],"args":[],"args":[],"modules":{{"stack":[]}}}}"#,
+            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[],"args":[],"args":[]}}"#,
             serde_json::to_string(cwd()).unwrap()
         );
         let error = from_slice::<WireContext>(bytes.as_bytes()).unwrap_err();
@@ -228,7 +216,7 @@ mod tests {
     #[test]
     fn raw_context_validates_environment_after_map_replacement() {
         let bytes = format!(
-            r#"{{"env_overrides":{{"A":"first","A":"last"}},"cwd":{},"grants":[],"handlers":[],"args":[],"modules":{{"stack":[]}}}}"#,
+            r#"{{"env_overrides":{{"A":"first","A":"last"}},"cwd":{},"grants":[],"handlers":[],"args":[]}}"#,
             serde_json::to_string(cwd()).unwrap()
         );
         let decoded = from_slice::<WireContext>(bytes.as_bytes()).unwrap();
@@ -369,7 +357,7 @@ mod tests {
         );
         assert_eq!(*error.cause, DecodeCause::MissingField("kind".into()));
         let bytes = format!(
-            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[{{"entries":[],"kind":"Within","kind":"Handler"}}],"args":[],"modules":{{"stack":[]}}}}"#,
+            r#"{{"env_overrides":{{}},"cwd":{},"grants":[],"handlers":[{{"entries":[],"kind":"Within","kind":"Handler"}}],"args":[]}}"#,
             serde_json::to_string(cwd()).unwrap()
         );
         assert_eq!(

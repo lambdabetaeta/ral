@@ -40,33 +40,12 @@ pub(crate) struct RunOpts {
     pub capabilities: Vec<std::path::PathBuf>,
 }
 
-/// Where a batch run stops short of running: static work on the source alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Halt {
-    /// `--dump-ast`: the parse.
-    Ast,
-    /// `--dump-ir`: the elaborated phrases, whether or not they typecheck.
-    Ir,
-    /// `--check`: the whole compile, reported as a run reports it.
-    Checked,
-}
-
-impl Halt {
-    fn flag(self) -> &'static str {
-        match self {
-            Self::Ast => "--dump-ast",
-            Self::Ir => "--dump-ir",
-            Self::Checked => "--check",
-        }
-    }
-}
-
 /// Flags valid only in batch (script / `-c`) modes.
 #[derive(Default, Clone)]
 pub(crate) struct BatchOpts {
     pub audit: bool,
     pub pretty: bool,
-    pub halt: Option<Halt>,
+    pub check: bool,
     pub run: RunOpts,
 }
 
@@ -107,7 +86,6 @@ impl InteractiveOpts {
     name = "ral",
     version = concat!(env!("CARGO_PKG_VERSION"), env!("RAL_VERSION_SUFFIX")),
     about = "ral: a typed, structured shell",
-    group(clap::ArgGroup::new("halt").args(["check", "dump_ast", "dump_ir"])),
     long_about = "\
 ral is a typed, structured shell. Programs pass values: records, lists, \
 variants, strings, numbers: and the type checker catches many mistakes before \
@@ -131,7 +109,6 @@ Use --norc to skip both.
 
 ENVIRONMENT
     RAL_INTERACTIVE_MODE  line editing: auto or minimal
-    RAL_PATH              platform-separated plugin/module search path
     RAL_TIMING            when present, print batch phase timings to stderr
 
 AUDIT
@@ -174,33 +151,18 @@ struct Cli {
 
     /// Check the program without running it.
     ///
-    /// Ral parses, elaborates and type-checks the program, then exits. It
-    /// returns status 0 when the check succeeds, 1 for a type error and 2 for a
-    /// syntax error. You must give ral a script file or use `-c`.
-    #[arg(long, short = 'n')]
+    /// Ral boots the session, applies capability profiles, then parses,
+    /// elaborates and type-checks the program without evaluating it. It returns
+    /// status 0 when the check succeeds, 1 for a type error and 2 for a syntax
+    /// error. You must give ral a script file or use `-c`.
+    #[arg(long)]
     check: bool,
-
-    /// Print ral's internal syntax tree to standard error without running it.
-    ///
-    /// Ral stops after parsing, so this option does not elaborate or type-check
-    /// the program. You must give ral a script file or use `-c`.
-    #[arg(long = "dump-ast")]
-    dump_ast: bool,
-
-    /// Print ral's elaborated phrases to standard error without running them.
-    ///
-    /// Ral stops after elaboration, so this option does not type-check the
-    /// program: it prints the phrases of a program that fails the check too.
-    /// You must give ral a script file or use `-c`.
-    #[arg(long = "dump-ir")]
-    dump_ir: bool,
 
     /// Set the maximum number of machine frames ral may use while running code.
     ///
     /// N must be a positive integer. The default is 100000. In an interactive
-    /// session, this option overrides `recursion-limit` in the rc file. It has
-    /// no effect with `--check`, `--dump-ast` or `--dump-ir` because those modes do
-    /// not run the program.
+    /// session, this option overrides `recursion-limit` in the rc file. It also
+    /// applies to session boot under `--check`.
     #[arg(long = "recursion-limit", value_name = "N",
           value_parser = clap::value_parser!(u64).range(1..))]
     recursion_limit: Option<u64>,
@@ -210,9 +172,7 @@ struct Cli {
     /// Separate paths with commas or repeat this option. Ral combines the
     /// profiles from left to right and applies them before running code. A
     /// relative path names a file in the directory ral starts in, even when a
-    /// start-up file changes directory. It has
-    /// no effect with `--check`, `--dump-ast` or `--dump-ir` because those modes do
-    /// not start a runtime session.
+    /// start-up file changes directory. The same profiles apply under `--check`.
     #[arg(long, value_name = "PATHS", value_delimiter = ',',
           action = clap::ArgAction::Append)]
     capabilities: Vec<std::path::PathBuf>,
@@ -302,17 +262,10 @@ impl Cli {
             }),
             capabilities,
         };
-        let halt = [
-            (self.check, Halt::Checked),
-            (self.dump_ast, Halt::Ast),
-            (self.dump_ir, Halt::Ir),
-        ]
-        .into_iter()
-        .find_map(|(on, halt)| on.then_some(halt));
         let batch = BatchOpts {
             audit: self.audit,
             pretty: self.pretty,
-            halt,
+            check: self.check,
             run: run.clone(),
         };
 
@@ -336,7 +289,7 @@ impl Cli {
             };
         }
 
-        reject_batch_flags_without_batch(self.audit, halt);
+        reject_batch_flags_without_batch(self.audit, self.check);
 
         Mode::Interactive(InteractiveOpts {
             login,
@@ -349,8 +302,11 @@ impl Cli {
     }
 }
 
-fn reject_batch_flags_without_batch(audit: bool, halt: Option<Halt>) {
-    let Some(flag) = audit.then_some("--audit").or_else(|| halt.map(Halt::flag)) else {
+fn reject_batch_flags_without_batch(audit: bool, check: bool) {
+    let Some(flag) = audit
+        .then_some("--audit")
+        .or_else(|| check.then_some("--check"))
+    else {
         return;
     };
     Cli::command()
@@ -484,6 +440,38 @@ mod tests {
     }
 
     #[test]
+    fn checking_keeps_the_boot_options() {
+        let Mode::Command { batch, .. } = mode_of(&[
+            "--check",
+            "--audit",
+            "--recursion-limit",
+            "2048",
+            "--capabilities",
+            "profile.ral",
+            "-c",
+            "return ()",
+        ]) else {
+            panic!("expected Command")
+        };
+        assert!(batch.check && batch.audit);
+        assert_eq!(batch.run.recursion_limit, Some(2048));
+        assert_eq!(
+            batch.run.capabilities,
+            [std::path::PathBuf::from("profile.ral")]
+        );
+    }
+
+    #[test]
+    fn removed_static_flags_are_unknown() {
+        use clap::Parser as _;
+
+        for flag in ["-n", "--dump-ast", "--dump-ir"] {
+            let error = Cli::try_parse_from(["ral", flag, "-c", "return ()"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
     fn value_taking_long_options_keep_their_values() {
         match mode_of(&["--recursion-limit", "2048", "script.ral", "-n"]) {
             Mode::Script {
@@ -494,7 +482,7 @@ mod tests {
                 assert_eq!(path, std::path::PathBuf::from("script.ral"));
                 assert_eq!(script_args, ["-n"]);
                 assert_eq!(batch.run.recursion_limit, Some(2048));
-                assert_eq!(batch.halt, None);
+                assert!(!batch.check);
             }
             m => panic!("expected Script, got {}", mode_name(&m)),
         }

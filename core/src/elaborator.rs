@@ -14,9 +14,10 @@
 //! `Exec` against the command namespace.  Every other head shape (`^name`,
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
+use crate::compile::{CompileError, UseRefusal};
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode, MapEntryV, Name,
-    Pattern, Phrase, Redirects, Unchecked, Val, ValListElem, synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, GroupNode, MapEntryV, Module,
+    Name, Pattern, Phrase, Redirects, Unchecked, Val, ValListElem, synthetic,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -31,8 +32,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
+/// Links the module a written `use` path names. `at` is the path's span;
+/// `script` is the containing file, if any.
+pub type Loader<'a> =
+    &'a mut (dyn FnMut(Span, &str, Option<&Path>) -> Result<Arc<Module>, UseRefusal> + Send);
+
 /// State threaded through the elaboration pass.
-struct Elaborator {
+struct Elaborator<'a> {
     /// Fresh-name counter for `gensym`.
     counter: usize,
     /// Prelude exports, in scope beneath every lexical frame.  Shared and never
@@ -46,13 +52,12 @@ struct Elaborator {
     /// Attached to every emitted `Comp`; narrowed and restored by `with_span`,
     /// which every traversal that knows a tighter byte range wraps its body in.
     current_span: Option<Span>,
-    /// The script file's path as shown, `None` where there is no
-    /// self-location to bake (the REPL, `-c`, virtual sources).  What
-    /// `$SCRIPT` resolves to.
-    script: Option<String>,
+    /// Native self-location, both the module anchor and `$SCRIPT`'s source.
+    script: Option<&'a Path>,
+    loader: Loader<'a>,
     /// Elaboration's one failure path, checked by `elaborate` once the walk is
     /// done — a single slot beats threading `Result` through every traversal.
-    error: Option<ParseError>,
+    error: Option<CompileError>,
 }
 
 /// A stretch under elaboration (SPEC §5.7): the references that resolve to
@@ -78,23 +83,28 @@ macro_rules! comp {
     };
 }
 
-impl WithSpan for Elaborator {
+impl WithSpan for Elaborator<'_> {
     fn span_slot(&mut self) -> &mut Option<Span> {
         &mut self.current_span
     }
 }
 
-impl Elaborator {
+impl<'a> Elaborator<'a> {
     /// `bindings` are names already live in the caller (REPL definitions, say);
     /// `script` is the file the source was read from, if any.
-    fn new_with_bindings(bindings: impl IntoIterator<Item = Name>, script: Option<&Path>) -> Self {
+    fn new_with_bindings(
+        bindings: impl IntoIterator<Item = Name>,
+        script: Option<&'a Path>,
+        loader: Loader<'a>,
+    ) -> Self {
         Self {
             counter: 0,
             prelude: prelude_scope(),
             lexical_scopes: vec![bindings.into_iter().collect(), HashSet::new()],
             stretches: Vec::new(),
             current_span: None,
-            script: script.map(crate::path::shown),
+            script,
+            loader,
             error: None,
         }
     }
@@ -109,7 +119,7 @@ impl Elaborator {
             return Val::Variable(name.into());
         }
         if let Some(s) = &self.script {
-            return Val::String(s.clone().into());
+            return Val::String(crate::path::shown(s).into());
         }
         self.refuse(ParseError::new(
             self.current_span,
@@ -126,7 +136,7 @@ impl Elaborator {
 
     /// Elaboration's one failure: the first refusal stands.
     fn refuse(&mut self, error: ParseError) {
-        self.error.get_or_insert(error);
+        self.error.get_or_insert(CompileError::Parse(error));
     }
 
     /// The one door into scope, hence the one place `SCRIPT` is refused as
@@ -265,16 +275,18 @@ pub(crate) fn word_val(s: &str) -> Val {
 /// `bindings` are the names already live in the calling environment (a REPL's
 /// accumulated definitions, say); the prelude is always in scope.  `script` is
 /// the file the source was read from, `None` for a virtual source; shown, it
-/// is the value `$SCRIPT` resolves to.
+/// is the value `$SCRIPT` resolves to. `loader` links each written `use` path,
+/// anchored at the native `script` path.
 ///
 /// # Errors
-/// `$SCRIPT` referenced where there is no `script`, or bound by a pattern.
+/// An invalid binding or operand, or a module the loader refuses.
 pub fn elaborate(
     ast: &[Stmt],
     bindings: impl IntoIterator<Item = Name>,
     script: Option<&Path>,
-) -> Result<Unchecked, ParseError> {
-    let mut elaborator = Elaborator::new_with_bindings(bindings, script);
+    loader: Loader<'_>,
+) -> Result<Unchecked, CompileError> {
+    let mut elaborator = Elaborator::new_with_bindings(bindings, script, loader);
     let mut phrases = Vec::new();
     let parts = group::parts(ast);
     for (k, part) in parts.iter().enumerate() {

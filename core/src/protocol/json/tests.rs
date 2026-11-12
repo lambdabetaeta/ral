@@ -608,9 +608,9 @@ fn program_and_report_trail_keep_field_index_payload_paths() {
 
 #[test]
 fn report_failure_status_zero_is_domain_failure_and_outside_byte_is_numeric_failure() {
-    for tag in ["Static", "Faulted"] {
+    for (tag, trail) in [("Static", r#", "trail":[]"#), ("Faulted", "")] {
         let error = failure::<Report>(
-            format!(r#"{{"{tag}":{{"rendered":"report","status":0}}}}"#).as_bytes(),
+            format!(r#"{{"{tag}":{{"rendered":"report","status":0{trail}}}}}"#).as_bytes(),
         );
         assert_eq!(
             error.path,
@@ -627,7 +627,7 @@ fn report_failure_status_zero_is_domain_failure_and_outside_byte_is_numeric_fail
             })
         );
         let error = failure::<Report>(
-            format!(r#"{{"{tag}":{{"rendered":"report","status":256}}}}"#).as_bytes(),
+            format!(r#"{{"{tag}":{{"rendered":"report","status":256{trail}}}}}"#).as_bytes(),
         );
         assert_eq!(
             error.path,

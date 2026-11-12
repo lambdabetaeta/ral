@@ -20,7 +20,9 @@ transport are runtime mechanisms, not mechanised rules.
   operand is a value. A primitive computes on those values and may fail;
   it neither resolves a shell name nor runs another computation.
 - **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
-  `Gather`, `Audit`, `Tilde`, `Protect`/`Val::Protected`. Resolved full-arity
+  `Gather`, `Audit`, `Tilde`, `Use`. `Use` holds
+  a linked checked module, closed under Σ; evaluation runs that tree and
+  never resolves or reads a module file. Resolved full-arity
   sample builtins correspond to Agda's `prim (builtin b)`; the shell forms
   themselves are outside the core.
 
@@ -50,6 +52,11 @@ transport are runtime mechanisms, not mechanised rules.
 - The checker writes returned-thunk application as `M to h. force h · V`;
   binding capture as `Capture(M) to d. Prim::Decode(d)`.
   No runtime rule forces implicitly or converts a value producer to a command.
+- Boundary sites admit first-order data at the door; imported residual data
+  is readmitted before the unit runs. A stored name whose scheme reaches a
+  weak residual beneath a thunk or handle is statically unusable in a later
+  unit, following μ-equations in both contexts. No returned value owes a
+  delayed contract check, and the runtime builds no contract IR.
 - A variant always has a payload: a bare tag carries `()`.
 - A form's options are one spread-free record node. `within`'s `handlers:`
   is an ordinary map-valued field; command names are data, with no

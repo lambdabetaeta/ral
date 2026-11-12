@@ -1,0 +1,5 @@
+# status: 1
+# contains: module load cycle
+# contains: cycle-a.ral
+# contains: cycle-b.ral
+let _ = use '../lib/modules/cycle-a.ral'

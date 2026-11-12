@@ -262,6 +262,9 @@ fn strip_scope(op: ScopeAst) -> ScopeAst {
             body: s(body),
         },
         ScopeAst::Gather { body } => ScopeAst::Gather { body: s(body) },
+        ScopeAst::Use { path } => ScopeAst::Use {
+            path: Spanned::synthetic(s(path.item)),
+        },
     }
 }
 
@@ -1752,6 +1755,43 @@ fn a_reserved_word_is_no_binding_name() {
             let err = parse(&src).expect_err(&src);
             assert_eq!(err.message, reserved_keyword_message(word), "{src}");
         }
+    }
+}
+
+#[test]
+fn use_keeps_its_operand_span_and_checks_arity() {
+    for written in ["lib.ral", "'lib.ral'", "\"lib.ral\"", "~/lib.ral", "$path"] {
+        let src = format!("use {written}");
+        let [stmt] = &parse(&src).expect("parse")[..] else {
+            panic!("expected one statement");
+        };
+        let Ast::Scope(ScopeAst::Use { path }) = &stmt.item else {
+            panic!("expected use: {stmt:?}");
+        };
+        assert_eq!(&src[path.span.expect("path span").range()], written);
+    }
+    for (src, expected) in [
+        ("use", "use requires 1 argument (a written path); got 0"),
+        ("use a b", "use requires 1 argument (a written path); got 2"),
+        (
+            "use ...$paths",
+            "`use` takes its operands by position (a written path); a spread `...` has no meaning here",
+        ),
+    ] {
+        let error = parse(src).expect_err(src);
+        assert_eq!(error.message, expected, "{src}");
+    }
+    let (head, _) = unwrap_single_exec(parse("^use lib.ral").expect("external use"));
+    assert_eq!(head, external_head("use"));
+}
+
+#[test]
+fn use_refuses_expression_syntax_before_it_can_become_a_literal() {
+    for written in ["$['lib.ral']", "$[1]", "$[1 + 1]"] {
+        let src = format!("use {written}");
+        let error = parse(&src).expect_err(&src);
+        assert_eq!(error.message, crate::syntax::USE_WRITTEN_PATH);
+        assert_eq!(&src[error.span.expect("operand span").range()], written);
     }
 }
 

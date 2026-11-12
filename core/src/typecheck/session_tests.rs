@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::SessionSchemes;
+use super::{SessionSchemes, Unit};
 use crate::compile::{CompileError, compile_and_typecheck};
 use crate::source::FileId;
 use crate::ty::{Closed, Kind, Role, Scheme, Ty, TyVar};
@@ -25,9 +25,18 @@ fn check_with_stored(names: &[&str], src: &str) -> Vec<super::TypeError> {
             .collect(),
         ..crate::test_helper::core_schemes()
     };
-    match compile_and_typecheck(src, schemes, FileId::DUMMY, None, None) {
+    match compile_and_typecheck(
+        src,
+        schemes,
+        FileId::DUMMY,
+        None,
+        Unit::Script,
+        &mut crate::compile::no_modules,
+    ) {
         Ok(_) => Vec::new(),
-        Err(CompileError::Parse(e)) => panic!("parse: {src:?}: {e}"),
+        Err(error @ (CompileError::Parse(_) | CompileError::Use { .. })) => {
+            panic!("front end: {src:?}: {error}")
+        }
         Err(CompileError::Types(errs)) => errs,
     }
 }
@@ -162,7 +171,7 @@ fn closure_only_gate_refusal_exports_no_one_shot_scheme_or_checked_tree() {
             schemes: (),
         })],
         crate::test_helper::core_schemes(),
-        None,
+        Unit::Script,
     )
     .expect_err("the late argv gate must prevent readback");
     assert_eq!(errors.len(), 1);

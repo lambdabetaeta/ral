@@ -588,13 +588,6 @@ pub mod scheme {
 
     scheme!(ask: [Ty::string()] -> Ty::string());
 
-    /// `use :: ∀ρ. Str → F [ | ρ]` — an open record, since a module's bindings
-    /// are heterogeneous and reached by name.
-    pub fn use_op(binders: &mut Binders) -> Ty {
-        let row = binders.row(false);
-        thunk(fun(Ty::string(), pure(Ty::record(Row::var(row)))))
-    }
-
     // ── Terminal, help & encoders ────────────────────────────────────────
     //
     // Each is a command: its value is what it writes.
@@ -616,21 +609,20 @@ pub mod scheme {
     scheme!(from_bytes: pure Ty::bytes());
     scheme!(from_string: pure Ty::string());
     scheme!(from_lines: pure Ty::list(Ty::string()));
-    /// `from-json`, `env` :: ∀α. F α — whatever the source holds.
+    /// `from-json`, `env` :: ∀α:data. F α.
     pub fn from_json(binders: &mut Binders) -> Ty {
-        thunk(pure(Ty::var(binders.ty(Kind::ANY))))
+        thunk(pure(Ty::var(binders.ty(Kind::DATA))))
     }
 
-    /// `from-json-at` :: ∀α. [String] → F α — the value at a path, whatever it
-    /// holds.
+    /// `from-json-at` :: ∀α:data. [String] → F α.
     pub fn from_json_at(binders: &mut Binders) -> Ty {
         let tokens = Ty::list(Ty::string());
-        thunk(fun(tokens, pure(Ty::var(binders.ty(Kind::ANY)))))
+        thunk(fun(tokens, pure(Ty::var(binders.ty(Kind::DATA)))))
     }
 
-    /// `from-jsonl`, `from-csv` :: ∀α. F \[α\] — a list of whatever each line holds.
+    /// `from-jsonl`, `from-csv` :: ∀α:data. F \[α\].
     pub fn from_jsonl(binders: &mut Binders) -> Ty {
-        thunk(pure(Ty::list(Ty::var(binders.ty(Kind::ANY)))))
+        thunk(pure(Ty::list(Ty::var(binders.ty(Kind::DATA)))))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────

@@ -39,12 +39,15 @@ bless $RAL_BLESS='1':
 test-types:
     cargo test --workspace --test markers --features {{features}},ral-core/test-util,exarch/test-util -- --ignored
 
-# Rustfmt, clippy, rustdoc's link checks, and the source's structural laws.
+# Rustfmt, clippy, and the source's structural laws.
 lint:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --features {{features}} --keep-going
-    cargo doc --workspace --no-deps --document-private-items --features {{features}}
     cargo test -p ral-lint
+
+# Generate Rust documentation and check its links.
+doc:
+    cargo doc --workspace --no-deps --document-private-items --features {{features}}
 
 # Clippy for the platforms an x86-64 host does not build: x86-64 musl and Windows (needs clang, lld, cargo-xwin).
 check-x86 $CC_x86_64_unknown_linux_musl='clang':
@@ -89,7 +92,7 @@ wiki *args:
     bash scripts/wiki/build.sh {{args}}
 
 # Everything GitHub CI runs that this host can.
-ci: lint test test-types docs ui
+ci: lint doc test test-types docs ui
 
 # Run recipes in the Linux container, e.g. `just box lint test`.
 [unix]

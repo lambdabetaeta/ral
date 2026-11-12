@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/host.rs, ral/src/repl/enquiry.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/config/, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/boot_builtin.rs, ral/src/surface.rs]
 ---
 
@@ -116,8 +116,8 @@ the rc's `RcSettings {edit-mode, bell, surface, theme, startup}` — the only
 part of the rc the host needs; everything else the rc configures lands on the
 engine's shell.
 
-**The rc ends in all thirteen options written out**, following SPEC §15.3.
-`source_rc_file` uses `shell::load::evaluate_source` against the live session
+**The rc ends in all twelve options written out**, following SPEC §15.3.
+`source_rc_file` uses `shell::load::extend_session` against the live session
 and `typecheck::table::declared(Form::Rc)`. The file's registered `FileId`
 keeps functions and persistent handlers naming their source for the session.
 
@@ -149,8 +149,9 @@ A `` startup: `set { … } `` registers the `Session/"startup"` hook, and the
 host dispatches it under `Denied` terminal authority — a fresh frame whose
 `let`s do not leak. `` startup: `inherit `` registers nothing.
 
-The rc's `env:` sets environment entries only; lexical values belong under
-`bindings:`. Persistent command handlers come from its `handlers:` field,
+The rc's `env:` sets environment entries only. Top-level `let`s above the
+`return` install lexical values and functions with their checked, generalised
+schemes. Persistent command handlers come from its `handlers:` field,
 installed by the host after the rc unit has run and been validated.
 No statement or builtin value changes persistent frames;
 interactive helpers use `let`, scoped interception uses `within [handlers: …]`.
@@ -276,8 +277,8 @@ and completion live in
   the default `❯ ` (a plugin's, to the prompt so far); the faults of one
   render print together through `prompt_fault`, when they differ from the last
   render's, and the session survives so the user can rebind it.
-- `config.rs` — the rc's thirteen keys (`env`, `prompt` — registered as the
-  `Session/"prompt"` hook — `bindings`, `handlers`, `edit-mode`, `bell`,
+- `config.rs` — the rc's twelve keys (`env`, `prompt` — registered as the
+  `Session/"prompt"` hook — `handlers`, `edit-mode`, `bell`,
   `surface`, `recursion-limit`, `plugins`, `startup`, `theme`, `umask`, `limits`) are declared
   once, in `Form::Rc`'s table, and `RcPlan::decode` judges them all engine-side,
   inside the boot builtin, before `RcPlan::apply` commits to the shell and the

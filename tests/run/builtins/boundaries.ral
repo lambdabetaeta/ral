@@ -91,35 +91,6 @@ let r1 = read '{"n": 1}'
 let r2 = read '{"n": 2}'
 echo $[$r1[n] + $r2[n]]
 
-# `use` holds a module's functions to the types the script uses them at, and
-# its record to the names the script reads
-let tmpdir = temp-dir
-echo "let inc = { |n| return \$[\$n + 1] }\nlet label = 'lib'" > "$tmpdir/lib.ral"
-let lib = use "$tmpdir/lib.ral"
-echo !{$lib[inc] 4}
-echo $lib[label]
-refusal {
-    let bad = use "$tmpdir/lib.ral"
-    let r = $bad[inc] 'text'
-    return ()
-}
-refusal {
-    let bad = use "$tmpdir/lib.ral"
-    let r = $bad[missing]
-    return ()
-}
-refusal {
-    let bad = use "$tmpdir/lib.ral"
-    let r = length $bad[inc]
-    return ()
-}
-refusal {
-    let bad = use "$tmpdir/lib.ral"
-    let r = $[$bad[label] + 1]
-    return ()
-}
-rm -rf $tmpdir
-
 # An under-applied boundary is a block of the saturated call, in a tail too
 let partial = { from-json-at }
 let piece = !{to-string '{"a": [1, 2]}' | !$partial ['a']}

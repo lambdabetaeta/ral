@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/error.rs, core/src/fact/error.rs, core/src/fact/error/, core/src/source.rs, core/src/diagnostic.rs, core/src/compile.rs, core/src/syntax/report.rs, core/src/io/terminal.rs, core/src/io/terminal/stderr.rs, core/src/text.rs, core/src/io/ansi.rs, core/src/shell/runtime/exit_hints.rs, core/src/shell/runtime/error.rs, core/src/shell/runtime/flow.rs]
 ---
 
@@ -48,7 +48,7 @@ before losing native units. Their portable strings include escaped quotes;
 renderers insert them once, without path normalization or re-quoting.
 
 **A block the checker refuses at install is one fact.** A handler, catch-all,
-hook or rc binding that the runtime vets and the checker refuses becomes
+hook that the runtime vets and the checker refuses becomes
 `InvalidCause::IllTyped { role: BlockRole, diagnostics }`
 (`fact/error/invalid.rs`): each `TypeDiagnostic` is the stable code and
 rendered message of one checker error, projected by `TypeError::diagnostic`
@@ -76,13 +76,13 @@ Every registered `Source` carries its `SourceOrigin` (`source.rs`): a
 `File` by the native path it was read from, or a `Virtual` label —
 `<stdin>`, `-c`, a hook, an embedded profile — for text no file holds.
 That path is a `SourceFile`, UTF-8 by construction: an origin travels
-serialized (on a `Run`, the module stack, the `SourceDb`) and serde holds a
+serialized (on a `Run`, a linked `Module`, the `SourceDb`) and serde holds a
 path only as text, so `SourceFile::new` — the one door, through
 `path::utf8` — refuses a path that is not UTF-8, naming it, before the file
 is read, rather than letting serialization fail late. Every loader (batch
 script, startup file, plugin, `use`, capability profile, exarch's config and
 network policy) surfaces that refusal as its own error. The
-origin is the source's identity: the module stack's cycle key, the
+origin is the source's identity: the check-time load chain's cycle key, the
 directory a script-relative path resolves beside, and, for a file, what
 `$SCRIPT` bakes. The display name a diagnostic draws and a `CallSite`
 carries is derived from it once, at registration: a file's path
@@ -93,11 +93,10 @@ root source by the `origin` on its `Run`.
 of every source the *session* has loaded, keyed by `FileId`, living on
 `SessionState::sources`: **append-only for the session's whole life**, so a
 nested run can never re-mint a `FileId` an outer run's live spans still
-name. `Shell::install_script_context` registers a source and
-`register_root` also returns the run's root span, which `IoLoan` installs
-with `SessionState::root_file` (`None` between runs); `SourceDb::next_id` peeks
-the id a registration will mint, so a compiler can stamp a program's spans
-before the source they name is itself in the db. Hosts read the db after a
+name. `compile_run` registers the root before compiling, once, so a nested
+module registration cannot take its `FileId`. Failed roots stay registered,
+as do loaded modules. `IoLoan` installs the root span with
+`SessionState::root_file` (`None` between runs). Hosts read the db after a
 run returns to render.
 
 This is the structural fix for the cross-source caret: a runtime error raised
@@ -122,26 +121,31 @@ and `await` agree.
 
 **A compile failure carries its own text**: `Rejection` (`diagnostic.rs`) pairs
 the failure's `Report`s with their `Source` and the status a run that failed so
-exits on (2 parse, 1 type). A root run registers only after compilation
-succeeds; runtime loads register before compiling so every stamped span resolves
-in the session. `compile::CompileError` (`Parse` or `Types`) becomes a rejection
-with `reject`. A run that never reached evaluation carries one in
-its `StaticDiagnostics` (`shell/run.rs`) — `Compile(Rejection)`, beside `Host`, a
-spanless pre-run failure (an unknown hook, a non-ground argument) — whose
-`render` is what every host on the wire prints through `Report::Static`
-([[map/core/engine-protocol|engine-protocol]]). Static rejection keeps its
-own status, separate from a runtime `Reason::Compile`, which exits 1. A file
-loaded at runtime — a `use`d module, the rc, a plugin, a capability profile —
-carries its rejection on the runtime `Error` instead, as `Error::rejection`,
-which `shell::load::check_source` attaches with `with_rejection` at the
-loader's compile door; `CompileError` itself knows no runtime error.
-Its `Reason::Compile(CompileFailure { source, phase })` keeps a portable
-summary: `CompilePhase::Parse` or `Types(TypeErrorCount { count })`. A `try`
-handler describes that summary; the rich source-labelled rejection, witness
-and loader context belong only to the report.
-`locate` supplies the `use` frame's provenance, so `$err[site]` names the
-`use` that failed, while the rejection draws the loaded source's compile
-failure.
+exits on (2 parse, 1 type). Root and module text register before compilation.
+`compile::CompileError` includes `Parse`, `Types` and
+`Use { at, refusal: UseRefusal }`. A load refusal names the one written path,
+or carries a nested module rejection, cycle chain or depth refusal. The
+importer's report points at `use`, then renders a rejected module against
+its own text. An unreadable module is never read and has no source report.
+
+A run refused before evaluation carries `StaticDiagnostics` (`shell/run.rs`):
+`Compile(Rejection)` or spanless `Host` (an unknown hook, a non-ground argument).
+Its `render` reaches every host through `Report::Static`
+([[map/core/engine-protocol|engine-protocol]]). Module resolution, read,
+compile and undecided-export failures are static failures of the importer;
+`try` cannot catch them. A host-file compile failure reaches its host loading
+operation as an `Error` carrying `Rejection`; `CompileError` itself has no
+runtime dependency.
+
+**Static refusals retain their trail.** `RunReport::Static` carries
+`Vec<Observation>`; wire `Report::Static` carries their encoded data. Successful
+check-only dispatches return `RunReport::Checked` / `Report::Checked`, also
+with a trail and no evaluated value. A check-time module read
+runs `shell.locate` under `Prov::Live { name: "use", span: at }`; its denial
+is recorded in the dispatch's trail even when checking refuses evaluation.
+There is no compile-time mooring or surface event. The host prints the static
+diagnostic; `ral --audit` emits the trail envelope, and exarch consumes the
+same observations in its shell-eval report. Successful reads add no observation.
 
 ## Rendering — `core/src/diagnostic.rs`
 
@@ -157,7 +161,10 @@ is the compact one-liner. The builders sit with their errors:
 message saying what is wrong and the help what to write), `TypeError::report` in
 `typecheck/explain.rs`, and `Error::render` / `Error::compact`
 (`shell/runtime/error.rs`, resolving live provenance against a `SourceDb`
-and borrowing the session's `ExitHints`).
+and borrowing the session's `ExitHints`). `UseRefusal::report` in `compile.rs`
+uses `U0001`–`U0005` for read, nested-check, cycle, depth and unavailable-loader
+refusals. Read refusals retain their structured `Error` and its hints; each
+refusal labels what failed, not every path failure as a failed typecheck.
 Rendering tests live inline with each owner: generic renderer tests in
 `diagnostic.rs`, parse and lexer reports in `syntax/report.rs`, type reports in
 `typecheck/explain.rs`, and runtime source selection in `shell/runtime/error.rs`.

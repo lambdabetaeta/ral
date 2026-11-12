@@ -1,0 +1,4 @@
+let m = use '../lib/modules/functions.ral'
+let number = $m[id] 1
+let text = $m[id] 'a'
+return [number: $[$number + 1], text: !{upper $text}]

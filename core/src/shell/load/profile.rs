@@ -1,7 +1,7 @@
 //! Load a capability profile — a `.ral` script ending in `grant`'s options
 //! written out, nested tables included (SPEC §15.3).
 //!
-//! Evaluation is [`super::evaluate_source`], decoding is
+//! Evaluation is [`super::evaluate_closed`], decoding is
 //! [`decode_capability_map`]; this file only joins them.
 //! Places freeze here, so a composed ceiling is the `meet` of already-resolved
 //! bundles.  Entered by the ral CLI's `--capabilities` flag and by exarch's
@@ -22,8 +22,8 @@ use crate::text::quote_native;
 /// Evaluate `source` and decode its terminal value into a resolved
 /// [`GrantLayer`], walking places against `ctx`.
 ///
-/// `origin` names the file in errors and keys the cycle stack — virtual
-/// (`<built-in:NAME>`) for embedded profiles.
+/// `origin` names the file in errors and anchors its imports; embedded
+/// profiles have a virtual origin (`<built-in:NAME>`).
 ///
 /// # Errors
 /// A compile, runtime, or decode failure, named with `origin`; an escape
@@ -37,13 +37,13 @@ pub fn load_capabilities_from_str(
 ) -> Settled<GrantLayer> {
     let options = crate::typecheck::table::declared(crate::typecheck::Form::Grant);
     let prefix = format!("capability file {origin}");
-    let value = super::evaluate_source(mooring, shell, source, origin, Some(options))
+    let value = super::evaluate_closed(mooring, shell, source, origin, Some(options))
         .map_err(|b| b.map_error(|e| e.with_context(&prefix)))?;
     decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
 
-/// Read `path` and forward to [`load_capabilities_from_str`], keyed by its
-/// real path so two spellings of one file share a cycle-stack entry.
+/// Read `path` and forward to [`load_capabilities_from_str`], identified by
+/// its real path so imports detect cycles through alternate spellings.
 ///
 /// `path` is anchored against the shell's cwd, not the process's, and the
 /// bytes are read through the very file the source is keyed by, judged for

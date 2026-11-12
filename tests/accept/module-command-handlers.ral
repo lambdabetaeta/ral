@@ -1,0 +1,2 @@
+let m = use '../lib/modules/handlers.ral'
+within [handlers: $m[handlers]] { greet }

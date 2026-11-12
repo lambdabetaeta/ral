@@ -1,7 +1,7 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
-covers_paths: [core/src/syntax/, editors/]
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
+covers_paths: [core/src/syntax.rs, core/src/syntax/, editors/]
 ---
 
 # Map: core / syntax
@@ -54,7 +54,7 @@ sees raw bytes and bare words.
   binding of stdin, stdout or stderr at the second redirect
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
 - `syntax.rs` — the module root: `CONTROL_OPERATORS` (`try`, `guard`,
-  `within`, `grant`, `audit`, `spawn`, `gather`) and `FLOW_KEYWORDS` (`if`, `elsif`, `else`,
+  `within`, `grant`, `audit`, `spawn`, `gather`, `use`) and `FLOW_KEYWORDS` (`if`, `elsif`, `else`,
   `let`, `return`, `case`), read by the parser and, through
   `is_control_operator` / `is_keyword`, by the checker, highlighters, and the
   [[map/core/builtins|help registry's]] documentation-completeness test;
@@ -114,6 +114,12 @@ sees raw bytes and bare words.
   ([[decisions/260930_redirects-are-bindings|redirects-are-bindings]]).
   `ScopeAst::Within { opts, body }` carries only the option record and body;
   there is no handler-specific AST node.
+  `ScopeAst::Use { path: Spanned<Box<Ast>> }` retains one path operand and
+  its own span. The parser recognises `use` as a static control operator;
+  elaboration admits only a constant word or quoted string without
+  interpolation, refusing computed paths at that span. The elaborator's
+  loader reads and checks the exact written path and emits linked `Use` IR
+  ([[map/core/ir|IR]]); no runtime builtin implements the form.
   `Ast::Unit` is the `()`
   literal — punctuation denoting the unit value, like `[]` and `[:]`, so not a
   word. `Ast::Case` carries `arms: Vec<CaseArm>`, a finite list of tag-and-body
@@ -180,8 +186,10 @@ governs both stages.
   sub-expressions bottom out here), patterns through `parse_pattern` (list and
   record patterns recurse back through it per element).
 
-The seven reserved [[design/control-operators|control operators]] are recognised
-at this layer: `guard` has exactly three operands (`acquire, body, release`),
+The eight reserved control operators are recognised at this layer: `use`
+links a written path at check time; the other seven delimit runtime control
+([[design/control-operators|control operators]]).
+`guard` has exactly three operands (`acquire, body, release`),
 represented by `ScopeAst::Guard { acquire, body, release }`;
 `spawn` has one operand or a title and body, and `gather` has one body.
 `with-temp-dir` and `with-temp-file` are ordinary prelude bindings. See `docs/SPEC.md` §3,

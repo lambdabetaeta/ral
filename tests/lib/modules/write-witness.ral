@@ -1,0 +1,2 @@
+let _witness = !{env}[MODULE_WITNESS]
+to-string ran > $_witness

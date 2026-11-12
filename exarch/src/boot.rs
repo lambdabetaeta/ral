@@ -2,7 +2,7 @@
 //! Nothing here runs per exchange — per-session disk state is
 //! [`crate::record::AgentLog`].
 
-use crate::app::{SCRATCH_VAR, seed_vars};
+use crate::app::SCRATCH_VAR;
 use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::data::FOValue;
@@ -39,8 +39,8 @@ pub fn engine_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
     Ok(runtime)
 }
 
-/// Exarch's root-only recipe: the agent library, hints, and the root's env
-/// seeded as bindings before the ledgers arm.
+/// Exarch's root-only recipe: the agent library, hints, and the root's
+/// environment overlay before the ledgers arm.
 ///
 /// The scratch is the host's, named by the root, and the shell carries its
 /// spelling, so that a `scratch` place in any grant frozen in this session
@@ -82,7 +82,7 @@ pub fn engine_root(root: &Root, shell: &mut Shell) -> Result<(), Error> {
     shell.set_exit_hints(ral_core::shell::runtime::ExitHints::from_text(
         include_str!("../../data/exit-hints.txt"),
     ));
-    seed_vars(shell, &root.env);
+    shell.overlay_env(&root.env);
     shell_eval::arm_session_ledgers(shell);
     Ok(())
 }

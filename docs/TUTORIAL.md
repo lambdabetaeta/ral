@@ -498,13 +498,31 @@ Use `within` for a scoped directory or environment:
 The old directory and environment return at the closing brace. Functions
 called inside the block see the active overrides, even if defined elsewhere.
 
-`use` evaluates a file in its own scope and returns its public bindings:
+`use` links a module when your script is checked, then runs it when reached
+and returns its public bindings:
 
     let strings = use 'lib/strings.ral'
     $strings[trim] '  hello  '
 
-Bindings beginning with `_` stay private. Paths are relative to the
-containing file; `RAL_PATH` adds search directories.
+Write the path as a constant word or a quoted string without interpolation;
+computed paths are refused. A relative path names a file beside the
+containing script, or relative to the session's cwd when there is no file.
+`~` and `xdg:` heads expand, and absolute paths are used as written. There is
+no search list or implicit extension.
+
+The module sees only natives and the prelude, not your script's `let`s or
+rc helpers. Bindings beginning with `_` stay private. Each public binding has
+its checked type, including polymorphism; missing exports and wrong argument
+types are caught before your script runs. An export whose shape a decoder
+left undecided is refused: use it at the intended type inside the module,
+or export text and decode it in the caller.
+
+Modules are read afresh on each check, not each function call. A `use`
+inside a function runs the checked module body on every call, but does not
+read the file again. An earlier `cd`, `within`, or `grant` in the same script
+cannot change the path or permission used to read it at check time.
+Missing files, denied reads, module compile errors, and import cycles are
+compile errors of your script, not failures `try` can catch.
 
 ## 8  Failure and audit
 
@@ -796,9 +814,13 @@ script under saved profiles with:
 ## 12  Types and the model underneath
 
 ral infers types for values, functions, records, variants, pipelines, and
-handles. Check a script without performing any command:
+handles. Check a script without evaluating it:
 
     ral --check script.ral
+
+This boots the engine as for a run, including evaluating capability profiles
+and applying the recursion limit. Module reads use the same paths and
+permissions as a run; the script and module bodies do not execute.
 
 The checker catches a pipeline stage that is still waiting for an argument,
 non-scalar interpolation, wrong function arguments, incompatible `if` branches,

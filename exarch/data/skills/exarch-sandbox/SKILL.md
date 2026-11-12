@@ -65,8 +65,9 @@ return [
 Places, frozen at launch: `` `home SUB ``, `` `xdg-config SUB `` (likewise
 `xdg-data`, `xdg-cache`, `xdg-state`, `xdg-bin`, honouring `XDG_*_HOME`),
 `` `cwd SUB `` (the launch directory), `` `gitdir SUB ``, `` `scratch SUB ``
-(`$EXARCH_SCRATCH`), `` `tempdir SUB ``, `` `absolute P ``. `.` is the anchor
-itself. Prefer an anchored place to `absolute`, so the file travels between
+(the environment variable `EXARCH_SCRATCH`), `` `tempdir SUB ``,
+`` `absolute P ``. `.` is the anchor itself. Read environment variables with
+`env`. Prefer an anchored place to `absolute`, so the file travels between
 machines.
 
 Exec targets: `` `name git `` (as `PATH` finds it at launch), a place naming one

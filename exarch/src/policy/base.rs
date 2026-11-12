@@ -413,7 +413,7 @@ mod tests {
     fn dir_selectors(text: &str) -> std::collections::BTreeSet<String> {
         use ral_core::shell::runtime::Value;
         let mut shell = ral_core::test_helper::core_shell();
-        let profile = ral_core::shell::load::evaluate_source(
+        let profile = ral_core::shell::load::evaluate_closed(
             &ral_core::shell::runtime::Mooring::adrift(),
             &mut shell,
             text,

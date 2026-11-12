@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -64,11 +64,31 @@ scope, and the base frames all come from the manifest the shell was booted with
 shell must be built over a `Runtime` that carries them or re-link a native by name.
 `register` clones the baked prelude's bindings into each fresh environment.
 `BOUNDARY_BUILTINS` (`from-json`, `from-jsonl`, `from-json-at`, `from-csv`,
-`env`, `use`) also sits
+`env`) also sits
 outside it, for a different reason: each row is a `BuiltinEntry::boundary`, whose
 body takes the `Site` the checker solved at the call and lets the value in
 through `Site::admitted` (`shell/runtime/admit.rs`), which words a mismatch as
 the door's refusal ([[decisions/260930_a-boundary-is-checked-against-its-type|a-boundary-is-checked-against-its-type]]).
+
+**Every registered boundary declares a data result.** This is a manifest-wide
+invariant, not a property of a hand-written decoder list:
+
+- every type variable in its declared result has `Kind::DATA`; every row
+  variable there is deep, requiring data in all added fields and payloads.
+  Functions and handles are excluded at every depth;
+- core's JSON factories (`scheme::from_json`, `scheme::from_json_at`,
+  `scheme::from_jsonl` in `core/src/typecheck/builtins.rs`) also type `env`
+  and `from-csv`. Host factories obey the same rule: exarch's three
+  `answer_ty` variables in `exarch/src/shell_eval/builtins/harness.rs`, and
+  `_ed-state` in `ral/src/repl/plugin/ed_builtins.rs`;
+- acceptance tests walk each host's whole manifest: core, ral's REPL and
+  batch surfaces, and exarch. Every `BuiltinBody::Boundary` entry must have
+  data result variables and deep result row variables, so adding a boundary
+  needs no change to a test's list;
+- using a boundary result as a function or handle is a kind error at the
+  use, before decoding or readmission. Ordinary data-shape mismatches remain
+  boundary-admission refusals. See [[design/codecs|codecs]].
+
 Three entries sit *outside* the macro, implemented in core but installed by a
 host. The public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
@@ -106,9 +126,9 @@ Prefer the prelude's `with-temp-dir` / `with-temp-file` for lexical lifetimes
 
 The read and CSV schemes live in `typecheck/builtins.rs`:
 
-- `env : ∀α. Returns α` admits the effective environment against its site's record
+- `env : ∀α:data. Returns α` admits the effective environment against its site's record
   or map shape (`ambient.rs`); values remain text.
-- `from-csv : ∀α. Returns [α]` parses text cells and admits the rows against the
+- `from-csv : ∀α:data. Returns [α]` parses text cells and admits the rows against the
   site's type (`codecs.rs`). Written field reads use records; computed reads
   use maps. The row stays a decoder for misuse diagnostics.
 - `to-csv : ∀α:data. [α] → Command` accepts record or map rows, requiring the
@@ -326,27 +346,6 @@ Bodies are grouped by concern, one submodule each:
   is process-local: `Shell::bequeath` scrubs it from every fork, and a run
   whose result is or holds one projects to `Err`, status 1
   (`core/src/shell/run/report.rs`);
-- `modules.rs` — the cacheless `use` loader (a boundary: it builds the export
-  record and admits it with `Site::admit_module`, checking every used export's
-  complete scheme, including functions nested in records, lists, maps or
-  variants, against its use). A known incompatible nested scheme is refused at
-  `use`. The admitted record also carries `Site::wrap`'s recursive delayed
-  contracts, including through unresolved re-exported shapes. An opaque or weak
-  function carries exactly the caller-required arrow and result contract;
-  incompatible applications or results raise when reached. These contracts do
-  not certify function bodies before invocation. Imported functions retain their
-  checked sites; scoped handler installation performs no inference or re-vetting.
-  It runs its phrases through
-  `shell::load::module_phrases`, the cycle stack and depth bound it shares with the
-  host loading door `shell::load::evaluate_source` (rank 10, `core/src/shell/load.rs`,
-  which also holds `check_source`, the compile door both share: it checks
-  against the live session, registering the source first so the module's
-  spans carry its real identity, and hands back a failure as an `Error`
-  carrying its `Rejection` ([[map/core/diagnostics|diagnostics]])); `use` is a
-  scope-projecting caller of that door, running under the session environment
-  rather than the caller's own block-local scope. Module loads carry no cache,
-  so the guards keep re-evaluation terminating — see
-  [[decisions/260606_cacheless-module-loader|cacheless-module-loader]];
 - `misc.rs` — `fail` takes a `String`, raising `Reason::raised` (a `Claim`
   of status 1); `raise` re-raises the `ErrorFact` a witnessed map holds
   (`Map::witness`) and otherwise decodes the closed `[frame, message, status,
@@ -406,6 +405,14 @@ Bodies are grouped by concern, one submodule each:
   leaving each line undecoded, since decoding is each caller's policy;
   `stdin_lines` runs it over `stdin_reader`, and `lossy_line_list` decodes
   its lines into the `[String]` that `from-lines` and `lines` return.
+
+**`use` is a control operator, not a builtin or boundary.** Elaboration calls
+`shell::load::load_module` to read and link one written path under the grant
+in force at check time. The checker instantiates its decided public schemes;
+`shell::load::run_module` runs that checked tree under Σ and returns its public
+bindings. Modules carry no cache; cycles and depth are refused by a check-time
+chain, not runtime shell state. See
+[[decisions/260606_cacheless-module-loader|cacheless-module-loader]].
 
 The capability `Value`-map decoder is *not* a builtin: it lives at
 `shell/grant/decode.rs` (`decode_capability_map`), consumed by the `grant`

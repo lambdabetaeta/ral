@@ -25,14 +25,16 @@ use std::process::Stdio;
 /// from the rc rather than from the defaults.
 #[test]
 fn rc_theme_bindings_and_startup_reach_a_live_session() {
-    let (_dir, env) = rc_home(&rc_source(&[
-        (
-            "theme",
-            r#"[value-prefix: `set "» ", value-color: `inherit]"#,
-        ),
-        ("bindings", "[greeting: 'hi-from-rc']"),
-        ("startup", "`set { echo started }"),
-    ]));
+    let (_dir, env) = rc_home(&format!(
+        "let greeting = 'hi-from-rc'\n{}",
+        rc_source(&[
+            (
+                "theme",
+                r#"[value-prefix: `set "» ", value-color: `inherit]"#,
+            ),
+            ("startup", "`set { echo started }"),
+        ])
+    ));
 
     let out = repl(&["-i"], &env, "$greeting\n");
     assert!(
@@ -59,14 +61,13 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 }
 
 /// A malformed *literal* rc key is a type error, caught before the file
-/// runs at all: the whole rc is skipped, not merely that one key — the
-/// keys around it do not survive either.
+/// runs at all: the whole rc is skipped, including its earlier `let`s.
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
-    let (_dir, env) = rc_home(&rc_source(&[
-        ("edit-mode", "42"),
-        ("bindings", "[okname: 'yes']"),
-    ]));
+    let (_dir, env) = rc_home(&format!(
+        "let okname = 'yes'\n{}",
+        rc_source(&[("edit-mode", "42")])
+    ));
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
@@ -76,7 +77,7 @@ fn rc_bad_literal_key_fails_the_whole_file() {
     );
     assert!(
         !out.stdout.contains("=> yes"),
-        "a failed rc must not apply any of its keys: {}",
+        "a refused rc must not install its top-level lets: {}",
         out.stdout
     );
 }

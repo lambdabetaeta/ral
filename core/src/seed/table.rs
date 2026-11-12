@@ -36,6 +36,7 @@ pub(crate) type SerialValue = FOValue<SerialClosure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialThunk {
+    /// Includes linked modules' checked tops and origins, never load requests.
     pub(super) comp: Arc<Comp>,
     pub env: SerialEnvSnapshot,
 }
@@ -506,7 +507,9 @@ impl SerialEnvSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::CompKind;
+    use crate::ir::{CompKind, Module, Phrase, Toplevel, Val};
+    use crate::source::{SourceFile, SourceOrigin, Spanned};
+    use crate::typecheck::Unit;
 
     /// The child reads the checker's verdicts off the node rather than
     /// re-inferring, so a lambda's comp must carry its interior annotations
@@ -516,9 +519,10 @@ mod tests {
     fn annotated_lambda_node() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
-        let annotated =
-            crate::typecheck(&top, crate::test_helper::core_schemes(), None).expect("typecheck");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
+        let annotated = crate::typecheck(&top, crate::test_helper::core_schemes(), Unit::Script)
+            .expect("typecheck");
         let [phrase] = annotated.phrases.as_slice() else {
             panic!("expected one phrase, got {:?}", annotated.phrases);
         };
@@ -639,6 +643,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closure_round_trips_with_nested_linked_modules() {
+        let inner = Arc::new(Module {
+            top: Toplevel {
+                phrases: vec![Spanned::synthetic(Phrase::Run(Arc::new(
+                    Spanned::synthetic(CompKind::Return(Val::Int(42))),
+                )))],
+                admits: Vec::new(),
+            },
+            origin: SourceOrigin::File(
+                SourceFile::new("/linked-seed/inner.ral").expect("UTF-8 path"),
+            ),
+        });
+        let outer = Arc::new(Module {
+            top: Toplevel {
+                phrases: vec![Spanned::synthetic(Phrase::Run(Arc::new(
+                    Spanned::synthetic(CompKind::Use(inner)),
+                )))],
+                admits: Vec::new(),
+            },
+            origin: SourceOrigin::File(
+                SourceFile::new("/linked-seed/outer.ral").expect("UTF-8 path"),
+            ),
+        });
+        let comp = Arc::new(Spanned::synthetic(CompKind::Lam {
+            param: "unused".into(),
+            body: Arc::new(Spanned::synthetic(CompKind::Use(outer))),
+        }));
+        let value = Value::Thunk(Closure::captured(Arc::clone(&comp), Env::new()));
+        let mut ctx = InternCtx::new();
+        let wire = SerialValue::from_runtime(&value, &mut ctx).expect("encode closure");
+        let table = ctx.finish().expect("encode scopes");
+        let bytes = crate::data::json::to_vec(&wire).expect("serialise closure");
+        let wire: SerialValue = crate::data::json::from_slice(&bytes).expect("deserialise closure");
+        let bytes = crate::data::json::to_vec(&table).expect("serialise scopes");
+        let table: ScopeTable = crate::data::json::from_slice(&bytes).expect("deserialise scopes");
+        let dec = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
+            .expect("rebuild scopes");
+        let Value::Thunk(back) = wire
+            .into_runtime(&dec)
+            .expect("hydrate closure without loading")
+        else {
+            panic!("round-trip changed the value variant");
+        };
+        assert_eq!(
+            back.comp(),
+            &comp,
+            "every linked module's checked top and origin survive the wire"
+        );
+    }
+
     /// Every boundary `Exec` under `comp`, in walk order.
     fn boundary_sites(comp: &Comp) -> Vec<Arc<crate::ty::Site>> {
         let mut sites = Vec::new();
@@ -659,9 +714,10 @@ mod tests {
     fn a_thunk_ships_its_boundary_sites_under_one_unit() {
         let src = "let f = { |p|\n  let a = from-json < $p\n  let b = from-json < $p\n  return $[$a[x] < $b[x]]\n}";
         let ast = crate::syntax::parser::parse(src).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, [], None).expect("elaborate");
-        let annotated =
-            crate::typecheck(&top, crate::test_helper::core_schemes(), None).expect("typecheck");
+        let top = crate::elaborator::elaborate(&ast, [], None, &mut crate::compile::no_modules)
+            .expect("elaborate");
+        let annotated = crate::typecheck(&top, crate::test_helper::core_schemes(), Unit::Script)
+            .expect("typecheck");
         let [phrase] = annotated.phrases.as_slice() else {
             panic!("expected one phrase, got {:?}", annotated.phrases);
         };
@@ -694,8 +750,6 @@ mod tests {
     /// the build must say so rather than blame the fallthrough case.
     #[test]
     fn out_of_range_scope_ref_is_not_reported_as_cyclic() {
-        use crate::ir::Val;
-        use crate::source::Spanned;
         let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
             comp: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
             env: SerialEnvSnapshot { bindings: 5 },
@@ -768,13 +822,7 @@ mod tests {
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its baseline");
-        shell.env.bind(
-            "only_mine".into(),
-            Binding {
-                value: Value::Int(1),
-                scheme: None,
-            },
-        );
+        crate::test_access::bind_untyped(&mut shell, "only_mine", Value::Int(1));
 
         let mut ctx = InternCtx::new();
         let _ = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);

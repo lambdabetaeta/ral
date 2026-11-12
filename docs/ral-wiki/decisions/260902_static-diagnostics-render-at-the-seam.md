@@ -2,6 +2,27 @@
 status: active
 ---
 
+> **Amended 2026-11-12 — Linking registers before compilation.** This
+> supersedes the failed-compile registration rule and rejected alternative
+> below, not seam rendering. `compile_run` registers the root once before
+> compiling: elaboration may recursively load and register modules, so a
+> peeked `FileId` cannot reserve the root's identity. Failed root text stays
+> in the append-only session registry, like loaded module text. Hook runs
+> still register nothing: they execute already checked values.
+>
+> `CompileError::Use` carries the importing span and a `UseRefusal`.
+> A rejected module renders the importer's `use` caret and then its own
+> rejection against its own text. Denied module reads never read the file.
+> `RunReport::Static` and wire `Report::Static` additionally carry a trail;
+> read denials recorded during checking retain the `use` site even when the
+> unit is refused before evaluation. `ral --audit` and exarch consume that
+> trail; no compile-time mooring or surface event is required.
+> `--check` boots the full engine and uses the run's compile path, stopping
+> before evaluation; there is no separate batch static compiler.
+>
+> See [[map/core/diagnostics|diagnostics]] and
+> [[decisions/260606_cacheless-module-loader|cacheless module loader]].
+
 # Static diagnostics render at the seam, and never enter the registry
 
 **A diagnostic that crosses the protocol as a sentence has already lost. The

@@ -225,6 +225,10 @@ pub(crate) fn settle(report: Result<Report, Severed>) -> Result<RcSettings, u8> 
     };
     let code = report.code();
     match report {
+        Report::Checked { .. } => {
+            errln!("ral: expected a boot result, received a check report");
+            Err(1)
+        }
         Report::Ran(Ran {
             ending: Ending::Ok(value),
             ..
@@ -292,6 +296,14 @@ mod tests {
             trail: Vec::new(),
         });
         assert!(matches!(settle(Ok(report)), Err(1)));
+    }
+
+    #[test]
+    fn a_check_report_is_not_a_boot_result() {
+        assert!(matches!(
+            settle(Ok(Report::Checked { trail: Vec::new() })),
+            Err(1)
+        ));
     }
 
     #[test]

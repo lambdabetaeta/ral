@@ -7,7 +7,7 @@
 //! which comes from the environment or the vault
 //! ([`crate::provider::credential`]). The file is source, not data: it runs
 //! through the same
-//! [`ral_core::shell::load::evaluate_source`] core as any other `.ral` load,
+//! [`ral_core::shell::load::evaluate_closed`] core as any other closed unit,
 //! and its terminal map decodes into [`Service`]s.
 //!
 //! A redirected `endpoint` aims the agent's own traffic at an arbitrary server, so
@@ -180,7 +180,7 @@ pub(crate) fn evaluate_no_authority(
         .map_err(|e| e.with_context(format!("{label} {origin}")).plain())?;
     shell
         .with_layer(nothing, |sh| {
-            ral_core::shell::load::evaluate_source(&mooring, sh, source, origin, None)
+            ral_core::shell::load::evaluate_closed(&mooring, sh, source, origin, None)
         })
         .map_err(|e| match e {
             Break::Escape(Escape::Exit(code)) => format!(
@@ -289,6 +289,31 @@ mod tests {
             "<test:config>",
             LABEL,
         )
+    }
+
+    #[test]
+    fn a_config_neither_reads_nor_installs_session_bindings() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let origin = SourceOrigin::named("<test:config-scope>");
+        ral_core::shell::load::extend_session(
+            &Mooring::adrift(),
+            &mut shell,
+            "let session_only = 7",
+            &origin,
+            None,
+        )
+        .expect("seed a checked session binding");
+        assert!(evaluate_no_authority(&mut shell, "return $session_only", &origin, LABEL).is_err());
+        let value = evaluate_no_authority(
+            &mut shell,
+            "let config_only = 'closed'\nreturn $config_only",
+            &origin,
+            LABEL,
+        )
+        .expect("a config sees its own bindings");
+        assert_eq!(value, Value::string("closed"));
+        assert!(shell.scope_lookup("session_only").is_some());
+        assert!(shell.scope_lookup("config_only").is_none());
     }
 
     /// What a window writes, the decoder reads back — the same three fields,

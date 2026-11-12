@@ -28,10 +28,6 @@ fn session(dir: &TempDir, cols: usize, rc: &str) -> PtySession {
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path())
         .env("XDG_STATE_HOME", dir.path())
-        .env(
-            "RAL_PATH",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins"),
-        )
         .env("TERM", "xterm-256color")
         .env("TERM_PROGRAM", "WezTerm")
         .env("RAL_INTERACTIVE_MODE", "full");
@@ -222,7 +218,13 @@ fn plugin_reedit_erases_the_old_drawing_but_not_previous_output() {
                 &rc_source(&[
                     ("prompt", "`set { 'P> ' }"),
                     ("startup", "`set { echo KEEP }"),
-                    ("plugins", "['./reedit.ral': [:]]"),
+                    (
+                        "plugins",
+                        &format!(
+                            "['{}': [:]]",
+                            ral_core::path::shown(dir.path().join("reedit.ral"))
+                        ),
+                    ),
                 ]),
             );
             paste(&mut session, &buffer);
@@ -318,7 +320,15 @@ fn stock_zoxide_key_accepts_a_crlf_selector_path() {
                 "env",
                 &format!("[SELECTED_DIRECTORY: '{}']", destination.display()),
             ),
-            ("plugins", "[zoxide: [:]]"),
+            (
+                "plugins",
+                &format!(
+                    "['{}': [:]]",
+                    ral_core::path::shown(
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/zoxide.ral")
+                    )
+                ),
+            ),
         ]);
         let mut session = session(&dir, 80, &rc);
         send(&mut session, "\x1bz");

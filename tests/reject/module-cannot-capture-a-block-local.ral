@@ -1,0 +1,4 @@
+# status: 1
+# contains: undefined variable: $x
+# contains: reads-importer.ral
+let _ = !{ let x = 1; use '../lib/modules/reads-importer.ral' }

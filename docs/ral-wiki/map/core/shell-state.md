@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
 ---
 
@@ -85,17 +85,18 @@ fact data are reached through their owning modules.
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
   `env.rs` — lexical `Env`, ρ alone; process-env overrides are
   `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
-  `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
-  rides next to the value
+  `Binding { value, scheme: Option<Closed> }`, so the checker's verdict
+  rides next to the value. Every session binding has a scheme; block-local
+  bindings may carry none
   ([[internals/type-inference|type-inference]]).
   **A shared write clones a node, and a node clones cheaply**: `Env`'s
   private `Entries` is a sorted array of at most `SMALL` (8) bindings, a persistent
   hash map past it, so a `bind` into an environment another holder still
   references copies only the touched node — the whole array up to `SMALL`,
   a path past it — and copying a node clones every `Binding` stored inline in
-  it. Each such clone is cheap, whatever the binding holds: `Binding.scheme`
-  sits behind an `Arc`, and the value copies no payload (above).
-  `binding_schemes` hands the next run's check those same `Arc`s.
+  it. Each such clone is cheap, whatever the binding holds: `Closed` wraps
+  an `Arc<Scheme>`, and the value copies no payload (above).
+  `binding_schemes` hands the next run's check those same shared schemes.
   Handler entries carry no schemes: `handled_names` supplies diagnostic names
   only. Their install check yields a verdict, not a type to persist.
   `signature.rs` — `Signature`, Σ: the natives and the frozen prelude, one
@@ -247,19 +248,17 @@ checkpoint, since a run never writes it.
   in the scope chain as permanently-exempt baseline and starts the
   committed-run clock. Every persistent top-level scope write funnels
   through one fused chokepoint, `Shell::note_define` (`scope.rs`,
-  beside `bind_value`/`set_var`), so "write a scope entry" and "stamp the
+  beside `set_var`), so "write a scope entry" and "stamp the
   ledger" can never be pulled apart: `Ran::define`'s single per-name
   loop over `pattern::destructure` calls it for every name a
   `Define` phrase installs under `Mode::Session` — a plain `let`, a
   destructuring pattern's `Name`/`...rest` arms, or a `Rec` group's
-  mutually-recursive members alike — and never under `Mode::Local`. Host verbs
-  (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
-  call to them precedes arming. Idleness is *use-observation*, not
-  re-installation: `Shell::dispatch`'s `Source` arm ticks the committed-run
-  clock, and a lease is renewed by reference at both harvest seams — the
-  run's own compiled program, and a runtime-compiled `use` load
-  (`check_source` in `core/src/shell/load.rs`) —
-  each reading `ir::referenced_names` off what it just compiled
+  mutually-recursive members alike — and never under `Mode::Local`. The host
+  door `set_var` requires a `Closed` scheme and uses the raw `Env` primitive,
+  since its host calls precede arming. Idleness is *use-observation*, not
+  re-installation: source and check dispatches tick the committed-run clock,
+  and the root's compiled program renews leases by `ir::referenced_names`.
+  Linked modules see Σ alone and renew no session lease
   ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
   whose value's `Value::shallow_size` (a structural estimate — `String`/
@@ -414,7 +413,11 @@ Methods on `Shell` live by concern, one submodule each:
   `Shell::child_of(runtime, bequest, narrow)` are its two instances;
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;
-- `scope.rs` — `within` / `grant` guards realising [[design/scoping|scoping]];
+- `scope.rs` — lexical binding and persistent-handler doors. `set_var` installs
+  a value with its explicit `Closed` scheme. The host's `TERMINAL` record and
+  scheme derive from one field table in `value.rs`. Rc lexical names use
+  top-level `let`s above the options `return`, checked and installed through
+  `Ran::define`;
 - `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
   `GrantStack` to `authority::guard`, whose `Denial` carries only portable
   request/cause facts. `Shell::refused` records its derived check and constructs
@@ -426,12 +429,20 @@ Methods on `Shell` live by concern, one submodule each:
   `seed_cwd` lets an in-process front end whose working directory is not the
   process cwd state it directly), `inherit.rs` (the
   flow matrix, below), `scrub.rs` (`Shell::bequeath` and its `Scrub`,
-  the one snapshot law's whole mechanism, below), `modules.rs`, `hooks.rs` (the session-lived hook table of named
+  the one snapshot law's whole mechanism, below), `hooks.rs` (the session-lived hook table of named
   run-entry points — prompt render, startup, plugin hooks — each a block, a
   lambda or a builtin, resolved by the `Program::Hook` arm of `Shell::run` under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
   fault in a hook run is labelled by `HookName::fault_label`, and a hook run
   is no ready boundary); the table is an `Option<HookTable>`, `Some` only on the booted session (every child holds `None`), and carries the [[map/repl|REPL]]'s plugin ledger beside the hooks.
+
+**Module loading carries no runtime stack.** `shell::load::load_module`
+threads a check-time `SourceOrigin` chain for cycles and the depth bound.
+`Context` and its seed carry no module chain. `use` runs linked checked IR
+under Σ, as do closed host files; only the rc and exarch's agent library
+extend the session through `extend_session`. Plugins, profiles, exarch's
+config and net policy use `evaluate_closed`, so their helper `let`s remain
+lexical to those units.
 
 ## The flow matrix
 

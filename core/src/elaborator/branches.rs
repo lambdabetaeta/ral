@@ -3,7 +3,7 @@ use super::{
     WithSpan, ast, wrap_binds,
 };
 
-impl Elaborator {
+impl Elaborator<'_> {
     /// Nest `if`/`elsif`/`else` into `CompKind::If`.  The first cond always
     /// runs, so it hoists into the caller's `binds`; every later cond gets a
     /// local vector wrapped inside the thunk that guards it.

@@ -1,5 +1,5 @@
-<!-- verified_at_commit: c4bd558f -->
-<!-- generated_at_commit: c4bd558f -->
+<!-- verified_at_commit: ed1b37eb -->
+<!-- generated_at_commit: ed1b37eb -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -326,7 +326,7 @@ else
 
 case
   $result
-  [`ok: { |value| use $value }, `err: { |error| raise $error }]
+  [`ok: { |value| consume $value }, `err: { |error| raise $error }]
 ```
 
 A newline after `return` ends that statement. It does not attach the value on
@@ -451,7 +451,7 @@ These words cannot be binding names or block parameters:
 
 ```text
 if  elsif  else  let  return  case
-within  grant  try  guard  audit  spawn  gather
+within  grant  try  guard  audit  spawn  gather  use
 true  false
 ```
 
@@ -1717,10 +1717,17 @@ from-json: the value at `/size` is text (`'12kB'`), but this script uses it as a
 A mismatch names an RFC 6901 pointer into the value, what was found, what the script uses it as, and the line of the use. An open record (the fields the script reads) admits extra fields; a closed record literal refuses them. Two decodes the program compares with `<` agree on numbers or on text, and are refused at the second decode otherwise. A JSON number keeps its kind: `3` is an `Int` and `2.5` a `Float`, so a position used as a `Float` refuses `3`, and `float` at the use accepts both. A decoder never converts a value to fit its type.
 
 The closed set of checked boundaries is `from-json`, `from-jsonl`,
-`from-json-at`, `from-csv`, `env`, `use` (§10.3), `exarch-agents`,
+`from-json-at`, `from-csv`, `env`, `exarch-agents`,
 `exarch-pins`, `exarch-transcript`, and `_ed-state`. Each call admits its own
-result. `from-csv : ∀α. Returns [α]` checks rows against their use; `env : ∀α. Returns α`
-checks the environment as a record or a map. Neither converts text to numbers.
+result. `from-csv : ∀α:data. Returns [α]` checks rows against their use;
+`env : ∀α:data. Returns α` checks the environment as a record or a map.
+Neither converts text to numbers.
+
+Every registered boundary returns first-order data. Its declared result
+constrains every type variable to `data` and every row variable to be deep,
+excluding functions and handles at every depth (§17.3). Using decoded data
+as a function or handle is therefore a kind error at the use, before execution,
+not a runtime admission refusal.
 
 A decoder is a legal pipeline tail:
 
@@ -2477,7 +2484,7 @@ within [dir: 'src'] {
 }
 ```
 
-The scoped directory is used by ral path operations, relative executable lookup, redirects, module lookup, and external children. ral does not change the process-wide working directory; each child is launched in the effective logical directory. This avoids races between concurrent workers.
+The scoped directory is used by ral path operations, relative executable lookup, redirects, and external children. It does not affect `use`, which is resolved before the body runs (§10.3). ral does not change the process-wide working directory; each child is launched in the effective logical directory. This avoids races between concurrent workers.
 
 The working directory is one piece of shell state: `cd` sets it, and `cwd` and every relative path read it. `dir` makes `within` a local handler for that state. `within` saves the working directory, sets it to `dir`, runs the body, and restores what it saved when the body returns, fails, or escapes. A `cd` inside the body therefore moves only the scope's directory:
 
@@ -2504,7 +2511,7 @@ within [env: [PATH: 'tools:/usr/bin', DEBUG: true]] {
 }
 ```
 
-An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `env`, `user`, `home`, home and XDG resolution, `PATH` lookup, `RAL_PATH`, capability-path resolution, and external child environments.
+An inner overlay shadows the same key in an outer overlay. Other keys remain inherited. The effective overlay is used by `env`, `user`, `home`, home and XDG resolution, `PATH` lookup, capability-path resolution, and external child environments.
 
 `PWD` and `OLDPWD` cannot be set through `within env`. `PWD` is ral’s logical cwd, so use `cd` or `within dir` instead; ral keeps no previous directory, so there is no `OLDPWD`. Lists, maps, blocks, handles, and other non-scalar environment values are rejected.
 
@@ -2634,7 +2641,7 @@ Boundary rules are deliberately specific:
 - A forced block and a function call keep their bindings private; a `cd` or other unbracketed shell-state write inside either persists to the caller. Inside a surrounding `within [dir:]`, a `cd` persists only until that `within` exits.
 - Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
 - Each stage of a pipeline runs as a subshell with a snapshot of the active lexical and dynamic context — a ral-written stage on its own thread over a cloned shell, an external command as a process. Stage-local bindings, cwd changes, environment changes, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
-- A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its body runs under that capture; `use` and `explain` inside it read the creator's session as of the birth. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
+- A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its body runs under that capture; `explain` reads the creator's session as of the birth, while `use` already carries its checked module (§10.3). Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
 - An external process receives the effective cwd and environment at launch. It cannot mutate ral’s shell state.
 
 These containment rules are the same on every supported host. Host differences affect executable lookup, path syntax, and the implementation of process-staged pipelines and process control, not lexical scope, handler precedence, or dynamic restoration.
@@ -2650,7 +2657,7 @@ ral -s                     # read a program from standard input
 ral                        # start the REPL when stdin is a terminal
 ```
 
-A script is parsed and typechecked before it starts. Runtime-loaded files are parsed and typechecked when `use` reaches them.
+A script and every module it names with `use` are read, parsed, and typechecked before the script starts.
 
 ### 10.1. Program arguments and identity
 
@@ -2709,58 +2716,97 @@ within [env: [MODE: 'test', USER: 'builder']] {
 }
 ```
 
-Environment overrides are dynamically scoped. They affect `env`, `user`, `home`, home and command lookup, `RAL_PATH`, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
+Environment overrides are dynamically scoped. They affect `env`, `user`, `home`, home and command lookup, and child processes, then disappear when the `within` body ends. There is no general `setenv` operation in the language.
 
 `PWD` and `OLDPWD` are deliberately absent from `env`. ral owns its working directory separately so concurrent computations never race over the process-wide current directory. Child commands receive `PWD` and their actual process working directory from this logical state, and no `OLDPWD`: ral keeps no previous directory.
 
-`cd path` changes the session’s logical working directory. It resolves `path` as every path builtin does, path-prefix sigils included. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
+`cd path` changes the session’s logical working directory. It resolves `path` as every path builtin does, path-prefix sigils included. Relative paths, file operations, command lookup, and child processes all use it. A module path without a containing file uses the cwd at check time, not an earlier `cd` in the same unit (§10.3). A top-level `cd` persists into later runs; one made inside `within [dir: path]` is undone when that `within` exits (§9.2).
 
 A `cd` inside a function call or a forced block changes the caller's working directory, as at top level; only the body's bindings stay local.
 
 ### 10.3. Importing a module with `use`
 
-`use path` evaluates a file in a fresh top-level scope and returns its public bindings as a record, each at its own type, read by name:
+`use` is a control operator taking one written path: a constant word or a
+quoted string without interpolation. The file is read and linked when the
+importer is checked, before any of its commands run. A computed path is an
+elaboration error; write the path relative to this file, or headed by `~` or
+`xdg:`.
 
 ```ral
 let math = use 'lib/math.ral'
-echo $math[mean] [1, 2, 3]
+$math[mean] [1, 2, 3]
 ```
 
-Bindings do not leak into the caller. Names beginning with `_` are private and are omitted from the returned record:
+A module is checked against Σ (the host's natives and the prelude) and runs
+under Σ. It sees neither session bindings, rc helpers, nor the importer's
+`let`s. Shared helpers belong in another module. Bindings do not leak into
+the caller. Names beginning with `_` are private and omitted from the
+returned record:
 
 ```ral
 # lib/math.ral
 let _sum = { |xs| fold add 0 $xs }
-let mean = { |xs| $[_sum $xs / length $xs] }
+let mean = { |xs| return $[!{_sum $xs} / !{length $xs}] }
 ```
 
-The module’s final expression is evaluated, but `use` returns the bindings rather than that expression’s value. A module's bindings are heterogeneous and reached by name, so the result is a record: `$m[mean]` reads one, and a key computed at run time has no type to give.
+The module's final expression runs, but `use` returns its public bindings,
+not that expression's value. Each export has its checked scheme; `use` is
+not a checked boundary (§7.3). Missing exports and incompatible uses of an
+export are static type errors. The result is a closed record with one field
+per public binding, so a computed field key has no type to give.
+`let m = use '…'` generalises normally: an exported polymorphic function can
+be used at different types in the importer.
 
-`use` is a checked boundary (§7.3): the record is admitted against the fields the script reads, so a read of a name the module does not export fails at the `use`. Every used export's complete scheme is checked against the type the script uses it at, including functions nested in records, lists, maps, or variants. A known incompatible nested scheme is refused at `use`. Unresolved re-exported shapes additionally carry recursive delayed contracts: an opaque or weak function is guarded by exactly the caller-required arrow and result contract, and an incompatible application or result raises when reached. This does not certify every function body before invocation. Imported functions retain the module's checked sites; scoped handler installation performs no inference or re-vetting.
+A module cannot export an undecided shape, even as data or nested inside a
+function or collection. After the module's constraints have been solved,
+every public definition is checked for remaining weak variables before its
+scheme is settled. A refusal names the definition and the boundary call
+that left its shape undecided. Use the decoded value at the intended type
+inside the module, or export text and decode it where it is used. Private
+bindings need not have decided shapes.
 
-`use` first resolves a path. A `~` or `xdg:` head expands first, as in any written path, and only a path still relative after that is read relative to the containing file, or relative to `cwd` when there is no containing file; an absolute one is resolved exactly as any written path is, never joined onto the file's directory; the containing file's own directory is never read for such a head, so a script under a directory named `~` is still found there. That path is the first candidate, and the directories in the effective `RAL_PATH` give the rest, in order; the first candidate that is a file the grant lets ral read is loaded, and one the grant refuses is passed over. Where none is admitted, the first refusal is the error, whether or not the refused file exists. The effective value is read when `use` runs, so a dynamically scoped `within [env: [RAL_PATH: ...]]` override controls only loads in that body. `RAL_PATH` uses the platform’s normal path-list separator: `:` on Unix and `;` on Windows. Each search candidate must be a regular file; a directory with the requested name does not stop the search of later entries.
+There is exactly one path to read. A `~` or `xdg:` head expands as in any
+written path; an absolute path is used as written. A path still relative is
+read against the containing file's directory, or the session's cwd at check
+time when there is no file. A shared library can be named explicitly, for
+example `use 'xdg:config/ral/lib/json.ral'`. There is no search list or
+implicit extension.
+
+Resolution uses the session's environment, cwd, and filesystem grant at
+check time. A surrounding `within` or `grant`, or an earlier `cd` in the
+same unit, cannot change which file is read or authorise that read. The
+module's execution still uses the caller's dynamic environment, handlers,
+cwd, and grants: a lexical `grant` governs what its body does when it runs.
 
 ### 10.4. Module freshness, cycles, and errors
 
-ral does not cache loaded modules. Every `use` reads, compiles, and evaluates the file again:
+ral has no module cache. Each check reads and compiles its modules afresh.
+Separate REPL submissions therefore see intervening edits; two `use`s in
+one script are both linked before the script starts. A unit cannot write a
+module and then load the new file with `use`.
 
-```ral
-let first = use 'config.ral'
-# after config.ral is edited:
-let second = use 'config.ral' # sees the new file
-```
+Each evaluation of `use` runs its already checked module again. A `use`
+inside a function is linked when that function's unit is checked, not at
+each call, but the module body runs on every call. Bind the returned record
+once when repeated evaluation is unwanted.
 
-This also means module side effects run on every load. Bind a module map once when repeated evaluation is unwanted.
+During checking, nested relative imports use the innermost file's directory.
+The check carries a load chain and refuses any file already in that chain,
+reporting the circular dependency. The load depth is limited to 100 files;
+exceeding it is a compile error, not runtime recursion.
 
-During a nested load, relative imports use the innermost file’s directory. ral keeps the active load chain and rejects a file that appears again in that chain:
+Filesystem read authority is checked before the module is read. A path that
+is not UTF-8 is refused before reading it. Missing or unreadable files,
+denied reads, parse or type errors, undecided exports, cycles, and depth
+overflow are compile errors of the importer. They cannot be caught by
+`try`: no phrase of that unit runs. A module's compile errors are reported
+against its own text, with the importer's `use` marking the load that caused
+them. A denied read names only the path, since the module was never read.
+A check-time filesystem refusal remains in the dispatch's audit trail,
+stamped at that `use`, even when compilation fails (§13.4).
 
-```text
-use: circular dependency: a.ral -> b.ral -> a.ral
-```
-
-The active load depth is limited to 100 files. Exceeding it is an error rather than an uncontrolled recursion.
-
-`use` checks filesystem read authority before reading. A denied load fails before the module body runs. A file whose resolved path is not UTF-8 is refused, naming it, before it is read: a source's path travels as text. Missing files, permission failures, parse errors, type errors, cycles, depth overflow, and failures raised by the module retain their cause and provenance; diagnostics are prefixed with `use:`. A module that does not compile is reported against its own text, with the line and column of each error, exactly as it would be were it run as a script; a `try` handler that catches the compile failure reads its plain description in `$error[message]`, and its `site` is the `use`.
+A failure raised while the checked module body executes is still a runtime
+failure and can be caught by `try` around the `use`.
 
 ### 10.5. Persistent sessions
 
@@ -3859,8 +3905,10 @@ ral --capabilities base.ral,offline.ral script.ral
 ```
 
 The loader parses, elaborates, type-checks, and evaluates each profile, then
-decodes its options. Bindings created by the script are not projected into a
-policy as `use` bindings would be. Every profile key is optional: an omitted
+decodes its options. Like a module, a profile is checked against Σ (natives
+and the prelude) and runs under Σ. It sees no rc or session bindings; its
+helper `let`s stay private, and its value is its tail, not its bindings.
+A profile may `use` modules. Every profile key is optional: an omitted
 axis states nothing, and `return ()` is the lattice top. Nested tables follow
 §15.3 too. Unknown keys and incompatible field types are refused before the
 profile runs; unresolved field values and domains retain runtime checks.
@@ -4299,7 +4347,7 @@ reports that shape; it does not deny it.
 ### 13.4. Batch audit JSON
 
 For a script or `-c` program, `--audit` records the entire run and emits its
-report as JSON after execution:
+report as JSON after the dispatch settles:
 
 ```text
 ral --audit script.ral
@@ -4309,14 +4357,19 @@ ral --audit --pretty -c 'echo hello'
 `--pretty` requires `--audit`. These flags are batch options for an explicit
 script or `-c`; they are not interactive or stdin-script options.
 
-The top-level JSON object is the same two-field report as the language-level
-`audit` form's — `outcome` and `trail` — for the whole run rather than one
-block. `trail` is the run's flat list of observations, in settlement order.
-`outcome` is the run's whole ending: `` `ok value ``, `` `err record ``,
-`` `exited n `` for an `exit`, `` `stopped cause ``, or `` `panic text ``.
+The top-level JSON object has the same two fields as the language-level
+`audit` report — `outcome` and `trail` — but describes the whole CLI dispatch,
+not one body's ending. `trail` is the dispatch's flat list of observations,
+in settlement order. `outcome` is one of:
 
-The report has no separate top-level process status: the host derives it
-from the ending (§16.3), and `--audit` does not change it.
+- `` `ok value `` or `` `err record `` for an evaluated program;
+- `` `exited n `` for an `exit`, `` `stopped cause ``, or `` `panic text ``;
+- `` `static [rendered: String, status: Int] `` for a compile refusal;
+- payloadless `` `checked `` for a successful `--check`.
+
+The runtime `audit` report's outcome remains only `` `ok `` or `` `err `` (§13.3).
+The CLI report has no separate top-level process status: the host derives it
+from the dispatch outcome (§16.3), and `--audit` does not change it.
 
 The JSON projection favours legibility over round-trip fidelity:
 
@@ -4328,9 +4381,11 @@ The JSON projection favours legibility over round-trip fidelity:
 
 The variant rule is what shapes the report: `outcome` reads as
 `{"tag": "ok", "payload": …}`, `{"tag": "err", "payload": {…}}`,
-`{"tag": "exited", "payload": 3}`, and the other ending tags likewise; a
-`Unit` payload is absent, so a unit result reads `{"tag": "ok"}`. Each
-observation's `what` reads as `{"tag": "command", "payload": {…}}` and its kin.
+`{"tag": "exited", "payload": 3}`, and the other outcome tags likewise; a
+`Unit` payload is absent, so a unit result reads `{"tag": "ok"}`. A successful
+check reads `{"tag": "checked"}`; a static refusal reads
+`{"tag": "static", "payload": {"rendered": …, "status": …}}`. Each observation's
+`what` reads as `{"tag": "command", "payload": {…}}` and its kin.
 
 Compact mode writes one JSON document followed by a newline. Pretty mode
 writes the same data with indentation. Both write to fd 2. Program output is
@@ -4339,12 +4394,14 @@ ordinary stderr. Consequently the JSON shares stderr with any bytes the
 program writes there, and with optional `RAL_TIMING` lines. fd 2 is not
 promised to be a standalone JSON stream.
 
-On a runtime failure, `--audit` suppresses the separate human diagnostic
-because the report's `` `err `` payload already carries ral's explanation. It
-does not suppress the program's raw stderr. Parse, elaboration, and type errors
-happen before execution, so they produce their ordinary diagnostics and no
-report. The program's real exit status is preserved; `--audit` does not turn a
-failed run into a successful one.
+For evaluated programs, static refusals, and successful checks, `--audit`
+emits only the report envelope, not a separate ordinary diagnostic. Runtime
+errors carry ral's explanation in `` `err ``; parse, elaboration, and type
+errors carry the rendered diagnostic and status in `` `static ``. A static
+refusal retains the check-time trail: a module read denial is stamped at the
+`use` that caused it, even though no phrase ran. Raw program stderr is not
+suppressed. The dispatch's real exit status is preserved; `--audit` does not
+turn a failed run into a successful one.
 
 ### 13.5. Testing ral programs
 
@@ -4401,12 +4458,9 @@ owns them. Tests that compare output bytes should inspect a `` `command ``'s
 
 For executable-level checks:
 
-- `ral --check` or `ral -n` parses, elaborates, and type-checks a script
-  without executing it;
-- `ral --dump-ast` parses and prints the debug AST to stderr without
-  elaborating, type-checking, or executing it;
-- `ral --dump-ir` parses and elaborates, and prints the elaborated phrases to
-  stderr without type-checking or executing them;
+- `ral --check` boots the engine as for a run, applies capability profiles
+  and the recursion limit, then parses, elaborates (linking modules), and
+  type-checks the script without evaluating it (§16.2);
 - `ral --audit` exercises the real program and exposes its audit trail.
 
 The repository's corpus harness runs each script under `tests/run/` through
@@ -4627,9 +4681,8 @@ drive or share. `C:x` names `x` in the working directory when that is on
 `C:`, and otherwise in the current directory Windows keeps for `C:` in the ral
 process, or at `C:\` when it keeps none.
 
-A relative `RAL_PATH` entry is read against the working directory, and `xdg:`
-reads the `XDG_*_HOME` of the effective environment, `within [env: …]`
-included.
+`xdg:` reads the `XDG_*_HOME` of the effective environment, `within [env: …]`
+included. For `use`, that environment is the session's at check time (§10.3).
 
 On Windows, every path ral returns or prints is `/`-separated, never
 `\`-separated: `cwd`, `home`, `~`, `$SCRIPT`, `absolute-path`,
@@ -4724,9 +4777,10 @@ encodes it, one per line.
 
 The core session family includes `fail`, `raise`, `exit` and `quit`, `cd`,
 `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
-`reset`, `help`, and `explain`. All of them are builtins except `echo`, which is a base
-handler: it takes an argument list, writes each argument's text conversion
-separated by single spaces, and ends with one newline.
+`reset`, `help`, and `explain`. `use` is a control operator (§10.3); the others
+are builtins except `echo`, which is a base handler: it takes an argument
+list, writes each argument's text conversion separated by single spaces,
+and ends with one newline.
 
 `fail` raises a recoverable failure from exactly one `String`:
 
@@ -4925,7 +4979,7 @@ At every depth, a nested table must itself be a record literal, at forms and
 in files alike. A bound table, spread, computed table, map, or `()` is T0079
 (`TableNotWritten`). Write the keys and compute only the values:
 `grant [exec: [allow: $targets]]`, not `grant [exec: $table]`.
-The keys of collections — `handlers:`, `env:`, `bindings:`, and `plugins:` —
+The keys of collections — `handlers:`, `env:`, and `plugins:` —
 are data, not nested-table keys, and are outside this restriction.
 
 `Generator::check_options` checks each written key with `check_option`.
@@ -4943,7 +4997,7 @@ and domain checks, not redundant checks of the host result's shape or keyset.
 Grant's decoder also handles grants received as data and keeps its runtime
 shape and keyset checks.
 
-**The rc is total.** It writes all thirteen keys below. `limits:` and
+**The rc is total.** It writes all twelve keys below. `limits:` and
 `theme:` are total nested tables: every one of their keys is required too.
 An empty rc or `return ()` is T0081, not an rc with hidden defaults. The
 skeleton writes every key at its empty value.
@@ -4958,8 +5012,7 @@ The empty values are exactly:
 | `limits` | `` [open-files: `inherit, core-bytes: `inherit, stack-bytes: `inherit] `` | Each key is `Setting(Int)`: keep ral's limit for children, or set a non-negative soft limit no greater than ral's hard limit. ral's own limits stay unchanged; a grant's limits win. |
 | `env` | `[:]` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
 | `prompt` | `` `inherit `` | Keep ral's built-in prompt, or `` `set { … } `` to install a zero-argument base-prompt body. |
-| `handlers` | `[:]` | `Map(U([String] → Command))`: install command handlers (§9.4); use `bindings:` for lexical values and functions. |
-| `bindings` | `[:]` | Install lexical values, including functions. |
+| `handlers` | `[:]` | `Map(U([String] → Command))`: install command handlers (§9.4); use `let` above the `return` for lexical values and functions. |
 | `edit-mode` | `emacs` | `String`: `emacs` or `vi`. |
 | `bell` | `false` | `Bool`: enable or disable the audible line-editor bell. |
 | `surface` | `readline` | `String`: `minimal` or `readline`. |
@@ -4970,18 +5023,23 @@ The empty values are exactly:
 
 The rc decoder validates `prompt:`, `startup:`, and collection value shapes;
 setting domains such as octal masks, positive recursion limits, limit bounds,
-and colour names remain runtime checks. Windows accepts `` umask: `inherit ``
-and an all-`` `inherit `` `limits:`, refusing only actual settings.
-For example, a complete rc can choose:
+and colour names remain runtime checks. `prompt:` and `startup:` and a
+manifest's `hooks:` and `keybindings:` have no static hook-type obligation;
+installation still infers closure types and checks hook arity. The built-in
+base prompt is itself a host-made thunk, not a declared native. Windows accepts
+`` umask: `inherit `` and an all-`` `inherit `` `limits:`, refusing only actual
+settings.
+Top-level `let`s above the `return` install session bindings with their checked,
+generalised schemes. For example, a complete rc can choose:
 
 ```ral
+let work = '/srv/work'
 return [
     umask: `inherit,
     limits: [open-files: `inherit, core-bytes: `inherit, stack-bytes: `inherit],
     env: [EDITOR: 'vim', PAGER: 'less'],
     prompt: `set { return "!{abbreviate-home !{cwd}} ❯ " },
     handlers: [:, ll: { |args| ls -lh ...$args }],
-    bindings: [work: '/srv/work'],
     edit-mode: vi,
     bell: false,
     surface: readline,
@@ -4999,9 +5057,7 @@ Write `[:, ll: { |args| ls -lh ...$args }]`, or `[:]` for none; a record such
 as `[ll: …]` is refused with the map spelling. These uses reach decoder
 admission sites inside locally checked handlers. Persistent handlers are
 still vetted against the same constant type at installation; names supply
-diagnostic wording only. A handler obtained through `use` retains its
-module's sites; unresolved returns and member types also require that
-install-time check.
+diagnostic wording only.
 
 The prompt body may return a value, whose display form becomes the prompt. If
 it returns `Unit`, its captured standard output is decoded lossily after
@@ -5103,13 +5159,20 @@ Plugin options are maps forwarded to the factory without checking their
 contents against its parameter type; they may contain blocks.
 
 Plugins load only from the RC's `plugins:` map at startup and remain installed
-for the session. A new plugin requires a new session. Each name or path is
-resolved in this order:
+for the session. A new plugin requires a new session. Each key names exactly
+one file:
 
-1. the `ral/plugins` subdirectory of the user configuration directory;
-2. each directory in `RAL_PATH`;
-3. the literal path;
-4. the literal path with `.ral` appended.
+- without a path separator, `NAME` names `<config>/ral/plugins/NAME.ral`,
+  where `<config>` is the user configuration directory;
+- any other key is a written path, resolved exactly as `use` resolves one
+  (§10.3).
+
+There is no search list, literal-path fallback, or extension added to a
+written path. A denied read refuses that file; no alternative is tried.
+A plugin is checked against Σ (natives and the prelude) and runs under Σ,
+like a module. It sees no rc or session bindings, and its own helper `let`s
+never enter the session. Its value is its manifest or factory tail. A
+helper shared with the rc belongs in a module, which either file may `use`.
 
 A direct manifest rejects non-empty options. In a complete rc (§15.3), set
 its `plugins:` field to:
@@ -5338,17 +5401,22 @@ Script arguments are returned by `args`. Arguments are text: one that is not UTF
 
 A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed: inference builds the checked IR beside its types, inserting capture/decode at bindings and explicit forces for returned-thunk application. After inference succeeds, the unit's sites are frozen and its binding schemes settled. A pipeline carries no per-stage type annotations.
 
-The batch-only inspection flags are:
+The batch-only checking and reporting flags are:
 
-- `-n`, `--check` — parse, elaborate, and typecheck without executing;
-- `--dump-ast` — parse and print the syntax tree to stderr without elaborating or executing;
-- `--dump-ir` — parse and elaborate, and print the phrases to stderr without typechecking or executing; at most one of `--check`, `--dump-ast`, `--dump-ir`;
+- `--check` — boot as for a run, then parse, elaborate (linking modules),
+  and typecheck without evaluating the requested program;
 - `--audit` — execute and print the run's audit report as JSON on stderr;
 - `--pretty` — pretty-print that JSON; it requires `--audit`.
 
 These flags require a script path or `-c`; they are not accepted for a bare interactive or stdin-script invocation.
 
-The checker and evaluator receive the same batch builtin surface. A command cannot pass `--check` by being treated as one kind of builtin and then run as another.
+`--check` runs in the same engine and follows the same compile path as a
+run. Boot evaluates the capability profiles and applies `--recursion-limit`
+before checking; `--check` is not an effect-free check of the source alone.
+Module resolution and read authority are therefore the same as for a run,
+including refusals imposed by `--capabilities`. The requested program and
+its linked module bodies are not evaluated. The checker and evaluator also
+receive the same batch builtin surface.
 
 The emitted JSON is one report for the whole batch run, its `trail` a flat list
 in settlement order. `` `command `` observations exist only for external or
@@ -5389,7 +5457,7 @@ computed, where it is clamped into `1..=255`. `exit` refuses arguments outside
 `0..=255`; `fail` takes text and yields code 1. A negative
 Windows `NTSTATUS` therefore cannot turn a failed external into success.
 `--audit` does not change the process status and adds no top-level status
-field: it represents the whole ending in `outcome` (§13.4) and suppresses the
+field: it represents the dispatch outcome in `outcome` (§13.4) and suppresses the
 duplicate ordinary diagnostic.
 
 A foreground batch launched from a terminal may lend that terminal to an interactive child. A backgrounded or non-terminal batch has no such authority.
@@ -5442,7 +5510,7 @@ ral seeds a stable dynamic environment at boot. Inherited values win; a variable
 
 `PWD` and `OLDPWD` are not exposed through `env`. ral owns the working directory as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD` and actual launch directory; an inherited `OLDPWD` is removed, since ral keeps no previous directory.
 
-`RAL_PATH` is a platform-separated list used to find modules and plugins. `RAL_TIMING`, when present, prints batch phase timings to stderr.
+`RAL_TIMING`, when present, prints batch phase timings to stderr.
 
 On Unix, `ral` refuses a setuid invocation (effective and real user id differ) before it does anything else — before argument parsing, and before any of the four modes above is selected. The refusal is therefore unconditional: it does not depend on which mode the arguments would otherwise name.
 
@@ -5519,7 +5587,7 @@ binding       ::= "let" pattern "=" NL* chain
 chain         ::= pipeline ((NL* "?" NL*) pipeline)*
 pipeline      ::= stage ((NL* "|" NL*) stage)*
 
-stage         ::= (return | conditional | case | scope-form | command)
+stage         ::= (return | conditional | case | scope-form | module-use | command)
                   redirects
 
 return        ::= "return" atom?
@@ -5540,6 +5608,8 @@ scope-form    ::= "try" atom atom
 options       ::= "[" "]"
                 | "[" option ("," option)* ","? "]"
 option        ::= static-key ":" atom
+module-use    ::= "use" written-path
+written-path  ::= constant-word | quoted-string | constant-double-quoted-string
 
 command       ::= head (argument | redirect)*
 head          ::= "^" bare-name | atom
@@ -5784,7 +5854,7 @@ atomic and never weak.
 - A binding defaults an undecided grade to `p` only at the close of its
   owning region (§17.5). A non-unit payload can entail `p` before then.
   A builtin parameter demanding a value, such as `filter`'s block, requires `p`.
-- Boundary results are `p`: checked-boundary JSON/CSV decoders, `use` and
+- Boundary results are `p`: checked-boundary JSON/CSV decoders and
   other checked doors supply data. A free boundary grade would let a command
   join type that data `Unit` and admit a program whose supplied value then
   fails admission.
@@ -5827,7 +5897,7 @@ scope alone is not a region.
 
 **Weak means rank zero, not a propagated mark.** A *boundary* — a place where
 a value of a shape the program did not decide enters typed code: the checked
-JSON/CSV decoders, `env`, `use`, the exarch host's answers, `_ed-state` — puts
+JSON/CSV decoders, `env`, the exarch host's answers, `_ed-state` — puts
 its result's unknowns at rank zero and records the result type on the call.
 No `let` generalizes rank zero, and unification lowers whatever meets it to
 zero. The result therefore has **one type per unit**. `WeakSource` retains
@@ -5846,12 +5916,24 @@ host. Admission checks the environment supplied to that unit, not necessarily
 the session environment. A refusal runs no phrase and names the use that
 imposed the type, in the loaded file when that is where it was written.
 Residuals are re-seeded at rank zero in the next unit, preserving
-their kinds and sharing. An occurrence whose type reaches a thunk or a handle
-also retains recursive protection: a thunk's arguments and results are
-checked when it runs, and a handle's payload when exposed by `await`, ready
-`poll`, or `race`. Importing a delayed value neither forces it nor consumes a
-handle. Only weak `comparable` identities acquire session-wide number-or-text
-fixings; universally quantified parameters remain fresh at each instantiation.
+their kinds and sharing. **A stored name cannot be used in a later unit if its
+scheme reaches a weak residual beneath a thunk or a handle.** This includes
+a function's argument and result types, a handle's payload, and weak type,
+computation or row variables. The refusal is static, even if that unit would
+decide the shape. Define and use a decoder helper in one unit, or return text
+and decode it where its shape is used.
+
+The rule follows recursive μ-equations from the scheme's body, retaining
+whether the path has entered a thunk or handle. A shared recursive type must
+be considered in both data and delayed contexts: `[data: α, later: U(F α)]`
+is refused if α reaches a weak residual, even though `[data: α]` alone can be
+readmitted. Unreachable μ-equations impose no delayed-use restriction.
+A decided function beside undecided data is allowed: `[x: _α, f: U(F Int)]`
+can be readmitted because its only weak residual is in existing data.
+Universally quantified parameters are not weak residuals and remain fresh at
+each instantiation. Only weak `comparable` identities acquire session-wide
+number-or-text fixings.
+
 A recursive group is inferred once, at its first projection, in a region of
 its own: against monomorphic self-bindings, each member then generalized as
 the region closes. Every projection, the first included, instantiates its
@@ -5914,10 +5996,11 @@ K ⊢ C1 ~ C2                        unification
 **Generation, solving and readback are separate.** Generation writes equations,
 instantiations, regions, the suspended matches of §17.5, `weak τ` (rank-zero
 lowering), and `gate τ` obligations. It builds a pending tree without resolving
-an unknown or inspecting a scheme's type. Instantiation and the two matches
-return unknowns, not their solved heads; only syntax and declarations supply
-known structure. An equation may report whether it held, solely to suppress
-a second complaint after the unit has already been refused.
+an unknown. Instantiation and the two matches return unknowns, not their
+solved heads; only syntax and declarations supply known structure. Stored
+schemes are inspected for cross-unit admissibility, not to select elaboration.
+An equation may report whether it held, solely to suppress a second complaint
+after the unit has already been refused.
 
 The solver settles equations and matches while the unit is open. Holes are
 annotations of the IR's inferring phase: every `let` RHS carries a binding
@@ -5926,9 +6009,8 @@ the checked phase these annotations are empty, and a bare binding call cannot
 occur, so no hole survives in a checked tree. Discharging or defaulting a
 match records its decision on its hole (§17.5). Closure produces a read-only
 solution only when the unit has no errors and every hole is decided; readback
-applies those decisions, freezes sites and settles schemes. Runtime protection
-is unchanged. A refused unit exports neither a checked tree nor a stored
-scheme.
+applies those decisions, freezes sites and settles schemes. A refused unit
+exports neither a checked tree nor a stored scheme.
 
 Types are regular trees, and every cycle crosses a data edge: a list element, a
 map element, a record field, or a variant payload. The edges `U`, `->`, `F` and
@@ -6270,8 +6352,7 @@ A one-shot session seeds its environment at rank zero and enters a region
 before inferring or checking its body. It exits that region, generalizes any
 scheme to be stored at enclosing rank zero, then closes the unit. Only success
 settles and exports the scheme; `arm_stands_in` stores none.
-`Site::scheme` likewise enters its scratch region before instantiation, exits,
-then generalizes. Opening a region around an already inferred type is too late.
+Opening a region around an already inferred type is too late.
 The unit's phases have this order:
 
 1. Generate equations and the pending tree on `Solver`, checking any
@@ -6633,8 +6714,17 @@ is Levy's `rec f. M`.
 
 A `Define` at the top level — `let x = v` outside any block — extends the
 *session* environment, not a frame's: it is installed as it is reached, so a
-later top-level phrase, or a `use` inside one, sees it, and a run that halts
+later top-level phrase sees it, and a run that halts
 has installed exactly the `Define`s that ran before the halt.
+
+Before its first phrase, a unit readmits imported residual data at the type
+that unit solved (§17.3). It does not force a thunk or consume a handle to do
+so. A weak residual beneath either is a static refusal, not an obligation
+postponed to a call or an `await`. Admission of a thunk checks only that it is
+a function value: the defining unit checked its body, and no undecided shape
+beneath it can be imported. Boundaries return first-order data (§7.3), never
+functions or handles. No continuation frame checks a returned value against
+a type contract.
 
 The stack is capped: a rule that would push a frame first checks `|κ| <
 stack_limit` (`session.stack_limit`, default 100 000, the `--recursion-limit` /
@@ -6712,24 +6802,21 @@ children are torn down and reaped before their cancelled computation returns.
 
 Each inference rule builds its pending node beside its type. A binding or
 call node carries its hole (§17.3); boundary calls are saturated or η-expanded
-at their inference rule and carry their result type. Imported residual
-execution heads force a protected variable; imported value occurrences carry
-their solved type as a membrane.
+at their inference rule and carry their result type. A stored name whose
+scheme delays a weak residual is refused at its use in a later unit (§17.3).
+An admitted residual occurrence remains a plain variable.
 
 Once generation and closure (including gates) succeed, one fold reads the
 tree back in the checked phase. A binding hole becomes Let or capture/decode
 (§17.5); a call hole becomes returned-thunk bind/force segments before the recorded
-arguments. Boundary types become site snapshots.
-A protected value's membrane is a checked tree's kept site, or an imported
-type, which remains only if its snapshot has delayed obligations. The
-membrane check `Protect` always holds a site: only runtime membranes build
-it, and inference keeps it. Frozen contracts may retain free weak variables
-and delayed types; they need not be ground. One unit identity serves all site
-snapshots and the first-use readmissions in `Toplevel.admits`. Re-checking a
-checked tree accepts it and inserts no further elaboration; raw variable ids
-are not canonical, so the re-checked tree need not be equal to it. These
-readmissions precede execution and are distinct from diagnostics for names bound to unit-valued
-calls.
+arguments. Boundary types become site snapshots. Frozen sites may retain
+free weak variables; they need not be ground. A readmission site may also
+contain a decided function beside undecided data. One unit identity serves
+all site snapshots and the first-use readmissions in `Toplevel.admits`.
+Re-checking a checked tree accepts it and inserts no further elaboration;
+raw variable ids are not canonical, so the re-checked tree need not be equal
+to it. Readmissions precede execution and are distinct from diagnostics for
+names bound to unit-valued calls. The runtime builds no IR for a contract.
 
 Readback applies `settle_weak` to the schemes carried by each
 `Phrase::Define`, producing closed schemes. It makes no capture or

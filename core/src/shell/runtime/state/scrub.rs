@@ -253,13 +253,18 @@ mod tests {
         let mut parent = crate::test_helper::core_shell();
         let entry = Arc::new(parent.lookup_builtin("has").expect("has builtin"));
         let unchanged: Arc<[Value]> = Arc::from([Value::Int(7)]);
-        parent.set_var(
-            "unchanged".into(),
+        crate::test_access::bind_untyped(
+            &mut parent,
+            "unchanged",
             Value::Native(Arc::clone(&entry), Arc::clone(&unchanged)),
         );
-        parent.set_var("live".into(), idle_handle());
+        crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
         let held = Value::list(vec![idle_handle(), block_over(&parent.env)]);
-        parent.set_var("partial".into(), Value::Native(entry, Arc::from([held])));
+        crate::test_access::bind_untyped(
+            &mut parent,
+            "partial",
+            Value::Native(entry, Arc::from([held])),
+        );
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
         let Some(Value::Native(_, args)) = fork.env.get("partial") else {
@@ -281,14 +286,19 @@ mod tests {
     #[test]
     fn a_handle_free_scope_forks_as_itself() {
         let mut parent = crate::test_helper::core_shell();
-        parent.set_var("big".into(), Value::string("x".repeat(1 << 20)));
-        parent.set_var(
-            "list".into(),
+        crate::test_access::bind_untyped(&mut parent, "big", Value::string("x".repeat(1 << 20)));
+        crate::test_access::bind_untyped(
+            &mut parent,
+            "list",
             Value::list(vec![Value::Int(1), Value::string("a")]),
         );
-        parent.set_var("map".into(), Value::map(vec![("k".into(), Value::Int(2))]));
+        crate::test_access::bind_untyped(
+            &mut parent,
+            "map",
+            Value::map(vec![("k".into(), Value::Int(2))]),
+        );
         let blk = block_over(&parent.env);
-        parent.set_var("blk".into(), blk);
+        crate::test_access::bind_untyped(&mut parent, "blk", blk);
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
@@ -300,13 +310,13 @@ mod tests {
     #[test]
     fn a_handle_is_scrubbed_through_every_block_and_nothing_else_is_copied() {
         let mut parent = crate::test_helper::core_shell();
-        parent.set_var("live".into(), idle_handle());
+        crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
         let blocks = ["b1", "b2", "b3"];
         for name in blocks {
             let blk = block_over(&parent.env);
-            parent.set_var(name.into(), blk);
+            crate::test_access::bind_untyped(&mut parent, name, blk);
         }
-        parent.set_var("big".into(), Value::string("x".repeat(1 << 20)));
+        crate::test_access::bind_untyped(&mut parent, "big", Value::string("x".repeat(1 << 20)));
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
@@ -343,7 +353,7 @@ mod tests {
         let mut parent = crate::test_helper::core_shell();
         for i in 0..40 {
             let blk = block_over(&parent.env);
-            parent.set_var(format!("d{i}"), blk);
+            crate::test_access::bind_untyped(&mut parent, &format!("d{i}"), blk);
         }
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
@@ -358,8 +368,9 @@ mod tests {
     fn a_deep_chain_over_a_handle_scrubs_to_its_foot() {
         const LINKS: usize = 10_000;
         let mut parent = crate::test_helper::core_shell();
-        parent.set_var(
-            "chain".into(),
+        crate::test_access::bind_untyped(
+            &mut parent,
+            "chain",
             crate::shell::runtime::deep_block_chain(LINKS, idle_handle()),
         );
 

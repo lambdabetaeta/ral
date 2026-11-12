@@ -1,0 +1,9 @@
+let config = if true {
+    to-string '{"port": 8080}' | from-json
+} else {
+    return [port: 8080]
+}
+let decode-port = { |text|
+    let value = !{to-string $text | from-json}
+    return $[$value[port] + 0]
+}

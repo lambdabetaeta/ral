@@ -52,6 +52,8 @@ Use forcing to put a computation in a value position:
     echo "notes.txt now has !{line-count notes.txt} while it had $n before"
 </CRITICAL>
 
+Define and use decoder helpers in ONE `ral` call; an undecided decoded shape beneath a function or handle cannot cross into a later call.
+
 A binding shadows the command of the same name for the rest of the session, so don't name a binding `ls`, `head` or `tail`; `^ls` runs the command.
 
 The shell's own state is read by six builtins: `cwd`, `env`, `args`, `user`, `home`, `nproc`. Use them as `let [a, b] = args`, `!{env}[HOME]`, `"!{cwd}/x"`.

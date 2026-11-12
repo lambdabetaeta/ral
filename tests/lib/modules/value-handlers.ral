@@ -1,0 +1,1 @@
+let handlers = [:, greet: { |args| return 1 }]

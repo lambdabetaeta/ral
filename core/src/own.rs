@@ -2,7 +2,8 @@
 //!
 //! Three kinds: what a program keeps for itself ([`OwnDir`]), what the user
 //! writes at the places it chooses ([`UserFile`]), and what the user names to
-//! it ([`read_named`], [`open_named`], [`kind_named`], [`create_named`]).
+//! it ([`read_named`], [`read_named_source`], [`open_named`], [`kind_named`],
+//! [`create_named`]).
 //!
 //! No grant judges any of them, and none raises a card: the authority is the
 //! user's own, minted by [`Ungoverned`], and no model named the object.  They
@@ -40,7 +41,7 @@ use crate::environ::EnvVars;
 use crate::host;
 use crate::path::{
     Access, Dir, EntryName, Handle, Judged, Kind, LeafMode, LexicalPath, Located, Reading,
-    Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,
+    RealPath, Resolver, Stat, Visibility, Writing, XdgKind, app_dir, dangling, file_name, shown,
     spelled_parent, sync_dir, sync_dir_chain, unsynced, walk, walk_dir, walk_dir_made,
     walk_dir_made_synced,
 };
@@ -1103,17 +1104,19 @@ impl UserFile {
 
 // ── The files a user names ────────────────────────────────────────────
 
-// `clippy.toml` bans these four, so that each caller is a typed site saying
-// whose name it is.  None calls another: they share the helpers above and
-// `opened_named`.
+// `clippy.toml` bans these doors: each caller names whose path it is.
 
-/// A read handle on the file the user named, links followed.
-fn opened_named(path: &Path) -> Result<File, OwnError> {
+/// A read handle and the identity of the same walked object.
+fn opened_named(path: &Path) -> Result<(File, RealPath), OwnError> {
     let found = walk(&anchored(path)?, LeafMode::Follow).map_err(|e| walked(Act::Open, path, e))?;
     if let Some(dangling) = dangled(path, &found) {
         return Err(dangling);
     }
-    reading(found).read().map_err(|e| io_at(Act::Open, path, e))
+    let real = found.real().clone();
+    let file = reading(found)
+        .read()
+        .map_err(|e| io_at(Act::Open, path, e))?;
+    Ok((file, real))
 }
 
 /// The text of the file the user named, links followed; a relative `path` is
@@ -1123,11 +1126,20 @@ fn opened_named(path: &Path) -> Result<File, OwnError> {
 /// [`OwnError::NoCwd`]; `NotFound`; [`OwnError::Dangling`] for a link to
 /// nothing; `InvalidData` for text that is not UTF-8; the read's.
 pub fn read_named(path: &Path) -> Result<String, OwnError> {
+    site!(Silent::Read, read_named_source(path)).map(|(_, text)| text)
+}
+
+/// The user's source text and its real path, from the same held object.
+/// A relative `path` is read against the process's cwd, before any shell boot.
+///
+/// # Errors
+/// As [`read_named`].
+pub fn read_named_source(path: &Path) -> Result<(RealPath, String), OwnError> {
+    let (mut file, real) = opened_named(path)?;
     let mut text = String::new();
-    opened_named(path)?
-        .read_to_string(&mut text)
+    file.read_to_string(&mut text)
         .map_err(|e| io_at(Act::Read, path, e))?;
-    Ok(text)
+    Ok((real, text))
 }
 
 /// A read handle on the file the user named, links followed.
@@ -1136,7 +1148,7 @@ pub fn read_named(path: &Path) -> Result<String, OwnError> {
 /// [`OwnError::NoCwd`]; `NotFound`; [`OwnError::Dangling`] for a link to
 /// nothing; the open's.
 pub fn open_named(path: &Path) -> Result<File, OwnError> {
-    opened_named(path)
+    opened_named(path).map(|(file, _)| file)
 }
 
 /// What the user's name reaches, links followed; `None` where nothing is, a
@@ -1167,6 +1179,25 @@ pub fn create_named(path: &Path) -> Result<File, OwnError> {
 mod typed_failure_tests {
     use super::*;
     use crate::fact::{DecodeCause, DecodeFailure, PathIoLeaf};
+
+    #[test]
+    fn named_source_returns_the_real_identity_of_the_text_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        let target = real.join("root.ral");
+        std::fs::write(&target, "return 7").unwrap();
+        #[cfg(unix)]
+        let named = {
+            let alias = real.join("alias.ral");
+            std::os::unix::fs::symlink("root.ral", &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let named = target.clone();
+        let (identity, text) = read_named_source(&named).unwrap();
+        assert_eq!(identity.as_path(), target);
+        assert_eq!(text, "return 7");
+    }
 
     #[test]
     fn own_projection_retains_every_terminal_variant_and_io_context() {

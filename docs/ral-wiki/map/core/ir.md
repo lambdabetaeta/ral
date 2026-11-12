@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
 
@@ -25,16 +25,14 @@ operand types and shared-node aliases take `P: Phase = Checked`, a trait with
 one associated type per annotated position: `Bind` (a `CompKind::Bind`'s or
 `Phrase::Define`'s right-hand side), `Call` (a `CompKind::App`),
 `BindingCall` (a `CompKind::BindingCall`), `Boundary` (`Exec.site`, an
-`Option<P::Boundary>`) and `Membrane` (`Val::Protected.site`). `Checked`, the
-phase the evaluator runs, has `Bind = Call = ()`, an uninhabited
-`BindingCall` and `Boundary = Membrane = Arc<Site>`. The checker's own
-`Inferring` phase holds holes and types there
+`Option<P::Boundary>`). `Checked`, the phase the evaluator runs, has
+`Bind = Call = ()`, an uninhabited `BindingCall` and `Boundary = Arc<Site>`.
+The checker's own `Inferring` phase holds holes and types there
 ([[map/core/typecheck|typecheck]]); readback alone turns it into `Checked`.
-`CompKind::Protect.site` is `Arc<Site>` in every phase. `Serial` is the phases
-whose trees serialise: the skipped annotations default, sites cross. `Toplevel`
-is always checked. `Prim::map_operands` converts `Prim<P>` to `Prim<Q>`,
-preserving operand spans; inference's individual sub-rules retain their own
-operand order.
+`Serial` marks the phases whose trees serialise: the skipped annotations
+default, sites cross. `Toplevel` is always checked. `Prim::map_operands`
+converts `Prim<P>` to `Prim<Q>`, preserving operand spans; inference's individual
+sub-rules retain their own operand order.
 
 Values, computations and shared nodes:
 
@@ -100,12 +98,19 @@ are runtime mechanisms, not IR constructors or mechanised rules.
   values, with no spread. `Bind` takes a pattern and a `hole`; `Seq` discards
   a computation's result without generalisation. Holes are skipped by serde.
 - `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`, `Gather`,
-  `Audit`, `Tilde`, `Protect` and `BindingCall` form the shell layer.
+  `Audit`, `Tilde`, `Use` and `BindingCall` form the shell layer.
   `BindingCall` is the only skipped computation variant: a bare head bound in
   scope while the checker decides its splits. Readback makes it an `Exec`,
   and it cannot occur in a checked tree. Builtin application never becomes IR;
   partial builtins are runtime `Value::Native(entry, args)`. Boundary builtins
   remain η-expanded over `Exec`, retaining their per-use checked site.
+- `Use(Arc<Module>)` holds a checked `Toplevel` and its `SourceOrigin`.
+  Elaboration links the one written path at check time; no path lookup remains
+  for evaluation. The module is checked and run under Σ alone, and its public
+  schemes contain no weak variables. `Use` is total in every IR phase;
+  `Toplevel::exported_schemes` supplies the importer's record type and the
+  evaluator's public-name projection. Seed encoding carries the linked tree
+  and origin, so a closure containing `use` reads no file when resumed.
 - `Within { opts, body }` and `Grant { caps, body }` carry their options as
   one spread-free `Arc<FieldsNode>`, the same node as a record literal.
   `handlers:` is an ordinary map-valued field; no handler-specific AST or IR
@@ -117,8 +122,12 @@ See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
 **The checker builds explicit verdicts into the IR.** Inference constructs
 nodes beside their types; readback applies the solution's decisions,
 snapshots sites and settles schemes only after the unit succeeds. Site graphs
-may retain free weak variables and delayed obligations. Every evaluated
-`Toplevel` has passed this check.
+may retain free weak variables; they need not be ground. A stored name whose
+scheme reaches a weak residual beneath a thunk or handle is statically
+unusable in a later unit. Accepted residual occurrences are plain variables;
+`Toplevel.admits` checks their existing data before execution, not future
+arguments, results or handle payloads. Every evaluated `Toplevel` has passed
+this check ([[invariants/schemes-leave-closed|scheme invariants]]).
 
 - `CompKind::Pipeline` is a struct variant `{ stages }`. The form's value is
   its final stage's. There is no per-stage type field, because every
@@ -160,17 +169,6 @@ may retain free weak variables and delayed obligations. Every evaluated
   [[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]). Neither has surface syntax.
 
-- `Val::Protected { value, site }` carries a contract's delayed obligations.
-  While inferring, an imported weak value occurrence or `Exec` head carries
-  `Membrane::Imported(ty)`; readback keeps the membrane only if the snapshot
-  reaches a thunk or handle (`Site::has_delayed`). Re-inferred protection uses
-  `Membrane::Kept(site)` to preserve the checked site.
-  Forming a membrane admits nothing; it does not run a thunk or consume a handle.
-  `CompKind::Protect { body, site }` checks and wraps the body's returned value,
-  so generated thunk wrappers can guard arguments and results at their actual
-  elimination points. Neither form has surface syntax; both retain their
-  contract when re-inferred ([[map/core/typecheck|typecheck]]).
-
 - `CompKind::Rec { group: Arc<GroupNode>, index }` is the `index`-th member of
   a recursive group — `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, typed `Cᵢₙdₑₓ` — an n-ary
   generalisation of Levy's `rec x. M`, which is a group of one. `group`'s occ
@@ -183,7 +181,7 @@ may retain free weak variables and delayed obligations. Every evaluated
 
 Every verdict
 the evaluator needs from the checker is explicit: capture/decode,
-returned-thunk splits, protection nodes, sites and schemes.
+returned-thunk splits, sites and schemes. The runtime builds no contract IR.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
 `TildePath`); `written()` gives it back as the source spelled it, `~`

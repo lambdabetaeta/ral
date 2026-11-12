@@ -142,7 +142,11 @@ pub(crate) mod engine {
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
         let terminal = ral_core::Value::from(&shell.terminal());
-        shell.set_var("TERMINAL".into(), terminal);
+        shell.set_var(
+            "TERMINAL".into(),
+            terminal,
+            ral_core::Value::terminal_scheme(),
+        );
         crate::repl::external_editor::register(shell)?;
         boot_builtin::register(shell)
     }
@@ -188,6 +192,74 @@ pub(crate) mod engine {
         Err(Error::new(ral_core::fact::Reason::State(Box::new(
             ral_core::fact::StateFailure::NoChildEngines,
         ))))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ral_core::path::{CwdPath, EnginePath};
+        use ral_core::protocol::Run;
+        use ral_core::source::SourceOrigin;
+
+        #[test]
+        fn every_boundary_in_repl_and_batch_returns_data() {
+            let dir = tempfile::tempdir().unwrap();
+            for installer in &INSTALLERS {
+                let spec = EngineSpec::new(installer.tag, EnginePath::Host(dir.path().to_owned()));
+                let runtime = (installer.runtime)(&spec).unwrap();
+                let shell = ral_core::Shell::root(
+                    runtime.into(),
+                    CwdPath::new(dir.path().to_owned()).unwrap(),
+                );
+                for name in shell.builtin_names() {
+                    let entry = shell
+                        .lookup_builtin(name)
+                        .expect("manifest entry has a body");
+                    if entry.decl.is_boundary() {
+                        assert!(
+                            ral_core::test_access::boundary_result_is_data(
+                                ral_core::test_access::builtin_scheme(&entry)
+                            ),
+                            "{} boundary `{name}` must return data with only deep rows",
+                            installer.tag
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn booted_repl_has_a_scheme_for_every_session_binding() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Root::new(EnginePath::Host(dir.path().to_owned()));
+            let spec = EngineSpec::new(REPL, root.cwd.clone());
+            let runtime = repl_runtime(&spec).unwrap();
+            let mut shell =
+                ral_core::Shell::root(runtime.into(), CwdPath::new(dir.path().to_owned()).unwrap());
+            ral_core::shell::boot::seed_host_env(&mut shell);
+            repl_root(&root, &mut shell).unwrap();
+            shell
+                .run(Run::captured(
+                    boot_builtin::Boot {
+                        no_rc: true,
+                        recursion_limit: None,
+                        capabilities: Vec::new(),
+                    }
+                    .program(),
+                    SourceOrigin::named("<boot>"),
+                ))
+                .expect_ran()
+                .into_settled()
+                .expect("the REPL boot hook must settle");
+
+            assert!(shell.scope_lookup("TERMINAL").is_some());
+            for (name, _) in shell.bindings() {
+                assert!(
+                    ral_core::test_access::binding_scheme(&shell, &name).is_some(),
+                    "booted REPL binding `{name}` has no scheme"
+                );
+            }
+        }
     }
 }
 

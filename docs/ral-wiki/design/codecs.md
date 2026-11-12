@@ -1,7 +1,3 @@
----
-generated_at_commit: d56977ff
----
-
 # Codecs: the typed crossing between bytes and values
 
 **The `from-X` / `to-X` builtins name the typed crossing between stdin bytes
@@ -53,7 +49,7 @@ for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoder
   object member by exact key, an array element by decimal), decoded and
   checked like `from-json`; a path given as tokens, never as a pointer string,
   so no key needs escaping;
-- `from-csv : ∀α. Returns [α]` → a list of header-keyed rows, a boundary like
+- `from-csv : ∀α:data. Returns [α]` → a list of header-keyed rows, a boundary like
   `from-jsonl`. Label reads use records and computed reads maps. Every cell
   is a `String`; use `int` / `float` to parse a number. Numeric use without
   parsing fails at decode, naming the column and line of use. Quoted fields,
@@ -61,13 +57,24 @@ for a `Bytes` value (for example `$s[stdout]` from a `poll` result). The decoder
   ragged rows are refused; a ragged row names its input line;
 - `from-lines` → `[String]`, split by the line rule (below), lossy per line.
 
-**A decoder of undecided shape is checked.** `from-json`'s type is `∀α. Returns α`,
-and its `α` would be a cast. It is instead weak (one type per unit) and the
-decoder admits the value it read against the type the checker solved for it, so
+**A decoder of undecided shape is checked.** `from-json`'s type is
+`∀α:data. Returns α`, and its `α` would be a cast. It is instead weak (one
+type per unit), and the decoder admits its value against the solved type, so
 what fails is the decode, naming the pointer and the line of the use that
 needed the shape: `the value at /items/3/size is text, but this script uses it
 as a number`. The decoder never converts: a JSON `3` is an `Int` and `2.5` a
 `Float`, and `float` at the use accepts both.
+
+**Every registered boundary's declared result is constrained to data.**
+This includes host boundaries, not just codecs:
+
+- every result type variable has kind `data`, and every result row variable
+  is *deep*: all fields or payloads it may acquire must also be data;
+- the constraint excludes functions and handles at every depth, including
+  inside lists, maps, records and variants;
+- using decoded data as a function or handle is a kind error at that use,
+  before execution, not a refusal at decoding or readmission. Incompatible
+  data still fails admission at the decoder, against its solved type.
 
 **A decoder is the pipeline's last stage.** `cat data.json | from-json` returns
 a decoded value, the pipeline's value being its final stage's. A decoder before

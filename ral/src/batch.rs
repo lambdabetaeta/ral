@@ -1,27 +1,23 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
 use ral_core::carrier::{IdentityTransport, Transport as _, dispatch_to_report};
-use ral_core::compile::{CompileError, compile_and_typecheck, on_compile_stack};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
-use ral_core::elaborator::elaborate;
 use ral_core::own;
-use ral_core::protocol::{Ending, Program, Ran, Report, Run};
-use ral_core::shell::run::StaticDiagnostics;
-use ral_core::shell::runtime::{CapturePolicy, DeferredSink, DoneEvent, Observation};
-use ral_core::source::{FileId, Source, SourceFile, SourceOrigin};
-use ral_core::syntax::parser::parse;
-use ral_core::{RequestedTerminalAccess, SessionSchemes, io::terminal};
+use ral_core::protocol::{Program, Ran, Report, Run};
+use ral_core::shell::runtime::{CapturePolicy, DeferredSink, DoneEvent};
+use ral_core::source::{SourceFile, SourceOrigin};
+use ral_core::{RequestedTerminalAccess, io::terminal};
 use ral_core::{err, errln, outln};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::boot_builtin::{self, Boot};
-use crate::cli::{BatchOpts, Halt, RunOpts};
+use crate::cli::{BatchOpts, RunOpts};
 use crate::platform::{local_attach, probe_terminal};
 use crate::site::{Silent, site};
-use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS, batch_surface};
+use crate::startup::engine::{BATCH, BatchConfig, INSTALLERS};
 
 /// Batch's session surface: a watched worker's lines on stdout.
 struct Stdout;
@@ -42,20 +38,21 @@ impl DeferredSink for Stdout {
 
 /// Run the script at `path`.
 pub(crate) fn run_file(path: &Path, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
-    let file = match SourceFile::new(path) {
+    let (real, source) = match site!(Silent::CliArgument, own::read_named_source(path)) {
+        Ok(source) => source,
+        Err(e) => {
+            terminal::cmd_error("ral", &e.to_string());
+            return ExitCode::from(1);
+        }
+    };
+    let file = match SourceFile::new(real.as_path().to_path_buf()) {
         Ok(file) => file,
         Err(e) => {
             terminal::cmd_error("ral", &e.to_string());
             return ExitCode::from(1);
         }
     };
-    match site!(Silent::CliArgument, own::read_named(path)) {
-        Ok(source) => run_source(&SourceOrigin::File(file), source, script_args, opts),
-        Err(e) => {
-            terminal::cmd_error("ral", &e.to_string());
-            ExitCode::from(1)
-        }
-    }
+    run_source(&SourceOrigin::File(file), source, script_args, opts)
 }
 
 /// Run the script arriving on stdin.
@@ -74,17 +71,15 @@ pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
     run_source(&SourceOrigin::named("<stdin>"), source, Vec::new(), batch)
 }
 
-/// Emit the run's whole ending and trail as the `--audit` envelope.
-fn emit_audit_report(ending: &Ending, trail: &[ral_core::data::FOValue], pretty: bool) {
-    use ral_core::shell::runtime::{Value, report_envelope};
-    let outcome = Value::from(ending.clone().encode());
-    let trail: Vec<Observation> = trail
-        .iter()
-        .filter_map(|fo| Observation::decode(fo).ok())
-        .collect();
-    let json_val = FOValue::try_from(&report_envelope(outcome, trail))
-        .expect("a report is built from first-order values")
-        .to_json(|b| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()));
+/// Emit an outcome and its unchanged wire trail as the `--audit` envelope.
+fn emit_audit_report(outcome: FOValue, trail: Vec<FOValue>, pretty: bool) {
+    let json_val = FOValue::Map {
+        entries: vec![
+            ("outcome".into(), outcome),
+            ("trail".into(), FOValue::List { items: trail }),
+        ],
+    }
+    .to_json(|b| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()));
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
     } else {
@@ -98,7 +93,7 @@ fn emit_audit_report(ending: &Ending, trail: &[ral_core::data::FOValue], pretty:
 ///
 /// Boots a `batch` engine, dispatches its boot builtin, then the script; when
 /// `--audit` is active, reports the script's run as one report envelope on
-/// stderr. `--check`, `--dump-ast` and `--dump-ir` are static, and boot nothing.
+/// stderr. `--check` boots identically, then checks without evaluating.
 ///
 /// Every batch source passes through here, so line endings are normalised
 /// here too — one place, one rule.
@@ -112,15 +107,12 @@ pub(crate) fn run_source(
     let BatchOpts {
         audit,
         pretty,
-        halt,
+        check,
         run: RunOpts {
             recursion_limit,
             capabilities,
         },
     } = opts;
-    if let Some(halt) = halt {
-        return halted(halt, origin, &source);
-    }
     let capabilities = match Boot::profiles(&capabilities) {
         Ok(capabilities) => capabilities,
         Err(e) => {
@@ -186,17 +178,21 @@ pub(crate) fn run_source(
     let script = Run {
         last: true,
         ..run(
-            Program::Source(source),
+            if check {
+                Program::Check(source)
+            } else {
+                Program::Source(source)
+            },
             audit.then_some(CapturePolicy::Bytes),
         )
     };
     let status = dispatch(&transport, script, audit.then_some(pretty));
-    tick("evaluate");
+    tick(if check { "check" } else { "evaluate" });
     ExitCode::from(status)
 }
 
 /// Dispatch `run` under the mute host and print what it rendered — or, under
-/// `--audit` (`Some(pretty)`), its report envelope instead of a runtime error.
+/// `--audit` (`Some(pretty)`), its report envelope instead of diagnostics.
 /// The run's status.
 fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> u8 {
     let report = match dispatch_to_report(transport, run, Arc::new(()), None) {
@@ -208,9 +204,42 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> u8 
     };
     let code = report.code();
     match report {
-        Report::Static { rendered, .. } | Report::Faulted { rendered, .. } => {
-            err!("{rendered}");
+        Report::Static {
+            rendered,
+            status,
+            trail,
+        } => {
+            if let Some(pretty) = audit {
+                emit_audit_report(
+                    FOValue::Variant {
+                        label: "static".into(),
+                        payload: Some(Box::new(FOValue::Map {
+                            entries: vec![
+                                ("rendered".into(), rendered.encode()),
+                                ("status".into(), i64::from(status.get()).encode()),
+                            ],
+                        })),
+                    },
+                    trail,
+                    pretty,
+                );
+            } else {
+                err!("{rendered}");
+            }
         }
+        Report::Checked { trail } => {
+            if let Some(pretty) = audit {
+                emit_audit_report(
+                    FOValue::Variant {
+                        label: "checked".into(),
+                        payload: None,
+                    },
+                    trail,
+                    pretty,
+                );
+            }
+        }
+        Report::Faulted { rendered, .. } => err!("{rendered}"),
         Report::Ran(Ran {
             ending,
             rendered,
@@ -218,43 +247,11 @@ fn dispatch(transport: &IdentityTransport, run: Run, audit: Option<bool>) -> u8 
             ..
         }) => {
             if let Some(pretty) = audit {
-                emit_audit_report(&ending, &trail, pretty);
+                emit_audit_report(ending.encode(), trail, pretty);
             } else if !rendered.is_empty() {
                 err!("{rendered}");
             }
         }
     }
     code
-}
-
-/// `--check`, `--dump-ast` and `--dump-ir`: static work on the source alone.
-fn halted(halt: Halt, origin: &SourceOrigin, source: &str) -> ExitCode {
-    let outcome = match halt {
-        Halt::Ast => on_compile_stack(|| {
-            parse(source)
-                .map(|ast| ast.iter().for_each(|node| errln!("{node:#?}")))
-                .map_err(CompileError::Parse)
-        }),
-        Halt::Ir => on_compile_stack(|| {
-            parse(source)
-                .and_then(|ast| elaborate(&ast, [], origin.file()))
-                .map(|phrases| errln!("{phrases:#?}"))
-                .map_err(CompileError::Parse)
-        }),
-        Halt::Checked => {
-            let schemes =
-                SessionSchemes::from_prelude(crate::PRELUDE.comp(), batch_surface().manifest());
-            compile_and_typecheck(source, schemes, FileId::DUMMY, origin.file(), None).map(drop)
-        }
-    };
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            let (rendered, status) =
-                StaticDiagnostics::Compile(e.reject(Source::from_text(origin.clone(), source)))
-                    .render(&ral_core::shell::runtime::ExitHints::default());
-            err!("{rendered}");
-            ExitCode::from(status.get())
-        }
-    }
 }

@@ -59,7 +59,8 @@ impl Output {
             RunReport::Ran {
                 ending, captured, ..
             } => (ending, captured),
-            RunReport::Static { diagnostics } => {
+            RunReport::Checked { .. } => panic!("enforcement probe must run, not only check"),
+            RunReport::Static { diagnostics, .. } => {
                 panic!(
                     "enforcement probe did not run: {}",
                     diagnostics

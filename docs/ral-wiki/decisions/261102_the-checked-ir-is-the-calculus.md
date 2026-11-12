@@ -2,10 +2,21 @@
 status: active
 generated_at_commit: c4bd558f
 generated_at_date: 2026-11-11
-verified_at_commit: c4bd558f
-verified_at_date: 2026-11-11
+verified_at_commit: ed1b37eb
+verified_at_date: 2026-11-12
 anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, Terminal::into_value, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
 ---
+
+> **Amended 2026-11-12 — `Use` is shell IR.** The shell layer additionally
+> contains `Use(Arc<Module>)`: a checked `Toplevel` and its `SourceOrigin`,
+> linked by elaboration from one written path at check time. Its checker
+> rule instantiates the module's decided public schemes; its evaluator rule
+> runs that tree under Σ and returns the public bindings as a record.
+> A module is checked against Σ alone, with no importer or session bindings.
+> `Use` is total in every phase and needs no new phase-associated type.
+> Its source reads, cycle and depth checks belong to linking, not evaluation;
+> the shell interpretation is outside the Agda core. The control/primitive
+> partition and standing correspondence gaps below are unchanged.
 
 > **Amended 2026-11-11 — Written host options.** Host-file and nested-table
 > fields are checked key by written key during generation (SPEC §15.3).

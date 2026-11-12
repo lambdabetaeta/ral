@@ -22,7 +22,6 @@ use super::lex::{anchor_on, fold_dots};
 #[cfg(windows)]
 use super::site::Silent;
 use super::{CwdPath, LeafMode, LexicalPath, Located, walk};
-use crate::environ::EnvVars;
 #[cfg(windows)]
 use crate::site::site;
 
@@ -307,14 +306,6 @@ pub fn path_dirs(path_value: impl AsRef<OsStr>, cwd: Option<&CwdPath>) -> Vec<Pa
         .filter_map(|dir| anchor_on(cwd, &dir))
         .map(|dir| fold_dots(&dir))
         .collect()
-}
-
-/// The `RAL_PATH` directories in declaration order, as written; empty when
-/// unset.  A PATH-style list: `env` before the host, the overlay-on-process
-/// rule `within [env: …]` obeys.
-pub fn ral_path_entries(env: &EnvVars) -> Vec<PathBuf> {
-    let raw = env.get_or_host("RAL_PATH").unwrap_or_default();
-    path_entries(OsStr::new(&raw)).collect()
 }
 
 /// The entries of a `PATH`-style list, in order and as written, split on the
@@ -709,14 +700,6 @@ mod tests {
         let (_tmp, dirs) = shadowed_tool();
         assert_eq!(locate_in("tool", dirs.clone()), Some(dirs[2].join("tool")));
         assert_eq!(locate_in("tool", dirs[..2].to_vec()), None);
-    }
-
-    #[test]
-    fn ral_path_entries_split_the_overlays_list_dropping_empties() {
-        let dirs = [PathBuf::from("/x"), PathBuf::from("/y")];
-        let joined = std::env::join_paths(["", "/x", "", "/y"]).unwrap();
-        let env = EnvVars::from_pairs([("RAL_PATH", joined.to_str().unwrap())]).unwrap();
-        assert_eq!(ral_path_entries(&env), dirs);
     }
 
     /// A bump made on one thread clears the memo of another.

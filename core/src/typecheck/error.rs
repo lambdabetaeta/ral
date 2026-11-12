@@ -72,8 +72,6 @@ pub enum Reason {
     RedirectShape,
     /// An unresolved computation forced to `Return` shape to read its value.
     ReturnShape,
-    /// A checker-inserted protection node re-inferred against its contract.
-    ProtectContract,
     /// An arm against the command it stands in for: its value is its output.
     StandsIn(Standing),
     /// A non-final pipeline stage against `Unit`: a stage feeds the next by
@@ -226,6 +224,17 @@ pub enum OptionsContext {
 /// The solver attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
 pub enum TypeErrorKind {
+    /// A module's public definition still leaves a boundary result undecided.
+    UndecidedExport {
+        name: String,
+        scheme: crate::ty::Closed,
+        source: super::unify::WeakSource,
+    },
+    /// An earlier unit left a weak shape beneath a function or handle.
+    DelayedResidual {
+        name: String,
+        scheme: std::sync::Arc<crate::ty::Scheme>,
+    },
     /// A binding runs, and a call applies, one computation nothing else decides.
     ConflictingDefaults {
         binding: Option<Span>,
@@ -482,6 +491,8 @@ impl TypeErrorKind {
     /// Stable per-phase error code (`T####`).
     pub fn code(&self) -> &'static str {
         match self {
+            Self::UndecidedExport { .. } => "T0082",
+            Self::DelayedResidual { .. } => "T0083",
             Self::ConflictingDefaults { .. } => "T0080",
             Self::RecursiveRow => "T0002",
             Self::TypeTooDeep => "T0003",

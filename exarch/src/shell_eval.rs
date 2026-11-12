@@ -17,7 +17,7 @@ use base64::Engine;
 use ral_core::Shell;
 use ral_core::Value as RalValue;
 use ral_core::data::FOValue;
-use ral_core::shell::runtime::{DeferredSink, TitlePolicy};
+use ral_core::shell::runtime::{CapturePolicy, DeferredSink, TitlePolicy};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -114,6 +114,7 @@ pub(crate) fn run_shell(
         cleanup_grace: Duration::from_secs(2),
         worker_cap: Some(LIVE_WORKER_CAP),
         worker_title: TitlePolicy::Required,
+        trail: Some(CapturePolicy::Off),
         ..Run::captured(cmd, SourceOrigin::named(source))
     };
 

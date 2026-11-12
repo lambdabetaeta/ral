@@ -34,23 +34,29 @@ pub struct Report {
 
 /// A compile failure with the text its carets point into.
 ///
-/// That text is never registered in the session's
-/// [`SourceDb`](crate::source::SourceDb): a failed compile leaves no live span
-/// behind, and the registry is append-only because live spans index it.
+/// Root and loaded module texts remain registered in the session's
+/// append-only [`SourceDb`](crate::source::SourceDb), even if checking fails.
+/// Each nested rejection retains the module text its own carets point into.
 #[derive(Debug, Clone)]
 pub struct Rejection {
     pub source: Source,
     pub reports: Vec<Report>,
     /// The status a run that failed so exits on.
     pub status: NonZeroU8,
+    pub nested: Option<Box<Self>>,
 }
 
 impl Rejection {
     pub fn render(&self) -> String {
-        self.reports
+        let mut rendered: String = self
+            .reports
             .iter()
             .map(|r| r.render(&self.source))
-            .collect()
+            .collect();
+        if let Some(nested) = &self.nested {
+            rendered.push_str(&nested.render());
+        }
+        rendered
     }
 }
 

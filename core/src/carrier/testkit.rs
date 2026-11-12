@@ -152,6 +152,7 @@ pub(crate) fn host_error(reason: crate::fact::Reason) -> Error {
             source: Source::new(SourceOrigin::named("host.ral"), "x".into()),
             reports: vec![],
             status: std::num::NonZeroU8::MIN,
+            nested: None,
         })
         .abandoning_tail()
         .discarded(17);

@@ -256,8 +256,7 @@ impl Shell {
         self.context.env_overrides().get_or_host(name)
     }
 
-    /// The dynamic overlay itself, for a host handing it to an overlay-aware
-    /// helper (the `RAL_PATH` plugin search) rather than reading one key.
+    /// The dynamic overlay itself, for an overlay-aware host helper.
     pub fn env_overrides(&self) -> &EnvVars {
         self.context.env_overrides()
     }

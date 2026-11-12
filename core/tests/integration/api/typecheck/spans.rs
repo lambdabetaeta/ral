@@ -10,16 +10,16 @@
 //! equals `expected`.  When a mistake produces multiple errors we only
 //! pin the first one — that is the entry the user sees first and acts on.
 
-use ral_core::typecheck::TypeError;
+use ral_core::typecheck::{TypeError, Unit};
 use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = parse(src).expect("parse");
-    let comp = elaborate(&ast, [], None).expect("elaborate");
+    let comp = elaborate(&ast, [], None, &mut crate::common::no_modules).expect("elaborate");
     typecheck(
         &comp,
         crate::common::schemes_for(&ral_core::HostSurface::default()),
-        None,
+        Unit::Script,
     )
     .err()
     .unwrap_or_default()

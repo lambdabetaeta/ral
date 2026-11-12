@@ -78,7 +78,7 @@ fn already_claimed(verb: &str) -> Error {
 /// Exact await of a claimed result: replay, then conclude.
 fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
     replay(handle, &settle.written, shell)?;
-    handle.protect_value(settle.end.into_settled()?, shell)
+    settle.end.into_settled()
 }
 
 /// One cancel-aware foreground wait, shared by `await`, `race`, a gather's
@@ -189,7 +189,7 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
         Sample::Stopping => Ok(Value::variant("stopping", Some(elapsed_record(elapsed)))),
         Sample::Ready(settle) => {
             let outcome = match settle.end.outcome() {
-                Ok(Ok(v)) => Ok(handle.protect_value(v, shell)?),
+                Ok(Ok(v)) => Ok(v),
                 Ok(Err(e)) => Err(e.fact(shell)),
                 Err(halt) => return halt.widen().into_settled(),
             };

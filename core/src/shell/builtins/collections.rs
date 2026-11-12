@@ -197,7 +197,8 @@ mod tests {
             crate::test_helper::core_schemes(),
             crate::source::FileId::DUMMY,
             None,
-            None,
+            crate::typecheck::Unit::Script,
+            &mut crate::compile::no_modules,
         )
         .expect("compile lambda");
         crate::shell::evaluator::run_phrases(

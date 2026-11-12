@@ -1,0 +1,4 @@
+grant [fs: [read: []]] {
+    let m = use '../lib/modules/values.ral'
+    return $m[version]
+}

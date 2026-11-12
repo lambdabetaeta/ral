@@ -86,6 +86,7 @@ pub(crate) struct RawRun {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RawProgram {
     Source(String),
+    Check(String),
     Hook {
         name: crate::shell::runtime::HookName,
         args: Vec<RawFOValue>,
@@ -117,9 +118,19 @@ pub(crate) struct RawWireError {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum RawReport {
-    Static { rendered: String, status: u8 },
+    Static {
+        rendered: String,
+        status: u8,
+        trail: Vec<RawFOValue>,
+    },
+    Checked {
+        trail: Vec<RawFOValue>,
+    },
     Ran(RawRan),
-    Faulted { rendered: String, status: u8 },
+    Faulted {
+        rendered: String,
+        status: u8,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -309,6 +320,7 @@ impl RawProgram {
     fn validate(self) -> Result<Program, DecodeFailure> {
         match self {
             Self::Source(source) => Ok(Program::Source(source)),
+            Self::Check(source) => Ok(Program::Check(source)),
             Self::Hook { name, args } => Ok(Program::Hook {
                 name,
                 args: values(&args).map_err(|e| e.field("args").payload("Hook"))?,
@@ -318,6 +330,7 @@ impl RawProgram {
     fn from_value(value: &Program) -> Self {
         match value {
             Program::Source(source) => Self::Source(source.clone()),
+            Program::Check(source) => Self::Check(source.clone()),
             Program::Hook { name, args } => Self::Hook {
                 name: name.clone(),
                 args: raw_values(args),
@@ -501,9 +514,14 @@ impl RawReport {
             Self::Static {
                 rendered,
                 status: value,
+                trail,
             } => Ok(Report::Static {
                 rendered,
                 status: status(value).map_err(|e| e.field("status").payload("Static"))?,
+                trail: values(&trail).map_err(|e| e.field("trail").payload("Static"))?,
+            }),
+            Self::Checked { trail } => Ok(Report::Checked {
+                trail: values(&trail).map_err(|e| e.field("trail").payload("Checked"))?,
             }),
             Self::Ran(ran) => ran
                 .validate()
@@ -520,9 +538,17 @@ impl RawReport {
     }
     fn from_value(value: &Report) -> Self {
         match value {
-            Report::Static { rendered, status } => Self::Static {
+            Report::Static {
+                rendered,
+                status,
+                trail,
+            } => Self::Static {
                 rendered: rendered.clone(),
                 status: status.get(),
+                trail: raw_values(trail),
+            },
+            Report::Checked { trail } => Self::Checked {
+                trail: raw_values(trail),
             },
             Report::Ran(ran) => Self::Ran(RawRan::from_value(ran)),
             Report::Faulted { rendered, status } => Self::Faulted {

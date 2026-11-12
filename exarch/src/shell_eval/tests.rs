@@ -42,6 +42,24 @@ fn fresh() -> IdentityTransport {
     crate::boot::test_transport()
 }
 
+#[test]
+fn a_booted_exarch_shell_has_a_scheme_for_every_session_binding() {
+    let scratch =
+        crate::app::Scratch::for_test(crate::app::EXARCH, "session-schemes").expect("test scratch");
+    let mut shell = crate::boot::test_shell();
+    scratch.install_into(&mut shell);
+    assert!(
+        shell.scope_lookup("exarch-tasks").is_some(),
+        "agent library booted"
+    );
+    for (name, _) in shell.bindings() {
+        assert!(
+            ral_core::test_access::binding_scheme(&shell, &name).is_some(),
+            "session binding {name} has no scheme"
+        );
+    }
+}
+
 /// One tool run through the **real** production `run_shell`, under the
 /// transport's installed session stack, composed via `report::tool_result`
 /// exactly as the boundary does — with no audit or worker rows to join,
@@ -71,6 +89,9 @@ fn run_shell_direct(
         }
         Ok(ral_core::protocol::Report::Faulted { rendered, .. }) => {
             panic!("engine fault: {rendered}")
+        }
+        Ok(ral_core::protocol::Report::Checked { .. }) => {
+            panic!("a source run must evaluate, not only check")
         }
         Err(s) => panic!("an identity engine never severs: {s}"),
     }
@@ -1838,9 +1859,8 @@ fn cat_redirect_surfaces_read_then_exec_in_order() {
     );
 }
 
-/// Code loading is not turn-time data I/O: `use` reads through `std::fs`
-/// below the redirect frame, so it raises no io card.  Only the loaded
-/// file's own effects would surface, and this one is pure bindings.
+/// Successful check-time code loading raises no read card. Only the module's
+/// own evaluation effects surface, and this one is pure bindings.
 #[test]
 fn using_a_ral_file_raises_no_io_card() {
     let engine = fresh();
@@ -1857,6 +1877,65 @@ fn using_a_ral_file_raises_no_io_card() {
         observations(&use_records).is_empty(),
         "use is code loading too: no io card, got {:?}",
         observations(&use_records)
+    );
+}
+
+#[test]
+fn a_static_module_refusal_reaches_the_record_at_its_use_site() {
+    let dir = scratch_dir("static-use-denied");
+    let root = dir.path().canonicalize().expect("canonical fixture root");
+    let path = shown(root.join("lib.ral"));
+    std::fs::write(root.join("lib.ral"), "let answer = 42\n").expect("module fixture");
+    let stack = ral_core::test_helper::stack([ral_core::test_helper::layer(Capabilities {
+        fs: Some(ral_core::authority::policy::FsPolicy {
+            read_prefixes: vec![ral_core::path::FrozenPath::root()],
+            write_prefixes: Vec::new(),
+            deny_paths: vec![ral_core::path::FrozenPath::from_surface(&shown(&root))],
+        }),
+        ..Capabilities::default()
+    })]);
+    let engine = crate::boot::test_transport_under(stack);
+    let (tx, rx) = channel();
+    let recorder = crate::record::Emitter::none();
+    recorder.attach(Box::new(crate::bus::FleetSink {
+        id: AgentId::new(0),
+        tx: tx.downgrade(),
+        meter: crate::bus::UsageMeter::default(),
+    }));
+    let applier = Arc::new(super::surface::SurfaceApplier::new(recorder));
+    let outcome = run_shell(
+        &engine,
+        "turn 1",
+        &format!("let never_bound = 1\nuse '{path}'"),
+        30,
+        applier.clone(),
+        Some(&DurableRoot::default().child()),
+    )
+    .expect("an identity engine never severs");
+    let ral_core::protocol::Report::Static {
+        rendered, trail, ..
+    } = outcome
+    else {
+        panic!("a denied module read must reject the source before evaluation")
+    };
+    assert_eq!(trail.len(), 1, "the check records its one refused read");
+    let event = Observation::decode(&trail[0]).expect("an encoded observation");
+    assert_eq!(event.site.script.as_ref(), "turn 1");
+    assert_eq!(event.site.line, 2);
+    let Observed::Check(check) = &event.what else {
+        panic!("a refused read records a capability check")
+    };
+    assert_eq!(check.resource, ral_core::fact::Resource::Fs);
+    assert_eq!(check.fields.get("op").map(String::as_str), Some("read"));
+    assert_eq!(check.fields.get("path"), Some(&path));
+    report::record_trail(&trail, applier.as_ref());
+    assert_eq!(observations(&crate::bus::drain_records(&rx)), [event.what]);
+    assert!(report::rejection(&rendered).contains("no command ran"));
+    assert!(
+        !ral_core::carrier::Transport::bindings(&engine)
+            .expect("an identity engine answers")
+            .iter()
+            .any(|binding| binding.name == "never_bound")
     );
 }
 

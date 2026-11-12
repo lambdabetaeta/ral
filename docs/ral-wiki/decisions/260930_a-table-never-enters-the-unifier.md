@@ -1,8 +1,16 @@
 ---
 status: accepted
-generated_at_commit: c4bd558f
-generated_at_date: 2026-11-11
+generated_at_commit: ed1b37eb
+generated_at_date: 2026-11-12
 ---
+
+> **Amended 2026-11-12 — Typed session bindings.** The rc writes twelve
+> required keys. This supersedes the thirteen-key count in the 2026-11-11
+> written-host-options amendment below: `bindings:` is not an rc key. Lexical
+> values and functions are top-level `let`s above the options `return`,
+> installed with their checked, generalised schemes. `env:` sets environment
+> entries only.
+> The written-tail and key-by-key checking rules are unchanged.
 
 > **Amended 2026-11-11 — Written host options.** Host files follow SPEC
 > §15.3: their options and nested tables are written records, checked key by

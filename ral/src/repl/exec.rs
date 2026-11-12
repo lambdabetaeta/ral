@@ -166,6 +166,10 @@ pub(super) fn step(
             ending: Ending::Exited(code),
             ..
         }) => Step::Exit(code),
+        Report::Checked { .. } => {
+            errln!("ral: expected an input-line result, received a check report");
+            return Step::Exit(1);
+        }
         Report::Static { rendered, .. }
         | Report::Faulted { rendered, .. }
         | Report::Ran(Ran { rendered, .. }) => {

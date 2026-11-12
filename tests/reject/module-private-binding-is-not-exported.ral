@@ -1,0 +1,4 @@
+# status: 1
+# contains: this record has no field named '_private'
+let m = use '../lib/modules/values.ral'
+return $m[_private]

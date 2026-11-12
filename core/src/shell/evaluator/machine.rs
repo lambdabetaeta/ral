@@ -130,11 +130,6 @@ enum Frame {
         resource: Value,
         span: Option<Span>,
     },
-    /// Checks and wraps the returned value against the site (`Site::protect`).
-    Protect {
-        site: Arc<Site>,
-        span: Option<Span>,
-    },
     Cleanup {
         outcome: Settled<Value>,
         /// The current scope before the cleanup's shield, restored on pop
@@ -199,7 +194,7 @@ fn operation_name(comp: &CompKind) -> Option<FrameName> {
         CompKind::Prim(Prim::Not(_)) => "not",
         CompKind::Prim(Prim::Render(_)) => "str",
         CompKind::Prim(Prim::Concat(_)) => "concat",
-        CompKind::Prim(Prim::Decode(_)) | CompKind::Protect { .. } => "decode",
+        CompKind::Prim(Prim::Decode(_)) => "decode",
         CompKind::Prim(Prim::Index { .. }) => "index",
         CompKind::Prim(Prim::Update { .. }) => "update",
         CompKind::Prim(Prim::List(_)) => "list",
@@ -222,15 +217,13 @@ fn operation_name(comp: &CompKind) -> Option<FrameName> {
         CompKind::Gather { .. } => "gather",
         CompKind::Audit { .. } => "audit",
         CompKind::Tilde(_) => "~",
+        CompKind::Use(_) => "use",
     };
     Some(FrameName::Static(name))
 }
 
-/// Protection preserves the source variable; compiler binders name no call.
-fn forced_name(mut value: &Val) -> Option<&Name> {
-    while let Val::Protected { value: inner, .. } = value {
-        value = inner;
-    }
+/// Compiler binders name no call.
+fn forced_name(value: &Val) -> Option<&Name> {
     match value {
         Val::Variable(name) if !is_synthetic(name) => Some(name),
         _ => None,
@@ -618,17 +611,11 @@ impl Machine {
         shell: &mut Shell,
     ) -> Settled<Focus> {
         Ok(match &comp.item {
-            CompKind::Protect { body, site } => {
-                self.reserve(shell)?.push(Frame::Protect {
-                    site: Arc::clone(site),
-                    span: comp.span,
-                });
-                Focus::Eval {
-                    comp: Arc::clone(body),
-                    env,
-                }
-            }
             CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
+
+            CompKind::Use(module) => Focus::Return(Terminal::Value(
+                crate::shell::load::run_module(module, mooring, shell)?,
+            )),
 
             // The frame on top decides: `Arg` applies it; any other frame receives it boxed.
             CompKind::Lam { .. } => Focus::Return(Terminal::Lambda {
@@ -995,12 +982,6 @@ impl Machine {
                 shell.local.audit.restore_site(*prev);
                 Ok(Focus::Return(t))
             }
-            Frame::Protect { site, span } => shell.at_site("decode", span, |shell| {
-                let value = site.protect(t.into_value(), shell);
-                value
-                    .map(|v| Focus::Return(Terminal::Value(v)))
-                    .map_err(|b| b.locate("decode", span, shell))
-            }),
             Frame::To { bind, env } => {
                 let v = t.into_value();
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
@@ -1175,7 +1156,7 @@ impl Machine {
                 })
             }
 
-            Frame::Arg { .. } | Frame::Protect { .. } => Err(s),
+            Frame::Arg { .. } => Err(s),
 
             Frame::Acquire { prev, .. } | Frame::Cleanup { prev, .. } => {
                 shell.scope = prev;
@@ -1255,8 +1236,7 @@ impl Frame {
             | Self::Seq { .. }
             | Self::Arg { .. }
             | Self::Try { .. }
-            | Self::Guard { .. }
-            | Self::Protect { .. } => {}
+            | Self::Guard { .. } => {}
         }
     }
 }
@@ -1376,7 +1356,8 @@ mod tests {
             crate::test_helper::core_schemes(),
             file,
             None,
-            None,
+            crate::typecheck::Unit::Script,
+            &mut crate::compile::no_modules,
         )
         .expect("compile");
         let mut env = shell.env.clone();
@@ -1810,13 +1791,7 @@ mod tests {
         let map = Value::Native(entry.into(), [].into());
         let mooring = Mooring::adrift();
         let partial = apply(map, vec![f], &mooring, &mut shell).expect("partial map");
-        shell.env.bind(
-            "held".into(),
-            Binding {
-                value: partial,
-                scheme: None,
-            },
-        );
+        crate::test_access::bind_untyped(&mut shell, "held", partial);
         let file = shell.install_script_context(
             &crate::source::SourceOrigin::named("<native-call>"),
             "held           held 1",
@@ -1881,13 +1856,7 @@ mod tests {
     fn a_recursive_call_reuses_its_node_and_its_environment() {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
-        shell.env.bind(
-            "k".into(),
-            Binding {
-                value: Value::Int(1),
-                scheme: None,
-            },
-        );
+        crate::test_access::bind_untyped(&mut shell, "k", Value::Int(1));
 
         // `even`/`odd`, both closing over the session `k`: occ(g) = {k}.
         let even_body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(

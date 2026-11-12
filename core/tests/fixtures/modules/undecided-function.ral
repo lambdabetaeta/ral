@@ -1,0 +1,4 @@
+let decode = { |text|
+    # No use in this unit decides the decoded result.
+    to-string $text | from-json
+}
