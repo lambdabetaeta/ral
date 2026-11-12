@@ -9,6 +9,7 @@
 //! returns false, so the theme can store an unconditional `Some(color)`.
 
 use ral_core::io::ansi::{YELLOW, named_color};
+use ral_core::text::code;
 use ral_core::{Map, Value};
 
 /// Styling applied to ral-computed values printed at the REPL prompt.
@@ -35,49 +36,36 @@ impl Default for OutputTheme {
 }
 
 impl OutputTheme {
-    /// Build a theme from an RC `theme:` map, starting from the default and
-    /// overriding the `value-prefix` / `value-color` keys it carries.  A
-    /// `value-color` names an ANSI colour (see [`named_color`]) or `none` to
-    /// suppress color entirely.  An unknown key or a malformed value is
-    /// rejected with an error naming it.
+    /// Decode a checked rc theme table. `inherit` keeps the built-in value;
+    /// `set` takes text, with a colour name or `none` for `value-color`.
     pub(crate) fn from_map(pairs: &Map) -> Result<Self, String> {
         let mut theme = Self::default();
         for (k, v) in pairs {
-            match k {
-                "value-prefix" => match v.as_ref() {
-                    Value::String(s) => theme.value_prefix = s.to_string(),
-                    other => {
-                        return Err(format!(
-                            "theme 'value-prefix' must be a string; got {}",
-                            other.type_name()
-                        ));
-                    }
-                },
-                "value-color" => match v.as_ref() {
-                    Value::String(s) if s.eq_ignore_ascii_case("none") => {
-                        theme.value_color = None;
-                    }
-                    Value::String(s) => match named_color(s.as_str()) {
-                        Some(color) => theme.value_color = Some(color),
-                        None => {
-                            return Err(format!(
-                                "theme 'value-color' must be one of black, red, green, \
-                                 yellow, blue, magenta, cyan, white, or none; got '{s}'"
-                            ));
-                        }
-                    },
-                    other => {
-                        return Err(format!(
-                            "theme 'value-color' must be a string; got {}",
-                            other.type_name()
-                        ));
-                    }
-                },
-                other => {
+            let value = super::config::decode_setting(v.into_owned(), &format!("theme.{k}"))?;
+            match (k, value) {
+                ("value-prefix" | "value-color", None) => {}
+                ("value-prefix", Some(Value::String(s))) => theme.value_prefix = s.to_string(),
+                ("value-color", Some(Value::String(s))) if s.eq_ignore_ascii_case("none") => {
+                    theme.value_color = None;
+                }
+                ("value-color", Some(Value::String(s))) => {
+                    theme.value_color = Some(named_color(s.as_str()).ok_or_else(|| {
+                        format!(
+                            "{} must be one of black, red, green, \
+                             yellow, blue, magenta, cyan, white, or none; got '{s}'",
+                            code("theme.value-color")
+                        )
+                    })?);
+                }
+                ("value-prefix" | "value-color", Some(other)) => {
                     return Err(format!(
-                        "theme: unknown key '{other}'; known keys are value-prefix and value-color"
+                        "{} payload for {} must be a String; got {}",
+                        code("`set"),
+                        code(&format!("theme.{k}")),
+                        other.type_name()
                     ));
                 }
+                _ => unreachable!("the checker admits only theme's keys (SPEC §15.3)"),
             }
         }
         Ok(theme)
@@ -88,16 +76,48 @@ impl OutputTheme {
 mod tests {
     use super::*;
 
-    fn map_of(pairs: Vec<(String, Value)>) -> Map {
-        let Value::Map(m) = Value::map(pairs) else {
-            unreachable!()
+    use ral_core::typecheck::table::THEME;
+
+    fn theme_source(value: &str) -> Map {
+        let source = ral_core::test_helper::rc_source(&[("theme", value)]);
+        let mut shell = ral_core::test_helper::core_shell();
+        let Value::Map(rc) = ral_core::shell::load::evaluate_source(
+            &ral_core::shell::runtime::Mooring::adrift(),
+            &mut shell,
+            &source,
+            &ral_core::source::SourceOrigin::named("rc.ral"),
+            Some(ral_core::typecheck::table::declared(
+                ral_core::typecheck::Form::Rc,
+            )),
+        )
+        .unwrap() else {
+            panic!("a checked rc returns a map");
         };
-        m
+        let Value::Map(theme) = rc.get("theme").unwrap().into_owned() else {
+            panic!("theme is a checked table");
+        };
+        theme
+    }
+
+    #[test]
+    fn theme_inherit_keeps_defaults() {
+        let pairs = theme_source("[value-prefix: `inherit, value-color: `inherit]");
+        let theme = OutputTheme::from_map(&pairs).unwrap();
+        assert_eq!(theme.value_prefix, "=> ");
+        assert_eq!(theme.value_color.as_deref(), Some(YELLOW));
+    }
+
+    #[test]
+    fn theme_set_overrides_defaults() {
+        let pairs = theme_source("[value-prefix: `set '> ', value-color: `set red]");
+        let theme = OutputTheme::from_map(&pairs).unwrap();
+        assert_eq!(theme.value_prefix, "> ");
+        assert_eq!(theme.value_color, named_color("red"));
     }
 
     #[test]
     fn theme_value_color_none_suppresses_color() {
-        let pairs = map_of(vec![("value-color".into(), Value::string("none"))]);
+        let pairs = theme_source("[value-prefix: `inherit, value-color: `set none]");
         let theme = OutputTheme::from_map(&pairs).unwrap();
         assert_eq!(theme.value_color, None);
         assert_eq!(theme.value_prefix, "=> ");
@@ -105,16 +125,29 @@ mod tests {
 
     #[test]
     fn theme_value_color_unknown_name_rejected() {
-        let pairs = map_of(vec![("value-color".into(), Value::string("purple"))]);
-        assert!(OutputTheme::from_map(&pairs).is_err());
+        let pairs = theme_source("[value-prefix: `inherit, value-color: `set purple]");
+        assert!(
+            OutputTheme::from_map(&pairs)
+                .unwrap_err()
+                .contains("purple")
+        );
     }
 
     #[test]
-    fn theme_unknown_key_rejected() {
-        let pairs = map_of(vec![
-            ("wat".into(), Value::string("x")),
-            ("value-prefix".into(), Value::string("> ")),
-        ]);
-        assert!(OutputTheme::from_map(&pairs).unwrap_err().contains("wat"));
+    fn every_declared_theme_key_is_handled_by_from_map() {
+        for key in THEME.keys {
+            let pairs = Map::from_iter([(key.label.to_owned(), Value::Unit)]);
+            let error = OutputTheme::from_map(&pairs).unwrap_err();
+            assert!(error.contains(key.label), "{error}");
+            let pairs = Map::from_iter([(
+                key.label.to_owned(),
+                Value::variant("set", Some(Value::Int(1))),
+            )]);
+            let error = OutputTheme::from_map(&pairs).unwrap_err();
+            assert!(
+                error.contains(key.label) && error.contains("String"),
+                "{error}"
+            );
+        }
     }
 }

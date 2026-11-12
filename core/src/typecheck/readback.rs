@@ -474,10 +474,7 @@ mod tests {
     }
 
     fn success(solver: Solver) -> Solution {
-        solver
-            .settle()
-            .close()
-            .unwrap_or_else(|errors| panic!("{errors:?}"))
+        solver.close().unwrap_or_else(|errors| panic!("{errors:?}"))
     }
 
     fn command() -> CompTy {

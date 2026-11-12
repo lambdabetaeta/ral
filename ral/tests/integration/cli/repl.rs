@@ -10,6 +10,7 @@
 #[cfg(unix)]
 use crate::common::{ral_command, repl_output_lines};
 use crate::common::{rc_home, repl};
+use ral_core::test_helper::rc_source;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
@@ -24,9 +25,14 @@ use std::process::Stdio;
 /// from the rc rather than from the defaults.
 #[test]
 fn rc_theme_bindings_and_startup_reach_a_live_session() {
-    let (_dir, env) = rc_home(
-        r#"return [theme: [value-prefix: "» "], bindings: [greeting: 'hi-from-rc'], startup: { echo started }]"#,
-    );
+    let (_dir, env) = rc_home(&rc_source(&[
+        (
+            "theme",
+            r#"[value-prefix: `set "» ", value-color: `inherit]"#,
+        ),
+        ("bindings", "[greeting: 'hi-from-rc']"),
+        ("startup", "`set { echo started }"),
+    ]));
 
     let out = repl(&["-i"], &env, "$greeting\n");
     assert!(
@@ -54,12 +60,13 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
 
 /// A malformed *literal* rc key is a type error, caught before the file
 /// runs at all: the whole rc is skipped, not merely that one key — the
-/// keys around it do not survive either.  A *map* rc is refused the same way,
-/// statically; the same mistake through a decoded rc, whose type the checker
-/// cannot see, is the runtime check's (`rc_unknown_key_in_a_decoded_rc_fails_the_whole_file`).
+/// keys around it do not survive either.
 #[test]
 fn rc_bad_literal_key_fails_the_whole_file() {
-    let (_dir, env) = rc_home("return [edit-mode: 42, bindings: [okname: 'yes']]");
+    let (_dir, env) = rc_home(&rc_source(&[
+        ("edit-mode", "42"),
+        ("bindings", "[okname: 'yes']"),
+    ]));
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(
@@ -74,17 +81,41 @@ fn rc_bad_literal_key_fails_the_whole_file() {
     );
 }
 
-/// An unknown key is a static error naming the rc's list — and it is caught
-/// through a spread, which a literal-only rule would wave through.
 #[test]
-fn rc_unknown_key_behind_a_spread_is_a_static_error() {
+fn empty_rc_reports_its_path_and_keeps_the_shell_live() {
+    let (_dir, env) = rc_home("");
+    let rc = env[0].1.join("ral/rc");
+
+    let out = repl(&["-i"], &env, "echo alive\n");
+    assert!(
+        out.stderr.contains("[T0081]")
+            && out.stderr.contains("`rc` is missing required keys:")
+            && out
+                .stderr
+                .contains(&format!("{}:1:1:", ral_core::path::shown(&rc)))
+            && out.stderr.contains("skipped, since it does not compile"),
+        "the empty rc must be refused at its own location: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("alive"),
+        "an empty rc must not strand the user at no shell: {}",
+        out.stdout
+    );
+}
+
+/// A spread hides the rc's keys, so it is refused before the file runs.
+#[test]
+fn rc_ending_in_a_spread_is_a_static_error() {
     let (_dir, env) =
         rc_home("let extra = [surfase: 'minimal', env: [:]]\nreturn [...$extra, env: [:]]");
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("surfase") && out.stderr.contains("skipped, since it does not compile"),
-        "the misspelling must be named before the file runs: {}",
+        out.stderr.contains("[T0077]")
+            && out.stderr.contains("a spread hides which keys it brings")
+            && out.stderr.contains("skipped, since it does not compile"),
+        "the spread must be refused before the file runs: {}",
         out.stderr
     );
     assert!(
@@ -102,7 +133,11 @@ fn rc_returning_a_map_is_a_static_error() {
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("takes a record of settings")
+        out.stderr.contains("[T0077]")
+            && out
+                .stderr
+                .contains("`rc`'s keys are labels: write a record")
+            && out.stderr.contains("not a map")
             && out.stderr.contains("skipped, since it does not compile"),
         "a map rc must be refused statically: {}",
         out.stderr
@@ -114,58 +149,23 @@ fn rc_returning_a_map_is_a_static_error() {
     );
 }
 
-/// An rc typed at a variable — here decoded from JSON — has no type for the
-/// checker to ascribe, so the keyset is met at `apply_rc_config` instead: the
-/// key is named, the list is offered, and the whole rc is refused rather than
-/// the keys around the bad one landing first.  The shell still starts, with
-/// defaults, and the refusal says so.
+/// A computed rc tail is refused statically; even earlier effects never run.
 #[test]
-fn rc_unknown_key_in_a_decoded_rc_fails_the_whole_file() {
-    let (_dir, env) =
-        rc_home(r#"return !{echo '{"surfase": "minimal", "edit-mode": "vi"}' | from-json}"#);
+fn rc_ending_in_a_computed_value_is_a_static_error() {
+    let (_dir, env) = rc_home(
+        r#"echo must-not-run
+return !{echo '{"edit-mode": "vi"}' | from-json}"#,
+    );
 
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
-        out.stderr.contains("unknown key 'surfase'"),
-        "the bad key must name itself: {}",
+        out.stderr.contains("[T0077]")
+            && out.stderr.contains("a computed value hides its keys")
+            && out.stderr.contains("skipped, since it does not compile"),
+        "a computed rc must be refused before it runs: {}",
         out.stderr
     );
-    assert!(
-        out.stderr.contains("recursion-limit"),
-        "the refusal must offer the rc's own list: {}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("not applied"),
-        "the refusal must say the rc did not take effect: {}",
-        out.stderr
-    );
-    assert!(
-        out.stdout.contains("alive"),
-        "a refused rc must not strand the user at no shell: {}",
-        out.stdout
-    );
-}
-
-/// A malformed *value* on a known key, through a decoded rc, refuses the
-/// whole file exactly as an unknown key does — agreeing with the record
-/// spelling, which fails the same way statically on the same mistake.
-#[test]
-fn rc_bad_value_in_a_decoded_rc_fails_the_whole_file() {
-    let (_dir, env) =
-        rc_home(r#"return !{echo '{"edit-mode": 3, "recursion-limit": 4096}' | from-json}"#);
-
-    let out = repl(&["-i"], &env, "echo alive\n");
-    assert!(
-        out.stderr.contains("'edit-mode'") && out.stderr.contains("must be 'emacs' or 'vi'"),
-        "the bad value must name the field and what was wrong with it: {}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("not applied"),
-        "the refusal must say the rc did not take effect: {}",
-        out.stderr
-    );
+    assert!(!out.stdout.contains("must-not-run"), "{out:?}");
     assert!(
         out.stdout.contains("alive"),
         "a refused rc must not strand the user at no shell: {}",
@@ -184,10 +184,10 @@ fn rc_plugin_installs_a_handler() {
         "return { |options| return [name: 'greeter', handlers: [:, hail: { |args| echo hail-from-plugin }]] }",
     )
     .unwrap();
-    let (_dir, env) = rc_home(&format!(
-        "return [plugins: ['{}': [:]]]",
-        manifest.display()
-    ));
+    let (_dir, env) = rc_home(&rc_source(&[(
+        "plugins",
+        &format!("['{}': [:]]", manifest.display()),
+    )]));
 
     let out = repl(&["-i"], &env, "hail\n");
     assert_eq!(
@@ -199,29 +199,25 @@ fn rc_plugin_installs_a_handler() {
     );
 }
 
-/// A factory made by application is a block of function type, not a written
-/// lambda, and its handler calls a helper the plugin's discarded scope held:
-/// both load, the handler vetted against what its own closure captured.
+/// A written factory's handler keeps the helper captured from its file scope.
 #[test]
-fn a_plugin_made_by_application_loads() {
+fn a_plugin_handler_calls_a_helper_its_scope_held() {
     let plug = tempfile::tempdir().unwrap();
     let manifest = plug.path().join("greeter.ral");
     std::fs::write(
         &manifest,
         "let greet = { |word args| echo $word ...$args }\n\
-         let make = { |word options| return [name: 'greeter', handlers: [:, hail: { greet $word }]] }\n\
-         let factory = make hail-from-plugin\n\
-         return $factory\n",
+         return { |options| [name: 'greeter', handlers: [:, hail: { greet hail-from-plugin }]] }\n",
     )
     .unwrap();
-    let (_dir, env) = rc_home(&format!(
-        "return [plugins: ['{}': [:]]]",
-        manifest.display()
-    ));
+    let (_dir, env) = rc_home(&rc_source(&[(
+        "plugins",
+        &format!("['{}': [:]]", manifest.display()),
+    )]));
     let out = repl(&["-i"], &env, "hail there\n");
     assert!(
         out.stdout.contains("hail-from-plugin there"),
-        "the made plugin loads and its handler runs: {}{}",
+        "the written factory loads and its handler runs: {}{}",
         out.stdout,
         out.stderr
     );
@@ -243,11 +239,14 @@ fn rc_plugins_take_differently_shaped_options() {
         )
         .unwrap();
     }
-    let (_dir, env) = rc_home(&format!(
-        "return [plugins: ['{}': [key: 'ctrl-t'], '{}': [depth: 3, quiet: true]]]",
-        plug.path().join("ping-alpha.ral").display(),
-        plug.path().join("ping-beta.ral").display(),
-    ));
+    let (_dir, env) = rc_home(&rc_source(&[(
+        "plugins",
+        &format!(
+            "['{}': [key: 'ctrl-t'], '{}': [depth: 3, quiet: true]]",
+            plug.path().join("ping-alpha.ral").display(),
+            plug.path().join("ping-beta.ral").display(),
+        ),
+    )]));
 
     let out = repl(&["-i"], &env, "ping-alpha\nping-beta\n");
     assert!(
@@ -269,7 +268,7 @@ fn rc_plugins_take_differently_shaped_options() {
 /// its fresh-grade `Unit` result unifies with `Command`.
 #[test]
 fn a_handler_ending_in_cd_installs_with_no_trailing_write() {
-    let (dir, env) = rc_home("return [handlers: [:, gohome: { |args| cd ~ }]]");
+    let (dir, env) = rc_home(&rc_source(&[("handlers", "[:, gohome: { |args| cd ~ }]")]));
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
@@ -284,10 +283,10 @@ fn a_handler_ending_in_cd_installs_with_no_trailing_write() {
 /// that unifies with `Command`.
 #[test]
 fn a_handler_whose_if_join_is_all_value_still_installs() {
-    let (dir, env) = rc_home(
-        "return [handlers: [:, gohome: { |args| \
-             if !{is-empty $args} { cd ~ } else { cd ~ } }]]",
-    );
+    let (dir, env) = rc_home(&rc_source(&[(
+        "handlers",
+        "[:, gohome: { |args| if !{is-empty $args} { cd ~ } else { cd ~ } }]",
+    )]));
     let marker = env[1].1.join("it-worked");
     let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
     assert!(
@@ -302,11 +301,15 @@ fn a_handler_whose_if_join_is_all_value_still_installs() {
 /// check, before even its first phrase runs, not by handler installation.
 #[test]
 fn a_handler_returning_a_string_is_still_rejected() {
-    let (_dir, env) =
-        rc_home("echo must-not-run\nreturn [handlers: [:, greet: { |args| \"hi\" }]]");
+    let rc = format!(
+        "echo must-not-run\n{}",
+        rc_source(&[("handlers", "[:, greet: { |args| \"hi\" }]")])
+    );
+    let (_dir, env) = rc_home(&rc);
     let out = repl(&["-i"], &env, "echo ok\n");
     assert!(
-        out.stderr.contains("a handler stands in for a command")
+        out.stderr
+            .contains("an arm for `greet` stands in for a command")
             && out.stderr.contains("String")
             && out.stderr.contains("skipped, since it does not compile"),
         "a value-returning arm over a fresh name must still fail; stderr was:\n{}",
@@ -318,7 +321,11 @@ fn a_handler_returning_a_string_is_still_rejected() {
 
 #[test]
 fn a_written_non_block_rc_handler_is_refused_before_sourcing() {
-    let (_dir, env) = rc_home("echo must-not-run\nreturn [handlers: [:, greet: 3]]");
+    let rc = format!(
+        "echo must-not-run\n{}",
+        rc_source(&[("handlers", "[:, greet: 3]")])
+    );
+    let (_dir, env) = rc_home(&rc);
     let out = repl(&["-i"], &env, "echo alive\n");
     assert!(
         out.stderr.contains("skipped, since it does not compile"),
@@ -342,10 +349,12 @@ fn written_factory_handlers_are_refused_before_the_plugin_runs() {
             ),
         )
         .unwrap();
-        let (_dir, env) = rc_home(&format!(
-            "let plugin = return {}; return [plugins: [$plugin: [:]]]",
-            ral_core::syntax::quote_word(&ral_core::path::shown(&path))
-        ));
+        let rc = format!(
+            "let plugin = return {}\n{}",
+            ral_core::syntax::quote_word(&ral_core::path::shown(&path)),
+            rc_source(&[("plugins", "[$plugin: [:]]")])
+        );
+        let (_dir, env) = rc_home(&rc);
         let out = repl(&["-i"], &env, "echo alive\n");
         assert!(
             out.stderr.contains("skipped, since it does not compile"),
@@ -483,7 +492,7 @@ fn an_interactive_shell_passes_inherited_ignored_signals_on() {
 #[test]
 fn rc_umask_applies_to_children_and_rals_own_creates() {
     use std::os::unix::fs::PermissionsExt;
-    let (_dir, env) = rc_home("return [umask: '077']");
+    let (_dir, env) = rc_home(&rc_source(&[("umask", "`set '077'")]));
     let file = env[1].1.join("created");
     let out = repl(
         &["-i"],
@@ -503,7 +512,10 @@ fn rc_umask_applies_to_children_and_rals_own_creates() {
 #[cfg(unix)]
 #[test]
 fn rc_open_file_limit_reaches_children() {
-    let (_dir, env) = rc_home("return [limits: [open-files: 64]]");
+    let (_dir, env) = rc_home(&rc_source(&[(
+        "limits",
+        "[open-files: `set 64, core-bytes: `inherit, stack-bytes: `inherit]",
+    )]));
     let out = repl(&["-i"], &env, "/bin/sh -c 'ulimit -n'\n");
     assert!(repl_output_lines(&out.stdout).any(|l| l == "64"), "{out:?}");
 }
@@ -511,7 +523,10 @@ fn rc_open_file_limit_reaches_children() {
 #[cfg(unix)]
 #[test]
 fn grant_core_limit_wins_over_rc_session_limit() {
-    let (_dir, env) = rc_home("return [limits: [core-bytes: 1048576]]");
+    let (_dir, env) = rc_home(&rc_source(&[(
+        "limits",
+        "[open-files: `inherit, core-bytes: `set 1048576, stack-bytes: `inherit]",
+    )]));
     let out = repl(
         &["-i"],
         &env,

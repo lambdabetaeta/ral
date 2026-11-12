@@ -1,6 +1,6 @@
 # codes: T0020
 # status: 1
-# at: 6:12
+# at: 6:19
 # contains: `` `cwdd `` is not a place
 # contains: did you mean `` `cwd ``
 grant [fs: [read: [`cwdd .]]] { return 1 }

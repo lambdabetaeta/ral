@@ -5,14 +5,4 @@ try { grant [fs: [read: [`absolute proj]]] { echo BODYRAN }; return () } { |e| e
 try { grant [exec: [allow: [`name ./tool]]] { echo BODYRAN }; return () } { |e| echo $e[message] }
 try { grant [exec: [allow: [`absolute /usr/bin]]] { echo BODYRAN }; return () } { |e| echo $e[message] }
 
-# Values the checker leaves to the decoder: a table reaching it through a
-# parameter is still validated, key by key
-let exec-of = { |table| grant [exec: $table] { echo BODYRAN } }
-try { exec-of [alow: []]; return () } { |e| echo $e[message] }
-
-# Argument policies are gone: a per-command entry or an `only` list is refused,
-# never read as an allowance
-try { exec-of [git: [status, log]]; return () } { |e| echo $e[message] }
-try { exec-of [only: [status]]; return () } { |e| echo $e[message] }
-
 echo 'grant decode tests done'

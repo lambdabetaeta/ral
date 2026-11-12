@@ -1,7 +1,7 @@
 ---
-verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+verified_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
 verified_at_date: 2026-11-11
-anchors: [Generator, Solver, Settled, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
+anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, file_options, check_options, check_option, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
 
 # Type inference: constraints, closure, readback
@@ -163,20 +163,13 @@ predecessors' closed schemes.
   exit and settled only after successful closure. An install-time arm check
   exports only a verdict, never a scheme.
   `Site::scheme` likewise enters its scratch region before instantiating the site.
-- A top-level `Run` introduces no region. `Solver::settle` closes rank zero
-  and yields `Settled`: every elaboration match has retired, including on
-  refusal. Every mode and split is fixed.
-- Unless settling reported errors, the return contract is held live on
-  `Settled`. It can equate and resolve types,
-  instantiate schemes, mint fresh types, queue nested tables and diagnose;
-  it cannot open a hole or enter a region. A contract is a use of the returned
-  value, never a choice of elaboration.
-- `Settled::close` then judges final-head argv gates and queued nested tables,
-  attaches `()` notes and returns a `Solution` only without errors; otherwise
-  the errors, sorted stably by source span.
-- A `Solution` is read-only: decisions (`mode`, `splits`), resolution, sites,
-  settlement and scratch judgements. Readback freezes its sites, schemes and
-  readmissions only after the live holds and close succeed.
+- A top-level `Run` introduces no region. After generation, `Solver::close`
+  closes rank zero and retires every elaboration match, including on refusal.
+  It judges final-head argv gates, attaches `()` notes and returns a `Solution`
+  only without errors; otherwise the errors, sorted stably by source span.
+- A `Solution` is read-only: decisions (`mode`, `splits`), resolution, sites
+  and scheme settlement. Readback freezes sites, schemes and readmissions
+  only after closure succeeds. Only tests may copy the type store.
 - Gates refuse known `Unit` at base-frame argv boundaries and the declared
   refused shapes at external heads, including handled ones. An external gate
   retains whether its head was handled where written, so its diagnostic can
@@ -186,42 +179,49 @@ predecessors' closed schemes.
   this inference architecture.
 - A unit with errors is discarded before readback or scheme export.
 
-## A return contract holds live after settling
+## A host file's options are uses during generation
 
-**Generate → settle → hold → close → freeze is one inference, not a loop.**
-A table is consulted key by key, never unified as a record type.
+**Generate → close → read back is one inference.** A declared table is
+consulted key by written key, never unified as a record type (SPEC §15.3).
 
-- `Held::Unify` uses `equate_held`, as written options do. Factory shape and
-  result equations also propagate through the live solver. Their solutions
-  reach decoder sites, schemes, readmissions and final argv gates.
-- `Holds::Handlers` gives rc and manifest `handlers:` one `Held::Unify`
-  equation against `Map(U([String] → Command))`, with `Reason::Handlers`.
-  Records are refused with the map spelling; there is no coercion or per-field
-  arm hold. Ascription needs no manifest. Persistent handlers retain their
-  install-time check, and imported arms retain their module's sites.
-- `within` checks a written handler map entry by entry through `install_arm`,
-  each in its own region with its name and span for diagnostics. Any other
-  value uses the same map equation. Only a written map contributes handled
-  names to the body's diagnostics; computed maps contribute none. Options
-  remain one record node, with no handler-specific syntax or IR. The total
-  static check makes runtime vetting of scoped handlers and catch-alls redundant.
-  The arm rule first equates the slot's parameter shape, then its fresh result
-  with `Command`; it reads neither the handler's name nor Σ to choose a type.
-  The catch-all uses `Held::Arm(Arm::CatchAll)`, not a second held-type equation.
-- The walk re-reads each row's tail after every field. After all live holds,
-  unknown, missing and refused keys are judged on the final types. Each
-  walked row is re-read to its final tail; fields the walk did not hold are
-  judged on scratch, without repeating a live clash or its weak-variable note.
-- Contract equations introduce ground types apart from fresh variables used
-  once. Every base-frame result is `Command`, with payload `Unit` by
-  construction. A field revealed in a row already left therefore has no
-  variable needing solving: the final scratch judgement suffices, without
-  repeated inference.
-- Nested tables are queued, then checked on scratch at close against the
-  final live types. They do not feed equations back into inference.
-- A wholly variable tail remains a runtime question: decoded data contains
-  no thunk. Unresolved field and member types likewise retain runtime checks.
-  Written tails use field spans; computed tails use the tail phrase's span.
+- `file_options` follows the elaborated tail through binds and sequences,
+  preserving their environment. A written record enters `check_options`;
+  a variable, spread or computed result is T0077. Field values remain arbitrary
+  expressions. A top-level trailing `let` is T0077; an empty file reads as `()`.
+- `check_options` checks each key with `check_option` during generation,
+  diagnosing unknown, refused and duplicate keys and all missing required
+  keys (one T0081 per table, without calling optional keys required).
+  `Holds::At` uses `equate_held`: its equations may constrain
+  binding modes and call splits and reach decoder sites before they freeze.
+- `Holds::Table` recurses immediately on a record literal. Any other value,
+  including `()`, is T0079. These equations constrain the nested field values
+  in the same solver as their parent.
+- All thirteen rc keys are required, and its `limits:` and `theme:` tables
+  are total too. `` `inherit `` and `` `set v `` make retention or override
+  explicit. Missing nested settings have pasteable `` `inherit `` hints,
+  just as missing top-level keys have declared empty values.
+  A manifest requires `name`; a grant profile requires no key,
+  so only the latter accepts empty options.
+- A manifest factory is a written one-parameter block whose body's tail is
+  checked by the same rule with factories disabled; refusals name the factory
+  body rather than the file's tail. Its parameter is fresh
+  and monomorphic; the host passes an options map at runtime, without
+  checking its contents against that parameter.
+- `Holds::Handlers` checks a written map arm by arm through `install_arm`,
+  each in its own region with duplicates refused, in rc, manifest and `within`
+  alike. Any other value meets `Map(U([String] → Command))` as a whole,
+  with `Reason::Handlers`; a record is refused with the map spelling.
+  Collection keys are data, not nested-table syntax.
+- Only a written `within` handler map contributes names to the body's
+  diagnostics. The arm rule equates the slot's parameter shape, then its
+  fresh result with `Command`, independently of the name and Σ.
+  `Holds::CatchAll` uses the catch-all arm rule without a second equation.
+  Scoped handlers need no runtime vet; persistent handlers retain installation
+  checks, and imported arms retain their module's checked sites.
+- Syntax guarantees rc and manifest result shape and keyset. Their decoders
+  retain value-shape and domain checks, plus installation vetting. Grant's
+  decoder also accepts grants received as data, so its runtime shape and
+  keyset checks remain.
 
 ## Readback fixes terms and sites
 

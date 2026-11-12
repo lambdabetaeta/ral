@@ -1,6 +1,6 @@
 # codes: T0020
 # status: 1
-# at: 6:12
+# at: 6:19
 # contains: as `` `dir `homebrew ``
 # contains: fs lists take places
 grant [fs: [read: [`homebrew]]] { return 1 }

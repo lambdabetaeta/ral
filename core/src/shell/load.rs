@@ -16,6 +16,7 @@ use crate::ir::Toplevel;
 use crate::shell::evaluator::{Mode, Ran};
 use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Value};
 use crate::source::{Source, SourceOrigin};
+use crate::typecheck::Table;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
@@ -23,22 +24,20 @@ const MAX_SOURCE_DEPTH: usize = 100;
 /// its defines landing in `shell.env`.
 ///
 /// The caller owns the filesystem read; `origin` only identifies the
-/// registered source and keys the cycle stack.  `contract` is the
-/// loading form's declared table, whose closed keyset `source`'s returned row
-/// is held to — the plugin loader's door, for a manifest's fields — in the
-/// same check as the rest of the file.
+/// registered source and keys the cycle stack. `options` is the table whose
+/// options this file's tail writes out (SPEC §15.3).
 ///
 /// # Errors
-/// A compile failure, a broken `contract` among them, as an error carrying its
+/// A compile failure, invalid `options` among them, as an error carrying its
 /// rejection; a circular dependency or the depth limit; or the file's own failure.
 pub fn evaluate_source(
     mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
     origin: &SourceOrigin,
-    contract: Option<crate::typecheck::ReturnContract>,
+    options: Option<&'static Table>,
 ) -> Settled<Value> {
-    let top = check_source(source, origin, shell, contract)?;
+    let top = check_source(source, origin, shell, options)?;
     let load = ModuleLoad { top: &top, origin };
     let ran = module_phrases(load, shell.env.clone(), Mode::Local, mooring, shell)?;
     // Unlike a nested `use`, this loader's whole point is to install its
@@ -130,7 +129,8 @@ impl Drop for ModuleStackFrame<'_> {
 /// door's script too, so the file's `$SCRIPT` references bake to it.
 ///
 /// Registers `source` before compiling, so every span the compile stamps,
-/// a rejection's among them, resolves in the session's registry.
+/// a rejection's among them, resolves in the session's registry. `options` is
+/// the table whose options this file's tail writes out (SPEC §15.3).
 ///
 /// Also the binding-lease harvest seam: every runtime-compiled load passes
 /// through here inside an already-committed run, so its referenced names
@@ -139,7 +139,7 @@ pub(crate) fn check_source(
     source: &str,
     origin: &SourceOrigin,
     shell: &mut Shell,
-    contract: Option<crate::typecheck::ReturnContract>,
+    options: Option<&'static Table>,
 ) -> Settled<Toplevel> {
     let text = Source::from_text(origin.clone(), source);
     let file = shell.session.sources.register(text.clone());
@@ -148,7 +148,7 @@ pub(crate) fn check_source(
         shell.session_schemes(),
         file,
         origin.file(),
-        contract,
+        options,
     )
     .map_err(|error| {
         Error::new(Reason::Compile(Box::new(error.failure(origin.to_string()))))

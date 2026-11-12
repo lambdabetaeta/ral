@@ -1,9 +1,10 @@
 # ral plugins
 
 A plugin extends an interactive `ral` session. It is an ordinary ral file
-whose result is a manifest: a record naming the hooks, keybindings, and
-handlers it contributes. The rc's `plugins:` map loads them at startup;
-they remain installed for the session. A new plugin requires a new session.
+ending in a written manifest: a record naming the hooks, keybindings, and
+handlers it contributes, or a written factory that ends in that record.
+The rc's `plugins:` map loads them at startup; they remain installed for
+the session. A new plugin requires a new session.
 
 This document is the design narrative. The [SPEC](SPEC.md) is the
 reference: §15.5 (manifest, loading), §15.6 (hooks, key notation,
@@ -14,14 +15,14 @@ document's own.
 
 ## 1 What a plugin is
 
-A plugin is data, not a program that registers things. The file computes
-a manifest and returns it; the host reads the manifest and does the
-registering. Four consequences follow.
+A plugin is data, not a program that registers things. The file writes
+out its manifest's keys and computes their values; the host reads the
+manifest and does the registering. Four consequences follow.
 
 - **No plugin language.** There is no `register-hook` call, no `plugin`
   form, no magic config binding. A plugin is written in ral and checked
-  as ral is checked. The manifest has a declared keyset, ascribed to the
-  file before it runs (SPEC §15.5, as for the rc file in §15.3), so a
+  as ral is checked. Its written manifest is checked key by key during
+  generation (SPEC §15.5, under the host-file rule in §15.3), so a
   misspelled key is a compile error and the file never executes. Quoted
   constant keys are names too: `["name": 'example']` is a record checked
   against the manifest table, not a map. `[:, name: 'example']` is a map
@@ -36,9 +37,11 @@ registering. Four consequences follow.
   programs against is the set of hook events and `_ed-*` builtins below,
   all of them ral values and ral builtins.
 
-The file's result is either a manifest, or a factory: a block of exactly
-one parameter, the options map, returning the manifest. Top-level
-bindings in the file are helpers; only the result matters.
+The file ends in a manifest record written out, or a written factory:
+a block of exactly one parameter, the options map, whose body ends in
+that record. Top-level bindings may supply helpers and field values,
+but `return $manifest`, spread manifests, and computed factories are refused
+(SPEC §15.3).
 
 ```
 { |options| [
@@ -48,9 +51,8 @@ bindings in the file are helpers; only the result matters.
 ```
 
 A plugin with nothing to configure returns the manifest directly.
-Options are first-order data (SPEC §15.5): they cannot carry blocks or
-handles. A factory chooses its own defaults by reading
-fields by name; there is no options schema.
+A factory chooses its own defaults by reading fields by name; there is
+no options schema, and options may hold blocks (SPEC §15.5).
 
 | Field | Meaning |
 |---|---|
@@ -62,19 +64,17 @@ fields by name; there is no options schema.
 The keyset is closed. In particular `capabilities:` is not an unknown key
 but a refused one, with its own message, for the reason in section 2.
 
-The checker generates the file, settles every remaining `let` mode and call
-split, holds the manifest contract live, closes gates, nested tables and
-errors, then freezes the checked tree. A contract solves types; it cannot
-change elaboration or open holes. Factory shape and result equations run in
-that same live phase. For example, `name:` can fix a decoded value's type to
-text, so incompatible data is refused at its decode, naming the field use.
+Manifest fields are ordinary uses during inference. For example, `name:`
+can fix a decoded value's type to text, so incompatible data is refused at
+its decode, naming the field use.
 
-`handlers:` is a map, held by one equation against
-`Map(U([String] → Command))`, as in the rc. Keys are data: written and
-computed names follow the same rule. A record such as `[hi: …]` is refused;
-write `[:, hi: { |args| … }]`, or `[:]` for none. The live equation reaches
-sites inside locally checked handlers; imported handlers retain their module's
-sites. Persistent handlers are also vetted by actual name at installation.
+`handlers:` is a map, as in the rc. A written map is checked arm by arm,
+each in its own region, with duplicate names refused. A bound or computed
+map is checked against `Map(U([String] → Command))`. Its keys are data,
+not table keys. A record such as `[hi: …]` is refused; write
+`[:, hi: { |args| … }]`, or `[:]` for none. Checks reach sites inside
+locally checked handlers; imported handlers retain their module's sites.
+Persistent handlers are also vetted by actual name at installation.
 Unlike `within`, persistent installation must cover unresolved returns and
 member types. Hooks and keybindings retain host validation; their results do
 not enter typed code unchecked.
@@ -84,7 +84,7 @@ not enter typed code unchecked.
 A plugin has no authority of its own to declare. A manifest field naming
 capabilities would be decoration: nothing could enforce it against the
 plugin's own code, and a reader would take it for confinement. So the
-key is refused at load, and the advice is the message: wrap the
+key is refused before the file runs, and the advice is the message: wrap the
 invocation in `grant`.
 
 What a plugin may do is what the code that runs it may do.
@@ -165,9 +165,9 @@ The file is typechecked and evaluated in a fresh scope under the
 manifest's declared table, a factory is applied to its options, and the
 result is parsed: handler arity, hook names, key notation, guard
 regexes, and handler collisions are all checked before anything is
-installed. Persistent command handlers already held statically by the map
-equation are vetted again against their actual names at installation, yielding
-only a verdict, no stored scheme. Runtime parsing also covers wholly
+installed. Persistent command handlers already checked statically are
+vetted again against their actual names at installation, yielding only a
+verdict, no stored scheme. Runtime parsing also covers those handlers'
 unresolved returns and unresolved field or member types. Hooks and handlers
 are then committed and the host told; if the host refuses the manifest, the
 whole namespace is rolled back. Errors are reported as `plugin 'NAME': …`,
@@ -377,15 +377,15 @@ no terminal to lend.
 Plugins are configured, not scripted into place, by the rc file's
 `plugins:` map (SPEC §15.3): from plugin name or path to that plugin's
 options map, forwarded to the plugin's factory as its single argument.
+Every rc key is required; the field below belongs in a complete rc, such
+as [rc.example](rc.example), not a file on its own.
 
 ```
-return [
-    plugins: [
-        autosuggestion: [:],
-        fzf-files:      [key: 'ctrl-t'],
-        zoxide:         [key: 'alt-z'],
-    ],
-]
+plugins: [
+    autosuggestion: [:],
+    fzf-files:      [key: 'ctrl-t'],
+    zoxide:         [key: 'alt-z'],
+],
 ```
 
 `[:]` is the empty map, for a plugin taking no options. A value that is
@@ -402,8 +402,11 @@ let plugins = if !{succeeds { which fzf > /dev/null }} {
 } else {
     return [autosuggestion: [:]]
 }
-return [env: [EDITOR: 'nvim'], plugins: $plugins]
 ```
+
+Then write `plugins: $plugins` in the rc's final record, alongside all its
+other required keys. Collection entries may be computed; the rc's own keys
+must remain written.
 
 ## 9 Examples
 
@@ -465,8 +468,6 @@ Each of these is a choice, not a gap.
   only from manifests loaded at startup.
 - **Return-value fallthrough in keybindings.** A guard claims a press
   before the handler runs.
-- **Non-first-order options.** A plugin that wants a block of its own
-  writes it in the plugin.
 - **Plugins outside the interactive `ral`.** Batch hosts, exarch, and
   synod load no REPL plugins and install no `_ed-*`; portable code must not
   assume them (SPEC §15, §15.8).

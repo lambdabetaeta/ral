@@ -6,17 +6,19 @@ mod data;
 mod scope;
 
 use super::env::{Inferring, TyEnv};
-use super::error::{Reason, UnderAppliedBuiltin};
+use super::error::{Reason, UnderAppliedBuiltin, Unwritten};
 use super::solve::{BindHole, Solver};
+use super::table::Table;
 use crate::ir::{
-    CommandName, CommandWord, Comp, CompKind, GroupNode, Name, Pattern, Phrase, Val, is_synthetic,
+    CommandName, CommandWord, Comp, CompKind, FieldsNode, GroupNode, Name, Pattern, Phrase, Val,
+    is_synthetic,
 };
 use crate::source::{Span, Spanned, WithSpan};
 use crate::ty::{CompTy, Label, Producer, Row, Scheme, Ty};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A `Define`'s schemes before settlement: live in the unit's unifier.
+/// A `Define`'s schemes before closure: live in the unit's unifier.
 pub(super) type LiveSchemes = Vec<(String, Arc<Scheme>)>;
 
 /// A recursive group checked once: its members' schemes and its rebuilt node.
@@ -60,19 +62,8 @@ impl Generator {
                 (self.produces(ty), CompKind::Return(value))
             }
             CompKind::Lam { param, body } => {
-                let param_ty = self.solver.fresh_ty();
-                let (body_ty, body) = self.scope(|this| {
-                    this.env
-                        .bind(param.to_string(), Scheme::mono(param_ty.clone()));
-                    this.comp(body)
-                });
-                (
-                    CompTy::fun(param_ty, body_ty),
-                    CompKind::Lam {
-                        param: param.clone(),
-                        body: Arc::new(body),
-                    },
-                )
+                let (param_ty, body_ty, item) = self.lam(param, |this| this.comp(body));
+                (CompTy::fun(param_ty, body_ty), item)
             }
             CompKind::Force(value) => {
                 let (ty, node) = self.val(value, None);
@@ -86,30 +77,8 @@ impl Generator {
                 hole: (),
                 pattern,
                 rest,
-            } => {
-                let (rhs, hole) = self.let_(pattern, rhs);
-                let (cty, rest) = self.comp(rest);
-                (
-                    cty,
-                    CompKind::Bind {
-                        comp: rhs,
-                        hole,
-                        pattern: Arc::clone(pattern),
-                        rest: Arc::new(rest),
-                    },
-                )
-            }
-            CompKind::Seq { first, rest } => {
-                let (_, first) = self.statement(first);
-                let (cty, rest) = self.comp(rest);
-                (
-                    cty,
-                    CompKind::Seq {
-                        first: Arc::new(first),
-                        rest: Arc::new(rest),
-                    },
-                )
-            }
+            } => self.bind(pattern, rhs, |this| this.comp(rest)),
+            CompKind::Seq { first, rest } => self.seq(first, |this| this.comp(rest)),
             CompKind::App {
                 head,
                 args,
@@ -143,6 +112,62 @@ impl Generator {
         (cty, Spanned::with_span(comp.span, item))
     }
 
+    fn lam<T>(
+        &mut self,
+        param: &Name,
+        body: impl FnOnce(&mut Self) -> (T, Comp<Inferring>),
+    ) -> (Ty, T, CompKind<Inferring>) {
+        let param_ty = self.solver.fresh_ty();
+        let (metadata, body) = self.scope(|this| {
+            this.env
+                .bind(param.to_string(), Scheme::mono(param_ty.clone()));
+            body(this)
+        });
+        (
+            param_ty,
+            metadata,
+            CompKind::Lam {
+                param: param.clone(),
+                body: Arc::new(body),
+            },
+        )
+    }
+
+    fn bind<T>(
+        &mut self,
+        pattern: &Arc<Pattern>,
+        rhs: &Comp,
+        rest: impl FnOnce(&mut Self) -> (T, Comp<Inferring>),
+    ) -> (T, CompKind<Inferring>) {
+        let (rhs, hole) = self.let_(pattern, rhs);
+        let (metadata, rest) = rest(self);
+        (
+            metadata,
+            CompKind::Bind {
+                comp: rhs,
+                hole,
+                pattern: Arc::clone(pattern),
+                rest: Arc::new(rest),
+            },
+        )
+    }
+
+    fn seq<T>(
+        &mut self,
+        first: &Comp,
+        rest: impl FnOnce(&mut Self) -> (T, Comp<Inferring>),
+    ) -> (T, CompKind<Inferring>) {
+        let (_, first) = self.statement(first);
+        let (metadata, rest) = rest(self);
+        (
+            metadata,
+            CompKind::Seq {
+                first: Arc::new(first),
+                rest: Arc::new(rest),
+            },
+        )
+    }
+
     pub(super) fn check(&mut self, comp: &Comp, expected: &CompTy, why: Reason) -> Comp<Inferring> {
         self.with_span(comp.span, |this| {
             if let CompKind::Lam { param, body } = &comp.item {
@@ -172,18 +197,36 @@ impl Generator {
     pub(super) fn phrases(
         &mut self,
         phrases: &[Spanned<Phrase<()>>],
-    ) -> (Vec<Spanned<Phrase<LiveSchemes, Inferring>>>, Option<CompTy>) {
-        let mut nodes = Vec::with_capacity(phrases.len());
-        let mut tail = None;
-        for phrase in phrases {
-            let (node, cty) = self.with_span(phrase.span, |this| this.phrase(&phrase.item));
-            nodes.push(Spanned::with_span(phrase.span, node));
-            tail = cty;
-        }
-        (nodes, tail)
+        options: Option<&'static Table>,
+    ) -> Vec<Spanned<Phrase<LiveSchemes, Inferring>>> {
+        let Some((last, prefix)) = phrases.split_last() else {
+            if let Some(table) = options {
+                self.check_options(&FieldsNode::new(Box::new([])), table);
+            }
+            return Vec::new();
+        };
+        prefix
+            .iter()
+            .map(|phrase| (phrase, None))
+            .chain(std::iter::once((last, options)))
+            .map(|(phrase, options)| {
+                let node = self.with_span(phrase.span, |this| match (&phrase.item, options) {
+                    (Phrase::Run(comp), Some(table)) => {
+                        Phrase::Run(Arc::new(this.file_options(comp, table, table.factory)))
+                    }
+                    (Phrase::Define { .. }, Some(table)) => {
+                        let node = this.phrase(&phrase.item);
+                        this.diagnose_unwritten(table, table.factory, Unwritten::Let);
+                        node
+                    }
+                    (_, None) => this.phrase(&phrase.item),
+                });
+                Spanned::with_span(phrase.span, node)
+            })
+            .collect()
     }
 
-    fn phrase(&mut self, phrase: &Phrase<()>) -> (Phrase<LiveSchemes, Inferring>, Option<CompTy>) {
+    fn phrase(&mut self, phrase: &Phrase<()>) -> Phrase<LiveSchemes, Inferring> {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
                 let (comp, hole) = self.let_(pattern, comp);
@@ -199,19 +242,16 @@ impl Generator {
                         (name.to_string(), scheme)
                     })
                     .collect();
-                (
-                    Phrase::Define {
-                        pattern: Arc::clone(pattern),
-                        comp,
-                        hole,
-                        schemes,
-                    },
-                    None,
-                )
+                Phrase::Define {
+                    pattern: Arc::clone(pattern),
+                    comp,
+                    hole,
+                    schemes,
+                }
             }
             Phrase::Run(comp) => {
-                let (cty, comp) = self.statement(comp);
-                (Phrase::Run(Arc::new(comp)), Some(cty))
+                let (_, comp) = self.statement(comp);
+                Phrase::Run(Arc::new(comp))
             }
         }
     }
@@ -508,10 +548,7 @@ mod tests {
     use crate::typecheck::solve::{Mode, Solution};
 
     pub(super) fn solved(solver: Solver) -> Solution {
-        solver
-            .settle()
-            .close()
-            .unwrap_or_else(|errors| panic!("{errors:?}"))
+        solver.close().unwrap_or_else(|errors| panic!("{errors:?}"))
     }
 
     pub(super) fn assert_solved_type(store: &Unifier, actual: &Ty, expected: &Ty) {
@@ -562,8 +599,7 @@ mod tests {
                 schemes: (),
             },
         );
-        let (phrases, tail) = generator.phrases(&[source]);
-        assert!(tail.is_none());
+        let phrases = generator.phrases(&[source], None);
         assert_eq!(phrases[0].span, Some(at(0)));
         let Phrase::Define {
             comp,

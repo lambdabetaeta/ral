@@ -1,5 +1,5 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
 generated_at_date: 2026-11-11
 covers_paths: [plugins/, ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/enquiry.rs]
 ---
@@ -202,10 +202,12 @@ binding on a proper prefix of a sequence kills it: `dead_entries` pairs each
 entry with its blocker — an unguarded entry on the same sequence loaded
 earlier, or on a proper prefix wherever loaded.
 
-- `plugin/manifest.rs` — a manifest is the Map a plugin's top-level block
-  returns. `parse` splits it into the first-order `Manifest` (`{name, hooks,
-  keybindings: [{key, guard}]}`) the host is told and the `ManifestHandlers`
-  (hook, keybinding, and command-handler values) the engine keeps. A `KeySpec` is
+- `plugin/manifest.rs` — a manifest is a written record, directly at the
+  file's tail or at the tail of a written one-parameter factory (SPEC §15.3).
+  Its runtime carrier is a `Map`; `parse(&Map)` splits it into the first-order
+  `Manifest` (`{name, hooks, keybindings: [{key, guard}]}`) the host is told
+  and the `ManifestHandlers` (hook, keybinding, and command-handler values)
+  the engine keeps. A `KeySpec` is
   validated at load — notation parsed, optional `guard:` regex compiled:
   `ctrl-c`/`ctrl-d` are reserved outright, as any chord of a sequence
   (`reserved_action`, the session's escape hatches); a sequence not beginning
@@ -213,35 +215,38 @@ earlier, or on a proper prefix wherever loaded.
   carrying a ral-owned built-in action (`builtin_action` — every unmodified
   key except F1–F12, none once any modifier is set) is a load error, so
   same-key bindings compose as an ordered match with the built-in as the
-  final arm. A `capabilities:` key is a load error, not
-  silent confinement — plugins run with host authority; to attenuate, wrap
-  the invocation in `grant { … }`. It is not an *unknown* key either: the
-  manifest's declared table (`typecheck::contract`, `Form::Manifest`) marks
-  it refused, with that advice as its own sentence. The table also closes the
-  keyset — `name` (required, `String`), `handlers`, `hooks`, `keybindings` —
-  so an unknown key is an error naming the list, here and in the checker
-  both. `handlers:` uses `Holds::Handlers` and one `Held::Unify` equation
-  against `Map(U([String] → Command))`, live after elaboration settles and
-  before closure and readback. A record is refused with the map spelling,
-  `[:, name: { |args| … }]`; there is no per-field arm hold.
-  Field and factory equations reach decoder admission sites inside this
-  unit's IR. `hooks:` and `keybindings:` retain runtime shape validation;
-  their results are host-checked, rendered or discarded, not passed unchecked
-  to typed code. Runtime parsing also covers unresolved returns, fields and
-  members. Command arms are vetted again at install against their actual
-  stand-in from Σ, yielding a verdict, never a scheme. Head types and argument
-  gates depend only on Σ and lexical bindings; handled names contribute only
-  diagnostic context. A handler for an external name therefore cannot widen
+  final arm. A `capabilities:` key is refused statically, with advice to
+  wrap an invocation in `grant { … }`: plugins run with host authority.
+  `typecheck::table::declared(Form::Manifest)` names the four admitted keys —
+  `name` (required, `String`), `handlers`, `hooks`, `keybindings`.
+  `check_options` checks them key by key during generation: unknown keys
+  are T0076, a missing `name` is T0081, including for `()` or an empty file.
+  A written `handlers:` map is checked arm by arm, each in its own region;
+  a bound or computed map meets `Map(U([String] → Command))` as a whole.
+  A record is refused with the map spelling, `[:, name: { |args| … }]`.
+  These equations reach decoder admission sites before readback.
+  Syntax guarantees the manifest result's shape and keyset; `parse` checks
+  field value shapes, domains and installability, not those facts again.
+  `hooks:` and `keybindings:` retain runtime shape validation; their results
+  are host-checked, rendered or discarded, not passed unchecked to typed code.
+  Command arms are vetted again at install against the same constant
+  `U([String] → Command)` type, yielding a verdict, never a scheme.
+  Head types and argument gates depend only on Σ and lexical bindings;
+  handled names contribute only diagnostic context. A handler for an external name therefore cannot widen
   its external argument gate. `handlers:` installs persistent handlers;
   scoped handlers use `within`, and interactive functions use `let`.
 - `plugin/load.rs` — startup-only `load_plugin`, called by the rc plan with
   an options `Map`. It resolves a plugin under `~/.config/ral/plugins/` or
   `RAL_PATH`, then typechecks and evaluates it through
   `shell::load::evaluate_source` in a fresh scope under
-  `contract::declared(Form::Manifest)`. `instantiate` applies a factory to its
-  options under the startup mooring. The contract holds its shape and inferred
-  result live on `Settled`, without choosing a `let` mode or call split or
-  opening a hole; `manifest::parse` checks the actual result again at runtime.
+  `table::declared(Form::Manifest)`. The file must end in a written record
+  or a written block of exactly one parameter whose body's tail is that
+  record; factory recursion is disabled inside the body. A bound factory,
+  spread or computed tail is T0077. `instantiate` applies the factory to its
+  options under the startup mooring; their contents are not checked against
+  its parameter type. A direct manifest refuses non-empty options.
+  After instantiation the loader asserts the statically guaranteed record
+  shape and calls `manifest::parse` for value validation.
   Hooks and handlers are installed before the host enquiry
   `` `repl-plugin `loaded ``. Any failure, including host refusal, removes the
   hooks and the locally retained `FrameHandle`s. Only committed names enter
@@ -265,10 +270,9 @@ earlier, or on a proper prefix wherever loaded.
   emacs). A `PendingKeybinding` carries the
   plugin's name plus a binding index *within* it, never a position in the
   runtime `Vec`; a resolution miss re-edits the line unchanged.
-- `plugins/` (repo root) ships the example plugins (`autosuggestion.ral`,
-  `fzf-*.ral`, `zoxide.ral`, the shared `lib/fzf.ral`), each a parameterised
-  manifest factory written against the `_ed-*` builtins; they are data to
-  this runtime, never read by it.
+- `plugins/` (repo root) ships `autosuggestion.ral` as a direct manifest,
+  `fzf-*.ral` and `zoxide.ral` as written one-parameter factories, and the
+  shared module `lib/fzf.ral`, written against the `_ed-*` builtins.
 - `plugin/rustyline.rs` is the runtime's rustyline boundary: `sync_plugins`
   reconciles rustyline's binding table by full unbind-then-rebind,
   registering one `RouterKeyHandler` per distinct bound sequence

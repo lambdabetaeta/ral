@@ -270,7 +270,7 @@ record!(TypeDiagnostic {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
-pub enum GrantVocabulary {
+pub enum Vocabulary {
     Place,
     ExecTarget,
     DirTarget,
@@ -278,16 +278,9 @@ pub enum GrantVocabulary {
     Gpu,
     Editor,
     Shell,
+    Setting,
 }
-label!(GrantVocabulary);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GrantForm {
-    Grant,
-    Manifest,
-}
-label!(GrantForm);
+label!(Vocabulary);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -579,7 +572,7 @@ record!(GlobFailureSyntax {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantFailureUnknownVocabulary {
-    pub vocabulary: GrantVocabulary,
+    pub vocabulary: Vocabulary,
     pub tag: String,
     pub offered: Vec<String>,
 }
@@ -591,12 +584,10 @@ record!(GrantFailureUnknownVocabulary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantFailureRefusedKey {
-    pub form: GrantForm,
     pub key: String,
     pub cause: RefusedGrantKey,
 }
 record!(GrantFailureRefusedKey {
-    form: "form",
     key: "key",
     cause: "cause"
 });
@@ -1102,7 +1093,7 @@ impl BlockRole {
     }
 }
 
-impl GrantVocabulary {
+impl Vocabulary {
     pub fn noun(&self) -> &'static str {
         match self {
             Self::Place => "place",
@@ -1111,6 +1102,7 @@ impl GrantVocabulary {
             Self::Net => "net mode",
             Self::Gpu => "GPU mode",
             Self::Editor | Self::Shell => "verb",
+            Self::Setting => "setting",
         }
     }
 
@@ -1138,16 +1130,10 @@ impl GrantVocabulary {
                 "dir" => Some("`` `dir `` does not nest; write `` `dir `cwd tools ``".into()),
                 _ => None,
             },
-            Self::Net | Self::Gpu | Self::Editor | Self::Shell => None,
+            Self::Net | Self::Gpu | Self::Editor | Self::Shell | Self::Setting => None,
         }
     }
 
-    pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
-    }
-}
-
-impl GrantForm {
     pub fn describe(&self) -> String {
         <&str>::from(*self).replace('-', " ")
     }
@@ -1559,8 +1545,7 @@ impl GrantFailureUnknownVocabulary {
 impl GrantFailureRefusedKey {
     pub fn describe(&self) -> String {
         format!(
-            "the {} field {:?} is not supported: {}",
-            self.form.describe(),
+            "the grant field {:?} is not supported: {}",
             self.key,
             match self.cause {
                 RefusedGrantKey::DetachMovedToShell => "detach is a shell verb, not a field",

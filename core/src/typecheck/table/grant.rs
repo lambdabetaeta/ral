@@ -9,61 +9,68 @@
 use super::{Holds, Key, Table, Vocab};
 use crate::authority::grant::freeze::{Anchor, Selector};
 use crate::authority::policy::{EditorVerb, Gpu, Net, ShellVerb};
-use crate::fact::{GrantVocabulary, RefusedGrantKey};
+use crate::fact::{RefusedGrantKey, Vocabulary};
 use crate::ty::Ty;
 use crate::typecheck::error::Reason;
 use strum::VariantArray;
 
 /// `grant`'s options.
 ///
-/// Checked statically: `net`, `gpu`, `editor` and `shell` are held to closed
-/// variants, so a misspelt tag or verb is an error at the form; `exec` and
-/// `fs` are nested tables, ascribed once inference has finished (their keys
-/// are optional, which no row expresses), as records only, with their lists
-/// held to closed rows of exec targets and places.  Nothing here constrains
-/// a bound table.
-///
-/// Left to `decode_capability_map`: whatever the types cannot see.  A table
-/// typed at a variable (a generic function's parameter, a `restrict` record
-/// off the wire) reaches the decoder unchecked, and the decoder still
-/// judges every payload: a place's subpath, an executable's name, a `~` that
-/// would never expand.
+/// `net`, `gpu`, `editor` and `shell` hold closed variants. `exec` and `fs`
+/// are written tables whose lists hold closed rows of exec targets and places.
+/// `decode_capability_map` judges what types cannot see — a place's subpath,
+/// an executable's name, a `~` that would never expand — and every grant that
+/// arrives as data.
 pub(super) static GRANT: Table = Table {
     form: "grant",
     keys: &[
         Key {
             label: "exec",
             holds: Holds::Table(&EXEC),
+            required: false,
+            blank: None,
             reason: None,
         },
         Key {
             label: "fs",
             holds: Holds::Table(&FS),
+            required: false,
+            blank: None,
             reason: None,
         },
         Key {
             label: "net",
             holds: Holds::At(net),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&NET)),
         },
         Key {
             label: "gpu",
             holds: Holds::At(gpu),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&GPU)),
         },
         Key {
             label: "editor",
             holds: Holds::At(editor),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&EDITOR)),
         },
         Key {
             label: "shell",
             holds: Holds::At(shell),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&SHELL)),
         },
         Key {
             label: "detach",
             holds: Holds::Refused(RefusedGrantKey::DetachMovedToShell),
+            required: false,
+            blank: None,
             reason: None,
         },
     ],
@@ -76,11 +83,15 @@ static EXEC: Table = Table {
         Key {
             label: "allow",
             holds: Holds::At(exec_targets),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&EXEC_TARGET)),
         },
         Key {
             label: "deny",
             holds: Holds::At(exec_targets),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&EXEC_TARGET)),
         },
     ],
@@ -93,16 +104,22 @@ static FS: Table = Table {
         Key {
             label: "read",
             holds: Holds::At(places),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
         Key {
             label: "write",
             holds: Holds::At(places),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
         Key {
             label: "deny",
             holds: Holds::At(places),
+            required: false,
+            blank: None,
             reason: Some(Reason::Vocabulary(&PLACE)),
         },
     ],
@@ -110,7 +127,7 @@ static FS: Table = Table {
 };
 
 pub(crate) static PLACE: Vocab = Vocab {
-    id: GrantVocabulary::Place,
+    id: Vocabulary::Place,
     row: place_row,
     untagged: "a place is a tagged path: write `` `absolute /tmp `` or `` `cwd src `` for a path under the working directory",
     payload: "a place's payload is a path: `` `absolute /tmp ``, `` `cwd src ``",
@@ -118,7 +135,7 @@ pub(crate) static PLACE: Vocab = Vocab {
 };
 
 pub(crate) static EXEC_TARGET: Vocab = Vocab {
-    id: GrantVocabulary::ExecTarget,
+    id: Vocabulary::ExecTarget,
     row: exec_target_row,
     untagged: "an exec target is tagged: write `` `name git `` for a command found on the PATH, or a place such as `` `absolute /bin/sh `` or `` `cwd tools/build ``",
     payload: "`` `name `` takes a command name and a place takes a path: `` `name git ``, `` `cwd tools/build ``; `` `dir `` takes a place or a selector with no payload of its own",
@@ -126,7 +143,7 @@ pub(crate) static EXEC_TARGET: Vocab = Vocab {
 };
 
 pub(crate) static DIR_TARGET: Vocab = Vocab {
-    id: GrantVocabulary::DirTarget,
+    id: Vocabulary::DirTarget,
     row: dir_target_row,
     untagged: "`` `dir `` takes a place or a selector: `` `dir `cwd tools ``, or `` `dir `system ``",
     payload: "a place takes a path and a selector takes none: `` `dir `cwd tools ``, `` `dir `system ``",
@@ -134,7 +151,7 @@ pub(crate) static DIR_TARGET: Vocab = Vocab {
 };
 
 pub(crate) static NET: Vocab = Vocab {
-    id: GrantVocabulary::Net,
+    id: Vocabulary::Net,
     row: nullary::<Net>,
     untagged: "a grant only narrows: omit `net` to inherit, or write `` net: `offline ``",
     payload: "`` `offline `` takes no payload",
@@ -142,7 +159,7 @@ pub(crate) static NET: Vocab = Vocab {
 };
 
 pub(crate) static GPU: Vocab = Vocab {
-    id: GrantVocabulary::Gpu,
+    id: Vocabulary::Gpu,
     row: nullary::<Gpu>,
     untagged: "a grant only narrows: omit `gpu` to inherit, or write `` gpu: `withheld ``",
     payload: "`` `withheld `` takes no payload",
@@ -150,7 +167,7 @@ pub(crate) static GPU: Vocab = Vocab {
 };
 
 pub(crate) static EDITOR: Vocab = Vocab {
-    id: GrantVocabulary::Editor,
+    id: Vocabulary::Editor,
     row: nullary::<EditorVerb>,
     untagged: "`editor` takes the list of verbs it permits, such as `` editor: [`read] ``; omit it to inherit",
     payload: "a verb takes no payload",
@@ -158,7 +175,7 @@ pub(crate) static EDITOR: Vocab = Vocab {
 };
 
 pub(crate) static SHELL: Vocab = Vocab {
-    id: GrantVocabulary::Shell,
+    id: Vocabulary::Shell,
     row: nullary::<ShellVerb>,
     untagged: "`shell` takes the list of verbs it permits, such as `` shell: [`chdir] ``; omit it to inherit",
     payload: "a verb takes no payload",

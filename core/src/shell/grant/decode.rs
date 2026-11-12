@@ -23,17 +23,18 @@ use crate::authority::policy::{
 use crate::data::FOValue;
 use crate::error::Error;
 use crate::fact::{
-    DataStep, Expected, Found, GrantFailure, GrantFailureRefusedKey, GrantForm, InvalidCause,
-    Reason, ShapeFailure, TextPreview, UnexpectedPayload, ValueShape,
+    DataStep, Expected, Found, GrantFailure, GrantFailureRefusedKey, InvalidCause, Reason,
+    ShapeFailure, TextPreview, UnexpectedPayload, ValueShape,
 };
 
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
-use crate::shell::runtime::{List, Map, Value, settings_map};
+use crate::shell::runtime::{List, Map, Value};
 use crate::text::near_names;
-use crate::typecheck::contract::{
-    DIR_TARGET, EDITOR, EXEC_TARGET, Form as ContractForm, GPU, Holds, NET, PLACE, SHELL, Table,
+use crate::typecheck::table::{
+    DIR_TARGET, EDITOR, EXEC_TARGET, Form as TableForm, GPU, Holds, NET, PLACE, SHELL, Table,
     Vocab, code, declared,
 };
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
@@ -78,7 +79,7 @@ fn at_index(error: Error, index: usize) -> Error {
 /// The declared table of a nested grant key, whose words refuse an unknown
 /// key at that depth.
 fn nested(key: &str) -> &'static Table {
-    match declared(ContractForm::Grant).holds(key) {
+    match declared(TableForm::Grant).holds(key) {
         Some(Holds::Table(table)) => table,
         _ => panic!("`grant` declares `{key}` as a nested table"),
     }
@@ -443,13 +444,17 @@ pub(crate) fn decode_capability_map(
     err_prefix: &str,
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, Error> {
-    let entries = settings_map(value).ok_or_else(|| {
-        shape(
-            value,
-            Expected::AnyOf(vec![ValueShape::Map, ValueShape::Unit]),
-        )
-        .with_context(err_prefix)
-    })?;
+    let entries = match value {
+        Value::Map(entries) => Cow::Borrowed(entries),
+        Value::Unit => Cow::Owned(Map::new()),
+        _ => {
+            return Err(shape(
+                value,
+                Expected::AnyOf(vec![ValueShape::Map, ValueShape::Unit]),
+            )
+            .with_context(err_prefix));
+        }
+    };
     let (mut exec, mut fs, mut net, mut gpu, mut editor, mut shell) =
         (None, None, None, None, None, None);
     for (k, v) in &*entries {
@@ -463,11 +468,10 @@ pub(crate) fn decode_capability_map(
                 "editor" => editor = Some(decode_verbs::<EditorVerb>(&v, &EDITOR, &context)?),
                 "shell" => shell = Some(decode_verbs::<ShellVerb>(&v, &SHELL, &context)?),
                 other => {
-                    let table = declared(ContractForm::Grant);
+                    let table = declared(TableForm::Grant);
                     return Err(match table.holds(other) {
                         Some(Holds::Refused(cause)) => {
                             grant_error(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                                form: GrantForm::Grant,
                                 key: other.into(),
                                 cause: *cause,
                             }))
@@ -1393,7 +1397,6 @@ mod tests {
             &e,
             vec![],
             InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                form: GrantForm::Grant,
                 key: "detach".into(),
                 cause: crate::fact::RefusedGrantKey::DetachMovedToShell,
             })),
@@ -1433,7 +1436,7 @@ mod tests {
     /// and decodes a valid value; a refused key errors in its table's advice.
     #[test]
     fn every_declared_grant_key_is_handled_by_decode_capability_map() {
-        let table = declared(ContractForm::Grant);
+        let table = declared(TableForm::Grant);
         for key in table.keys {
             match &key.holds {
                 Holds::Refused(cause) => {
@@ -1442,7 +1445,6 @@ mod tests {
                         &e,
                         vec![],
                         InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                            form: GrantForm::Grant,
                             key: key.label.into(),
                             cause: *cause,
                         })),
@@ -1470,7 +1472,7 @@ mod tests {
     /// each depth.
     #[test]
     fn an_unknown_key_is_refused_in_its_tables_words_at_each_depth() {
-        let table = declared(ContractForm::Grant);
+        let table = declared(TableForm::Grant);
         let e = refusal(&rec(&[("bogus", Value::Unit)]));
         assert_invalid(
             &e,

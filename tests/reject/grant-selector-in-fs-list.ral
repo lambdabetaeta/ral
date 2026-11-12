@@ -1,5 +1,5 @@
 # codes: T0020
 # status: 1
-# at: 5:12
+# at: 5:19
 # contains: fs lists take places such as `` `absolute `` or `` `cwd ``
 grant [fs: [read: [`path]]] { return 1 }

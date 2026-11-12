@@ -110,11 +110,10 @@ pub enum PluginFailure {
     AlreadyLoaded(PluginFailureAlreadyLoaded),
     NotFound(PluginFailureNotFound),
     OptionsWithoutFactory(PluginFailureOptionsWithoutFactory),
-    FactoryReturnedBlock(PluginFailureFactoryReturnedBlock),
     UnknownHookEvent(PluginFailureUnknownHookEvent),
     HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped),
 }
-variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", FactoryReturnedBlock(PluginFailureFactoryReturnedBlock): "factory-returned-block", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped): "handler-installation-escaped" });
+variant!(PluginFailure { AlreadyLoaded(PluginFailureAlreadyLoaded): "already-loaded", NotFound(PluginFailureNotFound): "not-found", OptionsWithoutFactory(PluginFailureOptionsWithoutFactory): "options-without-factory", UnknownHookEvent(PluginFailureUnknownHookEvent): "unknown-hook-event", HandlerInstallationEscaped(PluginFailureHandlerInstallationEscaped): "handler-installation-escaped" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeybindingFailure {
@@ -1029,12 +1028,6 @@ pub struct PluginFailureOptionsWithoutFactory {
     pub plugin: String,
 }
 record!(PluginFailureOptionsWithoutFactory { plugin: "plugin" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginFailureFactoryReturnedBlock {
-    pub plugin: String,
-}
-record!(PluginFailureFactoryReturnedBlock { plugin: "plugin" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginFailureUnknownHookEvent {
@@ -2169,7 +2162,6 @@ impl PluginFailure {
             Self::AlreadyLoaded(value) => value.describe(),
             Self::NotFound(value) => value.describe(),
             Self::OptionsWithoutFactory(value) => value.describe(),
-            Self::FactoryReturnedBlock(value) => value.describe(),
             Self::UnknownHookEvent(value) => value.describe(),
             Self::HandlerInstallationEscaped(value) => value.describe(),
         }
@@ -3295,15 +3287,6 @@ impl PluginFailureOptionsWithoutFactory {
     pub fn describe(&self) -> String {
         format!(
             "plugin '{}' takes no configuration",
-            self.plugin.escape_debug()
-        )
-    }
-}
-
-impl PluginFailureFactoryReturnedBlock {
-    pub fn describe(&self) -> String {
-        format!(
-            "plugin '{}' returned a Block as its manifest",
             self.plugin.escape_debug()
         )
     }
@@ -4687,9 +4670,6 @@ impl PluginFailure {
             Self::NotFound(_) => vec!["is it in <config>/ral/plugins or RAL_PATH?".into()],
             Self::OptionsWithoutFactory(_) => {
                 vec!["its entry in the rc's plugins map wants the empty options map `[:]`".into()]
-            }
-            Self::FactoryReturnedBlock(_) => {
-                vec!["expected a manifest Map, e.g. [name: 'my-plugin', hooks: [:], keybindings: []]".into()]
             }
             Self::UnknownHookEvent(value) => {
                 vec![format!(

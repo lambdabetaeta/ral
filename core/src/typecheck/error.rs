@@ -1,7 +1,7 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
-use super::contract::Vocab;
+use super::table::Vocab;
 use crate::ir::BinaryOp;
 use crate::source::Span;
 use crate::ty::{CompTy, CompTyNode, Kind, Label, RefusedArg, Row, Ty, TyNode};
@@ -123,9 +123,6 @@ pub enum Reason {
         form: &'static str,
         key: String,
     },
-    /// A block a contract file returns where its table admits a factory,
-    /// against one parameter, the options, making the table's row.
-    Factory,
     /// A written option's value against the closed set of tags a vocabulary names;
     /// the innermost one the clash met.
     Vocabulary(&'static Vocab),
@@ -204,6 +201,27 @@ pub enum KindFound {
     Used { kind: Kind, witness: Option<Span> },
 }
 
+/// The written shape that prevents an options table from being checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unwritten {
+    Let,
+    Variable(String),
+    Spread,
+    Computed,
+    Map,
+    List,
+    Block { params: usize },
+    Unit,
+    Value,
+}
+
+/// Where the options must be written, and whether a file may return a factory.
+#[derive(Debug, Clone, Copy)]
+pub enum OptionsContext {
+    File { factory: bool },
+    FactoryBody,
+}
+
 /// The structural cause of a type error, raised by the unifier or inferencer.
 /// The solver attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
@@ -265,26 +283,31 @@ pub enum TypeErrorKind {
         key: &'static str,
         advice: &'static str,
     },
-    /// A key a contract file returns, or a form is written with, that its
-    /// table does not name.
+    /// A written options key that its table does not name.
     UnknownKey {
         form: &'static str,
         key: String,
         offered: Vec<&'static str>,
     },
-    /// A contract file returns something its table cannot ascribe: not a
-    /// record, not `()`, and not the factory the table admits.
-    ReturnNotRecord {
+    /// A file's or factory body's tail does not write out its options.
+    OptionsNotWritten {
         form: &'static str,
-        found: Ty,
+        found: Unwritten,
         offered: Vec<&'static str>,
+        context: OptionsContext,
+        unit_ok: bool,
     },
-    /// A grant's nested table (`exec:`, `fs:`) given something that is no record.
-    NotATable {
+    /// A nested table is not a written record.
+    TableNotWritten {
         key: &'static str,
-        /// The table's first key, which its empty spelling is written with.
-        first: &'static str,
-        found: Ty,
+        first: Option<&'static str>,
+        found: Unwritten,
+    },
+    /// Required options missing from a written table, in declaration order.
+    OptionsMissing {
+        form: &'static str,
+        missing: Vec<&'static str>,
+        blanks: Vec<Option<&'static str>>,
     },
     /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
     CommandNotFunction {
@@ -471,8 +494,9 @@ impl TypeErrorKind {
             Self::DuplicateField { .. } => "T0022",
             Self::RefusedKey { .. } => "T0026",
             Self::UnknownKey { .. } => "T0076",
-            Self::ReturnNotRecord { .. } => "T0077",
-            Self::NotATable { .. } => "T0079",
+            Self::OptionsNotWritten { .. } => "T0077",
+            Self::TableNotWritten { .. } => "T0079",
+            Self::OptionsMissing { .. } => "T0081",
             Self::CaseNotExhaustive { .. } => "T0030",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",

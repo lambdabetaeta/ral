@@ -1,5 +1,5 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
 generated_at_date: 2026-11-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -15,10 +15,10 @@ reads back checked CBPV IR.** The algorithm is
 
 `core/src/typecheck.rs` owns the inference sessions and their export checks.
 
-- `typecheck(phrases, SessionSchemes, Option<ReturnContract>)` generates
-  pending phrases on `Solver`, settles all remaining elaboration into
-  `Settled`, holds an optional return contract live, closes gates, nested
-  tables and errors into `Solution`, then reads back a `Toplevel` whose sites and readmissions name one fresh
+- `typecheck(phrases, SessionSchemes, options: Option<&'static Table>)`
+  generates pending phrases, checking a host file's tail as written options
+  when a table is supplied (SPEC §15.3). `Solver::close` returns a `Solution`,
+  then readback builds a `Toplevel` whose sites and readmissions name one fresh
   `UnitId`. Errors are sorted by span and no checked tree escapes. Re-checking
   a checked tree accepts it and inserts no further elaboration; raw variable
   ids are not canonical, so the two trees need not be `==`.
@@ -77,14 +77,17 @@ reads back checked CBPV IR.** The algorithm is
   are refused there. `stage_root_stdin_feed` rejects an overridden pipe edge.
   Stdout redirects retain the payload at a fresh result grade.
 - `generate/scope.rs`: `within`, `grant`, options, audit, spawn,
-  gather and protection. Written options are checked key by key. For
-  `Holds::Handlers`, a `Val::Map` checks each entry through `install_arm` in
-  its own region, retaining the name and span for diagnostics. Any other value
-  uses the ordinary map equation. Only a written map contributes handled
-  names to the body's diagnostics; a computed map contributes none.
-  `Held::Arm(Arm::CatchAll)` checks the catch-all by the arm rule alone,
-  without a redundant held-type equation. Nested table obligations wait for
-  closure.
+  gather and protection. `file_options` follows elaborated binds and sequences
+  to a written tail; only a manifest admits a written one-parameter factory,
+  one level deep. `check_options` checks keys with `check_option`, diagnosing
+  unknown, refused, duplicate and missing keys during generation.
+  `Holds::Table` recurses on a record literal immediately; a bound or computed
+  table, map or `()` is T0079. `Holds::At` constrains field values through
+  `equate_held`. For `Holds::Handlers`, a `Val::Map` checks each entry through
+  `install_arm` in its own region, in forms and host files alike; any other
+  value uses the ordinary map equation. Only a written `within` map supplies
+  handled names to the body's diagnostics.
+  `Holds::CatchAll` checks the catch-all by the arm rule alone.
 
 ## Solver and readback
 
@@ -103,16 +106,12 @@ reads back checked CBPV IR.** The algorithm is
   `close_region` chooses all young defaults together;
   `ConflictingDefaults` (T0080) refuses a root with both a binding and an
   argument match waiting, carrying the variable each names, if any. Refused regions retire unresolved young matches.
-- `Solver::settle` closes rank zero and retires every elaboration match,
-  yielding `Settled`. Its contract-phase API permits equations (including
-  `equate_held`), fresh types, instantiation, resolution, `nested` and
-  `diagnose`, but no `binding`, `call`, `argument`, `enter` or `exit`.
-  All equations propagate through the solver; no contract mutates its private
-  unifier behind propagation. `Settled::close` judges final-head argv gates,
-  checks nested tables and attaches unit-read notes. It yields a `Solution`
-  only for an error-free unit; otherwise the sorted errors. `Solution`
-  exposes decisions, resolution, sites, settlement and scratch, never
-  constraints.
+- `Solver::close` closes rank zero and retires every elaboration match,
+  judges final-head argv gates and attaches unit-read notes. It yields a
+  `Solution` only for an error-free unit; otherwise the sorted errors.
+  `Solution` exposes decisions, resolution, sites and scheme settlement,
+  never constraints. Its `scratch` copy and `Unifier: Clone` are test-only;
+  production table checks all run during generation.
 - `readback.rs`: `Readback` turns an `Inferring` tree into a `Checked` one. It
   applies each `BindHole`'s `Mode` (run or capture/decode) and each
   `CallHole`'s splits, turns a `BindingCall` into an `Exec`, snapshots sites,
@@ -124,7 +123,7 @@ reads back checked CBPV IR.** The algorithm is
   while inferring: a checked tree's site, or a session binding's solved type
   ([[map/core/ir|IR]]).
 
-## Types, contracts and diagnostics
+## Types, tables and diagnostics
 
 - `unify.rs`: four typed union-find stores (`Store<T: Sort>`, slots
   `Parent` or a ranked `Root` whose state is free or bound), each root ranked
@@ -161,20 +160,30 @@ reads back checked CBPV IR.** The algorithm is
   reached, without inferring function bodies at handler installation. The graph
   data is in [[map/core/ty|ty]]; runtime admission is `shell/runtime/admit.rs`
   and delayed wrapping is `shell/runtime/protect.rs`.
-- `contract.rs` and `contract/`: closed declared keysets and held-type rules,
-  `ascribe`, nested checks and enum-derived shapes. `ascribe` takes `Settled`,
-  not the generator or a manifest; it holds fields and factory equations live
-  after elaboration settles. `Held::Unify` uses `equate_held`;
-  `Holds::Handlers` holds rc and manifest `handlers:` by one equation against
-  `Map(U([String] → Command))`, without a per-field arm rule. `Reason::Handlers`
-  explains records and lists with the map spelling and diagnoses handler
-  result or parameter mismatches. No record-to-map coercion exists.
-  It re-reads row tails after each field, then judges final keysets on scratch
-  and holds only fields not already held, without replaying live clashes or inference.
-  `written_at` supplies written field spans, the tail phrase otherwise.
-  `Settled::nested` queues nested tables for the unchanged scratch check at
-  close, after live holds. No declared table becomes a unified record type.
+- `table.rs` and `table/`: `Table`, `Key`, `Holds`, `Vocab`, `declared(Form)`
+  and enum-derived vocabulary shapes. `Key::required` is independent of
+  `Holds`; `Key::blank` supplies declared empty values for diagnostics and the
+  rc skeleton, including `` `inherit `` for nested `LIMITS` and `THEME` keys.
+  `setting_table!` derives each nested table and its parent's blank from one
+  label list. `RC` requires all thirteen keys, `LIMITS` all three child-limit
+  keys, and `THEME` both display keys. `setting_row` supplies the closed
+  ``[`inherit, `set T]`` vocabulary; `Vocabulary::Setting` identifies its
+  diagnostic vocabulary. `MANIFEST` requires only `name` and admits a
+  factory; `GRANT` and its nested tables have no required keys.
+  `unify_held` and `unify_vocab` word field equations; `Reason::Handlers`
+  explains the map spelling and arm mismatches. No declared table becomes
+  a unified record type. Runtime decoders keep value-shape and domain checks;
+  grant decoding also retains shape and keyset checks for grants received
+  as data.
 - `error.rs`: `TypeError`, `TypeErrorKind`, `Reason`, `Standing`, `UnitCall`.
+  `Unwritten` classifies refused syntax: `OptionsNotWritten` (T0077) for a
+  file tail, `TableNotWritten` (T0079) for a nested table. `OptionsContext`
+  distinguishes a file's factory admission from a factory body's written
+  result, so advice names the right context. Variable advice uses the actual
+  variable; spread and computed results use a neutral `$value` example.
+  `OptionsMissing` (T0081) lists only missing required keys in one diagnosis
+  per table; it does not claim that optional keys are required. Its defaults
+  hint appears when every missing key declares a blank.
   `Reason::{Binding, Call}` carry `defaulted_at`, the closing span when a
   default chose the branch, and `Call` whether it is a recursive call; failed
   head/coverage equations retain their source-specific diagnosis.

@@ -2,10 +2,10 @@
 
 use super::SessionSchemes;
 use super::builtins::{Arm, Decl};
-use super::contract::{self, Key, NestedCheck, Table};
 use super::env::TyEnv;
 use super::error::{Clash, Reason, TypeError, TypeErrorKind, UnitCall};
 use super::generalize::{generalize, instantiate, reseed_weak, settle_weak};
+use super::table::{self, Key, Table};
 use super::unify::{Unifier, WeakSource};
 use crate::source::{Span, WithSpan};
 use crate::ty::{
@@ -48,7 +48,6 @@ pub(super) struct Solver {
     calls: Vec<(usize, Vec<usize>)>,
     gates: Vec<(Option<Span>, Ty, ArgvBoundary)>,
     unit_reads: Vec<(Option<Span>, Ty, UnitCall)>,
-    nested: Vec<NestedCheck>,
 }
 
 enum Match {
@@ -93,9 +92,6 @@ enum Equation {
     Computation(CompTy, CompTy),
 }
 
-/// Inference decisions are fixed; only contract equations remain.
-pub(super) struct Settled(Solver);
-
 /// A closed unit with every hole decided.
 pub(super) struct Solution {
     unifier: Unifier,
@@ -123,7 +119,6 @@ impl Solver {
             calls: Vec::new(),
             gates: Vec::new(),
             unit_reads: Vec::new(),
-            nested: Vec::new(),
         }
     }
 
@@ -173,7 +168,7 @@ impl Solver {
         key: &'static Key,
     ) -> bool {
         self.constrain(|this| {
-            let outcome = contract::unify_held(table, key)(&mut this.unifier, declared, found);
+            let outcome = table::unify_held(table, key)(&mut this.unifier, declared, found);
             this.held(outcome, |u| {
                 u.weak_source_in_ty(declared)
                     .or_else(|| u.weak_source_in_ty(found))
@@ -311,10 +306,6 @@ impl Solver {
 
     pub(super) fn gate(&mut self, ty: &Ty, boundary: ArgvBoundary) {
         self.gates.push((self.unifier.at, ty.clone(), boundary));
-    }
-
-    pub(super) fn nested(&mut self, check: NestedCheck) {
-        self.nested.push(check);
     }
 
     pub(super) fn unit_read(&mut self, call: UnitCall, ty: &Ty) {
@@ -583,15 +574,11 @@ impl Solver {
         );
     }
 
-    pub(super) fn settle(mut self) -> Settled {
-        assert_eq!(self.unifier.rank(), 0, "unit settled inside a region");
-        self.close_region();
-        assert!(self.waiting.is_empty(), "settlement left a suspended match");
-        Settled(self)
-    }
-
     /// The solution, unless the unit has errors; they are sorted by position.
-    fn finish(mut self) -> Result<Solution, Vec<TypeError>> {
+    pub(super) fn close(mut self) -> Result<Solution, Vec<TypeError>> {
+        assert_eq!(self.unifier.rank(), 0, "unit closed inside a region");
+        self.close_region();
+        assert!(self.waiting.is_empty(), "closure left a suspended match");
         for (pos, ty, boundary) in std::mem::take(&mut self.gates) {
             let head = self.unifier.resolve_ty(&ty);
             let Some(refused) = RefusedArg::of_ty(&head) else {
@@ -610,8 +597,6 @@ impl Solver {
                 handled,
             });
         }
-        let nested = contract::check_nested(&self.unifier, std::mem::take(&mut self.nested));
-        self.errors.extend(nested);
         if !self.errors.is_empty() {
             for error in &mut self.errors {
                 error.unit = self.unit_reads.iter().find_map(|(pos, ty, call)| {
@@ -642,54 +627,6 @@ impl Solver {
             modes,
             splits,
         })
-    }
-}
-
-impl WithSpan for Settled {
-    fn span_slot(&mut self) -> &mut Option<Span> {
-        self.0.span_slot()
-    }
-}
-
-impl Settled {
-    pub(super) fn has_errors(&self) -> bool {
-        !self.0.errors.is_empty()
-    }
-    pub(super) fn close(self) -> Result<Solution, Vec<TypeError>> {
-        self.0.finish()
-    }
-    pub(super) fn fresh_ty(&mut self) -> Ty {
-        self.0.fresh_ty()
-    }
-    pub(super) fn fresh_grade(&mut self) -> Grade {
-        self.0.fresh_grade()
-    }
-    pub(super) fn equate_comp(&mut self, a: &CompTy, b: &CompTy, why: Reason) -> bool {
-        self.0.equate_comp(a, b, why)
-    }
-    pub(super) fn equate_held(
-        &mut self,
-        declared: &Ty,
-        found: &Ty,
-        table: &'static Table,
-        key: &'static Key,
-    ) -> bool {
-        self.0.equate_held(declared, found, table, key)
-    }
-    pub(super) fn resolve_ty(&self, ty: &Ty) -> Ty {
-        self.0.unifier.resolve_ty(ty)
-    }
-    pub(super) fn resolve_comp(&self, ty: &CompTy) -> CompTy {
-        self.0.unifier.resolve_comp_ty_graded(ty)
-    }
-    pub(super) fn resolve_row(&self, row: &Row) -> Row {
-        self.0.unifier.resolve_row(row)
-    }
-    pub(super) fn nested(&mut self, check: NestedCheck) {
-        self.0.nested(check);
-    }
-    pub(super) fn diagnose(&mut self, kind: TypeErrorKind) {
-        self.0.diagnose(kind);
     }
 }
 
@@ -753,7 +690,7 @@ impl Solver {
     pub(super) fn refused(mut self) -> (Unifier, Vec<TypeError>) {
         self.close_region();
         let store = self.unifier.clone();
-        let Err(errors) = self.settle().close() else {
+        let Err(errors) = self.close() else {
             panic!("the unit must be refused")
         };
         (store, errors)
@@ -803,7 +740,7 @@ mod tests {
     }
 
     fn success(solver: Solver) -> Solution {
-        match solver.settle().close() {
+        match solver.close() {
             Ok(solution) => solution,
             Err(errors) => panic!("{errors:?}"),
         }
@@ -1404,7 +1341,7 @@ mod tests {
             solver.equate(&binder, &payload, Reason::Argument);
             assert!(matches!(solver.unifier.resolve_grade(grade), Grade::Var(_)));
             assert_eq!(waiters(&solver), 1);
-            assert_eq!(solver.settle().close().is_ok(), payload == Ty::unit());
+            assert_eq!(solver.close().is_ok(), payload == Ty::unit());
         }
         let mut solver = Solver::new();
         let grade = solver.fresh_grade();
@@ -1584,7 +1521,7 @@ mod tests {
                 solver.unifier.resolve_comp_ty_graded(&head).node(),
                 CompTyNode::Fun(..)
             ));
-            assert!(solver.settle().close().is_err());
+            assert!(solver.close().is_err());
         }
     }
 
@@ -1637,57 +1574,6 @@ mod tests {
         let solution = success(solver);
         assert_eq!(solution.mode(hole), Mode::Run);
         assert_eq!(solution.splits(call), [] as [usize; 0]);
-    }
-
-    #[test]
-    fn contract_equations_solve_payloads_after_elaboration() {
-        let mut solver = Solver::new();
-        let rhs = solver.fresh_comp();
-        let (binder, bound) = solver.binding(&rhs, None);
-        let head = solver.fresh_comp();
-        let (result, call) = apply(&mut solver, &head, Ty::int(), false);
-        let mut settled = solver.settle();
-        assert!(settled.equate_comp(&rhs, &CompTy::pure(Ty::string()), Reason::Factory));
-        assert!(settled.equate_comp(&result, &command(), Reason::Factory));
-        let solution = settled.close().expect("contract only fixes payloads");
-        assert_eq!(solution.mode(bound), Mode::Run);
-        assert_eq!(solution.resolve_ty(&binder), Ty::string());
-        assert_eq!(solution.splits(call), [] as [usize; 0]);
-        let resolved = solution.resolve_comp(&head);
-        let CompTyNode::Fun(param, body) = resolved.node() else {
-            panic!("settled call head must remain a function")
-        };
-        assert_eq!(*param, Ty::int());
-        assert_eq!(solution.resolve_comp(body), command());
-        assert_eq!(solution.resolve_comp(&result), command());
-    }
-
-    #[test]
-    fn contract_equations_cannot_rechoose_settled_modes_or_call_splits() {
-        for late in [false, true] {
-            let mut solver = Solver::new();
-            let rhs = solver.fresh_comp();
-            let (_, bound) = solver.binding(&rhs, None);
-            let head = solver.fresh_comp();
-            let (_, call) = apply(&mut solver, &head, Ty::int(), false);
-            let returned_function = CompTy::pure(thunk(CompTy::arrows([Ty::int()], command())));
-            if !late {
-                assert!(solver.equate_comp(&rhs, &function(), Reason::Factory));
-                assert!(solver.equate_comp(&head, &returned_function, Reason::Factory));
-            }
-            let mut settled = solver.settle();
-            if late {
-                assert!(!settled.equate_comp(&rhs, &function(), Reason::Factory));
-                assert!(!settled.equate_comp(&head, &returned_function, Reason::Factory));
-                assert!(settled.close().is_err());
-            } else {
-                let solution = settled
-                    .close()
-                    .expect("inference can still choose elaboration");
-                assert_eq!(solution.mode(bound), Mode::Run);
-                assert_eq!(solution.splits(call), [0]);
-            }
-        }
     }
 
     #[test]
@@ -1864,7 +1750,7 @@ mod tests {
         assert_eq!(kept, [at(0), at(2), at(0)]);
     }
     #[test]
-    fn nested_table_and_gate_checks_are_late_and_stably_source_ordered() {
+    fn gate_checks_are_late_and_stably_source_ordered() {
         let mut solver = Solver::new();
         solver.unifier.at = Some(at(30));
         solver.gate(
@@ -1874,18 +1760,16 @@ mod tests {
                 handled: false,
             },
         );
-        solver.nested(NestedCheck::Table {
-            key: "exec",
-            table: contract::declared(contract::Form::Manifest),
-            ty: Ty::int(),
-            pos: Some(at(10)),
-            written: None,
-        });
+        solver.unifier.at = Some(at(10));
+        solver.gate(&Ty::unit(), ArgvBoundary::InShell("echo".into()));
         assert!(solver.errors.is_empty());
         let errors = solver.refused().1;
         assert_eq!(errors.len(), 2);
         assert_eq!(errors[0].pos, Some(at(10)));
-        assert!(matches!(errors[0].kind, TypeErrorKind::NotATable { .. }));
+        assert!(matches!(
+            errors[0].kind,
+            TypeErrorKind::ExecArgNotText { .. }
+        ));
         assert_eq!(errors[1].pos, Some(at(30)));
         assert!(matches!(
             errors[1].kind,

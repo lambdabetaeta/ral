@@ -420,7 +420,7 @@ mod tests {
     /// key, no arm" into a test failure.
     #[test]
     fn every_declared_within_key_is_handled_by_parse() {
-        use crate::typecheck::contract::{Form, declared};
+        use crate::typecheck::table::{Form, declared};
         let mut shell = crate::test_helper::core_shell();
         for key in declared(Form::Within).keys {
             let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);

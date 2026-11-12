@@ -2,16 +2,17 @@
 //! as data; every sentence a user reads is a pure function of that data,
 //! written here and nowhere else.
 
-use super::contract::{Vocab, code, unknown_key_message};
 use super::error::{
-    CycleVia, KindFound, Reason, SpreadHead, Standing, TypeError, TypeErrorKind, UnitCall,
+    CycleVia, KindFound, OptionsContext, Reason, SpreadHead, Standing, TypeError, TypeErrorKind,
+    UnitCall, Unwritten,
 };
+use super::table::Vocab;
 use super::unify::WeakSource;
 use crate::diagnostic::{self, Report};
 use crate::fact::ErrorRecord;
 use crate::ir::{ArithOp, BinaryOp};
 use crate::source::Span;
-use crate::text::{indefinite, plural};
+use crate::text::{code, indefinite, plural};
 use crate::ty::{
     CompTy, CompTyNode, FmtCtx, Grade, Kind, Label, RefusedArg, Row, TAG_PREFIX, Ty, TyNode,
     Typed as _, fmt_comp_ty_ctx, fmt_ty_ctx,
@@ -75,13 +76,21 @@ impl TypeErrorKind {
                 format!("`{form}` does not take '{key}'")
             }
             Self::UnknownKey { form, key, offered } => unknown_key_message(form, key, offered),
-            Self::ReturnNotRecord { form, found, .. } => format!(
-                "`{form}` takes a record of settings, and this file returns {}",
-                describe(found)
+            Self::OptionsNotWritten { form, offered, context, .. } => format!(
+                "this {} is read as `{form}`'s options, so it must end in them written out, {}",
+                match context {
+                    OptionsContext::File { .. } => "file",
+                    OptionsContext::FactoryBody => "factory body",
+                },
+                code(&format!("return {}", written_record(offered.first().copied(), "…")))
             ),
-            Self::NotATable { key, found, .. } => format!(
-                "`{key}` takes a record of settings, and this is {}",
-                describe(found)
+            Self::TableNotWritten { key, first, .. } => format!(
+                "`{key}` is a table: its keys are written where it is, `{key}: {}`",
+                written_record(*first, "…")
+            ),
+            Self::OptionsMissing { form, missing, .. } => format!(
+                "`{form}` is missing required keys: {}",
+                missing.join(", ")
             ),
             Self::CommandNotFunction { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
@@ -194,8 +203,10 @@ impl TypeErrorKind {
             Self::DuplicateField { label } => format!("'{label}' was already given above"),
             Self::RefusedKey { key, .. } => format!("'{key}' is refused here"),
             Self::UnknownKey { key, .. } => format!("no such key: '{key}'"),
-            Self::ReturnNotRecord { found, .. } => format!("returns {}", describe(found)),
-            Self::NotATable { found, .. } => format!("is {}", describe(found)),
+            Self::OptionsNotWritten { found, .. } | Self::TableNotWritten { found, .. } => {
+                found.label()
+            }
+            Self::OptionsMissing { missing, .. } => format!("missing: {}", missing.join(", ")),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
                     ([only], []) => format!("no arm for {}", code(only)),
@@ -800,11 +811,23 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 .to_string(),
         ),
         TypeErrorKind::RefusedKey { advice, .. } => Some((*advice).to_string()),
-        TypeErrorKind::ReturnNotRecord {
+        TypeErrorKind::OptionsNotWritten {
             form,
             found,
             offered,
-        } => Some(return_not_record_hint(form, found, offered)),
+            context,
+            unit_ok,
+        } => Some(options_not_written_hint(form, found, offered, *context, *unit_ok)),
+        TypeErrorKind::OptionsMissing { missing, blanks, .. } => {
+            let defaults: Option<Vec<_>> = missing
+                .iter()
+                .zip(blanks)
+                .map(|(key, blank)| blank.map(|blank| format!("{key}: {blank}")))
+                .collect();
+            defaults.map(|defaults| {
+                format!("write them at their defaults, {}", code(&defaults.join(", ")))
+            })
+        }
         TypeErrorKind::ControlOperatorAsValue { name } => Some(format!(
             "did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"
         )),
@@ -890,8 +913,9 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                 }
             })
         }
-        TypeErrorKind::NotATable { key, first, .. } => Some(format!(
-            "a grant table is a record; for `{key}` to admit nothing write `{key}: [{first}: []]`"
+        TypeErrorKind::TableNotWritten { key, first, .. } => Some(format!(
+            "write the keys and compute only the values, `{key}: {}`",
+            written_record(*first, "$v")
         )),
         TypeErrorKind::DuplicateField { label } => Some(format!(
             "a record has one value per field, so keep whichever '{label}' you meant; \
@@ -1131,11 +1155,6 @@ fn guidance(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
                     .to_string()
             }
         }),
-        Reason::Factory => Some(
-            "a plugin returns its manifest, or a block of one parameter, the options, \
-             that makes it: `return { |options| [name: …] }`"
-                .to_string(),
-        ),
         // These constraints cannot fail on user input, already have a complete
         // diagnosis, or apply only to checker-inserted nodes.
         Reason::CaseScrutinee
@@ -1429,20 +1448,99 @@ fn unbound_variable_hint(name: &str, suggestions: &[String]) -> String {
     "check the spelling, or define it with `let` before this line".into()
 }
 
-/// What a contract file that returns no record should return instead.
-fn return_not_record_hint(form: &str, found: &Ty, offered: &[&str]) -> String {
-    let key = offered.first().copied().unwrap_or("key");
-    match found.node() {
-        TyNode::Map(_) => format!(
-            "the keys of `{form}` are its labels, so write a record: `[{key}: …]`, \
-             not a map (`[:, {key}: …]`)"
+fn unknown_key_message(form: &str, key: &str, offered: &[&str]) -> String {
+    let near = match crate::text::near_names(key, offered.iter().copied(), 1)[..] {
+        [near] => format!(" (did you mean '{near}'?)"),
+        _ => String::new(),
+    };
+    format!(
+        "unknown key '{key}': `{form}` takes {list}{near}",
+        list = offered.join(", "),
+    )
+}
+
+impl Unwritten {
+    fn label(&self) -> String {
+        match self {
+            Self::Variable(name) => format!("`${name}` hides which keys it holds"),
+            Self::Spread => "a spread hides which keys it brings".into(),
+            Self::Computed => "a computed value hides its keys".into(),
+            Self::Map => "a map".into(),
+            Self::List => "a list".into(),
+            Self::Block { params } => format!("a block of {}", plural(*params, "parameter")),
+            Self::Let => "a `let`".into(),
+            Self::Unit => "`()` is no table".into(),
+            Self::Value => "not a record".into(),
+        }
+    }
+}
+
+fn written_record(first: Option<&str>, value: &str) -> String {
+    first.map_or_else(|| "[…]".into(), |key| format!("[{key}: {value}]"))
+}
+
+fn options_not_written_hint(
+    form: &str,
+    found: &Unwritten,
+    offered: &[&str],
+    context: OptionsContext,
+    unit_ok: bool,
+) -> String {
+    let first = offered.first().copied();
+    let record = written_record(first, "…");
+    let place = match context {
+        OptionsContext::File { .. } => "file",
+        OptionsContext::FactoryBody => "factory body",
+    };
+    let returned = code(&format!("return {record}"));
+    match found {
+        Unwritten::Variable(name) => format!(
+            "write each key here and compute only the values: {returned}; {} cannot stand for the options",
+            code(&format!("${name}"))
         ),
-        TyNode::List(_) => format!(
-            "`[]` is the empty list, not the empty record; a file with nothing to set \
-             returns `()`, and otherwise `{form}` wants a record such as `[{key}: …]`"
-        ),
-        TyNode::Thunk(_) => format!("`{form}` returns its settings, not a block"),
-        _ => format!("return a record such as `[{key}: …]`, or `()` for nothing to set"),
+        Unwritten::Spread | Unwritten::Computed => {
+            let computed = first.map_or_else(|| "[…]".into(), |key| format!("[{key}: $value, …]"));
+            format!(
+                "write each key here and compute only the values: {}",
+                code(&format!("return {computed}"))
+            )
+        }
+        Unwritten::Map => {
+            let map = first.map_or_else(|| "[:, …]".into(), |key| format!("[:, {key}: …]"));
+            format!(
+                "`{form}`'s keys are labels: write a record, {}, not a map, {}",
+                code(&record),
+                code(&map)
+            )
+        }
+        Unwritten::List => {
+            let unit = if unit_ok {
+                format!("; a {place} with nothing to set ends in `return ()`")
+            } else {
+                String::new()
+            };
+            format!("`[]` is the empty list, not a record{unit}")
+        }
+        Unwritten::Let | Unwritten::Unit | Unwritten::Value => {
+            let unit = if unit_ok {
+                ", or `return ()` to set nothing"
+            } else {
+                ""
+            };
+            format!("end the {place} in {returned}{unit}")
+        }
+        Unwritten::Block { .. } => match context {
+            OptionsContext::File { factory: true } => format!(
+                "`{form}` ends in its fields written out, {returned}, or in a block of one parameter, the options, that ends in them: {}",
+                code(&format!("return {{ |options| {record} }}"))
+            ),
+            OptionsContext::File { factory: false } => {
+                format!("end the file in {returned}, not a block")
+            }
+            OptionsContext::FactoryBody => {
+                format!("end the factory body in {returned}, not another block")
+            }
+        },
     }
 }
 
@@ -1546,6 +1644,358 @@ impl TypeError {
 mod tests {
     use super::*;
     use crate::ty::CompTy;
+
+    fn options(
+        found: Unwritten,
+        offered: Vec<&'static str>,
+        factory: bool,
+        unit_ok: bool,
+    ) -> TypeErrorKind {
+        TypeErrorKind::OptionsNotWritten {
+            form: "custom",
+            found,
+            offered,
+            context: OptionsContext::File { factory },
+            unit_ok,
+        }
+    }
+
+    #[test]
+    fn unwritten_options_name_the_written_shape() {
+        for (found, label) in [
+            (
+                Unwritten::Variable("cfg".into()),
+                "`$cfg` hides which keys it holds",
+            ),
+            (Unwritten::Spread, "a spread hides which keys it brings"),
+            (Unwritten::Computed, "a computed value hides its keys"),
+            (Unwritten::Map, "a map"),
+            (Unwritten::List, "a list"),
+            (Unwritten::Block { params: 0 }, "a block of 0 parameters"),
+            (Unwritten::Block { params: 1 }, "a block of 1 parameter"),
+            (Unwritten::Block { params: 2 }, "a block of 2 parameters"),
+            (Unwritten::Let, "a `let`"),
+            (Unwritten::Unit, "`()` is no table"),
+            (Unwritten::Value, "not a record"),
+        ] {
+            let tail = options(found.clone(), vec!["choice"], false, false);
+            assert_eq!(tail.code(), "T0077");
+            assert_eq!(
+                tail.render_message(),
+                "this file is read as `custom`'s options, so it must end in them written out, `return [choice: …]`"
+            );
+            assert_eq!(tail.render_label(), label);
+            let nested = TypeErrorKind::TableNotWritten {
+                key: "outer",
+                first: Some("choice"),
+                found,
+            };
+            assert_eq!(nested.code(), "T0079");
+            assert_eq!(
+                nested.render_message(),
+                "`outer` is a table: its keys are written where it is, `outer: [choice: …]`"
+            );
+            assert_eq!(nested.render_label(), label);
+            assert_eq!(
+                guidance(&nested, None).as_deref(),
+                Some("write the keys and compute only the values, `outer: [choice: $v]`")
+            );
+        }
+    }
+
+    #[test]
+    fn unwritten_options_hints_compute_values_not_keys() {
+        for (found, expected) in [
+            (
+                Unwritten::Variable("factory".into()),
+                "write each key here and compute only the values: `return [choice: …]`; `$factory` cannot stand for the options",
+            ),
+            (
+                Unwritten::Spread,
+                "write each key here and compute only the values: `return [choice: $value, …]`",
+            ),
+            (
+                Unwritten::Computed,
+                "write each key here and compute only the values: `return [choice: $value, …]`",
+            ),
+        ] {
+            assert_eq!(
+                guidance(&options(found, vec!["choice"], false, false), None).as_deref(),
+                Some(expected)
+            );
+        }
+        for (found, factory, expected) in [
+            (
+                Unwritten::Map,
+                false,
+                "`custom`'s keys are labels: write a record, `[choice: …]`, not a map, `[:, choice: …]`",
+            ),
+            (
+                Unwritten::Block { params: 2 },
+                true,
+                "`custom` ends in its fields written out, `return [choice: …]`, or in a block of one parameter, the options, that ends in them: `return { |options| [choice: …] }`",
+            ),
+            (
+                Unwritten::Block { params: 0 },
+                false,
+                "end the file in `return [choice: …]`, not a block",
+            ),
+        ] {
+            assert_eq!(
+                guidance(&options(found, vec!["choice"], factory, false), None).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn unit_advice_requires_an_optional_table() {
+        for (found, base, suffix) in [
+            (
+                Unwritten::List,
+                "`[]` is the empty list, not a record",
+                "; a file with nothing to set ends in `return ()`",
+            ),
+            (
+                Unwritten::Let,
+                "end the file in `return [choice: …]`",
+                ", or `return ()` to set nothing",
+            ),
+            (
+                Unwritten::Unit,
+                "end the file in `return [choice: …]`",
+                ", or `return ()` to set nothing",
+            ),
+            (
+                Unwritten::Value,
+                "end the file in `return [choice: …]`",
+                ", or `return ()` to set nothing",
+            ),
+        ] {
+            for unit_ok in [false, true] {
+                let expected = format!("{base}{}", if unit_ok { suffix } else { "" });
+                assert_eq!(
+                    guidance(
+                        &options(found.clone(), vec!["choice"], false, unit_ok),
+                        None
+                    ),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_custom_tables_offer_no_fabricated_key() {
+        for (found, factory, expected) in [
+            (
+                Unwritten::Variable("cfg".into()),
+                false,
+                "write each key here and compute only the values: `return […]`; `$cfg` cannot stand for the options",
+            ),
+            (
+                Unwritten::Spread,
+                false,
+                "write each key here and compute only the values: `return […]`",
+            ),
+            (
+                Unwritten::Computed,
+                false,
+                "write each key here and compute only the values: `return […]`",
+            ),
+            (
+                Unwritten::Map,
+                false,
+                "`custom`'s keys are labels: write a record, `[…]`, not a map, `[:, …]`",
+            ),
+            (Unwritten::Let, false, "end the file in `return […]`"),
+            (Unwritten::Value, false, "end the file in `return […]`"),
+            (
+                Unwritten::Block { params: 2 },
+                true,
+                "`custom` ends in its fields written out, `return […]`, or in a block of one parameter, the options, that ends in them: `return { |options| […] }`",
+            ),
+        ] {
+            let kind = options(found, vec![], factory, false);
+            assert_eq!(
+                kind.render_message(),
+                "this file is read as `custom`'s options, so it must end in them written out, `return […]`"
+            );
+            assert_eq!(guidance(&kind, None).as_deref(), Some(expected));
+        }
+        let nested = TypeErrorKind::TableNotWritten {
+            key: "outer",
+            first: None,
+            found: Unwritten::Unit,
+        };
+        assert_eq!(
+            nested.render_message(),
+            "`outer` is a table: its keys are written where it is, `outer: […]`"
+        );
+        assert_eq!(
+            guidance(&nested, None).as_deref(),
+            Some("write the keys and compute only the values, `outer: […]`")
+        );
+    }
+
+    #[test]
+    fn factory_body_wording_names_the_body_and_preserves_the_written_shape() {
+        for (found, expected) in [
+            (
+                Unwritten::Variable("factory".into()),
+                "write each key here and compute only the values: `return [choice: …]`; `$factory` cannot stand for the options",
+            ),
+            (
+                Unwritten::Spread,
+                "write each key here and compute only the values: `return [choice: $value, …]`",
+            ),
+            (
+                Unwritten::Computed,
+                "write each key here and compute only the values: `return [choice: $value, …]`",
+            ),
+            (
+                Unwritten::Map,
+                "`custom`'s keys are labels: write a record, `[choice: …]`, not a map, `[:, choice: …]`",
+            ),
+            (Unwritten::List, "`[]` is the empty list, not a record"),
+            (
+                Unwritten::Let,
+                "end the factory body in `return [choice: …]`",
+            ),
+            (
+                Unwritten::Unit,
+                "end the factory body in `return [choice: …]`",
+            ),
+            (
+                Unwritten::Value,
+                "end the factory body in `return [choice: …]`",
+            ),
+            (
+                Unwritten::Block { params: 1 },
+                "end the factory body in `return [choice: …]`, not another block",
+            ),
+        ] {
+            let kind = TypeErrorKind::OptionsNotWritten {
+                form: "custom",
+                found,
+                offered: vec!["choice"],
+                context: OptionsContext::FactoryBody,
+                unit_ok: false,
+            };
+            assert_eq!(
+                kind.render_message(),
+                "this factory body is read as `custom`'s options, so it must end in them written out, `return [choice: …]`"
+            );
+            assert_eq!(guidance(&kind, None).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn factory_bodies_preserve_empty_table_and_unit_advice() {
+        for offered in [vec!["choice"], vec![]] {
+            let record = if offered.is_empty() {
+                "[…]"
+            } else {
+                "[choice: …]"
+            };
+            for unit_ok in [false, true] {
+                for found in [
+                    Unwritten::Let,
+                    Unwritten::Unit,
+                    Unwritten::Value,
+                    Unwritten::List,
+                ] {
+                    let kind = TypeErrorKind::OptionsNotWritten {
+                        form: "custom",
+                        found: found.clone(),
+                        offered: offered.clone(),
+                        context: OptionsContext::FactoryBody,
+                        unit_ok,
+                    };
+                    let (base, suffix) = if found == Unwritten::List {
+                        (
+                            "`[]` is the empty list, not a record".to_string(),
+                            "; a factory body with nothing to set ends in `return ()`",
+                        )
+                    } else {
+                        (
+                            format!("end the factory body in `return {record}`"),
+                            ", or `return ()` to set nothing",
+                        )
+                    };
+                    assert_eq!(
+                        guidance(&kind, None),
+                        Some(format!("{base}{}", if unit_ok { suffix } else { "" }))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_options_list_all_keys_and_only_declared_defaults() {
+        for (blanks, expected) in [
+            (
+                vec![Some("false"), Some("`inherit")],
+                Some("write them at their defaults, `` first: false, second: `inherit ``"),
+            ),
+            (vec![Some("false"), None], None),
+            (vec![None, None], None),
+        ] {
+            let kind = TypeErrorKind::OptionsMissing {
+                form: "custom",
+                missing: vec!["first", "second"],
+                blanks,
+            };
+            assert_eq!(kind.code(), "T0081");
+            assert_eq!(
+                kind.render_message(),
+                "`custom` is missing required keys: first, second"
+            );
+            assert_eq!(kind.render_label(), "missing: first, second");
+            assert_eq!(guidance(&kind, None).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn missing_single_option_quotes_its_declared_default() {
+        for (blank, expected) in [
+            (
+                Some("`inherit"),
+                Some("write them at their defaults, `` choice: `inherit ``"),
+            ),
+            (
+                Some("42"),
+                Some("write them at their defaults, `choice: 42`"),
+            ),
+            (None, None),
+        ] {
+            let kind = TypeErrorKind::OptionsMissing {
+                form: "custom",
+                missing: vec!["choice"],
+                blanks: vec![blank],
+            };
+            assert_eq!(
+                kind.render_message(),
+                "`custom` is missing required keys: choice"
+            );
+            assert_eq!(kind.render_label(), "missing: choice");
+            assert_eq!(guidance(&kind, None).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_options_keep_the_tables_suggestions() {
+        let kind = TypeErrorKind::UnknownKey {
+            form: "custom",
+            key: "choise".into(),
+            offered: vec!["choice"],
+        };
+        assert_eq!(
+            kind.render_message(),
+            "unknown key 'choise': `custom` takes choice (did you mean 'choice'?)"
+        );
+    }
 
     fn mismatch(expected: Ty, actual: Ty) -> TypeErrorKind {
         TypeErrorKind::TyMismatch { expected, actual }

@@ -289,6 +289,7 @@ pub fn repl(args: &[&str], envs: &[(&str, PathBuf)], input: &str) -> Output {
 
 /// A temp `XDG_CONFIG_HOME` holding `ral/rc`, beside an empty `HOME`, so a
 /// spawned session discovers exactly this rc and no profile of the real user.
+/// Writes the source verbatim, including intentionally invalid fixtures.
 /// The returned directory must outlive the run.
 pub fn rc_home(rc: &str) -> (tempfile::TempDir, Vec<(&'static str, PathBuf)>) {
     let dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,6 @@
 # codes: T0076
 # status: 1
-# at: 6:14
+# at: 6:21
 # contains: unknown key 'only'
 # absent: per-command
 grant [exec: [only: [`name git]]] { return 1 }

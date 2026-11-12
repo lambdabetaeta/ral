@@ -2,6 +2,7 @@
 //! incomplete input, and accepting a key plugin's selection.
 
 use crate::common::pty::PtySession;
+use ral_core::test_helper::rc_source;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -218,9 +219,11 @@ fn plugin_reedit_erases_the_old_drawing_but_not_previous_output() {
             let mut session = session(
                 &dir,
                 cols,
-                r"
-                return [prompt: { 'P> ' }, startup: { echo KEEP }, plugins: ['./reedit.ral': [:]]]
-            ",
+                &rc_source(&[
+                    ("prompt", "`set { 'P> ' }"),
+                    ("startup", "`set { echo KEEP }"),
+                    ("plugins", "['./reedit.ral': [:]]"),
+                ]),
             );
             paste(&mut session, &buffer);
             session.send_byte(20).unwrap();
@@ -250,7 +253,7 @@ fn plugin_reedit_erases_the_old_drawing_but_not_previous_output() {
 #[test]
 fn ctrl_j_inserts_a_newline_without_executing_a_complete_command() {
     let dir = TempDir::new().unwrap();
-    let mut session = session(&dir, 80, "return [prompt: { 'P> ' }]");
+    let mut session = session(&dir, 80, &rc_source(&[("prompt", "`set { 'P> ' }")]));
     paste(&mut session, "echo first > executed");
     session.send_byte(b'\n').unwrap();
     paste(&mut session, "echo second > second-executed");
@@ -279,7 +282,7 @@ fn ctrl_j_inserts_a_newline_without_executing_a_complete_command() {
 #[test]
 fn enter_continues_incomplete_syntax_before_submitting() {
     let dir = TempDir::new().unwrap();
-    let mut session = session(&dir, 80, "return [prompt: { 'P> ' }]");
+    let mut session = session(&dir, 80, &rc_source(&[("prompt", "`set { 'P> ' }")]));
     paste(&mut session, "echo 'first");
     session.send_byte(b'\r').unwrap();
     paste(&mut session, "second' > executed");
@@ -309,10 +312,14 @@ fn stock_zoxide_key_accepts_a_crlf_selector_path() {
         let selector = dir.path().join("zoxide");
         std::fs::write(&selector, format!("#!/bin/sh\ncase \"$1\" in\nquery) printf '%s{ending}' \"$SELECTED_DIRECTORY\" ;;\nadd) printf '%s' \"$3\" > \"$HOME/recorded-directory\" ;;\n*) exit 2 ;;\nesac\n")).unwrap();
         std::fs::set_permissions(&selector, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let rc = format!(
-            "return [prompt: {{ 'P> ' }}, env: [SELECTED_DIRECTORY: '{}'], plugins: [zoxide: [:]]]",
-            destination.display()
-        );
+        let rc = rc_source(&[
+            ("prompt", "`set { 'P> ' }"),
+            (
+                "env",
+                &format!("[SELECTED_DIRECTORY: '{}']", destination.display()),
+            ),
+            ("plugins", "[zoxide: [:]]"),
+        ]);
         let mut session = session(&dir, 80, &rc);
         send(&mut session, "\x1bz");
         prompt(&mut session, 2);

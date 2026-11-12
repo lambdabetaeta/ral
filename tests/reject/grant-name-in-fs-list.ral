@@ -1,5 +1,5 @@
 # codes: T0020
 # status: 1
-# at: 5:12
+# at: 5:19
 # contains: `` `name `` is not a place
 grant [fs: [read: [`name git]]] { return 1 }

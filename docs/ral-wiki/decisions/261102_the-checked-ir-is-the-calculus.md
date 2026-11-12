@@ -1,11 +1,18 @@
 ---
 status: active
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: c4bd558f
 generated_at_date: 2026-11-11
-verified_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+verified_at_commit: c4bd558f
 verified_at_date: 2026-11-11
 anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, Terminal::into_value, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
 ---
+
+> **Amended 2026-11-11 — Written host options.** Host-file and nested-table
+> fields are checked key by written key during generation (SPEC §15.3).
+> Readback freezes sites and settles schemes after `Solver::close` succeeds,
+> without a separate live return-contract phase (SPEC §17.5); this supersedes
+> that phase's mention in `Where`. The calculus partition and standing gaps
+> below are unchanged.
 
 > Amended 2026-11-11 by
 > [[decisions/261111_a-guard-acquires|a-guard-acquires]]: the acquiring `guard`
@@ -98,7 +105,7 @@ and the application and sequencing rules of
 - `core/src/typecheck/solve.rs`: `Solver::binding` and `Solver::argument`
   suspend the matches that decide binding modes and returned-thunk splits.
 - `core/src/typecheck/readback.rs`: `Readback::toplevel` applies those decisions,
-  snapshots sites and settles schemes after live contract holds and unit closure;
+  snapshots sites and settles schemes after successful unit closure;
   `captured_string` builds capture/decode. See
   [[internals/type-inference|type inference]].
 - `core/src/shell/evaluator/machine.rs`: `Focus`, `Terminal`, `Frame`.

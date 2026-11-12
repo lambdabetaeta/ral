@@ -37,8 +37,12 @@ own: no `--extend` on the command line means no personal rules, and
 
 ## The file
 
-A `.exarch.ral` file is ral source returning a record. Every key is optional;
-an omitted key changes nothing.
+A `.exarch.ral` file ends in a record written out, as below. Every key is
+optional; an omitted key changes nothing. Write nested `fs:` and `exec:`
+tables too: bind or compute their values, not the tables themselves.
+`return $profile`, spread profiles, and decoded whole profiles are refused before
+anything runs. `return ()`, or an empty file, states nothing; a final `let`
+is not a profile. See SPEC §15.3 for the host-file rule.
 
 ```ral
 return [

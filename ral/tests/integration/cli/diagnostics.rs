@@ -9,10 +9,11 @@
 //! not the text the user just typed.
 
 use crate::common::{Scratch, rc_home, repl};
+use ral_core::test_helper::rc_source;
 use std::process::Command;
 
-/// `line` fed to a `-i` session whose config is isolated (an empty rc, or the
-/// given one), with `args` ahead of it.  Returns stderr.
+/// `line` fed to an isolated `-i` session with the given rc and arguments.
+/// Returns stderr.
 fn repl_stderr(rc: &str, args: &[&str], line: &str) -> String {
     let (_dir, env) = rc_home(rc);
     repl(&[args, &["-i"]].concat(), &env, line).stderr
@@ -22,10 +23,16 @@ fn repl_stderr(rc: &str, args: &[&str], line: &str) -> String {
 /// so the caret must point there rather than at the compact one-liner.
 #[test]
 fn an_rc_handler_faults_against_the_rc_file() {
-    let rc = "[\n  handlers: [:, boom: { |args| fail 'nope' } ]\n]\n";
-    let stderr = repl_stderr(rc, &[], "boom\n");
+    let rc = rc_source(&[("handlers", "[:, boom: { |args| fail 'nope' }]")]);
+    let fault_line = rc
+        .lines()
+        .position(|line| line.contains("fail 'nope'"))
+        .unwrap()
+        + 1;
+    assert!(fault_line > 1, "the rc definition must not be on line 1");
+    let stderr = repl_stderr(&rc, &[], "boom\n");
     assert!(
-        stderr.contains("ral/rc:2:") && stderr.contains("fail 'nope' }"),
+        stderr.contains(&format!("ral/rc:{fault_line}:")) && stderr.contains("fail 'nope' }"),
         "the caret must name the rc file, at the handler body's line; stderr was:\n{stderr}"
     );
 }
@@ -34,7 +41,11 @@ fn an_rc_handler_faults_against_the_rc_file() {
 /// at its definition, not at the call.
 #[test]
 fn a_lambda_bound_at_the_prompt_faults_at_its_definition() {
-    let stderr = repl_stderr("", &["--norc"], "let boom = { |x| fail 'nope' }\nboom 1\n");
+    let stderr = repl_stderr(
+        &rc_source(&[]),
+        &["--norc"],
+        "let boom = { |x| fail 'nope' }\nboom 1\n",
+    );
     assert!(
         stderr.contains("<stdin>:1:18") && stderr.contains("fail 'nope' }"),
         "the caret must name the definition (1:18), not the call; stderr was:\n{stderr}"
@@ -50,7 +61,7 @@ fn a_used_function_faults_against_its_own_file() {
     std::fs::write(&module, "let boom = { |x| fail 'nope' }\n").unwrap();
 
     let stderr = repl_stderr(
-        "",
+        &rc_source(&[]),
         &["--norc"],
         &format!("let m = use '{}'\n$m[boom] 1\n", module.display()),
     );
@@ -63,7 +74,7 @@ fn a_used_function_faults_against_its_own_file() {
 /// A bare external command that is not found is still reported.
 #[test]
 fn a_bare_missing_command_is_reported() {
-    let stderr = repl_stderr("", &["--norc"], "no-such-command-xyz\n");
+    let stderr = repl_stderr(&rc_source(&[]), &["--norc"], "no-such-command-xyz\n");
     assert!(
         stderr.contains("no-such-command-xyz: command not found"),
         "the failure must still be reported; stderr was:\n{stderr}"

@@ -40,8 +40,8 @@ try {
 try { grant [fs: [read: []]] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'empty read list restricts' }
 let unrestricted = grant [] { from-string < "$dir/visible.txt" }
 echo $unrestricted
-let none = [read: []]
-try { grant [fs: $none] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'bound empty read list restricts' }
+let none = []
+try { grant [fs: [read: $none]] { let _ = from-string < "$dir/visible.txt" } } { |_| echo 'bound empty read list restricts' }
 
 # A walked entry is judged by its own path and named to read back: `~` here is
 # a directory, not HOME

@@ -1,5 +1,6 @@
 ---
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
 ---
 
 # Records and maps
@@ -87,10 +88,14 @@ that call ([[decisions/260930_a-boundary-is-checked-against-its-type|checked bou
   booleans, rendered as `str` renders them. A refusal names the row index and
   key before any bytes are written ([[design/codecs|codecs]]).
 
-A contract file returns a record or `()`, checked against its declared table.
-`return ["edit-mode": 'vi']` names the record field just as an unquoted key
-does. `return [:, edit-mode: 'vi']` is a map and is refused. `()` denotes no
-settings; `[]` remains a list, not an empty record.
+**A host file writes its options as a record**, checked key by key during
+generation; nested tables are written records too (SPEC §15.3).
+`"edit-mode": 'vi'` names a field just as an unquoted key does; a map,
+spread or bound record cannot stand for the file's options.
+`()` denotes empty options only where no key is required: a grant profile,
+not the total rc or a manifest requiring `name`.
+Collection keys, including command names in `handlers:`, remain data;
+`[]` remains a list, not an empty record.
 
 ## Refusals explain the key
 

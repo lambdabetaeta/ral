@@ -1,7 +1,7 @@
 ---
-verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+verified_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
 verified_at_date: 2026-11-11
-anchors: [Solver, Settled, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, ReturnContract, contract::Table, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
+anchors: [Solver, Solution, compile, compile_and_typecheck, CompileError, SessionSchemes, table::Table, file_options, check_options, bake_prelude, BakedPrelude, postcard, Readback, Inferring, Mode, Capture, captured_string, Closed, run_phrases]
 ---
 
 # The compilation ladder: source to typed IR
@@ -80,27 +80,33 @@ a `Result` whose `CompileError` is `Parse` or `Types`).
   evaluated path. The evaluator executes the explicit capture/decode terms;
   it does not decide where capture belongs. ([[map/core/typecheck|typecheck]])
 
-A loading form may also hand this rung a `ReturnContract` — one of the
-declared `typecheck::contract::Table`s. The phase order is **generate on
-`Solver` → settle all remaining elaboration into `Settled` → hold the return
-contract live → close gates, nested tables and errors into `Solution` →
-freeze by readback**. If settling reports errors, the hold is skipped.
-The contract can solve weak types but cannot select a `let` mode or call
-split, or open a hole. Its field and factory equations reach decoder sites
-before they freeze; the declared table is never unified as a record type.
+A host loader may supply an `Option<&'static typecheck::table::Table>`.
+**Its file's tail is checked as options during generation**, by the same
+`check_options` and `check_option` that check `within` and `grant`.
+`file_options` descends elaborated binds and sequences in their lexical
+environment to find the written tail (SPEC §15.3).
 
-The rc's thirteen keys, a plugin manifest's four and a capability profile's
-six are judged over inferred types, including fields introduced by spreads.
-The live walk re-reads row tails after each field; final keysets and unseen
-fields are judged afterwards, the latter on scratch without repeated
-inference. Nested tables remain scratch judgements at close, after live
-holds. See [[internals/type-inference|type inference]] for this boundary.
-`()` is the empty keyset; a map, list, scalar, or (but for a manifest) a
-function is refused with the spelling to use. A manifest factory's shape and
-result are held live too. Wholly variable returns and unresolved fields or
-members retain their loader's runtime checks against the same table.
+- The tail is a record literal with arbitrary field values. A bound record,
+  spread, map or computed result is not written options (T0077). Nested
+  tables must also be record literals (T0079).
+- All thirteen rc keys are required, as are every key of its nested `limits:`
+  and `theme:` tables. `Setting(T)` is ``[`inherit, `set T]``: keep the
+  existing setting or override it. A manifest requires only `name`; grant
+  profiles have no required keys, so `()` and an empty file set nothing.
+  Each incomplete table produces one T0081 listing only missing required
+  keys. Rc defaults hints cover every depth, with `` `inherit `` for missing
+  nested settings.
+- Only a manifest admits a written one-parameter factory, one level deep;
+  its body's tail is checked as the manifest's options, not as another factory,
+  and refusal advice names the factory body.
+- Collection keys (`handlers:`, `env:`, `bindings:`, `plugins:`) are data,
+  not nested tables. A written handler map is checked arm by arm.
+- Field equations are ordinary uses during generation and reach decoder
+  admission sites before readback. Syntax establishes the host result's
+  shape and keyset; rc and manifest decoders retain value-shape, domain and
+  installation checks. Grant's decoder also validates grants received as data.
 
-After settling, live return-contract holds and closure succeed,
+After generation and `Solver::close` succeed,
 `Readback::toplevel` maps the pending tree to the checked `Toplevel`. One
 `UnitId` identifies all site snapshots and the first-use readmissions in
 `Toplevel.admits`. Imported value membranes survive only when their solved

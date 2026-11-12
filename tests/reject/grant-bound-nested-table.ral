@@ -1,0 +1,8 @@
+# codes: T0079
+# status: 1
+# at: 8:14
+# contains: is a table: its keys are written where it is
+# contains: `$t` hides which keys it holds
+# contains: exec: [allow: $v]
+let t = [allow: [`name git]]
+grant [exec: $t] { return 1 }

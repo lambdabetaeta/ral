@@ -1,7 +1,19 @@
 ---
 status: accepted
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
 ---
+
+> **Amended 2026-11-11 — Written host options.** Host-file fields are
+> ordinary uses during generation (SPEC §15.3), not equations held after
+> settling. This supersedes the “Return contracts” amendment immediately
+> below, including its phase restriction and single-equation treatment of
+> written handler maps. Each written `handlers:` arm is checked in its own
+> region in the rc, manifest and `within`; bound or computed maps use one
+> equation. These uses reach decoder admission sites before unit closure and
+> readback freeze them. Persistent installation still vets handlers, and
+> imported handlers retain their module's sites. The boundary, module and
+> session admission rules stand.
 
 > **Amended 2026-11-11 — Return contracts.** A contract is a use of the
 > returned value. After all elaboration settles, its field and factory

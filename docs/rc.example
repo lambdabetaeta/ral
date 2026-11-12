@@ -2,8 +2,11 @@
 #
 # Copy to $XDG_CONFIG_HOME/ral/rc (normally ~/.config/ral/rc), or ~/.ralrc.
 #
-# This file must return a record, or `()` to set nothing.  Every key is
-# optional; an unknown key or a wrongly typed value refuses the whole file.
+# End in a written record with all thirteen keys below (SPEC §15.3).
+# Write every limits/theme key too; compute values, not table keys.
+# Unknown or missing keys and statically wrong types refuse the file before it runs.
+# `inherit keeps ral's or the system's existing setting; `set VALUE overrides it.
+# Empty collections are [:]; edit-mode, bell, and surface take plain values.
 #
 # Inside a prompt block, `cwd` and `user` are in scope.
 
@@ -22,14 +25,18 @@ return [
     # Interactive surface: readline (default) or minimal.
     surface: readline,
 
-    # Maximum function-call recursion depth (default 100000).
-    recursion-limit: 50000,
+    # `inherit keeps --recursion-limit, else ral's built-in limit (100000).
+    recursion-limit: `set 50000,
 
-    # File creation mask, 1-4 octal digits (Unix only).
-    umask: '022',
+    # `inherit keeps the process's umask; `set takes 1-4 octal digits (Unix only).
+    umask: `set '022',
 
-    # Soft limits for child processes: open-files, core-bytes, stack-bytes (Unix only).
-    limits: [open-files: 4096, core-bytes: 0],
+    # Child soft limits: `inherit keeps ral's limit; `set takes bytes/count (Unix only).
+    limits: [
+        open-files: `set 4096,
+        core-bytes: `set 0,
+        stack-bytes: `inherit,
+    ],
 
     # Environment variables set in every child process.
     env: [
@@ -42,8 +49,8 @@ return [
         proj: ~/src/project,
     ],
 
-    # Prompt block.  Return a string; `user` and `cwd` are in scope.
-    prompt: {
+    # `inherit keeps ral's prompt; `set takes a block returning a string.
+    prompt: `set {
         let lbracket = '['
         let rbracket = ']'
         return "$red$lbracket !{user} $rbracket$reset $blue!{abbreviate-home !{cwd}}$reset $ "
@@ -64,12 +71,13 @@ return [
         autosuggestion: [:],
     ],
 
-    # Block run once after the rc is applied.
-    startup: { echo 'ready' },
+    # `inherit runs no startup block; `set runs this once after the rc is applied.
+    startup: `set { echo 'ready' },
 
-    # Result printing: prefix, and colour (black red green yellow blue magenta cyan white none).
+    # `inherit keeps '=> ' and yellow; `set overrides each independently.
+    # Colours: black red green yellow blue magenta cyan white none.
     theme: [
-        value-prefix: '=> ',
-        value-color:  yellow,
+        value-prefix: `set '→ ',
+        value-color: `inherit,
     ],
 ]

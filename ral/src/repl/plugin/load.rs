@@ -12,8 +12,7 @@ use ral_core::data::datum::Datum as _;
 use ral_core::error::Error;
 use ral_core::fact::{
     EscapedLoad, InvalidCause, InvalidFailure, IoOperation, IoSubject, PathFailure, PluginFailure,
-    PluginFailureAlreadyLoaded, PluginFailureFactoryReturnedBlock,
-    PluginFailureHandlerInstallationEscaped, PluginFailureNotFound,
+    PluginFailureAlreadyLoaded, PluginFailureHandlerInstallationEscaped, PluginFailureNotFound,
     PluginFailureOptionsWithoutFactory, Reason, StateFailure,
 };
 use ral_core::path::{Judged, Located, Reading};
@@ -67,14 +66,14 @@ pub(crate) fn load_plugin(
             shell,
             &source,
             &origin,
-            Some(ral_core::typecheck::contract::declared(
+            Some(ral_core::typecheck::table::declared(
                 ral_core::typecheck::Form::Manifest,
             )),
         )
     })?;
-    let module = instantiate(name_or_path, value, options, mooring, shell)?;
-    check_is_manifest(name_or_path, &module)?;
-
+    let Value::Map(module) = instantiate(name_or_path, value, options, mooring, shell)? else {
+        unreachable!("a manifest ends in its fields written out (SPEC §15.5)")
+    };
     let (manifest, handlers) = manifest::parse(&module)?;
     let name = manifest.name.clone();
     let mut installed = Vec::new();
@@ -225,19 +224,6 @@ fn instantiate(
         ))
         .into()),
         val => Ok(val),
-    }
-}
-
-/// Error if `val` is still a block after instantiation: a factory that made
-/// one, which only a return of unknown type can slip past the checker with.
-fn check_is_manifest(plugin: &str, val: &Value) -> Result<(), Error> {
-    match val {
-        Value::Thunk(_) => Err(super::refusal(PluginFailure::FactoryReturnedBlock(
-            PluginFailureFactoryReturnedBlock {
-                plugin: plugin.into(),
-            },
-        ))),
-        _ => Ok(()),
     }
 }
 
@@ -437,6 +423,47 @@ mod tests {
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
+    #[test]
+    fn file_and_factory_failures_and_exits_propagate_without_installation() {
+        for factory in [false, true] {
+            for (stop, exit) in [("fail plugin-stopped", false), ("exit 7", true)] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("plugin.ral");
+                let body = format!(
+                    "{stop}\nreturn [name: p, hooks: [post-exec: {{ |_ev| return () }}], keybindings: [[key: ctrl-t, handler: {{ |_ev| return () }}]], handlers: [:, xx: {{ |_args| echo hi }}]]"
+                );
+                let source = if factory {
+                    format!("return {{ |options|\n{body}\n}}")
+                } else {
+                    body
+                };
+                std::fs::write(&path, &source).unwrap();
+                let mut runtime = ral_core::test_helper::core_runtime();
+                runtime
+                    .install_captured_builtins(&vec![loader(ral_core::path::shown(&path))].into());
+                let mut shell = Shell::root(runtime.into(), ral_core::test_helper::process_cwd());
+                let ral_core::shell::run::RunReport::Ran { ending, .. } =
+                    shell.run(crate::repl::exec::line_run("_test-load"))
+                else {
+                    panic!("load must run: {source}")
+                };
+                match ending.into_settled() {
+                    Err(Break::Escape(Escape::Exit(7))) if exit => {}
+                    Err(Break::Error(error)) if !exit => {
+                        assert_eq!(error.reason, Reason::raised("plugin-stopped"));
+                        assert_eq!(error.hints(), []);
+                        assert!(error.context().is_none());
+                    }
+                    other => panic!("load must propagate {stop}, got {other:?}: {source}"),
+                }
+                assert!(!shell.plugin_loaded("p").unwrap());
+                assert!(!shell.has_handler("xx"));
+                assert!(!shell.has_hook(&HookName::plugin("p", "post-exec")));
+                assert!(!shell.has_hook(&HookName::plugin("p", "key#0")));
+            }
+        }
+    }
+
     #[test]
     fn a_host_refusal_rolls_back_hooks_and_handlers_without_reclassifying() {
         struct Refuse(ral_core::error::Error);

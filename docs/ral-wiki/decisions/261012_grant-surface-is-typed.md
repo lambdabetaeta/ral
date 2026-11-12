@@ -1,11 +1,29 @@
 ---
 status: active
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
-verified_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
+verified_at_commit: c4bd558f
 verified_at_date: 2026-11-11
-anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, check_nested, Solver::settle, Settled::close]
+anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, Generator::check_options, Generator::check_option, Solver::close, Vocabulary]
 ---
+
+> **Amended 2026-11-11 — Written host options.** A profile writes
+> `grant`'s options at its tail (SPEC §15.3), with `()` for no restriction;
+> axes remain optional. Nested `exec:` and `fs:` tables are written records
+> both there and at the form, checked recursively by `check_options` during
+> generation. Their fields constrain inference as ordinary uses; a bound,
+> computed or parameter-supplied table is refused with T0079.
+>
+> This supersedes the “Return-contract order” amendment and the checker
+> clauses below describing inferred-row ascription, a deferred queue,
+> scratch-only non-constraining checks and unresolved profile returns.
+> Generation is followed by `Solver::close` and readback, with no solver
+> `Settled` phase. The one grant decoder still validates field values and
+> domains and every grant received as data, including its shape and keyset;
+> wire grants are not subject to the host-file syntax rule.
+> The shared diagnostic vocabulary is `Vocabulary`, including `Setting`
+> for the rc's `` `inherit `` / `` `set v `` (SPEC §15.3).
 
 > **Amended 2026-11-11 — Return-contract order.** Generate on `Solver`,
 > settle all remaining elaboration into `Settled`, hold the return contract
@@ -494,8 +512,10 @@ Findings, in order:
 `authority::grant::freeze` (`Place`, `Selector`, `FreezeCtx::place`, `FreezeCtx::selector`),
 `shell::grant` (`decode_capability_map`, `Shell::decode_grant`, `Shell::freeze_ctx`),
 `authority::policy::lattice` (`Net`, `EditorVerb`, `ShellVerb`, `Flag`),
-`typecheck::contract` (`Holds`, `check_nested`),
-`typecheck::solve` (`Solver::settle`, `Settled::close`). See [[design/grant|grant]],
+`typecheck::table` (`Holds`, `Table`, `Vocab`; `core/src/typecheck/table.rs`
+and `table/grant.rs`), `typecheck::generate::scope`
+(`Generator::check_options`, `Generator::check_option`),
+`typecheck::solve` (`Solver::close`), `fact::Vocabulary`. See [[design/grant|grant]],
 [[design/capability-freeze|capability-freeze]],
 [[design/two-enforcers|two-enforcers]] and `docs/SPEC.md` §12.
 

@@ -1,6 +1,6 @@
-//! Rc sourcing inside the boot builtin: a record configures the session,
-//! and `()` leaves its defaults. `exit` ends the session; any other failure
-//! is reported and boot continues.
+//! Rc sourcing inside the boot builtin: a written, total record configures
+//! the session. `exit` ends the session; any other failure is reported and
+//! boot continues.
 
 use ral_core::path::shown;
 use ral_core::shell::runtime::{Break, Escape, Map, Mooring, Settled};
@@ -61,28 +61,19 @@ fn source_rc(
 }
 
 fn rc_config(path: &Path, text: String, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {
-    let contract = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Rc);
-    match evaluate(path, text, Some(contract), mooring, shell)? {
-        Value::Map(pairs) => Ok(pairs),
-        Value::Unit => Ok(Map::new()),
-        other => Err(Stop::Failed(format!(
-            "{}: rc file must return a record, a map, or `()` for nothing to set, \
-             e.g. `[edit-mode: 'vi']`; got {}; does the file end with `return [...]`?",
-            shown(path),
-            other.type_name()
-        ))),
-    }
+    let options = ral_core::typecheck::table::declared(ral_core::typecheck::Form::Rc);
+    let Value::Map(pairs) = evaluate(path, text, Some(options), mooring, shell)? else {
+        unreachable!("an rc ends in its keys written out (SPEC §15.3)")
+    };
+    Ok(pairs)
 }
 
-/// Evaluate the `text` of one startup file for its caller's contract, checked
-/// against the live session, so an earlier file's bindings are in scope for a
-/// later one. `contract` holds the returned row to a declared table in the
-/// same check.  The source is identified by the file's native `path`, and
-/// named by its shown one in every message.
+/// Evaluate one startup file against the live session and its tail's options
+/// table. The source keeps its native path and uses its shown path in messages.
 fn evaluate(
     path: &Path,
     text: String,
-    contract: Option<ral_core::typecheck::ReturnContract>,
+    options: Option<&'static ral_core::typecheck::Table>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<Value, Stop> {
@@ -90,7 +81,7 @@ fn evaluate(
     let file = SourceFile::new(path).map_err(|e| Stop::Failed(e.to_string()))?;
     let src = ral_core::source::normalize_source_text(text);
     let origin = SourceOrigin::File(file);
-    match ral_core::shell::load::evaluate_source(mooring, shell, &src, &origin, contract) {
+    match ral_core::shell::load::evaluate_source(mooring, shell, &src, &origin, options) {
         Ok(v) => Ok(v),
         Err(Break::Error(e)) => {
             let ran = "sourcing stopped at the error above";
@@ -108,6 +99,7 @@ fn evaluate(
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use ral_core::test_helper::rc_source;
 
     /// Write `src` as a startup file, returning the tempdir (keeping the
     /// file alive) and its path.
@@ -138,12 +130,52 @@ mod tests {
         )
     }
 
-    /// `()` is an rc with nothing to set, and so is a last phrase that is a
-    /// `let`, which yields `Unit` as `return ()` does.
     #[test]
-    fn rc_returning_unit_sets_nothing() {
-        for src in ["return ()\n", "let x = 1\n"] {
-            assert!(rc(src).unwrap().is_empty(), "{src}");
+    fn rc_at_every_blank_sets_nothing() {
+        let src = rc_source(&[]);
+        let (_dir, path) = startup_file(&src);
+        let mut shell = booted_shell();
+        let settings = source_rc(&path, src, &Mooring::adrift(), &mut shell).unwrap();
+        assert!(!settings.startup);
+        assert!(!settings.bell);
+        assert!(!shell.has_hook(&ral_core::shell::runtime::HookName::session("prompt")));
+        assert_eq!(
+            shell.stack_limit(),
+            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
+        );
+    }
+
+    #[test]
+    fn rc_returning_unit_is_refused() {
+        for src in ["return ()\n", ""] {
+            assert!(matches!(rc(src), Err(Stop::Reported)), "{src}");
+        }
+    }
+
+    #[test]
+    fn rc_ending_in_a_let_is_refused() {
+        assert!(matches!(rc("let x = 1\n"), Err(Stop::Reported)));
+    }
+
+    #[test]
+    fn rc_stopping_before_its_tail_propagates_without_decoding_or_applying() {
+        for (head, expected) in [
+            ("exit 23", Stop::Exit(23)),
+            ("fail 'rc failed'", Stop::Reported),
+        ] {
+            let src = format!(
+                "let rc-began = true\n{head}\n{}",
+                rc_source(&[("startup", "`set { return () }")])
+            );
+            let (_dir, path) = startup_file(&src);
+            let mut shell = booted_shell();
+            let outcome = source_rc(&path, src, &Mooring::adrift(), &mut shell);
+            assert!(matches!(outcome, Err(ref stop) if *stop == expected));
+            assert!(
+                shell.scope_lookup("rc-began").is_some(),
+                "the rc ran before stopping"
+            );
+            assert!(!shell.has_hook(&ral_core::shell::runtime::HookName::session("startup")));
         }
     }
 
@@ -152,7 +184,7 @@ mod tests {
     #[test]
     fn rc_bad_literal_field_is_a_type_error() {
         assert!(matches!(
-            rc("return [edit-mode: 42]\n"),
+            rc(&rc_source(&[("edit-mode", "42")])),
             Err(Stop::Reported)
         ));
     }

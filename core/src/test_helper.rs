@@ -45,6 +45,40 @@ pub fn core_schemes() -> crate::typecheck::SessionSchemes {
     crate::typecheck::SessionSchemes::new(crate::HostSurface::default().manifest())
 }
 
+/// A complete rc at its declared blanks, with selected values replaced.
+///
+/// # Panics
+/// If an override names an unknown key or repeats a key, or an rc key has no blank.
+pub fn rc_source(overrides: &[(&str, &str)]) -> String {
+    use crate::typecheck::table::{Form, declared};
+
+    let table = declared(Form::Rc);
+    for (i, (label, _)) in overrides.iter().enumerate() {
+        assert!(
+            table.keys.iter().any(|key| key.label == *label),
+            "unknown rc override {label:?}"
+        );
+        assert!(
+            !overrides[..i].iter().any(|(seen, _)| seen == label),
+            "duplicate rc override {label:?}"
+        );
+    }
+    let fields = table
+        .keys
+        .iter()
+        .map(|key| {
+            let blank = key.blank.expect("every rc key declares its blank");
+            let value = overrides
+                .iter()
+                .find(|(label, _)| *label == key.label)
+                .map_or(blank, |(_, value)| *value);
+            format!("    {}: {value},", key.label)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("return [\n{fields}\n]")
+}
+
 /// A layer resolved from `caps`, a bare name found on the host's `PATH`: the
 /// helper a test authors a layer through.  A path the grant names need not
 /// exist, for the walk ends its steps where the disk does.

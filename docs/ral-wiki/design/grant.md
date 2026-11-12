@@ -1,5 +1,6 @@
 ---
-generated_at_commit: 3e3fbc84
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
 ---
 
 # Capabilities and `grant`
@@ -320,11 +321,12 @@ process's death is dropped, which is what makes it a survivor rather than a
 receipt for something already killed.
 
 **The dimensions are syntax, and the bracket is the form's.** `grant` takes
-its five dimensions written out in its own bracket, the way `case` writes its
-arms, and the checker holds each written one to its table. No record type is
-built for the bracket, so a dimension that is not written is an absent premise,
-not a flag. A misspelled dimension is refused before the program runs, naming
-`grant` and its own five; a bundle bound elsewhere (`grant $o { … }`), a spread
+its six dimensions written out in its own bracket, the way `case` writes its
+arms, and the checker holds each written one to its table. The declared table
+is never unified as a record type. A dimension that is not written is an absent
+premise, not a flag.
+A misspelled dimension is refused before the program runs, naming
+`grant` and its own six; a bundle bound elsewhere (`grant $o { … }`), a spread
 and a repeated dimension are parse errors, since each hides which dimensions
 are written; a map is no bundle either, a map's keys being data
 ([[design/records-and-maps|records-and-maps]]); and `[]` is the empty grant
@@ -335,14 +337,17 @@ dimension only sometimes, lift the condition to the form.
 **The values are typed data.** Places and exec targets are tagged variants
 (`` `cwd src ``, `` `name git ``, `` `dir `system ``); `exec` and `fs` are
 nested records of lists, `net` is `` `offline ``, `gpu` is `` `withheld ``,
-`editor` and `shell` are verb lists. The checker ascribes the nested tables too, so a bare string where
-a place belongs, a misspelled tag or `net: true` fails before the program
-runs, naming the tags on offer. Every list is a set, with repeats idempotent;
-extension joins verb lists; a selector (`path`, `system` or a package manager) is valid only under
-`dir`; and there is no argument filter
-([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]). Values
-the checker cannot type still reach the runtime decoder, which judges the same
-vocabulary.
+`editor` and `shell` are verb lists. Nested tables are written records and
+checked key by key during generation, so their values constrain inference:
+a bare string where a place belongs, a misspelled tag or `net: true` fails
+before the program runs, naming the tags on offer. Every list is a set,
+with repeats idempotent; extension joins verb lists; a selector (`path`,
+`system` or a package manager) is valid only under `dir`; and there is no
+argument filter
+([[decisions/261012_grant-surface-is-typed|grant-surface-is-typed]]).
+Unresolved field values still reach the runtime decoder, which judges the
+same vocabulary; grants received as data also retain runtime shape and
+keyset checks.
 
 Why it is shaped so: lists are homogeneous and a tag has one payload type, so
 every place is tagged and every anchor takes a subpath (`.` for the anchor), or
@@ -362,10 +367,11 @@ socket. macOS adds its resolver socket under `net`; Linux admits none and
 falls back to DNS over IP. See
 [[decisions/261027_unix-sockets-follow-writes|unix-sockets-follow-writes]].
 
-A `.ral` profile and the inline
-`grant` surface are symmetric: both decode through the same walker into one
-resolved `GrantLayer`, so configuration is the grant value written as source,
-not a second schema. That walker resolves every place as it decodes —
+A `.ral` profile writes `grant`'s options at its tail, with `()` for no
+restriction (SPEC §15.3); axes stay optional so fragments compose.
+The profile and inline `grant` options share generation-time checking and
+decode through the same walker into one resolved `GrantLayer`, not a second
+schema. That walker resolves every place as it decodes —
 [[design/capability-freeze|the freeze boundary]] — so no unresolved form ever
 reaches the stack.
 

@@ -1,5 +1,5 @@
 # codes: T0076
 # status: 1
-# at: 5:14
+# at: 5:20
 # contains: unknown key 'git'
 grant [exec: [git: 'allow']] { return 1 }

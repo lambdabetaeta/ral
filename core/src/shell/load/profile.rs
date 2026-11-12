@@ -1,5 +1,5 @@
-//! Load a capability profile — a `.ral` script whose terminal expression is
-//! a map shaped like the argument of `grant [...] { body }`.
+//! Load a capability profile — a `.ral` script ending in `grant`'s options
+//! written out, nested tables included (SPEC §15.3).
 //!
 //! Evaluation is [`super::evaluate_source`], decoding is
 //! [`decode_capability_map`]; this file only joins them.
@@ -35,11 +35,9 @@ pub fn load_capabilities_from_str(
     origin: &SourceOrigin,
     ctx: &FreezeCtx,
 ) -> Settled<GrantLayer> {
-    // A profile's dimensions are `grant`'s own options, so the file's returned
-    // row is held to the same table the form is.
-    let contract = crate::typecheck::contract::declared(crate::typecheck::Form::Grant);
+    let options = crate::typecheck::table::declared(crate::typecheck::Form::Grant);
     let prefix = format!("capability file {origin}");
-    let value = super::evaluate_source(mooring, shell, source, origin, Some(contract))
+    let value = super::evaluate_source(mooring, shell, source, origin, Some(options))
         .map_err(|b| b.map_error(|e| e.with_context(&prefix)))?;
     decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }

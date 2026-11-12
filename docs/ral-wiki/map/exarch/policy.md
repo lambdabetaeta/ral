@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 96e103a5
-generated_at_date: 2026-11-01
+generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
+generated_at_date: 2026-11-11
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -179,12 +179,17 @@ recover `ls`. `minimal` is such a base, and is offered by `--base` only —
 `Base::spawnable` withholds it from `` exarch-agents `start ``,
 as it does `dangerous` ([[design/agents|agents]]).
 
-Each is a ral script whose terminal expression is a map shaped like the argument
-of `grant [...] { body }`, loaded through
-`ral_core::shell::load::profile::load_capabilities_from_str` — the same surface
-`--capabilities <path>.ral` consumes at the ral CLI. Two surfaces, one model. The
-host reads the resulting authority only through core's accessors, never its
-representation ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).
+Each is a ral script ending in `grant`'s options written out (SPEC §15.3),
+loaded through `ral_core::shell::load::profile::load_capabilities_from_str` —
+the same surface `--capabilities <path>.ral` consumes at the ral CLI.
+`typecheck::table::declared(Form::Grant)` checks keys during generation,
+including written nested `exec:` and `fs:` tables. Values may be computed;
+the tables themselves may not. No key is required: `dangerous` ends in
+`return ()`, stating no restriction, and an empty file means the same.
+The grant decoder retains runtime shape, keyset and domain checks for grants
+received as data as well as source profiles. The host reads the resulting
+authority only through core's accessors, never its representation
+([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).
 
 **The bake-ins name exec authority portably through the `dir` selectors** —
 [[map/core/capabilities|core]]'s spelling of live tool roots, each a row of one

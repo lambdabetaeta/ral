@@ -14,9 +14,10 @@ mod suspended;
 
 use ral_core::fact::RefusedGrantKey;
 use ral_core::ir::{CompKind, GroupNode, Phrase, Toplevel, Unchecked, Val};
+use ral_core::test_helper::rc_source;
 use ral_core::ty::{CompTyNode, Grade, Ty, TyNode};
-use ral_core::typecheck::contract::declared;
-use ral_core::typecheck::{Form, TypeErrorKind};
+use ral_core::typecheck::table::declared;
+use ral_core::typecheck::{Form, OptionsContext, TypeErrorKind};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 use std::sync::Arc;
 
@@ -561,53 +562,63 @@ fn a_boolean_computed_key_is_refused_as_a_non_string() {
     );
 }
 
-// ─── The return contract: a contract file's returned row ─────────────────────
+// ─── Host files: options written at the tail ─────────────────────────────────
 
-/// A host's own table, held to the same condition the declared four are.
+/// A host's own table, checked like the declared four.
 static TEST_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
     form: "test",
     keys: &[
-        ral_core::typecheck::contract::Key {
+        ral_core::typecheck::table::Key {
             label: "n",
-            holds: ral_core::typecheck::contract::Holds::At(Ty::int),
+            holds: ral_core::typecheck::table::Holds::At(Ty::int),
+            required: false,
+            blank: None,
             reason: None,
         },
-        ral_core::typecheck::contract::Key {
+        ral_core::typecheck::table::Key {
             label: "loose",
-            holds: ral_core::typecheck::contract::Holds::Decoded,
+            holds: ral_core::typecheck::table::Holds::Decoded,
+            required: false,
+            blank: None,
             reason: None,
         },
     ],
     factory: false,
 };
 
-/// A table with a key the row must have and a key it knows and refuses — the
+/// A table with a required key and a key it knows and refuses — the
 /// manifest's `name:` and `capabilities:` in miniature.
 static REQUIRED_TABLE: ral_core::typecheck::Table = ral_core::typecheck::Table {
     form: "required",
     keys: &[
-        ral_core::typecheck::contract::Key {
+        ral_core::typecheck::table::Key {
             label: "must",
-            holds: ral_core::typecheck::contract::Holds::Required(Ty::string),
+            holds: ral_core::typecheck::table::Holds::At(Ty::string),
+            required: true,
+            blank: None,
             reason: None,
         },
-        ral_core::typecheck::contract::Key {
+        ral_core::typecheck::table::Key {
             label: "loose",
-            holds: ral_core::typecheck::contract::Holds::Decoded,
+            holds: ral_core::typecheck::table::Holds::Decoded,
+            required: false,
+            blank: None,
             reason: None,
         },
-        ral_core::typecheck::contract::Key {
+        ral_core::typecheck::table::Key {
             label: "capabilities",
-            holds: ral_core::typecheck::contract::Holds::Refused(
+            holds: ral_core::typecheck::table::Holds::Refused(
                 RefusedGrantKey::ManifestCapabilitiesUnenforced,
             ),
+            required: false,
+            blank: None,
             reason: None,
         },
     ],
     factory: false,
 };
 
-fn contract_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
+fn table_errors(table: &'static ral_core::typecheck::Table, src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let top =
         elaborate(&ast, [], None).unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
@@ -644,22 +655,58 @@ fn assert_error_in(src: &str, err: &TypeError, fragment: &str) {
 }
 
 fn schema_errors(src: &str) -> Vec<TypeError> {
-    contract_errors(&TEST_TABLE, src)
+    table_errors(&TEST_TABLE, src)
 }
 
-/// A key the row must have is demanded, and its absence is not an unknown
-/// key — the plugin manifest's `name:` is this shape.
+/// A required key's absence is not an unknown key.
 #[test]
 fn return_schema_demands_a_required_key() {
-    let errs = contract_errors(&REQUIRED_TABLE, "return [loose: 1]");
-    assert!(
-        errs.iter().any(|e| e.kind.code() == "T0021"),
-        "expected T0021, got: {errs:?}"
+    let src = "return [loose: 1]";
+    let errs = table_errors(&REQUIRED_TABLE, src);
+    assert_eq!(codes_of(&errs), ["T0081"], "{errs:?}");
+    assert_eq!(
+        errs[0].message(),
+        "`required` is missing required keys: must"
     );
+    assert_eq!(errs[0].kind.render_label(), "missing: must");
+    let pos = errs[0].pos.expect("the incomplete record");
+    assert_eq!(&src[pos.start as usize..pos.end as usize], "[loose: 1]");
     assert!(
-        contract_errors(&REQUIRED_TABLE, "return [must: 'here']").is_empty(),
+        matches!(&errs[0].kind, TypeErrorKind::OptionsMissing { form: "required", missing, blanks }
+            if missing == &["must"] && blanks == &[None]),
+        "{errs:?}"
+    );
+    assert!(errs[0].hint().is_none(), "no default is declared: {errs:?}");
+    assert!(
+        table_errors(&REQUIRED_TABLE, "return [must: 'here']").is_empty(),
         "the required key, written, satisfies it"
     );
+}
+
+#[test]
+fn manifest_missing_name_does_not_claim_optional_keys_are_required() {
+    let src = "return [handlers: [:]]";
+    let errs = table_errors(declared(Form::Manifest), src);
+    assert_eq!(codes_of(&errs), ["T0081"], "{errs:?}");
+    assert!(
+        matches!(&errs[0].kind, TypeErrorKind::OptionsMissing { form: "plugin manifest", missing, blanks }
+            if missing == &["name"] && blanks == &[None]),
+        "{errs:?}"
+    );
+    assert_eq!(
+        errs[0].message(),
+        "`plugin manifest` is missing required keys: name"
+    );
+    assert_eq!(errs[0].kind.render_label(), "missing: name");
+    assert!(errs[0].hint().is_none(), "name has no default: {errs:?}");
+    let pos = errs[0].pos.expect("the incomplete manifest");
+    assert_eq!(
+        &src[pos.start as usize..pos.end as usize],
+        "[handlers: [:]]"
+    );
+    let repaired = "return [name: 'p', handlers: [:]]";
+    let errs = table_errors(declared(Form::Manifest), repaired);
+    assert!(errs.is_empty(), "the required name suffices: {errs:?}");
 }
 
 #[test]
@@ -674,30 +721,51 @@ fn return_schema_accepts_a_correctly_typed_literal_field() {
     assert!(errs.is_empty(), "expected no schema errors, got: {errs:?}");
 }
 
-/// The row is what is checked, not the syntax that built it: a return the
-/// program computed is held exactly as one written out is.
+/// A bound record hides its keys, regardless of its inferred row.
 #[test]
 fn return_schema_checks_a_computed_return_value() {
-    let errs = schema_errors("let m = [n: \"x\"]\nreturn $m");
-    assert_eq!(codes_of(&errs), ["T0010"], "{errs:?}");
+    let src = "let m = [n: \"x\"]\nreturn $m";
+    let errs = schema_errors(src);
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert!(matches!(
+        errs[0].kind,
+        TypeErrorKind::OptionsNotWritten { .. }
+    ));
+    assert_eq!(
+        errs[0].kind.render_label(),
+        "`$m` hides which keys it holds"
+    );
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some(
+            "write each key here and compute only the values: `return [n: …]`; `$m` cannot stand for the options"
+        )
+    );
+    assert_error_in(src, &errs[0], "$m");
 }
 
-/// The bad key arrives through a spread, which a literal-only rule would wave
-/// through.
+/// A spread is refused before inspecting the keys it would bring.
 #[test]
 fn return_schema_catches_a_key_misspelled_behind_a_spread() {
-    let errs = schema_errors("let extra = [nn: 1, loose: 0]\nreturn [...$extra, loose: 1]");
-    assert!(
-        errs.iter().any(|e| e.kind.code() == "T0076"),
-        "expected T0076, got: {errs:?}"
+    let src = "let extra = [nn: 1, loose: 0]\nreturn [...$extra, loose: 1]";
+    let errs = schema_errors(src);
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert_eq!(
+        errs[0].kind.render_label(),
+        "a spread hides which keys it brings"
     );
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some("write each key here and compute only the values: `return [n: $value, …]`")
+    );
+    assert_error_in(src, &errs[0], "[...$extra, loose: 1]");
 }
 
 /// A known refused key preserves its intrinsic advice rather than becoming
 /// an unknown key.
 #[test]
 fn return_schema_keeps_a_refused_keys_own_sentence() {
-    let errs = contract_errors(&REQUIRED_TABLE, "return [must: 'here', capabilities: 1]");
+    let errs = table_errors(&REQUIRED_TABLE, "return [must: 'here', capabilities: 1]");
     let refusal = errs
         .iter()
         .find(|e| e.kind.code() == "T0026")
@@ -710,7 +778,7 @@ fn return_schema_keeps_a_refused_keys_own_sentence() {
     assert_eq!(errs.len(), 1, "and it is not also an unknown key: {errs:?}");
 }
 
-/// An unknown key shares the table's facts with the runtime checks.
+/// An unknown key reports exactly the table's facts.
 #[test]
 fn return_schema_shares_the_tables_unknown_key_facts() {
     let errs = schema_errors("return [nn: 1]");
@@ -735,105 +803,344 @@ fn return_schema_shares_the_tables_unknown_key_facts() {
 /// A map has keys where the table has labels, so the spelling is refused.
 #[test]
 fn return_schema_refuses_a_map() {
-    for form in [Form::Rc, Form::Grant, Form::Manifest] {
-        let errs = contract_errors(declared(form), "return [:, nn: 1]");
-        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
-        let hint = errs[0].hint().unwrap();
-        assert!(hint.contains("not a map"), "{hint}");
+    for table in [&TEST_TABLE, declared(Form::Grant), declared(Form::Manifest)] {
+        let errs = table_errors(table, "return [:, nn: 1]");
+        assert_eq!(codes_of(&errs), ["T0077"], "{}: {errs:?}", table.form);
+        assert_eq!(errs[0].kind.render_label(), "a map");
+        let key = table.offered()[0];
+        assert_eq!(
+            errs[0].hint(),
+            Some(format!(
+                "`{}`'s keys are labels: write a record, `[{key}: …]`, not a map, `[:, {key}: …]`",
+                table.form
+            ))
+        );
     }
 }
 
-/// `[]` is the empty list; `()` is how a file says it has nothing to set.
+/// `()` advice is offered only when no key is required.
 #[test]
 fn return_schema_refuses_a_list_and_points_at_unit() {
-    for form in [Form::Rc, Form::Grant] {
-        let errs = contract_errors(declared(form), "return []");
-        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
-        assert!(errs[0].hint().unwrap().contains("returns `()`"));
+    for table in [&TEST_TABLE, declared(Form::Grant)] {
+        let errs = table_errors(table, "return []");
+        assert_eq!(codes_of(&errs), ["T0077"], "{}: {errs:?}", table.form);
+        assert_eq!(errs[0].kind.render_label(), "a list");
+        assert_eq!(
+            errs[0].hint().as_deref(),
+            Some(
+                "`[]` is the empty list, not a record; a file with nothing to set ends in `return ()`"
+            )
+        );
     }
+    let errs = table_errors(&REQUIRED_TABLE, "return []");
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some("`[]` is the empty list, not a record")
+    );
 }
 
 #[test]
 fn return_schema_refuses_a_function_unless_the_table_admits_a_factory() {
     let factory = "return { |options| [name: 'p'] }";
-    for form in [Form::Rc, Form::Grant] {
-        let errs = contract_errors(declared(form), factory);
-        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
+    for table in [&TEST_TABLE, declared(Form::Grant)] {
+        let errs = table_errors(table, factory);
+        assert_eq!(codes_of(&errs), ["T0077"], "{}: {errs:?}", table.form);
+        assert_eq!(errs[0].kind.render_label(), "a block of 1 parameter");
+        assert_eq!(
+            errs[0].hint(),
+            Some(format!(
+                "end the file in `return [{}: …]`, not a block",
+                table.offered()[0]
+            ))
+        );
     }
-    assert!(contract_errors(declared(Form::Manifest), factory).is_empty());
+    assert!(table_errors(declared(Form::Manifest), factory).is_empty());
 }
 
-/// A factory is a block of one parameter, the options, making the manifest:
-/// held to that shape statically, and what it makes ascribed as a direct
-/// return is.
+/// A factory is written, with exactly one parameter and a written result.
 #[test]
 fn a_returned_block_is_held_to_the_factory_shape() {
-    for src in ["return { [name: 'p'] }", "return { |a b| [name: 'p'] }"] {
-        let errs = contract_errors(declared(Form::Manifest), src);
-        assert_eq!(codes_of(&errs), ["T0011"], "{src}: {errs:?}");
+    for (src, params) in [
+        ("return { [name: 'p'] }", 0),
+        ("return { |a b| [name: 'p'] }", 2),
+    ] {
+        let errs = table_errors(declared(Form::Manifest), src);
+        assert_eq!(codes_of(&errs), ["T0077"], "{src}: {errs:?}");
+        assert_eq!(
+            errs[0].kind.render_label(),
+            format!("a block of {params} parameters")
+        );
+        assert_eq!(
+            errs[0].hint().as_deref(),
+            Some(
+                "`plugin manifest` ends in its fields written out, `return [name: …]`, or in a block of one parameter, the options, that ends in them: `return { |options| [name: …] }`"
+            )
+        );
     }
-    let errs = contract_errors(declared(Form::Manifest), "return { |options| [nam: 'p'] }");
-    assert_eq!(codes_of(&errs), ["T0076", "T0021"], "{errs:?}");
-    let made = "let mk = { |n options| return [name: $n] }\nlet f = mk 'p'\nreturn $f";
-    assert!(contract_errors(declared(Form::Manifest), made).is_empty());
+    let src = "return { |options| [nam: 'p'] }";
+    let errs = table_errors(declared(Form::Manifest), src);
+    assert_eq!(codes_of(&errs), ["T0081", "T0076"], "{errs:?}");
+    for (err, expected) in errs.iter().zip(["[nam: 'p']", "'p'"]) {
+        let pos = err.pos.expect("a located factory result error");
+        assert_eq!(&src[pos.start as usize..pos.end as usize], expected);
+    }
+    let made = "let mk = { |n options| return [name: $n] }\nlet factory = mk 'p'\nreturn $factory";
+    let errs = table_errors(declared(Form::Manifest), made);
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert_eq!(
+        errs[0].kind.render_label(),
+        "`$factory` hides which keys it holds"
+    );
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some(
+            "write each key here and compute only the values: `return [name: …]`; `$factory` cannot stand for the options"
+        )
+    );
+    assert_error_in(made, &errs[0], "$factory");
+}
+
+#[test]
+fn factory_body_scalar_advice_names_the_body_not_the_file() {
+    let src = "return { |options| return 3 }";
+    let errs = table_errors(declared(Form::Manifest), src);
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert!(matches!(
+        errs[0].kind,
+        TypeErrorKind::OptionsNotWritten {
+            context: OptionsContext::FactoryBody,
+            ..
+        }
+    ));
+    assert_eq!(
+        errs[0].message(),
+        "this factory body is read as `plugin manifest`'s options, so it must end in them written out, `return [name: …]`"
+    );
+    assert_eq!(errs[0].kind.render_label(), "not a record");
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some("end the factory body in `return [name: …]`")
+    );
+    let pos = errs[0].pos.expect("the factory body's scalar tail");
+    assert_eq!(&src[pos.start as usize..pos.end as usize], "3");
 }
 
 #[test]
 fn return_schema_refuses_a_scalar() {
-    let errs = contract_errors(declared(Form::Rc), "return 3");
+    let errs = schema_errors("return 3");
     assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
 }
 
-/// `()` is the empty keyset: fine for a table with nothing required, and a
-/// missing `name` for the manifest.
+/// `()` is empty options only when no key is required.
 #[test]
 fn return_schema_reads_unit_as_nothing_to_set() {
-    assert!(contract_errors(declared(Form::Rc), "return ()").is_empty());
-    assert!(contract_errors(declared(Form::Grant), "return ()").is_empty());
-    let errs = contract_errors(declared(Form::Manifest), "return ()");
-    assert_eq!(codes_of(&errs), ["T0021"], "{errs:?}");
-}
-
-/// A file with no returning phrase evaluates to `()`, so it is ascribed as
-/// `return ()` is.
-#[test]
-fn return_schema_reads_a_file_with_no_returning_phrase_as_unit() {
-    for src in ["", "let name = 'p'"] {
-        assert!(
-            contract_errors(declared(Form::Rc), src).is_empty(),
-            "{src:?}"
-        );
-        let errs = contract_errors(declared(Form::Manifest), src);
-        assert_eq!(codes_of(&errs), ["T0021"], "{src:?}: {errs:?}");
+    assert!(table_errors(declared(Form::Grant), "return ()").is_empty());
+    for form in [Form::Rc, Form::Manifest] {
+        let errs = table_errors(declared(form), "return ()");
+        assert_eq!(codes_of(&errs), ["T0081"], "{form:?}: {errs:?}");
     }
 }
 
-/// A return typed at a variable is the runtime check's.
+/// An empty file means `()`; a trailing `let` never writes options.
 #[test]
-fn return_schema_leaves_a_decoded_value_to_the_runtime_check() {
-    assert!(contract_errors(declared(Form::Rc), "return !{from-json}").is_empty());
+fn return_schema_reads_a_file_with_no_returning_phrase_as_unit() {
+    assert!(table_errors(declared(Form::Grant), "").is_empty());
+    for form in [Form::Rc, Form::Manifest] {
+        let errs = table_errors(declared(form), "");
+        assert_eq!(codes_of(&errs), ["T0081"], "{form:?}: {errs:?}");
+    }
+    for form in [Form::Rc, Form::Grant, Form::Manifest] {
+        let src = "let name = 'p'";
+        let errs = table_errors(declared(form), src);
+        assert_eq!(codes_of(&errs), ["T0077"], "{form:?}: {errs:?}");
+        assert_eq!(errs[0].kind.render_label(), "a `let`");
+        let key = declared(form).offered()[0];
+        let nothing = if matches!(form, Form::Grant) {
+            ", or `return ()` to set nothing"
+        } else {
+            ""
+        };
+        assert_eq!(
+            errs[0].hint(),
+            Some(format!("end the file in `return [{key}: …]`{nothing}"))
+        );
+        assert_error_in(src, &errs[0], src);
+    }
 }
 
-/// Ascription reads a finished result, so the order of independent statements
-/// decides nothing.
 #[test]
-fn return_schema_gives_one_verdict_in_either_statement_order() {
-    let one = "let a = [surfase: 1]\nlet b = [bell: 2]\nreturn [...$a, ...$b]";
-    let two = "let b = [bell: 2]\nlet a = [surfase: 1]\nreturn [...$a, ...$b]";
-    let render = |src| {
-        let mut msgs: Vec<_> = contract_errors(declared(Form::Rc), src)
-            .iter()
-            .map(|e| e.kind.render_message())
-            .collect();
-        msgs.sort();
-        msgs
+fn rc_empty_options_list_every_missing_key_with_a_pasteable_hint() {
+    let table = declared(Form::Rc);
+    let expected = [
+        "umask",
+        "limits",
+        "env",
+        "prompt",
+        "handlers",
+        "bindings",
+        "edit-mode",
+        "bell",
+        "surface",
+        "recursion-limit",
+        "plugins",
+        "startup",
+        "theme",
+    ];
+    let defaults = table.keys.iter().map(|key| key.blank).collect::<Vec<_>>();
+    let fields = table
+        .keys
+        .iter()
+        .map(|key| {
+            format!(
+                "{}: {}",
+                key.label,
+                key.blank.expect("an rc key has a blank")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    for src in ["return ()", ""] {
+        let errs = table_errors(table, src);
+        assert_eq!(codes_of(&errs), ["T0081"], "{src:?}: {errs:?}");
+        let TypeErrorKind::OptionsMissing {
+            form,
+            missing,
+            blanks,
+        } = &errs[0].kind
+        else {
+            panic!("expected missing options: {errs:?}");
+        };
+        assert_eq!(*form, "rc");
+        assert_eq!(missing, &expected);
+        assert_eq!(blanks, &defaults);
+        assert_eq!(
+            errs[0].message(),
+            format!("`rc` is missing required keys: {}", expected.join(", "))
+        );
+        let hint = errs[0].hint().expect("rc supplies every blank");
+        assert_eq!(
+            hint,
+            format!("write them at their defaults, `` {fields} ``")
+        );
+        let pasted = hint
+            .strip_prefix("write them at their defaults, `` ")
+            .unwrap()
+            .strip_suffix(" ``")
+            .unwrap();
+        let repaired = format!("return [{pasted}]");
+        let errs = table_errors(table, &repaired);
+        assert!(errs.is_empty(), "the hint must paste cleanly: {errs:?}");
+    }
+    let errs = table_errors(table, &rc_source(&[]));
+    assert!(errs.is_empty(), "every blank checks: {errs:?}");
+}
+
+#[test]
+fn rc_partial_nested_settings_have_pasteable_inherit_hints() {
+    for (key, written, missing, defaults) in [
+        (
+            "limits",
+            "open-files: `set 128",
+            &["core-bytes", "stack-bytes"][..],
+            "core-bytes: `inherit, stack-bytes: `inherit",
+        ),
+        (
+            "theme",
+            "value-prefix: `set '=> '",
+            &["value-color"][..],
+            "value-color: `inherit",
+        ),
+    ] {
+        let partial = format!("[{written}]");
+        let src = rc_source(&[(key, &partial)]);
+        let errs = table_errors(declared(Form::Rc), &src);
+        assert_eq!(codes_of(&errs), ["T0081"], "{src}: {errs:?}");
+        let TypeErrorKind::OptionsMissing {
+            form,
+            missing: found,
+            blanks,
+        } = &errs[0].kind
+        else {
+            panic!("expected missing nested settings: {errs:?}");
+        };
+        assert_eq!(*form, format!("rc {key}"));
+        assert_eq!(found, missing);
+        assert_eq!(blanks, &vec![Some("`inherit"); missing.len()]);
+        assert_eq!(
+            errs[0].message(),
+            format!(
+                "`rc {key}` is missing required keys: {}",
+                missing.join(", ")
+            )
+        );
+        assert_eq!(
+            errs[0].kind.render_label(),
+            format!("missing: {}", missing.join(", "))
+        );
+        let pos = errs[0].pos.expect("the incomplete nested record");
+        assert_eq!(&src[pos.start as usize..pos.end as usize], partial);
+        let hint = errs[0]
+            .hint()
+            .expect("nested settings declare inherit blanks");
+        assert_eq!(
+            hint,
+            format!("write them at their defaults, `` {defaults} ``")
+        );
+        let pasted = hint
+            .strip_prefix("write them at their defaults, `` ")
+            .unwrap()
+            .strip_suffix(" ``")
+            .unwrap();
+        let complete = format!("[{written}, {pasted}]");
+        let repaired = rc_source(&[(key, &complete)]);
+        let errs = table_errors(declared(Form::Rc), &repaired);
+        assert!(
+            errs.is_empty(),
+            "the nested hint must paste cleanly: {repaired}: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn rc_umask_set_payload_uses_the_settings_vocabulary() {
+    let src = rc_source(&[("umask", "`set 22")]);
+    let errs = table_errors(declared(Form::Rc), &src);
+    assert_eq!(codes_of(&errs), ["T0010"], "{errs:?}");
+    let key = declared(Form::Rc)
+        .keys
+        .iter()
+        .find(|key| key.label == "umask")
+        .unwrap();
+    let Some(ral_core::typecheck::Reason::Vocabulary(vocab)) = &key.reason else {
+        panic!("umask has a setting vocabulary");
     };
-    assert_eq!(render(one).len(), 2);
-    assert_eq!(render(one), render(two));
+    assert_eq!(errs[0].hint().as_deref(), Some(vocab.payload), "{errs:?}");
+    assert_error_in(&src, &errs[0], "`set 22");
+    let repaired = rc_source(&[("umask", "`set '022'")]);
+    let errs = table_errors(declared(Form::Rc), &repaired);
+    assert!(errs.is_empty(), "a string setting checks: {errs:?}");
+}
+
+/// A decoded value cannot hide the file's keys.
+#[test]
+fn return_schema_refuses_a_decoded_value() {
+    let src = "return !{from-json}";
+    let errs = schema_errors(src);
+    assert_eq!(codes_of(&errs), ["T0077"], "{errs:?}");
+    assert_eq!(
+        errs[0].kind.render_label(),
+        "a computed value hides its keys"
+    );
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some("write each key here and compute only the values: `return [n: $value, …]`")
+    );
+    assert_error_in(src, &errs[0], "!{from-json}");
 }
 
 /// `$x` is bound by an earlier top-level `let` — a separate `Phrase::Define`
-/// from the final `return`'s own phrase — and the contract must resolve it
+/// from the final `return`'s own phrase — and checking options must resolve it
 /// too, not misreport it as unbound.
 #[test]
 fn return_schema_resolves_an_earlier_top_level_let() {
@@ -846,10 +1153,8 @@ fn return_schema_resolves_an_earlier_top_level_let() {
 
 // ─── grant tables ─────────────────────────────────────────────────────────────
 //
-// `grant` holds `net`, `gpu`, `editor` and `shell` to closed variants where they are
-// written, and queues `exec` and `fs` to be ascribed against their nested
-// tables once inference has finished, so the verdict is the same inline,
-// bound, and returned from a profile.
+// `grant` checks closed variants and written nested tables key by key during
+// generation, both at a form and at a profile's tail. Values may be computed.
 
 fn grant_messages(src: &str) -> Vec<String> {
     raw_errors(src).iter().map(TypeError::message).collect()
@@ -882,7 +1187,7 @@ fn grant_accepts_the_typed_surface_inline_computed_and_as_a_profile() {
     let computed = "let tool = 'rg'\nlet shared = [`absolute /usr/share]\n\
                     grant [exec: [allow: [`name $tool]], fs: [read: [...$shared]]] { return 1 }";
     assert_eq!(grant_messages(computed), Vec::<String>::new());
-    let profile = contract_errors(declared(Form::Grant), &format!("return {GRANT_SURFACE}"));
+    let profile = table_errors(declared(Form::Grant), &format!("return {GRANT_SURFACE}"));
     assert!(profile.is_empty(), "{profile:?}");
 }
 
@@ -898,7 +1203,7 @@ fn grant_rejects_an_under_applied_body() {
 fn grant_names_a_misspelt_place_in_the_places_words() {
     let sources = [
         "grant [fs: [read: [`cwdd .]]] { return 1 }",
-        "let t = [read: [`cwdd .]]\ngrant [fs: $t] { return 1 }",
+        "let t = [`cwdd .]\ngrant [fs: [read: $t]] { return 1 }",
     ];
     for src in sources {
         let (msgs, hints) = (grant_messages(src), grant_hints(src));
@@ -915,7 +1220,7 @@ fn grant_names_a_misspelt_place_in_the_places_words() {
             "the vocabulary replaces the row hint: {hints:?}"
         );
     }
-    let errs = contract_errors(declared(Form::Grant), "return [fs: [read: [`cwdd .]]]");
+    let errs = table_errors(declared(Form::Grant), "return [fs: [read: [`cwdd .]]]");
     assert_eq!(codes_of(&errs), ["T0020"], "{errs:?}");
     assert!(errs[0].message().starts_with("`` `cwdd `` is not a place"));
 }
@@ -1022,7 +1327,7 @@ fn grant_steers_a_detach_option_to_the_shell_verb() {
     let hint = errs[0].hint().unwrap();
     assert!(hint.contains("`detach` is a shell verb"), "{hint}");
     assert!(hint.contains("`` shell: [`chdir, `detach] ``"), "{hint}");
-    let errs = contract_errors(declared(Form::Grant), "return [detach: true]");
+    let errs = table_errors(declared(Form::Grant), "return [detach: true]");
     assert_eq!(codes_of(&errs), ["T0026"], "{errs:?}");
 }
 
@@ -1070,24 +1375,22 @@ fn grant_refuses_an_unknown_verb_with_the_nearest_one() {
     );
 }
 
-/// A tag's payload is typed wherever the table sits: bound, or returned from
-/// a profile.
+/// A tag's payload is typed in a bound list and in a profile alike.
 #[test]
-fn grant_refuses_a_wrongly_typed_payload_in_a_bound_table_and_a_profile() {
-    for (axis, table) in [
-        ("fs", "[read: [`cwd 1]]"),
-        ("exec", "[allow: [`name false]]"),
+fn grant_refuses_a_wrongly_typed_payload_in_a_bound_list_and_a_profile() {
+    for (axis, key, list) in [
+        ("fs", "read", "[`cwd 1]"),
+        ("exec", "allow", "[`name false]"),
     ] {
         let bound = raw_errors(&format!(
-            "let t = {table}\ngrant [{axis}: $t] {{ return 1 }}"
+            "let t = {list}\ngrant [{axis}: [{key}: $t]] {{ return 1 }}"
         ));
-        assert_eq!(codes_of(&bound), ["T0010"], "bound {table}: {bound:?}");
-        let profile = contract_errors(declared(Form::Grant), &format!("return [{axis}: {table}]"));
-        assert_eq!(
-            codes_of(&profile),
-            ["T0010"],
-            "profile {table}: {profile:?}"
+        assert_eq!(codes_of(&bound), ["T0010"], "bound {list}: {bound:?}");
+        let profile = table_errors(
+            declared(Form::Grant),
+            &format!("return [{axis}: [{key}: {list}]]"),
         );
+        assert_eq!(codes_of(&profile), ["T0010"], "profile {list}: {profile:?}");
     }
 }
 
@@ -1097,8 +1400,7 @@ fn grant_refuses_a_place_given_no_payload() {
     assert_eq!(codes_of(&errs), ["T0010"], "{errs:?}");
 }
 
-/// A nested table is a record, as a profile is: a map and `()` are refused
-/// with the record spelling.
+/// Nested keys must be written, even for empty options.
 #[test]
 fn grant_refuses_a_map_or_unit_as_a_nested_table() {
     for table in ["[:]", "[:, allow: []]", "()"] {
@@ -1106,20 +1408,36 @@ fn grant_refuses_a_map_or_unit_as_a_nested_table() {
         let errs = raw_errors(&src);
         assert_eq!(codes_of(&errs), ["T0079"], "{table}: {errs:?}");
         let hint = errs[0].hint().unwrap();
-        assert!(hint.contains("a grant table is a record"), "{hint}");
-        assert!(hint.contains("exec: [allow: []]"), "{hint}");
+        assert_eq!(
+            errs[0].message(),
+            "`exec` is a table: its keys are written where it is, `exec: [allow: …]`"
+        );
+        assert_eq!(
+            hint,
+            "write the keys and compute only the values, `exec: [allow: $v]`"
+        );
+        assert_eq!(
+            errs[0].kind.render_label(),
+            if table == "()" {
+                "`()` is no table"
+            } else {
+                "a map"
+            }
+        );
     }
-    let errs = contract_errors(declared(Form::Grant), "return [fs: ()]");
+    let errs = table_errors(declared(Form::Grant), "return [fs: ()]");
     assert_eq!(codes_of(&errs), ["T0079"], "{errs:?}");
-    assert!(errs[0].hint().unwrap().contains("fs: [read: []]"));
+    assert_eq!(
+        errs[0].hint().as_deref(),
+        Some("write the keys and compute only the values, `fs: [read: $v]`")
+    );
 }
 
 #[test]
 fn grant_shares_the_nested_tables_unknown_key_facts() {
     let errs = raw_errors("grant [exec: [allwo: []]] { return 1 }");
     assert_eq!(codes_of(&errs), ["T0076"], "{errs:?}");
-    let Some(ral_core::typecheck::contract::Holds::Table(table)) =
-        declared(Form::Grant).holds("exec")
+    let Some(ral_core::typecheck::table::Holds::Table(table)) = declared(Form::Grant).holds("exec")
     else {
         panic!("exec holds a nested table");
     };
@@ -1139,27 +1457,90 @@ fn grant_shares_the_nested_tables_unknown_key_facts() {
     );
 }
 
-/// The nested check reads the table's type as it then stands, so a later
-/// statement that fixes it is seen whichever side of the form it sits.
+/// Each ordering rejects `cwdd` at the equation that encounters the closed row.
 #[test]
-fn grant_nested_check_does_not_depend_on_statement_order() {
-    let form = "grant [exec: $t] { return 1 }";
-    let fix = "let _ = [$t, [allow: [`cwdd .]]]";
-    for body in [format!("{form}\n{fix}"), format!("{fix}\n{form}")] {
+fn grant_written_nested_table_checks_a_list_in_either_statement_order() {
+    let form = "grant [exec: [allow: $t]] { return 1 }";
+    let fix = "let _ = [$t, [`cwdd .]]";
+    for (body, grant_first) in [
+        (format!("{form}\n{fix}"), true),
+        (format!("{fix}\n{form}"), false),
+    ] {
         let src = format!("let f = {{ |t|\n{body}\n}}");
         let errs = raw_errors(&src);
-        assert_eq!(codes_of(&errs), ["T0020"], "{src}: {errs:?}");
+        let [err] = &errs[..] else {
+            panic!("{src}: {errs:?}");
+        };
+        let (code, blamed) = if grant_first {
+            assert!(
+                matches!(&err.kind, TypeErrorKind::RowMissingField { label } if label == "`cwdd"),
+                "{src}: {err:?}"
+            );
+            ("T0021", "[`cwdd .]")
+        } else {
+            assert!(
+                matches!(&err.kind, TypeErrorKind::RowExtraField {
+                    label: ral_core::ty::Label::Case(tag), ..
+                } if tag == "cwdd"),
+                "{src}: {err:?}"
+            );
+            ("T0020", "$t")
+        };
+        assert_eq!(err.kind.code(), code, "{src}: {err:?}");
+        let pos = err
+            .pos
+            .expect("the rejected equation has a source location");
+        let start = src.rfind(blamed).unwrap();
+        assert_eq!(
+            (pos.start as usize, pos.end as usize),
+            (start, start + blamed.len()),
+            "{src}: {err:?}"
+        );
     }
 }
 
-/// A table typed at a variable is never constrained and never refused: a
-/// generic function's parameter is the runtime decoder's.
+/// A table's keys cannot be hidden behind a binding or parameter.
 #[test]
-fn grant_leaves_an_unresolved_table_to_the_decoder() {
-    let src = "let exec-of = { |table| grant [exec: $table] { return 1 } }\n\
-               let _ = exec-of [allow: [`name git]]\n\
-               let _ = exec-of [allow: [`cwdd .]]";
-    assert_eq!(grant_messages(src), Vec::<String>::new());
+fn grant_refuses_bound_and_parameter_tables_and_checks_parameter_lists() {
+    for src in [
+        "let table = [allow: [`name git]]\ngrant [exec: $table] { return 1 }",
+        "let exec-of = { |table| grant [exec: $table] { return 1 } }",
+    ] {
+        let errs = raw_errors(src);
+        assert_eq!(codes_of(&errs), ["T0079"], "{src}: {errs:?}");
+        assert!(matches!(
+            errs[0].kind,
+            TypeErrorKind::TableNotWritten {
+                key: "exec",
+                first: Some("allow"),
+                ..
+            }
+        ));
+        assert_eq!(
+            errs[0].kind.render_label(),
+            "`$table` hides which keys it holds"
+        );
+        assert_eq!(
+            errs[0].hint().as_deref(),
+            Some("write the keys and compute only the values, `exec: [allow: $v]`")
+        );
+        assert_error_in(src, &errs[0], "$table");
+    }
+    let exec_of = "let exec-of = { |allow| grant [exec: [allow: $allow]] { return 1 } }";
+    let good = format!("{exec_of}\nlet _ = exec-of [`name git]");
+    assert_eq!(grant_messages(&good), Vec::<String>::new());
+    let bad = format!("{exec_of}\nlet _ = exec-of [`cwdd .]");
+    let errs = raw_errors(&bad);
+    assert_eq!(codes_of(&errs), ["T0020"], "{errs:?}");
+    assert!(matches!(
+        &errs[0].kind,
+        TypeErrorKind::RowExtraField {
+            label: ral_core::ty::Label::Case(tag),
+            ..
+        } if tag == "cwdd"
+    ));
+    let pos = errs[0].pos.expect("a located rejected argument");
+    assert_eq!(&bad[pos.start as usize..pos.end as usize], "[`cwdd .]");
 }
 
 // ─── IR capture annotation ────────────────────────────────────────────────────

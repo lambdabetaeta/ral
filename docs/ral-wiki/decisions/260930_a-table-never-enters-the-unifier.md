@@ -1,7 +1,27 @@
 ---
 status: accepted
-generated_at_commit: 2d05ef216180fc2454ccef6f4ed4d4c65bf69136
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
 ---
+
+> **Amended 2026-11-11 — Written host options.** Host files follow SPEC
+> §15.3: their options and nested tables are written records, checked key by
+> key during generation, as at `within` and `grant`. This supersedes the
+> return-ascription bullet below and the “Live return contracts” amendment:
+> no inferred-row walk, return-ascription factory equations,
+> queued nested checks, scratch table judgement or solver `Settled` phase.
+> Fields are ordinary uses that may constrain binding and application
+> matches and reach decoder admission sites before readback.
+>
+> A manifest factory is a written one-parameter block, one level deep.
+> The rc writes all thirteen keys and every `limits:` and `theme:` key;
+> `` `inherit `` and `` `set v `` state retention or override explicitly.
+> `()` is empty options only without required keys, as in a grant profile.
+> Collection keys remain data; written `handlers:` maps are checked arm by
+> arm in separate regions everywhere, bound or computed maps by one equation.
+> The rc and manifest decoders retain value-shape, domain and installation
+> checks, not result-shape or keyset checks. The table still never becomes a
+> unified record type; the row and spread decisions below stand.
 
 > **Amended 2026-11-11 — Live return contracts.** Generate on `Solver`,
 > settle every remaining elaboration decision into `Settled`, hold the return

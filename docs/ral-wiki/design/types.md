@@ -167,12 +167,12 @@ because the value binding wins. Stub it by binding its name
 A `()`-returning stub is admitted when its grade is free and captures `""`.
 A call through the arm types as its head does; no handler scheme is persisted.
 A mismatch is `Reason::StandsIn`; the name supplies diagnostic wording only.
-`within` checks a written `handlers:` map entry by entry through `stands_in`,
-with a name and site for each diagnostic. Any other value, and rc/manifest
-`handlers:`, is held by one equation against `Map(U([String] → Command))`;
-a record is refused, with the map spelling. The catch-all also uses the arm
-rule. Only persistent handlers retain the run-time vet (`arm_stands_in`),
-which yields a verdict, not a scheme. Imported arms retain their module's
+`within`, rc and manifest options check a written `handlers:` map entry by
+entry through `stands_in`, each arm in its own region, with a name and site
+for each diagnostic. A bound or computed map is held by one equation against
+`Map(U([String] → Command))`; a record is refused, with the map spelling.
+The catch-all also uses the arm rule. Only persistent handlers retain the
+run-time vet (`arm_stands_in`), which yields a verdict, not a scheme. Imported arms retain their module's
 sites. `within`'s static check is total and needs no install-time vet. An arm's
 parameters are its slot's, read off its type, never its spelling (SPEC §17.7).
 
@@ -184,19 +184,14 @@ contract, with incompatible applications or results raising when reached.
 This is not certification of every function body before invocation, nor
 inference at scoped handler installation (SPEC §10.3).
 
-## A return contract is a use, not an elaboration rule
+## A host file's options are uses
 
-**Infer the structure, settle its elaboration, then hold its result live.**
-Like ML signature matching, a return contract may fix weak variables, but
-never chooses a `let` mode or call split. The settled phase cannot open a
-hole. Only afterwards do gates and scratch-only nested tables close the unit,
-and readback freeze sites, schemes and readmissions.
-
-A declared table is consulted field by field, not unified as a record type.
-Its live equations therefore reach decoder admission sites: returning decoded
-`5` under `umask:` is refused at the decode, naming the use requiring text.
-Final keyset checks and scratch judgement of fields revealed after the live
-walk require neither repeated inference nor a fixpoint
+**A host file writes its options**, checked key by key during generation as
+`within` and `grant` options are, with nested tables written too (SPEC §15.3).
+Each field is an ordinary use: its equations may constrain binding and
+application matches and reach decoder admission sites before freezing.
+Generation is followed by unit closure and readback, with no inferred-row
+ascription, queued table check or scratch judgement
 ([[internals/type-inference|type inference]]).
 
 ## Branching is HM over thunks, joined by grade

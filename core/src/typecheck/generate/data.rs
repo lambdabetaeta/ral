@@ -38,7 +38,7 @@ fn spell_key(key: &Key) -> String {
 }
 
 impl Generator {
-    fn diagnose_if_duplicate<'a>(
+    pub(super) fn diagnose_if_duplicate<'a>(
         &mut self,
         key: &str,
         existing: impl Iterator<Item = &'a str>,

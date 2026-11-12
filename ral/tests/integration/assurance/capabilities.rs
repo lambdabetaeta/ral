@@ -451,34 +451,6 @@ fn an_unread_interpreter_is_refused_naming_the_read_it_needs() {
     assert!(!out.stderr.contains("does not exist"), "{}", out.stderr);
 }
 
-/// A table reaching `exec:` through a parameter is left to the runtime
-/// decoder, which must refuse an ill-shaped one *before* the grant frame is
-/// pushed and the body entered.
-#[test]
-fn undecodable_exec_table_passes_the_checker_and_is_refused_at_run() {
-    let src = "let g = { |t| grant [exec: $t] { echo BODYRAN } }; g [git: 5]";
-    assert_eq!(
-        ral(&["--check", "-c", src]).status,
-        0,
-        "the checker does not constrain a parameter"
-    );
-    let out = ral(&["-c", src]);
-    assert_ne!(out.status, 0, "an argument policy must not decode");
-    assert!(
-        out.stderr.contains(
-            "grant exec: grant: field \"exec\": unknown field \"git\"; offered: allow, deny"
-        ),
-        "expected the exec-table diagnostic; got:\n{}",
-        out.stderr
-    );
-    // stdout only: stderr echoes the source line inside the ariadne snippet.
-    assert!(
-        !out.stdout.contains("BODYRAN"),
-        "the body must not run under an undecodable grant; stdout:\n{}",
-        out.stdout
-    );
-}
-
 /// A confined command can fork; macOS also sets a hard process budget.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]

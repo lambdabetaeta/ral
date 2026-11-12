@@ -72,6 +72,9 @@ impl Report {
             return self.plain();
         };
         let name = &**src.name();
+        if src.as_str().is_empty() {
+            return format!("{name}:1:1: {}", self.plain());
+        }
         let label = |l: &Label, color| {
             ariadne::Label::new((name, caret(src, l.span)))
                 .with_message(&l.text)
@@ -118,7 +121,7 @@ impl Report {
 
 /// The bytes a caret underlines: `span` widened to one whole char where it is
 /// empty, the last char at the end of the input.  Ariadne drops a label that
-/// is out of range or empty, so every caret is made drawable here.
+/// is out of range or empty; truly empty sources bypass its drawer.
 fn caret(src: &Source, span: Option<Span>) -> Range<usize> {
     let text = src.as_str();
     let (start, end) = span.map_or((text.len(), text.len()), |s| {
@@ -137,6 +140,27 @@ fn caret(src: &Source, span: Option<Span>) -> Range<usize> {
 mod tests {
     use super::*;
     use crate::source::{FileId, SourceOrigin};
+
+    #[test]
+    fn empty_labelled_source_renders_its_location_message_and_help() {
+        let source = Source::from_text(SourceOrigin::named("empty-file"), "");
+        let report = Report {
+            code: Some("T0081"),
+            message: "missing required keys".into(),
+            at: Some(Label {
+                span: Some(Span::point(FileId(0), 0)),
+                text: "missing keys".into(),
+            }),
+            also: None,
+            hint: Some("write the required keys".into()),
+        };
+        assert_eq!(
+            report.render(&source),
+            format!("empty-file:1:1: {}", report.plain())
+        );
+        let spanless = Report { at: None, ..report };
+        assert_eq!(spanless.render(&source), spanless.plain());
+    }
 
     #[test]
     fn caret_width_is_the_span_for_multibyte() {

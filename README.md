@@ -99,6 +99,12 @@ ral --audit script.ral    # audit report as JSON on stderr
 `ral-sh` is ral by another name, for `chsh`: interactive sessions get ral,
 POSIX command strings and scripts go to `/bin/sh`, so scp and rsync never notice.
 
+For interactive configuration, copy [docs/rc.example](docs/rc.example) to
+`~/.config/ral/rc`. The rc writes all thirteen top-level keys and every nested
+`limits` and `theme` key; `` `inherit `` keeps ral's or the system's existing setting,
+and `` `set v `` overrides it. See
+[SPEC §15.3](docs/SPEC.md#153-startup-files-and-rc-configuration).
+
 ## Around the shell
 
 - **[exarch](exarch/README.md)** — a coding agent whose only tool is ral; its

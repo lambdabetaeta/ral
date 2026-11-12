@@ -1,5 +1,5 @@
-<!-- verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57 -->
-<!-- generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57 -->
+<!-- verified_at_commit: c4bd558f -->
+<!-- generated_at_commit: c4bd558f -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -714,11 +714,8 @@ makes every written key in that literal data. `[a: 1, "b c": 2, 'd': 3]`
 is a record.
 
 There is no empty-record literal: `[]` is the empty list, not `[a: 1]` with
-its fields removed. A contract file (an rc file, a plugin manifest, a
-capability profile; §12.12, §15.3, §15.5) that has nothing to set returns
-`()`, which it reads as the empty keyset; one that returns a record is
-ascribed its declared keyset before the file runs at all, and one that returns
-a map or `[]` is refused there, with the spelling to use.
+its fields removed. A host file (§15.3) ends in its options written out;
+`()` means no options only where its table has no required keys.
 
 ```ral
 let record = [host: 'db', port: 5432]
@@ -2788,11 +2785,10 @@ A nested block's bindings stay local, but its shell-state writes, such as `cd`, 
 
 Interactive sessions load their rc file unless `--norc` (or its
 `--noprofile` alias) is given. Login sessions additionally load the system and
-user login profiles. These are ral source with host-level result contracts:
-each login profile must return `Unit`, while the rc file must return a
-configuration `Map`. Their evaluation is not transactional, so bindings and
-effects completed before a runtime failure, `exit`, or result-contract check
-remain part of the session. Applied RC bindings, handlers, environment
+user login profiles. Each login profile must return `Unit`. The rc ends in
+its options written out (§15.3), checked before it runs. Their evaluation is
+not transactional, so bindings and effects completed before a runtime failure
+or `exit` remain part of the session. Applied RC bindings, handlers, environment
 configuration, hooks, and startup behavior likewise belong to that session.
 
 ## 11. Concurrency and process lifetime
@@ -3552,9 +3548,9 @@ A capability record accepts exactly these names:
 
 Unknown names are errors, reported before the program runs. `exec` and `fs` are nested tables with the fields below; `net` takes `` `offline `` and `gpu` takes `` `withheld ``; `editor` and `shell` take lists of verbs.
 
-`grant`'s bracket is the form's own, as `within`'s is: `[]` is the empty grant, each field is written out with a value that may be computed, and a bundle or a map in its place is a parse error. A nested table is a record in the same way: a map (`exec: [:]` included) and `()` are refused statically, with the record spelling to use. The empty table is written with an empty list: `exec: [allow: []]`, `fs: [read: []]`.
+`grant`'s bracket is the form's own, as `within`'s is: `[]` is the empty grant, each field is written out with a value that may be computed, and a bundle or a map in its place is a parse error. Nested tables follow §15.3, at forms and in files alike. Write an empty list under a table's key to allow nothing: `exec: [allow: []]`, `fs: [read: []]`.
 
-The tags are types, not strings. A bare string where a place or an exec target belongs, a misspelled tag, a tag with the wrong payload, and `net: true` are refused statically, before the program runs, with the tags on offer and the nearest one named. A value the checker cannot type (a profile decoded from JSON, a parameter of a generic function) reaches the runtime decoder, which judges the same vocabulary.
+The tags are types, not strings. A bare string where a place or an exec target belongs, a misspelled tag, a tag with the wrong payload, and `net: true` are refused statically, before the program runs, with the tags on offer and the nearest one named. Unresolved field values retain runtime shape checks; grants received as data also retain runtime keyset checks.
 
 Omitting a whole field inherits that dimension. Within `fs`, an omitted `read` or `write` adds no allowances of its own (reads still follow from `write` and from what the grant runs, §12.4); a present `exec` table admits only what its `allow` list names (§12.3).
 
@@ -3838,8 +3834,8 @@ On another host, a filesystem restriction fails when no per-command sandbox back
 
 ### 12.12. Capability profiles
 
-A capability profile is an ordinary `.ral` script whose terminal value must be
-a capability record with exactly the same contract as the one `grant` accepts:
+A capability profile is an ordinary `.ral` script that writes `grant`'s
+options under the host-file rule (§15.3):
 
 ```ral
 # read-only.ral
@@ -3863,25 +3859,13 @@ ral --capabilities base.ral,offline.ral script.ral
 ```
 
 The loader parses, elaborates, type-checks, and evaluates each profile, then
-decodes that terminal value. Bindings created by the script are not projected
-into a policy as `use` bindings would be: the value itself must be the
-returned record, or `()` for a profile with nothing to set, which is the
-lattice top. `return [...]` is the direct way to make that contract explicit.
-A profile that ends in a scalar, a list, a block, or any other value is
-rejected.
-
-A profile is ascribed `grant`'s table after inference, as at the rc file
-(§15.3) and the plugin manifest (§15.5). ``return [exec: …, net: `offline]`` is a
-record, so `exec`'s misspelling as `exect` is caught statically, before the
-profile script runs at all; so is a misspelled place tag, a bare string in a
-list of places, or `net: true`, since the nested tables are ascribed too.
-`return ["exec": …]` also names the record field and is checked against the
-table. `return [:, exec: …]` is a map and is refused statically with the
-record spelling to use. A profile whose return the checker cannot type — one
-decoded from JSON — runs to completion first, and its keys are then checked
-against the same table at the moment the profile is decoded. Either way an
-unknown key or a badly-shaped value refuses the whole profile — the session
-never starts under it.
+decodes its options. Bindings created by the script are not projected into a
+policy as `use` bindings would be. Every profile key is optional: an omitted
+axis states nothing, and `return ()` is the lattice top. Nested tables follow
+§15.3 too. Unknown keys and incompatible field types are refused before the
+profile runs; unresolved field values and domains retain runtime checks.
+Either kind of failure refuses the whole profile — the session never starts
+under it.
 
 All listed profiles use the same load-time home and working directory. They
 are decoded by the same strict decoder as inline grants. Each decoded profile
@@ -3891,12 +3875,12 @@ ambient root, rather than flattened into one composite policy — the ceiling
 they form is whatever the ordinary per-check fold of that stack decides. Later
 inline grants may narrow that ceiling but cannot widen it.
 
-A profile computed in the language is a profile file, then, not an inline
-bundle: `grant`'s bracket writes its fields, so `grant $p[policy] { … }` does not
-parse. ``grant [fs: [read: $paths], net: `offline] { … }``, with computed *values*, does.
+Profile field values may be computed, as at inline grants:
+``grant [fs: [read: $paths], net: `offline] { … }``. A bound bundle in place
+of `grant`'s bracket, `grant $p[policy] { … }`, does not parse.
 
-Compilation or runtime failure in a profile, a terminal value that is not a
-record, a map or `()` where a nested table belongs, unknown fields at any
+Compilation or runtime failure in a profile, an unwritten options tail
+(§15.3), a map or `()` where a nested table belongs, unknown fields at any
 depth, a bare string where a place or exec target belongs, an unknown tag,
 verb, or `net` or `gpu` value, a tag with the wrong payload, an obsolete argument
 restriction (`only`, or a list of subcommands), a selector in an `fs` list, an
@@ -4902,93 +4886,122 @@ If neither exists, ral attempts to create a documented skeleton at the first
 available location. `--norc`, also accepted as `--noprofile`, skips both login
 environment adoption and the RC file.
 
-The RC file is ordinary ral source and its file-level result must be a record
-of configuration keys, or `()` for a file with nothing to set. Every other
-result shape is rejected. For example:
+**Host files write their options.** An rc file, a plugin manifest (§15.5), or
+a capability profile (§12.12) is checked against its declared table during
+constraint generation, key by key, exactly as `within` and `grant` options
+are. This is a syntactic rule on the elaborated tail, not a check of an
+inferred return row.
 
-```ral
-return [
-    edit-mode: vi,
-    bell: false,
-    surface: readline,
-    recursion-limit: 1024,
+The tail is the last phrase. For a `Run(M)`, descend through `Bind.rest` and
+`Seq.rest` to its terminal computation, preserving the environment of hoisted
+binds. The accepted tails are:
 
-    prompt: { return "!{abbreviate-home !{cwd}} ❯ " },
-    env: [EDITOR: 'vim', PAGER: 'less'],
-    bindings: [work: '/srv/work'],
-    handlers: [:, ll: { |args| ls -lh ...$args }],
-    theme: [value-prefix: '⇒ ', value-color: cyan],
-    startup: { echo 'ready' },
-]
-```
+- `Return(Val::Record(fields))`: a record literal, with `return` or bare.
+  Every key is written; values may be arbitrary expressions.
+- `Return(Val::Unit)`: `()`, read as empty options.
+- Only for a manifest, `Return(Val::Thunk(b))` where `b` is a `Lam` with
+  exactly one parameter and its body is not another `Lam`: a written
+  `{ |options| … }`. Its body's tail follows the first two cases, not this
+  one. Factories are one level deep.
 
-The recognized fields are:
+An empty file reads as `()`. A top-level `let` as the last phrase is T0077:
+it is not the file's options. Bare `return` means `()` too. Inside a factory,
+an empty body or one ending in `let` elaborates to `return ()` and follows
+that case; it therefore lacks the manifest's required `name` (T0081).
 
-| Field | Meaning |
-|---|---|
-| `env: Record` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
-| `prompt: Block` | Install the zero-argument base-prompt body. |
-| `bindings: Record` | Install lexical values, including functions. |
-| `handlers: Map(U([String] → Command))` | Install command handlers (§9.4); use `bindings:` for lexical values and functions. |
-| `edit-mode: String` | `emacs` or `vi`; default `emacs`. |
-| `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
-| `surface: String` | `minimal` or `readline`; default `readline`. |
-| `umask: String` | Unix creation mask: 1–4 octal digits, at most `0777`, e.g. `'077'` or `'0022'`. Applies to ral's own creates and every child. Refused on Windows. |
-| `limits: Record` | Unix child soft limits: optional non-negative `Int` keys `open-files`, `core-bytes`, `stack-bytes`, no greater than ral's hard limit. ral's own limits stay unchanged; a grant's limits win. Refused on Windows. |
-| `recursion-limit: Int` | A positive function-call recursion limit; default `100000`. |
-| `plugins: Record` | Names each plugin and its options; loaded before the first prompt; see below. |
-| `startup: Block` | A zero-argument block run once after the map is applied. |
-| `theme: Record` | `value-prefix: String` and `value-color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
-
-The thirteen fields above are the RC file's whole keyset, and it is closed: an
-unknown top-level key is an error naming the key and the list. The check is
-over the file's *inferred* return row, not over its syntax, so a key
-misspelled inside a spread is caught exactly as one written out is:
+Every other tail is T0077 (`OptionsNotWritten`), at the tail: a bound record
+(`return $cfg`), a computed result, a spread, a map, a list, or a block not
+admitted above. A hoist of a computed tail does not make it written.
+Advice distinguishes the file's tail from a factory body's tail, and names
+an actual returned variable when showing how to write its fields explicitly.
+For example:
 
 ```ral
 let extra = [surfase: 'minimal', env: [:]]
-return [...$extra, env: [:]]        # refused — 'surfase' is not an RC key
+return [...$extra, env: [:]]        # T0077 — a spread hides its keys
 ```
 
-The table is ascribed live after all remaining elaboration decisions settle,
-as ML ascribes a signature, but before gates, nested tables and errors close
-the unit and readback freezes its sites (§17.5). It solves the returned value's
-types; it never selects a `let` mode or call split, and cannot open a hole.
-Thus `let d = echo 5 | from-json; return [umask: $d]` checks, but admission
-refuses the integer at the decode, naming the `umask:` use that requires text.
-The return must be a record, or `()`: `return ["edit-mode": 'vi']`
-is a record checked against the table, while `return ["edit_mde": 'vi']`
-has an unknown field. `return [:, edit-mode: 'vi']` is a map and `return []`
-the empty list; each is refused before the file runs, with the spelling to
-use. A file whose return the checker cannot type — `return !{from-json < rc.json}` — meets the same keyset,
-and the same field types, when the value is applied instead: an unknown key or
-a wrongly-typed value both name the mistake and refuse the whole rc,
-agreeing with the static check above — the shell starts with defaults. An
-unknown key inside `theme` produces a warning rather than a refusal.
-Unresolved field or member types also retain their runtime checks.
+At every depth, a nested table must itself be a record literal, at forms and
+in files alike. A bound table, spread, computed table, map, or `()` is T0079
+(`TableNotWritten`). Write the keys and compute only the values:
+`grant [exec: [allow: $targets]]`, not `grant [exec: $table]`.
+The keys of collections — `handlers:`, `env:`, `bindings:`, and `plugins:` —
+are data, not nested-table keys, and are outside this restriction.
 
-The `handlers:` field is held by one equation against
-`Map(U([String] → Command))` in this unit's live solver, not by per-name
-checks. Write `[:, ll: { |args| ls -lh ...$args }]`, or `[:]` for none;
-a record such as `[ll: …]` is refused with the map spelling. The equation
-reaches decoder admission sites inside locally checked handlers. Persistent
-handlers are still vetted against the same constant type at installation;
-the name supplies diagnostic wording only. A handler obtained
-through `use` retains its module's sites; unresolved returns and member types
-also require that install-time check.
+`Generator::check_options` checks each written key with `check_option`.
+Unknown keys are T0076, refused keys T0026, duplicate keys T0022. Missing
+required keys produce one T0081 (`OptionsMissing`) per table listing only the
+missing required keys, without claiming that optional keys are required:
+“`form` is missing required keys: …”. It points at the record, or at the tail
+for `()` and an empty file. When every missing key has an empty value, its
+hint supplies those values for pasting. This includes missing `limits:` and
+`theme:` keys, whose empty value is `` `inherit ``. All these checks precede
+execution. Field types are ordinary uses during generation: they may
+constrain a `let` mode or call split and reach decoder admission sites before
+readback freezes them (§17.5). The rc and manifest decoders retain value-shape
+and domain checks, not redundant checks of the host result's shape or keyset.
+Grant's decoder also handles grants received as data and keeps its runtime
+shape and keyset checks.
 
-`return [edit_mde: 'vi']` never runs the rest of the file: a misspelling is a
-compile error and the rc is skipped before its first statement executes. A
-file with nothing to set returns `()`, because there is no empty-record
-literal (§4.5) and `[]` is the empty list.
+**The rc is total.** It writes all thirteen keys below. `limits:` and
+`theme:` are total nested tables: every one of their keys is required too.
+An empty rc or `return ()` is T0081, not an rc with hidden defaults. The
+skeleton writes every key at its empty value.
 
-The same discipline holds of the other two files a host reads against a fixed
-keyset — a plugin manifest (§15.5) and a capability profile (§12.12) — and of the
-options `within` and `grant` take. Each is one declared table, and no label may
-be declared at two different types across all of them: an optional field is
-absent *at the type its label is assigned*, so a label has one such type across
-a whole check. A build whose tables break that is refused, naming both tables
-and the label.
+`Setting(T)` is the closed variant ``[`inherit, `set T]``. `` `inherit ``
+keeps what ral or the system already has; `` `set v `` overrides it.
+The empty values are exactly:
+
+| Key | Empty value | Meaning |
+|---|---|---|
+| `umask` | `` `inherit `` | `Setting(String)`: keep the process umask, or set 1–4 octal digits at most `0777`, e.g. `` `set '0022' ``. Applies to ral's own creates and every child. |
+| `limits` | `` [open-files: `inherit, core-bytes: `inherit, stack-bytes: `inherit] `` | Each key is `Setting(Int)`: keep ral's limit for children, or set a non-negative soft limit no greater than ral's hard limit. ral's own limits stay unchanged; a grant's limits win. |
+| `env` | `[:]` | Set environment entries. `PWD` and `OLDPWD` are ignored: ral derives `PWD` from its logical working directory and keeps no `OLDPWD`. |
+| `prompt` | `` `inherit `` | Keep ral's built-in prompt, or `` `set { … } `` to install a zero-argument base-prompt body. |
+| `handlers` | `[:]` | `Map(U([String] → Command))`: install command handlers (§9.4); use `bindings:` for lexical values and functions. |
+| `bindings` | `[:]` | Install lexical values, including functions. |
+| `edit-mode` | `emacs` | `String`: `emacs` or `vi`. |
+| `bell` | `false` | `Bool`: enable or disable the audible line-editor bell. |
+| `surface` | `readline` | `String`: `minimal` or `readline`. |
+| `recursion-limit` | `` `inherit `` | `Setting(Int)`: keep `--recursion-limit`, else `DEFAULT_STACK_LIMIT` (`100000`), or set a positive function-call recursion limit. |
+| `plugins` | `[:]` | Names each plugin and its options; loaded before the first prompt (§15.5). |
+| `startup` | `` `inherit `` | No startup block, or `` `set { … } `` to run a zero-argument block once after the configuration is applied. |
+| `theme` | `` [value-prefix: `inherit, value-color: `inherit] `` | Both keys are `Setting(String)`: keep `"=> "` and yellow respectively, or set a prefix and a colour (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`). |
+
+The rc decoder validates `prompt:`, `startup:`, and collection value shapes;
+setting domains such as octal masks, positive recursion limits, limit bounds,
+and colour names remain runtime checks. Windows accepts `` umask: `inherit ``
+and an all-`` `inherit `` `limits:`, refusing only actual settings.
+For example, a complete rc can choose:
+
+```ral
+return [
+    umask: `inherit,
+    limits: [open-files: `inherit, core-bytes: `inherit, stack-bytes: `inherit],
+    env: [EDITOR: 'vim', PAGER: 'less'],
+    prompt: `set { return "!{abbreviate-home !{cwd}} ❯ " },
+    handlers: [:, ll: { |args| ls -lh ...$args }],
+    bindings: [work: '/srv/work'],
+    edit-mode: vi,
+    bell: false,
+    surface: readline,
+    recursion-limit: `set 1024,
+    plugins: [:],
+    startup: `set { echo 'ready' },
+    theme: [value-prefix: `set '⇒ ', value-color: `set cyan],
+]
+```
+
+A written `handlers:` map is checked arm by arm, each in its own region,
+with duplicates refused, in the rc, manifest, and `within` alike. A bound or
+computed map is constrained as a whole to `Map(U([String] → Command))`.
+Write `[:, ll: { |args| ls -lh ...$args }]`, or `[:]` for none; a record such
+as `[ll: …]` is refused with the map spelling. These uses reach decoder
+admission sites inside locally checked handlers. Persistent handlers are
+still vetted against the same constant type at installation; names supply
+diagnostic wording only. A handler obtained through `use` retains its
+module's sites; unresolved returns and member types also require that
+install-time check.
 
 The prompt body may return a value, whose display form becomes the prompt. If
 it returns `Unit`, its captured standard output is decoded lossily after
@@ -5025,9 +5038,9 @@ such as `watch` and `_ed-*` only where they are actually installed.
 
 ### 15.5. Plugins
 
-A plugin is an ordinary ral file. Its file-level result is either a manifest
-`Map` directly or a factory taking exactly one options `Map` and returning that
-manifest. No other result shape is accepted.
+A plugin is an ordinary ral file following the host-file rule (§15.3): its
+manifest is a written record, directly or as the tail of a written
+one-parameter factory. The runtime passes the factory its options as a `Map`.
 
 ```ral
 let change = { |_old|
@@ -5060,29 +5073,22 @@ The manifest schema is:
 ]
 ```
 
-`name` is required. The other fields default to empty collections, and those
-four are the manifest's whole keyset: an unknown top-level key is an error
-naming the key and the list. A manifest the file returns is ascribed the
-table before the file runs, as at the rc file (§15.3): `return [nam: 'example']`
-is a record, so the misspelled `name` is caught statically and the plugin file
-never runs. `return ["nam": 'example']` has the same unknown record field;
-`return [:, name: 'example']` is a map, refused with the record spelling to
-use. `return ()` lacks `name`, and is refused for that. A factory is held to
-the same table before the file runs: it must be a block of one parameter, the
-options, and what it makes is ascribed as a returned manifest is, so
-`return { [name: 'example'] }` and `return { |a b| [name: 'example'] }` are
-refused statically. Factory shape and result equations run on the same live
-settled solver, after every `let` mode and call split is fixed (§15.3).
-The `name:` field can therefore solve a decoder's type. The `handlers:` field
-is a map, held by one equation against `Map(U([String] → Command))`, just as
-in the rc; written and computed keys follow the same rule. A record such as
-`[hi: …]` is refused with the map spelling `[:, hi: { |args| … }]`; `[:]`
-is the empty map. A handler returning `5` is refused statically; one returning
-decoded data is held to `Command`, so incompatible data is refused at its
-decode, naming the field use. Persistent handlers are vetted against the same
+`name` is required; the other fields are optional and default to empty
+collections. These four are the manifest's whole keyset. Unknown keys are
+T0076, and a missing `name`, including `return ()`, is T0081. Both are refused
+before the file runs. `return { [name: 'example'] }` and
+`return { |a b| [name: 'example'] }` are T0077, as is a factory made by
+application (`return $factory`); see §15.3.
+
+The `name:` field can constrain a decoder's type during generation. The
+`handlers:` map follows §15.3's arm-by-arm rule. A record such as `[hi: …]`
+is refused with the map spelling `[:, hi: { |args| … }]`; `[:]` is the empty
+map. A handler returning `5` is refused statically; one returning decoded
+data is held to `Command`, so incompatible data is refused at its decode,
+naming the field use. Persistent handlers are vetted against the same
 constant type again at installation; names supply diagnostic wording only.
-What a factory returns is checked again as it is parsed; unresolved returns,
-fields and members remain runtime questions.
+Unresolved field and member shapes, domains, and install-time checks remain
+runtime questions; the result's shape and keyset do not.
 Each declared field is checked exactly: ral does not stringify a value of the wrong
 type or silently drop a malformed handler. Hook and keybinding handlers each
 take exactly one argument. Unknown hook names, wrong handler arity, invalid
@@ -5093,8 +5099,8 @@ keybindings, or handlers installed.
 Plugins run with the authority of the live session and current grant stack. A
 manifest `capabilities:` field is rejected because it would not enforce
 confinement. Use `grant` around an invocation that needs narrower authority.
-Plugin options must be a first-order map: they cannot contain blocks, handles,
-or other non-transportable values.
+Plugin options are maps forwarded to the factory without checking their
+contents against its parameter type; they may contain blocks.
 
 Plugins load only from the RC's `plugins:` map at startup and remain installed
 for the session. A new plugin requires a new session. Each name or path is
@@ -5105,14 +5111,13 @@ resolved in this order:
 3. the literal path;
 4. the literal path with `.ral` appended.
 
-A direct manifest rejects non-empty options. Configure plugins in the RC file:
+A direct manifest rejects non-empty options. In a complete rc (§15.3), set
+its `plugins:` field to:
 
 ```ral
-return [
-    plugins: [
-        autosuggestion: [:],
-        fzf-files:      [key: 'ctrl-t'],
-    ],
+[
+    autosuggestion: [:],
+    fzf-files:      [key: 'ctrl-t'],
 ]
 ```
 
@@ -5331,7 +5336,7 @@ Script arguments are returned by `args`. Arguments are text: one that is not UTF
 
 ### 16.2. Batch processing
 
-A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed: inference builds the checked IR beside its types, inserting capture/decode at bindings and explicit forces for returned-thunk application. After inference and ascription succeed, the unit's sites are frozen and its binding schemes settled. A pipeline carries no per-stage type annotations.
+A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed: inference builds the checked IR beside its types, inserting capture/decode at bindings and explicit forces for returned-thunk application. After inference succeeds, the unit's sites are frozen and its binding schemes settled. A pipeline carries no per-stage type annotations.
 
 The batch-only inspection flags are:
 
@@ -5402,13 +5407,18 @@ therefore leaves the user a shell. Installers that write only to `~/.zprofile`
 or `~/.bashrc` are not seen. A profile's umask and resource limits are not
 adopted; use the rc's `umask:` and `limits:` instead. Windows adopts nothing.
 
-Every interactive session then reads `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc`. The rc file must return a configuration map. If neither file exists, ral may create a default rc skeleton and reports the created path. Parse, type, runtime, or return-contract errors are reported, no invalid configuration map is applied, and the user still receives a shell. An `exit` in the rc ends the session with its status.
+Every interactive session then reads `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc`.
+The rc writes all its options under §15.3, checked before it runs. If neither
+file exists, ral may create a complete default rc skeleton and reports the
+created path. Read, parse, type, runtime, and configuration-value errors are
+reported; no invalid configuration is applied, and the user still receives a
+shell. An `exit` in the rc ends the session with its status.
 
 Startup evaluation is not transactional. A read, parse, or type error prevents
-that file from running, and an invalid RC result prevents configuration-map
+that file from running, and invalid RC values prevent configuration
 application, but bindings and effects produced before a runtime failure,
-`exit`, or return-contract check are not rolled back. Boot continues after
-errors; `exit` ends the session.
+`exit`, or value validation are not rolled back. Boot continues after errors;
+`exit` ends the session.
 
 `--norc`, also accepted as `--noprofile`, skips POSIX login environment adoption and the rc file. Command-line `--recursion-limit` and `--surface` values are applied after the rc and therefore override it. Session `--capabilities` profiles are also applied after startup files: startup is operator-trusted setup, and the capability profile becomes the ceiling for subsequent work. A relative profile path names a file in the directory ral was started in, even when a startup file or an earlier profile changes directory.
 
@@ -6264,28 +6274,16 @@ settles and exports the scheme; `arm_stands_in` stores none.
 then generalizes. Opening a region around an already inferred type is too late.
 The unit's phases have this order:
 
-1. Generate equations and the pending tree on `Solver`.
-2. Settle rank zero (`Solver → Settled`), deciding every remaining binding
-   mode and call split. No suspended elaboration match remains.
-3. Hold the optional return contract live on `Settled`, unless settling
-   already reported errors. This phase can solve types but cannot open holes,
-   enter inference regions or select elaboration.
-4. Close gates (§17.3), queued nested tables and errors
-   (`Settled → Solution`), attaching `()` notes. Only an error-free unit
-   yields a solution.
-5. Freeze sites, schemes and readmissions by readback from that solution.
+1. Generate equations and the pending tree on `Solver`, checking any
+   host-file options as ordinary uses (§15.3).
+2. Close the unit (`Solver → Solution`): close rank zero, deciding every
+   remaining binding mode and call split, then check gates (§17.3) and errors,
+   attaching `()` notes. No suspended elaboration match remains, and only an
+   error-free unit yields a solution.
+3. Freeze sites, schemes and readmissions by readback from that solution.
 
-Ascription holds fields key by key, re-reading each row's tail after each
-field. Unknown, missing and refused keys are judged on the final rows after
-the live walk. Each walked row is then re-read to its final tail; a field not
-held by the walk is judged on a scratch copy, without replaying live clashes.
-Contract equations introduce ground types apart from fresh variables used
-once, and every base frame has result `Command` with payload `Unit` by
-construction, so such a revealed field needs no further solving. There is no
-repeated inference or fixpoint.
-Nested tables are queued and checked on scratch only at close, after live
-holds have solved their inputs. The declared table itself is never unified
-as a record type.
+Table checks finish during generation, not in a deferred or scratch walk.
+The declared table itself is never unified as a record type.
 
 **Readback makes the chosen branch explicit.** A match records its decision
 on its hole when it is discharged or defaulted: a binding its mode (run,
@@ -6486,8 +6484,9 @@ its own region, closed without generalizing or storing a scheme. A match on
 an old scrutinee still belongs to the enclosing region (§17.5). Written map
 labels are imported while checking the body for diagnostics alone; a computed
 map imports none. The catch-all is likewise checked in a region. Other
-`handlers:` values take one equation against `Map(U([String] → Command))`,
-as rc and manifest fields always do. `grant` checks known capability fields.
+`handlers:` values take one equation against `Map(U([String] → Command))`.
+Rc and manifest maps use the same arm-by-arm or whole-map check (§15.3).
+`grant` checks known capability fields.
 
 Every named handler has one type, independent of its name and Σ. The
 catch-all adds the command name as its first parameter. `Command` is `F_w Unit`:
@@ -6717,10 +6716,9 @@ at their inference rule and carry their result type. Imported residual
 execution heads force a protected variable; imported value occurrences carry
 their solved type as a membrane.
 
-Once generation, settling, live return-contract ascription and closure
-(including gates and nested checks) succeed, one fold reads the tree back in
-the checked phase. A binding hole becomes Let or capture/decode (§17.5);
-a call hole becomes returned-thunk bind/force segments before the recorded
+Once generation and closure (including gates) succeed, one fold reads the
+tree back in the checked phase. A binding hole becomes Let or capture/decode
+(§17.5); a call hole becomes returned-thunk bind/force segments before the recorded
 arguments. Boundary types become site snapshots.
 A protected value's membrane is a checked tree's kept site, or an imported
 type, which remains only if its snapshot has delayed obligations. The

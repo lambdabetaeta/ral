@@ -415,7 +415,7 @@ pub(crate) struct Kinded {
     pub(crate) witness: Option<Span>,
 }
 
-#[derive(Clone)]
+#[cfg_attr(test, derive(Clone))]
 pub struct Unifier {
     rank: u32,
     tys: Store<Ty>,

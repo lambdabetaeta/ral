@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-generated_at_date: 2026-11-10
-covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
+generated_at_commit: c4bd558f157dbf49cf244af6c6eda4ba88bf37c7
+generated_at_date: 2026-11-11
+covers_paths: [core/src/authority/, core/src/authority.rs, core/src/path/, core/src/path.rs, core/src/own.rs, core/src/own/, core/src/shell/grant.rs, core/src/shell/grant/, core/src/shell/load/profile.rs, core/src/shell/runtime/state/checks.rs, core/src/shell/runtime/walk.rs]
 ---
 
 # Map: core / capabilities & sandbox
@@ -123,10 +123,14 @@ Submodules:
 
 The `shell::load` module holds `shell/load/profile.rs` —
 `load_capabilities_from_path` / `_from_str` for `.ral` capability profiles,
-compiled under `grant`'s own declared table (`typecheck::contract`,
-`Form::Grant`): a profile's dimensions *are* the form's options, so a returned
-row is held to them statically and the decoder below is where a profile
-returning a map meets the same six keys.
+compiled under `typecheck::table::declared(Form::Grant)`. A profile ends in
+`grant`'s options written out (SPEC §15.3): `check_options` checks each key
+during generation, recursing immediately into written `exec:` and `fs:`
+records. A bound or computed tail is T0077; an unwritten nested table is
+T0079. All profile keys are optional, so `()` or an empty file states nothing
+(the policy top, or an empty extension fragment). Runtime grant decoding
+retains shape, keyset and domain checks because it also accepts grants
+received as data, including wire grants and spawn restrictions.
 
 ## The guard — `core/src/authority/guard/`
 

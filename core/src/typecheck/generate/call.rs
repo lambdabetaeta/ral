@@ -769,7 +769,6 @@ mod tests {
         assert!(!generator.env.is_handled("tool"));
         let errors = generator
             .solver
-            .settle()
             .close()
             .err()
             .expect("external gate refusal");
@@ -811,7 +810,6 @@ mod tests {
             generator.statement(&source);
             let errors = generator
                 .solver
-                .settle()
                 .close()
                 .err()
                 .expect("external gate refusal");

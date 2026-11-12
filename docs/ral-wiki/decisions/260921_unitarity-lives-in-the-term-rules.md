@@ -1,6 +1,7 @@
 ---
 status: superseded
-generated_at_commit: f06a5056
+generated_at_commit: c4bd558f
+generated_at_date: 2026-11-11
 superseded_by: decisions/260930_a-table-never-enters-the-unifier
 ---
 
@@ -62,7 +63,7 @@ carries one, and the only operation that touches a `Var` payload is
 nothing else names — dead, therefore unobservable — and could *fail* only when
 two declared tables disagree at one label.
 
-That last case is exactly what the door in `typecheck/contract.rs` already
+That last case is exactly what the door in `typecheck/table.rs` already
 forbids, so nothing is lost by deleting the equation and the store behind it.
 
 **This makes the door load-bearing.** Under `Δ` the one-optional-type condition

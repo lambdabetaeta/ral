@@ -1,5 +1,5 @@
 # codes: T0020
 # status: 1
-# at: 5:14
+# at: 5:22
 # contains: `` `name `` is not a place or a selector
 grant [exec: [allow: [`dir `name git]]] { return 1 }

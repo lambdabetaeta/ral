@@ -4,7 +4,6 @@
 //! Seeding and entry points live here; the rules generate constraints, then read back a closed solution.
 
 pub mod builtins;
-pub mod contract;
 mod env;
 mod error;
 mod explain;
@@ -15,14 +14,16 @@ mod readback;
 mod session_tests;
 mod site;
 mod solve;
+pub mod table;
 mod unify;
 
 pub use self::builtins::{Decl, Manifest, builtin_type_hint};
-pub use self::contract::{Form, Table};
 pub use self::error::{
-    CycleVia, KindFound, Reason, Standing, TypeError, TypeErrorKind, UnderAppliedBuiltin,
+    CycleVia, KindFound, OptionsContext, Reason, Standing, TypeError, TypeErrorKind,
+    UnderAppliedBuiltin,
 };
 pub(crate) use self::explain::{hyphen_boundary, hyphen_boundary_hint, spread_into_application};
+pub use self::table::{Form, Table};
 pub(crate) use self::unify::Unifier;
 
 use self::builtins::Arm;
@@ -36,14 +37,6 @@ use crate::ir::{Comp, Phrase, Toplevel, Val};
 use crate::source::Spanned;
 use crate::ty::{Closed, CompTy, Ty, TyNode, UnitId};
 use std::sync::Arc;
-
-/// What a form holds its programs' own return value to: the declared
-/// [`Table`] whose closed keyset the returned row is checked against.
-///
-/// An rc file's top-level keys, a plugin manifest's fields, a capability
-/// profile's dimensions.  `&'static`, so a host crate with a table of its own
-/// passes it here.
-pub type ReturnContract = &'static Table;
 
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
@@ -93,26 +86,20 @@ fn seeded_generator(schemes: SessionSchemes) -> Generator {
 /// Exit the inference region before generalising, and export only after closure.
 fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Vec<TypeError>> {
     let scheme = generator.solver.generalise(&Ty::thunk(cty));
-    let solution = generator.solver.settle().close()?;
+    let solution = generator.solver.close()?;
     Ok(solution.settle(Arc::new(scheme)))
 }
 
 /// Type-check `phrases`, seeding from the live session.
 ///
 /// Infer each phrase in order, building its checked IR beside its type and
-/// extending `TyEnv` at each `Define`. After ascription succeeds, freeze sites,
+/// extending `TyEnv` at each `Define`. After closure succeeds, freeze sites,
 /// settle `Define` schemes and build readmissions under one fresh unit. Only closed
 /// schemes leave — a run's unifier dies with the run and its variable ids
 /// restart at zero, so an open scheme from run *N* would alias run
 /// *N+1*'s fresh variables.
 ///
-/// A [`ReturnContract`] additionally ascribes the declared table to the
-/// phrases' own return value, once inference has finished (`contract::ascribe`).  The
-/// *inferred* type is what is checked, so a key misspelled inside a spread is
-/// caught with one written out.  A return typed at a variable stays on the
-/// caller's own runtime check, which dispatches off the same table; a factory
-/// is held to a block of the options, and what it makes is ascribed as a
-/// direct return is.
+/// `options`: the table whose options this file's tail writes out (SPEC §15.3).
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
@@ -120,17 +107,11 @@ fn close_thunk_scheme(generator: Generator, cty: CompTy) -> Result<Closed, Vec<T
 pub fn typecheck(
     phrases: &[Spanned<Phrase<()>>],
     schemes: SessionSchemes,
-    contract: Option<ReturnContract>,
+    options: Option<&'static Table>,
 ) -> Result<Toplevel, Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
-    let (pending, tail) = generator.phrases(phrases);
-    let mut settled = generator.solver.settle();
-    if !settled.has_errors()
-        && let Some(table) = contract
-    {
-        contract::ascribe(&mut settled, phrases.last(), tail, table);
-    }
-    let solution = settled.close()?;
+    let pending = generator.phrases(phrases, options);
+    let solution = generator.solver.close()?;
     Ok(
         Readback::new(&solution, UnitId::fresh(), generator.synth_counter)
             .toplevel(&pending, &generator.residual_uses),
@@ -169,7 +150,7 @@ pub(crate) fn arm_stands_in(
 ) -> Result<(), Vec<TypeError>> {
     let mut generator = seeded_generator(schemes);
     generator.region(|this| this.arm(&Val::thunk(Arc::clone(comp)), Arm::Named(name), None));
-    generator.solver.settle().close().map(drop)
+    generator.solver.close().map(drop)
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`):

@@ -19,12 +19,11 @@ grant [
     shell:  [`chdir],
 ] { return 1 }
 
-# Bound tables and lists are checked where they are written
-let nothing = [allow: []]
-let nowhere = [read: []]
-grant [exec: $nothing, fs: $nowhere, editor: [], shell: []] { return 1 }
+# Bound lists are checked under written table keys
+let nothing = []
+grant [exec: [allow: $nothing], fs: [read: $nothing], editor: [], shell: []] { return 1 }
 grant [editor: [`read, `write, `tui], shell: [`chdir, `detach]] { return 1 }
 
-# A table passed through a generic function's parameter is left to the decoder
-let exec-of = { |table| grant [exec: $table] { return 1 } }
-let _ = exec-of [allow: [`name git]]
+# A list passed through a parameter is checked under a written key
+let exec-of = { |allow| grant [exec: [allow: $allow]] { return 1 } }
+let _ = exec-of [`name git]

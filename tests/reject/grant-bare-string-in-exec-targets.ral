@@ -1,6 +1,6 @@
 # codes: T0010
 # status: 1
-# at: 6:14
+# at: 6:22
 # contains: `name
 # contains: `cwd
 grant [exec: [allow: ['git']]] { return 1 }

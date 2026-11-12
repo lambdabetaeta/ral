@@ -1,12 +1,9 @@
 //! RC file discovery, parsing, and application.
 //!
-//! An rc file is ral source whose return value is a configuration record, or
-//! `()` for a file with nothing to set.  Its thirteen keys are declared once, in
-//! `Form::Rc`'s table, and the checker ascribes that table to the file's
-//! inferred return type, so an unknown key or a wrong field type is a static
-//! error and the whole file is skipped.  A file whose return the checker
-//! cannot type (decoded JSON), or whose fields remain unresolved, meets the
-//! same keyset and field types in [`RcPlan::decode`].
+//! An rc file ends in a written record of all thirteen keys, checked against
+//! `Form::Rc`'s table during generation. Nested tables are written too.
+//! [`RcPlan::decode`] checks value shapes, domains and installation gates;
+//! the checker has already guaranteed the keysets.
 //!
 //! The rc is a plan, decoded then committed: `decode` makes every fallible
 //! judgement reading the shell only, so a refused rc has changed nothing;
@@ -30,8 +27,8 @@ use ral_core::record;
 use ral_core::shell::runtime::{
     Break, DefaultPolicy, HandlerEntry, Hook, HookName, HookSig, Map, Mooring, Settled,
 };
+use ral_core::text::code;
 use ral_core::ty::{Ty, Typed};
-use ral_core::typecheck::Form;
 use ral_core::{RegisterError, Shell, Value, io::terminal};
 use std::path::PathBuf;
 
@@ -91,72 +88,49 @@ impl Datum for Surface {
 
 const DEFAULT_RC: &str = "\
 # ~/.config/ral/rc: ral shell configuration
-#
-# This file must return a record, or `()` to leave everything at its default;
-# all keys are optional.  To customise, uncomment the `return [` … `]` block
-# with the sections you want, and delete the final `return ()`.
-
-# return [
-    # edit-mode:        vi,          # emacs (default) or vi
-    # bell:             false,       # audible bell on readline error (default false)
-    # surface:          readline,    # readline (default) or minimal
-    # recursion-limit:  100000,      # maximum machine-frame recursion depth
-    # umask:            '022',       # file creation mask (octal)
-    # limits:           [open-files: 4096], # child soft resource limits
-
-    # prompt: {
-    #     return \"!{abbreviate-home !{cwd}} $ \"
-    # },
-
-    # env: [
-    #     EDITOR: vim,
-    #     PAGER:  less,
-    # ],
-
-    # handlers: [:,
-    #     ll: { |args| ls -lh ...$args },
-    #     la: { |args| ls -lha ...$args },
-    # ],
-
-    # plugins: [
-    #     zoxide:         [key: 'alt-z'],  # plugin name (or path) => its options
-    #     autosuggestion: [:],             # [:]: no options, the plugin's own defaults
-    # ],
-
-    # startup: {
-    #     fortune
-    # },
-
-    # theme: [
-    #     value-prefix: \"=> \",
-    #     value-color:  yellow,   # black red green yellow blue magenta cyan white none
-    # ],
-# ]
-
-return ()
+# Write every key. `inherit keeps the current value; `set v replaces it.
+return [
+    umask: `inherit, # Set octal permission bits, e.g. `set '022'.
+    limits: [open-files: `inherit, core-bytes: `inherit, stack-bytes: `inherit], # Child soft limits.
+    env: [:], # Export variables, e.g. [EDITOR: vim].
+    prompt: `inherit, # Set a block returning prompt text.
+    handlers: [:], # Command handlers, e.g. [:, ll: { |args| ls -lh ...$args }].
+    bindings: [:], # Lexical values and functions available at the prompt.
+    edit-mode: emacs, # emacs or vi.
+    bell: false, # Ring on readline errors.
+    surface: readline, # readline or minimal; the command-line flag wins.
+    recursion-limit: `inherit, # Set a positive machine-frame limit.
+    plugins: [:], # Plugin names or paths mapped to options; [:] uses plugin defaults.
+    startup: `inherit, # Set a block to run once before the first prompt.
+    theme: [value-prefix: `inherit, value-color: `inherit], # Set text and a colour name or none.
+]
 ";
 
 // ── RC config: decoded, then committed ───────────────────────────────────
 
-/// The trailer every refusal of a decoded rc carries: a bad key or a bad
-/// value refuses the whole rc, and nothing of it was applied.
+/// A bad value refuses the whole rc before anything is applied.
 fn refuse(reason: impl std::fmt::Display) -> String {
     format!("rc: {reason}. The rc was not applied; the shell started with defaults.")
 }
 
-fn unknown_rc_key(cause: &ral_core::fact::UnknownField) -> String {
-    let near =
-        match ral_core::text::near_names(&cause.field, cause.offered.iter().map(String::as_str), 1)
-            [..]
-        {
-            [near] => format!(" (did you mean '{near}'?)"),
-            _ => String::new(),
-        };
-    format!(
-        "unknown key '{}': `rc` takes {}{near}",
-        cause.field,
-        cause.offered.join(", ")
-    )
+/// Decode the tag only; each setting checks its own payload.
+pub(super) fn decode_setting(value: Value, key: &str) -> Result<Option<Value>, String> {
+    match value {
+        Value::Variant { label, payload } if label.as_ref() == "inherit" && payload.is_none() => {
+            Ok(None)
+        }
+        Value::Variant {
+            label,
+            payload: Some(value),
+        } if label.as_ref() == "set" => Ok(Some(*value)),
+        other => Err(format!(
+            "{} must be {} (no payload) or {} (one payload); got {other} ({})",
+            code(key),
+            code("`inherit"),
+            code("`set v"),
+            other.type_name()
+        )),
+    }
 }
 
 /// A fully judged rc: every field already has its final shape and every hook
@@ -177,22 +151,26 @@ pub(crate) struct RcPlan {
 }
 
 impl RcPlan {
-    /// Judge the rc's map against `shell`, which it only reads: the keyset,
-    /// every field's shape, the theme, the prompt and startup blocks, and each
-    /// handler.  The map contract (and the diagnostic for breaking it) lives
-    /// with the sourcing in [`source`].
+    /// Judge values against `shell`, which it only reads. The map's keyset
+    /// comes from a file checked against the rc table (SPEC §15.3).
     pub(crate) fn decode(pairs: &Map, shell: &Shell) -> Result<Self, String> {
-        let table = ral_core::typecheck::contract::declared(Form::Rc);
         let mut plan = Self::default();
         for (key, val) in pairs {
-            match (key, val.into_owned()) {
-                #[cfg(windows)]
-                (k @ ("umask" | "limits"), _) => {
-                    return Err(refuse(format!("'{k}' is not supported on Windows")));
+            let value = val.into_owned();
+            let value = match key {
+                "umask" | "recursion-limit" | "prompt" | "startup" => {
+                    let Some(value) = decode_setting(value, key).map_err(refuse)? else {
+                        continue;
+                    };
+                    value
                 }
+                _ => value,
+            };
+            match (key, value) {
+                #[cfg(windows)]
+                ("umask", _) => return Err(refuse("'umask' is not supported on Windows")),
                 #[cfg(unix)]
                 ("umask", Value::String(s)) => plan.umask = Some(decode_umask(&s)?),
-                #[cfg(unix)]
                 ("limits", Value::Map(m)) => plan.child_limits = decode_limits(&m)?,
                 ("env", Value::Map(m)) => plan.env = m,
                 ("bindings", Value::Map(m)) => plan.bindings = m,
@@ -253,25 +231,27 @@ impl RcPlan {
                     plan.settings.startup |= k == "startup";
                     plan.hooks.push((name, hook));
                 }
-                (k, other) if table.holds(k).is_some() => {
+                (k, other) => {
                     let want = match k {
-                        "env" | "bindings" | "handlers" | "theme" => "a map",
+                        "limits" | "theme" => {
+                            unreachable!("nested rc tables are written records (SPEC §15.3)")
+                        }
+                        "env" | "bindings" | "handlers" => "a map",
                         "plugins" => {
                             "a map from plugin name to its options, e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]"
                         }
                         "edit-mode" => "'emacs' or 'vi'",
                         "bell" => "a bool",
-                        "umask" => "octal digits as a string, e.g. '077'",
-                        "limits" => "a record, e.g. [open-files: 4096]",
+                        "umask" => "a String of octal digits, e.g. '077'",
                         "surface" => "minimal or readline",
-                        _ => "a positive int",
+                        "recursion-limit" => "a positive Int",
+                        _ => unreachable!("the checker admits only rc's keys (SPEC §15.3)"),
                     };
                     return Err(refuse(format!(
                         "'{k}' must be {want}; got {}",
                         other.type_name()
                     )));
                 }
-                (k, _) => return Err(refuse(unknown_rc_key(&table.unknown_key(k)))),
             }
         }
         Ok(plan)
@@ -356,41 +336,65 @@ fn decode_umask(s: &str) -> Result<rustix::fs::Mode, String> {
         .ok_or_else(invalid)
 }
 
-#[cfg(unix)]
 fn decode_limits(map: &Map) -> Result<ral_core::process::ChildLimits, String> {
-    use ral_core::process::ChildLimit;
-    use rustix::process::getrlimit;
     let mut limits = ral_core::process::ChildLimits::default();
     for (key, value) in map {
-        let limit = ChildLimit::ALL
-            .iter()
-            .find(|limit| limit.name == key)
-            .ok_or_else(|| {
-                let names = ChildLimit::ALL.map(|limit| limit.name).join(", ");
-                refuse(format!("unknown 'limits' key '{key}'; expected {names}"))
-            })?;
-        let value = value.into_owned();
+        let Some(value) =
+            decode_setting(value.into_owned(), &format!("limits.{key}")).map_err(refuse)?
+        else {
+            continue;
+        };
         let Value::Int(value) = value else {
             return Err(refuse(format!(
-                "'limits' key '{key}' must be an Int; got {}",
+                "{} payload for {} must be an Int; got {}",
+                code("`set"),
+                code(&format!("limits.{key}")),
                 value.type_name()
             )));
         };
-        let value = u64::try_from(value).map_err(|_| {
-            refuse(format!(
-                "'limits' key '{key}' must be non-negative; got {value}"
-            ))
-        })?;
-        if let Some(hard) = getrlimit(limit.resource).maximum
-            && value > hard
-        {
-            return Err(refuse(format!(
-                "'limits' key '{key}' exceeds ral's hard limit of {hard}; got {value}"
-            )));
-        }
-        *(limit.slot)(&mut limits) = Some(value);
+        set_limit(&mut limits, key, value)?;
     }
     Ok(limits)
+}
+
+#[cfg(unix)]
+fn set_limit(
+    limits: &mut ral_core::process::ChildLimits,
+    key: &str,
+    value: i64,
+) -> Result<(), String> {
+    let limit = ral_core::process::ChildLimit::ALL
+        .into_iter()
+        .find(|limit| limit.name == key)
+        .expect("the checker admits only limits' keys (SPEC §15.3)");
+    let value = u64::try_from(value).map_err(|_| {
+        refuse(format!(
+            "{} must be non-negative; got {value}",
+            code(&format!("limits.{key}"))
+        ))
+    })?;
+    if let Some(hard) = rustix::process::getrlimit(limit.resource).maximum
+        && value > hard
+    {
+        return Err(refuse(format!(
+            "{} exceeds ral's hard limit of {hard}; got {value}",
+            code(&format!("limits.{key}"))
+        )));
+    }
+    *(limit.slot)(limits) = Some(value);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_limit(
+    _limits: &mut ral_core::process::ChildLimits,
+    key: &str,
+    value: i64,
+) -> Result<(), String> {
+    Err(refuse(format!(
+        "{} is not supported on Windows (got {value})",
+        code(&format!("limits.{key}"))
+    )))
 }
 
 // ── Config file locations ────────────────────────────────────────────────
@@ -438,6 +442,8 @@ mod tests {
 
     use crate::repl::host::ReplHost;
     use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+    use ral_core::test_helper::rc_source;
+    use ral_core::typecheck::Form;
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
 
@@ -448,12 +454,19 @@ mod tests {
         )
     }
 
-    // Uncontracted evaluation keeps the runtime decoder independently covered.
     fn rc_map(shell: &mut Shell, rc_src: &str) -> Map {
-        match crate::repl::eval(shell, rc_src) {
+        match ral_core::shell::load::evaluate_source(
+            &Mooring::adrift(),
+            shell,
+            rc_src,
+            &ral_core::source::SourceOrigin::named("rc.ral"),
+            Some(ral_core::typecheck::table::declared(Form::Rc)),
+        )
+        .expect("test rc checks and evaluates")
+        {
             Value::Map(pairs) => pairs,
             other => panic!(
-                "test rc source must return a record or a map; got {}",
+                "test rc source must return a written record; got {}",
                 other.type_name()
             ),
         }
@@ -526,10 +539,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("plugin.ral");
         std::fs::write(&path, plugin).unwrap();
-        let rc_src = format!(
-            "return [plugins: ['{}': {options}]]\n",
-            path.to_string_lossy()
-        );
+        let rc_src = rc_source(&[(
+            "plugins",
+            &format!("['{}': {options}]", path.to_string_lossy()),
+        )]);
         loaded_plugins(&rc_src).into_iter().next()
     }
 
@@ -568,27 +581,142 @@ mod tests {
     #[test]
     fn rc_plugin_non_map_options_is_rejected() {
         assert_eq!(
-            loaded_plugins("return [plugins: [zoxide: 'alt-z']]\n"),
+            loaded_plugins(&rc_source(&[("plugins", "[zoxide: 'alt-z']")])),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn default_rc_writes_every_declared_blank_and_checks_clean() {
+        let fields = DEFAULT_RC
+            .lines()
+            .filter_map(|line| {
+                line.split('#')
+                    .next()?
+                    .trim()
+                    .strip_suffix(',')?
+                    .split_once(": ")
+            })
+            .collect::<Vec<_>>();
+        let table = ral_core::typecheck::table::declared(Form::Rc);
+        assert_eq!(fields.len(), table.keys.len());
+        for key in table.keys {
+            let (_, value) = fields
+                .iter()
+                .find(|(label, _)| *label == key.label)
+                .expect("the skeleton writes every rc key");
+            assert_eq!(Some(*value), key.blank, "{}", key.label);
+        }
+        let mut shell = prelude_shell();
+        let skeleton = rc_map(&mut shell, DEFAULT_RC);
+        let blanks = rc_map(&mut shell, &rc_source(&[]));
+        assert_eq!(skeleton, blanks);
+        assert!(RcPlan::decode(&skeleton, &shell).is_ok());
+    }
+
+    #[test]
+    fn inherit_keeps_recursion_limit_and_builtin_hooks() {
+        let (shell, settings) = apply_rc_inner(&rc_source(&[]));
+        assert_eq!(
+            shell.stack_limit(),
+            ral_core::shell::runtime::DEFAULT_STACK_LIMIT
+        );
+        assert!(!settings.startup);
+        assert!(!shell.has_hook(&HookName::session("prompt")));
+        assert!(!shell.has_hook(&HookName::session("startup")));
+
+        let mut shell = prelude_shell();
+        shell.set_stack_limit(321);
+        let pairs = rc_map(&mut shell, &rc_source(&[]));
+        commit(&pairs, &Mooring::adrift(), &mut shell).unwrap();
+        assert_eq!(
+            shell.stack_limit(),
+            321,
+            "inherit keeps the command-line limit"
+        );
+    }
+
+    #[test]
+    fn prompt_and_startup_set_install_hooks() {
+        let (shell, settings) = apply_rc_inner(&rc_source(&[
+            ("prompt", "`set { return 'custom> ' }"),
+            ("startup", "`set { return () }"),
+        ]));
+        assert!(settings.startup);
+        assert!(shell.has_hook(&HookName::session("prompt")));
+        assert!(shell.has_hook(&HookName::session("startup")));
+    }
+
+    #[test]
+    fn prompt_and_startup_refuse_malformed_tags_and_payloads() {
+        for key in ["prompt", "startup"] {
+            for value in [
+                "{ return () }",
+                "`other",
+                "`inherit 1",
+                "`set",
+                "`set 1",
+                "`set { |arg| return () }",
+            ] {
+                let (_, error) = apply_to_fresh_env_rejected(&[(key, value)]);
+                assert!(
+                    error.contains(key) && error.contains("not applied"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn limits_inherit_leaves_child_limits_unchanged() {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(&mut shell, &rc_source(&[]));
+        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        assert_eq!(plan.child_limits, ral_core::process::ChildLimits::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn umask_inherit_leaves_the_process_mask_and_set_decodes_it() {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(&mut shell, &rc_source(&[]));
+        assert!(RcPlan::decode(&pairs, &shell).unwrap().umask.is_none());
+        let pairs = rc_map(&mut shell, &rc_source(&[("umask", "`set '022'")]));
+        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        assert_eq!(plan.umask.unwrap().as_raw_mode(), 0o22);
+        let (_, error) = apply_to_fresh_env_rejected(&[("umask", "`set '888'")]);
+        assert!(error.contains("octal digits"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_only_explicit_umask_and_limits() {
+        for (key, value) in [
+            ("umask", "`set '022'"),
+            (
+                "limits",
+                "[open-files: `set 64, core-bytes: `inherit, stack-bytes: `inherit]",
+            ),
+        ] {
+            let (_, error) = apply_to_fresh_env_rejected(&[(key, value)]);
+            assert!(
+                error.contains(key) && error.contains("not supported on Windows"),
+                "{error}"
+            );
+        }
     }
 
     /// rc `recursion-limit:` overrides the default on the shell.
     #[test]
     fn rc_recursion_limit_applied() {
-        let shell = apply_rc("return [recursion-limit: 256]\n");
+        let shell = apply_rc(&rc_source(&[("recursion-limit", "`set 256")]));
         assert_eq!(shell.stack_limit(), 256);
     }
 
-    /// A non-positive `recursion-limit` refuses the whole map — agreeing
-    /// with the record spelling, which fails the same way statically —
-    /// naming the field rather than letting `0` through to disable the cap.
+    /// Zero refuses the whole rc rather than disabling the cap.
     #[test]
     fn rc_recursion_limit_zero_rejected() {
-        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![(
-            "recursion-limit".into(),
-            Value::Int(0),
-        )]));
+        let (shell, err) = apply_to_fresh_env_rejected(&[("recursion-limit", "`set 0")]);
         assert_eq!(
             shell.stack_limit(),
             ral_core::shell::runtime::DEFAULT_STACK_LIMIT
@@ -598,14 +726,10 @@ mod tests {
 
     // ── RcPlan: bindings / handlers routing ───────────────────────
 
-    /// Apply `config` to a fresh shell, expecting `RcPlan::decode` to
-    /// refuse it — the decoded spelling's contract check.  Returns the shell
-    /// (untouched by the refused keys) and the refusal text.
-    fn apply_to_fresh_env_rejected(config: Value) -> (Shell, String) {
-        let mut shell = ral_core::test_helper::core_shell();
-        let Value::Map(pairs) = config else {
-            panic!("test rc config must be a map; got {}", config.type_name());
-        };
+    /// A checked rc can still fail value validation without changing the shell.
+    fn apply_to_fresh_env_rejected(overrides: &[(&str, &str)]) -> (Shell, String) {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(&mut shell, &rc_source(overrides));
         let Err(err) = commit(&pairs, &Mooring::adrift(), &mut shell) else {
             panic!("test rc must fail its contract");
         };
@@ -622,11 +746,11 @@ mod tests {
     #[test]
     fn rc_surface_selects_frontend() {
         assert_eq!(
-            apply_rc_surface("return [surface: 'minimal']\n"),
+            apply_rc_surface(&rc_source(&[("surface", "'minimal'")])),
             Surface::Minimal
         );
         assert_eq!(
-            apply_rc_surface("return [surface: 'Readline']\n"),
+            apply_rc_surface(&rc_source(&[("surface", "'Readline'")])),
             Surface::Readline
         );
     }
@@ -647,38 +771,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn limits_refuse_unknown_negative_noninteger_and_above_hard_values() {
-        let map = |key: &str, value| Map::from(vec![(key.to_owned(), value)]);
-        assert!(
-            decode_limits(&map("unknown", Value::Int(0)))
-                .unwrap_err()
-                .contains("open-files, core-bytes, stack-bytes")
-        );
-        assert!(
-            decode_limits(&map("open-files", Value::Int(-1)))
-                .unwrap_err()
-                .contains("non-negative")
-        );
-        assert!(
-            decode_limits(&map("open-files", Value::string("64")))
-                .unwrap_err()
-                .contains("must be an Int")
-        );
+    fn limits_refuse_negative_and_above_hard_values() {
+        let (_, error) = apply_to_fresh_env_rejected(&[(
+            "limits",
+            "[open-files: `set -1, core-bytes: `inherit, stack-bytes: `inherit]",
+        )]);
+        assert!(error.contains("non-negative"), "{error}");
         if let Some(hard) = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum
             && let Ok(above) = i64::try_from(hard).and_then(|n| i64::try_from(i128::from(n) + 1))
         {
-            let error = decode_limits(&map("open-files", Value::Int(above))).unwrap_err();
+            let (_, error) = apply_to_fresh_env_rejected(&[(
+                "limits",
+                &format!("[open-files: `set {above}, core-bytes: `inherit, stack-bytes: `inherit]"),
+            )]);
             assert!(error.contains(&format!("hard limit of {hard}")), "{error}");
         }
-        let limits = decode_limits(&map("open-files", Value::Int(0))).unwrap();
-        assert_eq!(limits.open_files, Some(0));
-        assert_eq!(limits.core_bytes, None);
-        assert_eq!(limits.stack_bytes, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn limits_set_each_child_ceiling() {
+        let mut shell = prelude_shell();
+        let pairs = rc_map(
+            &mut shell,
+            &rc_source(&[(
+                "limits",
+                "[open-files: `set 0, core-bytes: `set 0, stack-bytes: `set 0]",
+            )]),
+        );
+        let plan = RcPlan::decode(&pairs, &shell).unwrap();
+        assert_eq!(
+            plan.child_limits,
+            ral_core::process::ChildLimits {
+                open_files: Some(0),
+                core_bytes: Some(0),
+                stack_bytes: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn declared_limit_keys_reject_wrong_runtime_shapes() {
+        for key in ral_core::typecheck::table::LIMITS.keys {
+            for value in [
+                Value::Unit,
+                Value::variant("set", Some(Value::string("64"))),
+            ] {
+                let map = Map::from_iter([(key.label.to_owned(), value)]);
+                let error = decode_limits(&map).unwrap_err();
+                assert!(error.contains(key.label), "{error}");
+            }
+        }
     }
 
     #[test]
     fn rc_env_sets_only_the_environment() {
-        let mut shell = apply_rc("return [env: [GREETING: 'hello']]\n");
+        let mut shell = apply_rc(&rc_source(&[("env", "[GREETING: 'hello']")]));
         assert_eq!(
             crate::repl::eval(&mut shell, "!{env}[GREETING]"),
             Value::string("hello")
@@ -693,7 +841,13 @@ mod tests {
         let mut shell = prelude_shell();
         let pairs = rc_map(
             &mut shell,
-            "return [prompt: { return 'x' }, theme: [value-color: 'purple']]\n",
+            &rc_source(&[
+                ("prompt", "`set { return 'x' }"),
+                (
+                    "theme",
+                    "[value-prefix: `inherit, value-color: `set 'purple']",
+                ),
+            ]),
         );
         let Err(err) = commit(&pairs, &Mooring::adrift(), &mut shell) else {
             panic!("theme refuses");
@@ -710,8 +864,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("must-not-run");
         let source = format!(
-            "echo ran > {}\nreturn [handlers: [ll: {{ |args| echo hi }}]]\n",
-            ral_core::syntax::quote_word(&ral_core::path::shown(&marker))
+            "echo ran > {}\n{}",
+            ral_core::syntax::quote_word(&ral_core::path::shown(&marker)),
+            rc_source(&[("handlers", "[ll: { |args| echo hi }]")])
         );
         let mut shell = prelude_shell();
         let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
@@ -719,7 +874,7 @@ mod tests {
             &mut shell,
             &source,
             &ral_core::source::SourceOrigin::named("rc.ral"),
-            Some(ral_core::typecheck::contract::declared(Form::Rc)),
+            Some(ral_core::typecheck::table::declared(Form::Rc)),
         ) else {
             panic!("a record under handlers must refuse the rc");
         };
@@ -733,41 +888,38 @@ mod tests {
         assert!(!shell.has_handler("ll"));
     }
 
-    /// A non-thunk member refuses the homogeneous map before installation.
+    /// A non-block written arm refuses the rc before installation.
     #[test]
     fn refused_rc_installs_no_handlers() {
         let mut shell = prelude_shell();
         let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
             &Mooring::adrift(),
             &mut shell,
-            "return [handlers: [:, ll: { |args| ls ...$args }, bad: 3]]\n",
+            &rc_source(&[("handlers", "[:, ll: { |args| ls ...$args }, bad: 3]")]),
             &ral_core::source::SourceOrigin::named("rc.ral"),
-            Some(ral_core::typecheck::contract::declared(Form::Rc)),
+            Some(ral_core::typecheck::table::declared(Form::Rc)),
         ) else {
             panic!("a non-block member must refuse the whole rc");
         };
         assert!(matches!(&error.reason, Reason::Compile(_)), "{error:?}");
         let rendered = error.rejection().expect("static refusal").render();
         assert!(
-            rendered.contains("a map's keys are data, so every value must have the one type"),
+            rendered.contains("a handler installed under a name stands in for that command"),
             "{rendered}"
         );
         assert!(!shell.has_handler("ll") && !shell.has_handler("bad"));
     }
 
-    /// A malformed *value* on a known key refuses the whole map, exactly as
-    /// an unknown key does: a key around it does not survive either.
+    /// A malformed decoded field refuses the whole rc.
     #[test]
     fn rc_bad_value_fails_the_whole_map() {
-        let (shell, err) = apply_to_fresh_env_rejected(Value::map(vec![
-            ("edit-mode".into(), Value::Int(42)),
-            ("recursion-limit".into(), Value::Int(256)),
-        ]));
+        let (shell, err) =
+            apply_to_fresh_env_rejected(&[("bindings", "42"), ("recursion-limit", "`set 256")]);
         assert_eq!(
             shell.stack_limit(),
             ral_core::shell::runtime::DEFAULT_STACK_LIMIT
         );
-        assert!(err.contains("edit-mode") && err.contains("not applied"));
+        assert!(err.contains("bindings") && err.contains("not applied"));
     }
 
     /// Typecheck `src` against `shell`'s live session schemes — the same
@@ -787,8 +939,8 @@ mod tests {
     /// command `ws` would instead refuse the block argument.
     #[test]
     fn rc_bindings_function_typechecks_heterogeneous_call() {
-        let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src);
+        let src = rc_source(&[("bindings", "[ws: { |name body| echo $name; !$body }]")]);
+        let (shell, _) = apply_rc_inner(&src);
         // Lexical binding, not a persistent handler frame.
         assert!(shell.scope_lookup("ws").is_some());
         assert!(!shell.has_handler("ws"));
@@ -803,8 +955,8 @@ mod tests {
     /// a nullary call succeeds, but a block argument is refused at check time.
     #[test]
     fn rc_handler_keeps_the_external_argument_gate() {
-        let src = "return [\n    handlers: [:,\n        ws: { |args| echo $args },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src);
+        let src = rc_source(&[("handlers", "[:, ws: { |args| echo $args }]")]);
+        let (shell, _) = apply_rc_inner(&src);
         // Persistent handler frame, not a scope binding.
         assert!(shell.has_handler("ws"));
         assert!(shell.scope_lookup("ws").is_none());
@@ -836,15 +988,16 @@ mod tests {
     fn rc_contract_admits_decoded_fields_before_later_effects() {
         use ral_core::source::SourceOrigin;
 
-        for (field, use_text) in [
-            ("handlers: [:, foo: { |args| return $d }]", "return $d"),
-            ("umask: $d", "$d"),
+        for (key, value, use_text) in [
+            ("handlers", "[:, foo: { |args| return $d }]", "return $d"),
+            ("umask", "$d", "$d"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let marker = dir.path().join("after-decode");
             let source = format!(
-                "let d = from-json << '5'\necho ran > {}\nreturn [{field}]\n",
-                ral_core::syntax::quote_word(&ral_core::path::shown(&marker))
+                "let d = from-json << '5'\necho ran > {}\n{}",
+                ral_core::syntax::quote_word(&ral_core::path::shown(&marker)),
+                rc_source(&[(key, value)])
             );
             let mut shell = prelude_shell();
             let Err(Break::Error(error)) = ral_core::shell::load::evaluate_source(
@@ -852,7 +1005,7 @@ mod tests {
                 &mut shell,
                 &source,
                 &SourceOrigin::named("rc.ral"),
-                Some(ral_core::typecheck::contract::declared(Form::Rc)),
+                Some(ral_core::typecheck::table::declared(Form::Rc)),
             ) else {
                 panic!("the live rc contract must refuse decoded 5: {source}");
             };
@@ -868,28 +1021,39 @@ mod tests {
             let witness = error.witness().expect("the contract must name the use");
             assert!(
                 source[witness.start as usize..witness.end as usize].contains(use_text),
-                "the witness must identify {field}: {error:?}"
+                "the witness must identify {key}: {error:?}"
             );
             assert!(!marker.exists(), "nothing after the decoder may run");
             assert!(!shell.has_handler("foo"));
         }
     }
 
-    /// Every key `Form::Rc`'s table declares reaches its own arm in
-    /// `RcPlan::decode`: fed a value of the wrong shape (`Unit`), it refuses
-    /// with its own message, never the table's `unknown_key` wording.
+    /// Malformed values on declared keys must name the offending key.
     #[test]
     fn every_declared_rc_key_is_handled_by_decode() {
-        let table = ral_core::typecheck::contract::declared(Form::Rc);
+        let table = ral_core::typecheck::table::declared(Form::Rc);
         let shell = ral_core::test_helper::core_shell();
         for key in table.keys {
-            let pairs = Map::from_iter([(key.label.to_string(), Value::Unit)]);
+            let value = match &key.holds {
+                ral_core::typecheck::table::Holds::Table(sub) => Value::Map(Map::from_iter(
+                    sub.keys.iter().enumerate().map(|(i, key)| {
+                        let value = if i == 0 {
+                            Value::variant("set", Some(Value::Int(-1)))
+                        } else {
+                            Value::variant("inherit", None)
+                        };
+                        (key.label.to_owned(), value)
+                    }),
+                )),
+                _ => Value::Unit,
+            };
+            let pairs = Map::from_iter([(key.label.to_string(), value)]);
             let err = RcPlan::decode(&pairs, &shell)
                 .err()
-                .expect("Unit satisfies no key");
+                .expect("the malformed value satisfies no key");
             assert!(
-                !err.contains(&unknown_rc_key(&table.unknown_key(key.label))),
-                "key '{}' fell through",
+                err.contains(key.label),
+                "key '{}' fell through: {err}",
                 key.label
             );
         }

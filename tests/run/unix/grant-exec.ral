@@ -18,8 +18,8 @@ echo 'unfolded head runs'
 
 # An empty allowance admits nothing, written or bound; omission inherits
 try { grant [exec: [allow: []]] { /bin/echo hi } } { |_| echo 'written empty allowance refuses' }
-let nothing = [allow: []]
-try { grant [exec: $nothing] { /bin/echo hi } } { |_| echo 'bound empty allowance refuses' }
+let nothing = []
+try { grant [exec: [allow: $nothing]] { /bin/echo hi } } { |_| echo 'bound empty allowance refuses' }
 grant [] { /bin/echo 'omission inherits' }
 
 # Refusal needs no audit trail around it

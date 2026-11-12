@@ -86,15 +86,6 @@ impl Value {
     }
 }
 
-/// A contract file's settings: a map, or `()` for nothing to set.
-pub fn settings_map(val: &Value) -> Option<std::borrow::Cow<'_, Map>> {
-    match val {
-        Value::Map(m) => Some(std::borrow::Cow::Borrowed(m)),
-        Value::Unit => Some(std::borrow::Cow::Owned(Map::new())),
-        _ => None,
-    }
-}
-
 /// An invalid input at its owning operation.
 pub(crate) fn invalid(operation: &str, cause: InvalidCause) -> Error {
     Error::new(Reason::Invalid(Box::new(InvalidFailure::new(

@@ -10,13 +10,11 @@ use super::router::{CTRL_X, KeyChord, builtin_action, parse_key_notation, reserv
 use ral_core::data::FOValue;
 use ral_core::error::Error;
 use ral_core::fact::{
-    DataStep, Expected, GrantFailure, GrantFailureRefusedKey, GrantForm, HostFailure, InvalidCause,
-    InvalidFailure, KeybindingFailure, KeybindingFailureGuardRegex, KeybindingFailureNotation,
-    KeybindingFailureReservedAction, KeybindingFailureSequencePrefix,
-    KeybindingFailureUnguardedBuiltinShadow, PluginFailure, PluginFailureUnknownHookEvent,
-    RalFailure, Reason, ShapeFailure, ValueShape,
+    DataStep, Expected, HostFailure, InvalidCause, InvalidFailure, KeybindingFailure,
+    KeybindingFailureGuardRegex, KeybindingFailureNotation, KeybindingFailureReservedAction,
+    KeybindingFailureSequencePrefix, KeybindingFailureUnguardedBuiltinShadow, PluginFailure,
+    PluginFailureUnknownHookEvent, RalFailure, Reason, ShapeFailure, ValueShape,
 };
-use ral_core::shell::runtime::settings_map;
 use ral_core::{Map, Value, label, record};
 use std::collections::HashMap;
 use strum::{IntoStaticStr, VariantArray};
@@ -137,7 +135,7 @@ impl KeySpec {
 /// the plugin's persistent state, read and updated via `_ed-state`.
 ///
 /// Plugins run with host authority — the manifest cannot narrow it.  A
-/// `capabilities:` key is rejected as a load error rather than accepted and
+/// `capabilities:` key is rejected statically rather than accepted and
 /// ignored, so a plugin author cannot mistake the declaration for
 /// confinement; to confine a plugin invocation, wrap it in `grant { ... }`.
 #[derive(Debug, Clone)]
@@ -204,32 +202,7 @@ fn expected_at(path: Vec<DataStep>, value: &Value, expected: Expected) -> Error 
     )
 }
 
-pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> {
-    let Some(map) = settings_map(val) else {
-        return Err(expected_at(vec![], val, Expected::Shape(ValueShape::Map)));
-    };
-    let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
-    for key in map.keys() {
-        match table.holds(key) {
-            Some(ral_core::typecheck::contract::Holds::Refused(cause)) => {
-                return Err(invalid_at(
-                    vec![],
-                    InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                        form: GrantForm::Manifest,
-                        key: key.into(),
-                        cause: *cause,
-                    })),
-                ));
-            }
-            Some(_) => {}
-            None => {
-                return Err(invalid_at(
-                    vec![],
-                    InvalidCause::UnknownField(table.unknown_key(key)),
-                ));
-            }
-        }
-    }
+pub(super) fn parse(map: &Map) -> Result<(Manifest, ManifestHandlers), Error> {
     let name = match map.get("name").as_deref() {
         Some(Value::String(s)) => s.to_string(),
         Some(other) => {
@@ -239,12 +212,7 @@ pub(super) fn parse(val: &Value) -> Result<(Manifest, ManifestHandlers), Error> 
                 Expected::Shape(ValueShape::String),
             ));
         }
-        None => {
-            return Err(invalid_at(
-                vec![],
-                InvalidCause::MissingField("name".into()),
-            ));
-        }
+        None => unreachable!("the manifest's required-key invariant guarantees name (SPEC §15.5)"),
     };
     let handlers = match map.get("handlers").as_deref() {
         Some(Value::Map(m)) => parse_handlers(m)?,
@@ -442,101 +410,35 @@ mod tests {
         cause
     }
 
-    /// A `capabilities:` key is rejected with an error that names the key and
-    /// points at `grant` (the authority rationale lives on the struct doc).
-    #[test]
-    fn capabilities_key_is_rejected() {
-        let manifest = Value::map(vec![
-            ("name".into(), Value::string("p")),
-            ("capabilities".into(), Value::map(vec![])),
-        ]);
-        let err = parse(&manifest).unwrap_err();
-        assert_eq!(
-            invalid_reason(&err).cause,
-            InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                form: GrantForm::Manifest,
-                key: "capabilities".into(),
-                cause: ral_core::fact::RefusedGrantKey::ManifestCapabilitiesUnenforced,
-            }))
-        );
-        assert_eq!(
-            invalid_reason(&err).path,
-            Vec::<ral_core::fact::DataStep>::new()
-        );
-        assert!(
-            err.reason
-                .advice()
-                .iter()
-                .any(|hint| hint.contains("grant"))
-        );
-        assert!(err.describe().contains("capabilities"));
-    }
-
-    /// A key the table does not name is refused with the table's own list —
-    /// the runtime fallback for a manifest whose row remains unresolved.
-    #[test]
-    fn unknown_key_names_the_manifests_list() {
-        let manifest = Value::map(vec![
-            ("name".into(), Value::string("p")),
-            ("hookz".into(), Value::map(vec![])),
-        ]);
-        let err = parse(&manifest).unwrap_err();
-        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
-        assert_eq!(
-            invalid_reason(&err).cause,
-            InvalidCause::UnknownField(table.unknown_key("hookz"))
-        );
-        assert_eq!(
-            invalid_reason(&err).path,
-            Vec::<ral_core::fact::DataStep>::new()
-        );
-        assert!(err.describe().contains("hookz"));
-    }
-
-    /// Every key `Form::Manifest`'s table declares reaches its own handling
-    /// in `LoadedPlugin::parse`: a `Holds::Refused` key errors with its own
-    /// advice, and every other key parses with a minimal value of its
-    /// declared shape rather than being refused as unknown or silently
-    /// dropped.
+    /// Every statically admitted key reaches its decoder arm.
     #[test]
     fn every_declared_manifest_key_is_handled_by_parse() {
-        use ral_core::typecheck::contract::Holds;
+        use ral_core::typecheck::table::Holds;
 
-        let table = ral_core::typecheck::contract::declared(ral_core::typecheck::Form::Manifest);
+        let table = ral_core::typecheck::table::declared(ral_core::typecheck::Form::Manifest);
         for key in table.keys {
-            let mut fields = vec![("name".into(), Value::string("p"))];
+            if matches!(key.holds, Holds::Refused(_)) {
+                continue;
+            }
+            let mut fields = vec![(key.label.into(), Value::Int(42))];
             if key.label != "name" {
-                let value = if key.label == "keybindings" {
-                    Value::list(vec![])
-                } else {
-                    Value::map(vec![])
-                };
-                fields.push((key.label.into(), value));
+                fields.push(("name".into(), Value::string("p")));
             }
-            let manifest = Value::map(fields);
-            let result = parse(&manifest);
-            match &key.holds {
-                Holds::Refused(advice) => {
-                    let err = result.expect_err("refused key must error");
-                    assert_eq!(
-                        invalid_reason(&err).cause,
-                        InvalidCause::Grant(GrantFailure::RefusedKey(GrantFailureRefusedKey {
-                            form: GrantForm::Manifest,
-                            key: key.label.into(),
-                            cause: *advice
-                        }))
-                    );
-                }
-                _ => {
-                    result.unwrap_or_else(|err| {
-                        panic!(
-                            "key '{}' should parse cleanly, got: {}",
-                            key.label,
-                            err.describe()
-                        )
-                    });
-                }
-            }
+            let manifest = Map::from(fields);
+            let error = parse(&manifest).expect_err("every admitted key must decode its value");
+            let failure = invalid_reason(&error);
+            assert_eq!(failure.path, vec![DataStep::Field(key.label.into())]);
+            assert!(
+                matches!(
+                    &failure.cause,
+                    InvalidCause::Shape(ShapeFailure {
+                        found: ral_core::fact::Found::Int(42),
+                        ..
+                    })
+                ),
+                "{}: {error:?}",
+                key.label
+            );
         }
     }
 
@@ -544,14 +446,14 @@ mod tests {
     fn factory_contract_admits_decoded_fields_before_later_effects() {
         use ral_core::shell::runtime::{Break, Mooring};
         use ral_core::source::SourceOrigin;
-        use ral_core::typecheck::{Form, contract};
+        use ral_core::typecheck::{Form, table};
 
         for (fields, use_text) in [
             (
                 "name: 'p', handlers: [:, foo: { |args| return $d }]",
                 "return $d",
             ),
-            ("name: $d", "name: $d"),
+            ("name: $d", "$d"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let marker = dir.path().join("after-decode");
@@ -566,7 +468,7 @@ mod tests {
                 &mut shell,
                 &source,
                 &SourceOrigin::named("plugin.ral"),
-                Some(contract::declared(Form::Manifest)),
+                Some(table::declared(Form::Manifest)),
             )
             .expect("JSON contents must not be inspected at check time");
             let Err(Break::Error(error)) = ral_core::shell::evaluator::apply(
@@ -575,7 +477,7 @@ mod tests {
                 &mooring,
                 &mut shell,
             ) else {
-                panic!("the live factory contract must refuse decoded 5: {source}");
+                panic!("the checked factory must refuse decoded 5: {source}");
             };
             assert!(
                 matches!(&error.reason, Reason::Invalid(failure)
@@ -586,19 +488,57 @@ mod tests {
             let fact = error.fact(&shell);
             assert_eq!(fact.site().script.as_ref(), "plugin.ral");
             assert_eq!(fact.site().line, 2);
-            let witness = error.witness().expect("the contract must name the use");
-            assert!(
-                source[witness.start as usize..witness.end as usize].contains(use_text),
-                "the witness must identify {fields}: {error:?}"
-            );
+            let witness = error.witness().expect("the table must name the use");
+            let witnessed = &source[witness.start as usize..witness.end as usize];
+            if fields == "name: $d" {
+                assert_eq!(
+                    witnessed, use_text,
+                    "the witness must identify the name value"
+                );
+            } else {
+                assert!(
+                    witnessed.contains(use_text),
+                    "the witness must identify {fields}: {error:?}"
+                );
+            }
             assert!(!marker.exists(), "nothing after the decoder may run");
             assert!(!shell.has_handler("foo"));
         }
     }
 
     #[test]
+    fn checked_factory_admits_a_decoded_name_and_parses_its_written_manifest() {
+        use ral_core::shell::runtime::Mooring;
+        use ral_core::source::SourceOrigin;
+        use ral_core::typecheck::{Form, table};
+
+        let mut shell = ral_core::test_helper::core_shell();
+        let mooring = Mooring::adrift();
+        let factory = ral_core::shell::load::evaluate_source(
+            &mooring,
+            &mut shell,
+            "return { |options| let name = from-json << '\"p\"'; return [name: $name] }",
+            &SourceOrigin::named("plugin.ral"),
+            Some(table::declared(Form::Manifest)),
+        )
+        .expect("the factory's written manifest must check");
+        let value = ral_core::shell::evaluator::apply(
+            &factory,
+            vec![Value::Map(Map::new())],
+            &mooring,
+            &mut shell,
+        )
+        .expect("the decoded string must meet name's admission");
+        let Value::Map(map) = value else {
+            panic!("a checked factory returns its written manifest (SPEC §15.5)")
+        };
+        let (manifest, _) = parse(&map).expect("the admitted name must parse");
+        assert_eq!(manifest.name, "p");
+    }
+
+    #[test]
     fn non_block_handler_member_is_a_runtime_decode_error() {
-        let manifest = Value::map(vec![
+        let manifest = Map::from(vec![
             ("name".into(), Value::string("p")),
             (
                 "handlers".into(),
@@ -652,10 +592,11 @@ mod tests {
             ("hooks", ValueShape::Map),
             ("keybindings", ValueShape::List),
         ] {
-            let manifest = Value::map(vec![
-                ("name".into(), Value::string("p")),
-                (field.into(), Value::Int(42)),
-            ]);
+            let mut fields = vec![(field.into(), Value::Int(42))];
+            if field != "name" {
+                fields.push(("name".into(), Value::string("p")));
+            }
+            let manifest = Map::from(fields);
             let err = parse(&manifest).unwrap_err();
             assert_eq!(
                 invalid_reason(&err).path,
@@ -670,20 +611,6 @@ mod tests {
             );
             assert!(err.describe().contains(field));
         }
-    }
-
-    /// `()` is a manifest with nothing set, so it lacks `name`.
-    #[test]
-    fn unit_manifest_lacks_a_name() {
-        let err = parse(&Value::Unit).unwrap_err();
-        assert_eq!(
-            invalid_reason(&err).cause,
-            InvalidCause::MissingField("name".into())
-        );
-        assert_eq!(
-            invalid_reason(&err).path,
-            Vec::<ral_core::fact::DataStep>::new()
-        );
     }
 
     /// A non-block keybinding handler rejects the manifest — it is not
