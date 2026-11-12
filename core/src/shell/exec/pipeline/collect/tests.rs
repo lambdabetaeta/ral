@@ -1468,7 +1468,7 @@ fn sequential_pipelines_release_every_stage_ticket_before_returning() {
             .run_under(
                 &scope,
                 crate::shell::run::RunRequest::from(crate::protocol::Run::captured(
-                    "/bin/echo hello | !{filter-lines { |_| true }} | !{from-lines}",
+                    "/bin/echo hello | !{to-lines !{from-lines}} | !{from-lines}",
                     crate::source::SourceOrigin::named("<test>"),
                 )),
             )

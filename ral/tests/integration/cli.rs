@@ -4,6 +4,7 @@ mod audit;
 mod check;
 mod diagnostics;
 mod examples;
+mod guards;
 mod invocation;
 mod login;
 pub(crate) mod pipeline;

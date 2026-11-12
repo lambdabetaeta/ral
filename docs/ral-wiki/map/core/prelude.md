@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
-generated_at_date: 2026-11-11
+generated_at_commit: 63a7d5a4
+generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/prelude.ral]
 ---
 
@@ -40,6 +40,8 @@ removed when the body's extent ends, so workers using it belong inside a
 `gather` in that body. Bare `temp-*` remains available for caller-owned
 lifetimes ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 Their `##` summaries are served by `explain`, like every prelude binding's.
+`ral/tests/integration/cli/guards.rs` checks release and body endings through
+actual `ral` processes, including the bundled `rm` child on musl.
 
 Structural equality is the `==` / `!=` expression operator; callbacks use
 ordinary lambdas such as `{ |a b| $[$a == $b] }`.
