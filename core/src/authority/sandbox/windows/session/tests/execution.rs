@@ -4,6 +4,9 @@ use super::{
 };
 use crate::authority::policy::{Baseline, Capabilities, FsPolicy};
 use crate::authority::sandbox::{ExecProjection, FsProjection, SandboxProjection};
+use crate::fact::{
+    DaclFailure, DaclFailureRedirected, LaunchFailure, Reason, RedirectedTargetKind,
+};
 use crate::path::FrozenPath;
 use crate::process::{Placement, Unstarted};
 use crate::test_helper::confinement::{Output, admitted, denied};
@@ -196,7 +199,19 @@ fn a_junction_replacing_a_granted_leaf_or_ancestor_refuses_the_next_launch() {
                 Err(other) => panic!("expected a redirected allowance, got {other:?}"),
                 Ok(_) => panic!("a junction on the frozen allowance admitted a launch"),
             };
-            assert!(refusal.describe().contains("is now a link"), "{refusal}");
+            assert!(
+                matches!(
+                    &refusal.reason,
+                    Reason::Launch(failure) if matches!(
+                        failure.as_ref(),
+                        LaunchFailure::Dacl(DaclFailure::Redirected(DaclFailureRedirected {
+                            target_kind: RedirectedTargetKind::JunctionOrLink,
+                            ..
+                        }))
+                    )
+                ),
+                "{refusal}"
+            );
         }
     });
 }

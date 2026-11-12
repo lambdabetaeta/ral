@@ -102,7 +102,8 @@ mod tests {
             let boot = tempfile::tempdir().unwrap();
             std::fs::write(boot.path().join(media), []).unwrap();
             let refusal = read(boot.path()).unwrap_err();
-            let manifest = shown(boot.path().join("boot-manifest.txt"));
+            let manifest =
+                ral_core::text::quote_native(boot.path().join("boot-manifest.txt").as_os_str());
             assert!(refusal.contains(&manifest), "{refusal}");
         }
     }

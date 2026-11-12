@@ -509,8 +509,8 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
     assert_eq!(
         err.to_string(),
         format!(
-            "--restrict: capability file: could not open {:?}: no such file or directory",
-            ral_core::path::shown(dir.path().join("no-such-file.ral"))
+            "--restrict: capability file: could not open {}: no such file or directory",
+            ral_core::text::quote_native(dir.path().join("no-such-file.ral").as_os_str())
         )
     );
 }
