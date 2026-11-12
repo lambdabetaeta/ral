@@ -34,5 +34,5 @@ pub(super) fn items<'a>(m: &'a FOValue, field: &str) -> &'a [FOValue] {
 
 /// `v` in ral's own syntax: what an unreadable mark degrades to.
 pub(super) fn shown(v: &FOValue) -> String {
-    ral_core::Value::from(v.clone()).to_string()
+    ral_core::ValClos::from(v.clone()).to_string()
 }

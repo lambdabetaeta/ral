@@ -22,6 +22,7 @@ use crate::enquiry::{
     Survey, Transcript, Turns, Word, family,
 };
 use crate::schedule::ScheduleInfo;
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
@@ -29,18 +30,18 @@ use ral_core::fact::{
     DecodeFailure, InvalidCause, InvalidFailure, ProtocolData, ProtocolFailure,
     ProtocolFailureDecode, Reason, StateFailure,
 };
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled};
+use ral_core::shell::runtime::{Fork, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{Binders, Kind, Row, RowVar, Ty, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{Shell, SpawnGrant, Value};
+use ral_core::{Shell, SpawnGrant, ValClos};
 use std::borrow::Cow;
 use std::sync::Arc;
 
 const AGENTS: &str = "exarch-agents";
 
 /// The model's argument as first-order data, the only kind that crosses.
-fn first_order(verb: &str, arg: &Value) -> Settled<FOValue> {
+fn first_order(verb: &str, arg: &ValClos) -> Settled<FOValue> {
     Ok(FOValue::try_from(arg).map_err(|cause| {
         Error::new(Reason::Invalid(Box::new(InvalidFailure::new(
             verb.into(),
@@ -60,19 +61,19 @@ fn decode_error(operation: &str, kind: ProtocolData, cause: DecodeFailure) -> Er
 }
 
 /// Enquire `request`, admitting the host's answer only in the shape owed.
-fn ask(verb: &str, request: Request, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+fn ask(verb: &str, request: Request, mooring: &Mooring, shell: &Shell) -> Settled<ValClos> {
     let owed = request.owed();
     let answer = shell.enquire(mooring, request.encode())?;
     owed(&answer).map_err(|why| decode_error(verb, ProtocolData::Answer, why))?;
-    Ok(Value::from(answer))
+    Ok(ValClos::from(answer))
 }
 
 /// `exarch-<class>` for every family but the fleet: one enquiry per call.
 fn builtin_family<F: Family>(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let verb = format!("exarch-{}", F::CLASS);
     let request = family::<F>(&first_order(&verb, &args[0])?)
         .map_err(|cause| decode_error(&verb, ProtocolData::Request, cause))?;
@@ -81,11 +82,11 @@ fn builtin_family<F: Family>(
 
 /// [`builtin_family`] for a family whose answer is the script's to decide.
 fn boundary_family<F: Family>(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let answer = builtin_family::<F>(args, mooring, shell)?;
     site.admitted(&format!("exarch-{}", F::CLASS), answer, shell)
 }
@@ -93,16 +94,16 @@ fn boundary_family<F: Family>(
 /// `exarch-agents <tag>`: `` `start `` forks before it enquires, every other
 /// tag is one enquiry.
 fn builtin_agents(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let answer = agents(args, mooring, shell)?;
     site.admitted(AGENTS, answer, shell)
 }
 
-fn agents(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+fn agents(args: &[ValClos], mooring: &Mooring, shell: &Shell) -> Settled<ValClos> {
     match Word::decode(&first_order(AGENTS, &args[0])?)
         .map_err(|cause| decode_error(AGENTS, ProtocolData::Request, cause))?
     {
@@ -121,7 +122,7 @@ fn fork_then_enquire(
     mooring: &Mooring,
     shell: &Shell,
     request: impl FnOnce(ForkClaim) -> Request,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let claim = match mooring.fork() {
         Some(Fork::Park(nursery)) => ForkClaim::Parked(nursery.park(shell.bequeath(grant))),
         Some(Fork::Seal) => ForkClaim::Sealed(ral_core::seed::seal(&shell.bequeath(grant))?),

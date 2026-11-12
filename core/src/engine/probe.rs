@@ -6,8 +6,9 @@ use super::Engine;
 use crate::data::FOValue;
 use crate::data::datum::Datum;
 use crate::fact::FailureCode as _;
+use crate::handle::Handle;
 use crate::protocol::probe::{BindingRow, CompletionNames, Grants, HandleRow, Probe};
-use crate::shell::runtime::{Shell, Value};
+use crate::shell::runtime::{Shell, ValClos, View};
 
 mod fs;
 
@@ -63,8 +64,8 @@ fn binding_rows(shell: &Shell) -> Vec<BindingRow> {
     shell
         .env
         .fold_union(&shell.sig, |b| {
-            let handle = match &b.value {
-                Value::Handle(h) => Some(HandleRow {
+            let handle = match b.value.view() {
+                View::Handle(Handle::Live(h)) => Some(HandleRow {
                     state: h.sample(),
                     title: h.title.clone(),
                 }),
@@ -86,7 +87,7 @@ fn binding_rows(shell: &Shell) -> Vec<BindingRow> {
         .collect()
 }
 
-fn preview(v: &Value) -> String {
+fn preview(v: &ValClos) -> String {
     const CAP: usize = 40;
     let s = v.to_string().replace('\n', " ");
     if s.chars().count() <= CAP {

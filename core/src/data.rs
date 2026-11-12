@@ -1,4 +1,4 @@
-//! The first-order vocabulary: data all the way down, knowing no `Value`.
+//! The first-order vocabulary: data all the way down, knowing no `ValClos`.
 //!
 //! [`FOValue`] is first-order by construction over an extension slot that is
 //! uninhabited by default ([`NoExt`]); [`datum`] types the protocol's

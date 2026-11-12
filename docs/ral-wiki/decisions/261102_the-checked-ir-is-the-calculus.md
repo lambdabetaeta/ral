@@ -1,11 +1,29 @@
 ---
 status: active
-generated_at_commit: c4bd558f
-generated_at_date: 2026-11-11
-verified_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
+verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
-anchors: [CompKind, Prim, Val, Focus, Terminal, Frame, Terminal::into_value, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
+anchors: [CompKind, CompKind::Builtin, Prim, Val, ValClos, BuiltinEntry::eta, Machine::settle, Frame, Solver::binding, Solver::argument, Readback::toplevel, captured_string]
+amended_by: "[[261112_runtime-values-are-value-closures|runtime values are value closures]]"
 ---
+
+> **Amended 2026-11-12 — One value syntax.**
+> [[261112_runtime-values-are-value-closures|Runtime values are value closures]]
+> adds runtime constants `Val::Bytes`, `Val::Builtin` and `Val::Handle`, and
+> runtime-only `CompKind::Builtin` (δ). A builtin forces to a λ-chain ending
+> in δ, which reads its entry and arguments from ρ; partial application is
+> an ordinary boxed λ and crosses the wire as a thunk. Exactly saturated
+> runtime calls may invoke the entry directly. δ is a host-operation form,
+> distinct from value-only `Prim`; the elaborator writes none, and
+> `ValClos::block` keeps η residuals out of rechecking. The state is ⟨M, ρ⟩
+> or `Err(e)`; values pass down through
+> `Machine::settle` without a persistent register. This withdraws the native
+> terminal, separate runtime value syntax and “no builtin code enters IR”
+> representation claims below, not the control/primitive/shell partition.
+> Agda still substitutes where Rust carries environments; η now agrees in
+> shape, but correspondence for the new representation remains a follow-up.
+> The other standing gaps, including acquiring-guard divergence D4, remain.
 
 > **Amended 2026-11-12 — `Use` is shell IR.** The shell layer additionally
 > contains `Use(Arc<Module>)`: a checked `Toplevel` and its `SourceOrigin`,
@@ -112,14 +130,17 @@ and the application and sequencing rules of
 
 ## Where
 
-- `core/src/ir.rs`: `CompKind`, `Prim`, `Val`.
+- `core/src/ir.rs`: `CompKind`, `CompKind::Builtin`, `Prim`, `Val`;
+  `core/src/typecheck/env.rs`: `Inferring` excludes δ.
 - `core/src/typecheck/solve.rs`: `Solver::binding` and `Solver::argument`
   suspend the matches that decide binding modes and returned-thunk splits.
 - `core/src/typecheck/readback.rs`: `Readback::toplevel` applies those decisions,
   snapshots sites and settles schemes after successful unit closure;
   `captured_string` builds capture/decode. See
   [[internals/type-inference|type inference]].
-- `core/src/shell/evaluator/machine.rs`: `Focus`, `Terminal`, `Frame`.
+- `core/src/shell/evaluator/machine.rs`: `Machine::settle`, `Frame`, `State`,
+  `Next`; `core/src/shell/runtime/value.rs`: `ValClos`;
+  `core/src/builtin.rs`: `BuiltinEntry::eta`.
 - `dev/agda/Extrinsic/{Syntax/Term,Prims,Semantics/Machine}.agda`:
   corresponding syntax, primitives and CK rules.
 - `dev/agda/README.md`: correspondence tables and standing gaps.

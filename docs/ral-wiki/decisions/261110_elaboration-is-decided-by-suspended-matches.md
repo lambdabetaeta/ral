@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-verified_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-verified_at_date: 2026-11-10
+generated_at_commit: c0905f5e
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
 anchors: [Generator, Solver, Solution, Readback, Phase, Inferring, BindHole, CallHole, Mode, generalize, Closed]
 ---
 
@@ -106,7 +106,7 @@ diagnostics are not claimed order-independent.
 
 ## Where
 
-- `core/src/ir.rs` (`Phase`, `Checked`) and `core/src/typecheck/env.rs`
+- `core/src/ir.rs` (`Phase`, `Explicit`) and `core/src/typecheck/env.rs`
   (`Inferring`): holes as phase annotations.
 - `core/src/typecheck/generate.rs` and `generate/`: constraint generation.
 - `core/src/typecheck/solve.rs`: private store, suspensions keyed by scrutinee

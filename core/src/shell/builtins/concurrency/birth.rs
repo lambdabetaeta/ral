@@ -4,12 +4,14 @@
 use super::join;
 use crate::error::Error;
 use crate::fact::{Reason, StateFailure, Worker, WorkerCap};
+use crate::handle::HandleInner;
+use crate::handle::brood::{BroodGuard, BroodOwner, Cradle, EnrolClosed};
+use crate::handle::surface::DeferredSurface;
 use crate::io::{Sink, Streams, new_buffer};
 use crate::process::{DurableRoot, Scope};
 use crate::shell::runtime::{
-    BroodGuard, BroodOwner, Cradle, DeferredSurface, DoneEvent, End, EnrolClosed, HandleInner,
-    Mooring, Observed, Owner, Settled, Shell, SurfaceSink, Value, WatchEvent, WorkerEntry,
-    WorkerId,
+    DoneEvent, End, Mooring, Observed, Owner, Settled, Shell, SurfaceSink, ValClos, WatchEvent,
+    WorkerEntry, WorkerId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +36,7 @@ pub(super) fn spawn_child<F>(
     work: F,
 ) -> Settled<HandleInner>
 where
-    F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
+    F: FnOnce(&Mooring, &mut Shell) -> Settled<ValClos> + Send + 'static,
 {
     let reservation = shell
         .local
@@ -183,10 +185,10 @@ pub(super) fn convert_own_stop(end: End, root: &DurableRoot) -> End {
 /// the body's, the child's, or the stop that cut the join.
 pub(crate) fn exit_brood(
     owner: &BroodGuard,
-    body: Settled<Value>,
+    body: Settled<ValClos>,
     grace: Duration,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     owner.close();
     let result = body.and_then(|value| {
         for child in owner.children() {

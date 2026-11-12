@@ -28,7 +28,7 @@ pub(crate) enum ReportFault {
 
 impl RunReport {
     /// Project into the protocol [`Report`] — the one lossy step between the
-    /// engine and the protocol: the live `Value` becomes an [`FOValue`], and rich
+    /// engine and the protocol: the live `ValClos` becomes an [`FOValue`], and rich
     /// diagnostics render to strings.
     pub(crate) fn into_report(self, shell: &Shell) -> Report {
         match self {

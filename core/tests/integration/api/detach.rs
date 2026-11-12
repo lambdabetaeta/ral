@@ -31,7 +31,10 @@ use ral_core::shell::run::RunReport;
 use ral_core::shell::runtime::{Break, Shell};
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::eventually;
-use ral_core::{RunIo, Value, shell::builtins};
+use ral_core::{
+    RunIo, ValClos,
+    shell::{builtins, runtime::View},
+};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::Duration;
@@ -55,7 +58,7 @@ fn with_detach() -> Shell {
 }
 
 /// Birth one process through `call` and return the receipt as JSON — via
-/// `to-json` rather than the `Value`, so what the model would read is what
+/// `to-json` rather than the `ValClos`, so what the model would read is what
 /// the test reads.
 fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     let report = shell.run(Run {
@@ -67,10 +70,12 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     });
     match report {
         RunReport::Ran {
-            ending: ral_core::shell::runtime::End::Ok(Value::Unit),
+            ending: ral_core::shell::runtime::End::Ok(value),
             captured: Some(captured),
             ..
-        } => serde_json::from_slice(&captured.stdout.bytes).expect("`to-json` emits JSON"),
+        } if matches!(value.view(), View::Unit) => {
+            serde_json::from_slice(&captured.stdout.bytes).expect("`to-json` emits JSON")
+        }
         RunReport::Ran { ending, .. } => {
             panic!("{call} must return a receipt record, got {ending:?}")
         }
@@ -372,9 +377,9 @@ fn a_bound_stub_stands_in_for_detach() {
     let receipt = result.expect("a bound stub returns its receipt");
     assert_eq!(
         receipt,
-        Value::map(vec![
-            ("pid".into(), Value::Int(0)),
-            ("desc".into(), Value::string("x")),
+        ValClos::map(vec![
+            ("pid".into(), ValClos::int(0)),
+            ("desc".into(), ValClos::string("x")),
         ])
     );
     let commands = crate::common::commands(&events);

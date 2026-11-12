@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/evaluator.rs, core/src/shell/evaluator/]
 ---
@@ -14,8 +14,9 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 ## Entry
 
 - `machine::evaluate(comp, env, mooring, shell)` injects ⟨M, ρ⟩ over an
-  empty stack. `machine::apply(f, args, …)` pushes the arguments, if any,
-  then forces the value. Both are crate-private and return `Settled<Value>`.
+  empty stack. `machine::apply(f, args, …)` seeds `call`: an exact-arity
+  builtin runs directly; otherwise arguments are pushed and the value forced.
+  Both are crate-private and return `Settled<ValClos>`.
 - `run_phrases(top: &Toplevel, env: Env, …)` (`shell/evaluator.rs`)
   readmits `top.admits` against the supplied `env` before the first phrase,
   in every mode, including loaded files. Private `readmit` uses that `Env`
@@ -38,35 +39,37 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 
 ## Machine: `machine.rs`
 
-- `Focus::{Eval, Return, Halt}` holds a computation closure, a terminal,
-  or a `Break`. `Terminal::{Value, Lambda, Native}` distinguishes a returned
-  value from a lambda or builtin awaiting arguments. `Terminal::into_value`
-  boxes residual lambdas with `Closure::new` over `Occ::of`, and natives as
-  `Value::Native(entry, args)`, at value demands and run end.
-- `eval_rules` has one arm per `CompKind`; `step_return` and `step_halt`
-  have one per `Frame`. Rules return `Settled<Focus>`; raising points use
-  visibility-checked `Break::locate(name, span, shell)`; `step` folds failure
-  into `Halt`. The operation-name table excludes `Exec`/`App`: dispatch and
-  admission claim those failures at their own innermost frame.
+- `State = Settled<(Arc<Comp>, Env)>` holds only a computation closure or
+  `Err(Break)`. `Next` is a closure or `ValClos`, a transient rule result.
+  `settle` hands values to frames in the same step, never storing a value
+  state or constructing `return V` IR. `boxed` closes a residual λ through
+  `ValClos::thunk` at value demands and run end.
+- `eval_rules` interprets `CompKind`; `resume` and `unwind` interpret frames.
+  Rules return `Settled<Next>`; `step` pops a frame for a λ or break and
+  settles the result. Raising points use visibility-checked `Break::locate`.
+  `Exec`/`App` claim their innermost dispatch/admission failures; builtin δ
+  uses `run_native`'s own provenance.
 - `App` pushes one `Frame::Arg` per argument, right to left, then evaluates
-  the head. `Lambda` consumes `Arg`, binding its one name and entering the
-  body; `Native` collects it and runs the builtin at saturation. A returned
-  value meeting `Arg` is an invariant failure, never implicitly forced.
+  the head. A λ consumes `Arg`, binds its name and enters the body. Builtins
+  force to cached λ-chains ending in `CompKind::Builtin` (δ); β supplies
+  their arguments, and δ reads the entry and arguments from its environment.
+  A returned value meeting `Arg` is an invariant failure, never implicitly forced.
   Returned-thunk splits follow the [[invariants/ir-pure-cbpv|IR invariant]].
-  A call with n arguments needs n free frames.
+  Pushing n arguments needs n free frames.
 - `force_val` enters a literal thunk in the current environment without
-  closing it. `force` enters a stored thunk's closure or yields a native
-  terminal holding the entry and supplied arguments; arity zero runs on force.
-  `dispatch_exec` runs a native directly when held plus new arguments saturate
-  it. Boundary builtins remain inference-built λ-closures over `Exec` with
-  their per-use checked site; no builtin application becomes IR.
+  closing it. `force` enters a stored thunk or a builtin's η-expansion over
+  its captured entry; arity zero enters δ immediately. `call` runs a builtin
+  directly at exactly its arity, otherwise pushes arguments and forces it.
+  Under-application yields an ordinary λ residual. `dispatch_exec` handles
+  boundaries with their checked site; inference-built partial boundaries
+  remain λ-closures over `Exec`.
 - Every `let` runs its RHS. `Bind` pushes `Frame::To`, which binds the result,
   boxing a residual function; `Seq` pushes `Frame::Seq`. These alone carry
   saved environments for their continuations. A lambda binds a name;
   parameter destructuring runs through body binds at parameter spans.
 - `If` forces its selected arm; `step_case` first pushes one `Arg` holding
   the variant payload. Bare tags carry `Unit`. `Try` passes an error record
-  to its handler by the same push-then-force rule.
+  through `call`, including its exact-arity builtin shortcut.
 - `Guard` checks room for three frames and polls before shielded acquisition.
   `Frame::Acquire` restores scope, installs `Frame::Guard { release, resource }`
   and calls the body without an intervening poll. `guard_release` saves the
@@ -109,11 +112,13 @@ and shell. Hosts enter only through the framed run in `shell/run.rs`.
 
 ## Values and primitives
 
-- `val.rs`: `form(val, env, sig)` is side-effect-free. Variables use
-  `lookup`; thunks use `Closure::new`; variants use `Value::variant`,
-  normalising unit payloads. Plain list/record/map literals close over
-  precomputed occurrence sets, unless a directly mentioned name requires
-  Σ lookup and therefore eager formation.
+- `runtime/value.rs`: `ValClos::close(val, env, sig)` closes inert syntax.
+  Variables use `lookup`; other forms restrict ρ to occurrences and pull Σ's
+  answers for missing direct names into the capture, never descending a thunk.
+  `View` reads one layer; components share ρ without re-restriction. Lists
+  and maps expose `ListRef` / `MapRef`; a variant's resolved unit payload is
+  absent in its view. See
+  [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]].
 - `expr.rs`: `eval_prim` interprets every `Prim` on values. `field`,
   `position` and `lookup` implement `Key::{Label, Position, Data}` reads;
   `position` is shared with `nth`. `Render` checks scalars; `Concat` joins

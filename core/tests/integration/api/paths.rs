@@ -3,13 +3,15 @@
 //! and a name ending in a separator are directories.  On Linux, a glob over a
 //! non-UTF-8 name keeps the native bytes and refuses a match it cannot show.
 
-use ral_core::Value;
+use ral_core::ValClos;
 #[cfg(target_os = "linux")]
 use ral_core::path::CwdPath;
 use ral_core::protocol::Run;
 #[cfg(target_os = "linux")]
 use ral_core::shell::run::RunReport;
 use ral_core::shell::runtime::Settled;
+#[cfg(unix)]
+use ral_core::shell::runtime::View;
 use ral_core::source::SourceOrigin;
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
@@ -18,7 +20,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// `body` run with `dir` for its working directory.
-fn run_in(dir: &Path, body: &str) -> Settled<Value> {
+fn run_in(dir: &Path, body: &str) -> Settled<ValClos> {
     let source = format!("within [dir: '{}'] {{ {body} }}", dir.display());
     ral_core::test_helper::fresh_shell()
         .run(Run::captured(source, SourceOrigin::named("<test>")))
@@ -297,7 +299,7 @@ fn assert_fs_denial(dir: &Path, body: &str) {
     use ral_core::fact::{Decision, Observation, Observed, Resource};
 
     let report = run_in(dir, &format!("audit {{ {body} }}")).expect("audit returns the refusal");
-    let Value::Map(report) = report else {
+    let View::Map(report) = report.view() else {
         panic!("audit must return a record");
     };
     let outcome = report.get("outcome").unwrap().to_string();
@@ -309,7 +311,7 @@ fn assert_fs_denial(dir: &Path, body: &str) {
     );
     assert!(!outcome.contains("too many levels"), "{body}: {outcome}");
     let trail = report.get("trail").unwrap();
-    let Value::List(trail) = trail.as_ref() else {
+    let View::List(trail) = trail.view() else {
         panic!("audit must return a trail");
     };
     let checks: Vec<_> = trail

@@ -10,12 +10,9 @@ pub(crate) mod signature;
 pub(crate) use signature::{PreludeMap, Signature, lookup};
 
 mod value;
-pub use value::Value;
+pub use value::{ValClos, View};
 #[cfg(test)]
 pub(crate) use value::{block_over, captured, deep_block_chain};
-
-mod closure;
-pub use closure::Closure;
 
 // What the exec boundary refuses, declared once for the two sides that read it:
 // the checker before the spawn, `shell::exec::command::check_argv` at it.
@@ -24,39 +21,20 @@ mod handler;
 pub use handler::{FrameHandle, HandlerEntry};
 pub(crate) use handler::{FrameKind, HandlerArity, HandlerFrame, HandlerLookup};
 
-// The shared state behind `Value::Handle`.
-mod handle;
-#[allow(unused_imports)]
-pub(crate) use handle::brood::{
-    Brood, BroodGuard, BroodOwner, Cradle, EnrolClosed, stop_and_drain,
-};
-#[cfg(test)]
-pub(crate) use handle::idle_handle;
-pub(crate) use handle::surface::DeferredSurface;
-pub use handle::{CompletedHandle, HandleInner, Sample, Stamp};
-#[allow(unused_imports)]
-pub(crate) use handle::{CompletionPermit, Snapshot, pins_live_work};
-
 // A boundary's checked type, and what a door admits against it.
 mod admit;
 pub use admit::Mismatch;
 pub(crate) use admit::pointer_token;
 
-mod builtin;
 pub use crate::typecheck::builtins::Convention;
-pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable};
-pub(crate) use builtin::{Set, language_constants};
 
-// The inner of `Value::List`.
 mod list;
-pub use list::List;
+pub use list::{List, ListRef};
 
-// The inner of `Value::Map`.
 mod map;
-pub use map::Map;
+pub use map::{Map, MapRef};
 
-// The inner of `Value::Bytes`.
-// Here because `Value::Bytes` holds one.
+// Shared byte strings.
 pub use crate::data::Bytes;
 
 mod error;

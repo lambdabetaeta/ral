@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
@@ -125,8 +125,8 @@ keeps its terms through core's `Shell::bequeath` and `Shell::child_of`
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
 (1 MiB) rides the same `BindingLease` at the same arming site — a
-residency threshold, not a lifetime one, so the install chokepoint checks it
-independently of idle age or baseline status.
+residency threshold on `ValClos::shallow_size`, not a lifetime one, so the
+install chokepoint checks it independently of idle age or baseline status.
 
 Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
 is folded by every attend-loop caller into
@@ -214,7 +214,7 @@ order, and exits 124:
    of its `spawn`, up to five, and counts aloud whatever it does not name — a
    silent truncation would read as "that was all of them".
 
-`run_shell` asks for no trail (`trail: None`). The host already hears every
+`run_shell` disables retained trails (`trail: Some(CapturePolicy::Off)`). The host already hears every
 observation on the surface, so a trail would only retain, until the run ends,
 records nothing reads. "This command completed, that one was cut" is the
 engine diagnostic's job.

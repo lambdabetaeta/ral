@@ -100,7 +100,7 @@ mod tests {
     use crate::fact::{
         ExarchFailure, HostFailure, PolicyFailure, PolicyFailureUnknownBase, Reason,
     };
-    use crate::shell::runtime::Value;
+    use crate::shell::runtime::ValClos;
 
     /// A narrower no test here may reach: only [`SpawnGrant::Base`] consults
     /// one, and these cases are the other two arms.
@@ -115,17 +115,17 @@ mod tests {
         )
     }
 
-    fn restrict(record: &Value) -> SpawnGrant {
+    fn restrict(record: &ValClos) -> SpawnGrant {
         SpawnGrant::Restrict(FOValue::try_from(record).expect("a first-order grant record"))
     }
 
     #[test]
     fn a_restriction_freezes_against_the_cwd_it_is_given() {
-        let record = Value::map(vec![(
+        let record = ValClos::map(vec![(
             "fs".to_string(),
-            Value::map(vec![(
+            ValClos::map(vec![(
                 "read".to_string(),
-                Value::list(vec![Value::variant("cwd", Some(Value::string(".")))]),
+                ValClos::list(vec![ValClos::variant("cwd", Some(ValClos::string(".")))]),
             )]),
         )]);
         let layer = restrict(&record)

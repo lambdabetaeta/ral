@@ -13,7 +13,8 @@ use crate::authority::grant::value::LayerValue;
 use crate::authority::policy::{GrantLayer, GrantStack};
 use crate::data::datum::{Datum, tag};
 use crate::data::{Bytes, FOValue, Finite};
-use crate::shell::runtime::{Done, Owner, Sample, Value};
+use crate::handle::Sample;
+use crate::shell::runtime::{Done, Owner, ValClos};
 use crate::ty::{Ty, Typed, closed_record};
 use crate::{memoized_ty, record, variant};
 
@@ -241,12 +242,12 @@ impl Typed for WorkerRow {
 
 impl WorkerRow {
     /// The row as ral reads it: every field but the host's `retention_left`.
-    pub fn ral_value(&self) -> Value {
+    pub fn ral_value(&self) -> ValClos {
         let FOValue::Map { mut entries } = self.clone().encode() else {
             unreachable!("a record encodes as a map");
         };
         entries.retain(|(k, _)| k != "retention-left");
-        Value::from(FOValue::Map { entries })
+        ValClos::from(FOValue::Map { entries })
     }
 }
 

@@ -19,7 +19,7 @@ use ral_core::shell::runtime::{DeferredSink, DoneEvent, HookName};
 use ral_core::source::SourceOrigin;
 use ral_core::sync::LockExt as _;
 use ral_core::text::plural;
-use ral_core::{Captured, RequestedTerminalAccess, Value};
+use ral_core::{Captured, RequestedTerminalAccess, ValClos};
 use ral_core::{errln, outln};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -193,7 +193,7 @@ impl ReplHost {
             Some(("notice", Some(payload))) => self.line(&format!(
                 "{}note: {}{}",
                 ral_core::io::ansi::DIM,
-                Value::from(payload.clone()),
+                ValClos::from(payload.clone()),
                 ral_core::io::ansi::RESET
             )),
             _ => {

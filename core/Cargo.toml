@@ -52,6 +52,7 @@ dunce         = "1.0.5"
 globset       = "0.4"
 either        = "1"
 imbl          = { version = "7", features = ["serde"] }
+triomphe      = "0.1.15"
 rustc-hash    = { workspace = true }
 regex         = "1"
 regex-syntax  = "0.8"

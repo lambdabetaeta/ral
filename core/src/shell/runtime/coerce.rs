@@ -1,13 +1,16 @@
 //! The decoders of a builtin's arguments.
 
-use super::{Break, Closure, Error, HandleInner, List, Map, Value};
+use super::{Break, Env, Error, ListRef, MapRef, ValClos, View};
 use crate::fact::{
     BlockRole, CodecFailure, CodecFailureUtf8, Expected, IllTyped, InvalidCause, InvalidFailure,
     Reason, ShapeFailure, Utf8Failure, Utf8Subject, ValueShape,
 };
+use crate::handle::HandleInner;
+use crate::ir::Comp;
+use std::sync::Arc;
 
 /// Each decoder fails with a bare `Error`: a shape mismatch is never an exit.
-impl Value {
+impl ValClos {
     /// A shape refusal with a semantic operation, not a diagnostic headline.
     pub fn expected(&self, operation: &str, expected: Expected) -> Error {
         invalid(
@@ -24,8 +27,8 @@ impl Value {
     /// # Errors
     /// `self` is not a `String`.
     pub fn as_str(&self, ctx: &str) -> Result<&str, Error> {
-        match self {
-            Self::String(s) => Ok(s.as_str()),
+        match self.view() {
+            View::String(s) => Ok(s.as_str()),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::String))),
         }
     }
@@ -33,8 +36,8 @@ impl Value {
     /// # Errors
     /// `self` is not `Bytes`.
     pub(crate) fn as_bytes(&self, ctx: &str) -> Result<&[u8], Error> {
-        match self {
-            Self::Bytes(b) => Ok(b),
+        match self.view() {
+            View::Bytes(b) => Ok(b),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Bytes))),
         }
     }
@@ -42,8 +45,8 @@ impl Value {
     /// # Errors
     /// `self` is not a `Handle`.
     pub(crate) fn expect_handle(&self, ctx: &str) -> Result<&HandleInner, Error> {
-        match self {
-            Self::Handle(h) => Ok(h),
+        match self.view() {
+            View::Handle(h) => h.live(),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Handle))),
         }
     }
@@ -52,37 +55,29 @@ impl Value {
     ///
     /// # Errors
     /// `self` is not a block.
-    pub(crate) fn expect_thunk(&self, ctx: &str) -> Result<Closure, Error> {
-        match self {
-            Self::Thunk(c) => Ok(c.clone()),
+    pub(crate) fn expect_thunk(&self, ctx: &str) -> Result<(&Arc<Comp>, &Env), Error> {
+        match self.view() {
+            View::Thunk { comp, env } => Ok((comp, env)),
             _ => Err(self.expected(ctx, Expected::Closure)),
         }
     }
 
     /// # Errors
     /// `self` is not a `List`.
-    pub fn as_list(&self, ctx: &str) -> Result<List, Error> {
-        match self {
-            Self::List(items) => Ok(items.clone()),
+    pub fn as_list(&self, ctx: &str) -> Result<ListRef<'_>, Error> {
+        match self.view() {
+            View::List(items) => Ok(items),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::List))),
         }
     }
 
     /// # Errors
     /// `self` is not a `Map`.
-    pub(crate) fn as_map_ref(&self, ctx: &str) -> Result<&Map, Error> {
-        match self {
-            Self::Map(m) => Ok(m),
+    pub fn as_map(&self, ctx: &str) -> Result<MapRef<'_>, Error> {
+        match self.view() {
+            View::Map(m) => Ok(m),
             _ => Err(self.expected(ctx, Expected::Shape(ValueShape::Map))),
         }
-    }
-
-    /// Owning variant of [`Self::as_map_ref`].
-    ///
-    /// # Errors
-    /// `self` is not a `Map`.
-    pub fn as_map(&self, ctx: &str) -> Result<Map, Error> {
-        self.as_map_ref(ctx).cloned()
     }
 }
 
@@ -145,7 +140,7 @@ mod tests {
 
     #[test]
     fn coercions_keep_typed_expectations_and_bounded_previews() {
-        let value = Value::string("é".repeat(25));
+        let value = ValClos::string("é".repeat(25));
         let error = value.as_list("map").unwrap_err();
         let Reason::Invalid(failure) = error.reason else {
             panic!("invalid input")

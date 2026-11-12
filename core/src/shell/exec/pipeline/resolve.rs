@@ -5,19 +5,19 @@ use super::super::command::{Command, Request};
 use super::super::resolve::Resolution;
 use super::StageEval;
 use crate::ir::{Comp, CompKind};
-use crate::shell::runtime::{Break, Env, Settled, Shell, Value};
+use crate::shell::runtime::{Break, Env, Settled, Shell, ValClos};
 use std::sync::Arc;
 
 /// One stage's launch decision, frozen here and read by launch rather than
 /// re-derived.  Argv is evaluated only on the `Direct` path: a `Thread` stage
 /// re-evaluates its own inside the thread, so doing it here too would run
-/// effectful arguments twice.  Args stay `Value`s so launch-time
+/// effectful arguments twice.  Args stay `ValClos`s so launch-time
 /// `command::check_argv` applies the same shape rejection single-command exec does.
 #[derive(Debug)]
 pub(super) enum StageLaunch {
     Direct {
         command: Command<Request>,
-        args: Vec<Value>,
+        args: Vec<ValClos>,
     },
     Thread,
 }

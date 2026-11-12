@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ed1b37eb
+verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
 anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, file_options, check_options, check_option, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
@@ -80,7 +80,7 @@ a head again.
 Holes are phase annotations of the IR. The pending tree is
 `Inferring`-phase: `CompKind::Bind` and `Phrase::Define` carry a `BindHole`,
 and `CompKind::App` and `CompKind::BindingCall` (a bare head bound in scope)
-carry a `CallHole`. In `Checked`, the evaluator's phase, those annotations are
+carry a `CallHole`. In `Explicit`, the phase the evaluator runs, those annotations are
 `()` and `BindingCall`'s is uninhabited, so no hole reaches the evaluator.
 
 ## Ranks determine the closing boundary

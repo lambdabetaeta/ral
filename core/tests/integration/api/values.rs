@@ -2,16 +2,15 @@
 //! and what a `race` returns.
 
 use crate::common::must_succeed;
-use ral_core::shell::runtime::Value;
+use ral_core::shell::runtime::{ValClos, View};
 
 /// `$upper` is a plain env hit on the native — the entry *is* the value.
 #[test]
 fn return_deref_name_is_bound_value() {
     let v = must_succeed("return $upper");
-    match v {
-        Value::Native(entry, args) => {
+    match v.view() {
+        View::Builtin(entry) => {
             assert_eq!(entry.decl.name, "upper");
-            assert!(args.is_empty());
         }
         other => panic!("expected the native itself, got {other:?}"),
     }
@@ -20,17 +19,23 @@ fn return_deref_name_is_bound_value() {
 #[test]
 fn lexical_non_head_name_uses_deref_to_get_value() {
     let v = must_succeed("let f = { |x| return $x }\nreturn $f");
-    assert!(matches!(v, Value::Thunk(_)), "expected thunk, got {v:?}");
+    assert!(
+        matches!(v.view(), View::Thunk { .. }),
+        "expected thunk, got {v:?}"
+    );
 }
 
 #[test]
 fn list_position_deref_gives_thunk() {
     // $upper in list position is a variable lookup.
     let v = must_succeed("let upper = { |x| return $x }\nreturn [$upper]");
-    match v {
-        Value::List(items) => {
+    match v.view() {
+        View::List(items) => {
             assert!(
-                matches!(items.get(0).as_deref(), Some(Value::Thunk(_))),
+                matches!(
+                    items.get(0).as_deref().map(ValClos::view),
+                    Some(View::Thunk { .. })
+                ),
                 "expected thunk, got {:?}",
                 items.get(0)
             );
@@ -51,6 +56,6 @@ fn race_first_wins() {
             return $r
         "
         ),
-        Value::string("winner")
+        ValClos::string("winner")
     );
 }

@@ -307,7 +307,7 @@ fn parent_prose_is_copyable_while_its_helper_still_owes_a_report() {
     use crate::agent::testkit::{dressed, launch_child, ral_call, set_provider};
     use crate::provider::scripted::Reply;
     use crate::record::{Control, Display, Record};
-    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+    use ral_core::builtin::{BuiltinBody, BuiltinEntry};
     use std::borrow::Cow;
     use std::sync::{Mutex, mpsc};
 
@@ -325,7 +325,7 @@ fn parent_prose_is_copyable_while_its_helper_still_owes_a_report() {
                 .recv_timeout(WAIT)
                 .expect("release helper");
             shell.poll()?;
-            Ok(ral_core::Value::Unit)
+            Ok(ral_core::ValClos::UNIT)
         })),
     )]);
     let mut parent = crate::agent::Agent::for_test_with(crate::agent::TestLaunch {

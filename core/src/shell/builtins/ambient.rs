@@ -1,61 +1,61 @@
 //! The ambient reads — the dynamic `Context` and the machine — as nullary natives.
 
 use crate::fact::{AmbientSetting, Reason, StateFailure};
-use crate::shell::runtime::{Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Error, Mooring, Settled, Shell, ValClos};
 use crate::ty::Site;
 use std::sync::Arc;
 
-pub(super) fn cwd(shell: &Shell) -> Value {
-    Value::string(crate::path::shown(shell.cwd()))
+pub(super) fn cwd(shell: &Shell) -> ValClos {
+    ValClos::string(crate::path::shown(shell.cwd()))
 }
 
 /// Home as ral shows it: the spelling `~` expands to
 /// ([`crate::path::TildePath::shown`]), so `~/x` and `"!{home}/x"` are
 /// the same string on every host.
-pub(super) fn home(shell: &Shell) -> Result<Value, Error> {
+pub(super) fn home(shell: &Shell) -> Result<ValClos, Error> {
     let home = shell.context.require_home()?;
-    Ok(Value::string(crate::path::shown(home)))
+    Ok(ValClos::string(crate::path::shown(home)))
 }
 
 /// The host environment under the overlay:
 /// [`EnvVars::visible`](crate::environ::EnvVars::visible).
-pub(super) fn env(shell: &Shell) -> Value {
-    Value::Map(
+pub(super) fn env(shell: &Shell) -> ValClos {
+    ValClos::map(
         shell
             .context
             .env_overrides()
             .visible()
-            .map(|(k, v)| (k, Value::string(v)))
+            .map(|(k, v)| (k, ValClos::string(v)))
             .collect(),
     )
 }
 
 pub(super) fn builtin_env(
-    _args: &[Value],
+    _args: &[ValClos],
     site: &Arc<Site>,
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     site.admitted("env", env(shell), shell)
 }
 
-pub(super) fn args(shell: &Shell) -> Value {
-    Value::list(
+pub(super) fn args(shell: &Shell) -> ValClos {
+    ValClos::list(
         shell
             .context
             .args
             .iter()
             .cloned()
-            .map(Value::string)
+            .map(ValClos::string)
             .collect(),
     )
 }
 
-pub(super) fn user(shell: &Shell) -> Result<Value, Error> {
+pub(super) fn user(shell: &Shell) -> Result<ValClos, Error> {
     shell
         .env_overrides()
         .user()
-        .map(Value::string)
+        .map(ValClos::string)
         .ok_or_else(|| {
             Error::new(Reason::State(Box::new(StateFailure::MissingAmbient(
                 AmbientSetting::User,
@@ -63,8 +63,8 @@ pub(super) fn user(shell: &Shell) -> Result<Value, Error> {
         })
 }
 
-pub(super) fn nproc() -> Value {
-    Value::Int(
+pub(super) fn nproc() -> ValClos {
+    ValClos::int(
         std::thread::available_parallelism().map_or(1, |n| i64::try_from(n.get()).unwrap_or(1)),
     )
 }
@@ -79,9 +79,8 @@ mod tests {
 
     #[test]
     fn env_has_neither_pwd_nor_oldpwd() {
-        let Value::Map(m) = env(&new_shell()) else {
-            panic!("env must be a Map");
-        };
+        let value = env(&new_shell());
+        let m = value.as_map("env").expect("env must be a Map");
         assert!(m.get("PWD").is_none() && m.get("OLDPWD").is_none());
     }
 
@@ -92,12 +91,11 @@ mod tests {
             .context
             .set_env_var("RAL_AMBIENT_TEST_KEY", "v")
             .unwrap();
-        let Value::Map(m) = env(&shell) else {
-            panic!("env must be a Map");
-        };
+        let value = env(&shell);
+        let m = value.as_map("env").expect("env must be a Map");
         assert_eq!(
             m.get("RAL_AMBIENT_TEST_KEY").as_deref(),
-            Some(&Value::string("v"))
+            Some(&ValClos::string("v"))
         );
     }
 

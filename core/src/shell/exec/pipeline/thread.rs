@@ -234,7 +234,7 @@ mod tests {
                         |_, _, _, child| {
                             child.write_stdout(b"out-tail").unwrap();
                             child.write_stderr(b"err-tail").unwrap();
-                            Ok(crate::shell::runtime::Value::Unit)
+                            Ok(crate::shell::runtime::ValClos::UNIT)
                         }
                     },
                     ..crate::shell::evaluator::STAGE_EVAL
@@ -346,7 +346,7 @@ mod tests {
             eval: super::super::StageEval {
                 run: |_, _, mooring, _| {
                     mooring.home.cancel(CancelCause::ReaderGone);
-                    Ok(crate::shell::runtime::Value::Unit)
+                    Ok(crate::shell::runtime::ValClos::UNIT)
                 },
                 ..crate::shell::evaluator::STAGE_EVAL
             },
@@ -394,7 +394,7 @@ mod tests {
                     mooring: &Mooring,
                     shell: &mut crate::shell::runtime::Shell,
                     readable: bool,
-                ) -> Settled<crate::shell::runtime::Value> {
+                ) -> Settled<crate::shell::runtime::ValClos> {
                     assert!(matches!(
                         (readable, &shell.io.stdin),
                         (true, crate::io::Source::Terminal) | (false, crate::io::Source::Empty)
@@ -408,12 +408,12 @@ mod tests {
                         run: if readable {
                             |_, _, _, child| {
                                 assert!(matches!(child.io.stdin, crate::io::Source::Terminal));
-                                Ok(crate::shell::runtime::Value::Unit)
+                                Ok(crate::shell::runtime::ValClos::UNIT)
                             }
                         } else {
                             |_, _, _, child| {
                                 assert!(matches!(child.io.stdin, crate::io::Source::Empty));
-                                Ok(crate::shell::runtime::Value::Unit)
+                                Ok(crate::shell::runtime::ValClos::UNIT)
                             }
                         },
                         ..crate::shell::evaluator::STAGE_EVAL

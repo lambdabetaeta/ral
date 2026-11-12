@@ -1,4 +1,4 @@
-//! The seed's scope table: serialisable mirrors of `Value` and `Env`.
+//! The seed's scope table: serialisable value closures and environments.
 //!
 //! [`SerialValue`] fills [`FOValue`]'s extension slot with closures so the
 //! sealed child ([`super::EngineSeed`]) can ship a
@@ -8,67 +8,32 @@
 //! captured environment carries only ρ.  `into_runtime`, given a
 //! [`WireDecoder`], is the sole wire→runtime conversion.
 
+use crate::builtin::BuiltinTable;
 use crate::data::FOValue;
 use crate::data::json::{drop_value, on_json_stack};
-use crate::fact::{
-    InvariantFailure, ProtocolFailure, ProtocolFailureInvalidNativeArguments, Reason,
-};
+use crate::fact::{ProtocolFailure, Reason};
 use crate::ir::{Comp, Name};
-use crate::shell::runtime::{Binding, BuiltinTable, Closure, Env, Error, Runtime, Value};
+use crate::shell::runtime::{Binding, Env, Error, Runtime, ValClos, View};
 use crate::ty::Closed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
-/// scopes.
-///
-/// One wire shape for the one runtime thunk value.
+/// The non-data values child IPC adds to [`FOValue`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum SerialClosure {
+pub(crate) enum SerialAtom {
     Thunk(SerialThunk),
-    Native(SerialNative),
+    Builtin(String),
+    Handle(String),
 }
 
-/// [`FOValue`] with closures, for the re-exec'd child IPC.  A `Handle` has no
-/// wire form; encoding one is an error.
-pub(crate) type SerialValue = FOValue<SerialClosure>;
+pub(crate) type SerialValue = FOValue<SerialAtom>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialThunk {
     /// Includes linked modules' checked tops and origins, never load requests.
     pub(super) comp: Arc<Comp>,
     pub env: SerialEnvSnapshot,
-}
-
-/// Wire mirror of a [`Value::Native`]: the body
-/// cannot cross, so hydration re-links the name against the receiving
-/// shell's manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct SerialNative {
-    pub name: std::string::String,
-    pub args: Vec<SerialValue>,
-}
-
-impl Drop for SerialNative {
-    fn drop(&mut self) {
-        let mut pending = std::mem::take(&mut self.args);
-        while let Some(mut value) = pending.pop() {
-            match &mut value {
-                SerialValue::List { items } => pending.append(items),
-                SerialValue::Map { entries } => {
-                    pending.extend(std::mem::take(entries).into_iter().map(|(_, value)| value));
-                }
-                SerialValue::Variant { payload, .. } => {
-                    if let Some(value) = payload.take() {
-                        pending.push(*value);
-                    }
-                }
-                SerialValue::Ext(SerialClosure::Native(native)) => pending.append(&mut native.args),
-                _ => {}
-            }
-        }
-    }
 }
 
 /// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
@@ -152,26 +117,22 @@ impl InternCtx {
     /// environments, which join the queue rather than the stack — and yield
     /// the table.  Nothing ships without passing through here: the table has
     /// no other accessor.
-    ///
-    /// # Errors
-    /// A binding's value reaches a handle, which [`crate::Shell::bequeath`]
-    /// should have scrubbed before any shell reached this wire.
-    pub(crate) fn finish(mut self) -> Result<ScopeTable, Error> {
+    pub(crate) fn finish(mut self) -> ScopeTable {
         while let Some((id, bindings)) = self.pending.pop() {
             self.scope_table[id as usize] = bindings
                 .iter()
                 .map(|(k, b)| {
-                    Ok((
+                    (
                         k.to_string(),
                         SerialBinding {
-                            value: SerialValue::from_runtime(&b.value, &mut self)?,
+                            value: SerialValue::from_runtime(&b.value, &mut self),
                             scheme: b.scheme.clone(),
                         },
-                    ))
+                    )
                 })
-                .collect::<Result<_, Error>>()?;
+                .collect();
         }
-        Ok(self.scope_table)
+        self.scope_table
     }
 }
 
@@ -193,7 +154,7 @@ fn unresolved_scope_ref(id: u32) -> Error {
 type EnvRows = Vec<Option<Env>>;
 
 /// Decode capability for one wire envelope: the rebuilt environment rows,
-/// and the [`BuiltinTable`] a captured [`Value::Native`] re-links its name
+/// and the [`BuiltinTable`] a captured builtin re-links its name
 /// against.  Σ never rides the wire, so no tier crosses here either.
 ///
 /// Constructible only from the [`Runtime`] that will run the decoded values,
@@ -293,19 +254,17 @@ impl WireDecoder {
     }
 }
 
-/// The match is exhaustive on purpose: a new [`SerialClosure`] variant must
-/// declare whether it carries scope references, or its dependency edges go
-/// silently missing from [`WireDecoder::for_runtime`].
+/// Every atom declares whether it carries a scope reference.
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
-    for_each_closure(value, |closure| match closure {
-        SerialClosure::Thunk(thunk) => {
+    for_each_atom(value, |atom| match atom {
+        SerialAtom::Thunk(thunk) => {
             out.insert(thunk.env.bindings);
         }
-        SerialClosure::Native(_) => {}
+        SerialAtom::Builtin(_) | SerialAtom::Handle(_) => {}
     });
 }
 
-fn for_each_closure(value: &SerialValue, mut visit: impl FnMut(&SerialClosure)) {
+fn for_each_atom(value: &SerialValue, mut visit: impl FnMut(&SerialAtom)) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
@@ -314,12 +273,7 @@ fn for_each_closure(value: &SerialValue, mut visit: impl FnMut(&SerialClosure)) 
                 pending.extend(entries.iter().rev().map(|(_, value)| value));
             }
             SerialValue::Variant { payload, .. } => pending.extend(payload.as_deref()),
-            SerialValue::Ext(closure) => {
-                visit(closure);
-                if let SerialClosure::Native(native) = closure {
-                    pending.extend(native.args.iter().rev());
-                }
-            }
+            SerialValue::Ext(atom) => visit(atom),
             SerialValue::Unit
             | SerialValue::Bool { .. }
             | SerialValue::Int { .. }
@@ -332,160 +286,125 @@ fn for_each_closure(value: &SerialValue, mut visit: impl FnMut(&SerialClosure)) 
 
 // ── Value conversions ─────────────────────────────────────────────────────
 
-impl FOValue<SerialClosure> {
+impl FOValue<SerialAtom> {
     /// Encode a value without recursing through captured environments.
-    pub(crate) fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
-        on_json_stack(|| match value {
-            Value::Unit => Ok(Self::Unit),
-            Value::Bool(value) => Ok(Self::Bool { value: *value }),
-            Value::Int(value) => Ok(Self::Int { value: *value }),
-            Value::Float(value) => Ok(Self::Float { value: *value }),
-            Value::String(value) => Ok(Self::String {
-                value: value.to_string(),
-            }),
-            Value::Bytes(value) => Ok(Self::Bytes {
-                value: value.to_vec(),
-            }),
-            Value::List(items) => {
-                let mut values = Vec::with_capacity(items.len());
-                for value in items {
-                    match Self::from_runtime(&value, ctx) {
-                        Ok(value) => values.push(value),
-                        Err(error) => {
-                            values.into_iter().for_each(drop_value);
-                            return Err(error);
-                        }
-                    }
-                }
-                Ok(Self::List { items: values })
-            }
-            Value::Map(items) => {
-                let mut values = Vec::with_capacity(items.len());
-                for (name, value) in items {
-                    match Self::from_runtime(&value, ctx) {
-                        Ok(value) => values.push((name.to_string(), value)),
-                        Err(error) => {
-                            for (_, value) in values {
-                                drop_value(value);
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-                Ok(Self::Map { entries: values })
-            }
-            Value::Variant { label, payload } => Ok(Self::Variant {
-                label: label.to_string(),
-                payload: payload
-                    .as_deref()
-                    .map(|value| Self::from_runtime(value, ctx).map(Box::new))
-                    .transpose()?,
-            }),
-            Value::Thunk(closure) => Ok(Self::Ext(SerialClosure::Thunk(SerialThunk {
-                comp: Arc::clone(closure.comp()),
-                env: SerialEnvSnapshot::from_runtime(closure.env(), ctx),
-            }))),
-            Value::Native(entry, args) => {
-                let mut native = SerialNative {
-                    name: entry.decl.name.to_string(),
-                    args: Vec::with_capacity(args.len()),
+    pub(crate) fn from_runtime(value: &ValClos, ctx: &mut InternCtx) -> Self {
+        on_json_stack(|| {
+            let (labels, terminal) = value.peel_variants();
+            let mut encoded = match terminal.view() {
+                View::Unit => Self::Unit,
+                View::Bool(value) => Self::Bool { value },
+                View::Int(value) => Self::Int { value },
+                View::Float(value) => Self::Float { value },
+                View::String(value) => Self::String {
+                    value: value.to_string(),
+                },
+                View::Bytes(value) => Self::Bytes {
+                    value: value.to_vec(),
+                },
+                View::List(items) => Self::List {
+                    items: items
+                        .iter()
+                        .map(|value| Self::from_runtime(&value, ctx))
+                        .collect(),
+                },
+                View::Map(items) => Self::Map {
+                    entries: items
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), Self::from_runtime(&value, ctx)))
+                        .collect(),
+                },
+                View::Variant { .. } => unreachable!("the tag spine was peeled above"),
+                View::Thunk { comp, env } => Self::Ext(SerialAtom::Thunk(SerialThunk {
+                    comp: Arc::clone(comp),
+                    env: SerialEnvSnapshot::from_runtime(env, ctx),
+                })),
+                View::Builtin(entry) => Self::Ext(SerialAtom::Builtin(entry.decl.name.to_string())),
+                View::Handle(handle) => Self::Ext(SerialAtom::Handle(handle.title().to_string())),
+            };
+            for label in labels.into_iter().rev() {
+                encoded = Self::Variant {
+                    label: label.to_string(),
+                    payload: (!matches!(encoded, Self::Unit)).then(|| Box::new(encoded)),
                 };
-                for value in args.iter() {
-                    native.args.push(Self::from_runtime(value, ctx)?);
-                }
-                Ok(Self::Ext(SerialClosure::Native(native)))
             }
-            Value::Handle(_) => Err(Error::new(Reason::Invariant(Box::new(
-                InvariantFailure::HandleInSeed,
-            )))),
+            encoded
         })
     }
 
     /// Check all fallible references before building any runtime value.
     pub(crate) fn validate_runtime(&self, dec: &WireDecoder) -> Result<(), Error> {
         let mut result = Ok(());
-        for_each_closure(self, |closure| {
+        for_each_atom(self, |atom| {
             if result.is_err() {
                 return;
             }
-            result = match closure {
-                SerialClosure::Thunk(thunk) => thunk.env.clone().into_runtime(dec).map(|_| ()),
-                SerialClosure::Native(native) => {
-                    let failure = match dec.manifest.value(&native.name) {
-                        None => Some(ProtocolFailure::UnknownNative(native.name.clone())),
-                        Some(entry) => {
-                            let arity = entry.decl.fixed_arity();
-                            (native.args.len() > arity.saturating_sub(1)).then(|| {
-                                ProtocolFailure::InvalidNativeArguments(
-                                    ProtocolFailureInvalidNativeArguments {
-                                        name: native.name.clone(),
-                                        arity: arity.into(),
-                                        actual: native.args.len().into(),
-                                    },
-                                )
-                            })
-                        }
-                    };
-                    failure.map_or(Ok(()), |failure| {
-                        Err(Error::new(Reason::Protocol(Box::new(failure))))
-                    })
-                }
+            result = match atom {
+                SerialAtom::Thunk(thunk) => thunk.env.clone().into_runtime(dec).map(|_| ()),
+                SerialAtom::Builtin(name) if dec.manifest.value(name).is_none() => Err(Error::new(
+                    Reason::Protocol(Box::new(ProtocolFailure::UnknownNative(name.clone()))),
+                )),
+                SerialAtom::Builtin(_) | SerialAtom::Handle(_) => Ok(()),
             };
         });
         result
     }
 
     /// Resolve against the receiving runtime, then dispose the wire spine iteratively.
-    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<ValClos, Error> {
         let result = self.validate_runtime(dec).map(|()| self.hydrate(dec));
         drop_value(self);
         result
     }
 
-    fn hydrate(&self, dec: &WireDecoder) -> Value {
-        on_json_stack(|| match self {
-            Self::Unit => Value::Unit,
-            Self::Bool { value } => Value::Bool(*value),
-            Self::Int { value } => Value::Int(*value),
-            Self::Float { value } => Value::Float(*value),
-            Self::String { value } => Value::string(value.as_str()),
-            Self::Bytes { value } => Value::bytes(value.clone()),
-            Self::List { items } => {
-                Value::list(items.iter().map(|value| value.hydrate(dec)).collect())
+    fn hydrate(&self, dec: &WireDecoder) -> ValClos {
+        on_json_stack(|| {
+            let mut labels = Vec::new();
+            let mut terminal = self;
+            while let Self::Variant { label, payload } = terminal {
+                labels.push(label);
+                terminal = payload.as_deref().unwrap_or(&Self::Unit);
             }
-            Self::Map { entries } => Value::Map(crate::shell::runtime::Map::from_seed_values(
-                entries
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.hydrate(dec))),
-            )),
-            Self::Variant { label, payload } => Value::variant(
-                label.as_str(),
-                payload.as_deref().map(|value| value.hydrate(dec)),
-            ),
-            Self::Ext(SerialClosure::Thunk(thunk)) => {
-                let env = thunk
-                    .env
-                    .clone()
-                    .into_runtime(dec)
-                    .expect("validated scope reference");
-                Value::Thunk(Closure::captured(Arc::clone(&thunk.comp), env))
+            let mut value = match terminal {
+                Self::Unit => ValClos::UNIT,
+                Self::Bool { value } => ValClos::bool(*value),
+                Self::Int { value } => ValClos::int(*value),
+                Self::Float { value } => ValClos::float(*value),
+                Self::String { value } => ValClos::string(value.as_str()),
+                Self::Bytes { value } => ValClos::bytes(value.clone()),
+                Self::List { items } => {
+                    ValClos::list(items.iter().map(|value| value.hydrate(dec)).collect())
+                }
+                Self::Map { entries } => crate::shell::runtime::Map::from_seed_values(
+                    entries
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.hydrate(dec))),
+                )
+                .into(),
+                Self::Variant { .. } => unreachable!("the tag spine was peeled above"),
+                Self::Ext(SerialAtom::Thunk(thunk)) => {
+                    let env = thunk
+                        .env
+                        .clone()
+                        .into_runtime(dec)
+                        .expect("validated scope reference");
+                    ValClos::thunk(Arc::clone(&thunk.comp), &env)
+                }
+                Self::Ext(SerialAtom::Builtin(name)) => ValClos::builtin(Arc::new(
+                    dec.manifest.value(name).expect("validated builtin name"),
+                )),
+                Self::Ext(SerialAtom::Handle(title)) => ValClos::withheld(title.as_str()),
+            };
+            for label in labels.into_iter().rev() {
+                value = ValClos::variant(label.as_str(), Some(value));
             }
-            Self::Ext(SerialClosure::Native(native)) => Value::Native(
-                Arc::new(
-                    dec.manifest
-                        .value(&native.name)
-                        .expect("validated native name"),
-                ),
-                native.args.iter().map(|value| value.hydrate(dec)).collect(),
-            ),
+            value
         })
     }
 }
 
 impl SerialEnvSnapshot {
-    /// Intern `env` into `ctx`, recording its row id.  Infallible: interning
-    /// reserves the id, and any encoding failure surfaces at
-    /// [`InternCtx::finish`].
+    /// Intern `env` into `ctx`, reserving its row for [`InternCtx::finish`].
     pub(crate) fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
         Self {
             bindings: ctx.intern_env(env),
@@ -622,7 +541,7 @@ mod tests {
             "body's let of a command carries a Capture node"
         );
 
-        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+        let lambda = SerialValue::Ext(SerialAtom::Thunk(SerialThunk {
             comp: Arc::clone(&node),
             env: SerialEnvSnapshot { bindings: 0 },
         }));
@@ -630,7 +549,7 @@ mod tests {
         let json = crate::data::json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = crate::data::json::from_slice(&json).expect("deserialise lambda");
 
-        let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
+        let SerialValue::Ext(SerialAtom::Thunk(back)) = back else {
             panic!("round-trip changed the value variant");
         };
         assert_eq!(
@@ -671,25 +590,24 @@ mod tests {
             param: "unused".into(),
             body: Arc::new(Spanned::synthetic(CompKind::Use(outer))),
         }));
-        let value = Value::Thunk(Closure::captured(Arc::clone(&comp), Env::new()));
+        let value = ValClos::thunk(Arc::clone(&comp), &Env::EMPTY);
         let mut ctx = InternCtx::new();
-        let wire = SerialValue::from_runtime(&value, &mut ctx).expect("encode closure");
-        let table = ctx.finish().expect("encode scopes");
+        let wire = SerialValue::from_runtime(&value, &mut ctx);
+        let table = ctx.finish();
         let bytes = crate::data::json::to_vec(&wire).expect("serialise closure");
         let wire: SerialValue = crate::data::json::from_slice(&bytes).expect("deserialise closure");
         let bytes = crate::data::json::to_vec(&table).expect("serialise scopes");
         let table: ScopeTable = crate::data::json::from_slice(&bytes).expect("deserialise scopes");
         let dec = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
             .expect("rebuild scopes");
-        let Value::Thunk(back) = wire
+        let back = wire
             .into_runtime(&dec)
-            .expect("hydrate closure without loading")
-        else {
+            .expect("hydrate closure without loading");
+        let View::Thunk { comp: body, .. } = back.view() else {
             panic!("round-trip changed the value variant");
         };
         assert_eq!(
-            back.comp(),
-            &comp,
+            body, &comp,
             "every linked module's checked top and origin survive the wire"
         );
     }
@@ -728,13 +646,13 @@ mod tests {
         let sent = boundary_sites(&node);
         assert_eq!(sent.len(), 2, "each decode carries its site");
 
-        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+        let lambda = SerialValue::Ext(SerialAtom::Thunk(SerialThunk {
             comp: Arc::clone(&node),
             env: SerialEnvSnapshot { bindings: 0 },
         }));
         let json = crate::data::json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = crate::data::json::from_slice(&json).expect("deserialise lambda");
-        let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
+        let SerialValue::Ext(SerialAtom::Thunk(back)) = back else {
             panic!("round-trip changed the value variant");
         };
         assert_eq!(*back.comp, *node, "sites survive the wire");
@@ -750,7 +668,7 @@ mod tests {
     /// the build must say so rather than blame the fallthrough case.
     #[test]
     fn out_of_range_scope_ref_is_not_reported_as_cyclic() {
-        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+        let lambda = SerialValue::Ext(SerialAtom::Thunk(SerialThunk {
             comp: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
             env: SerialEnvSnapshot { bindings: 5 },
         }));
@@ -775,14 +693,178 @@ mod tests {
     /// stage died on a lazy list a few hundred closures long.)
     #[test]
     fn deep_stream_chain_encodes_on_a_small_stack() {
+        use crate::fact::{CompareFailure, EqualityOrOrder, EvalFailure, ValueShape};
+        use crate::handle::{Handle, HandleInner, pins_live_work};
+        use crate::shell::runtime::{Break, End, block_over};
+
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                let chain = crate::shell::runtime::deep_block_chain(50_000, Value::Unit);
+                let chain = crate::shell::runtime::deep_block_chain(50_000, ValClos::UNIT);
                 let mut ctx = InternCtx::new();
-                SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
-                let table = ctx.finish().expect("finish");
+                SerialValue::from_runtime(&chain, &mut ctx);
+                let table = ctx.finish();
                 assert_eq!(table.len(), 50_000, "one scope row per link");
+
+                let assert_equality_error = |left: &ValClos,
+                                             right: &ValClos,
+                                             shapes: (ValueShape, ValueShape)| {
+                    let Break::Error(error) = left.equals(right).expect_err("opaque equality") else {
+                        panic!("equality must return a catchable error");
+                    };
+                    assert_eq!(
+                        error.reason,
+                        Reason::Evaluation(Box::new(EvalFailure::Compare(CompareFailure {
+                            operation: "equality".into(),
+                            relation: EqualityOrOrder::Equality,
+                            left: shapes.0,
+                            right: shapes.1,
+                        })))
+                    );
+                };
+                let (handle, permit) = HandleInner::new(
+                    crate::fact::WorkerId::mint(),
+                    "deep tags",
+                    crate::process::DurableRoot::default().child(),
+                    crate::io::Streams::default(),
+                );
+                let live = ValClos::handle(handle);
+                let mut env = Env::EMPTY;
+                env.bind("work".into(), Binding { value: live.clone(), scheme: None });
+                let mut unit_spine = None;
+                for foot in [
+                    ValClos::UNIT,
+                    ValClos::int(7),
+                    ValClos::list(vec![ValClos::int(7)]),
+                    crate::handle::idle_handle(),
+                    block_over(&env),
+                    live,
+                ] {
+                    let is_unit = matches!(foot.view(), View::Unit);
+                    let is_handle = matches!(foot.view(), View::Handle(_));
+                    let is_opaque = foot.opacity().is_some();
+                    let pins = matches!(foot.view(), View::Handle(Handle::Live(h)) if h.sample().is_live());
+                    let foot_size = foot.shallow_size();
+                    let foot_shape = foot.shape();
+                    let mut value = foot;
+                    for depth in 0..10_000 {
+                        if depth == 5_000 && !is_unit && !is_handle {
+                            let mut env = Env::EMPTY;
+                            env.bind(
+                                "tail".into(),
+                                Binding {
+                                    value,
+                                    scheme: None,
+                                },
+                            );
+                            value = ValClos::close(
+                                &Val::Variant {
+                                    label: "deep".into(),
+                                    payload: Box::new(Val::Variable("tail".into())),
+                                },
+                                &env,
+                                &crate::shell::runtime::Signature::default(),
+                            )
+                            .unwrap();
+                        } else {
+                            value = ValClos::variant("deep", Some(value));
+                        }
+                    }
+                    let copy = value.clone();
+                    assert_eq!(copy.shape(), ValueShape::Variant);
+                    assert_eq!(copy.shallow_size(), 10_000 * "deep".len() + foot_size);
+                    assert_eq!(pins_live_work(&copy), pins);
+                    assert_eq!(value == copy, !is_opaque);
+                    if is_opaque {
+                        assert_equality_error(&value, &copy, (foot_shape, foot_shape));
+                    } else {
+                        assert!(value.equals(&copy).unwrap());
+                    }
+                    if is_unit {
+                        unit_spine = Some(copy.clone());
+                    }
+                    let unit = unit_spine.as_ref().unwrap();
+                    assert_eq!(unit.equals(&copy).unwrap(), is_unit);
+                    assert_eq!(copy.equals(unit).unwrap(), is_unit);
+                    let longer = ValClos::variant("deep", Some(copy.clone()));
+                    assert_ne!(value, longer);
+                    assert!(!unit.equals(&longer).unwrap());
+                    assert!(!longer.equals(unit).unwrap());
+                    if is_opaque {
+                        assert_equality_error(&value, &longer, (foot_shape, ValueShape::Variant));
+                        assert_equality_error(&longer, &value, (ValueShape::Variant, foot_shape));
+                    } else {
+                        assert!(!value.equals(&longer).unwrap());
+                        assert!(!longer.equals(&value).unwrap());
+                    }
+                    let different = ValClos::variant("different", Some(copy.clone()));
+                    assert!(!value.equals(&different).unwrap());
+                    assert!(!different.equals(&value).unwrap());
+                    let text = copy.to_string();
+                    assert_eq!(text.matches("`deep").count(), 10_000);
+                    assert_eq!(text.ends_with("`deep"), is_unit);
+                    let scrubbed = copy.scrubbed(&mut |env| Some(env.clone())).unwrap();
+                    let (labels, terminal) = scrubbed.peel_variants();
+                    assert_eq!(labels.len(), 10_000);
+                    if !is_handle {
+                        assert!(copy.scrubbed(&mut |_| None).is_none());
+                    }
+                    if is_opaque {
+                        assert_equality_error(&ValClos::UNIT, &terminal, (ValueShape::Unit, foot_shape));
+                        assert_equality_error(&terminal, &ValClos::UNIT, (foot_shape, ValueShape::Unit));
+                        assert!(FOValue::try_from(&copy).unwrap_err().nested);
+                    } else {
+                        let back = ValClos::from(FOValue::try_from(&copy).expect("deep data"));
+                        assert_eq!(back, copy);
+                        back.drop_seed();
+                    }
+                    let mut ctx = InternCtx::new();
+                    let wire = SerialValue::from_runtime(&copy, &mut ctx);
+                    let mut cursor = &wire;
+                    let mut depth = 0;
+                    while let SerialValue::Variant { label, payload } = cursor {
+                        assert_eq!(label, "deep");
+                        depth += 1;
+                        let Some(payload) = payload.as_deref() else {
+                            assert!(is_unit);
+                            break;
+                        };
+                        cursor = payload;
+                    }
+                    assert_eq!(depth, 10_000);
+                    assert_eq!(
+                        matches!(cursor, SerialValue::Variant { payload: None, .. }),
+                        is_unit
+                    );
+                    assert_eq!(
+                        matches!(cursor, SerialValue::Ext(SerialAtom::Handle(_))),
+                        is_handle
+                    );
+                    let table = ctx.finish();
+                    assert_eq!(
+                        table.len(),
+                        usize::from(foot_shape == ValueShape::Block),
+                        "only the block captures a scope"
+                    );
+                    let dec = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
+                        .expect("deep tag decoder");
+                    let back = wire.into_runtime(&dec).expect("hydrate deep tags");
+                    let (labels, terminal) = back.peel_variants();
+                    assert_eq!(labels.len(), 10_000);
+                    assert!(labels.iter().all(|label| label.as_ref() == "deep"));
+                    assert_eq!(terminal.shape(), foot_shape);
+                    if is_handle {
+                        assert!(matches!(terminal.view(), View::Handle(Handle::Withheld(_))));
+                    }
+                    if !is_opaque {
+                        assert_eq!(back, copy);
+                    }
+                    drop(terminal);
+                    back.drop_seed();
+                    drop(copy);
+                    value.drop_seed();
+                }
+                permit.finish(End::Ok(ValClos::UNIT));
             })
             .expect("spawn")
             .join()
@@ -793,18 +875,18 @@ mod tests {
     /// dependencies and `into_runtime` rebuilds every link.
     #[test]
     fn deep_stream_chain_round_trips() {
-        let chain = crate::shell::runtime::deep_block_chain(500, Value::Unit);
+        let chain = crate::shell::runtime::deep_block_chain(500, ValClos::UNIT);
         let mut ctx = InternCtx::new();
-        let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
-        let table = ctx.finish().expect("finish");
+        let ipc = SerialValue::from_runtime(&chain, &mut ctx);
+        let table = ctx.finish();
         let dec =
             WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table).expect("decoder");
         let back = ipc.into_runtime(&dec).expect("decode");
         let mut depth = 0;
         let mut cur = &back;
-        while let Value::Thunk(closure) = cur {
+        while let View::Thunk { env, .. } = cur.view() {
             depth += 1;
-            cur = closure.env().get("tail").expect("each link binds the next");
+            cur = env.get("tail").expect("each link binds the next");
         }
         assert_eq!(depth, 500, "every link survives the round-trip");
     }
@@ -822,11 +904,11 @@ mod tests {
             crate::test_helper::process_cwd(),
         )
         .expect("a test host resolves its baseline");
-        crate::test_access::bind_untyped(&mut shell, "only_mine", Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "only_mine", ValClos::int(1));
 
         let mut ctx = InternCtx::new();
         let _ = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
-        let table = ctx.finish().expect("finish");
+        let table = ctx.finish();
 
         assert_eq!(table.len(), 1, "one row: the session tier alone");
         let names: Vec<&str> = table[0].iter().map(|(n, _)| n.as_str()).collect();

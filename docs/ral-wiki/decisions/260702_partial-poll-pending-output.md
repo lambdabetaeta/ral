@@ -81,4 +81,4 @@ See also [[decisions/260615_poll-total-failed-arm|the settle decision]],
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|map: builtins]]; `docs/SPEC.md` §11.2.
 
-**Amended 2026-11-07.** `take_buffer` and `peek_buffer` are `CapturedBytes::take` and `CapturedBytes::peek` (`core/src/io/sink.rs`), and `complete_handle` is the worker's terminal publication in `HandleInner` (`core/src/shell/runtime/handle.rs`), which takes the buffers once.
+**Amended 2026-11-07.** `take_buffer` and `peek_buffer` are `CapturedBytes::take` and `CapturedBytes::peek` (`core/src/io/sink.rs`), and `complete_handle` is the worker's terminal publication in `HandleInner` (`core/src/handle.rs`), which takes the buffers once.

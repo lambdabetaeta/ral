@@ -22,10 +22,10 @@
 use crate::data::FOValue;
 use crate::data::datum::{Datum, tag, untag};
 use crate::fact::{Done, WorkerId};
+use crate::handle::compacting::Compacting;
+use crate::handle::{HandleInner, Sample};
 use crate::process::{DEFAULT_CLEANUP_GRACE, TEARDOWN_GRACE, wait_ended};
 use crate::protocol::probe::WorkerRow;
-use crate::shell::runtime::handle::compacting::Compacting;
-use crate::shell::runtime::{HandleInner, Sample};
 use crate::sync::LockExt as _;
 use crate::{label, record, variant};
 use std::collections::HashSet;
@@ -523,10 +523,10 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handle::compacting::MIN_SWEEP_AT;
     use crate::io::Streams;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::handle::compacting::MIN_SWEEP_AT;
-    use crate::shell::runtime::{End, Value};
+    use crate::shell::runtime::{End, ValClos};
 
     fn test_handle(id: u64, title: &str) -> (HandleInner, impl FnOnce()) {
         let (handle, permit) = HandleInner::new(
@@ -536,7 +536,7 @@ mod tests {
             Streams::default(),
         );
         (handle, move || {
-            let _ = permit.finish(End::Ok(Value::Unit));
+            let _ = permit.finish(End::Ok(ValClos::UNIT));
         })
     }
 

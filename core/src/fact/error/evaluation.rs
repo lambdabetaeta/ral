@@ -193,6 +193,7 @@ variant!(ArithmeticFailure { ZeroDivisor(DivOrMod): "zero-divisor", IntegerOverf
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalFailure {
+    WithheldHandle(String),
     MissingBinding(String),
     MissingEntry(MissingEntry),
     IndexBounds(IndexBounds),
@@ -205,7 +206,7 @@ pub enum EvalFailure {
     Arithmetic(ArithmeticFailure),
     Compare(CompareFailure),
 }
-variant!(EvalFailure { MissingBinding(String): "missing-binding", MissingEntry(MissingEntry): "missing-entry", IndexBounds(IndexBounds): "index-bounds", Unreadable(Unreadable): "unreadable", DuplicateMapKey(String): "duplicate-map-key", Apply(ApplyFailure): "apply", Interpolate(ValueShape): "interpolate", PatternLength(PatternLength): "pattern-length", CaseArm(CaseArmFailure): "case-arm", Arithmetic(ArithmeticFailure): "arithmetic", Compare(CompareFailure): "compare" });
+variant!(EvalFailure { WithheldHandle(String): "withheld-handle", MissingBinding(String): "missing-binding", MissingEntry(MissingEntry): "missing-entry", IndexBounds(IndexBounds): "index-bounds", Unreadable(Unreadable): "unreadable", DuplicateMapKey(String): "duplicate-map-key", Apply(ApplyFailure): "apply", Interpolate(ValueShape): "interpolate", PatternLength(PatternLength): "pattern-length", CaseArm(CaseArmFailure): "case-arm", Arithmetic(ArithmeticFailure): "arithmetic", Compare(CompareFailure): "compare" });
 
 impl KeyOrField {
     pub fn describe(&self) -> String {
@@ -384,6 +385,9 @@ impl ArithmeticFailure {
 impl EvalFailure {
     pub fn describe(&self) -> String {
         match self {
+            Self::WithheldHandle(title) => format!(
+                "handle `{title}` was spawned by another shell and is withheld here; await it where it was spawned and pass its result instead"
+            ),
             Self::MissingBinding(name) => format!("undefined variable: ${name}"),
             Self::MissingEntry(cause) => cause.describe(),
             Self::IndexBounds(cause) => cause.describe(),
@@ -507,6 +511,15 @@ mod tests {
         assert_eq!(&decoded, failure);
         assert_eq!(decoded.describe(), description);
         assert_eq!(decoded.advice(), advice);
+    }
+
+    #[test]
+    fn withheld_handle_names_its_origin_and_recovery() {
+        projection(
+            &EvalFailure::WithheldHandle("worker".into()),
+            "handle `worker` was spawned by another shell and is withheld here; await it where it was spawned and pass its result instead",
+            &[],
+        );
     }
 
     #[test]

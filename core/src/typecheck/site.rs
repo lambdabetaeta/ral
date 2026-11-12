@@ -168,7 +168,7 @@ impl Build<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::{Map, Value};
+    use crate::shell::runtime::ValClos;
     use crate::source::{FileId, Span};
     use crate::ty::{Fixings, Kind, Label, closed_record, open_record, open_variant};
     use crate::typecheck::unify::WeakSource;
@@ -252,18 +252,12 @@ mod tests {
         u.unify_row(&Row::var(rho), &row).unwrap();
         let ty = Ty::variant(Row::var(rho));
         let site = Site::snapshot(&u, &ty, UnitId::fresh());
-        let stop = Value::Variant {
-            label: "stop".into(),
-            payload: None,
-        };
-        let more = |value| Value::Variant {
-            label: "more".into(),
-            payload: Some(Box::new(value)),
-        };
+        let stop = ValClos::variant("stop", None);
+        let more = |value| ValClos::variant("more", Some(value));
         let fixings = Fixings::default();
         site.admit(&stop, &fixings).unwrap();
         site.admit(&more(more(stop)), &fixings).unwrap();
-        assert!(site.admit(&more(Value::Int(1)), &fixings).is_err());
+        assert!(site.admit(&more(ValClos::int(1)), &fixings).is_err());
     }
 
     #[test]
@@ -328,11 +322,11 @@ mod tests {
         let site = Site::snapshot(&u, &a, UnitId::fresh());
         assert_eq!(site.nodes[site.root].shape, Shape::List(site.root));
         assert!(
-            site.admit(&Value::list(vec![]), &Fixings::default())
+            site.admit(&ValClos::list(vec![]), &Fixings::default())
                 .is_ok()
         );
         assert!(
-            site.admit(&Value::list(vec![Value::Int(1)]), &Fixings::default())
+            site.admit(&ValClos::list(vec![ValClos::int(1)]), &Fixings::default())
                 .is_err()
         );
     }
@@ -350,10 +344,10 @@ mod tests {
             let ty = closed_record(&[("a", x), ("b", y)]);
             u.mark_weak(&ty, &WeakSource::Residual);
             let site = Site::snapshot(&u, &ty, UnitId::fresh());
-            let value = Value::Map(Map::from_seed_values([
-                ("a".into(), Value::Int(1)),
-                ("b".into(), Value::string("text")),
-            ]));
+            let value = ValClos::map(vec![
+                ("a".into(), ValClos::int(1)),
+                ("b".into(), ValClos::string("text")),
+            ]);
             assert_eq!(site.admit(&value, &Fixings::default()).is_ok(), !shared);
         }
     }
@@ -364,8 +358,8 @@ mod tests {
         let free = u.fresh_kinded(Kind::NUMBER);
         let site = Site::snapshot(&u, &free, UnitId::fresh());
         let fixings = Fixings::default();
-        assert!(site.admit(&Value::Int(1), &fixings).is_ok());
-        assert!(site.admit(&Value::string("text"), &fixings).is_err());
+        assert!(site.admit(&ValClos::int(1), &fixings).is_ok());
+        assert!(site.admit(&ValClos::string("text"), &fixings).is_err());
     }
 
     /// A node remembers the use that narrowed its kind or fixed its structure.

@@ -1,8 +1,7 @@
 //! The seed's serialization graph, with semantic validation outside serde.
 
 use super::table::{
-    ScopeTable, SerialBinding, SerialClosure, SerialEnvSnapshot, SerialNative, SerialThunk,
-    SerialValue,
+    ScopeTable, SerialAtom, SerialBinding, SerialEnvSnapshot, SerialThunk, SerialValue,
 };
 use super::{EngineSeed, Sealed, WireHandlerFrame};
 use crate::data::Bytes;
@@ -30,41 +29,13 @@ pub(crate) struct RawEngineSeed {
 }
 
 type RawScopeTable = Vec<Vec<(String, RawSerialBinding)>>;
-type RawSerialValue = RawFOValue<RawSerialClosure>;
+type RawSerialValue = RawFOValue<RawSerialAtom>;
 
 #[derive(Debug, Serialize, Deserialize)]
-enum RawSerialClosure {
+enum RawSerialAtom {
     Thunk(SerialThunk),
-    Native(RawSerialNative),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RawSerialNative {
-    name: String,
-    args: Vec<RawSerialValue>,
-}
-
-impl Drop for RawSerialNative {
-    fn drop(&mut self) {
-        let mut pending = std::mem::take(&mut self.args);
-        while let Some(mut value) = pending.pop() {
-            match &mut value {
-                RawFOValue::List { items } => pending.append(items),
-                RawFOValue::Map { entries } => {
-                    pending.extend(std::mem::take(entries).into_iter().map(|(_, value)| value));
-                }
-                RawFOValue::Variant { payload, .. } => {
-                    if let Some(value) = payload.take() {
-                        pending.push(*value);
-                    }
-                }
-                RawFOValue::Ext(RawSerialClosure::Native(native)) => {
-                    pending.append(&mut native.args);
-                }
-                _ => {}
-            }
-        }
-    }
+    Builtin(String),
+    Handle(String),
 }
 
 /// A scheme is read structurally and closed by [`close`], so no serde
@@ -113,48 +84,20 @@ impl RawSpawnGrant {
 
 fn validate_value(value: &RawSerialValue) -> Result<SerialValue, DecodeFailure> {
     on_json_stack(|| {
-        value.validate_with(|closure| match closure {
-            RawSerialClosure::Thunk(thunk) => Ok(SerialClosure::Thunk(thunk.clone())),
-            RawSerialClosure::Native(native) => {
-                let mut decoded = SerialNative {
-                    name: native.name.clone(),
-                    args: Vec::with_capacity(native.args.len()),
-                };
-                for (index, value) in native.args.iter().enumerate() {
-                    decoded.args.push(validate_value(value).map_err(|error| {
-                        error.index(index.into()).field("args").payload("Native")
-                    })?);
-                }
-                Ok(SerialClosure::Native(decoded))
-            }
+        value.validate_with(|atom| match atom {
+            RawSerialAtom::Thunk(thunk) => Ok(SerialAtom::Thunk(thunk.clone())),
+            RawSerialAtom::Builtin(name) => Ok(SerialAtom::Builtin(name.clone())),
+            RawSerialAtom::Handle(title) => Ok(SerialAtom::Handle(title.clone())),
         })
     })
 }
 
 fn encode_value(value: &SerialValue) -> Result<RawSerialValue, JsonEncodeFailure> {
-    encode_owned_value(value.clone())
-}
-
-fn encode_owned_value(value: SerialValue) -> Result<RawSerialValue, JsonEncodeFailure> {
     on_json_stack(|| {
-        RawFOValue::from_value_with(value, |closure| match closure {
-            SerialClosure::Thunk(thunk) => Ok(RawSerialClosure::Thunk(thunk)),
-            SerialClosure::Native(mut native) => {
-                let mut encoded = RawSerialNative {
-                    name: native.name.clone(),
-                    args: Vec::with_capacity(native.args.len()),
-                };
-                native.args.reverse();
-                while let Some(value) = native.args.pop() {
-                    let index = encoded.args.len();
-                    encoded
-                        .args
-                        .push(encode_owned_value(value).map_err(|error| {
-                            error.index(index.into()).field("args").payload("Native")
-                        })?);
-                }
-                Ok(RawSerialClosure::Native(encoded))
-            }
+        RawFOValue::from_value_with(value.clone(), |atom| match atom {
+            SerialAtom::Thunk(thunk) => Ok(RawSerialAtom::Thunk(thunk)),
+            SerialAtom::Builtin(name) => Ok(RawSerialAtom::Builtin(name)),
+            SerialAtom::Handle(title) => Ok(RawSerialAtom::Handle(title)),
         })
     })
 }

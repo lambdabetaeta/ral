@@ -6,15 +6,17 @@
 use super::Mooring;
 use super::Shell;
 use super::bindings::BindingLease;
+use crate::builtin::BuiltinEntry;
 use crate::environ::EnvVars;
 use crate::environ::Reserved;
 use crate::fact::unix_secs;
+use crate::handle::Sample;
 use crate::io::Sink;
 use crate::io::terminal::TerminalState;
 use crate::process::{DurableRoot, GroupOwner, ScopeNode};
 use crate::protocol::probe::{WorkerRow, WorkerState};
 use crate::shell::runtime::ExitHints;
-use crate::shell::runtime::{BuiltinEntry, ReapNotice, Sample, WorkerEntry};
+use crate::shell::runtime::{ReapNotice, WorkerEntry};
 use crate::source::SourceDb;
 use crate::ty::Fixings;
 use std::sync::Arc;
@@ -365,8 +367,9 @@ mod tests {
     /// produce mixed rows.
     #[test]
     fn worker_row_is_coherent_across_running_stopping_ready_and_consumed() {
+        use crate::handle::HandleInner;
         use crate::io::Streams;
-        use crate::shell::runtime::{Done, End, HandleInner, Owner, Value, WorkerId};
+        use crate::shell::runtime::{Done, End, Owner, ValClos, WorkerId};
 
         let mut shell = crate::test_helper::core_shell();
         shell.arm_worker_retention(4);
@@ -393,7 +396,7 @@ mod tests {
         assert_eq!(row.state, WorkerState::Running);
         assert_eq!(row.settled, None);
         assert_eq!(row.retention_left, None);
-        let _ = running_permit.finish(End::Ok(Value::Unit));
+        let _ = running_permit.finish(End::Ok(ValClos::UNIT));
 
         // 2. Stopping: settled is None, retention_left is None even if settled_epoch is Some.
         let (stopping_h, stopping_permit) = make(2, "stopping");
@@ -411,12 +414,12 @@ mod tests {
         assert_eq!(row.retention_left, None);
 
         // Once stopping finishes, it becomes Consumed and worker_row returns None.
-        let _ = stopping_permit.finish(End::Ok(Value::Unit));
+        let _ = stopping_permit.finish(End::Ok(ValClos::UNIT));
         assert!(shell.worker_row(&stopping_entry).is_none());
 
         // 3. Ready: settled is Some, retention_left reflects settled_epoch countdown.
         let (ready_h, ready_permit) = make(3, "ready");
-        let _ = ready_permit.finish(End::Ok(Value::Int(7)));
+        let _ = ready_permit.finish(End::Ok(ValClos::int(7)));
         let ready_entry = WorkerEntry {
             handle: ready_h.clone(),
             owner: Owner::Session,

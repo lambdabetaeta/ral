@@ -8,13 +8,16 @@ the acquiring `guard` and its ending-reading release await the strong-model
 Agda follow-up ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 The correspondence excludes that rule until the follow-up re-establishes it.
 Residual-function boxing also awaits an Agda follow-up: its Let-fun still
-suspends the whole RHS, without Box. Native terminals and partial-native
-transport are runtime mechanisms, not mechanised rules.
+suspends the whole RHS, without Box. Runtime builtin η-expansion and δ
+require their own correspondence follow-up
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 
 - **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
   `Case`, `Try`, `Guard`, `Capture`. A lambda binds one name;
   `Bind` takes a pattern, generalising its binders over one shared set of
-  variables. Failure is a machine register, not a computation constructor.
+  variables. State is a computation closure or `Err(Break)`, not a stored
+  value. `settle` hands a produced value to frames in the same step; failure
+  is not a computation constructor.
 - **Primitives:** `CompKind::Prim` contains `Binary`, `Negate`, `Not`,
   `Render`, `Concat`, `Decode`, `Index`, `Update`, `List`, `Map`. Every
   operand is a value. A primitive computes on those values and may fail;
@@ -42,10 +45,13 @@ transport are runtime mechanisms, not mechanised rules.
 - A value head is hoisted and run before its arguments, whatever its type:
   every `let` runs its right-hand side. A λ with no argument returns its
   occurrence-restricted closure as a thunk.
-  Application has one `Arg` frame per argument; a lambda terminal consumes
-  one, and a native terminal collects one until saturated. A partial builtin
-  is `Value::Native(entry, args)`, not code in the IR. Boundary builtins remain
-  η-expanded by inference, retaining their checked site in `Exec`.
+  Application has one `Arg` frame per argument; a λ consumes
+  one. A builtin forces to `λa₀.…λaₙ₋₁.δ(b; a⃗)` over its captured entry;
+  ordinary β binds its arguments. A partial builtin is the boxed residual λ.
+  Runtime-only `CompKind::Builtin` is δ; the elaborator writes none;
+  it reads the entry and arguments from ρ. An exact-arity builtin call invokes
+  its body directly. Boundary partials remain inference-expanded over `Exec`,
+  retaining their checked site.
   A spread belongs to argv, not value application: elaboration refuses it
   for written value heads and lexically bound heads;
   checking refuses it when a bare head resolves to a builtin or session binding.
@@ -57,7 +63,12 @@ transport are runtime mechanisms, not mechanised rules.
   weak residual beneath a thunk or handle is statically unusable in a later
   unit, following μ-equations in both contexts. No returned value owes a
   delayed contract check, and the runtime builds no contract IR.
-- A variant always has a payload: a bare tag carries `()`.
+- `Val` is the one value syntax, including runtime `Bytes`, `Builtin` and
+  `Handle` constants the elaborator never writes. `ValClos` closes a
+  nonvariable `Val`, binding every direct name in ρ; formation restricts and
+  pulls missing direct names from Σ, while component reads share ρ.
+- A variant always has a syntax payload: a bare tag carries `()`.
+  `View::Variant` omits any resolved unit payload, even one named by a variable.
 - A form's options are one spread-free record node. `within`'s `handlers:`
   is an ordinary map-valued field; command names are data, with no
   handler-specific syntax, AST or IR node.

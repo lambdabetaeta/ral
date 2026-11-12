@@ -1,12 +1,14 @@
 //! The user handler stack, ordered innermost-last. Scoped frames come off by
 //! handle; host-installed handler frames also come off by name.
 
-use super::builtin::BuiltinEntry;
-use super::value::Value;
-use super::{Break, Closure, Shell, ill_typed};
+use super::value::ValClos;
+use super::{Break, Env, Shell, ill_typed};
+use crate::builtin::BuiltinEntry;
 use crate::fact::{BlockRole, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure};
+use crate::ir::Comp;
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 use super::flow::Settled;
 
@@ -33,12 +35,12 @@ pub(crate) enum HandlerArity {
 pub struct HandlerEntry {
     pub name: Cow<'static, str>,
     pub(crate) arity: HandlerArity,
-    pub(crate) thunk: Value,
+    pub(crate) thunk: ValClos,
 }
 
 impl HandlerEntry {
     /// Build a per-name entry, unary by construction. The caller has checked the thunk.
-    pub(crate) fn ral_per_name(name: String, thunk: Value) -> Self {
+    pub(crate) fn ral_per_name(name: String, thunk: ValClos) -> Self {
         Self {
             name: Cow::Owned(name),
             arity: HandlerArity::Unary,
@@ -53,10 +55,10 @@ impl HandlerEntry {
     /// # Errors
     /// `thunk` not a block, or not an arm by its type: one parameter, the
     /// argv, producing what its head produces (`crate::typecheck::arm_stands_in`).
-    pub(crate) fn vet(name: String, thunk: Value, shell: &Shell) -> Settled<Self> {
-        let closure = arm_closure(&thunk, &name)?;
-        crate::typecheck::arm_stands_in(&name, closure.comp(), shell.closure_schemes(closure))
-            .map_err(|errors| refused_arm(&name, &errors, closure.comp().span, shell))?;
+    pub(crate) fn vet(name: String, thunk: ValClos, shell: &Shell) -> Settled<Self> {
+        let (comp, env) = arm_closure(&thunk, &name)?;
+        crate::typecheck::arm_stands_in(&name, comp, shell.closure_schemes(env))
+            .map_err(|errors| refused_arm(&name, &errors, comp.span, shell))?;
         Ok(Self::ral_per_name(name, thunk))
     }
 }
@@ -77,26 +79,24 @@ fn refused_arm(
     .locate("handler", span, shell)
 }
 
-/// The closure an arm installs: any block.  Its parameters are its type's
-/// business, which the caller checks.
+/// An arm's thunk, excluding builtin η residuals before checking its type.
 ///
 /// # Errors
-/// `value` is not a block.
-fn arm_closure<'a>(value: &'a Value, subject: &str) -> Settled<&'a Closure> {
-    match value {
-        Value::Thunk(closure) => Ok(closure),
-        other => Err(super::Error::new(Reason::Invalid(Box::new(
+/// `value` is not a non-builtin block.
+fn arm_closure<'a>(value: &'a ValClos, subject: &str) -> Settled<(&'a Arc<Comp>, &'a Env)> {
+    value.block().ok_or_else(|| {
+        super::Error::new(Reason::Invalid(Box::new(
             InvalidFailure::new(
                 "handler".into(),
                 InvalidCause::Shape(ShapeFailure {
                     expected: Expected::Closure,
-                    found: other.found(),
+                    found: value.found(),
                 }),
             )
             .field(subject.into()),
         )))
-        .into()),
-    }
+        .into()
+    })
 }
 
 impl fmt::Debug for HandlerEntry {
@@ -123,7 +123,7 @@ pub(crate) enum FrameKind {
 pub(crate) struct HandlerFrame {
     pub(crate) entries: Vec<HandlerEntry>,
     /// `within [handler: thunk]`; `None` on persistent handler frames.
-    pub(crate) catch_all: Option<Value>,
+    pub(crate) catch_all: Option<ValClos>,
     pub(crate) kind: FrameKind,
 }
 
@@ -134,7 +134,7 @@ impl HandlerFrame {
     }
 
     /// Every value this frame holds: each entry's thunk, then the catch-all.
-    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut ValClos> {
         self.entries
             .iter_mut()
             .map(|entry| &mut entry.thunk)
@@ -154,7 +154,7 @@ pub(crate) enum HandlerLookup {
 /// The handler stack: the innermost frame sits at the highest index, each
 /// beside the handle this stack minted for it.
 ///
-/// No `Serialize` / `Deserialize` — frames carry `Value`, whose closures must
+/// No `Serialize` / `Deserialize` — frames carry `ValClos`, whose captures must
 /// be interned through `seed`'s `InternCtx` to cross an IPC boundary, which
 /// `seed`'s `WireHandlerFrame` does field by field.
 ///
@@ -186,7 +186,7 @@ impl HandlerStack {
 
     /// Push a scoped `within` frame.  `Shell::with_handlers` owns the paired
     /// [`Self::remove_by_handle`].
-    pub fn push(&mut self, entries: Vec<HandlerEntry>, catch_all: Option<Value>) -> FrameHandle {
+    pub fn push(&mut self, entries: Vec<HandlerEntry>, catch_all: Option<ValClos>) -> FrameHandle {
         self.push_frame(HandlerFrame {
             entries,
             catch_all,
@@ -338,6 +338,38 @@ mod tests {
             refused.prov.as_ref().and_then(crate::error::Prov::span),
             span
         );
+    }
+
+    #[test]
+    fn a_residual_is_refused_as_a_handler_arm() {
+        let mut shell = crate::test_helper::core_shell();
+        let entry = shell.lookup_builtin("map").expect("map builtin");
+        let function = crate::shell::runtime::block_over(&shell.env);
+        let residual = crate::shell::evaluator::machine::apply(
+            ValClos::builtin(Arc::new(entry)),
+            vec![function],
+            &crate::shell::runtime::Mooring::adrift(),
+            &mut shell,
+        )
+        .expect("one argument leaves map's η residual");
+        assert!(residual.residual().is_some());
+        let Err(Break::Error(error)) = shell.install_handler("echo".into(), residual.clone())
+        else {
+            panic!("a residual is not a handler closure")
+        };
+        let Reason::Invalid(failure) = error.reason else {
+            panic!("invalid handler closure")
+        };
+        assert_eq!(failure.operation, "handler");
+        assert_eq!(failure.path, [DataStep::Field("echo".into())]);
+        assert_eq!(
+            failure.cause,
+            InvalidCause::Shape(ShapeFailure {
+                expected: Expected::Closure,
+                found: residual.found(),
+            })
+        );
+        assert!(!shell.has_handler("echo"));
     }
 
     #[test]

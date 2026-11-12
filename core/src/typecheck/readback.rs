@@ -168,6 +168,10 @@ impl<'a> Readback<'a> {
                 group: self.rec_group(group),
                 index: *index,
             },
+            CompKind::Builtin { builtin, args } => CompKind::Builtin {
+                builtin: builtin.clone(),
+                args: args.clone(),
+            },
             CompKind::Tilde(path) => CompKind::Tilde(path.clone()),
             CompKind::Use(module) => CompKind::Use(Arc::clone(module)),
             CompKind::If { cond, then, else_ } => CompKind::If {
@@ -243,6 +247,9 @@ impl<'a> Readback<'a> {
             },
             Val::Unit => Val::Unit,
             Val::String(v) => Val::String(v.clone()),
+            Val::Bytes(v) => Val::Bytes(v.clone()),
+            Val::Builtin(v) => Val::Builtin(Arc::clone(v)),
+            Val::Handle(v) => Val::Handle(v.clone()),
             Val::Int(v) => Val::Int(*v),
             Val::Float(v) => Val::Float(*v),
             Val::Bool(v) => Val::Bool(*v),

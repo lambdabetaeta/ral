@@ -1,5 +1,7 @@
-<!-- verified_at_commit: ed1b37eb -->
-<!-- generated_at_commit: ed1b37eb -->
+<!-- verified_at_commit: c0905f5e -->
+<!-- verified_at_date: 2026-11-12 -->
+<!-- generated_at_commit: c0905f5e -->
+<!-- generated_at_date: 2026-11-12 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1380,11 +1382,13 @@ let add-two = add 2
 let five = add-two 3
 ```
 
-A call to a parameterized block with too few arguments binds the parameters it
-was given and returns the block, holding them; nothing of its body has run.
-`add 2` returns a block of one parameter. A builtin instead holds its entry and
-the arguments supplied so far; its body runs only at saturation. Boundary
-builtins are the exception: inference η-expands them into blocks carrying the
+A call to a parameterized block or builtin with too few arguments binds the
+parameters it was given and returns the residual function as a block;
+nothing of its body has run. `add 2` returns a block of one parameter.
+An ordinary builtin of arity n displays as `<native NAME>`, or as
+`<native NAME, k of n arguments>` when 0 < k < n arguments are supplied.
+Its body runs only at saturation.
+Boundary builtins are η-expanded during inference into blocks carrying the
 call's checked site (§17.9).
 
 If the callee's type returns a block before all arguments are used, the checker
@@ -2988,10 +2992,18 @@ also has empty completion buffers because its bytes were streamed live, so
 
 ### 11.2. Handles and eliminators
 
-A handle is a process-local capability for one worker. Typed handles are the
-only capabilities for retrieving a result, observing a handle directly, or
-cancelling an individual worker: `await`, `race`, and `cancel` are the core
+A live handle is a shell-local capability for one worker. Typed handles are
+the only capabilities for retrieving a result, observing a handle directly,
+or cancelling an individual worker: `await`, `race`, and `cancel` are the core
 eliminators, and `poll`, `is-done`, and `first-settled` are the observations.
+
+When a host bequeaths shell state to a child, every inherited handle becomes
+withheld, including inside collections, block captures and handler arms. Its
+binding, data position, type `Handle` and title remain. All six operations
+above refuse a withheld handle with `withheld-handle`, naming its title and
+advising the caller to await it where it was spawned and pass its result
+instead. This rule holds for both in-process and serialized bequests; no
+live capability crosses.
 
 Every worker moves monotonically through a four-state public lifecycle that
 separates execution liveness from result availability and claim state:
@@ -3527,10 +3539,11 @@ waiting and `cancel` for termination; Ctrl-C ends what Ctrl-Z used to park.
 | `watch` | optional | yes | yes | no |
 | `detach` | optional, Unix only | no | no | Unix sessions that enable it |
 
-Handles are local runtime values. They may be stored, passed to functions, and
-returned through locally evaluated blocks, but they cannot cross a serialized
-child-evaluation or remote-host boundary. Await the handle before crossing such
-a boundary.
+Handles may be stored, passed to functions, and returned through locally
+evaluated blocks. Child-shell bequests retain them only as withheld handles
+(§11.2), not opaque data placeholders. First-order host results do not carry
+handles at all: returning one fails rather than transferring its capability.
+Await it where it was spawned and pass its result instead.
 
 ## 12. Capabilities and sandboxing
 
@@ -5753,9 +5766,9 @@ Surface syntax elaborates into a call-by-push-value IR. Its essential value
 and computation forms are:
 
 ```text
-v ::= unit | true | false | n | f | s | bytes
+v ::= x | unit | true | false | n | f | s | bytes
     | [v1, ..., vn] | {l1 = v1, ..., ln = vn}
-    | `l v | thunk M | handle A
+    | `l v | thunk M | builtin b | handle h
 
 M ::= return v
     | force v
@@ -5772,6 +5785,7 @@ M ::= return v
     | scope op
     | capture M
     | prim o [v1, ..., vn]
+    | δ(b; a1, ..., an)
 
 op ::= try v1 v2 | guard v1 v2 v3 | within v1 v2 | grant v1 v2 | audit v
      | spawn [v1] v2 | gather v
@@ -5786,6 +5800,10 @@ takes the computation itself: its body is an application or a nested scope,
 neither of which can fuse its own redirects the way `exec` does.
 `guard`'s three values are acquisition, body, and release, in that order; the
 last two are thunks accepting one and two arguments respectively.
+
+Byte, builtin and handle constants share this value syntax but are written
+only by the runtime. The runtime also writes δ: it reads its builtin and
+arguments by name from the lexical environment (§17.8).
 
 `capture` is a checker-written control form (§17.5).
 `decode v` abbreviates `prim decode [v]`, a primitive on a byte value.
@@ -6612,45 +6630,46 @@ imports handled names for diagnostics alone.
 
 ### 17.8. Operational outcomes
 
-Evaluation is a small-step machine, presented here at the level the rest of
-this section uses; the implementation is exactly this shape, one Rust match
-arm per rule. A state is a **focus** over a **stack** of frames, stepped
-against a store:
+Evaluation is a small-step machine over a **computation closure** and a
+**stack** of frames, or a break over that stack:
 
 ```text
 ⟨M, Γ⟩ / κ, Σ  ⟶  ⟨N, Γ'⟩ / κ', Σ'
-R / κ, Σ                          (κ nonempty: meets its top frame next step)
 X / κ, Σ                          (climbs to the first frame whose rule catches it)
+v ⇓ κ, Σ                          (a value handed to its frame within the transition)
 ```
 
-- The focus is either a **closure** ⟨M, Γ⟩ — a computation paired with the
-  environment its free variables read — a **terminal** `R` meeting the frame
-  atop `κ`, or a **break** `X` climbing past it.
-- `κ` is a stack of **frames** for pending binds, sequences, arguments and
-  scopes. Bind and sequence frames carry the environment they resume under,
-  so a binder's extent is structural. Application pushes one `Arg` per
-  argument, right to left, before evaluating its computation head. Forcing a
-  thunk puts its closure in focus and pushes nothing: `force(thunk M) = M`.
-  A lambda consumes one argument frame and enters its body in tail position.
-  Depth counts computational frames; provenance-only restoration frames do
-  not consume the limit. A call with n arguments needs n free frames at entry.
-- `Σ` is everything not lexical: current directory, environment overrides,
-  handlers, capabilities, and audit state. Lexical bindings live in
-  `Γ`, never in `Σ`.
-- `R` has three shapes: `value v`, `lambda ⟨λx.M, Γ⟩`, and
-  `native b v⃗`. A lambda is a computation, not a value (§17.2). An `Arg`
-  consumes it by β; a native terminal collects the argument until saturated.
-  Pass-through frames preserve terminals; every value-demanding frame receives
-  a residual lambda as `thunk ⟨λx.M, Γ|occ(λx.M)⟩`, or a native as its entry
-  and held arguments. The empty stack boxes them likewise. No rule applies a
-  returned value or forces implicitly; the checker writes an application
+- A runtime value is a **value closure** ⟨v, Γ⟩ whose root is not a variable.
+  Every direct name — one outside a thunk — is bound in Γ. Forming a value
+  restricts Γ to the names it mentions and captures any missing direct name
+  from the signature. Reading a component shares that Γ; it does not
+  restrict it again. Scalar, builtin and handle constructors use empty
+  captures.
+- The machine stores only ⟨M, Γ⟩ or a break `X`. A rule producing a value
+  hands it to the frame below in the same transition, through any restoring
+  frames, until a computation resumes or the stack empties. The `⇓` notation
+  denotes this handoff, not a stored value state; no runtime `return v` is
+  constructed for it.
+- `κ` holds pending binds, sequences, arguments and scopes. Bind and sequence
+  frames carry their resumption environment, so a binder's extent is
+  structural. Application pushes one `Arg` per argument, right to left,
+  before evaluating its computation head. Forcing a thunk enters its
+  computation and pushes nothing: `force(thunk M) = M`. A lambda consumes
+  one argument frame and enters its body in tail position. Depth counts
+  computational frames, not provenance-only restoration frames. Pushing n
+  arguments needs n free frames at entry.
+- `Σ` supplies the host signature and dynamic shell state: current directory,
+  environment overrides, handlers, capabilities and audit state. Lexical
+  bindings live in Γ; the signature supplies fallback names.
+- A lambda is a computation, not a value (§17.2). An `Arg` consumes it by β.
+  Restoring frames preserve its computation closure; a value-demanding frame
+  or the empty stack boxes it as ⟨thunk (λx.M), Γ|occ(λx.M)⟩. No rule applies
+  a returned value or forces implicitly; the checker writes application
   through a returned thunk as `M to h. force h v`.
-- `X` has two shapes, `error e` and `escape q` (`q ::= exit n`).
-  A break climbs `κ` past every frame whose rule does not catch it, each
-  frame's own rule running once on the way up to close what it opened — a
-  redirect settled, a handler frame popped, an audit scope closed. `try` and
-  `?` are among the few frames an ordinary error does not climb past; nothing
-  catches an escape but the run boundary itself.
+- `X` is `error e` or `escape q`, where `q` is `exit n` or a stop (§8.10).
+  A break climbs κ past frames whose rules do not catch it, each closing what
+  it opened. `try` and `?` catch ordinary errors; escapes reach their owning
+  boundary.
 
 Box is the rule for a lambda that finds no argument:
 
@@ -6660,35 +6679,36 @@ Box is the rule for a lambda that finds no argument:
 λx.M ; ε                     final: thunk (λx.M)                 Box at run end
 ```
 
-With environments, the box is `thunk ⟨λx.M, Γ|occ(λx.M)⟩`: it retains the
+With environments, the box is `⟨thunk (λx.M), Γ|occ(λx.M)⟩`: it retains the
 arguments supplied so far and only the names its code mentions. A tail call
 still consumes its caller's remaining arguments.
 
-A builtin value is `native b v⃗`, with fewer held arguments than its arity n
-when n > 0, and none when n = 0. Forcing it produces a native terminal;
-forcing an arity-zero builtin runs it immediately. Its application never
-becomes IR:
+Forcing a builtin c of arity n enters its η-expansion, binding the builtin
+itself rather than looking its name up in the host signature:
 
 ```text
-force (native b v⃗)           ⟶ native b v⃗                       |v⃗| < n
-force (native b [])           ⟶ run b []                         n = 0
-native b v⃗ ; V :: K          ⟶ native b (v⃗, V) ; K              |v⃗| + 1 < n
-native b v⃗ ; V :: K          ⟶ run b (v⃗, V) ; K                 |v⃗| + 1 = n
-native b v⃗ ; F :: K          ⟶ value (native b v⃗) ; F :: K      F demands a value
-native b v⃗ ; ε              final: native b v⃗
+force (builtin c)  ⟶  ⟨λa₀.…λaₙ₋₁. δ(b; a⃗), {b ↦ c}⟩
+⟨δ(b; a⃗), Γ⟩ / κ, Σ  ⟶  run Γ(b) [Γ(a₀), …, Γ(aₙ₋₁)] ⇓ κ, Σ
 ```
 
-A partial builtin seals by name with its held arguments. Boundary builtins
-instead remain inference-built λ-closures over `Exec` with their per-use
+Application is ordinary β. An under-applied builtin is a residual lambda,
+boxed by the same rule as any other lambda. Its runtime `type_name` is
+`Lambda`; its display retains the native name and supplied-argument count
+(§6.5). A call holding exactly the builtin's arity runs its body directly;
+forcing an arity-zero builtin runs it without arguments.
+
+A partial builtin crosses the child-shell wire as a thunk, with its supplied
+arguments captured in Γ and its builtin entry encoded by name. Boundary
+builtins remain inference-built λ-closures over `Exec` with their per-use
 checked site; that site crosses as IR.
 
 The central continuation rules are:
 
 ```text
-⟨return v, Γ⟩ / κ, Σ  ⟶  value v / κ, Σ
+⟨return v, Γ⟩ / κ, Σ  ⟶  close(v, Γ, Σ) ⇓ κ, Σ
 
 ⟨M to p.N, Γ⟩ / κ, Σ  ⟶  ⟨M, Γ⟩ / (to p.N, Γ) :: κ, Σ      To-push
-value v / (to p.N, Γ) :: κ, Σ  ⟶  ⟨N, Γ[p ↦ v]⟩ / κ, Σ      To-return
+v ⇓ (to p.N, Γ) :: κ, Σ  ⟶  ⟨N, Γ[p ↦ v]⟩ / κ, Σ            To-return
 error e / (to p.N, Γ) :: κ, Σ  ⟶  error e / κ, Σ             Propagate
 ```
 
@@ -6706,9 +6726,9 @@ nullary tag, and forces the arm. The arm is a branch and not an ordinary
 function call: it runs in the ambient shell context, so the arm's own effects
 on the shell outlive the `case`.
 
-Recursion is one frame form, `Rec`, n-ary: `letrec {xi = vi}` binds every
-group member's name to the thunk of its own projection and puts the chosen
-member in focus; a recursive reference forces its name, which re-enters `Rec`
+Recursion is one n-ary computation, `Rec`: `letrec {xi = vi}` binds every
+group member's name to the thunk of its own projection and enters the chosen
+member; a recursive reference forces its name, which re-enters `Rec`
 and re-extends from the outer `Γ`. No body is ever rewritten; a group of one
 is Levy's `rec f. M`.
 
@@ -6732,13 +6752,12 @@ rc `recursion-limit:` knob) and raises rather than pushing, *before* any
 effect the frame would hold undo for — a sink swap, a redirect's file open, a
 capability push — so a refused push commits nothing.
 
-A multi-stage pipeline is a configuration, not a sub-evaluation: each stage is
-this same machine started fresh, over the empty stack, in its own process; the
-parent's `Pipeline` rule launches the group, joins the stages' outcomes and
-returns them to the parent's own `κ` like any other rule's terminal — no
-frame stands for the running group, since nothing runs beneath it. No frame ever crosses a stage boundary — bytes cross
-by the wiring of §7.1, and the bindings a stage's `Γ` starts from cross the
-same way, as store rather than continuation.
+A ral-written pipeline stage starts this machine fresh, over the empty stack,
+on a worker thread; an external stage is a process. The parent's `Pipeline`
+rule launches the group, joins its outcomes and returns the final stage's value
+to its own `κ`. No frame stands for the running group or crosses a stage
+boundary. Bytes cross by the wiring of §7.1; lexical bindings travel as a
+persistent environment, not as continuation frames.
 
 For `try body handler`, a body value is returned unchanged. A body error is
 converted to `E` and passed to the handler. An escape bypasses the handler.
@@ -6832,7 +6851,7 @@ the standard-output sink it replaces:
 
 ```text
 ⟨capture M, Γ⟩ / κ, Σ   ⟶  ⟨M, Γ⟩ / (cap prev) :: κ, Σ[stdout ↦ buf]            Cap-push
-value v / (cap prev) :: κ, Σ  ⟶  value bytes(buf) / κ, Σ[stdout ↦ prev]          Cap-return
+v ⇓ (cap prev) :: κ, Σ       ⟶  bytes(buf) ⇓ κ, Σ[stdout ↦ prev]               Cap-return
 X / (cap prev) :: κ, Σ        ⟶  X / κ, Σ[stdout ↦ prev]                          Cap-halt
 ```
 

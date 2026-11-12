@@ -11,6 +11,7 @@
 //! binary takes `BakedPrelude::runtime` instead.
 
 use crate::authority::policy::Baseline;
+use crate::builtin::{BuiltinEntry, BuiltinTable, Set, language_constants};
 use crate::environ::EnvVars;
 use crate::error::Error;
 use crate::io::Source;
@@ -18,9 +19,7 @@ use crate::io::terminal::TerminalState;
 use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::path::CwdPath;
 use crate::shell::evaluator::{Mode, run_phrases};
-use crate::shell::runtime::{
-    BuiltinEntry, BuiltinTable, Env, Mooring, PreludeMap, Runtime, Set, Shell, language_constants,
-};
+use crate::shell::runtime::{Env, Mooring, PreludeMap, Runtime, Shell};
 use crate::site::{Silent, site};
 use crate::typecheck::Manifest;
 use std::sync::{Arc, OnceLock};
@@ -186,6 +185,7 @@ fn describe_comp(kind: &CompKind) -> &'static str {
         CompKind::Bind { .. } => "`to`",
         CompKind::Seq { .. } => "a sequence",
         CompKind::Force(_) => "`force`",
+        CompKind::Builtin { .. } => "a builtin",
         _ => "a computation",
     }
 }

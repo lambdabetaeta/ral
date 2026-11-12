@@ -1,10 +1,27 @@
 ---
 status: accepted
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
-amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
+anchors: [Machine, Machine::settle, Machine::resume, Machine::unwind, Frame, ValClos]
+amended_by:
+  - "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
+  - "[[261112_runtime-values-are-value-closures|runtime values are value closures]]"
 ---
 
 # The evaluator steps closures
+
+> **Amended 2026-11-12:**
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]]
+> makes the persistent state ⟨M, ρ⟩ or `Err(e)`. `Machine::settle` passes a
+> produced value down the continuation immediately: there is no persistent
+> value register or allocated runtime `return`. A computation closure meets
+> a frame only at a λ; a value-receiving frame boxes it as `ValClos::thunk`.
+> Builtins force to λ-chains ending in δ, so their residuals use ordinary β,
+> not a native terminal. `To` and `Seq` retain continuation environments.
+> The CEK separation stands; the terminal inventory below and the November
+> 11 amendment's native-argument mechanism are historical.
 
 > **Amended 2026-11-11:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
@@ -109,3 +126,9 @@ account and the body-shares-the-session bracket in
 as descriptions of the mechanism; their invariants hold by construction now.
 
 Refined by [[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]: capture is a scrub, and the focus is a computation closure, a type apart from the thunk value.
+
+## Where
+
+- `core/src/shell/evaluator/machine.rs`: `Machine`, `Frame`, `Machine::settle`,
+  `Machine::resume`, `Machine::unwind`; `State` holds ⟨M, ρ⟩ or a break.
+- `core/src/shell/runtime/value.rs`: `ValClos::thunk`, `ValClos::into_computation`.

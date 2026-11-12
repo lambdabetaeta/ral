@@ -11,11 +11,12 @@ use crate::bus::{Command, Drained, Input, Next, Rest};
 use crate::provider::scripted::{Reply, Script};
 use crate::record::{ChildStatus, Commit, Display, Publish, Record, Transcript};
 use genai::chat::ChatRole;
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::process::{CancelCause, DurableRoot};
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
+use ral_core::shell::runtime::{Mooring, Settled};
 use ral_core::ty::{Binders, Ty};
 use ral_core::typecheck::builtins::{pure, thunk};
-use ral_core::{Shell, Value};
+use ral_core::{Shell, ValClos};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -230,14 +231,14 @@ thread_local! {
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]
 fn builtin_t2_cancel_now(
-    _args: &[Value],
+    _args: &[ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     if let Some(cancel) = T2_CANCEL.take() {
         cancel();
     }
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 fn scheme_t2_cancel_now(_: &mut Binders) -> Ty {
@@ -246,38 +247,42 @@ fn scheme_t2_cancel_now(_: &mut Binders) -> Ty {
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]
 fn builtin_t2_queue_prompt(
-    _args: &[Value],
+    _args: &[ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     T2_QUEUE.with(|cell| {
         if let Some(handle) = cell.borrow().as_ref() {
             handle.steer("queued prompt".into()).unwrap();
         }
     });
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]
 fn builtin_t2_queue_read(
-    _args: &[Value],
+    _args: &[ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     T2_QUEUE.with(|cell| {
         if let Some(handle) = cell.borrow().as_ref() {
             let _posted = handle.command(Command::Read(crate::bus::Read::Resources));
         }
     });
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]
-fn builtin_t2_arrive(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
+fn builtin_t2_arrive(
+    _args: &[ValClos],
+    _mooring: &Mooring,
+    _shell: &mut Shell,
+) -> Settled<ValClos> {
     if let Some(arrive) = T2_ARRIVAL.take() {
         arrive();
     }
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 4] = [
@@ -1026,16 +1031,16 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
         std::sync::Mutex::new(None);
     #[allow(clippy::unnecessary_wraps, reason = "fixed builtin signature")]
     fn builtin_arm_sever(
-        _args: &[Value],
+        _args: &[ValClos],
         _mooring: &Mooring,
         _shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         use ral_core::sync::LockExt as _;
         let armed = ARM_SEVER.lock_ignore_poison().take();
         if let Some((recorder, sink)) = armed {
             recorder.attach(Box::new(sink));
         }
-        Ok(Value::Unit)
+        Ok(ValClos::UNIT)
     }
     static ARM_SEVER_BUILTINS: [BuiltinEntry; 1] = [BuiltinEntry::new(
         Cow::Borrowed("test-arm-sever-on-card"),

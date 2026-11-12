@@ -1,5 +1,5 @@
 use super::*;
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::ty::{Binders, Ty};
 use ral_core::typecheck::builtins::{pure, thunk};
 use std::borrow::Cow;
@@ -156,7 +156,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
                 "test-only: bound worker teardown wait.",
                 BuiltinBody::Captured(Arc::new(|_, _, shell| {
                     shell.set_worker_drain_grace(Duration::from_millis(20));
-                    Ok(ral_core::Value::Unit)
+                    Ok(ral_core::ValClos::UNIT)
                 })),
             ),
             BuiltinEntry::new(
@@ -166,7 +166,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
                 BuiltinBody::Captured(Arc::new(move |_, _, _| {
                     entered.send(()).unwrap();
                     held.lock().unwrap().recv_timeout(WAIT).unwrap();
-                    Ok(ral_core::Value::Unit)
+                    Ok(ral_core::ValClos::UNIT)
                 })),
             ),
         ]

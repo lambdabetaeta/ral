@@ -350,10 +350,10 @@ mod durability_tests {
     use super::*;
 
     fn builtin_panic_now(
-        _args: &[crate::shell::runtime::Value],
+        _args: &[crate::shell::runtime::ValClos],
         _mooring: &crate::shell::runtime::Mooring,
         _shell: &mut Shell,
-    ) -> crate::shell::runtime::Settled<crate::shell::runtime::Value> {
+    ) -> crate::shell::runtime::Settled<crate::shell::runtime::ValClos> {
         panic!("transport test: deliberate mid-eval panic");
     }
 
@@ -362,12 +362,12 @@ mod durability_tests {
         thunk(pure(crate::ty::Ty::unit()))
     }
 
-    static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =
-        [crate::shell::runtime::BuiltinEntry::new(
+    static PANIC_BUILTINS_ARR: [crate::builtin::BuiltinEntry; 1] =
+        [crate::builtin::BuiltinEntry::new(
             std::borrow::Cow::Borrowed("protocol-panic-now"),
             scheme_panic_now,
             "test-only: panic the evaluator mid-run.",
-            crate::shell::runtime::BuiltinBody::Static(builtin_panic_now),
+            crate::builtin::BuiltinBody::Static(builtin_panic_now),
         )];
 
     static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
@@ -607,7 +607,7 @@ mod probe_tests {
         let rows = transport.bindings().expect("a reading");
         let row = rows.iter().find(|r| r.name == "probe_h").expect("the row");
         let handle = row.handle.as_ref().expect("a handle row");
-        assert_eq!(handle.state, crate::shell::runtime::Sample::Consumed);
+        assert_eq!(handle.state, crate::handle::Sample::Consumed);
     }
 
     #[test]

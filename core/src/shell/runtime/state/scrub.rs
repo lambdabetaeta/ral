@@ -10,13 +10,9 @@
 
 use super::Shell;
 use super::construct::{Bequest, Image, Terms};
-use crate::data::Opaque;
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::handler::HandlerFrame;
-use crate::shell::runtime::{Binding, Closure, Env, List, Map, Value};
-use std::convert::Infallible;
-use std::ops::ControlFlow;
-use std::sync::Arc;
+use crate::shell::runtime::{Binding, Env, ValClos};
 
 impl Shell {
     /// What a child takes: this session's scope and handler frames with every
@@ -24,10 +20,7 @@ impl Shell {
     /// of its fixings, and `grant`.  No hook and no terminal lease: those are
     /// a root's.
     ///
-    /// No handle is reachable from the bequest, so an identity-adopted child
-    /// and a sealed child resolve every name alike: both decode against the
-    /// one `Runtime`.  A handle becomes its `` `opaque `` placeholder.  A scope
-    /// reaching no handle is shared, not copied.
+    /// A live handle becomes withheld; handle-free scopes stay shared.
     pub fn bequeath(&self, grant: SpawnGrant) -> Bequest {
         let mut scrub = Scrub::default();
         let env = scrub.scope(&self.env).unwrap_or_else(|| self.env.clone());
@@ -66,11 +59,11 @@ impl Scrub {
     }
 
     /// `v`'s replacement, `None` if it reaches no handle.
-    fn value(&mut self, v: &Value) -> Option<Value> {
+    fn value(&mut self, v: &ValClos) -> Option<ValClos> {
         let mut roots = Vec::new();
-        captured_scopes(v, &mut roots);
+        v.captured_envs(&mut roots);
         self.settle(roots);
-        self.rebuild(v)
+        v.scrubbed(&mut |env| self.replacement(env))
     }
 
     /// Memoise every environment reachable from `roots`, each after every
@@ -85,7 +78,7 @@ impl Scrub {
                     }
                     let mut captured = Vec::new();
                     for (_, binding) in scope.iter() {
-                        captured_scopes(&binding.value, &mut captured);
+                        binding.value.captured_envs(&mut captured);
                     }
                     captured.retain(|s| self.seen(s).is_none());
                     stack.push(Visit::Close(scope));
@@ -94,16 +87,20 @@ impl Scrub {
                 // A DAG: every scope this one captures was opened above it,
                 // so is settled.
                 Visit::Close(scope) => {
-                    let rebuilt = patched(
-                        &scope,
-                        scope.iter().filter_map(|(name, binding)| {
-                            self.rebuild(&binding.value).map(|value| {
-                                let scheme = binding.scheme.clone();
-                                (name.clone(), Binding { value, scheme })
-                            })
-                        }),
-                        Env::bind,
-                    );
+                    let mut rebuilt = None;
+                    for (name, binding) in scope.iter() {
+                        if let Some(value) =
+                            binding.value.scrubbed(&mut |env| self.replacement(env))
+                        {
+                            rebuilt.get_or_insert_with(|| scope.clone()).bind(
+                                name.clone(),
+                                Binding {
+                                    value,
+                                    scheme: binding.scheme.clone(),
+                                },
+                            );
+                        }
+                    }
                     self.memo.push((scope, rebuilt));
                 }
             }
@@ -126,74 +123,6 @@ impl Scrub {
             .expect("a captured scope is settled before any value holding it is rebuilt")
             .clone()
     }
-
-    /// `v` with every handle it reaches replaced, `None` if it reaches none.
-    /// Recurses through data alone: a closure's scope is already settled.
-    ///
-    /// # Panics
-    /// If `v` holds a closure over an unsettled scope (see [`Self::replacement`]).
-    fn rebuild(&self, v: &Value) -> Option<Value> {
-        match v {
-            Value::Handle(_) => Some(Value::from(Opaque::Handle.placeholder())),
-            Value::List(items) => match items.literal_parts() {
-                Some((node, env)) => {
-                    let env = self.replacement(env)?;
-                    Some(Value::List(List::captured(Arc::clone(node), env)))
-                }
-                None => patched(
-                    items,
-                    items
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, item)| self.rebuild(&item).map(|new| (i, new))),
-                    List::set,
-                )
-                .map(Value::List),
-            },
-            Value::Map(entries) => match entries.literal_parts() {
-                Some((node, env)) => {
-                    let env = self.replacement(env)?;
-                    Some(Value::Map(Map::captured(Arc::clone(node), env)))
-                }
-                None => patched(
-                    entries,
-                    entries.iter().filter_map(|(key, item)| {
-                        self.rebuild(&item).map(|new| (key.to_string(), new))
-                    }),
-                    Map::insert,
-                )
-                .map(Value::Map),
-            },
-            Value::Variant { label, payload } => {
-                let payload = self.rebuild(payload.as_deref()?)?;
-                Some(Value::Variant {
-                    label: label.clone(),
-                    payload: Some(Box::new(payload)),
-                })
-            }
-            Value::Thunk(closure) => {
-                let env = self.replacement(closure.env())?;
-                Some(Value::Thunk(Closure::captured(
-                    Arc::clone(closure.comp()),
-                    env,
-                )))
-            }
-            Value::Native(entry, args) => patched(
-                args,
-                args.iter()
-                    .enumerate()
-                    .filter_map(|(i, arg)| self.rebuild(arg).map(|new| (i, new))),
-                |args, i, new| Arc::make_mut(args)[i] = new,
-            )
-            .map(|args| Value::Native(Arc::clone(entry), args)),
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::String(_)
-            | Value::Bytes(_) => None,
-        }
-    }
 }
 
 /// A scope on the walk's stack: to open, pushing every scope it captures, or
@@ -203,99 +132,58 @@ enum Visit {
     Close(Env),
 }
 
-/// `container` with each change put into a copy, or `None` if there is none:
-/// what changed is replaced, the rest stays shared.
-fn patched<C: Clone, K, V>(
-    container: &C,
-    changes: impl IntoIterator<Item = (K, V)>,
-    mut put: impl FnMut(&mut C, K, V),
-) -> Option<C> {
-    let mut changes = changes.into_iter().peekable();
-    changes.peek()?;
-    let mut copy = container.clone();
-    for (key, new) in changes {
-        put(&mut copy, key, new);
-    }
-    Some(copy)
-}
-
-/// Push the environment of every closure `v` holds, through data, never
-/// entering a closure.
-fn captured_scopes(v: &Value, out: &mut Vec<Env>) {
-    let capture = match v {
-        Value::Thunk(closure) => Some(closure.env()),
-        Value::List(items) => items.literal_parts().map(|(_, env)| env),
-        Value::Map(entries) => entries.literal_parts().map(|(_, env)| env),
-        _ => None,
-    };
-    match capture {
-        Some(env) => out.push(env.clone()),
-        None => {
-            let ControlFlow::Continue(()) = v.try_for_each_child::<Infallible>(&mut |c| {
-                captured_scopes(c, out);
-                ControlFlow::Continue(())
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::{block_over, captured, idle_handle};
+    use crate::handle::{Handle, idle_handle};
+    use crate::shell::runtime::{Mooring, View, block_over, captured};
+    use std::sync::Arc;
 
-    fn is_placeholder(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::data::OPAQUE_TAG)
+    fn is_withheld(v: Option<&ValClos>) -> bool {
+        matches!(v.map(ValClos::view), Some(View::Handle(Handle::Withheld(title))) if title.as_ref() == "<test>")
+    }
+
+    fn partial(shell: &mut Shell, value: ValClos) -> ValClos {
+        let builtin = ValClos::builtin(Arc::new(shell.lookup_builtin("has").expect("has builtin")));
+        crate::shell::evaluator::apply(&builtin, vec![value], &Mooring::adrift(), shell)
+            .expect("partial application")
     }
 
     #[test]
-    fn native_arguments_scrub_handles_and_captured_scopes_without_copying_untouched_args() {
+    fn residuals_scrub_handles_and_captures_without_copying_untouched_environments() {
         let mut parent = crate::test_helper::core_shell();
-        let entry = Arc::new(parent.lookup_builtin("has").expect("has builtin"));
-        let unchanged: Arc<[Value]> = Arc::from([Value::Int(7)]);
-        crate::test_access::bind_untyped(
-            &mut parent,
-            "unchanged",
-            Value::Native(Arc::clone(&entry), Arc::clone(&unchanged)),
-        );
+        let unchanged = partial(&mut parent, ValClos::int(7));
+        let unchanged_env = captured(Some(&unchanged)).clone();
+        crate::test_access::bind_untyped(&mut parent, "unchanged", unchanged);
         crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
-        let held = Value::list(vec![idle_handle(), block_over(&parent.env)]);
-        crate::test_access::bind_untyped(
-            &mut parent,
-            "partial",
-            Value::Native(entry, Arc::from([held])),
-        );
+        let held = ValClos::list(vec![idle_handle(), block_over(&parent.env)]);
+        let residual = partial(&mut parent, held);
+        crate::test_access::bind_untyped(&mut parent, "partial", residual);
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
-        let Some(Value::Native(_, args)) = fork.env.get("partial") else {
-            panic!("the partial builtin must remain a native");
+        let env = captured(fork.env.get("partial"));
+        let held = env.get("%arg0").expect("η binds the first argument");
+        let View::List(items) = held.view() else {
+            panic!("the residual must retain its held list");
         };
-        let [Value::List(items)] = args.as_ref() else {
-            panic!("the partial builtin must retain its held list");
-        };
-        assert!(is_placeholder(items.get(0).as_deref()));
-        assert!(is_placeholder(
-            captured(items.get(1).as_deref()).get("live")
-        ));
-        let Some(Value::Native(_, args)) = fork.env.get("unchanged") else {
-            panic!("the handle-free builtin must remain a native");
-        };
-        assert!(Arc::ptr_eq(args, &unchanged));
+        assert!(is_withheld(items.get(0).as_deref()));
+        assert!(is_withheld(captured(items.get(1).as_deref()).get("live")));
+        assert!(captured(fork.env.get("unchanged")).ptr_eq(&unchanged_env));
     }
 
     #[test]
     fn a_handle_free_scope_forks_as_itself() {
         let mut parent = crate::test_helper::core_shell();
-        crate::test_access::bind_untyped(&mut parent, "big", Value::string("x".repeat(1 << 20)));
+        crate::test_access::bind_untyped(&mut parent, "big", ValClos::string("x".repeat(1 << 20)));
         crate::test_access::bind_untyped(
             &mut parent,
             "list",
-            Value::list(vec![Value::Int(1), Value::string("a")]),
+            ValClos::list(vec![ValClos::int(1), ValClos::string("a")]),
         );
         crate::test_access::bind_untyped(
             &mut parent,
             "map",
-            Value::map(vec![("k".into(), Value::Int(2))]),
+            ValClos::map(vec![("k".into(), ValClos::int(2))]),
         );
         let blk = block_over(&parent.env);
         crate::test_access::bind_untyped(&mut parent, "blk", blk);
@@ -316,16 +204,17 @@ mod tests {
             let blk = block_over(&parent.env);
             crate::test_access::bind_untyped(&mut parent, name, blk);
         }
-        crate::test_access::bind_untyped(&mut parent, "big", Value::string("x".repeat(1 << 20)));
+        crate::test_access::bind_untyped(&mut parent, "big", ValClos::string("x".repeat(1 << 20)));
 
         let fork = parent.bequeath(SpawnGrant::Inherit).image;
         assert!(
-            is_placeholder(fork.env.get("live")),
-            "a handle binding must become the placeholder"
+            is_withheld(fork.env.get("live")),
+            "a handle binding must remain in place, withheld"
         );
-        let (Some(Value::String(ours)), Some(Value::String(theirs))) =
-            (parent.env.get("big"), fork.env.get("big"))
-        else {
+        let (Some(View::String(ours)), Some(View::String(theirs))) = (
+            parent.env.get("big").map(ValClos::view),
+            fork.env.get("big").map(ValClos::view),
+        ) else {
             panic!("both shells bind `big` to a string");
         };
         assert_eq!(
@@ -340,8 +229,8 @@ mod tests {
                 "`{name}`'s captured scope must be rebuilt"
             );
             assert!(
-                is_placeholder(theirs.get("live")),
-                "`{name}`'s captured scope must hold the placeholder"
+                is_withheld(theirs.get("live")),
+                "`{name}`'s captured scope must retain the withheld handle"
             );
         }
     }
@@ -363,6 +252,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_handle_under_a_deep_tag_spine_is_withheld_in_place() {
+        let mut parent = crate::test_helper::core_shell();
+        let tagged = (0..10_000).fold(idle_handle(), |v, _| ValClos::variant("deep", Some(v)));
+        crate::test_access::bind_untyped(&mut parent, "tagged", tagged);
+
+        let fork = parent.bequeath(SpawnGrant::Inherit).image;
+        let (labels, terminal) = fork.env.get("tagged").expect("bound").peel_variants();
+        assert_eq!(labels.len(), 10_000);
+        assert!(is_withheld(Some(&terminal)));
+    }
+
     /// On the default test thread's stack: the walk must not recurse per link.
     #[test]
     fn a_deep_chain_over_a_handle_scrubs_to_its_foot() {
@@ -380,8 +281,8 @@ mod tests {
             link = captured(link).get("tail");
         }
         assert!(
-            is_placeholder(link),
-            "the chain's foot must be the placeholder"
+            is_withheld(link),
+            "the chain's foot must retain the withheld handle"
         );
     }
 }

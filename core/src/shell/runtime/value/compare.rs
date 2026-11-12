@@ -1,13 +1,11 @@
-//! ral's equality and order: one pair of `Value` methods, behind `==`, `<`,
-//! `lt`, `gt`, `sort-list` and the rest.
+//! ral's structural equality and exact numeric order.
 
-use super::Value;
+use super::{ValClos, View};
 use crate::data::Finite;
-use crate::fact::{CompareFailure, EqualityOrOrder, EvalFailure, Reason};
+use crate::fact::{CompareFailure, EqualityOrOrder, EvalFailure, Reason, ValueShape};
 use crate::shell::runtime::{Error, Settled};
 use std::cmp::Ordering;
 
-/// `i` against `f`, exactly: no rounding of `i` into an `f64`.
 fn cmp_int_float(i: i64, f: Finite) -> Ordering {
     let Some(whole) = f.to_i64() else {
         return if f.get() > 0.0 {
@@ -16,12 +14,10 @@ fn cmp_int_float(i: i64, f: Finite) -> Ordering {
             Ordering::Greater
         };
     };
-    // `f - trunc(f)` is never `-0.0`, so `total_cmp` agrees with `==`.
+    // `f - trunc(f)` is never `-0.0`.
     i.cmp(&whole)
         .then_with(|| 0.0_f64.total_cmp(&(f.get() - f.get().trunc())))
 }
-
-/// Conjunction that stops at the first `false` or `Err`, in traversal order.
 fn all(pairs: impl Iterator<Item = Settled<bool>>) -> Settled<bool> {
     for eq in pairs {
         if !eq? {
@@ -30,120 +26,118 @@ fn all(pairs: impl Iterator<Item = Settled<bool>>) -> Settled<bool> {
     }
     Ok(true)
 }
-
-impl Value {
-    fn comparison_error(&self, other: &Self, operation: &str, relation: EqualityOrOrder) -> Error {
-        Error::new(Reason::Evaluation(Box::new(EvalFailure::Compare(
-            CompareFailure {
-                operation: operation.into(),
-                relation,
-                left: self.shape(),
-                right: other.shape(),
-            },
-        ))))
-    }
-
-    /// Numbers by magnitude, `None` for a non-number.
+fn comparison_error(
+    left: ValueShape,
+    right: ValueShape,
+    operation: &str,
+    relation: EqualityOrOrder,
+) -> Error {
+    Error::new(Reason::Evaluation(Box::new(EvalFailure::Compare(
+        CompareFailure {
+            operation: operation.into(),
+            relation,
+            left,
+            right,
+        },
+    ))))
+}
+impl ValClos {
     fn number_order(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Int(a), Self::Int(b)) => Some(a.cmp(b)),
-            (Self::Int(a), Self::Float(b)) => Some(cmp_int_float(*a, *b)),
-            (Self::Float(a), Self::Int(b)) => Some(cmp_int_float(*b, *a).reverse()),
-            (Self::Float(a), Self::Float(b)) => Some(a.cmp(b)),
+        match (self.view(), other.view()) {
+            (View::Int(a), View::Int(b)) => Some(a.cmp(&b)),
+            (View::Int(a), View::Float(b)) => Some(cmp_int_float(a, b)),
+            (View::Float(a), View::Int(b)) => Some(cmp_int_float(b, a).reverse()),
+            (View::Float(a), View::Float(b)) => Some(a.cmp(&b)),
             _ => None,
         }
     }
-
-    /// ral's `==`: structural, and a suspension refuses rather than answering
-    /// a non-reflexive `false`.
-    ///
     /// # Errors
     /// Either side is a block, function or handle.
     pub(crate) fn equals(&self, other: &Self) -> Settled<bool> {
-        Ok(match (self, other) {
-            (Self::Unit, Self::Unit) => true,
-            (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::Int(_) | Self::Float(_), Self::Int(_) | Self::Float(_)) => {
-                self.number_order(other) == Some(Ordering::Equal)
+        let (left_labels, left) = self.peel_variants();
+        let (right_labels, right) = other.peel_variants();
+        if left_labels.iter().zip(&right_labels).any(|(a, b)| a != b) {
+            return Ok(false);
+        }
+        let shapes = match left_labels.len().cmp(&right_labels.len()) {
+            Ordering::Less if left.opacity().is_some() => Some((left.shape(), ValueShape::Variant)),
+            Ordering::Greater if right.opacity().is_some() => {
+                Some((ValueShape::Variant, right.shape()))
             }
-            (Self::String(a), Self::String(b)) => a == b,
-            (Self::Bytes(a), Self::Bytes(b)) => a == b,
-            (Self::List(a), Self::List(b)) => {
+            Ordering::Less | Ordering::Greater => return Ok(false),
+            Ordering::Equal => None,
+        };
+        if let Some((left, right)) = shapes {
+            return Err(
+                comparison_error(left, right, "equality", EqualityOrOrder::Equality).into(),
+            );
+        }
+        // An absent tag payload short-circuits before inspecting the other payload.
+        if !left_labels.is_empty()
+            && matches!(left.view(), View::Unit) != matches!(right.view(), View::Unit)
+        {
+            return Ok(false);
+        }
+        Ok(match (left.view(), right.view()) {
+            (View::Unit, View::Unit) => true,
+            (View::Bool(a), View::Bool(b)) => a == b,
+            (View::Int(_) | View::Float(_), View::Int(_) | View::Float(_)) => {
+                left.number_order(&right) == Some(Ordering::Equal)
+            }
+            (View::String(a), View::String(b)) => a == b,
+            (View::Bytes(a), View::Bytes(b)) => a == b,
+            (View::List(a), View::List(b)) => {
                 a.len() == b.len() && all(a.iter().zip(b.iter()).map(|(a, b)| a.equals(&b)))?
             }
-            // Both sides iterate sorted by key, so a pointwise zip decides it.
-            (Self::Map(a), Self::Map(b)) => {
+            (View::Map(a), View::Map(b)) => {
                 a.len() == b.len()
                     && all(a
                         .iter()
                         .zip(b.iter())
                         .map(|((ka, a), (kb, b))| Ok(ka == kb && a.equals(&b)?)))?
             }
-            (
-                Self::Variant {
-                    label: la,
-                    payload: pa,
-                },
-                Self::Variant {
-                    label: lb,
-                    payload: pb,
-                },
-            ) => {
-                la == lb
-                    && match (pa, pb) {
-                        (Some(a), Some(b)) => a.equals(b)?,
-                        (None, None) => true,
-                        _ => false,
-                    }
-            }
-            (a, b) if a.opacity().is_some() || b.opacity().is_some() => {
-                return Err(a
-                    .comparison_error(b, "equality", EqualityOrOrder::Equality)
-                    .into());
+            _ if left.opacity().is_some() || right.opacity().is_some() => {
+                return Err(comparison_error(
+                    left.shape(),
+                    right.shape(),
+                    "equality",
+                    EqualityOrOrder::Equality,
+                )
+                .into());
             }
             _ => false,
         })
     }
-
-    /// ral's order: numbers by magnitude, exactly across Int and Float, and
-    /// strings lexicographically.  `op` names the asker in the error.
-    ///
     /// # Errors
-    /// Anything else.
+    /// Anything but numbers or two strings.
     pub(crate) fn compare(&self, other: &Self, op: &str) -> Settled<Ordering> {
         if let Some(order) = self.number_order(other) {
             return Ok(order);
         }
-        match (self, other) {
-            (Self::String(a), Self::String(b)) => Ok(a.cmp(b)),
-            _ => Err(self
-                .comparison_error(other, op, EqualityOrOrder::Order)
-                .into()),
+        match (self.view(), other.view()) {
+            (View::String(a), View::String(b)) => Ok(a.cmp(b)),
+            _ => Err(
+                comparison_error(self.shape(), other.shape(), op, EqualityOrOrder::Order).into(),
+            ),
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shell::runtime::{Env, block_over};
-
-    fn float(f: f64) -> Value {
-        Value::Float(Finite::new(f).expect("finite"))
+    fn float(f: f64) -> ValClos {
+        ValClos::float(Finite::new(f).expect("finite"))
     }
-
     const TWO_53: i64 = 9_007_199_254_740_992;
-
-    fn cmp(a: &Value, b: &Value) -> Ordering {
+    fn cmp(a: &ValClos, b: &ValClos) -> Ordering {
         a.compare(b, "test").expect("numbers order")
     }
-
-    /// B7: promotion to `f64` made `2^53+1 == 2^53.0 == 2^53 < 2^53+1`.
     #[test]
     fn mixed_int_float_order_is_exact_past_2_53() {
         let (lo, hi, f) = (
-            Value::Int(TWO_53),
-            Value::Int(TWO_53 + 1),
+            ValClos::int(TWO_53),
+            ValClos::int(TWO_53 + 1),
             float(9_007_199_254_740_992.0),
         );
         assert_eq!(cmp(&lo, &f), Ordering::Equal);
@@ -152,24 +146,29 @@ mod tests {
         assert_eq!(cmp(&hi, &f), Ordering::Greater);
         assert!(!hi.equals(&f).unwrap());
     }
-
     #[test]
     fn the_ends_of_the_integer_range_meet_their_floats() {
-        let top = float(9_223_372_036_854_775_808.0);
-        assert_eq!(cmp(&Value::Int(i64::MAX), &top), Ordering::Less);
-        let bottom = float(-9_223_372_036_854_775_808.0);
-        assert_eq!(cmp(&Value::Int(i64::MIN), &bottom), Ordering::Equal);
-        assert_eq!(cmp(&Value::Int(0), &float(0.5)), Ordering::Less);
-        assert_eq!(cmp(&Value::Int(-1), &float(-0.5)), Ordering::Less);
-        assert!(Value::Int(3).equals(&float(3.0)).unwrap());
+        assert_eq!(
+            cmp(&ValClos::int(i64::MAX), &float(9_223_372_036_854_775_808.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp(
+                &ValClos::int(i64::MIN),
+                &float(-9_223_372_036_854_775_808.0)
+            ),
+            Ordering::Equal
+        );
+        assert_eq!(cmp(&ValClos::int(0), &float(0.5)), Ordering::Less);
+        assert_eq!(cmp(&ValClos::int(-1), &float(-0.5)), Ordering::Less);
+        assert!(ValClos::int(3).equals(&float(3.0)).unwrap());
     }
-
     #[test]
     fn a_suspension_refuses_even_nested_but_a_first_false_stops_the_walk() {
-        let block = block_over(&Env::new());
-        let item = |n: i64| Value::list(vec![Value::Int(n), block.clone()]);
+        let block = block_over(&Env::EMPTY);
+        let item = |n| ValClos::list(vec![ValClos::int(n), block.clone()]);
         assert!(item(1).equals(&item(1)).is_err());
         assert!(!item(1).equals(&item(2)).unwrap());
-        assert!(block.equals(&Value::Int(1)).is_err());
+        assert!(block.equals(&ValClos::int(1)).is_err());
     }
 }

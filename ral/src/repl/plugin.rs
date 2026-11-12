@@ -516,7 +516,7 @@ impl PluginRuntime {
 mod tests {
     use super::load::harness::dressed;
     use super::*;
-    use ral_core::Value;
+    use ral_core::ValClos;
 
     /// A `complete` hook claims the word: it sees the command at the cursor,
     /// and its list replaces from the word's start.
@@ -543,11 +543,11 @@ mod tests {
         assert_eq!(
             *sink.lock().unwrap(),
             vec![
-                Value::Int(2),
-                Value::Int(13),
-                Value::string("git"),
-                Value::string("checkout"),
-                Value::string("ma"),
+                ValClos::int(2),
+                ValClos::int(13),
+                ValClos::string("git"),
+                ValClos::string("checkout"),
+                ValClos::string("ma"),
             ]
         );
     }

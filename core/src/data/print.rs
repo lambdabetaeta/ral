@@ -61,7 +61,7 @@ pub trait Printable {
     fn shape(&self) -> Shape<'_, Self>;
 }
 
-/// One level of a value, its children unread.
+/// A value's head, grouping consecutive tags before their nonvariant terminal.
 pub enum Shape<'a, V: Printable + ?Sized + 'a> {
     String(&'a str),
     Bytes(&'a [u8]),
@@ -74,8 +74,9 @@ pub enum Shape<'a, V: Printable + ?Sized + 'a> {
         entries: Box<dyn Iterator<Item = (&'a str, V::Child<'a>)> + 'a>,
     },
     Variant {
-        label: &'a str,
-        payload: Option<&'a V>,
+        /// Nonempty consecutive tags; the payload, if any, is not a variant.
+        labels: Vec<&'a str>,
+        payload: Option<V::Child<'a>>,
     },
     /// A scalar, or a leaf that is not data, as its text.
     Atom(Cow<'a, str>),
@@ -100,10 +101,19 @@ impl Printable for FOValue {
                 len: entries.len(),
                 entries: Box::new(entries.iter().map(|(k, v)| (k.as_str(), v))),
             },
-            Self::Variant { label, payload } => Shape::Variant {
-                label,
-                payload: payload.as_deref(),
-            },
+            Self::Variant { label, payload } => {
+                let mut labels = vec![label.as_str()];
+                let mut payload = payload.as_deref();
+                while let Some(Self::Variant {
+                    label,
+                    payload: next,
+                }) = payload
+                {
+                    labels.push(label.as_str());
+                    payload = next.as_deref();
+                }
+                Shape::Variant { labels, payload }
+            }
             #[allow(
                 clippy::uninhabited_references,
                 reason = "no value of `NoExt` exists to be read"
@@ -152,10 +162,21 @@ fn full<V: Printable + ?Sized>(
             parts.extend(more);
             bracketed(&parts, indent, params)
         }
-        Shape::Variant {
-            label,
-            payload: Some(p),
-        } => format!("`{label} {}", full(p, indent, params, budget)),
+        Shape::Variant { labels, payload } => {
+            let mut text = String::new();
+            for label in labels {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push('`');
+                text.push_str(label);
+            }
+            if let Some(p) = payload {
+                text.push(' ');
+                text.push_str(&full(&*p, indent, params, budget));
+            }
+            text
+        }
         _ => shallow(val, params),
     }
 }
@@ -263,9 +284,7 @@ fn child<V: Printable + ?Sized>(
 }
 
 /// The floor: scalars verbatim, a string cut to its head and tail, a container
-/// to its cardinality. Recursion runs only through `Variant` payloads, which
-/// carry no container of their own, so no chain of records can outrun the depth
-/// bound.
+/// to its cardinality. Grouped tags render their nonvariant terminal once.
 fn shallow<V: Printable + ?Sized>(val: &V, params: &PrintParams) -> String {
     match val.shape() {
         Shape::String(s) => quote_string(&elide(s, params.max_string), params),
@@ -278,10 +297,21 @@ fn shallow<V: Printable + ?Sized>(val: &V, params: &PrintParams) -> String {
         Shape::List { len, .. } => format!("[...{len} items]"),
         Shape::Map { len: 0, .. } => "[:]".into(),
         Shape::Map { len, .. } => format!("[:...{len} pairs]"),
-        Shape::Variant { label, payload } => match payload {
-            None => format!("`{label}"),
-            Some(p) => format!("`{label} {}", shallow(p, params)),
-        },
+        Shape::Variant { labels, payload } => {
+            let mut text = String::new();
+            for label in labels {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push('`');
+                text.push_str(label);
+            }
+            if let Some(p) = payload {
+                text.push(' ');
+                text.push_str(&shallow(&*p, params));
+            }
+            text
+        }
         Shape::Atom(text) => text.into_owned(),
     }
 }
@@ -433,6 +463,55 @@ mod tests {
                 RecordEntry::Spread(_) => panic!("printed records cannot spread"),
             })
             .collect()
+    }
+
+    #[test]
+    fn variants_keep_optional_payloads_in_full_and_shallow_forms() {
+        for (payload, full, shallow_text) in [
+            (None, "`tag", "`tag"),
+            (Some(FOValue::Unit), "`tag ()", "`tag ()"),
+            (
+                Some(FOValue::String {
+                    value: "a#'b".into(),
+                }),
+                "`tag ##'a#'b'##",
+                "`tag ##'a#'b'##",
+            ),
+            (
+                Some(FOValue::List {
+                    items: vec![FOValue::Int { value: 7 }],
+                }),
+                "`tag [7]",
+                "`tag [...1 items]",
+            ),
+        ] {
+            let value = FOValue::Variant {
+                label: "tag".into(),
+                payload: payload.map(Box::new),
+            };
+            assert_eq!(pretty_print(&value, 0, &params()), full);
+            assert_eq!(shallow(&value, &params()), shallow_text);
+            let mut value = (0..10_000).fold(value, |payload, _| FOValue::Variant {
+                label: "outer".into(),
+                payload: Some(Box::new(payload)),
+            });
+            let prefix = "`outer ".repeat(10_000);
+            assert_eq!(
+                pretty_print(&value, 0, &params()),
+                format!("{prefix}{full}")
+            );
+            assert_eq!(
+                shallow(&value, &params()),
+                format!("{prefix}{shallow_text}")
+            );
+            while let FOValue::Variant {
+                payload: Some(payload),
+                ..
+            } = value
+            {
+                value = *payload;
+            }
+        }
     }
 
     #[test]

@@ -8,18 +8,19 @@
 //! not observations.  Only `audit` collects: `evaluator::machine` opens a
 //! trail scope (`Audit::open` / `Audit::close`) around its body.
 
-use crate::shell::runtime::{BuiltinEntry, Mooring, Settled, Shell, Value};
+use crate::builtin::BuiltinEntry;
+use crate::shell::runtime::{Mooring, Settled, Shell, ValClos};
 use std::sync::Arc;
 
 /// Run a native body in a fresh call frame.
 pub(crate) fn run_native(
     entry: &BuiltinEntry,
-    args: &[Value],
+    args: &[ValClos],
     site: Option<&Arc<crate::ty::Site>>,
     span: Option<crate::source::Span>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     entry.framed(span, shell, |shell, frame| {
         entry.call_body(frame, args, site, mooring, shell)
     })
@@ -31,7 +32,7 @@ impl BuiltinEntry {
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
-    pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    pub fn run(&self, args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
         run_native(self, args, None, None, mooring, shell)
     }
 }

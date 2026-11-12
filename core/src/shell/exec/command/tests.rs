@@ -1042,7 +1042,8 @@ mod vet {
                 .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant runs this directory");
-                let Err(Break::Error(e)) = command.prepare(&[Value::Unit], Ownership::Kept, shell)
+                let Err(Break::Error(e)) =
+                    command.prepare(&[ValClos::UNIT], Ownership::Kept, shell)
                 else {
                     panic!("the admitted path cannot be run");
                 };
@@ -1070,7 +1071,7 @@ mod vet {
                 .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
                 .expect("the grant admits the non-executable file");
-            let Err(Break::Error(e)) = command.prepare(&[Value::Unit], Ownership::Kept, shell)
+            let Err(Break::Error(e)) = command.prepare(&[ValClos::UNIT], Ownership::Kept, shell)
             else {
                 panic!("a non-executable candidate cannot be run");
             };
@@ -1082,7 +1083,7 @@ mod vet {
     #[test]
     fn rejected_argv_keeps_the_argument_index_and_head() {
         let error =
-            check_argv("tool", &[Value::string("okay"), Value::List(vec![].into())]).unwrap_err();
+            check_argv("tool", &[ValClos::string("okay"), ValClos::list(vec![])]).unwrap_err();
         let Reason::Invalid(failure) = &error.reason else {
             panic!("typed argv shape");
         };
@@ -1103,7 +1104,7 @@ mod vet {
     fn a_nul_in_argv_is_refused_with_its_argument_number() {
         use crate::fact::{LaunchFailure, PrepareCause, PrepareFailure, PrepareInvalid};
         let error =
-            check_argv("tool", &[Value::string("okay"), Value::string("a\0b")]).unwrap_err();
+            check_argv("tool", &[ValClos::string("okay"), ValClos::string("a\0b")]).unwrap_err();
         let Reason::Launch(failure) = &error.reason else {
             panic!("a NUL argument is a launch refusal");
         };
@@ -1124,21 +1125,21 @@ mod vet {
     #[test]
     fn a_value_and_its_type_earn_the_same_verdict() {
         use crate::ty::{Row, Ty};
-        let of_value = |v: &Value| v.heads().first().copied().and_then(RefusedArg::of_head);
-        let pairs: [(Value, Ty); 9] = [
-            (Value::Unit, Ty::unit()),
-            (Value::Bool(true), Ty::bool()),
-            (Value::Int(1), Ty::int()),
+        let of_value = |v: &ValClos| v.heads().first().copied().and_then(RefusedArg::of_head);
+        let pairs: [(ValClos, Ty); 9] = [
+            (ValClos::UNIT, Ty::unit()),
+            (ValClos::bool(true), Ty::bool()),
+            (ValClos::int(1), Ty::int()),
             (
-                Value::Float(crate::data::Finite::new(1.0).expect("finite")),
+                ValClos::float(crate::data::Finite::new(1.0).expect("finite")),
                 Ty::float(),
             ),
-            (Value::string("x"), Ty::string()),
-            (Value::bytes(vec![1]), Ty::bytes()),
-            (Value::List(vec![].into()), Ty::list(Ty::string())),
-            (Value::map(vec![]), Ty::map(Ty::int())),
+            (ValClos::string("x"), Ty::string()),
+            (ValClos::bytes(vec![1]), Ty::bytes()),
+            (ValClos::list(vec![]), Ty::list(Ty::string())),
+            (ValClos::map(vec![]), Ty::map(Ty::int())),
             // A tagged value renders, so neither side refuses it.
-            (Value::variant("ok", None), Ty::variant(Row::empty())),
+            (ValClos::variant("ok", None), Ty::variant(Row::empty())),
         ];
         for (value, ty) in pairs {
             assert_eq!(
@@ -1334,7 +1335,7 @@ mod foreground {
                         .lookup(&shell.context.grants, shell.baseline())
                         .admit(&mooring, &mut shell)
                         .expect("unrestricted sleep")
-                        .prepare(&[Value::string("30")], Ownership::Kept, &shell)
+                        .prepare(&[ValClos::string("30")], Ownership::Kept, &shell)
                         .expect("prepare sleep");
                 let pid_file = tempfile::tempfile().expect("pid file");
                 command.launch = ProgramLaunch::Direct(marked_sleep(&pid_file, MARKER));
@@ -1466,7 +1467,7 @@ mod process {
         use crate::io::child::Connection;
         use crate::io::{Sink, Source};
         use crate::ir::CommandName;
-        use crate::shell::runtime::{Mooring, Shell, Value};
+        use crate::shell::runtime::{Mooring, Shell, ValClos};
         use std::os::unix::fs::{PermissionsExt, symlink};
         use std::path::{Path, PathBuf};
 
@@ -1501,7 +1502,7 @@ mod process {
         fn judge(shell: &mut Shell, args: &[&str]) -> Prepared {
             let command =
                 Command::from_name(&CommandName::Path("tools/build".into()), &shell.context);
-            let args: Vec<_> = args.iter().map(|arg| Value::string(*arg)).collect();
+            let args: Vec<_> = args.iter().map(|arg| ValClos::string(*arg)).collect();
             command
                 .lookup(&shell.context.grants, shell.baseline())
                 .admit(&Mooring::adrift(), shell)
@@ -1961,13 +1962,16 @@ mod alone {
                 let result = shell.run_external(
                     program,
                     &[
-                        Value::string("one argument"),
-                        Value::string(code.to_string()),
+                        ValClos::string("one argument"),
+                        ValClos::string(code.to_string()),
                     ],
                     &Mooring::adrift(),
                 );
                 if code == 0 {
-                    assert!(matches!(result, Ok(Value::Unit)), "{result:?}");
+                    assert!(
+                        matches!(&result, Ok(value) if matches!(value.view(), View::Unit)),
+                        "{result:?}"
+                    );
                 } else {
                     assert_eq!(result.unwrap_err().code(), code);
                 }
@@ -1990,7 +1994,7 @@ mod alone {
         let scope = shell.local.audit.open(CapturePolicy::Off);
         let result = shell.run_external(
             "on-path",
-            &[Value::string("one argument"), Value::string("7")],
+            &[ValClos::string("one argument"), ValClos::string("7")],
             &Mooring::adrift(),
         );
         let Err(Break::Error(error)) = result else {

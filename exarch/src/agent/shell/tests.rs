@@ -5,16 +5,21 @@ use crate::agent::outcome::Outcome;
 use crate::agent::testkit::*;
 use crate::provider::scripted::{Reply, Script};
 use crate::record::Voice;
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::process::DurableRoot;
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
+use ral_core::shell::runtime::{Mooring, Settled};
 use ral_core::ty::{Binders, Ty};
 use ral_core::typecheck::builtins::{pure, thunk};
-use ral_core::{Shell, Value};
+use ral_core::{Shell, ValClos};
 use std::borrow::Cow;
 
 mod arms;
 
-fn builtin_panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
+fn builtin_panic_now(
+    _args: &[ValClos],
+    _mooring: &Mooring,
+    _shell: &mut Shell,
+) -> Settled<ValClos> {
     panic!("a4 test: deliberate mid-eval panic");
 }
 

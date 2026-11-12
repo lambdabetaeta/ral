@@ -1,4 +1,4 @@
-//! Destructuring: match a runtime `Value` against a compiled `Pattern`.
+//! Destructuring: match a runtime `ValClos` against a compiled `Pattern`.
 //! Pure and all-or-nothing: [`destructure`] collects every binding first, so a
 //! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — binds nothing.
 
@@ -6,13 +6,13 @@ use crate::fact::{
     CountRule, EvalFailure, Expected, KeyOrField, MissingEntry, PatternLength, Reason, ValueShape,
 };
 use crate::ir::{Name, Pattern};
-use crate::shell::runtime::{Binding, Env, Error, Settled, Value};
+use crate::shell::runtime::{Binding, Env, Error, Settled, ValClos, View};
 
 /// The `(name, value)` pairs `pattern` binds in `value`, in pattern order.
 ///
 /// # Errors
 /// The shape mismatches [`stage`] reports.
-pub(crate) fn destructure(pattern: &Pattern, value: &Value) -> Settled<Vec<(Name, Value)>> {
+pub(crate) fn destructure(pattern: &Pattern, value: &ValClos) -> Settled<Vec<(Name, ValClos)>> {
     let mut staged = Vec::new();
     stage(pattern, value, &mut staged)?;
     Ok(staged)
@@ -22,7 +22,7 @@ pub(crate) fn destructure(pattern: &Pattern, value: &Value) -> Settled<Vec<(Name
 ///
 /// # Errors
 /// The shape mismatches [`destructure`] reports.
-pub(crate) fn bind(pattern: &Pattern, value: &Value, mut env: Env) -> Settled<Env> {
+pub(crate) fn bind(pattern: &Pattern, value: &ValClos, mut env: Env) -> Settled<Env> {
     env.extend(
         destructure(pattern, value)?
             .into_iter()
@@ -40,7 +40,7 @@ pub(crate) fn bind(pattern: &Pattern, value: &Value, mut env: Env) -> Settled<En
 }
 
 /// Recursive worker for [`destructure`]: pushes each binding onto `staged`.
-fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> Settled<()> {
+fn stage(pattern: &Pattern, value: &ValClos, staged: &mut Vec<(Name, ValClos)>) -> Settled<()> {
     match pattern {
         Pattern::Wildcard => Ok(()),
         Pattern::Name(name) => {
@@ -52,7 +52,7 @@ fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> S
             Ok(())
         }
         Pattern::List { elems, rest } => {
-            let Value::List(items) = value else {
+            let View::List(items) = value.view() else {
                 return Err(value
                     .expected("pattern", Expected::Shape(ValueShape::List))
                     .into());
@@ -74,14 +74,14 @@ fn stage(pattern: &Pattern, value: &Value, staged: &mut Vec<(Name, Value)>) -> S
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
-                let mut whole = items.clone();
+                let mut whole = items.to_list();
                 let tail = whole.split_off(elems.len());
-                staged.push((name.clone(), Value::List(tail)));
+                staged.push((name.clone(), tail.into()));
             }
             Ok(())
         }
         Pattern::Record(entries) => {
-            let Value::Map(m) = value else {
+            let View::Map(m) = value.view() else {
                 return Err(value
                     .expected("pattern", Expected::Shape(ValueShape::Map))
                     .into());
@@ -130,7 +130,7 @@ mod tests {
         }
     }
 
-    fn failure(result: Settled<Vec<(Name, Value)>>) -> EvalFailure {
+    fn failure(result: Settled<Vec<(Name, ValClos)>>) -> EvalFailure {
         match result {
             Err(Break::Error(Error {
                 reason: Reason::Evaluation(e),
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn rest_pattern_errors_when_list_shorter_than_elems() {
         let pat = list_pat(&["a", "b"], Some("rest"));
-        let value = Value::list(vec![Value::string("x")]);
+        let value = ValClos::list(vec![ValClos::string("x")]);
         assert_eq!(
             failure(destructure(&pat, &value)),
             EvalFailure::PatternLength(PatternLength {
@@ -157,10 +157,10 @@ mod tests {
     #[test]
     fn list_pattern_errors_when_list_longer_than_elems() {
         let pat = list_pat(&["a", "b"], None);
-        let value = Value::list(vec![
-            Value::string("x"),
-            Value::string("y"),
-            Value::string("z"),
+        let value = ValClos::list(vec![
+            ValClos::string("x"),
+            ValClos::string("y"),
+            ValClos::string("z"),
         ]);
         assert_eq!(
             failure(destructure(&pat, &value)),
@@ -174,17 +174,17 @@ mod tests {
     #[test]
     fn rest_pattern_binds_tail_when_list_long_enough() {
         let pat = list_pat(&["a", "b"], Some("rest"));
-        let value = Value::list(vec![
-            Value::string("x"),
-            Value::string("y"),
-            Value::string("z"),
+        let value = ValClos::list(vec![
+            ValClos::string("x"),
+            ValClos::string("y"),
+            ValClos::string("z"),
         ]);
         let env = bind(&pat, &value, Env::new()).expect("binds");
-        assert_eq!(env.get("a"), Some(&Value::string("x")));
-        assert_eq!(env.get("b"), Some(&Value::string("y")));
+        assert_eq!(env.get("a"), Some(&ValClos::string("x")));
+        assert_eq!(env.get("b"), Some(&ValClos::string("y")));
         assert_eq!(
             env.get("rest"),
-            Some(&Value::list(vec![Value::string("z")])),
+            Some(&ValClos::list(vec![ValClos::string("z")])),
         );
     }
     #[test]
@@ -193,12 +193,12 @@ mod tests {
             (list_pat(&["x"], None), ValueShape::List),
             (Pattern::Record(vec![]), ValueShape::Map),
         ] {
-            let Err(Break::Error(error)) = destructure(&pattern, &Value::Unit) else {
+            let Err(Break::Error(error)) = destructure(&pattern, &ValClos::UNIT) else {
                 panic!("invalid pattern input")
             };
             assert_eq!(
                 error.reason,
-                Value::Unit
+                ValClos::UNIT
                     .expected("pattern", Expected::Shape(shape))
                     .reason
             );
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(
             failure(destructure(
                 &pattern,
-                &Value::map(vec![("available".into(), Value::Unit)])
+                &ValClos::map(vec![("available".into(), ValClos::UNIT)])
             )),
             EvalFailure::MissingEntry(MissingEntry {
                 kind: KeyOrField::Field,

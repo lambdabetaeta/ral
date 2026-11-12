@@ -15,8 +15,9 @@ pub use op::{ArithOp, BinaryOp, CompareOp, EqOp};
 pub use pattern::{FieldPattern, Pattern};
 pub use redirect::{Redirect, Redirects, StderrTarget, StdinSource, WriteMode};
 
-use crate::data::Finite;
-use crate::data::Str;
+use crate::builtin::BuiltinEntry;
+use crate::data::{Bytes, Finite, Str};
+use crate::handle::Handle;
 use crate::path::TildePath;
 use crate::source::{SourceOrigin, Span, Spanned};
 use crate::ty::Site;
@@ -28,21 +29,21 @@ use std::sync::Arc;
 
 // ── Phases ──────────────────────────────────────────────────────────────
 
-/// What each annotated position of a tree holds: [`Checked`] in a tree the
-/// evaluator runs, the checker's own phase while it infers one.
+/// What each annotated position of a tree holds: [`Explicit`] once nothing is
+/// left to infer, the checker's `Inferring` while it infers one.
 pub trait Phase: Debug + Clone + PartialEq {
     /// How a [`CompKind::Bind`]'s or a `Define`'s right-hand side is bound.
     type Bind: Debug + Clone + PartialEq;
     /// Where a [`CompKind::App`] forces a returned block between arguments.
     type Call: Debug + Clone + PartialEq;
-    /// A [`CompKind::BindingCall`]'s; uninhabited once checked.
+    /// A [`CompKind::BindingCall`]'s; uninhabited in an explicit tree.
     type BindingCall: Debug + Clone + PartialEq;
     /// The type an [`Exec`]'s door admits a value against.
     type Boundary: Debug + Clone + PartialEq;
 }
 
-/// A phase whose trees serialise: bind and call notes are skipped and read
-/// back as their defaults, while boundary sites are written out.
+/// A phase whose trees serialise: bind and call notes read back
+/// as their defaults, while boundary sites are written out.
 pub trait Serial:
     Phase<Bind: Default, Call: Default, Boundary: Serialize + DeserializeOwned>
 {
@@ -53,12 +54,12 @@ impl<P> Serial for P where
 {
 }
 
-/// No holes: every elaboration is explicit in the tree.  The elaborator's
-/// output shares this phase with the checker's, which alone carries sites.
+/// No unknowns: every elaboration decision is written in the tree. Elaborator
+/// output, checked IR and runtime IR share it; only checked IR carries sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Checked {}
+pub enum Explicit {}
 
-impl Phase for Checked {
+impl Phase for Explicit {
     type Bind = ();
     type Call = ();
     type BindingCall = Infallible;
@@ -176,11 +177,11 @@ impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
     }
 }
 
-pub type ThunkNode<P = Checked> = Node<Arc<Comp<P>>>;
-pub type GroupNode<P = Checked> = Node<Box<[(Name, Arc<Comp<P>>)]>>;
-pub type ListNode<P = Checked> = Node<Box<[Spanned<Val<P>>]>>;
-/// Entries sorted by key, stably; equal keys are the checker's to refuse.
-pub type FieldsNode<P = Checked> = Node<Box<[(Name, Spanned<Val<P>>)]>>;
+pub type ThunkNode<P = Explicit> = Node<Arc<Comp<P>>>;
+pub type GroupNode<P = Explicit> = Node<Box<[(Name, Arc<Comp<P>>)]>>;
+pub type ListNode<P = Explicit> = Node<Box<[Spanned<Val<P>>]>>;
+/// Entries sorted by key, distinct; the checker refuses equal keys.
+pub type FieldsNode<P = Explicit> = Node<Box<[(Name, Spanned<Val<P>>)]>>;
 
 impl<P: Phase> Mentions for Arc<Comp<P>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
@@ -255,7 +256,7 @@ impl CommandName {
 /// than round-tripping through string parsing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Val<P: Phase = Checked> {
+pub enum Val<P: Phase = Explicit> {
     Unit,
     String(Str),
     Int(i64),
@@ -276,11 +277,19 @@ pub enum Val<P: Phase = Checked> {
         label: Name,
         payload: Box<Self>,
     },
+    /// A byte string; the elaborator writes none.
+    Bytes(Bytes),
+    /// A builtin; the elaborator writes none.
+    #[serde(skip)]
+    Builtin(Arc<BuiltinEntry>),
+    /// A handle; the elaborator writes none.
+    #[serde(skip)]
+    Handle(Handle),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Key<P: Phase = Checked> {
+pub enum Key<P: Phase = Explicit> {
     Label(Str),
     Position(usize),
     Data(Val<P>),
@@ -310,7 +319,7 @@ impl<P: Phase> Val<P> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum ValListElem<P: Phase = Checked> {
+pub enum ValListElem<P: Phase = Explicit> {
     Single(Spanned<Val<P>>),
     /// `...x`, spliced into the surrounding list, its `...` included in an argument span.
     Spread(Spanned<Val<P>>),
@@ -327,7 +336,7 @@ impl<P: Phase> ValListElem<P> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum MapEntryV<P: Phase = Checked> {
+pub enum MapEntryV<P: Phase = Explicit> {
     Entry(Spanned<Val<P>>, Spanned<Val<P>>),
     Spread(Spanned<Val<P>>),
 }
@@ -337,7 +346,7 @@ pub enum MapEntryV<P: Phase = Checked> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
 #[serde(transparent)]
-pub struct Argv<P: Phase = Checked>(Vec<ValListElem<P>>);
+pub struct Argv<P: Phase = Explicit>(Vec<ValListElem<P>>);
 
 impl<P: Phase> Default for Argv<P> {
     fn default() -> Self {
@@ -434,7 +443,7 @@ pub type DefineSchemes<S = crate::ty::Closed> = Vec<(String, S)>;
     serialize = "D: Serialize, P: Serial",
     deserialize = "D: Deserialize<'de>, P: Serial"
 ))]
-pub enum Phrase<D = DefineSchemes, P: Phase = Checked> {
+pub enum Phrase<D = DefineSchemes, P: Phase = Explicit> {
     /// `let p = M` at the top level: run M, extend the session environment.
     /// `schemes` has one entry per name `pattern` binds, closed and
     /// generalised by the checker — a destructuring `let` carries one per
@@ -537,7 +546,7 @@ impl Toplevel {
 
 /// A computation with the source span elaboration gave it — the type the
 /// evaluator interprets.
-pub type Comp<P = Checked> = Spanned<CompKind<P>>;
+pub type Comp<P = Explicit> = Spanned<CompKind<P>>;
 
 impl<P: Phase> Comp<P> {
     /// The λ this code opens with, through a `Rec` projection.  Syntax, not
@@ -604,6 +613,10 @@ impl<P: Phase> Mentions for Comp<P> {
             }
             // The group is a nested node: its own occ, not a walk.
             CompKind::Rec { group, index: _ } => out.extend(group.occ().names()),
+            CompKind::Builtin { builtin, args } => {
+                out.push(builtin);
+                out.extend(args.iter());
+            }
             // A linked module is closed under the prelude, not the importer.
             CompKind::Tilde(_) | CompKind::Use(_) => {}
             CompKind::If { cond, then, else_ } => {
@@ -656,7 +669,14 @@ impl<P: Phase> Mentions for Comp<P> {
 impl<P: Phase> Mentions for Val<P> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
-            Self::Unit | Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_) => {}
+            Self::Unit
+            | Self::String(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::Bool(_)
+            | Self::Bytes(_)
+            | Self::Builtin(_)
+            | Self::Handle(_) => {}
             Self::Variable(name) => out.push(name),
             Self::Thunk(node) => out.extend(node.occ().names()),
             Self::List(node) => out.extend(node.occ().names()),
@@ -697,7 +717,7 @@ impl<P: Phase> Mentions for Redirects<Val<P>> {
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum CompKind<P: Phase = Checked> {
+pub enum CompKind<P: Phase = Explicit> {
     // CBPV core.
     /// return V — produce a value.
     Return(Val<P>),
@@ -820,6 +840,11 @@ pub enum CompKind<P: Phase = Checked> {
     Tilde(TildePath),
     /// A module linked at check time, run under the prelude alone.
     Use(Arc<Module>),
+    /// δ: run the builtin bound to `builtin` on the values its η's λs bind to `args`.
+    Builtin {
+        builtin: Name,
+        args: Box<[Name]>,
+    },
     /// A bare head bound in scope, called with `args` while the checker
     /// decides its splits; readback makes it an [`Exec`]. The only skipped
     /// variant, kept last so it does not shift any wire index.
@@ -836,7 +861,7 @@ pub enum CompKind<P: Phase = Checked> {
 /// it may fail.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Prim<P: Phase = Checked> {
+pub enum Prim<P: Phase = Explicit> {
     /// Arithmetic, comparison, or equality.
     Binary(BinaryOp, Val<P>, Val<P>),
     /// Numeric negation, without choosing a zero's type.
@@ -953,7 +978,7 @@ impl<P: Phase> Prim<P> {
 /// string comparison and not a row-label round trip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub struct CaseArm<P: Phase = Checked> {
+pub struct CaseArm<P: Phase = Explicit> {
     pub tag: Spanned<String>,
     pub(crate) body: Spanned<Val<P>>,
 }
@@ -961,7 +986,7 @@ pub struct CaseArm<P: Phase = Checked> {
 /// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub struct Exec<P: Phase = Checked> {
+pub struct Exec<P: Phase = Explicit> {
     pub(crate) head: CommandWord,
     /// Each element crosses rendered, whichever boundary it reaches — a
     /// handler arm, a base frame, or the syscall itself.

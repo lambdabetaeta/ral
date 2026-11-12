@@ -328,25 +328,25 @@ impl Drop for ReleaseModelTool {
 }
 
 fn hold_model_tool(
-    _args: &[ral_core::Value],
+    _args: &[ral_core::ValClos],
     _mooring: &ral_core::shell::runtime::Mooring,
     shell: &mut ral_core::Shell,
-) -> ral_core::shell::runtime::Settled<ral_core::Value> {
+) -> ral_core::shell::runtime::Settled<ral_core::ValClos> {
     MODEL_TOOL_ENTERED.store(true, std::sync::atomic::Ordering::Release);
     while !MODEL_TOOL_RELEASE.load(std::sync::atomic::Ordering::Acquire) {
         shell.poll()?;
         std::thread::sleep(Duration::from_millis(2));
     }
     shell.poll()?;
-    Ok(ral_core::Value::Unit)
+    Ok(ral_core::ValClos::UNIT)
 }
 
-static MODEL_TOOL_BUILTINS: [ral_core::shell::runtime::BuiltinEntry; 1] =
-    [ral_core::shell::runtime::BuiltinEntry::new(
+static MODEL_TOOL_BUILTINS: [ral_core::builtin::BuiltinEntry; 1] =
+    [ral_core::builtin::BuiltinEntry::new(
         std::borrow::Cow::Borrowed("test-model-boundary"),
         testkit::scheme_test_clear_block_forever,
         "test-only: hold the tool boundary until released.",
-        ral_core::shell::runtime::BuiltinBody::Static(hold_model_tool),
+        ral_core::builtin::BuiltinBody::Static(hold_model_tool),
     )];
 
 #[test]

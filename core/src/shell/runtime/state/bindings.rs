@@ -11,8 +11,9 @@
 //! `&mut Shell` for a live agent and this unlocked design is the first thing
 //! that must change.
 
+use crate::handle::pins_live_work;
 use crate::record;
-use crate::shell::runtime::{Env, pins_live_work};
+use crate::shell::runtime::Env;
 use std::collections::{HashMap, HashSet};
 
 /// Host-stated per-agent policy.
@@ -23,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 ///
 /// `large_binding_bytes` is an orthogonal axis — residency, not lifetime:
 /// an install whose
-/// [`Value::shallow_size`](crate::shell::runtime::Value::shallow_size) estimate meets
+/// [`ValClos::shallow_size`](crate::shell::runtime::ValClos::shallow_size) estimate meets
 /// it queues a [`LargeBindingNotice`], however fresh the name.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BindingLease {
@@ -37,7 +38,7 @@ pub struct Pruned {
     pub name: String,
     /// Epochs elapsed since last use at prune time (`>= lease.idle_calls`).
     pub idle_calls: u64,
-    /// The pruned value's [`Value::type_name`](crate::shell::runtime::Value::type_name).
+    /// The pruned value's [`ValClos::type_name`](crate::shell::runtime::ValClos::type_name).
     pub kind: String,
 }
 
@@ -339,10 +340,11 @@ mod tests {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod chokepoint_tests {
     use crate::RunIo;
+    use crate::handle::{Handle, Sample};
     use crate::protocol::{Program, Run};
     use crate::shell::boot::BakedPrelude;
     use crate::shell::run::RunReport;
-    use crate::shell::runtime::{Sample, Settled, Shell, Value};
+    use crate::shell::runtime::{Settled, Shell, ValClos, View};
     use crate::source::SourceOrigin;
     use crate::test_helper::eventually;
     use std::time::Duration;
@@ -373,7 +375,7 @@ mod chokepoint_tests {
 
     /// One top-level run through the public entry. Every source below must
     /// compile; a `Static` report is a test bug.
-    fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+    fn top_level(shell: &mut Shell, source: &str) -> Settled<ValClos> {
         shell
             .run(Run::foreground(source, SourceOrigin::named("<test>")))
             .expect_ran()
@@ -433,8 +435,8 @@ mod chokepoint_tests {
     }
 
     fn handle_state(shell: &Shell, name: &str) -> Sample<()> {
-        match shell.scope_lookup(name) {
-            Some(Value::Handle(h)) => h.sample(),
+        match shell.scope_lookup(name).map(ValClos::view) {
+            Some(View::Handle(Handle::Live(h))) => h.sample(),
             other => panic!("{name} is not a handle: {other:?}"),
         }
     }
@@ -513,7 +515,7 @@ mod chokepoint_tests {
             .into_iter()
             .next()
             .expect("the prelude seeds at least one binding");
-        crate::test_access::bind_untyped(&mut shell, "host_seed", Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "host_seed", ValClos::int(1));
         shell.arm_binding_lease(BindingLease {
             idle_calls: 64,
             large_binding_bytes: u64::MAX,
@@ -673,11 +675,14 @@ mod chokepoint_tests {
         let p = path.to_string_lossy().into_owned();
         let epoch_before = epoch(&shell);
         let module = top_level(&mut shell, &format!("use '{p}'")).expect("use");
-        let Value::Map(exports) = module else {
+        let View::Map(exports) = module.view() else {
             panic!("use must return the module's exports");
         };
-        assert_eq!(exports.get("used_helper").as_deref(), Some(&Value::Int(7)));
-        assert_eq!(shell.scope_lookup("used_ref_x"), Some(&Value::Int(1)));
+        assert_eq!(
+            exports.get("used_helper").as_deref(),
+            Some(&ValClos::int(7))
+        );
+        assert_eq!(shell.scope_lookup("used_ref_x"), Some(&ValClos::int(1)));
         assert_eq!(epoch(&shell), epoch_before + 1, "use still ages leases");
         assert_eq!(
             last_used_of(&shell, "used_ref_x"),
@@ -771,9 +776,10 @@ mod chokepoint_tests {
     /// (`consumed`), at which point pruning drops it.
     #[test]
     fn stopping_handle_pins_name_until_consumed() {
+        use crate::handle::HandleInner;
         use crate::io::Streams;
         use crate::process::DurableRoot;
-        use crate::shell::runtime::{End, HandleInner, WorkerId};
+        use crate::shell::runtime::{End, WorkerId};
 
         let mut shell = armed_shell(2);
         let (handle, permit) = HandleInner::new(
@@ -785,11 +791,7 @@ mod chokepoint_tests {
         handle.claim_and_stop();
         assert_eq!(handle.sample(), Sample::Stopping);
 
-        crate::test_access::bind_untyped(
-            &mut shell,
-            "h_stopping",
-            Value::Handle(Box::new(handle.clone())),
-        );
+        crate::test_access::bind_untyped(&mut shell, "h_stopping", ValClos::handle(handle.clone()));
         shell.local.bindings.note_install("h_stopping");
         idle_spin(&mut shell, 2);
 
@@ -799,7 +801,7 @@ mod chokepoint_tests {
         );
         assert!(shell.scope_lookup("h_stopping").is_some());
 
-        let _ = permit.finish(End::Ok(Value::Unit));
+        let _ = permit.finish(End::Ok(ValClos::UNIT));
         assert_eq!(handle.sample(), Sample::Consumed);
 
         let notices = shell.local.bindings.prune(&mut shell.env);
@@ -865,7 +867,7 @@ mod chokepoint_tests {
     #[test]
     fn stray_untracked_name_is_adopted_not_pruned() {
         let mut shell = armed_shell(2);
-        crate::test_access::bind_untyped(&mut shell, "stray_y", Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "stray_y", ValClos::int(1));
         assert!(!is_leased(&shell, "stray_y"));
         assert!(!is_baseline(&shell, "stray_y"));
 

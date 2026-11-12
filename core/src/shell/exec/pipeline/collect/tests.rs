@@ -491,7 +491,7 @@ fn returned(ix: usize, obs: StageObservation) -> Event {
     Event::Returned(ix, obs)
 }
 
-fn fold_of(state: CollectState) -> Settled<Value> {
+fn fold_of(state: CollectState) -> Settled<ValClos> {
     let mut shell = crate::test_helper::core_shell();
     state.fold(&Mooring::adrift(), &mut shell)
 }

@@ -1,9 +1,9 @@
 use super::*;
 use crate::bus::{Drained, Input};
 use crate::record::{ChildStatus, Forensic, Record, Transcript};
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::carrier::Transport as _;
 use ral_core::data::FOValue;
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
 use std::borrow::Cow;
 use std::time::Instant;
 

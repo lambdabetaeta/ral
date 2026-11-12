@@ -5,7 +5,7 @@
 use ral_core::path::shown;
 use ral_core::shell::runtime::{Break, Escape, Map, Mooring, Settled};
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::{Shell, Value, io::terminal};
+use ral_core::{Shell, ValClos, View, io::terminal};
 use std::path::Path;
 
 use super::super::errfmt::report_failed_load;
@@ -62,10 +62,11 @@ fn source_rc(
 
 fn rc_config(path: &Path, text: String, mooring: &Mooring, shell: &mut Shell) -> Result<Map, Stop> {
     let options = ral_core::typecheck::table::declared(ral_core::typecheck::Form::Rc);
-    let Value::Map(pairs) = evaluate(path, text, Some(options), mooring, shell)? else {
+    let value = evaluate(path, text, Some(options), mooring, shell)?;
+    let View::Map(pairs) = value.view() else {
         unreachable!("an rc ends in its keys written out (SPEC §15.3)")
     };
-    Ok(pairs)
+    Ok(pairs.to_map())
 }
 
 /// Evaluate one startup file against the live session and its tail's options
@@ -76,7 +77,7 @@ fn evaluate(
     options: Option<&'static ral_core::typecheck::Table>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Result<Value, Stop> {
+) -> Result<ValClos, Stop> {
     let name = shown(path);
     let file = SourceFile::new(path).map_err(|e| Stop::Failed(e.to_string()))?;
     let src = ral_core::source::normalize_source_text(text);

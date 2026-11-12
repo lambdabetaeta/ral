@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-03
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
 
@@ -36,8 +36,10 @@ shell is unrepresentable), and the wire engine boots the same dressing
 through its `EngineInstaller`'s two halves
 (`boot::engine_runtime` and `boot::engine_root`), named on the wire by `INSTALLER_TAG` in
 `Frame::Attach`.
-The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
-logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
+Atom bodies take `&[ValClos]` and return `Settled<ValClos>`; `View` reads a
+value's head. The bulk-I/O atoms read in Rust, **below the redirect frame**,
+so each is one logical operation with one surface
+([[map/exarch/io-surface|io-surface]]).
 
 The readers and editors share one line-ending policy (`Eol`): a file whose
 every `\n` follows a `\r` is CRLF, read as `\n` text and written back in CRLF;
@@ -398,7 +400,12 @@ and ends itself after its idle interval (five hours by default)
   one layer the child gets — `` `inherit ``, one of the four spawnable
   [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
   `reasonable`), or `` `restrict R `` with `R` a capability record in
-  `grant [...] { body }`'s own vocabulary; `Launch` splits the model's record into that `Grant` and the remaining `Spec`; `fork_then_enquire` bequeaths the grant onto the forked shell, and the desk's `Start` carries the `Spec` with its `ForkClaim`. `Grant::decode` (`enquiry.rs`) closes the row,
+  `grant [...] { body }`'s own vocabulary; `Launch` splits the model's record
+  into that `Grant` and the remaining `Spec`; `fork_then_enquire` bequeaths
+  the grant onto the forked shell, and the desk's `Start` carries the `Spec`
+  with its `ForkClaim`. Parked and sealed bequests both withhold inherited
+  handles, including inside residual builtin thunks
+  ([[design/agents|the snapshot law]]). `Grant::decode` (`enquiry.rs`) closes the row,
   naming all six shapes and `R`'s own keys in its refusal and holding `R` to
   first-order data, since the ceiling crosses to the far side as data; the
   record itself is decoded by `decode_capability_map` off the `Form::Grant`

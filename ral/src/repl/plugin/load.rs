@@ -16,10 +16,10 @@ use ral_core::fact::{
 };
 use ral_core::path::{EntryName, Judged, Kind, Located, Reading};
 use ral_core::shell::runtime::{
-    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Map, Mooring, Settled,
+    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Mooring, Settled,
 };
 use ral_core::source::{SourceFile, SourceOrigin};
-use ral_core::{RegisterError, Shell, Value};
+use ral_core::{RegisterError, Shell, ValClos, View};
 
 use super::super::enquiry::{Enquiry, PluginNote};
 use super::manifest::{self, HookEvent, ManifestHandlers};
@@ -49,7 +49,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
 /// plugin configured by nothing but its own defaults.
 pub(crate) fn load_plugin(
     name_or_path: &str,
-    options: &Map,
+    options: &ValClos,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
@@ -64,10 +64,11 @@ pub(crate) fn load_plugin(
             ral_core::typecheck::Form::Manifest,
         )),
     )?;
-    let Value::Map(module) = instantiate(name_or_path, value, options, mooring, shell)? else {
+    let value = instantiate(name_or_path, value, options, mooring, shell)?;
+    let View::Map(module) = value.view() else {
         unreachable!("a manifest ends in its fields written out (SPEC §15.5)")
     };
-    let (manifest, handlers) = manifest::parse(&module)?;
+    let (manifest, handlers) = manifest::parse(module)?;
     let name = manifest.name.clone();
     let mut installed = Vec::new();
     if shell
@@ -156,7 +157,7 @@ fn register_plugin_hooks(
 /// plugin, rc config, or host. Atomic: checked before
 /// any insertion happens.  A lexical or native binding under the same
 /// name is not a conflict, but the binding shadows the handler.
-fn check_no_binding_conflicts(bindings: &[(String, Value)], shell: &Shell) -> Result<(), Error> {
+fn check_no_binding_conflicts(bindings: &[(String, ValClos)], shell: &Shell) -> Result<(), Error> {
     match bindings.iter().find(|(name, _)| shell.has_handler(name)) {
         Some((name, _)) => Err(Error::new(Reason::State(Box::new(
             StateFailure::HandlerConflict(name.clone()),
@@ -166,7 +167,7 @@ fn check_no_binding_conflicts(bindings: &[(String, Value)], shell: &Shell) -> Re
 }
 
 fn install_bindings(
-    bindings: &[(String, Value)],
+    bindings: &[(String, ValClos)],
     handles: &mut Vec<FrameHandle>,
     shell: &mut Shell,
 ) -> Result<(), Error> {
@@ -198,25 +199,22 @@ fn install_bindings(
 /// non-empty options map is a load-time error; an empty one is fine.
 fn instantiate(
     plugin: &str,
-    val: Value,
-    options: &Map,
+    val: ValClos,
+    options: &ValClos,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
-    match val {
-        Value::Thunk(_) => ral_core::shell::evaluator::apply(
-            &val,
-            vec![Value::Map(options.clone())],
-            mooring,
-            shell,
-        ),
-        _ if !options.is_empty() => Err(super::refusal(PluginFailure::OptionsWithoutFactory(
-            PluginFailureOptionsWithoutFactory {
+) -> Settled<ValClos> {
+    match val.view() {
+        View::Thunk { .. } => {
+            ral_core::shell::evaluator::apply(&val, vec![options.clone()], mooring, shell)
+        }
+        _ if !options.as_map("load-plugin")?.is_empty() => Err(super::refusal(
+            PluginFailure::OptionsWithoutFactory(PluginFailureOptionsWithoutFactory {
                 plugin: plugin.into(),
-            },
-        ))
+            }),
+        )
         .into()),
-        val => Ok(val),
+        _ => Ok(val),
     }
 }
 
@@ -280,7 +278,7 @@ fn resolve_plugin_path(name_or_path: &str, shell: &mut Shell) -> Settled<Located
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
+    use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 
     fn loader(path: String) -> BuiltinEntry {
         BuiltinEntry::new(
@@ -292,12 +290,13 @@ mod tests {
             },
             "_test-load: load a plugin under the dispatch's mooring.",
             BuiltinBody::Captured(std::sync::Arc::new(move |_, mooring, shell| {
-                load_plugin(&path, &Map::new(), mooring, shell).map(|()| Value::Unit)
+                load_plugin(&path, &ValClos::map(Vec::new()), mooring, shell)
+                    .map(|()| ValClos::UNIT)
             })),
         )
     }
 
-    fn hooks_only(hooks: Vec<(HookEvent, Value)>) -> ManifestHandlers {
+    fn hooks_only(hooks: Vec<(HookEvent, ValClos)>) -> ManifestHandlers {
         ManifestHandlers {
             hooks,
             keybindings: Vec::new(),
@@ -681,21 +680,21 @@ pub(in crate::repl) mod harness {
     use crate::repl::host::ReplHost;
     use crate::repl::plugin::manifest::{LoadedPlugin, Manifest};
     use crate::repl::plugin::{PluginRuntime, lock};
+    use ral_core::builtin::{BuiltinBody, BuiltinEntry};
     use ral_core::carrier::IdentityTransport;
-    use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry};
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
 
     /// A test-only sink base frame: `record` appends its argument values into
     /// the shared vector, so a hook handler's projections out of the event
     /// record become observable.
-    fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
+    fn sink_builtin(sink: Arc<Mutex<Vec<ValClos>>>) -> BuiltinEntry {
         BuiltinEntry::base_frame(
             Cow::Borrowed("record"),
             "record: test sink appending its arguments.",
             BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
                 sink.lock().unwrap().extend(args.iter().cloned());
-                Ok(Value::Unit)
+                Ok(ValClos::UNIT)
             })),
         )
     }
@@ -706,7 +705,7 @@ pub(in crate::repl) mod harness {
     /// builtin appends every call to.
     pub(in crate::repl) fn dressed(
         hooks: &[(&str, HookEvent, &str)], // (plugin, event, handler source)
-    ) -> (IdentityTransport, Arc<ReplHost>, Arc<Mutex<Vec<Value>>>) {
+    ) -> (IdentityTransport, Arc<ReplHost>, Arc<Mutex<Vec<ValClos>>>) {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let recorder = sink_builtin(sink.clone());
         let owned: Vec<_> = hooks

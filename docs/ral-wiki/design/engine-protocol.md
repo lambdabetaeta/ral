@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 64b60eafa2eec1a958ff29d8671376d79856dc3a
-generated_at_date: 2026-11-10
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
 ---
 
 # The engine protocol
@@ -155,10 +155,15 @@ from — its cwd, the host's per-session env, `grants` installed after the
 recipe, and `config`, the installer's own settings as an `FOValue` its
 recipe decodes and core never reads. A `Child` is a sealed bequest the
 engine alone reads, carrying its own cwd and env. `SerialValue` — the
-closure-capable sibling that carries a forked session into a sealed child
-engine (*The factory*, below) — is a different type for a different domain;
-it never reaches the protocol, and the host never reads the bytes it travels
-as. That is the **opacity law**: a payload the host relays but never reads
+closure-capable sibling `FOValue<SerialAtom>` that carries a forked session
+into a sealed child engine (*The factory*, below) — adds thunks, builtin names
+and withheld handle titles. Builtin residuals cross as thunks with their
+supplied arguments in ρ. A bequest withholds every live handle even for
+identity adoption: names, positions and `Handle` types survive, but every
+observation fails `withheld-handle`. The seed is a different domain
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]);
+only its sealed bytes reach the protocol, and the host never reads their
+contents. That is the **opacity law**: a payload the host relays but never reads
 crosses as bytes; its content is a contract between the engines at its two
 ends, and the spawner is what makes those ends one binary
 ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).

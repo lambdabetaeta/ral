@@ -207,9 +207,10 @@ mod tests {
     use super::super::Sample;
     use super::super::compacting::MIN_SWEEP_AT;
     use super::*;
+    use crate::handle::CompletionPermit;
     use crate::io::Streams;
     use crate::process::DurableRoot;
-    use crate::shell::runtime::{CompletionPermit, End, Value};
+    use crate::shell::runtime::{End, ValClos};
 
     fn fresh_handle() -> (HandleInner, CompletionPermit) {
         HandleInner::new(
@@ -235,7 +236,7 @@ mod tests {
 
         // An already-ready handle rejected by closed enrolment is immediately Consumed.
         let (ready, ready_permit) = fresh_handle();
-        ready_permit.finish(End::Ok(Value::Int(7)));
+        ready_permit.finish(End::Ok(ValClos::int(7)));
         assert_eq!(ready.sample(), Sample::Ready(()));
         assert_eq!(brood.enrol(ready.clone()), Err(EnrolClosed));
         assert_eq!(ready.sample(), Sample::Consumed);
@@ -267,8 +268,8 @@ mod tests {
         let (running, running_permit) = fresh_handle();
         let finisher = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            stopping_permit.finish(End::Ok(Value::Unit));
-            running_permit.finish(End::Ok(Value::Unit));
+            stopping_permit.finish(End::Ok(ValClos::UNIT));
+            running_permit.finish(End::Ok(ValClos::UNIT));
         });
 
         stop_and_drain(
@@ -290,7 +291,7 @@ mod tests {
 
         for _ in 0..200 {
             let (h, permit) = fresh_handle();
-            permit.finish(End::Ok(Value::Unit));
+            permit.finish(End::Ok(ValClos::UNIT));
             let _ = h.claim_ready();
             assert_eq!(h.sample(), Sample::Consumed);
             brood.enrol(h).expect("enrol consumed");

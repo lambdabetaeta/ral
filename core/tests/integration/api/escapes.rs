@@ -3,7 +3,7 @@
 //! surviving a panic mid-body.
 
 use crate::common::top_level;
-use ral_core::Value;
+use ral_core::ValClos;
 use ral_core::fact::FailureCode as _;
 use ral_core::io::terminal::TerminalState;
 use ral_core::shell::boot::{HostSurface, boot_shell};
@@ -28,21 +28,21 @@ const HOST: &str = "a test host resolves its baseline";
 /// no shipped builtin should panic, so the test owns one rather than
 /// leaning on whichever builtin happens to be panic-prone.
 fn panic_builtin(
-    _args: &[Value],
+    _args: &[ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> ral_core::shell::runtime::Settled<Value> {
+) -> ral_core::shell::runtime::Settled<ValClos> {
     panic!("__test-panic builtin invoked");
 }
 
-static PANIC_BUILTIN_ARR: [ral_core::shell::runtime::BuiltinEntry; 1] =
-    [ral_core::shell::runtime::BuiltinEntry::new(
+static PANIC_BUILTIN_ARR: [ral_core::builtin::BuiltinEntry; 1] =
+    [ral_core::builtin::BuiltinEntry::new(
         std::borrow::Cow::Borrowed("__test-panic"),
         ral_core::typecheck::builtins::scheme::diverges,
         "__test-panic  — test-only: raise a Rust panic.",
-        ral_core::shell::runtime::BuiltinBody::Static(panic_builtin),
+        ral_core::builtin::BuiltinBody::Static(panic_builtin),
     )];
-static PANIC_BUILTIN: &[ral_core::shell::runtime::BuiltinEntry] = &PANIC_BUILTIN_ARR;
+static PANIC_BUILTIN: &[ral_core::builtin::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 
 /// A Rust panic raised inside a handler body must leave the handler
 /// still installed.  The body invokes `__test-panic`, a host builtin the

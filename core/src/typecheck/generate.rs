@@ -91,6 +91,9 @@ impl Generator {
                 (self.produces(ty), CompKind::Prim(prim))
             }
             CompKind::Rec { group, index } => self.rec(group, *index),
+            CompKind::Builtin { .. } => unreachable!(
+                "δ never reaches the checker: the elaborator writes none, and the doors that check a runtime body take it through `ValClos::block`, which excludes η residuals"
+            ),
             CompKind::Tilde(path) => (self.produces(Ty::string()), CompKind::Tilde(path.clone())),
             CompKind::Use(module) => {
                 let row = crate::ir::public_exports(&module.top.phrases)

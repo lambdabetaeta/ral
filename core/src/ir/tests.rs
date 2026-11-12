@@ -24,8 +24,7 @@ fn ret(name: &str) -> Arc<Comp> {
     Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
 }
 
-/// One synthetic `Comp` per `CompKind` and `Val` variant: `r_*` labels
-/// what it references, `*_bound` what it merely binds.
+/// Serializable forms: `r_*` labels references, `*_bound` mere binders.
 fn every_variant() -> Vec<Arc<Comp>> {
     let lam_param = "lam_param_bound".into();
     let lam = Spanned::synthetic(CompKind::Lam {
@@ -185,6 +184,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Spanned::synthetic(Val::Int(1)),
         Spanned::synthetic(Val::Float(Finite::new(1.0).expect("finite"))),
         Spanned::synthetic(Val::Bool(true)),
+        Spanned::synthetic(Val::Bytes(vec![0, 128, 255].into())),
         svar("r_list_single"),
     ])));
     let val_record = Spanned::synthetic(CompKind::Return(Val::record(vec![(
@@ -224,6 +224,11 @@ fn every_variant() -> Vec<Arc<Comp>> {
         top: toplevel(vec![run(ret("module_own_reference"))]),
         origin: SourceOrigin::named("linked module"),
     })));
+
+    let builtin = Spanned::synthetic(CompKind::Builtin {
+        builtin: "r_builtin".into(),
+        args: vec!["r_builtin_arg_first".into(), "r_builtin_arg_second".into()].into(),
+    });
 
     // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
     // wrap all of the above in one tree, so each is walked on its own
@@ -270,6 +275,7 @@ fn every_variant() -> Vec<Arc<Comp>> {
         Arc::new(capture),
         Arc::new(decode),
         Arc::new(use_module),
+        Arc::new(builtin),
     ]
 }
 
@@ -359,6 +365,9 @@ fn referenced_names_walks_every_variant() {
         "r_thunk_body",
         "r_capture_body",
         "r_decode_body",
+        "r_builtin",
+        "r_builtin_arg_first",
+        "r_builtin_arg_second",
     ];
 
     for name in expected {

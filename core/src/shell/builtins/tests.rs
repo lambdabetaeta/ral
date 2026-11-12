@@ -23,7 +23,7 @@
 
 use super::{BOUNDARY_BUILTINS, CORE_BUILTINS};
 use crate::Break;
-use crate::shell::runtime::{Map, Mooring, Value};
+use crate::shell::runtime::{Mooring, ValClos, View};
 use crate::test_helper::fresh_shell;
 use crate::ty::{CompTyNode, Grade, RowNode, Ty, TyNode};
 
@@ -56,18 +56,18 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
 /// for a type the generator does not synthesise (the whole builtin is then
 /// skipped).  `Ty::Var` is a polymorphic position — any value inhabits it,
 /// so a scalar stands in.
-fn inhabitant(ty: &Ty) -> Option<Value> {
+fn inhabitant(ty: &Ty) -> Option<ValClos> {
     Some(match ty.node() {
-        TyNode::Unit => Value::Unit,
-        TyNode::Bool => Value::Bool(true),
-        TyNode::Int | TyNode::Var(_) => Value::Int(1),
-        TyNode::Float => Value::Float(crate::data::Finite::new(1.5).expect("finite")),
-        TyNode::String => Value::string("ab"),
-        TyNode::Bytes => Value::bytes(vec![1, 2]),
-        TyNode::List(elem) => Value::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
+        TyNode::Unit => ValClos::UNIT,
+        TyNode::Bool => ValClos::bool(true),
+        TyNode::Int | TyNode::Var(_) => ValClos::int(1),
+        TyNode::Float => ValClos::float(crate::data::Finite::new(1.5).expect("finite")),
+        TyNode::String => ValClos::string("ab"),
+        TyNode::Bytes => ValClos::bytes(vec![1, 2]),
+        TyNode::List(elem) => ValClos::list(vec![inhabitant(elem)?, inhabitant(elem)?]),
         TyNode::Map(val) => {
-            let pairs: Vec<(String, Value)> = vec![("k".into(), inhabitant(val)?)];
-            Value::Map(Map::from(pairs))
+            let pairs: Vec<(String, ValClos)> = vec![("k".into(), inhabitant(val)?)];
+            ValClos::map(pairs)
         }
         // Thunk / Handle / Record / Variant arguments need a constructed
         // closure or live resource; out of the pure-reducer fragment.
@@ -77,25 +77,25 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
 
 /// Does `value` inhabit the (resolved) declared return type?  A `Ty::Var`
 /// return is polymorphic — any value inhabits it.
-fn inhabits(value: &Value, ty: &Ty) -> bool {
-    match (ty.node(), value) {
-        (TyNode::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
-        (TyNode::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
+fn inhabits(value: &ValClos, ty: &Ty) -> bool {
+    match (ty.node(), value.view()) {
+        (TyNode::List(elem), View::List(items)) => items.iter().all(|v| inhabits(&v, elem)),
+        (TyNode::Map(val), View::Map(m)) => m.iter().all(|(_, v)| inhabits(&v, val)),
         (TyNode::Var(_), _)
-        | (TyNode::Unit, Value::Unit)
-        | (TyNode::Bool, Value::Bool(_))
-        | (TyNode::Int, Value::Int(_))
+        | (TyNode::Unit, View::Unit)
+        | (TyNode::Bool, View::Bool(_))
+        | (TyNode::Int, View::Int(_))
         // The checker promotes Int to Float at use sites; an Int result for
         // a Float position still inhabits it.
-        | (TyNode::Float, Value::Float(_) | Value::Int(_))
-        | (TyNode::String, Value::String(_))
-        | (TyNode::Bytes, Value::Bytes(_))
-        | (TyNode::Handle(..), Value::Handle(_))
+        | (TyNode::Float, View::Float(_) | View::Int(_))
+        | (TyNode::String, View::String(_))
+        | (TyNode::Bytes, View::Bytes(_))
+        | (TyNode::Handle(..), View::Handle(_))
         // Record/Variant returns carry a row; a Map/Variant runtime value is
         // the honest first-order witness and the dedicated builtin tests
         // check the field shapes.
-        | (TyNode::Record(_), Value::Map(_))
-        | (TyNode::Variant(_), Value::Variant { .. }) => true,
+        | (TyNode::Record(_), View::Map(_))
+        | (TyNode::Variant(_), View::Variant { .. }) => true,
         _ => false,
     }
 }
@@ -226,7 +226,7 @@ fn every_scheme_pairs_a_grade_with_one_value_type() {
 #[test]
 fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
     use crate::fact::{ArithmeticFailure, EvalFailure, InvalidCause, Reason};
-    let invalid = |result: crate::shell::runtime::Settled<Value>, operation: &str| {
+    let invalid = |result: crate::shell::runtime::Settled<ValClos>, operation: &str| {
         let Err(Break::Error(error)) = result else {
             panic!("expected refusal for {operation}")
         };
@@ -239,30 +239,30 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
     let mut shell = fresh_shell();
     for (builtin, name) in [
         (
-            super::math::builtin_floor as fn(&[Value]) -> crate::shell::runtime::Settled<Value>,
+            super::math::builtin_floor as fn(&[ValClos]) -> crate::shell::runtime::Settled<ValClos>,
             "floor",
         ),
         (super::math::builtin_ceil, "ceil"),
         (super::math::builtin_trunc, "trunc"),
     ] {
         assert!(matches!(
-            invalid(builtin(&[Value::Int(1)]), name).cause,
+            invalid(builtin(&[ValClos::int(1)]), name).cause,
             InvalidCause::Shape(_)
         ));
         let value = crate::data::Finite::new(f64::MAX).unwrap();
         assert_eq!(
-            invalid(builtin(&[Value::Float(value)]), name).cause,
+            invalid(builtin(&[ValClos::float(value)]), name).cause,
             InvalidCause::IntegerRange(value)
         );
     }
     for args in [
         [
-            Value::Float(crate::data::Finite::from(1_i64)),
-            Value::string("2"),
+            ValClos::float(crate::data::Finite::from(1_i64)),
+            ValClos::string("2"),
         ],
         [
-            Value::Float(crate::data::Finite::from(1_i64)),
-            Value::Int(309),
+            ValClos::float(crate::data::Finite::from(1_i64)),
+            ValClos::int(309),
         ],
     ] {
         let failure = invalid(super::math::builtin_round(&args), "round");
@@ -272,12 +272,12 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
         ));
     }
     assert!(
-        matches!(super::math::builtin_round(&[Value::Float(crate::data::Finite::new(f64::MAX).unwrap()), Value::Int(308)]),
+        matches!(super::math::builtin_round(&[ValClos::float(crate::data::Finite::new(f64::MAX).unwrap()), ValClos::int(308)]),
         Err(Break::Error(crate::Error { reason: Reason::Evaluation(f), .. })) if matches!(*f, EvalFailure::Arithmetic(ArithmeticFailure::RoundUnrepresentable(_))))
     );
     assert!(matches!(
         invalid(
-            super::collections::builtin_nth(&[Value::Int(-1), Value::list(vec![])]),
+            super::collections::builtin_nth(&[ValClos::int(-1), ValClos::list(vec![])]),
             "nth"
         )
         .cause,
@@ -286,7 +286,7 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
     assert!(matches!(
         invalid(
             super::collections::builtin_range(
-                &[Value::Int(i64::MIN), Value::Int(i64::MAX)],
+                &[ValClos::int(i64::MIN), ValClos::int(i64::MAX)],
                 &shell
             ),
             "range"
@@ -294,7 +294,7 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
         .cause,
         InvalidCause::AddressableRange(_)
     ));
-    for arg in [Value::string(""), Value::Int(1)] {
+    for arg in [ValClos::string(""), ValClos::int(1)] {
         let _ = invalid(super::shell::builtin_chdir(&[arg], &mut shell), "cd");
     }
 }
@@ -302,9 +302,9 @@ fn ordinary_builtin_backstops_are_typed_and_keep_operations() {
 #[test]
 fn byte_list_validation_keeps_the_element_path() {
     use crate::fact::{DataStep, InvalidCause, Reason};
-    for (item, range) in [(Value::Int(256), true), (Value::string("1"), false)] {
+    for (item, range) in [(ValClos::int(256), true), (ValClos::string("1"), false)] {
         let Err(Break::Error(error)) =
-            super::util::as_byte_list(&Value::list(vec![Value::Int(0), item]), "ints-to-bytes")
+            super::util::as_byte_list(&ValClos::list(vec![ValClos::int(0), item]), "ints-to-bytes")
         else {
             panic!("invalid byte")
         };

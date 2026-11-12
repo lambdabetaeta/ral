@@ -12,7 +12,7 @@ use super::command::Command;
 use crate::authority::policy::Admitted;
 use crate::error::Error;
 use crate::fact::{self, AuditIo, ExitCode, Observation, Observed};
-use crate::shell::runtime::{Break, CommandOrigin, Mooring, Settled, Shell, Value, epoch_us};
+use crate::shell::runtime::{Break, CommandOrigin, Mooring, Settled, Shell, ValClos, epoch_us};
 use crate::source::{CallSite, Span};
 
 /// One external's `Command` observation, from launch to end. Silent when
@@ -35,7 +35,7 @@ impl CommandRecord {
     /// are rendered only if somebody listens.
     pub(super) fn begin(
         command: &Command<Result<Admitted, Error>>,
-        args: &[Value],
+        args: &[ValClos],
         origin: CommandOrigin,
         mooring: &Mooring,
         shell: &Shell,
@@ -44,7 +44,7 @@ impl CommandRecord {
             site: shell.call_site(),
             time: epoch_us(),
             shown: command.shown.clone(),
-            args: Value::render_argv(args),
+            args: ValClos::render_argv(args),
             origin,
         }))
     }
@@ -117,13 +117,13 @@ impl Command<Result<Admitted, Error>> {
     /// and its failure claimed by that frame.
     pub(super) fn with_record(
         self,
-        args: &[Value],
+        args: &[ValClos],
         origin: CommandOrigin,
         span: Option<Span>,
         mooring: &Mooring,
         shell: &mut Shell,
-        launch: impl FnOnce(Self, &mut Shell) -> Settled<Value>,
-    ) -> Settled<Value> {
+        launch: impl FnOnce(Self, &mut Shell) -> Settled<ValClos>,
+    ) -> Settled<ValClos> {
         let shown = self.shown.clone();
         shell.at_site(shown.clone(), span, |shell| {
             let record = CommandRecord::begin(&self, args, origin, mooring, shell);

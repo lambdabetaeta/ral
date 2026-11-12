@@ -11,7 +11,7 @@ use crate::ir::CommandName;
 use crate::path::shown;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::shell::exec::command::{Command, LookupFailure};
-use crate::shell::runtime::{Binding, HandlerLookup, Settled, Shell, Value};
+use crate::shell::runtime::{Binding, HandlerLookup, Settled, Shell, ValClos};
 use crate::typecheck::builtin_type_hint;
 use std::fmt::{self, Write};
 use std::path::PathBuf;
@@ -324,7 +324,7 @@ fn fmt_line(
     }
 }
 
-pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_help(_args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let colors = Colors::current();
     let Colors {
         bold, dim, reset, ..
@@ -344,16 +344,16 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Settled<Value>
     );
 
     shell.write_stdout(out.as_bytes())?;
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
-pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_explain(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let out = match args.first() {
         Some(arg) => explanation(&arg.to_string(), shell, Colors::current()),
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     shell.write_stdout(out.as_bytes())?;
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 /// What documents `name` over the frame that would run.  A name nothing binds

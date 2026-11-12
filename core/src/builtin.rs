@@ -3,7 +3,7 @@
 //! The per-shell [`BuiltinTable`] is the boot manifest, and it is authored as
 //! two halves — ral's two argument conventions, one row apiece
 //! ([`Convention`]).  It seeds the base env scope from the value half (as
-//! `Value::Native`) and the base handler frames from the argv half at
+//! `ValClos::builtin`) and the base handler frames from the argv half at
 //! construction, and backs `help` / `explain`.  Dispatch never consults it —
 //! resolution is env → handlers → external — and it admits no names: a user
 //! handler installs under any.
@@ -14,10 +14,12 @@
 //! row's type rule or fixes an argv row at `[String] → Command`.
 //! `BuiltinBody` has no bodiless variant, so every entry has a live body.
 
-use super::flow::Settled;
-use super::value::Value;
-use super::{Error, Mooring, Shell};
 use crate::fact::{InvariantFailure, Reason};
+use crate::ir::{Comp, CompKind, Name, synthetic};
+use crate::shell::runtime::Settled;
+use crate::shell::runtime::{Error, Mooring, Shell};
+use crate::shell::runtime::{ValClos, View};
+use crate::source::Spanned;
 use crate::ty::Site;
 use crate::typecheck::builtins::{
     BuiltinDiagnostic, BuiltinTypeRule, Convention, Decl, LANGUAGE_CONSTANTS, Manifest,
@@ -25,15 +27,15 @@ use crate::typecheck::builtins::{
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Runtime closure backing a captured builtin body.
 pub(crate) type CapturedBuiltinFn =
-    Arc<dyn Fn(&[Value], &Mooring, &mut Shell) -> Settled<Value> + Send + Sync>;
+    Arc<dyn Fn(&[ValClos], &Mooring, &mut Shell) -> Settled<ValClos> + Send + Sync>;
 
 /// A door: handed the [`Site`] the checker solved at its call, which it
 /// admits the value it lets in against.
-pub type BoundaryFn = fn(&[Value], &Arc<Site>, &Mooring, &mut Shell) -> Settled<Value>;
+pub type BoundaryFn = fn(&[ValClos], &Arc<Site>, &Mooring, &mut Shell) -> Settled<ValClos>;
 
 /// Host implementation of a builtin command binding.
 ///
@@ -41,7 +43,7 @@ pub type BoundaryFn = fn(&[Value], &Arc<Site>, &Mooring, &mut Shell) -> Settled<
 /// disjoint from the `&mut Shell` a body mutates.
 #[derive(Clone)]
 pub enum BuiltinBody {
-    Static(fn(&[Value], &Mooring, &mut Shell) -> Settled<Value>),
+    Static(fn(&[ValClos], &Mooring, &mut Shell) -> Settled<ValClos>),
     Captured(CapturedBuiltinFn),
     Boundary(BoundaryFn),
 }
@@ -67,9 +69,35 @@ pub(crate) struct Frame(());
 pub struct BuiltinEntry {
     pub decl: Decl,
     body: BuiltinBody,
+    eta: OnceLock<(Arc<Comp>, Name)>,
+}
+
+impl PartialEq for BuiltinEntry {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
 }
 
 impl BuiltinEntry {
+    /// The λ-chain ending in δ, and the name δ reads its builtin from.
+    pub(crate) fn eta(&self) -> &(Arc<Comp>, Name) {
+        self.eta.get_or_init(|| {
+            let builtin: Name = "%builtin".into();
+            let args: Box<[Name]> = (0..self.decl.fixed_arity())
+                .map(|i| synthetic("arg", i))
+                .collect();
+            let params = args.clone();
+            let body = Arc::new(Spanned::synthetic(CompKind::Builtin {
+                builtin: builtin.clone(),
+                args,
+            }));
+            let eta = params.into_iter().rev().fold(body, |body, param| {
+                Arc::new(Spanned::synthetic(CompKind::Lam { param, body }))
+            });
+            (eta, builtin)
+        })
+    }
+
     const fn row(
         name: Cow<'static, str>,
         convention: Convention,
@@ -80,6 +108,7 @@ impl BuiltinEntry {
         Self {
             decl: Decl::new(name, convention, doc, boundary),
             body,
+            eta: OnceLock::new(),
         }
     }
 
@@ -121,8 +150,8 @@ impl BuiltinEntry {
         &self,
         span: Option<crate::source::Span>,
         shell: &mut Shell,
-        f: impl FnOnce(&mut Shell, &Frame) -> Settled<Value>,
-    ) -> Settled<Value> {
+        f: impl FnOnce(&mut Shell, &Frame) -> Settled<ValClos>,
+    ) -> Settled<ValClos> {
         shell.at_site(self.decl.name.clone(), span, |shell| {
             f(shell, &Frame(())).map_err(|b| b.locate(&self.decl.name, span, shell))
         })
@@ -136,11 +165,11 @@ impl BuiltinEntry {
     pub(crate) fn call_body(
         &self,
         _frame: &Frame,
-        args: &[Value],
+        args: &[ValClos],
         site: Option<&Arc<Site>>,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         let value = match (&self.body, site) {
             (BuiltinBody::Static(f), _) => f(args, mooring, shell),
             (BuiltinBody::Captured(f), _) => f(args, mooring, shell),
@@ -156,12 +185,12 @@ impl BuiltinEntry {
         // debug, coerced to `Unit` in release.
         if self.decl.settles_at_unit() {
             debug_assert!(
-                matches!(value, Value::Unit),
+                matches!(value.view(), View::Unit),
                 "{}: typed `F Unit` but answered a {}",
                 self.decl.name,
                 value.type_name()
             );
-            return Ok(Value::Unit);
+            return Ok(ValClos::UNIT);
         }
         Ok(value)
     }
@@ -259,16 +288,10 @@ impl BuiltinTable {
     }
 }
 
-pub(crate) fn language_constants() -> impl Iterator<Item = (String, Value)> {
+pub(crate) fn language_constants() -> impl Iterator<Item = (String, ValClos)> {
     LANGUAGE_CONSTANTS
         .into_iter()
-        .map(|(name, b)| (name.to_string(), Value::Bool(b)))
-}
-
-/// A value row's `Value::Native`.  Shared by boot and wire hydration, so the
-/// two never build one differently.
-pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
-    Value::Native(Arc::new(entry.clone()), Arc::from([]))
+        .map(|(name, b)| (name.to_string(), ValClos::bool(b)))
 }
 
 #[cfg(test)]
@@ -321,7 +344,8 @@ mod tests {
     fn a_boundary_without_a_site_remains_a_recoverable_invariant() {
         let mut shell = crate::test_helper::core_shell();
         let entry = &BOUNDARY_BUILTINS[0];
-        let Err(super::super::Break::Error(error)) = entry.run(&[], &Mooring::adrift(), &mut shell)
+        let Err(crate::shell::runtime::Break::Error(error)) =
+            entry.run(&[], &Mooring::adrift(), &mut shell)
         else {
             panic!("boundary refusal")
         };

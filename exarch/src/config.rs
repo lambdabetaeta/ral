@@ -21,7 +21,7 @@ use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::authority::grant::value::GrantValue;
 use ral_core::own::UserFile;
-use ral_core::shell::runtime::{Break, Escape, Mooring, Value};
+use ral_core::shell::runtime::{Break, Escape, Mooring, ValClos, View};
 use ral_core::source::{SourceFile, SourceOrigin};
 
 pub(crate) const CONFIG_FILE: &str = "config.ral";
@@ -70,7 +70,7 @@ pub(crate) fn load_declared(file: &UserFile, label: &str) -> Result<Vec<Service>
         .shell(ral_core::io::terminal::TerminalState::default(), cwd)
         .map_err(|e| e.with_context(format!("{label} cannot load")).plain())?;
     decode(
-        evaluate_no_authority(&mut shell, &source, &origin, label)?,
+        &evaluate_no_authority(&mut shell, &source, &origin, label)?,
         &origin.to_string(),
         label,
     )
@@ -171,7 +171,7 @@ pub(crate) fn evaluate_no_authority(
     source: &str,
     origin: &SourceOrigin,
     label: &str,
-) -> Result<Value, String> {
+) -> Result<ValClos, String> {
     // No run is in hand — a throwaway shell computing a value — so nothing is
     // installed: no surface, no desk, no nursery.
     let mooring = Mooring::adrift();
@@ -193,8 +193,8 @@ pub(crate) fn evaluate_no_authority(
 }
 
 /// Decode the config's terminal map of `name → declaration` into [`Service`]s.
-fn decode(value: Value, display: &str, label: &str) -> Result<Vec<Service>, String> {
-    let Value::Map(map) = value else {
+fn decode(value: &ValClos, display: &str, label: &str) -> Result<Vec<Service>, String> {
+    let View::Map(map) = value.view() else {
         return Err(format!(
             "{label} {display}: expected a map of provider declarations \
              (`[name: [endpoint: ..., protocol: ...]]`), got {}",
@@ -202,15 +202,15 @@ fn decode(value: Value, display: &str, label: &str) -> Result<Vec<Service>, Stri
         ));
     };
     let mut services = Vec::with_capacity(map.len());
-    for (name, decl) in &map {
+    for (name, decl) in map {
         services.push(decode_one(name, &decl, display, label)?);
     }
     Ok(services)
 }
 
-fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Service, String> {
+fn decode_one(name: &str, decl: &ValClos, display: &str, label: &str) -> Result<Service, String> {
     let where_ = format!("{label} {display}: provider '{name}'");
-    let Value::Map(fields) = decl else {
+    let View::Map(fields) = decl.view() else {
         return Err(format!(
             "{where_}: expected a map [endpoint: ..., protocol: ...], got {}",
             decl.type_name()
@@ -233,9 +233,9 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
              provider cannot reuse its name."
         ));
     }
-    let auth = match fields.get("key").as_deref() {
+    let auth = match fields.get("key").as_deref().map(ValClos::view) {
         None => Auth::Key(key_var(&name)),
-        Some(Value::Variant {
+        Some(View::Variant {
             label,
             payload: None,
         }) if &**label == "none" => Auth::Keyless,
@@ -258,13 +258,15 @@ fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Se
     ))
 }
 
-fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<String, String> {
+fn string_field(value: Option<&ValClos>, field: &str, where_: &str) -> Result<String, String> {
     match value {
-        Some(Value::String(s)) => Ok(s.to_string()),
-        Some(other) => Err(format!(
-            "{where_}: '{field}' must be a string, got {}",
-            other.type_name()
-        )),
+        Some(value) => match value.view() {
+            View::String(s) => Ok(s.to_string()),
+            _ => Err(format!(
+                "{where_}: '{field}' must be a string, got {}",
+                value.type_name()
+            )),
+        },
         None => Err(format!("{where_}: missing '{field}'")),
     }
 }
@@ -280,7 +282,7 @@ mod tests {
         let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            evaluate_no_authority(
+            &evaluate_no_authority(
                 &mut shell,
                 &source,
                 &SourceOrigin::named("<test:config>"),
@@ -311,7 +313,7 @@ mod tests {
             LABEL,
         )
         .expect("a config sees its own bindings");
-        assert_eq!(value, Value::string("closed"));
+        assert_eq!(value, ValClos::string("closed"));
         assert!(shell.scope_lookup("session_only").is_some());
         assert!(shell.scope_lookup("config_only").is_none());
     }

@@ -4,7 +4,7 @@
 #![cfg(feature = "coreutils")]
 
 use crate::common::must_succeed;
-use ral_core::shell::runtime::Value;
+use ral_core::shell::runtime::{ValClos, View};
 
 #[cfg(unix)]
 fn must_fail(input: &str) {
@@ -25,7 +25,8 @@ fn bundled_uutils_capture_honours_scoped_cwd() {
         "within [dir: '{}'] {{ let out = pwd\nreturn $out }}",
         dir.path().display()
     );
-    let Value::String(output) = must_succeed(&script) else {
+    let value = must_succeed(&script);
+    let View::String(output) = value.view() else {
         panic!("expected pwd output string");
     };
     assert_eq!(
@@ -41,8 +42,8 @@ fn bundled_uutils_capture_honours_scoped_cwd() {
 #[test]
 fn bundled_uutils_capture_completes_with_buffer_sink() {
     let out = must_succeed("let out = ls -lah\nreturn $out");
-    match out {
-        Value::String(s) => assert!(!s.is_empty()),
+    match out.view() {
+        View::String(s) => assert!(!s.is_empty()),
         other => panic!("expected captured ls output, got {other:?}"),
     }
 }
@@ -62,7 +63,7 @@ fn bundled_uutils_capture_completes_with_buffer_sink() {
 fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
     assert_eq!(
         must_succeed("!{printf 'a\\nb\\nc\\nd\\n' | wc -l | from-string}"),
-        Value::string("4\n"),
+        ValClos::string("4\n"),
         "a bundled `wc -l` over four lines must emit `4`, recovered through \
          the byte-to-value `from-string` edge"
     );

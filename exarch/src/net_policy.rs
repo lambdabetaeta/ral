@@ -10,7 +10,7 @@
 
 use ral_core::egress::{Host, NetPolicy};
 use ral_core::own::UserFile;
-use ral_core::shell::runtime::Value;
+use ral_core::shell::runtime::{ValClos, View};
 use ral_core::source::{SourceFile, SourceOrigin};
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
@@ -37,7 +37,7 @@ pub fn load() -> Result<NetPolicy, String> {
         .shell(ral_core::io::terminal::TerminalState::default(), cwd)
         .map_err(|e| e.with_context(format!("{LABEL} cannot load")).plain())?;
     decode(
-        crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
+        &crate::config::evaluate_no_authority(&mut shell, &source, &origin, LABEL)?,
         &origin.to_string(),
     )
 }
@@ -69,8 +69,8 @@ fn machine_policy() -> Result<Option<(String, SourceOrigin)>, String> {
 /// Decode the policy's terminal map into a [`NetPolicy`]. An unrecognised key
 /// is a hard error naming itself, never ignored — a policy that half-parses
 /// binds nobody.
-fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
-    let Value::Map(map) = value else {
+fn decode(value: &ValClos, display: &str) -> Result<NetPolicy, String> {
+    let View::Map(map) = value.view() else {
         return Err(format!(
             "network policy {display}: expected a map [hosts: [...], search: ...], got {}",
             value.type_name()
@@ -106,25 +106,26 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
     }
     let hosts_field = map.get("hosts");
     let raw_hosts = match hosts_field.as_deref() {
-        Some(Value::List(items)) => items,
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: 'hosts' must be a list of strings, got {}",
-                other.type_name()
-            ));
-        }
+        Some(value) => match value.view() {
+            View::List(items) => items,
+            _ => {
+                return Err(format!(
+                    "network policy {display}: 'hosts' must be a list of strings, got {}",
+                    value.type_name()
+                ));
+            }
+        },
         None => return Err(format!("network policy {display}: missing 'hosts'")),
     };
     let mut hosts = std::collections::HashSet::with_capacity(raw_hosts.len());
     for v in raw_hosts {
-        let v = v.into_owned();
-        let Value::String(raw) = v else {
+        let View::String(raw) = v.view() else {
             return Err(format!(
                 "network policy {display}: 'hosts' entries must be strings, got {}",
                 v.type_name()
             ));
         };
-        let host = Host::parse(&raw).map_err(|e| format!("network policy {display}: {e}"))?;
+        let host = Host::parse(raw).map_err(|e| format!("network policy {display}: {e}"))?;
         if !hosts.insert(host) {
             return Err(format!(
                 "network policy {display}: '{raw}' is named twice in 'hosts' after lowercasing"
@@ -132,13 +133,15 @@ fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
         }
     }
     let search = match map.get("search").as_deref() {
-        Some(Value::Bool(b)) => *b,
-        Some(other) => {
-            return Err(format!(
-                "network policy {display}: 'search' must be a Bool, got {}",
-                other.type_name()
-            ));
-        }
+        Some(value) => match value.view() {
+            View::Bool(b) => b,
+            _ => {
+                return Err(format!(
+                    "network policy {display}: 'search' must be a Bool, got {}",
+                    value.type_name()
+                ));
+            }
+        },
         None => return Err(format!("network policy {display}: missing 'search'")),
     };
     Ok(NetPolicy { hosts, search })
@@ -153,7 +156,7 @@ mod tests {
         let mut shell = ral_core::test_helper::core_shell();
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
-            crate::config::evaluate_no_authority(
+            &crate::config::evaluate_no_authority(
                 &mut shell,
                 &source,
                 &SourceOrigin::named("<test:net-policy>"),

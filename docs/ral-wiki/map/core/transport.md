@@ -1,6 +1,6 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-generated_at_date: 2026-11-11
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
 covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
 
@@ -26,33 +26,34 @@ indistinguishable from an in-process fork exactly when no hop drops a field or
 collapses a variant. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
 
-- *value walks* (`shell/runtime/value/first_order.rs`) match `Value` / `FOValue` exhaustively, once forward and once back;
+- *value walks* (`shell/runtime/value/first_order.rs`) match `View` / `FOValue` exhaustively, once forward and once back;
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
   its `FrameKind`; a persistent frame remains host-managed. A per-name entry
   is unary by construction and hydration does not re-check its arity, validated
   by the sender's static check or persistent-install vet
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]);
-- *kinds* ride as serde enums (`SerialClosure`, `SpawnGrant`), and *floats* by
+- *kinds* ride as serde enums (`SerialAtom`, `SpawnGrant`), and *floats* by
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
   into `null`.
 
 ## Values — `core/src/data.rs`, `core/src/seed/table.rs`
 
-**`FOValue<X>` (`data.rs`, which knows no `Value`) is the one value
+**`FOValue<X>` (`data.rs`, which knows no `ValClos`) is the one value
 vocabulary every seam speaks. The top-level `data` module is independent of
 runtime values and shared by protocols and snapshots: first-order by construction, over an extension
 slot `X` uninhabited by default (`NoExt`).** Externally tagged on the wire, with
 typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 
-- `SerialValue = FOValue<SerialClosure>` (`seed/table.rs`) fills the slot with what this wire
-  adds: `SerialClosure::Thunk(SerialThunk)` — the closure's `comp` and a
-  `SerialEnvSnapshot` naming its scope's row — and `SerialClosure::Native`,
-  a builtin's name and held arguments (`SerialNative { name, args }`),
-  re-linked against the receiver's own table. A partial user block crosses
-  as the box of its residual λ, closing over the arguments given. Boundary
-  builtins likewise cross as λ-closures over `Exec` with their checked site;
-  ordinary partial builtins cross by name with their arguments.
+- `SerialValue = FOValue<SerialAtom>` (`seed/table.rs`) adds `Thunk`,
+  `Builtin(name)` and `Handle(title)`. `SerialThunk` holds `comp` and a
+  `SerialEnvSnapshot` naming its capture's row. Builtins re-link by name
+  against the receiver's manifest; missing names fail `UnknownNative`.
+  A handle, live or withheld, encodes its title and hydrates withheld.
+  User and builtin partials cross as thunks of residual λs over supplied
+  arguments; the builtin entry is a binding in that capture. Boundary
+  partials cross as λ-closures over `Exec` with their checked site
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 - `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
   keeps each binding's type
   ([[internals/type-inference|type-inference]]).
@@ -76,8 +77,9 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   `Io::ty().extend(..)` over them. The doors that mint them sit above
   (`shell::runtime::error`, `shell::runtime::audit`).
 - `data/print.rs` — the one value printer, `pretty_print` over a `Printable`
-  view (`Shape`: one level, children unread), which `FOValue` implements here
-  and the shell's `Value` implements in `shell/builtins/print.rs`; beneath
+  view (`Shape`: collection children unread; consecutive variant labels
+  grouped with one optional terminal child), which `FOValue` implements here
+  and the shell's `ValClos` implements in `shell/builtins/print.rs`; beneath
   `authority`, so a grant prints without the shell
   ([[invariants/core-below-shell|core-below-shell]]).
 - `data/string.rs` — `Str`, the shared immutable string, exported as
@@ -86,34 +88,37 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
   and native bytes in binary codecs. Binary decoding copies or takes the
   whole byte buffer. Each decoder requires its encoding.
 
-**One walk each way joins `Value` and `FOValue`
-(`shell/runtime/value/first_order.rs`).** `FOValue::walk` folds a `Value`, handing each
-leaf that is not data to the caller as a borrowed `Leaf`; `unwalk` and
-`for_each_ext` are its converses. `from_runtime`, `try_from` and `scrubbed`
-differ only in that leaf function, and so do `into_runtime` and `From<FOValue>`.
-The reverse walk uses `Value::variant`, normalising a unit payload to absence.
+**One walk each way joins `ValClos` and `FOValue`
+(`shell/runtime/value/first_order.rs`).** `FOValue::walk` reads `View` and
+hands non-data leaves to its caller as `Leaf`; `unwalk` is the reverse walk.
+`try_from` and `scrubbed` differ only in their leaf function; `From<FOValue>`
+uses `unwalk`. The seed's `from_runtime` instead preserves typed
+atoms and interns thunk environments. The reverse walks use `ValClos::variant`;
+`View::Variant` omits resolved unit payloads.
 
-**A leaf that is not data has three treatments, one per seam.** `Value::opacity`
+**A leaf that is not data has three treatments, one per seam.** `ValClos::opacity`
 classifies it — a block, a function, a handle:
 
-- `TryFrom<&Value> for FOValue` refuses it, naming the first such leaf and
+- `TryFrom<&ValClos> for FOValue` refuses it, naming the first such leaf and
   whether it was nested (`NotData`);
 - `FOValue::scrubbed` makes the conversion total by writing every such leaf as
   its `` `opaque [type: …] `` placeholder — the flat wire's treatment, taken by
   `Mooring::surface`;
 - the fork's scrub (`core/src/shell/runtime/state/scrub.rs`,
-  [[map/core/shell-state|shell-state]]) replaces only `Handle`s, with the same
-  placeholder, and keeps closures live, since this wire interns them. It
-  reaches every handle the fork holds — in a binding's data, in every scope a
-  closure captured, in a partial native's held arguments, and in a handler
-  frame's arms; it empties the fork's hooks.
+  [[map/core/shell-state|shell-state]]) withholds every live handle while
+  preserving its binding, position and type. Every observation then fails
+  `withheld-handle`. It reaches captures, builtin residual arguments and
+  handler arms; no live handle remains reachable in the bequest. Closures
+  remain executable and hooks are absent by construction. This scrub is
+  required even on identity adoption, which shares the parent's memory.
 
 ## Scopes — `InternCtx` and `WireDecoder`
 
 **Environments cross as rows of a table, one per distinct allocation, by
 `Env::ptr_eq` identity** — so a captured environment with shared structure
-cannot unfold into an O(2^N) tree. A closure keeps only the bindings it
-mentions, so rows are per closure and small: every empty capture is one row,
+cannot unfold into an O(2^N) tree. Captures are restricted at formation;
+component thunks may retain their container's other bindings. Every empty
+capture is one row,
 a `Rec` group's siblings share one, and the linear root scan makes interning
 O(roots²). A value two closures mention is written in both rows
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
@@ -126,13 +131,13 @@ them for any other, through the receiver's `Signature`.
   encoder stack depth is bounded by data nesting within one environment,
   never by the length of a chain of closures
   ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]). `finish`
-  encodes every binding: every path onto this wire is a scrubbed fork, so a
-  handle reaching `SerialValue::from_runtime` is a fault in ral, and its
-  error says so.
+  encodes every binding. `SerialValue::from_runtime` materialises literal
+  data through `View`, interns thunk captures, and writes every handle as its
+  title; handles have no encoding refusal.
 - `WireDecoder::for_runtime` rebuilds the rows in dependency order by Kahn's
   algorithm over `collect_scope_deps`' edges, so a stream chain decodes in
   linear time, refusing an out-of-range reference or a cycle. It
-  carries the receiver's builtin manifest, for a decoded `Native` to re-link
+  carries the receiver's builtin manifest, for a decoded `Builtin` to re-link
   its name against — nothing else, since neither Σ tier rides the wire.
 - `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
   wire→runtime conversion of an environment.
@@ -230,11 +235,12 @@ of inferring causes from serde's diagnostic text.
   has no mirror of the IR or of schemes: `Arc<Comp>` and `Arc<Scheme>` cross
   through their own serde impls, and the semantic step closes each scheme
   (`Closed::new`, refusing with `DecodeCause::OpenScheme` at its path; a
-  non-finite float is `DecodeCause::FiniteBits`). Native arguments are
-  traversed too, so nested closures and native names are validated; every
-  sealed thunk carries IR, never builtin code. Raw seed values, including
-  native arguments, remain `RawFOValue` until validation, preserving typed
-  error paths. Seed-local cleanup drains nested native arguments iteratively.
+  non-finite float is `DecodeCause::FiniteBits`). `RawSerialAtom` preserves
+  `Thunk`, `Builtin` and `Handle` until validation, with no separate native
+  argument payload or arity check. Arguments reside in residual thunk
+  environments, whose rows validate through the same decoder. Every sealed
+  thunk carries IR, never builtin code. Seed cleanup drains owned value and
+  environment spines iteratively.
 - `JsonEncode` returns `JsonEncodeFailure` before writing a frame. Audited raw
   representations serialize only after fallible leaves have been checked;
   `serialize_structural` is not a blanket encoding fallback.

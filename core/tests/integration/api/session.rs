@@ -38,7 +38,7 @@ use ral_core::syntax::quote_word;
 use ral_core::test_access::{bind_untyped, binding_scheme as scheme_of, has_weak_residuals};
 use ral_core::test_helper::{fresh_shell, layer};
 use ral_core::typecheck::{TypeErrorKind, Unit};
-use ral_core::{Break, SessionSchemes, Shell, TypeError, Value};
+use ral_core::{Break, SessionSchemes, Shell, TypeError, ValClos};
 use std::path::{Path, PathBuf};
 
 // ── Harness ─────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ fn top_level_let_persists_across_calls() {
         let mut shell = shell_under(caps);
         top_level(&mut shell, "let persist_n = 41").expect("first run");
         let result = top_level(&mut shell, "return $[$persist_n + 1]").expect("second run");
-        assert_eq!(result, Value::Int(42));
+        assert_eq!(result, ValClos::int(42));
     }
 }
 
@@ -159,7 +159,7 @@ fn top_level_cd_persists_across_calls() {
         let tmp = shown_dir(ral_core::test_helper::real(std::env::temp_dir()).as_path());
         top_level(&mut shell, &format!("cd '{tmp}'")).expect("cd should succeed");
         let result = top_level(&mut shell, "cwd").expect("cwd should succeed");
-        assert_eq!(result, Value::string(tmp), "cwd after cd");
+        assert_eq!(result, ValClos::string(tmp), "cwd after cd");
     }
 }
 
@@ -195,7 +195,7 @@ fn try_error_record_carries_the_script() {
             "try { fail 'x' } { |err| \
              return \"$err[site][script]:$err[site][line]\" }"
         ),
-        Value::string("<test>:1")
+        ValClos::string("<test>:1")
     );
 }
 
@@ -204,7 +204,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = prelude_shell();
     shell.set_env_var("RAL_TEST_ENV", "override").unwrap();
     let result = run_on(&mut shell, "return !{env}[RAL_TEST_ENV]").expect("evaluate env");
-    assert_eq!(result, Value::string("override"));
+    assert_eq!(result, ValClos::string("override"));
 }
 
 /// `$STATUS` is not a name: `try` binds a record carrying the failure reason.
@@ -233,16 +233,16 @@ fn status_is_an_unbound_variable_that_names_its_replacement() {
 #[cfg(unix)]
 #[test]
 fn session_scope_let_shadows_a_path_command() {
-    assert_eq!(must_succeed("let cat = 1\nreturn $cat"), Value::Int(1));
+    assert_eq!(must_succeed("let cat = 1\nreturn $cat"), ValClos::int(1));
     assert_eq!(
         must_succeed(
             "let cat = { |x| if $[$x <= 0] { return 0 } else { cat $[$x - 1] } }\nreturn !{cat 3}"
         ),
-        Value::Int(0)
+        ValClos::int(0)
     );
     assert_eq!(
         must_succeed("let [cat, other] = [1, 2]\nreturn $[$cat + $other]"),
-        Value::Int(3)
+        ValClos::int(3)
     );
 }
 
@@ -563,7 +563,7 @@ fn decoder_output_is_rejected_as_a_function_at_its_use_in_the_same_unit() {
 #[test]
 fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
     let mut sh = shell();
-    bind_untyped(&mut sh, "sv", Value::Int(1));
+    bind_untyped(&mut sh, "sv", ValClos::int(1));
     let checked = compile_and_typecheck(
         "let y = $sv",
         sh.session_schemes(),
@@ -584,7 +584,7 @@ fn scheme_less_host_binding_exports_a_closed_weak_scheme() {
 #[test]
 fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
     let mut sh = shell();
-    bind_untyped(&mut sh, "sv", Value::Int(1));
+    bind_untyped(&mut sh, "sv", ValClos::int(1));
     let first = compile_and_typecheck(
         "let take_step = { |f| fold $f () [()] }\n\
          take_step $sv\n\
@@ -623,8 +623,8 @@ fn host_fold_wrapper_exports_a_closed_grade_polymorphic_scheme() {
 #[test]
 fn host_fold_wrapper_keeps_a_grade_fixed_after_generalization_next_unit() {
     let mut sh = shell();
-    bind_untyped(&mut sh, "sv", Value::Int(1));
-    bind_untyped(&mut sh, "sv_data", Value::Int(1));
+    bind_untyped(&mut sh, "sv", ValClos::int(1));
+    bind_untyped(&mut sh, "sv_data", ValClos::int(1));
     let first = compile_and_typecheck(
         "let take_step = { |f| fold $f () [()] }\n\
          take_step $sv\n\
@@ -734,7 +734,7 @@ fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
 // ─── checked boundaries ─────────────────────────────────────────────────────
 
 /// The refusal a run ended in, as text.
-fn refusal(result: Settled<Value>) -> String {
+fn refusal(result: Settled<ValClos>) -> String {
     match result {
         Err(ral_core::shell::runtime::Break::Error(e)) => e.describe().into_owned(),
         other => panic!("the run must be refused, got {other:?}"),
@@ -810,7 +810,7 @@ fn delayed_functions_are_refused_at_every_use_route_but_work_in_their_unit() {
         let mut same_unit = shell();
         assert_eq!(
             top_level(&mut same_unit, &format!("{WEAK_DECODER}\n{setup}\n{later}")).unwrap(),
-            Value::Int(2),
+            ValClos::int(2),
             "{later}"
         );
     }
@@ -855,9 +855,9 @@ fn decided_decoder_functions_keep_their_quantified_instances_across_units() {
             "let a = f true; let b = f 1; let flag = $[not $a[item]]; return $[$b[item] + $b[data]]",
         )
         .unwrap(),
-        Value::Int(3)
+        ValClos::int(3)
     );
-    assert_eq!(sh.scope_lookup("flag"), Some(&Value::Bool(false)));
+    assert_eq!(sh.scope_lookup("flag"), Some(&ValClos::bool(false)));
 }
 
 #[test]
@@ -874,7 +874,7 @@ fn decided_comparable_parameters_stay_polymorphic_inside_imported_closures() {
             "let g = { |x| f $x }; let a = g 1; let b = g hello; return $[$a[data] + $b[data]]",
         )
         .unwrap(),
-        Value::Int(2)
+        ValClos::int(2)
     );
     assert!(
         check_errors(&sh, "g [1]")
@@ -895,7 +895,7 @@ fn delayed_callback_arguments_are_refused_across_units_but_checked_in_their_unit
     let mut same_unit = shell();
     assert_eq!(
         top_level(&mut same_unit, &format!("{setup}\n{later}")).unwrap(),
-        Value::Int(2)
+        ValClos::int(2)
     );
     let mut bad_data = shell();
     let setup = setup.replace("'1'", "'\"bad\"'");
@@ -925,7 +925,7 @@ fn delayed_handles_are_refused_at_every_payload_observation() {
         let mut same_unit = shell();
         assert_eq!(
             top_level(&mut same_unit, &format!("{setup}\n{later}")).unwrap(),
-            Value::Int(2),
+            ValClos::int(2),
             "{later}"
         );
     }
@@ -952,9 +952,9 @@ fn decided_handle_aliases_share_claims_and_poll_does_not_claim() {
             ]",
         )
         .unwrap(),
-        Value::Int(2)
+        ValClos::int(2)
     );
-    assert_eq!(top_level(&mut sh, "await $alias").unwrap(), Value::Int(2));
+    assert_eq!(top_level(&mut sh, "await $alias").unwrap(), ValClos::int(2));
     let message = refusal(top_level(&mut sh, "await $h"));
     assert!(message.contains("already claimed"), "{message}");
 }
@@ -973,9 +973,9 @@ fn a_decided_handle_payload_preserves_function_polymorphism_across_units() {
             "let box = await $h; let flag = $box[f] true; let n = $box[f] 1; return $[$n + 1]",
         )
         .unwrap(),
-        Value::Int(2)
+        ValClos::int(2)
     );
-    assert_eq!(sh.scope_lookup("flag"), Some(&Value::Bool(true)));
+    assert_eq!(sh.scope_lookup("flag"), Some(&ValClos::bool(true)));
 }
 
 #[test]
@@ -1037,9 +1037,9 @@ fn a_module_refuses_session_data_statically_before_either_unit_runs() {
     for (seed, expected) in [
         (
             "let d = !{to-string '\"s\"' | from-json}",
-            Value::string("s"),
+            ValClos::string("s"),
         ),
-        ("let d = 1", Value::Int(1)),
+        ("let d = 1", ValClos::int(1)),
     ] {
         top_level(&mut sh, seed).unwrap();
         assert!(check_errors(&sh, &source).is_empty());
@@ -1092,13 +1092,13 @@ fn extend_session_readmits_session_data_before_its_first_phrase() {
     assert_eq!(record.site().line, 2);
     assert!(!marker.exists(), "the source's first phrase must not run");
     assert!(sh.scope_lookup("y").is_none());
-    assert_eq!(sh.scope_lookup("d"), Some(&Value::string("s")));
+    assert_eq!(sh.scope_lookup("d"), Some(&ValClos::string("s")));
 
     top_level(&mut sh, "let d = 1").unwrap();
     ral_core::shell::load::extend_session(&Mooring::adrift(), &mut sh, &source, &origin, None)
         .expect("the source runs with integer session data");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran");
-    assert_eq!(sh.scope_lookup("y"), Some(&Value::Int(2)));
+    assert_eq!(sh.scope_lookup("y"), Some(&ValClos::int(2)));
 }
 
 /// What the defining unit's own uses fixed stays fixed: a residual stays weak
@@ -1154,7 +1154,7 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
             "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']; length $second",
         )
         .unwrap(),
-        Value::Int(0)
+        ValClos::int(0)
     );
     assert!(
         check_errors(&sh, "return $[$doc + 1]")
@@ -1171,7 +1171,7 @@ fn a_residual_datum_is_admitted_again_by_each_unit_that_uses_it() {
     top_level(&mut sh, DECODE_A).unwrap();
     assert_eq!(
         top_level(&mut sh, "let text = upper $m[a]; return !{upper $m[a]}").unwrap(),
-        Value::string("X")
+        ValClos::string("X")
     );
     let later = "let readmission_marker = 1; return $[$m[a] + 1]";
     assert!(check_errors(&sh, later).is_empty());
@@ -1190,9 +1190,9 @@ fn weak_data_beside_a_decided_function_is_legal_and_readmitted_before_use() {
     .unwrap();
     assert_eq!(
         top_level(&mut sh, "let text = upper $bundle[data]; $bundle[inc] 1").unwrap(),
-        Value::Int(2)
+        ValClos::int(2)
     );
-    assert_eq!(sh.scope_lookup("text"), Some(&Value::string("X")));
+    assert_eq!(sh.scope_lookup("text"), Some(&ValClos::string("X")));
 
     let later = "let adjacent_marker = 1; return $[$bundle[data] + 1]";
     assert!(check_errors(&sh, later).is_empty());

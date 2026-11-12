@@ -13,11 +13,12 @@ use crate::provider::{Provider, ToolCall};
 use crate::record::{Born, Voice};
 use ral_core::Runtime;
 use ral_core::Shell;
-use ral_core::Value;
+use ral_core::ValClos;
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::engine::EngineInstaller;
 use ral_core::own::{OwnDir, TestDir};
 use ral_core::process::ScopeNode;
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Settled};
+use ral_core::shell::runtime::{Mooring, Settled};
 use ral_core::ty::{Binders, Ty};
 use ral_core::typecheck::builtins::{pure, thunk};
 use std::borrow::Cow;
@@ -521,10 +522,10 @@ pub(crate) fn launch_child(
 /// Named apart from `shell_eval/builtins.rs`'s `test-block-forever`, since one
 /// test binary installs both.
 pub(crate) fn builtin_test_clear_block_forever(
-    _args: &[Value],
+    _args: &[ValClos],
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     loop {
         shell.poll()?;
         std::thread::sleep(std::time::Duration::from_millis(2));

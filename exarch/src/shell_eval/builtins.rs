@@ -7,6 +7,7 @@ use crate::skill::{self, Judge as _};
 use grep::matcher::LineTerminator;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::error::Error;
 use ral_core::fact::{
     CodecFailure, CodecFailureUtf8, Count, EditFailure, EditFailureDuplicateTargetLine,
@@ -18,11 +19,11 @@ use ral_core::fact::{
 };
 use ral_core::path::tree::Walk;
 use ral_core::path::{LeafMode, LexicalPath, Reading, file_name};
-use ral_core::shell::runtime::{BuiltinBody, BuiltinEntry, Mooring, Observed, Settled};
+use ral_core::shell::runtime::{Mooring, Observed, Settled};
 use ral_core::text::{quote_native, rank};
 use ral_core::ty::{Binders, Ty, closed_record};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{HostSurface, Shell, Value};
+use ral_core::{HostSurface, Shell, ValClos, View};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -212,7 +213,7 @@ fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
     mooring.surface_data(&shell.observation(read).to_surface());
 }
 
-fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
+fn view_bound(arg: &ValClos, which: &str, tool: &str) -> Settled<usize> {
     match arg.as_int() {
         Some(n) if n >= 1 => {
             #[allow(
@@ -253,7 +254,7 @@ fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
 /// clamped to the file — what both readers show, differing only in what each
 /// row carries.
 fn view_range(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
     tool: &str,
@@ -280,26 +281,26 @@ fn view_range(
 }
 
 /// A row index as the 1-based line number the model reads.
-fn line_no(i: usize) -> Value {
+fn line_no(i: usize) -> ValClos {
     #[allow(
         clippy::cast_possible_wrap,
         reason = "line index bounded by file length; no i64 wrap"
     )]
     let line = i as i64 + 1;
-    Value::Int(line)
+    ValClos::int(line)
 }
 
 /// `view-text PATH START END` — the half-open line range `[START, END)` as
 /// `[line, text]` rows.  The text is the whole address here: `edit-replace`
 /// matches it verbatim, so a row is copied as it stands.
-fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_view_text(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let (rows, range) = view_range(args, mooring, shell, "view-text")?;
-    Ok(Value::list(
+    Ok(ValClos::list(
         range
             .map(|i| {
-                Value::map(vec![
+                ValClos::map(vec![
                     ("line".into(), line_no(i)),
-                    ("text".into(), Value::string(rows[i].clone())),
+                    ("text".into(), ValClos::string(rows[i].clone())),
                 ])
             })
             .collect(),
@@ -309,16 +310,16 @@ fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// `view-hash PATH START END` — the same range with each row's witness, the
 /// handle `edit-hash` checks.  Hashes the whole file even for a small slice,
 /// since a witness depends on file-wide uniqueness.
-fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_view_hash(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let (rows, range) = view_range(args, mooring, shell, "view-hash")?;
     let hashes = window_hashes(&rows);
-    Ok(Value::list(
+    Ok(ValClos::list(
         range
             .map(|i| {
-                Value::map(vec![
+                ValClos::map(vec![
                     ("line".into(), line_no(i)),
-                    ("hash".into(), Value::string(hashes[i].clone())),
-                    ("text".into(), Value::string(rows[i].clone())),
+                    ("hash".into(), ValClos::string(hashes[i].clone())),
+                    ("text".into(), ValClos::string(rows[i].clone())),
                 ])
             })
             .collect(),
@@ -544,18 +545,18 @@ fn search_tree(
     Ok(results)
 }
 
-fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_grep_files(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     grep(false, args, mooring, shell)
 }
 
-fn builtin_grep_hidden(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_grep_hidden(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     grep(true, args, mooring, shell)
 }
 
 /// `grep-files`/`grep-hidden PATTERN PATH` — [`search_tree`] over `PATH`,
 /// emitting exactly one `grep` surface for the whole walk rather than a card
 /// per file read.
-fn grep(hidden: bool, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn grep(hidden: bool, args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let pattern = args[0].as_str(grep_name(hidden))?;
     let path = args[1].as_str(grep_name(hidden))?;
 
@@ -573,14 +574,14 @@ fn grep(hidden: bool, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
                 reason = "line number bounded by file length; no i64 wrap"
             )]
             let line = hit.line as i64;
-            Value::map(vec![
-                ("file".into(), Value::string(hit.file)),
-                ("line".into(), Value::Int(line)),
-                ("text".into(), Value::string(hit.text)),
+            ValClos::map(vec![
+                ("file".into(), ValClos::string(hit.file)),
+                ("line".into(), ValClos::int(line)),
+                ("text".into(), ValClos::string(hit.text)),
             ])
         })
         .collect();
-    Ok(Value::list(results))
+    Ok(ValClos::list(results))
 }
 
 /// A hash resolved against the file as read: the 0-based line it uniquely named.
@@ -615,7 +616,7 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool) {
 /// The read raises no card; the write goes through [`Shell::atomic_write`] below
 /// the redirect frame, which observes nothing. So `edit-hash` owns its surface
 /// entirely, and speaks it as one whole-file diff card ([`surface_edit`]).
-fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_edit_hash(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let path = args[0].as_str("edit-hash")?;
     let edits = args[1].as_list("edit-hash")?;
     if edits.is_empty() {
@@ -631,31 +632,27 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     // fails here, before anything is written.
     let mut resolved = Vec::with_capacity(edits.len());
     for (index, e) in edits.iter().enumerate() {
-        let e = e.into_owned();
         let at_edit =
             |cause| invalid(InvalidFailure::new("edit-hash".into(), cause).index(index.into()));
-        let m = match e {
-            Value::Map(m) => m,
-            other => {
-                return Err(at_edit(InvalidCause::Shape(ral_core::fact::ShapeFailure {
-                    expected: Expected::Record(vec!["hash".into(), "line".into()]),
-                    found: other.found(),
-                }))
-                .into());
-            }
+        let View::Map(m) = e.view() else {
+            return Err(at_edit(InvalidCause::Shape(ral_core::fact::ShapeFailure {
+                expected: Expected::Record(vec!["hash".into(), "line".into()]),
+                found: e.found(),
+            }))
+            .into());
         };
         let text = |field: &str| {
             let value = m
                 .get(field)
                 .ok_or_else(|| at_edit(InvalidCause::MissingField(field.into())))?;
-            match &*value {
-                Value::String(text) => Ok(text.as_str().to_owned()),
-                other => Err(invalid(
+            match value.view() {
+                View::String(text) => Ok(text.as_str().to_owned()),
+                _ => Err(invalid(
                     InvalidFailure::new(
                         "edit-hash".into(),
                         InvalidCause::Shape(ral_core::fact::ShapeFailure {
                             expected: Expected::Shape(ValueShape::String),
-                            found: other.found(),
+                            found: value.found(),
                         }),
                     )
                     .field(field.into())
@@ -724,7 +721,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         .join(", ");
     note_edit(shell, path, &lines, line_nums.len() > 1);
 
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 /// Surface what an edit changed: the diff of the two texts the builtin
@@ -785,7 +782,11 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<(Eol, St
 /// 0 or >1 matches errors and leaves the file untouched.  Composed over the same
 /// helpers as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
 /// one whole-file diff.
-fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_edit_replace(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let path = args[0].as_str("edit-replace")?;
     let from = args[1].as_str("edit-replace")?;
     let to = args[2].as_str("edit-replace")?;
@@ -813,7 +814,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     };
     note_edit(shell, path, &lines, start_line != end_line);
 
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 /// The 1-based line that byte offset `at` falls on.
@@ -865,23 +866,27 @@ fn unindented_match(body: &str, from: &str) -> Option<usize> {
 }
 
 /// `explore-dir DEPTH PATH` — list PATH's tree (ignore-aware) to `DEPTH`.
-fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let depth: usize = match &args[0] {
-        Value::Int(n) if *n >= 0 => {
+fn builtin_explore_dir(
+    args: &[ValClos],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
+    let depth: usize = match args[0].view() {
+        View::Int(n) if n >= 0 => {
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "guarded n >= 0; exarch is 64-bit so usize == u64"
             )]
-            let depth = *n as usize;
+            let depth = n as usize;
             depth
         }
-        Value::Int(n) => {
+        View::Int(n) => {
             return Err(invalid(
                 InvalidFailure::new(
                     "explore-dir".into(),
                     InvalidCause::Range(NumberRange {
-                        value: Number::Int(*n),
+                        value: Number::Int(n),
                         minimum: Number::Int(0),
                         maximum: Number::Int(i64::MAX),
                     }),
@@ -890,13 +895,13 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
             )
             .into());
         }
-        other => {
+        _ => {
             return Err(invalid(
                 InvalidFailure::new(
                     "explore-dir".into(),
                     InvalidCause::Shape(ral_core::fact::ShapeFailure {
                         expected: Expected::Shape(ValueShape::Int),
-                        found: other.found(),
+                        found: args[0].found(),
                     }),
                 )
                 .field("depth".into()),
@@ -911,10 +916,10 @@ fn builtin_explore_dir(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
     let mut entries = Vec::new();
     while let Some(entry) = walk.next()? {
         if entry.depth > 0 {
-            entries.push(Value::string(walk.name(&entry)?));
+            entries.push(ValClos::string(walk.name(&entry)?));
         }
     }
-    Ok(Value::list(entries))
+    Ok(ValClos::list(entries))
 }
 
 /// `find-files`' cut, a literal so the help text can quote it.
@@ -928,7 +933,7 @@ const FIND_LIMIT: usize = find_limit!();
 /// `find-files QUERY PATH` — the files under PATH, walked as `grep-files`
 /// walks, ranked by path against QUERY.  The grant filters before the ranking
 /// cuts, so a denied match neither takes a slot nor shows in the count.
-fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_find_files(args: &[ValClos], _mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let query = args[0].as_str("find-files")?;
     let path = args[1].as_str("find-files")?;
     let root = walk_root(shell, "find-files", path)?;
@@ -940,7 +945,7 @@ fn builtin_find_files(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
         }
     }
     let best = rank(query, files).into_iter().take(FIND_LIMIT);
-    Ok(Value::list(best.map(Value::string).collect()))
+    Ok(ValClos::list(best.map(ValClos::string).collect()))
 }
 
 /// The grant-checked root of a walk; a missing one is an error, not an empty walk.
@@ -1041,7 +1046,7 @@ fn scheme_skill(_: &mut Binders) -> Ty {
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
 /// added or edited mid-session is found; a built-in answers only where no root
 /// holds the name.
-fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_skill(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let name = args[0].as_str("skill")?;
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(name) {
@@ -1079,12 +1084,12 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
     let body = skill::read_skill_body(&found)?;
     // Only once the body is in hand, so the card never claims a load that did
     // not happen.
-    mooring.surface(&Value::map(vec![
-        ("io".into(), Value::string("skill")),
-        ("name".into(), Value::string(name)),
-        ("dir".into(), Value::string(place.clone())),
+    mooring.surface(&ValClos::map(vec![
+        ("io".into(), ValClos::string("skill")),
+        ("name".into(), ValClos::string(name)),
+        ("dir".into(), ValClos::string(place.clone())),
     ]));
-    Ok(Value::string(format!("// skill root: {place}\n\n{body}")))
+    Ok(ValClos::string(format!("// skill root: {place}\n\n{body}")))
 }
 
 fn scheme_skill_list(_: &mut Binders) -> Ty {
@@ -1095,9 +1100,9 @@ fn scheme_skill_list(_: &mut Binders) -> Ty {
 /// fresh-scanned and filtered by the live grant.
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<Value>` return is the shape the builtin table dispatches through, not a choice of this body."
+    reason = "registered as a `BuiltinBody::Static` fn pointer; the `Settled<ValClos>` return is the shape the builtin table dispatches through, not a choice of this body."
 )]
-fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn builtin_skill_list(_args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let cwd = shell.cwd();
     let config_dir = crate::app::EXARCH.xdg_dir(ral_core::path::XdgKind::Config);
     let (mut entries, mut errors) = (Vec::new(), Vec::new());
@@ -1113,11 +1118,11 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
             )),
         }
     }
-    mooring.surface(&Value::map(vec![
-        ("io".into(), Value::string("skill-list")),
+    mooring.surface(&ValClos::map(vec![
+        ("io".into(), ValClos::string("skill-list")),
         (
             "count".into(),
-            Value::Int(i64::try_from(entries.len()).unwrap_or(i64::MAX)),
+            ValClos::int(i64::try_from(entries.len()).unwrap_or(i64::MAX)),
         ),
     ]));
     let sections: Vec<_> = [entries, errors]
@@ -1125,7 +1130,7 @@ fn builtin_skill_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> 
         .filter(|v| !v.is_empty())
         .map(|v| v.join("\n"))
         .collect();
-    Settled::Ok(Value::string(sections.join("\n\n")))
+    Settled::Ok(ValClos::string(sections.join("\n\n")))
 }
 
 // A named array, not a promoted temporary: rustc refuses promotion once an

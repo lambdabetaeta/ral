@@ -23,6 +23,7 @@ use crate::authority::policy::{ExecDeny, KernelAllow};
 use crate::authority::sandbox::FsProjection;
 #[cfg(unix)]
 use crate::authority::sandbox::{ExecProjection, SandboxProjection};
+use crate::builtin::BuiltinEntry;
 use crate::carrier::{IdentityTransport, ProbeError, Transport};
 use crate::data::FOValue;
 use crate::ir::{CaseArm, Comp, CompKind, Exec, Val};
@@ -31,7 +32,7 @@ use crate::path::Walked;
 use crate::protocol::Frame;
 use crate::protocol::channel::{WireChannel, WireStream};
 use crate::protocol::probe::Probe;
-use crate::shell::runtime::{Binding, BuiltinEntry, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Binding, Mooring, Settled, Shell, ValClos};
 use crate::ty::{Closed, Scheme, Ty, Var};
 use crate::typecheck::Unifier;
 use std::sync::Arc;
@@ -190,7 +191,7 @@ pub fn check_file(shell: &mut Shell, real: &str) -> Settled<()> {
 }
 
 /// Bind a test value without a scheme, bypassing the host binding door.
-pub fn bind_untyped(shell: &mut Shell, name: &str, value: Value) {
+pub fn bind_untyped(shell: &mut Shell, name: &str, value: ValClos) {
     shell.env.bind(
         name.into(),
         Binding {

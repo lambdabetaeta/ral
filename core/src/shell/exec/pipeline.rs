@@ -16,7 +16,7 @@ mod thread;
 
 use crate::ir::{Argv, Comp};
 use crate::process::{GroupOwner, PreparedTerminalLoan, TerminalHold, TerminalInput};
-use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, Value};
+use crate::shell::runtime::{Env, Error, Mooring, Settled, Shell, Signature, ValClos};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
@@ -35,8 +35,8 @@ use route::open_stage_routes;
 /// environment, `close_argv` closes a direct external's argv.
 #[derive(Clone, Copy)]
 pub(crate) struct StageEval {
-    pub(crate) run: fn(Arc<Comp>, Env, &Mooring, &mut Shell) -> Settled<Value>,
-    pub(crate) close_argv: fn(&Argv, &Env, &Signature) -> Result<Vec<Value>, Error>,
+    pub(crate) run: fn(Arc<Comp>, Env, &Mooring, &mut Shell) -> Settled<ValClos>,
+    pub(crate) close_argv: fn(&Argv, &Env, &Signature) -> Result<Vec<ValClos>, Error>,
 }
 
 /// A multi-stage pipeline from its launch to its join, its stages running in
@@ -65,7 +65,7 @@ impl PipeNode {
         eval: StageEval,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         shell.poll()?;
         let launches = resolve_pipeline(stages, env, eval, shell)?;
 
@@ -116,7 +116,7 @@ impl PipeNode {
         launched: Result<(), StartFailure>,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         if launched.is_err() {
             self.collect.roll_back();
         }
@@ -132,7 +132,7 @@ impl PipeNode {
     /// anchor ends before the fold, so every key it heard is on the channel
     /// and struck before the terminal returns; its zombie pins the pgid until
     /// the group drops, after the fold's last kill.
-    fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
         let Self {
             mut collect,
             mut group,

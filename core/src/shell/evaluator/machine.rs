@@ -1,11 +1,4 @@
-//! The machine: a CEK machine for CBPV — closures in focus, frames on a
-//! stack, one `step`.
-//!
-//! [`Machine::eval_rules`] has one match arm per `CompKind`;
-//! [`Machine::step_return`] and [`Machine::step_halt`] are each frame's two
-//! rules, one match arm per [`Frame`]. `step` itself only
-//! dispatches on the shape of [`Focus`]. No arm calls another arm; no arm
-//! loops. Every call pushes one `Arg` frame per argument, then forces.
+//! CBPV closures step; values settle immediately through restoring frames.
 
 use crate::fact::{
     ApplyFailure, ArityFailure, CallOrForce, CaptureLimit, CaseArmFailure, CountRule, DepthFailure,
@@ -13,14 +6,19 @@ use crate::fact::{
     StateFailure, ValueShape, tag,
 };
 use crate::shell::runtime::invalid;
+use either::Either;
+use std::borrow::Cow;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use crate::builtin::BuiltinEntry;
+use crate::handle::brood::{BroodGuard, BroodOwner, Cradle};
 use crate::io::{self, Sink};
 use crate::ir::Name;
 use crate::ir::Redirects;
 use crate::ir::{
-    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, GroupNode, Occ, Pattern, Prim, Val,
-    ValListElem, is_synthetic,
+    Argv, CaseArm, CommandName, CommandWord, Comp, CompKind, Pattern, Prim, Val, ValListElem,
+    is_synthetic,
 };
 use crate::process::Scope;
 use crate::shell::builtins::concurrency::{self, legible_title};
@@ -30,57 +28,51 @@ use crate::shell::exec::redirect::RedirectState;
 use crate::shell::exec::resolve::Resolution;
 use crate::shell::grant::decode_capability_map;
 use crate::shell::runtime::{
-    Binding, Break, BroodGuard, BroodOwner, BuiltinEntry, CapturePolicy, Closure, Cradle,
-    DisplacedSite, Env, Error, Escape, FrameHandle, FrameName, HandlerArity, HandlerFrame,
-    HandlerLookup, Mooring, Settled, Shell, Signature, TrailScope, Value, report_value,
+    Binding, Break, CapturePolicy, DisplacedSite, Env, Error, Escape, FrameHandle, FrameName,
+    HandlerArity, HandlerFrame, HandlerLookup, Mooring, Settled, Shell, Signature, TrailScope,
+    ValClos, View, report_value,
 };
 use crate::source::{Span, Spanned};
 use crate::ty::Site;
 
+use super::assemble::spread_type_err;
 use super::expr;
 use super::pattern;
 use super::scope::{WithinScope, WithinUndo};
-use super::val::{form, spread_type_err};
 
 // ── The stack ─────────────────────────────────────────────────────────
 
-/// What a computation closure settles to, before a frame decides what it
-/// means: a value, or a function awaiting its arguments.
-pub(crate) enum Terminal {
-    Value(Value),
-    /// `λx. M` awaiting an argument, over the environment it was reached in.
-    Lambda {
-        comp: Arc<Comp>,
-        env: Env,
-    },
-    Native {
-        entry: Arc<BuiltinEntry>,
-        args: Arc<[Value]>,
-    },
-}
+/// ⟨M, ρ⟩, or `raise e` as `Err(e)`.
+type State = Settled<(Arc<Comp>, Env)>;
+/// A next computation closure, or a value for the frame below.
+type Next = Either<(Arc<Comp>, Env), ValClos>;
 
-impl Terminal {
-    /// A function that finds no argument returns itself; a λ closes over
-    /// only what it mentions.
-    fn into_value(self) -> Value {
-        match self {
-            Self::Value(v) => v,
-            Self::Native { entry, args } => Value::Native(entry, args),
-            Self::Lambda { comp, env } => {
-                Value::Thunk(Closure::new(Arc::clone(&comp), &Occ::of(&comp), &env))
-            }
-        }
+const VACANT: State = Err(Break::Escape(Escape::Exit(0)));
+
+fn boxed(t: Next) -> ValClos {
+    match t {
+        Either::Left((comp, env)) => ValClos::thunk(comp, &env),
+        Either::Right(v) => v,
     }
 }
 
-/// The machine's one register.
-pub(crate) enum Focus {
-    /// `⟨M, ρ⟩` to step: `ρ` is the whole environment `M` was reached in.
-    Eval { comp: Arc<Comp>, env: Env },
-    /// A terminal meeting the frame above.
-    Return(Terminal),
-    /// A signal climbing the stack.
-    Halt(Break),
+fn force(v: ValClos) -> Result<(Arc<Comp>, Env), Error> {
+    v.into_computation().map_err(|v| {
+        Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
+            ApplyFailure {
+                operation: CallOrForce::Force,
+                found: v.found(),
+            },
+        ))))
+    })
+}
+
+/// A literal block runs in place, without forming a value closure.
+fn force_val(val: &Val, env: Env, sig: &Signature) -> Result<(Arc<Comp>, Env), Error> {
+    match val {
+        Val::Thunk(node) => Ok((Arc::clone(node.shape()), env)),
+        _ => force(ValClos::close(val, &env, sig)?),
+    }
 }
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
@@ -101,7 +93,7 @@ enum Frame {
     },
     /// `□ V`: an argument awaiting a forced function; `span` is its call's.
     Arg {
-        value: Value,
+        value: ValClos,
         span: Option<Span>,
     },
     /// A halt drops `buf`: a capture that does not become its value commits
@@ -116,22 +108,22 @@ enum Frame {
         frame: Box<(FrameHandle, HandlerFrame)>,
     },
     Try {
-        handler: Value,
+        handler: ValClos,
         span: Option<Span>,
     },
     Acquire {
-        body: Value,
-        release: Value,
+        body: ValClos,
+        release: ValClos,
         prev: Scope,
         span: Option<Span>,
     },
     Guard {
-        release: Value,
-        resource: Value,
+        release: ValClos,
+        resource: ValClos,
         span: Option<Span>,
     },
     Cleanup {
-        outcome: Settled<Value>,
+        outcome: Settled<ValClos>,
         /// The current scope before the cleanup's shield, restored on pop
         /// and on abandon.
         prev: Scope,
@@ -154,22 +146,22 @@ enum Frame {
 /// Large frame states are boxed: any alone would exceed the cap.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
 
-/// The state: a focus and a stack. Private — nothing outside this module
-/// constructs one or sees the stack.
-pub(crate) struct Machine {
-    focus: Focus,
+/// The configuration ⟨M, ρ | K⟩ under the run's mooring.
+pub(crate) struct Machine<'m> {
+    state: State,
     stack: Vec<Frame>,
     /// Provenance frames do not consume the computational stack budget.
     call_site_frames: usize,
+    mooring: &'m Mooring,
 }
 
-impl Default for Machine {
-    /// The one placeholder state: a `Unit` return over the empty stack.
-    fn default() -> Self {
+impl<'m> Machine<'m> {
+    fn new(mooring: &'m Mooring) -> Self {
         Self {
-            focus: Focus::Return(Terminal::Value(Value::Unit)),
+            state: VACANT,
             stack: Vec::new(),
             call_site_frames: 0,
+            mooring,
         }
     }
 }
@@ -187,7 +179,11 @@ pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 fn operation_name(comp: &CompKind) -> Option<FrameName> {
     let name = match comp {
-        CompKind::Exec(_) | CompKind::App { .. } | CompKind::Force(_) => return None,
+        CompKind::Exec(_)
+        | CompKind::App { .. }
+        | CompKind::Force(_)
+        | CompKind::Lam { .. }
+        | CompKind::Builtin { .. } => return None,
         CompKind::Prim(Prim::Binary(op, ..)) => op.symbol(),
         &CompKind::BindingCall { hole, .. } => match hole {},
         CompKind::Prim(Prim::Negate(_)) => "-",
@@ -200,7 +196,6 @@ fn operation_name(comp: &CompKind) -> Option<FrameName> {
         CompKind::Prim(Prim::List(_)) => "list",
         CompKind::Prim(Prim::Map(_)) => "map",
         CompKind::Return(_) => "return",
-        CompKind::Lam { .. } => "lambda",
         CompKind::Bind { .. } => "let",
         CompKind::Seq { .. } => "sequence",
         CompKind::Rec { .. } => "rec",
@@ -230,7 +225,7 @@ fn forced_name(value: &Val) -> Option<&Name> {
     }
 }
 
-fn exit_case(outcome: &Settled<Value>, shell: &Shell) -> Value {
+fn exit_case(outcome: &Settled<ValClos>, shell: &Shell) -> ValClos {
     let ending: ExitCase<ErrorFact> = match outcome {
         Ok(_) => ExitCase::Ok,
         Err(Break::Error(error)) => ExitCase::Err(error.fact(shell)),
@@ -238,12 +233,12 @@ fn exit_case(outcome: &Settled<Value>, shell: &Shell) -> Value {
         Err(Break::Escape(Escape::Stopped(stop))) => ExitCase::Stopped(stop.cause),
     };
     let (label, payload) = match ending {
-        ExitCase::Ok => (tag::OK, Value::Unit),
-        ExitCase::Err(fact) => (tag::ERR, Value::failure(fact)),
-        ExitCase::Exited(code) => (tag::EXITED, Value::Int(code.into())),
-        ExitCase::Stopped(cause) => (tag::STOPPED, Value::from_datum(cause)),
+        ExitCase::Ok => (tag::OK, ValClos::UNIT),
+        ExitCase::Err(fact) => (tag::ERR, ValClos::failure(fact)),
+        ExitCase::Exited(code) => (tag::EXITED, ValClos::int(code.into())),
+        ExitCase::Stopped(cause) => (tag::STOPPED, ValClos::from_datum(cause)),
     };
-    Value::variant(label, Some(payload))
+    ValClos::variant(label, Some(payload))
 }
 
 fn capture_overflowed() -> Error {
@@ -256,17 +251,10 @@ fn capture_overflowed() -> Error {
 
 /// `V` meeting an argument: unreachable for a checked program, which applies
 /// only what it has forced; kept a clean error, not a panic.
-fn not_a_function(v: &Value) -> Error {
+fn not_a_function(v: &ValClos) -> Error {
     Error::new(Reason::Invariant(Box::new(
         InvariantFailure::AppliedUnforcedValue(v.shape()),
     )))
-}
-
-fn rec_node(group: &Arc<GroupNode>, index: usize) -> Arc<Comp> {
-    Arc::new(Spanned::synthetic(CompKind::Rec {
-        group: Arc::clone(group),
-        index,
-    }))
 }
 
 /// `body`, at `span` when it has no span of its own.
@@ -281,12 +269,12 @@ fn located(body: &Arc<Comp>, span: Option<Span>) -> Arc<Comp> {
 /// a call that is not is one the checker never saw.
 fn run_boundary(
     entry: &BuiltinEntry,
-    argv: &[Value],
+    argv: &[ValClos],
     site: Option<&Arc<Site>>,
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let arity = entry.decl.fixed_arity();
     if argv.len() != arity {
         let name = &entry.decl.name;
@@ -302,23 +290,18 @@ fn run_boundary(
     super::call::run_native(entry, argv, site, span, mooring, shell)
 }
 
-fn form_args<'a>(
-    args: impl IntoIterator<Item = &'a Val>,
-    env: &Env,
-    sig: &Signature,
-) -> Result<Vec<Value>, Error> {
-    args.into_iter().map(|arg| form(arg, env, sig)).collect()
-}
-
-pub(crate) fn close_argv(argv: &Argv, env: &Env, sig: &Signature) -> Result<Vec<Value>, Error> {
+pub(crate) fn close_argv(argv: &Argv, env: &Env, sig: &Signature) -> Result<Vec<ValClos>, Error> {
     let mut out = Vec::with_capacity(argv.len());
     for elem in argv {
         match elem {
-            ValListElem::Single(v) => out.push(form(&v.item, env, sig)?),
-            ValListElem::Spread(v) => match form(&v.item, env, sig)? {
-                Value::List(list) => out.extend(list.iter().map(std::borrow::Cow::into_owned)),
-                other => return Err(spread_type_err(&other)),
-            },
+            ValListElem::Single(v) => out.push(ValClos::close(&v.item, env, sig)?),
+            ValListElem::Spread(v) => {
+                let value = ValClos::close(&v.item, env, sig)?;
+                match value.view() {
+                    View::List(list) => out.extend(list.iter().map(Cow::into_owned)),
+                    _ => return Err(spread_type_err(&value)),
+                }
+            }
         }
     }
     Ok(out)
@@ -329,13 +312,13 @@ pub(crate) fn close_redirects(
     env: &Env,
     sig: &Signature,
 ) -> Result<Redirects<String>, Error> {
-    redirects.try_map(|v| form(v, env, sig).map(|v| v.to_string()))
+    redirects.try_map(|v| ValClos::close(v, env, sig).map(|v| v.to_string()))
 }
 
 /// A directory or plain file ran as a command.
 /// `e`, offering a path head given no arguments as text: it was most likely
 /// meant as such.
-fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[Value]) -> Error {
+fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[ValClos]) -> Error {
     match head.name() {
         path @ (CommandName::Path(_) | CommandName::TildePath(_)) if argv.is_empty() => e
             .with_hint(format!(
@@ -346,47 +329,26 @@ fn offer_path_as_text(e: Error, head: &CommandWord, argv: &[Value]) -> Error {
     }
 }
 
-fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<Value> {
-    let list = Value::list(
-        Value::render_argv(argv)
+fn render_handler_args(name: &str, arity: HandlerArity, argv: &[ValClos]) -> Vec<ValClos> {
+    let list = ValClos::list(
+        ValClos::render_argv(argv)
             .into_iter()
-            .map(Value::string)
+            .map(ValClos::string)
             .collect(),
     );
     match arity {
-        HandlerArity::CatchAll => vec![Value::string(name), list],
+        HandlerArity::CatchAll => vec![ValClos::string(name), list],
         HandlerArity::Unary => vec![list],
     }
 }
 
 /// Room for frames, handed out only after the stack cap check.
-struct Slot<'a> {
-    machine: &'a mut Machine,
+struct Slot<'a, 'm> {
+    machine: &'a mut Machine<'m>,
     count: usize,
 }
 
-impl Slot<'_> {
-    fn push_args(self, args: Vec<Value>, span: Option<Span>) {
-        self.extend(
-            args.into_iter()
-                .rev()
-                .map(|value| Frame::Arg { value, span }),
-        );
-    }
-
-    /// The one way anything is called: `args` pushed, then `f` forced.
-    fn call(
-        self,
-        f: Value,
-        args: Vec<Value>,
-        span: Option<Span>,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
-        self.push_args(args, span);
-        Machine::force(f, span, mooring, shell)
-    }
-
+impl Slot<'_, '_> {
     fn push(self, frame: Frame) {
         self.extend(std::iter::once(frame));
     }
@@ -399,7 +361,7 @@ impl Slot<'_> {
     }
 }
 
-impl Machine {
+impl<'m> Machine<'m> {
     fn push_frame(&mut self, frame: Frame) {
         let call_site = usize::from(matches!(frame, Frame::CallSite(_)));
         self.stack.push(frame);
@@ -428,11 +390,11 @@ impl Machine {
         Ok(())
     }
 
-    fn reserve(&mut self, shell: &Shell) -> Settled<Slot<'_>> {
+    fn reserve(&mut self, shell: &Shell) -> Settled<Slot<'_, 'm>> {
         self.reserve_n(1, shell)
     }
 
-    fn reserve_n(&mut self, count: usize, shell: &Shell) -> Settled<Slot<'_>> {
+    fn reserve_n(&mut self, count: usize, shell: &Shell) -> Settled<Slot<'_, 'm>> {
         self.room(count, shell)?;
         Ok(Slot {
             machine: self,
@@ -442,30 +404,49 @@ impl Machine {
 
     /// One `Arg` frame per argument, the first on top, where the head's
     /// first λ meets it.
-    fn push_args(&mut self, args: Vec<Value>, span: Option<Span>, shell: &Shell) -> Settled<()> {
-        self.reserve_n(args.len(), shell)?.push_args(args, span);
+    fn push_args(&mut self, args: Vec<ValClos>, span: Option<Span>, shell: &Shell) -> Settled<()> {
+        self.reserve_n(args.len(), shell)?.extend(
+            args.into_iter()
+                .rev()
+                .map(|value| Frame::Arg { value, span }),
+        );
         Ok(())
     }
 
-    /// One transition: `step_eval` on `Eval`, `step_return`/`step_halt` otherwise.
-    fn step(&mut self, mooring: &Mooring, shell: &mut Shell) {
-        let focus = std::mem::replace(&mut self.focus, Self::default().focus);
-        self.focus = match focus {
-            Focus::Eval { comp, env } => self.step_eval(&comp, env, mooring, shell),
-            Focus::Return(t) => {
-                let frame = self.pop_frame().expect(
-                    "Return with an empty stack: evaluate's loop must stop before calling step again",
-                );
-                self.step_return(frame, t, mooring, shell)
+    fn step(&mut self, shell: &mut Shell) -> ControlFlow<Settled<ValClos>> {
+        let next = match std::mem::replace(&mut self.state, VACANT) {
+            Err(b) => match self.pop_frame() {
+                None => return ControlFlow::Break(Err(b)),
+                Some(frame) => self.unwind(frame, b, shell),
+            },
+            Ok((comp, env)) if matches!(comp.item, CompKind::Lam { .. }) => {
+                match self.pop_frame() {
+                    None => return ControlFlow::Break(Ok(boxed(Either::Left((comp, env))))),
+                    Some(frame) => self.resume(frame, Either::Left((comp, env)), shell),
+                }
             }
-            Focus::Halt(brk) => {
-                let frame = self.pop_frame().expect(
-                    "Halt with an empty stack: evaluate's loop must stop before calling step again",
-                );
-                self.step_halt(frame, brk, mooring, shell)
-            }
-        }
-        .unwrap_or_else(Focus::Halt);
+            Ok((comp, env)) => self.eval(&comp, env, shell),
+        };
+        self.settle(next, shell)
+    }
+
+    fn settle(
+        &mut self,
+        mut next: Settled<Next>,
+        shell: &mut Shell,
+    ) -> ControlFlow<Settled<ValClos>> {
+        self.state = loop {
+            let v = match next {
+                Ok(Either::Right(v)) => v,
+                Ok(Either::Left(closure)) => break Ok(closure),
+                Err(b) => break Err(b),
+            };
+            next = match self.pop_frame() {
+                None => return ControlFlow::Break(Ok(v)),
+                Some(frame) => self.resume(frame, Either::Right(v), shell),
+            };
+        };
+        ControlFlow::Continue(())
     }
 
     // ── call, force ────────────────────────────────────────────────────
@@ -480,90 +461,54 @@ impl Machine {
 
     fn call(
         &mut self,
-        f: Value,
-        args: Vec<Value>,
+        f: ValClos,
+        args: Vec<ValClos>,
         span: Option<Span>,
-        mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Focus> {
-        self.reserve_n(args.len(), shell)?
-            .call(f, args, span, mooring, shell)
+    ) -> Settled<Next> {
+        if let View::Builtin(entry) = f.view()
+            && args.len() == entry.decl.fixed_arity()
+        {
+            return Ok(Either::Right(self.run_native(
+                &Arc::clone(entry),
+                &args,
+                span,
+                shell,
+            )?));
+        }
+        self.push_args(args, span, shell)?;
+        Ok(Either::Left(force(f)?))
     }
 
     fn guard_release(
         &mut self,
-        release: Value,
-        resource: Value,
-        outcome: Settled<Value>,
+        release: ValClos,
+        resource: ValClos,
+        outcome: Settled<ValClos>,
         span: Option<Span>,
-        mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Focus> {
+    ) -> Settled<Next> {
+        let mooring = self.mooring;
         let ending = exit_case(&outcome, shell);
         let slot = self.reserve(shell).expect("room reserved at guard entry");
         let prev = shell.shield(mooring.cleanup_grace);
         slot.push(Frame::Cleanup { outcome, prev });
-        self.reserve_n(2, shell)
-            .expect("room reserved at guard entry")
-            .call(release, vec![resource, ending], span, mooring, shell)
+        self.call(release, vec![resource, ending], span, shell)
             .map_err(|b| b.locate("guard", span, shell))
     }
 
     fn run_native(
+        &self,
         entry: &BuiltinEntry,
-        args: &[Value],
+        args: &[ValClos],
         span: Option<Span>,
-        mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Focus> {
+    ) -> Settled<ValClos> {
         let name = FrameName::from(entry.decl.name.clone());
         shell.at_site(name.clone(), span, |shell| {
-            super::call::run_native(entry, args, None, span, mooring, shell)
-                .map(|v| Focus::Return(Terminal::Value(v)))
+            super::call::run_native(entry, args, None, span, self.mooring, shell)
                 .map_err(|b| b.locate(&name, span, shell))
         })
-    }
-
-    /// Force a closed block, or collect a native's remaining arguments.
-    fn force(v: Value, span: Option<Span>, mooring: &Mooring, shell: &mut Shell) -> Settled<Focus> {
-        match v {
-            Value::Thunk(c) => {
-                let (comp, env) = c.into_parts();
-                Ok(Focus::Eval { comp, env })
-            }
-            Value::Native(entry, args) => {
-                if args.len() == entry.decl.fixed_arity() {
-                    Self::run_native(&entry, &args, span, mooring, shell)
-                } else {
-                    Ok(Focus::Return(Terminal::Native { entry, args }))
-                }
-            }
-            other => Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
-                ApplyFailure {
-                    operation: CallOrForce::Force,
-                    found: other.found(),
-                },
-            ))))
-            .into()),
-        }
-    }
-
-    /// `force V` on a value still syntax: `force(thunk M) = M`, a literal block
-    /// running in place and closing nothing.
-    fn force_val(
-        val: &Val,
-        env: Env,
-        span: Option<Span>,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
-        match val {
-            Val::Thunk(node) => Ok(Focus::Eval {
-                comp: Arc::clone(node.shape()),
-                env,
-            }),
-            other => Self::force(form(other, &env, &shell.sig)?, span, mooring, shell),
-        }
     }
 
     /// `push_redirect(redirs)`: nothing when empty, else install and push
@@ -572,9 +517,9 @@ impl Machine {
         &mut self,
         redirs: &Redirects<String>,
         span: Option<Span>,
-        mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<()> {
+        let mooring = self.mooring;
         if redirs.is_empty() {
             return Ok(());
         }
@@ -586,42 +531,39 @@ impl Machine {
 
     // ── Rules on a computation closure in focus ────────────────────────
 
-    fn step_eval(
-        &mut self,
-        comp: &Arc<Comp>,
-        env: Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
+    fn eval(&mut self, comp: &Arc<Comp>, env: Env, shell: &mut Shell) -> Settled<Next> {
         match operation_name(&comp.item) {
             Some(name) => shell.at_site(name.clone(), comp.span, |shell| {
-                self.eval_rules(comp, env, mooring, shell)
+                self.eval_rules(comp, env, shell)
                     .map_err(|b| b.locate(&name, comp.span, shell))
             }),
-            None => self.eval_rules(comp, env, mooring, shell),
+            None => self.eval_rules(comp, env, shell),
         }
     }
 
-    /// Dispatch claims its own refusals; other operations use `step_eval`.
-    fn eval_rules(
-        &mut self,
-        comp: &Arc<Comp>,
-        env: Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
+    /// Dispatch claims its own refusals; other operations use `eval`.
+    fn eval_rules(&mut self, comp: &Arc<Comp>, env: Env, shell: &mut Shell) -> Settled<Next> {
+        let mooring = self.mooring;
         Ok(match &comp.item {
-            CompKind::Return(val) => Focus::Return(Terminal::Value(form(val, &env, &shell.sig)?)),
+            CompKind::Return(val) => Either::Right(ValClos::close(val, &env, &shell.sig)?),
 
-            CompKind::Use(module) => Focus::Return(Terminal::Value(
-                crate::shell::load::run_module(module, mooring, shell)?,
-            )),
+            CompKind::Use(module) => {
+                Either::Right(crate::shell::load::run_module(module, mooring, shell)?)
+            }
 
-            // The frame on top decides: `Arg` applies it; any other frame receives it boxed.
-            CompKind::Lam { .. } => Focus::Return(Terminal::Lambda {
-                comp: Arc::clone(comp),
-                env,
-            }),
+            CompKind::Lam { .. } => unreachable!("`step` meets a λ against the frame below"),
+
+            CompKind::Builtin { builtin, args } => {
+                let value = env.get(builtin).expect("η binds its builtin");
+                let View::Builtin(entry) = value.view() else {
+                    unreachable!("η binds its builtin")
+                };
+                let args = args
+                    .iter()
+                    .map(|name| env.get(name).expect("η's λs bind its arguments").clone())
+                    .collect::<Vec<_>>();
+                Either::Right(self.run_native(entry, &args, comp.span, shell)?)
+            }
 
             CompKind::Rec { group, index } => {
                 shell.poll()?;
@@ -633,36 +575,36 @@ impl Machine {
                     let thunk_comp = if j == *index {
                         Arc::clone(comp)
                     } else {
-                        rec_node(group, j)
+                        Arc::new(Spanned::synthetic(CompKind::Rec {
+                            group: Arc::clone(group),
+                            index: j,
+                        }))
                     };
                     (
                         name.clone(),
                         Binding {
-                            value: Value::Thunk(Closure::captured(thunk_comp, restricted.clone())),
+                            value: ValClos::thunk(thunk_comp, &restricted),
                             scheme: None,
                         },
                     )
                 }));
-                Focus::Eval {
-                    comp: Arc::clone(&group.shape()[*index].1),
-                    env: env2,
-                }
+                Either::Left((Arc::clone(&group.shape()[*index].1), env2))
             }
 
-            CompKind::Tilde(path) => Focus::Return(Terminal::Value(Value::string(
-                path.shown(&shell.context.require_home()?),
-            ))),
+            CompKind::Tilde(path) => {
+                Either::Right(ValClos::string(path.shown(&shell.context.require_home()?)))
+            }
 
             CompKind::Force(val) => {
                 let name = forced_name(val).map_or(FrameName::Static("!"), FrameName::from);
                 self.enter_call(name.clone(), comp.span, shell);
-                Self::force_val(val, env, comp.span, mooring, shell)
+                force_val(val, env, &shell.sig)
+                    .map(Either::Left)
+                    .map_err(Break::from)
                     .map_err(|b| b.locate(&name, comp.span, shell))?
             }
 
-            CompKind::Prim(prim) => {
-                Focus::Return(Terminal::Value(expr::eval_prim(prim, env, shell)?))
-            }
+            CompKind::Prim(prim) => Either::Right(expr::eval_prim(prim, env, shell)?),
 
             CompKind::Bind {
                 comp: rhs,
@@ -675,10 +617,7 @@ impl Machine {
                     bind: Arc::clone(comp),
                     env: env.clone(),
                 });
-                Focus::Eval {
-                    comp: Arc::clone(rhs),
-                    env,
-                }
+                Either::Left((Arc::clone(rhs), env))
             }
 
             CompKind::Seq { first, rest } => {
@@ -687,29 +626,25 @@ impl Machine {
                     rest: Arc::clone(rest),
                     env: env.clone(),
                 });
-                Focus::Eval {
-                    comp: Arc::clone(first),
-                    env,
-                }
+                Either::Left((Arc::clone(first), env))
             }
 
-            CompKind::If { cond, then, else_ } => match form(&cond.item, &env, &shell.sig)? {
-                Value::Bool(b) => Self::force_val(
-                    &if b { then } else { else_ }.item,
-                    env,
-                    comp.span,
-                    mooring,
-                    shell,
-                )?,
-                other => {
-                    return Err(other
+            CompKind::If { cond, then, else_ } => {
+                let condition = ValClos::close(&cond.item, &env, &shell.sig)?;
+                let View::Bool(b) = condition.view() else {
+                    return Err(condition
                         .expected("if", Expected::Shape(ValueShape::Bool))
                         .into());
-                }
-            },
+                };
+                Either::Left(force_val(
+                    &if b { then } else { else_ }.item,
+                    env,
+                    &shell.sig,
+                )?)
+            }
 
             CompKind::Case { scrutinee, arms } => {
-                self.step_case(scrutinee, arms, comp.span, env, mooring, shell)?
+                self.step_case(scrutinee, arms, comp.span, env, shell)?
             }
 
             CompKind::App {
@@ -725,23 +660,23 @@ impl Machine {
                 self.enter_call(name.clone(), comp.span, shell);
                 let call = (|| {
                     shell.poll()?;
-                    let args = form_args(args.iter().map(|arg| &arg.item), &env, &shell.sig)?;
+                    let args = args
+                        .iter()
+                        .map(|arg| ValClos::close(&arg.item, &env, &shell.sig))
+                        .collect::<Result<Vec<_>, _>>()?;
                     self.push_args(args, comp.span, shell)?;
-                    Ok(Focus::Eval {
-                        comp: Arc::clone(head),
-                        env,
-                    })
+                    Ok(Either::Left((Arc::clone(head), env)))
                 })();
                 call.map_err(|b: Break| b.locate(&name, comp.span, shell))?
             }
 
-            CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell)?,
+            CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, shell)?,
 
             &CompKind::BindingCall { hole, .. } => match hole {},
 
-            CompKind::Pipeline { stages } => Focus::Return(Terminal::Value(
-                pipeline::PipeNode::run(stages, &env, STAGE_EVAL, mooring, shell)?,
-            )),
+            CompKind::Pipeline { stages } => Either::Right(pipeline::PipeNode::run(
+                stages, &env, STAGE_EVAL, mooring, shell,
+            )?),
 
             CompKind::Capture(body) => {
                 let slot = self.reserve(shell)?;
@@ -752,50 +687,44 @@ impl Machine {
                     buf,
                     span: comp.span,
                 });
-                Focus::Eval {
-                    comp: Arc::clone(body),
-                    env,
-                }
+                Either::Left((Arc::clone(body), env))
             }
 
             CompKind::Redirect { body, redirects } => {
                 let redirs = close_redirects(redirects, &env, &shell.sig)?;
-                self.push_redirect(&redirs, comp.span, mooring, shell)?;
-                Focus::Eval {
-                    comp: Arc::clone(body),
-                    env,
-                }
+                self.push_redirect(&redirs, comp.span, shell)?;
+                Either::Left((Arc::clone(body), env))
             }
 
             CompKind::Within { opts, body } => {
-                let opts = form(&Val::Record(Arc::clone(opts)), &env, &shell.sig)?;
-                let scope = WithinScope::parse(&opts.as_map("within")?, shell)?;
-                let body = form(body, &env, &shell.sig)?;
+                let opts = ValClos::close(&Val::Record(Arc::clone(opts)), &env, &shell.sig)?;
+                let scope = WithinScope::parse(opts.as_map("within")?, shell)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Within(scope.enter(shell)));
-                Self::force(body, comp.span, mooring, shell)?
+                Either::Left(force(body)?)
             }
 
             CompKind::Grant { caps, body } => {
-                let c = form(&Val::Record(Arc::clone(caps)), &env, &shell.sig)?;
+                let c = ValClos::close(&Val::Record(Arc::clone(caps)), &env, &shell.sig)?;
                 let caps = decode_capability_map(&c, "grant", &shell.freeze_ctx())?;
-                let body = form(body, &env, &shell.sig)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 let at = shell.context.grants.len();
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 slot.push(Frame::Grant(at));
-                Self::force(body, comp.span, mooring, shell)?
+                Either::Left(force(body)?)
             }
 
             CompKind::Try { body, handler } => {
-                let body = form(body, &env, &shell.sig)?;
-                let handler = form(handler, &env, &shell.sig)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
+                let handler = ValClos::close(handler, &env, &shell.sig)?;
                 self.reserve(shell)?.push(Frame::Try {
                     handler,
                     span: comp.span,
                 });
-                Self::force(body, comp.span, mooring, shell)?
+                Either::Left(force(body)?)
             }
 
             CompKind::Guard {
@@ -806,9 +735,9 @@ impl Machine {
                 // Acquire and Guard pop back to this depth; Cleanup and two Args need three slots.
                 self.room(3, shell)?;
                 shell.poll()?;
-                let acquire = form(acquire, &env, &shell.sig)?;
-                let body = form(body, &env, &shell.sig)?;
-                let release = form(release, &env, &shell.sig)?;
+                let acquire = ValClos::close(acquire, &env, &shell.sig)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
+                let release = ValClos::close(release, &env, &shell.sig)?;
                 let slot = self.reserve(shell).expect("room reserved at guard entry");
                 let prev = shell.shield(mooring.cleanup_grace);
                 slot.push(Frame::Acquire {
@@ -817,31 +746,29 @@ impl Machine {
                     prev,
                     span: comp.span,
                 });
-                Self::force(acquire, comp.span, mooring, shell)?
+                Either::Left(force(acquire)?)
             }
 
             CompKind::Audit { body } => {
-                let body = form(body, &env, &shell.sig)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 slot.push(Frame::Audit {
                     scope: shell.local.audit.open(CapturePolicy::Bytes),
                 });
-                Self::force(body, comp.span, mooring, shell)?
+                Either::Left(force(body)?)
             }
 
             CompKind::Spawn { title, body } => {
                 let title = title
                     .as_ref()
-                    .map(|t| legible_title(&form(&t.item, &env, &shell.sig)?, "spawn"))
+                    .map(|t| legible_title(&ValClos::close(&t.item, &env, &shell.sig)?, "spawn"))
                     .transpose()?;
-                let body = form(body, &env, &shell.sig)?;
-                Focus::Return(Terminal::Value(concurrency::spawn_form(
-                    title, &body, mooring, shell,
-                )?))
+                let body = ValClos::close(body, &env, &shell.sig)?;
+                Either::Right(concurrency::spawn_form(title, &body, mooring, shell)?)
             }
 
             CompKind::Gather { body } => {
-                let body = form(body, &env, &shell.sig)?;
+                let body = ValClos::close(body, &env, &shell.sig)?;
                 let slot = self.reserve(shell)?;
                 let owner = BroodGuard::new(BroodOwner::Gather);
                 let prev = std::mem::replace(
@@ -853,7 +780,7 @@ impl Machine {
                     prev,
                     span: comp.span,
                 });
-                Self::force(body, comp.span, mooring, shell)?
+                Either::Left(force(body)?)
             }
         })
     }
@@ -865,18 +792,18 @@ impl Machine {
         arms: &[CaseArm],
         span: Option<Span>,
         env: Env,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
-        let (label, payload) = match form(&scrutinee.item, &env, &shell.sig)? {
-            Value::Variant { label, payload } => (label, payload),
-            other => {
-                return Err(other
-                    .expected("case", Expected::Shape(ValueShape::Variant))
-                    .into());
-            }
+        shell: &Shell,
+    ) -> Settled<Next> {
+        let value = ValClos::close(&scrutinee.item, &env, &shell.sig)?;
+        let View::Variant { label, payload } = value.view() else {
+            return Err(value
+                .expected("case", Expected::Shape(ValueShape::Variant))
+                .into());
         };
-        let Some(arm) = arms.iter().find(|arm| arm.tag.item == *label) else {
+        let Some(arm) = arms
+            .iter()
+            .find(|arm| arm.tag.item.as_str() == label.as_ref())
+        else {
             let handled: Vec<String> = arms.iter().map(|a| a.tag.item.clone()).collect();
             return Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::CaseArm(
                 CaseArmFailure {
@@ -886,9 +813,9 @@ impl Machine {
             ))))
             .into());
         };
-        let payload = payload.map_or(Value::Unit, |p| *p);
+        let payload = payload.map_or(ValClos::UNIT, Cow::into_owned);
         self.push_args(vec![payload], span, shell)?;
-        Self::force_val(&arm.body.item, env, span, mooring, shell)
+        Ok(Either::Left(force_val(&arm.body.item, env, &shell.sig)?))
     }
 
     fn step_exec(
@@ -896,12 +823,11 @@ impl Machine {
         exec: &crate::ir::Exec,
         span: Option<Span>,
         env: &Env,
-        mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Focus> {
+    ) -> Settled<Next> {
         let name = FrameName::from(exec.head.name().written().into_owned());
         self.enter_call(name.clone(), span, shell);
-        self.dispatch_exec(exec, span, env, mooring, shell)
+        self.dispatch_exec(exec, span, env, shell)
             .map_err(|b| b.locate(&name, span, shell))
     }
 
@@ -910,46 +836,37 @@ impl Machine {
         exec: &crate::ir::Exec,
         span: Option<Span>,
         env: &Env,
-        mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Focus> {
+    ) -> Settled<Next> {
+        let mooring = self.mooring;
         shell.poll()?;
         let argv = close_argv(&exec.argv, env, &shell.sig)?;
         let redirs = close_redirects(&exec.redirects, env, &shell.sig)?;
         match Resolution::of(&exec.head, env, shell) {
-            Resolution::Env(Value::Native(entry, _)) if entry.decl.is_boundary() => {
-                self.push_redirect(&redirs, span, mooring, shell)?;
-                let v = run_boundary(&entry, &argv, exec.site.as_ref(), span, mooring, shell)?;
-                Ok(Focus::Return(Terminal::Value(v)))
-            }
-            // Agda's `prim` rule: a builtin given its arity runs on its argv.
-            Resolution::Env(Value::Native(entry, held))
-                if held.len() + argv.len() == entry.decl.fixed_arity() =>
-            {
-                self.push_redirect(&redirs, span, mooring, shell)?;
-                let mut args = held.to_vec();
-                args.extend(argv);
-                Self::run_native(&entry, &args, span, mooring, shell)
-            }
             Resolution::Env(v) => {
-                self.push_redirect(&redirs, span, mooring, shell)?;
-                self.call(v, argv, span, mooring, shell)
+                self.push_redirect(&redirs, span, shell)?;
+                match v.view() {
+                    View::Builtin(entry) if entry.decl.is_boundary() => Ok(Either::Right(
+                        run_boundary(entry, &argv, exec.site.as_ref(), span, mooring, shell)?,
+                    )),
+                    _ => self.call(v, argv, span, shell),
+                }
             }
             Resolution::Handler(HandlerLookup::Frame(entry, depth)) => {
-                self.push_redirect(&redirs, span, mooring, shell)?;
+                self.push_redirect(&redirs, span, shell)?;
                 let slot = self.reserve(shell)?;
                 let frame = Box::new(shell.context.handlers.strip_matched(depth));
                 slot.push(Frame::Unmask { frame });
                 let args = render_handler_args(&entry.name, entry.arity, &argv);
-                self.call(entry.thunk.clone(), args, span, mooring, shell)
+                self.call(entry.thunk.clone(), args, span, shell)
             }
             Resolution::Handler(HandlerLookup::Base(entry)) => {
-                self.push_redirect(&redirs, span, mooring, shell)?;
+                self.push_redirect(&redirs, span, shell)?;
                 // Unlike a handler arm's, a native body's argv is not rendered.
                 let v = entry.framed(span, shell, |shell, frame| {
                     entry.call_body(frame, &argv, None, mooring, shell)
                 })?;
-                Ok(Focus::Return(Terminal::Value(v)))
+                Ok(Either::Right(v))
             }
             Resolution::External(command) => {
                 let offer = |e| offer_path_as_text(e, &exec.head, &argv);
@@ -963,48 +880,40 @@ impl Machine {
                     .map_err(|b| b.map_error(offer))?
                     .map_lookup_error(|e| if names_no_program { offer(e) } else { e });
                 let v = command.run(&argv, &redirs, span, mooring, shell)?;
-                Ok(Focus::Return(Terminal::Value(v)))
+                Ok(Either::Right(v))
             }
         }
     }
 
     // ── Frames, and their two rules each ───────────────────────────────
 
-    fn step_return(
-        &mut self,
-        frame: Frame,
-        t: Terminal,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
+    fn resume(&mut self, frame: Frame, t: Next, shell: &mut Shell) -> Settled<Next> {
+        let mooring = self.mooring;
         match frame {
             Frame::CallSite(prev) => {
                 shell.local.audit.restore_site(*prev);
-                Ok(Focus::Return(t))
+                Ok(t)
             }
             Frame::To { bind, env } => {
-                let v = t.into_value();
+                let v = boxed(t);
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
                 let env = pattern::bind(pattern, &v, env)
                     .map_err(|b| b.locate("let", bind.span, shell))?;
-                Ok(Focus::Eval {
-                    comp: Arc::clone(rest),
-                    env,
-                })
+                Ok(Either::Left((Arc::clone(rest), env)))
             }
 
             Frame::Seq { rest, env } => {
-                t.into_value();
-                Ok(Focus::Eval { comp: rest, env })
+                drop(t);
+                Ok(Either::Left((rest, env)))
             }
 
             // β: `⟨λx. M, ρ⟩` meeting `Arg(V)` is `⟨M, ρ[x ↦ V]⟩`.
             Frame::Arg { value, span } => match t {
-                Terminal::Lambda { comp, mut env } => {
+                Either::Left((comp, mut env)) => {
                     let CompKind::Lam { param, body } = &comp.item else {
-                        unreachable!("a Terminal::Lambda is built only from a Lam node")
+                        unreachable!("a λ is the only closure that meets a frame")
                     };
                     shell.poll().map_err(|b| b.locate("apply", span, shell))?;
                     env.bind(
@@ -1014,25 +923,9 @@ impl Machine {
                             scheme: None,
                         },
                     );
-                    Ok(Focus::Eval {
-                        comp: located(body, span),
-                        env,
-                    })
+                    Ok(Either::Left((located(body, span), env)))
                 }
-                Terminal::Native { entry, args } => {
-                    shell.poll().map_err(|b| b.locate("apply", span, shell))?;
-                    let mut args = args.to_vec();
-                    args.push(value);
-                    if args.len() == entry.decl.fixed_arity() {
-                        Self::run_native(&entry, &args, span, mooring, shell)
-                    } else {
-                        Ok(Focus::Return(Terminal::Native {
-                            entry,
-                            args: args.into(),
-                        }))
-                    }
-                }
-                Terminal::Value(v) => {
+                Either::Right(v) => {
                     Err(Break::from(not_a_function(&v)).locate("apply", span, shell))
                 }
             },
@@ -1041,7 +934,7 @@ impl Machine {
                 shell.io.stdout = prev;
                 let retained = buf.take();
                 if retained.is_whole() {
-                    Ok(Focus::Return(Terminal::Value(Value::bytes(retained.bytes))))
+                    Ok(Either::Right(ValClos::bytes(retained.bytes)))
                 } else {
                     Err(Break::from(capture_overflowed()).locate("capture", span, shell))
                 }
@@ -1049,10 +942,10 @@ impl Machine {
 
             Frame::Redirect(state) => {
                 state.commit(mooring, shell)?;
-                Ok(Focus::Return(t))
+                Ok(t)
             }
 
-            Frame::Try { .. } => Ok(Focus::Return(t)),
+            Frame::Try { .. } => Ok(t),
 
             Frame::Acquire {
                 body,
@@ -1061,7 +954,7 @@ impl Machine {
                 span,
             } => {
                 shell.scope = prev;
-                let resource = t.into_value();
+                let resource = boxed(t);
                 self.reserve(shell)
                     .expect("room reserved at guard entry")
                     .push(Frame::Guard {
@@ -1069,9 +962,7 @@ impl Machine {
                         resource: resource.clone(),
                         span,
                     });
-                self.reserve_n(1, shell)
-                    .expect("room reserved at guard entry")
-                    .call(body, vec![resource], span, mooring, shell)
+                self.call(body, vec![resource], span, shell)
                     .map_err(|b| b.locate("guard", span, shell))
             }
 
@@ -1080,47 +971,37 @@ impl Machine {
                 resource,
                 span,
             } => {
-                let outcome = Ok(t.into_value());
-                self.guard_release(release, resource, outcome, span, mooring, shell)
+                let outcome = Ok(boxed(t));
+                self.guard_release(release, resource, outcome, span, shell)
             }
 
             Frame::Cleanup { outcome, prev } => {
                 shell.scope = prev;
-                outcome.map(|v| Focus::Return(Terminal::Value(v)))
+                outcome.map(Either::Right)
             }
 
             undo @ (Frame::Unmask { .. } | Frame::Within(_) | Frame::Grant(_)) => {
                 undo.abandon(shell);
-                Ok(Focus::Return(t))
+                Ok(t)
             }
 
             Frame::Audit { scope } => {
                 let trail = shell.local.audit.close(scope);
-                let v = t.into_value();
-                Ok(Focus::Return(Terminal::Value(report_value(Ok(v), trail))))
+                let v = boxed(t);
+                Ok(Either::Right(report_value(Ok(v), trail)))
             }
 
             Frame::Gather { owner, prev, span } => {
                 shell.local.cradle = prev;
-                let v = concurrency::exit_brood(
-                    &owner,
-                    Ok(t.into_value()),
-                    mooring.cleanup_grace,
-                    shell,
-                )
-                .map_err(|b| b.locate("gather", span, shell))?;
-                Ok(Focus::Return(Terminal::Value(v)))
+                let v = concurrency::exit_brood(&owner, Ok(boxed(t)), mooring.cleanup_grace, shell)
+                    .map_err(|b| b.locate("gather", span, shell))?;
+                Ok(Either::Right(v))
             }
         }
     }
 
-    fn step_halt(
-        &mut self,
-        frame: Frame,
-        s: Break,
-        mooring: &Mooring,
-        shell: &mut Shell,
-    ) -> Settled<Focus> {
+    fn unwind(&mut self, frame: Frame, s: Break, shell: &mut Shell) -> Settled<Next> {
+        let mooring = self.mooring;
         match frame {
             Frame::CallSite(prev) => {
                 let at = shell.local.audit.call_site();
@@ -1175,8 +1056,8 @@ impl Machine {
 
             Frame::Try { handler, span } => match s {
                 Break::Error(e) => {
-                    let record = Value::failure(e.fact(shell));
-                    self.call(handler, vec![record], span, mooring, shell)
+                    let record = ValClos::failure(e.fact(shell));
+                    self.call(handler, vec![record], span, shell)
                         .map_err(|b| b.locate("try", span, shell))
                 }
                 escape @ Break::Escape(_) => Err(escape),
@@ -1186,16 +1067,13 @@ impl Machine {
                 release,
                 resource,
                 span,
-            } => self.guard_release(release, resource, Err(s), span, mooring, shell),
+            } => self.guard_release(release, resource, Err(s), span, shell),
 
             Frame::Audit { scope, .. } => match s {
                 Break::Error(e) => {
                     let trail = shell.local.audit.close(scope);
                     let record = e.fact(shell);
-                    Ok(Focus::Return(Terminal::Value(report_value(
-                        Err(record),
-                        trail,
-                    ))))
+                    Ok(Either::Right(report_value(Err(record), trail)))
                 }
                 escape @ Break::Escape(_) => {
                     drop(shell.local.audit.close(scope));
@@ -1243,27 +1121,14 @@ impl Frame {
 
 // ── Boundaries ───────────────────────────────────────────────────────────
 
-/// A run returns its terminal as a value, boxing a function that found no argument.
-fn end_of_run(focus: Focus) -> Settled<Value> {
-    match focus {
-        Focus::Return(t) => Ok(t.into_value()),
-        Focus::Halt(s) => Err(s),
-        Focus::Eval { .. } => {
-            unreachable!(
-                "the loop only stops when the stack is empty and focus is a terminal or a halt"
-            )
-        }
-    }
-}
-
 /// The nested-machine depth guard around `seed`, then `step` until the stack
 /// is empty: `Ok` on a value, `Err` on a halt. `catch_unwind` around the
 /// loop; on panic, `abandon` walks every frame top-down before resuming.
 fn run(
-    seed: impl FnOnce(&mut Machine, &Mooring, &mut Shell),
+    seed: impl FnOnce(&mut Machine<'_>, &mut Shell) -> Settled<Next>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     if shell.local.machine_depth >= NESTED_MACHINE_LIMIT {
         return Err(
             Error::new(Reason::State(Box::new(StateFailure::Depth(DepthFailure {
@@ -1274,16 +1139,20 @@ fn run(
         );
     }
     shell.local.machine_depth += 1;
-    let mut m = Machine::default();
+    let mut m = Machine::new(mooring);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        seed(&mut m, mooring, shell);
-        while !(m.stack.is_empty() && matches!(m.focus, Focus::Return(_) | Focus::Halt(_))) {
-            m.step(mooring, shell);
+        let next = seed(&mut m, shell);
+        let mut flow = m.settle(next, shell);
+        loop {
+            match flow {
+                ControlFlow::Break(answer) => break answer,
+                ControlFlow::Continue(()) => flow = m.step(shell),
+            }
         }
     }));
     shell.local.machine_depth -= 1;
     match result {
-        Ok(()) => end_of_run(m.focus),
+        Ok(answer) => answer,
         Err(payload) => {
             while let Some(frame) = m.pop_frame() {
                 frame.abandon(shell);
@@ -1306,31 +1175,18 @@ pub(crate) fn evaluate(
     env: Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
-    run(
-        |m, _, _| m.focus = Focus::Eval { comp, env },
-        mooring,
-        shell,
-    )
+) -> Settled<ValClos> {
+    run(|_, _| Ok(Either::Left((comp, env))), mooring, shell)
 }
 
-/// The same, from a closed value meeting arguments: [`Slot::call`] sets
-/// the first state, so a value meeting none is forced.
+/// Enter a closed value with arguments; a value meeting none is forced.
 pub(crate) fn apply(
-    f: Value,
-    args: Vec<Value>,
+    f: ValClos,
+    args: Vec<ValClos>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
-    run(
-        |m, mooring, shell| {
-            m.focus = m
-                .call(f, args, None, mooring, shell)
-                .unwrap_or_else(Focus::Halt);
-        },
-        mooring,
-        shell,
-    )
+) -> Settled<ValClos> {
+    run(|m, shell| m.call(f, args, None, shell), mooring, shell)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1340,7 +1196,7 @@ pub(crate) fn apply(
 mod tests {
     use super::*;
     use crate::io::Retained;
-    use crate::ir::{Name, Phrase};
+    use crate::ir::{GroupNode, Name, Occ, Phrase};
     use crate::shell::evaluator::{run_source, with_capture};
     use crate::shell::runtime::{Break, Escape, Stop, captured};
 
@@ -1348,7 +1204,7 @@ mod tests {
     /// into the running `Env` with `pattern::bind`, a `Run` phrase's
     /// value is the previous one, mirroring `run_phrases`'s shape without
     /// its lease machinery, irrelevant to what these tests probe.
-    fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
         let file =
             shell.install_script_context(&crate::source::SourceOrigin::named("<machine>"), source);
         let top = crate::compile::compile_and_typecheck(
@@ -1361,7 +1217,7 @@ mod tests {
         )
         .expect("compile");
         let mut env = shell.env.clone();
-        let mut value = Ok(Value::Unit);
+        let mut value = Ok(ValClos::UNIT);
         for phrase in &top.phrases {
             match &phrase.item {
                 Phrase::Run(comp) => {
@@ -1371,7 +1227,7 @@ mod tests {
                 Phrase::Define { pattern, comp, .. } => {
                     let v = evaluate(comp.clone(), env.clone(), mooring, shell)?;
                     env = pattern::bind(pattern, &v, env)?;
-                    value = Ok(Value::Unit);
+                    value = Ok(ValClos::UNIT);
                 }
             }
         }
@@ -1482,7 +1338,7 @@ mod tests {
             &mut shell,
         );
         assert!(
-            matches!(out, Ok(Value::Int(0))),
+            matches!(out.as_ref().map(ValClos::view), Ok(View::Int(0))),
             "the block's `inner` must not outlive it, got {out:?}"
         );
     }
@@ -1494,7 +1350,9 @@ mod tests {
         let (result, Retained { bytes, .. }) = with_capture(&mut shell, |shell| {
             run_source("let x = !{ echo a; echo b }\nreturn $x", shell)
         });
-        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "a\nb"));
+        assert!(
+            matches!(result.as_ref().map(ValClos::view), Ok(View::String(s)) if s.as_str() == "a\nb")
+        );
         assert!(bytes.is_empty(), "nothing escaped the capture");
     }
 
@@ -1510,7 +1368,9 @@ mod tests {
                 shell,
             )
         });
-        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "note\nbody"));
+        assert!(
+            matches!(result.as_ref().map(ValClos::view), Ok(View::String(s)) if s.as_str() == "note\nbody")
+        );
         assert!(bytes.is_empty(), "nothing escaped the capture");
     }
 
@@ -1543,7 +1403,9 @@ mod tests {
                 shell,
             )
         });
-        assert!(matches!(result, Ok(Value::String(ref s)) if s.as_str() == "handled"));
+        assert!(
+            matches!(result.as_ref().map(ValClos::view), Ok(View::String(s)) if s.as_str() == "handled")
+        );
         assert!(bytes.is_empty(), "the failed capture wrote {bytes:?}");
     }
 
@@ -1672,18 +1534,6 @@ mod tests {
         }
     }
 
-    /// Running `f 1` returns the block awaiting its second argument.
-    #[test]
-    fn a_partial_application_returns_itself() {
-        let mut shell = new_shell();
-        let out = run_source(
-            "let f = { |a b| return $[$a + $b] }\nlet g = f 1\ng 2",
-            &mut shell,
-        )
-        .expect("curried call must succeed");
-        assert!(matches!(out, Value::Int(3)), "expected 3, got {out:?}");
-    }
-
     #[test]
     fn function_typed_right_hand_sides_run_once_in_order() {
         for (source, expected) in [
@@ -1719,17 +1569,14 @@ mod tests {
         let mut shell = new_shell();
         let f = run_source("{ |a b| return $[$a + $b] }", &mut shell).expect("closure");
         let mooring = Mooring::adrift();
-        let partial = apply(f, vec![Value::Int(1)], &mooring, &mut shell).expect("partial");
-        let Value::Thunk(closure) = &partial else {
+        let partial = apply(f, vec![ValClos::int(1)], &mooring, &mut shell).expect("partial");
+        let View::Thunk { comp, env } = partial.view() else {
             panic!("expected a residual closure, got {partial:?}")
         };
-        assert_eq!(
-            closure.comp().lam().map(|(param, _)| param.as_ref()),
-            Some("b")
-        );
-        assert_eq!(closure.env().get("a"), Some(&Value::Int(1)));
-        let out = apply(partial, vec![Value::Int(2)], &mooring, &mut shell).expect("sum");
-        assert_eq!(out, Value::Int(3));
+        assert_eq!(comp.lam().map(|(param, _)| param.as_ref()), Some("b"));
+        assert_eq!(env.get("a"), Some(&ValClos::int(1)));
+        let out = apply(partial, vec![ValClos::int(2)], &mooring, &mut shell).expect("sum");
+        assert_eq!(out, ValClos::int(3));
     }
 
     #[test]
@@ -1740,47 +1587,52 @@ mod tests {
             &mut shell,
         )
         .expect("saturated map");
-        assert_eq!(out, Value::list(vec![Value::Int(2), Value::Int(3)]));
+        assert_eq!(out, ValClos::list(vec![ValClos::int(2), ValClos::int(3)]));
     }
 
     #[test]
     fn forcing_an_arity_zero_native_runs_its_body() {
         let mut shell = new_shell();
         let entry = shell.lookup_builtin("reset").expect("reset builtin");
-        let reset = Value::Native(entry.into(), [].into());
+        let reset = ValClos::builtin(entry.into());
         let (out, retained) = with_capture(&mut shell, |shell| {
             apply(reset, vec![], &Mooring::adrift(), shell)
         });
-        assert_eq!(out.expect("forced reset"), Value::Unit);
+        assert_eq!(out.expect("forced reset"), ValClos::UNIT);
         assert!(retained.is_whole());
         assert_eq!(retained.bytes, b"\x1bc");
     }
 
     #[test]
-    fn apply_returns_a_native_holding_its_supplied_arguments() {
+    fn apply_returns_the_eta_residual_over_its_supplied_arguments() {
         let mut shell = new_shell();
-        let f = run_source("{ |x| return $[$x + 1] }", &mut shell).expect("callback");
-        let entry = shell.lookup_builtin("map").expect("map builtin");
-        let map = Value::Native(entry.into(), [].into());
+        let entry = shell.lookup_builtin("has").expect("has builtin");
+        let has = ValClos::builtin(entry.into());
+        assert_eq!(has.to_string(), "<native has>");
         let mooring = Mooring::adrift();
-        let partial = apply(map, vec![f.clone()], &mooring, &mut shell).expect("partial map");
-        let Value::Native(entry, args) = &partial else {
-            panic!("expected a partial native, got {partial:?}")
-        };
-        assert_eq!(entry.decl.name.as_ref(), "map");
-        let (Value::Thunk(expected), [Value::Thunk(held)]) = (&f, args.as_ref()) else {
-            panic!("expected one held callback, got {args:?}")
-        };
-        assert!(Arc::ptr_eq(held.comp(), expected.comp()));
-        assert!(held.env().ptr_eq(expected.env()));
+        let record = ValClos::map(vec![("present".into(), ValClos::int(7))]);
+        let partial = apply(has, vec![record], &mooring, &mut shell).expect("partial has");
+        assert_eq!(partial.to_string(), "<native has, 1 of 2 arguments>");
+        assert_eq!(partial.type_name(), "Lambda");
         let out = apply(
             partial,
-            vec![Value::list(vec![Value::Int(1), Value::Int(2)])],
+            vec![ValClos::string("present")],
             &mooring,
             &mut shell,
         )
-        .expect("saturated map");
-        assert_eq!(out, Value::list(vec![Value::Int(2), Value::Int(3)]));
+        .expect("saturated has");
+        assert_eq!(out, ValClos::bool(true));
+    }
+
+    #[test]
+    fn an_under_applied_builtin_in_a_body_takes_the_callers_next_argument() {
+        let mut shell = new_shell();
+        let out = run_source(
+            "let m = { |f| map $f }; m { |x| return $[$x + 1] } [1, 2]",
+            &mut shell,
+        )
+        .expect("the residual lambda crosses the body's call site");
+        assert_eq!(out, ValClos::list(vec![ValClos::int(2), ValClos::int(3)]));
     }
 
     #[test]
@@ -1788,7 +1640,7 @@ mod tests {
         let mut shell = new_shell();
         let f = run_source("{ |x| return $x }", &mut shell).expect("callback");
         let entry = shell.lookup_builtin("map").expect("map builtin");
-        let map = Value::Native(entry.into(), [].into());
+        let map = ValClos::builtin(entry.into());
         let mooring = Mooring::adrift();
         let partial = apply(map, vec![f], &mooring, &mut shell).expect("partial map");
         crate::test_access::bind_untyped(&mut shell, "held", partial);
@@ -1826,13 +1678,13 @@ mod tests {
             "payload".repeat(4096),
         );
         let out = run_source(&source, &mut shell).expect("partial boundary");
-        let Value::Thunk(closure) = out else {
+        let View::Thunk { comp, env } = out.view() else {
             panic!("expected a boxed boundary lambda, got {out:?}")
         };
-        assert!(matches!(closure.comp().item, CompKind::Lam { .. }));
-        assert!(closure.env().binding("big").is_none());
-        let occ = Occ::of(closure.comp());
-        assert!(closure.env().iter().all(|(name, _)| occ.contains(name)));
+        assert!(matches!(comp.item, CompKind::Lam { .. }));
+        assert!(env.binding("big").is_none());
+        let occ = Occ::of(comp);
+        assert!(env.iter().all(|(name, _)| occ.contains(name)));
     }
 
     /// `apply` — the boundary natives reach `machine::apply` through —
@@ -1842,9 +1694,14 @@ mod tests {
         let mut shell = new_shell();
         let f = run_source("{ |a b| return $[$a + $b] }", &mut shell).expect("closure must close");
         let mooring = Mooring::adrift();
-        let out = apply(f, vec![Value::Int(1), Value::Int(2)], &mooring, &mut shell)
-            .expect("apply must succeed");
-        assert!(matches!(out, Value::Int(3)), "expected 3, got {out:?}");
+        let out = apply(
+            f,
+            vec![ValClos::int(1), ValClos::int(2)],
+            &mooring,
+            &mut shell,
+        )
+        .expect("apply must succeed");
+        assert_eq!(out, ValClos::int(3));
     }
 
     /// The `Rec` rule reuses ρ|occ(g): forcing a sibling from one unfold and
@@ -1856,7 +1713,7 @@ mod tests {
     fn a_recursive_call_reuses_its_node_and_its_environment() {
         let mut shell = new_shell();
         let mooring = Mooring::adrift();
-        crate::test_access::bind_untyped(&mut shell, "k", Value::Int(1));
+        crate::test_access::bind_untyped(&mut shell, "k", ValClos::int(1));
 
         // `even`/`odd`, both closing over the session `k`: occ(g) = {k}.
         let even_body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
@@ -1874,29 +1731,26 @@ mod tests {
             index: 0,
         }));
 
-        let mut machine = Machine::default();
-        let Focus::Eval { env: env1, .. } = machine
-            .eval_rules(&rec_even, shell.env.clone(), &mooring, &mut shell)
-            .expect("first unfold")
-        else {
-            panic!("expected an Eval focus");
-        };
-        let Value::Thunk(odd1) = env1.get("odd").cloned().expect("odd bound") else {
-            panic!("odd must be a thunk");
-        };
-        let forced_env = odd1.env().clone();
-
-        let Focus::Eval { env: env2, .. } = machine
-            .eval_rules(odd1.comp(), forced_env.clone(), &mooring, &mut shell)
-            .expect("second unfold")
-        else {
-            panic!("expected an Eval focus");
-        };
-        let Value::Thunk(even2) = env2.get("even").cloned().expect("even bound") else {
-            panic!("even must be a thunk");
-        };
+        let mut machine = Machine::new(&mooring);
         assert!(
-            even2.env().ptr_eq(&forced_env),
+            machine
+                .settle(Ok(Either::Left((rec_even, shell.env.clone()))), &mut shell)
+                .is_continue()
+        );
+        assert!(machine.step(&mut shell).is_continue());
+        let (_, env1) = machine.state.as_ref().expect("first unfold");
+        let odd1 = env1.get("odd").cloned().expect("odd bound");
+        let (odd_comp, forced_env) = force(odd1).expect("odd must be a thunk");
+        assert!(
+            machine
+                .settle(Ok(Either::Left((odd_comp, forced_env.clone()))), &mut shell)
+                .is_continue()
+        );
+        assert!(machine.step(&mut shell).is_continue());
+        let (_, env2) = machine.state.as_ref().expect("second unfold");
+        let even2 = env2.get("even").expect("even bound");
+        assert!(
+            even2.env().expect("even is a thunk").ptr_eq(&forced_env),
             "a later unfold's siblings hold the environment that forced it, unchanged"
         );
 
@@ -1907,17 +1761,22 @@ mod tests {
             group: Arc::clone(&solo),
             index: 0,
         }));
-        let Focus::Eval { env: solo_env, .. } = machine
-            .eval_rules(&rec_solo, shell.env.clone(), &mooring, &mut shell)
-            .expect("solo unfold")
-        else {
-            panic!("expected an Eval focus");
-        };
-        let Value::Thunk(solo_closure) = solo_env.get("f").cloned().expect("f bound") else {
+        assert!(
+            machine
+                .settle(
+                    Ok(Either::Left((Arc::clone(&rec_solo), shell.env.clone()))),
+                    &mut shell
+                )
+                .is_continue()
+        );
+        assert!(machine.step(&mut shell).is_continue());
+        let (_, solo_env) = machine.state.as_ref().expect("solo unfold");
+        let solo_closure = solo_env.get("f").expect("f bound");
+        let View::Thunk { comp, .. } = solo_closure.view() else {
             panic!("f must be a thunk");
         };
         assert!(
-            Arc::ptr_eq(solo_closure.comp(), &rec_solo),
+            Arc::ptr_eq(comp, &rec_solo),
             "a group of one's own member is the node already in focus"
         );
     }
@@ -1933,20 +1792,20 @@ mod tests {
             &mut shell,
         )
         .expect("a literal record must form");
-        let Value::Map(record) = &out else {
+        let View::Map(record) = out.view() else {
             panic!("expected a record, got {out:?}")
         };
         assert!(
-            record.literal_env().is_some(),
+            out.env().is_some(),
             "a literal forms as a value closure, not built data"
         );
 
-        let expected = Value::map(vec![
+        let expected = ValClos::map(vec![
             (
                 "b".to_string(),
-                Value::list(vec![Value::Int(1), Value::Int(2)]),
+                ValClos::list(vec![ValClos::int(1), ValClos::int(2)]),
             ),
-            ("a".to_string(), Value::Int(1)),
+            ("a".to_string(), ValClos::int(1)),
         ]);
         assert_eq!(out, expected, "a literal reads the same as the built value");
         assert_eq!(
@@ -1958,21 +1817,21 @@ mod tests {
             "a literal record iterates in a built map's order"
         );
 
-        let Value::List(inner) = record.get("b").expect("a list field").into_owned() else {
-            panic!("expected a list")
-        };
+        let inner = record.get("b").expect("a list field").into_owned();
+        assert!(matches!(inner.view(), View::List(_)), "expected a list");
         assert!(
-            inner.literal_env().is_some(),
+            inner.env().is_some(),
             "a nested list literal also forms as a value closure"
         );
 
         let out = run_source("let l = [1, 2]\nreturn $l", &mut shell)
             .expect("a literal naming nothing must still form");
-        let Value::List(list) = &out else {
-            panic!("expected a list, got {out:?}")
-        };
-        let env = list
-            .literal_env()
+        assert!(
+            matches!(out.view(), View::List(_)),
+            "expected a list, got {out:?}"
+        );
+        let env = out
+            .env()
             .expect("a literal naming nothing is still a literal");
         assert!(
             env.ptr_eq(&Env::new()),
@@ -2023,7 +1882,7 @@ mod tests {
         )
         .expect("mutual recursion must terminate");
         assert!(
-            matches!(out, Value::Bool(true)),
+            matches!(out.view(), View::Bool(true)),
             "expected true, got {out:?}"
         );
         for name in ["even", "odd"] {
@@ -2041,12 +1900,13 @@ mod tests {
             .install_script_context(&crate::source::SourceOrigin::named("<accounting>"), "f g");
         let span = Some(Span::new(file, 0, 1));
         let before = shell.local.audit.call_site().clone();
-        let mut machine = Machine::default();
+        let mooring = Mooring::adrift();
+        let mut machine = Machine::new(&mooring);
         machine.enter_call("f", span, &mut shell);
         machine.enter_call("g", span, &mut shell);
         assert_eq!((machine.stack.len(), machine.call_site_frames), (1, 1));
         machine
-            .push_args(vec![Value::Unit, Value::Unit], span, &shell)
+            .push_args(vec![ValClos::UNIT, ValClos::UNIT], span, &shell)
             .expect("provenance costs no computational frames");
         machine.enter_call("f", span, &mut shell);
         machine.enter_call("g", span, &mut shell);
@@ -2054,17 +1914,24 @@ mod tests {
         assert!(machine.reserve(&shell).is_err());
         assert_eq!((machine.stack.len(), machine.call_site_frames), (4, 2));
 
-        let mooring = Mooring::adrift();
-        machine.step(&mooring, &mut shell);
-        assert_eq!((machine.stack.len(), machine.call_site_frames), (3, 1));
-        assert!(matches!(machine.focus, Focus::Return(_)));
-        machine.step(&mooring, &mut shell);
+        assert!(
+            machine
+                .settle(Ok(Either::Right(ValClos::UNIT)), &mut shell)
+                .is_continue()
+        );
         assert_eq!((machine.stack.len(), machine.call_site_frames), (2, 1));
-        assert!(matches!(machine.focus, Focus::Halt(_)));
-        machine.step(&mooring, &mut shell);
+        assert!(
+            machine.state.is_err(),
+            "settle restores the call site, then the value meets an Arg"
+        );
+        assert!(machine.step(&mut shell).is_continue());
         assert_eq!((machine.stack.len(), machine.call_site_frames), (1, 1));
-        machine.step(&mooring, &mut shell);
+        assert!(machine.step(&mut shell).is_continue());
         assert_eq!((machine.stack.len(), machine.call_site_frames), (0, 0));
+        assert!(matches!(
+            machine.step(&mut shell),
+            ControlFlow::Break(Err(_))
+        ));
         assert!(machine.pop_frame().is_none());
         assert!(machine.room(2, &shell).is_ok());
         assert_eq!(shell.local.audit.call_site(), &before);
@@ -2077,14 +1944,24 @@ mod tests {
             shell.install_script_context(&crate::source::SourceOrigin::named("<panic>"), "f g");
         let span = Some(Span::new(file, 0, 1));
         let before = shell.local.audit.call_site().clone();
+        let panicking = ValClos::builtin(Arc::new(BuiltinEntry::new(
+            Cow::Borrowed("machine-panic"),
+            |_| {
+                crate::typecheck::builtins::thunk(crate::typecheck::builtins::pure(
+                    crate::ty::Ty::unit(),
+                ))
+            },
+            "test-only panic",
+            crate::builtin::BuiltinBody::Static(|_, _, _| panic!("abandon the continuation")),
+        )));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = run(
-                |machine, _, shell| {
+                |machine, shell| {
                     machine.enter_call("f", span, shell);
-                    machine.push_args(vec![Value::Unit], span, shell).unwrap();
+                    machine.push_args(vec![ValClos::UNIT], span, shell).unwrap();
                     machine.enter_call("g", span, shell);
                     assert_eq!((machine.stack.len(), machine.call_site_frames), (3, 2));
-                    panic!("abandon the continuation");
+                    Ok(Either::Left(force(panicking)?))
                 },
                 &Mooring::adrift(),
                 &mut shell,
@@ -2137,7 +2014,7 @@ mod tests {
             )]),
         ))));
         let out = evaluate(node, shell.env.clone(), &Mooring::adrift(), &mut shell);
-        assert!(matches!(out, Ok(Value::Map(_))));
+        assert!(matches!(out.as_ref().map(ValClos::view), Ok(View::Map(_))));
     }
 
     #[test]
@@ -2219,7 +2096,7 @@ mod tests {
     }
 
     /// A cancellation is a `Break` like any other: whichever polled rule
-    /// sees it, the halt leaves `step_eval` through `locate` and so
+    /// sees it, the halt leaves `eval` through `locate` and so
     /// carries that node's span.
     #[test]
     fn a_cancelled_rec_and_a_cancelled_bind_both_carry_a_span() {
@@ -2275,7 +2152,7 @@ mod tests {
         let mut shell = new_shell();
         shell.local.machine_depth = NESTED_MACHINE_LIMIT;
         let Err(Break::Error(error)) = run(
-            |_, _, _| panic!("depth check must precede seeding"),
+            |_, _| panic!("depth check must precede seeding"),
             &Mooring::adrift(),
             &mut shell,
         ) else {
@@ -2307,7 +2184,7 @@ mod tests {
         };
         assert_eq!(
             error.reason,
-            Value::Int(1)
+            ValClos::int(1)
                 .expected("if", Expected::Shape(ValueShape::Bool))
                 .reason
         );
@@ -2315,20 +2192,20 @@ mod tests {
             tag: Spanned::synthetic("other".into()),
             body: Spanned::synthetic(Val::Unit),
         }];
-        let mut machine = Machine::default();
+        let mooring = Mooring::adrift();
+        let mut machine = Machine::new(&mooring);
         let Err(Break::Error(error)) = machine.step_case(
             &Spanned::synthetic(Val::Int(1)),
             &arms,
             None,
             Env::new(),
-            &Mooring::adrift(),
-            &mut shell,
+            &shell,
         ) else {
             panic!("invalid scrutinee")
         };
         assert_eq!(
             error.reason,
-            Value::Int(1)
+            ValClos::int(1)
                 .expected("case", Expected::Shape(ValueShape::Variant))
                 .reason
         );
@@ -2336,14 +2213,9 @@ mod tests {
             label: "tag".into(),
             payload: Box::new(Val::Unit),
         });
-        let Err(Break::Error(error)) = machine.step_case(
-            &scrutinee,
-            &arms,
-            None,
-            Env::new(),
-            &Mooring::adrift(),
-            &mut shell,
-        ) else {
+        let Err(Break::Error(error)) =
+            machine.step_case(&scrutinee, &arms, None, Env::new(), &shell)
+        else {
             panic!("missing arm")
         };
         assert_eq!(
@@ -2357,7 +2229,7 @@ mod tests {
         let arity = entry.decl.fixed_arity();
         let Err(Break::Error(error)) = run_boundary(
             entry,
-            &vec![Value::Unit; arity + 1],
+            &vec![ValClos::UNIT; arity + 1],
             None,
             None,
             &Mooring::adrift(),

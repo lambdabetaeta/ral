@@ -12,7 +12,7 @@ use crate::process::{
     CancelCause, Group, POLL_SLICE, Pgid, Scope, ScopeId, Spawned, TerminalHold, WaitOutcome, Watch,
 };
 use crate::shell::runtime::{
-    AuditFragment, Break, End, Mooring, Settled, Shell, Stop, UNREPORTED, Value,
+    AuditFragment, Break, End, Mooring, Settled, Shell, Stop, UNREPORTED, ValClos,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -89,7 +89,7 @@ impl Settlement {
                 AuditFragment::from_observations(vec![observation])
             });
         StageObservation {
-            end: End::settled(settled.map(|()| Value::Unit)),
+            end: End::settled(settled.map(|()| ValClos::UNIT)),
             audit: fragment,
         }
     }
@@ -275,7 +275,7 @@ impl StageObservation {
     #[cfg(test)]
     pub(super) fn ok() -> Self {
         Self {
-            end: End::Ok(Value::Unit),
+            end: End::Ok(ValClos::UNIT),
             audit: AuditFragment::empty(),
         }
     }
@@ -293,7 +293,7 @@ impl StageObservation {
     fn names(&self, stage: &ScopeId) -> bool {
         matches!(
             &self.end,
-            End::Stopped(Stop { owner: Some(o), .. }) if o == stage
+            End::Stopped(Stop { owner: Some(owner), .. }) if owner == stage
         )
     }
 
@@ -316,7 +316,7 @@ impl StageObservation {
     /// happened and is kept.
     pub(super) fn forgiven(self) -> Self {
         Self {
-            end: End::Ok(Value::Unit),
+            end: End::Ok(ValClos::UNIT),
             audit: self.audit,
         }
     }
@@ -689,11 +689,11 @@ impl CollectState {
     /// value whenever that stage is `Ok` and unread otherwise.  The audit is
     /// merged before the verdict is ranked, so a failing stage still
     /// contributes what it observed.
-    pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
         let observed = self.vacate();
         let mut verdict: Option<Break> = None;
         let mut panic: Option<String> = None;
-        let mut last = Value::Unit;
+        let mut last = ValClos::UNIT;
         for end in observed {
             // Thread stages already published their facts.
             let surface = matches!(&end, Some(StageEnd::External { .. })).then_some(mooring);

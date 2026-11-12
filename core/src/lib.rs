@@ -15,6 +15,7 @@
 )]
 
 pub mod authority;
+pub mod builtin;
 pub mod carrier;
 pub mod compile;
 pub mod data;
@@ -26,6 +27,7 @@ pub mod environ;
 pub mod error;
 pub mod external_editor;
 pub mod fact;
+pub mod handle;
 pub mod host;
 pub mod invocation;
 pub mod io;
@@ -58,14 +60,15 @@ pub mod uutils;
 
 // The host surface. A host imports a run from here; it does not reach the
 // evaluator or syntax layers through the crate root.
+pub use handle::{Handle, HandleInner};
 pub use io::{Captured, Retained, RunIo, RunStdin, Streams};
 pub use process::RequestedTerminalAccess;
 pub use role::{Invocation, Role, classify};
 pub use shell::boot::HostSurface;
 pub use shell::grant::SpawnGrant;
 pub use shell::runtime::{
-    Bequest, Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError,
-    Runtime, Settled, Shell, SurfaceSink, Value,
+    Bequest, Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, List, ListRef, Map,
+    MapRef, RegisterError, Runtime, Settled, Shell, SurfaceSink, ValClos, View,
 };
 pub use ty::Scheme;
 pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};

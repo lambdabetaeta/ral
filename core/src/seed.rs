@@ -10,7 +10,7 @@
 //! Nothing host-local rides: the builtin table holds fn pointers, hooks are
 //! host lifecycle entry points, and IO and session state belong to whoever
 //! runs, the child constructing its own. The scrub that makes this safe is
-//! `Shell::bequeath`: no handle in the scope or the handler stack, and no
+//! `Shell::bequeath`: handles withheld in the scope and handler stack, and no
 //! terminal authority, inbox, cancel token or provider handle.
 
 use crate::data::datum::Datum;
@@ -67,24 +67,24 @@ impl Drop for SeedHandlers {
 }
 
 impl WireHandlerFrame {
-    fn from_runtime(frame: &HandlerFrame, ctx: &mut InternCtx) -> Result<Self, Error> {
-        let mut wire = Self {
-            entries: Vec::with_capacity(frame.entries.len()),
-            catch_all: None,
+    fn from_runtime(frame: &HandlerFrame, ctx: &mut InternCtx) -> Self {
+        Self {
+            entries: frame
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.name.as_ref().to_string(),
+                        SerialValue::from_runtime(&entry.thunk, ctx),
+                    )
+                })
+                .collect(),
+            catch_all: frame
+                .catch_all
+                .as_ref()
+                .map(|value| SerialValue::from_runtime(value, ctx)),
             kind: frame.kind,
-        };
-        for entry in &frame.entries {
-            wire.entries.push((
-                entry.name.as_ref().to_string(),
-                SerialValue::from_runtime(&entry.thunk, ctx)?,
-            ));
         }
-        wire.catch_all = frame
-            .catch_all
-            .as_ref()
-            .map(|value| SerialValue::from_runtime(value, ctx))
-            .transpose()?;
-        Ok(wire)
     }
 
     fn into_runtime(mut self, dec: &WireDecoder) -> Result<HandlerFrame, Error> {
@@ -157,12 +157,12 @@ pub struct Sealed(Bytes);
 /// Encode and frame `bequest` into bytes.
 ///
 /// # Errors
-/// Preserves an interning failure; framing failures are typed at this boundary.
+/// Framing failures are typed at this boundary.
 ///
 /// # Panics
 /// Only if writing the encoded frame to an in-memory vector fails.
 pub fn seal(bequest: &Bequest) -> Result<Sealed, Error> {
-    let seed = EngineSeed::encode(bequest)?;
+    let seed = EngineSeed::encode(bequest);
     let frame = crate::io::frame::encode(&seed).map_err(|cause| {
         Error::new(Reason::Protocol(Box::new(ProtocolFailure::Unencodable(
             ProtocolFailureUnencodable {
@@ -225,10 +225,8 @@ fn failed(part: &'static str) -> impl FnOnce(Error) -> Error {
 }
 
 impl EngineSeed {
-    /// `bequest`, interned for the wire.  The bequest is expected scrubbed by
-    /// `Shell::bequeath`, and this trusts that law rather than re-checking it:
-    /// a handle that slips through fails the encode as a fault in ral.
-    pub(crate) fn encode(bequest: &Bequest) -> Result<Self, Error> {
+    /// Intern a bequest; every handle crosses withheld by its title.
+    pub(crate) fn encode(bequest: &Bequest) -> Self {
         let Image {
             env,
             context,
@@ -238,23 +236,22 @@ impl EngineSeed {
         } = &bequest.image;
         let mut ctx = InternCtx::new();
         let env = SerialEnvSnapshot::from_runtime(env, &mut ctx);
-        let context = context
-            .with_handlers(&context.handlers)
-            .try_map_handlers(|frames| {
-                frames
-                    .iter()
-                    .map(|frame| WireHandlerFrame::from_runtime(frame, &mut ctx))
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-        Ok(Self {
-            scope_table: ctx.finish()?,
+        let context = context.with_handlers(
+            context
+                .handlers
+                .iter()
+                .map(|frame| WireHandlerFrame::from_runtime(frame, &mut ctx))
+                .collect::<Vec<_>>(),
+        );
+        Self {
+            scope_table: ctx.finish(),
             env,
             context,
             sources: sources.clone(),
             terms: terms.clone(),
             fixings: fixings.snapshot(),
             grant: bequest.grant.clone(),
-        })
+        }
     }
 
     /// Decode against `runtime`, whose builtin table re-links natives by name.
@@ -298,9 +295,10 @@ impl EngineSeed {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::handle::{Handle, idle_handle};
     use crate::shell::boot::BakedPrelude;
     use crate::shell::runtime::{
-        DefaultPolicy, Env, HookName, HookSig, Shell, Value, block_over, captured, idle_handle,
+        DefaultPolicy, Env, HookName, HookSig, Mooring, Shell, ValClos, View, block_over, captured,
     };
     use crate::sync::LockExt as _;
     use std::collections::BTreeSet;
@@ -356,11 +354,11 @@ mod tests {
             .fixings()
             .fix(crate::ty::UnitId::fresh(), 0, crate::ty::Side::Number, "/n")
             .expect("a fresh variable is fixed");
-        crate::test_access::bind_untyped(&mut parent, "kept", Value::Int(7));
+        crate::test_access::bind_untyped(&mut parent, "kept", ValClos::int(7));
         crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
         let blk = block_over(&parent.env);
         crate::test_access::bind_untyped(&mut parent, "blk", blk.clone());
-        let native = partial_over(&parent, idle_handle());
+        let native = partial_over(&mut parent, idle_handle());
         crate::test_access::bind_untyped(&mut parent, "nat", native);
         let catch_all = block_over(&parent.env);
         let handler = HandlerEntry::ral_per_name("handler".into(), blk.clone());
@@ -386,12 +384,11 @@ mod tests {
         parent
     }
 
-    /// `has` applied to `held` alone, holding its argument directly.
-    fn partial_over(shell: &Shell, held: Value) -> Value {
-        Value::Native(
-            Arc::new(shell.lookup_builtin("has").expect("has builtin")),
-            Arc::from([held]),
-        )
+    /// `has` applied to `held` alone, captured by its η residual.
+    fn partial_over(shell: &mut Shell, held: ValClos) -> ValClos {
+        let builtin = ValClos::builtin(Arc::new(shell.lookup_builtin("has").expect("has builtin")));
+        crate::shell::evaluator::apply(&builtin, vec![held], &Mooring::adrift(), shell)
+            .expect("partial application")
     }
 
     /// `bequest` through bytes, and decoded against `runtime`.
@@ -437,29 +434,25 @@ mod tests {
             .expect_ran()
             .into_settled()
             .unwrap();
-        assert_eq!(value, Value::Int(7));
+        assert_eq!(value, ValClos::int(7));
     }
 
-    fn opaque(v: Option<&Value>) -> bool {
-        matches!(v, Some(Value::Variant { label, .. }) if label.as_ref() == crate::data::OPAQUE_TAG)
+    fn withheld(v: Option<&ValClos>) -> bool {
+        matches!(v.map(ValClos::view), Some(View::Handle(Handle::Withheld(title))) if title.as_ref() == "<test>")
     }
 
     fn names(env: &Env) -> BTreeSet<String> {
         env.names().map(ToString::to_string).collect()
     }
 
-    /// Values agree across the wire: data by `==`, a closure by its body and
-    /// its captured scope, a native by its name and held arguments.
-    fn agree(a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Thunk(x), Value::Thunk(y)) => {
-                x.comp() == y.comp() && scopes_agree(x.env(), y.env())
+    /// Wire agreement includes captured environments and builtin identities by name.
+    fn agree(a: &ValClos, b: &ValClos) -> bool {
+        match (a.view(), b.view()) {
+            (View::Thunk { comp: x, env: xs }, View::Thunk { comp: y, env: ys }) => {
+                x == y && scopes_agree(xs, ys)
             }
-            (Value::Native(x, xs), Value::Native(y, ys)) => {
-                x.decl.name == y.decl.name
-                    && xs.len() == ys.len()
-                    && xs.iter().zip(ys.iter()).all(|(x, y)| agree(x, y))
-            }
+            (View::Builtin(x), View::Builtin(y)) => x.decl.name == y.decl.name,
+            (View::Handle(x), View::Handle(y)) => x.title() == y.title(),
             _ => a == b,
         }
     }
@@ -471,6 +464,38 @@ mod tests {
                     .zip(b.get(name))
                     .is_some_and(|(x, y)| agree(x, y))
             })
+    }
+
+    #[test]
+    fn awaiting_a_withheld_handle_names_it() {
+        let mut parent = booted();
+        crate::test_access::bind_untyped(&mut parent, "live", idle_handle());
+        let bequest = parent.bequeath(SpawnGrant::Inherit);
+        let decoded = through_the_wire(&bequest, &runtime());
+        for bequest in [bequest, decoded] {
+            let mut child = Shell::child_of(runtime().into(), bequest, no_base).expect("a child");
+            let await_builtin = ValClos::builtin(Arc::new(
+                child.lookup_builtin("await").expect("await builtin"),
+            ));
+            let handle = child.env.get("live").expect("the binding remains").clone();
+            let error = crate::shell::evaluator::apply(
+                &await_builtin,
+                vec![handle],
+                &Mooring::adrift(),
+                &mut child,
+            )
+            .expect_err("the child's handle is withheld");
+            let crate::shell::runtime::Break::Error(error) = error else {
+                panic!("await must raise an evaluation error");
+            };
+            assert_eq!(
+                error.reason,
+                Reason::Evaluation(Box::new(crate::fact::EvalFailure::WithheldHandle(
+                    "<test>".into()
+                ),))
+            );
+            assert!(error.describe().contains("<test>"));
+        }
     }
 
     #[test]
@@ -496,22 +521,24 @@ mod tests {
                 &d.image.context.handlers,
             ),
         ] {
-            assert!(opaque(env.get("live")), "{arm} must scrub a handle binding");
             assert!(
-                opaque(captured(env.get("blk")).get("live")),
+                withheld(env.get("live")),
+                "{arm} must withhold a handle binding"
+            );
+            assert!(
+                withheld(captured(env.get("blk")).get("live")),
                 "{arm} must scrub a block's captured handle"
             );
             let catch_all = frames.iter().find_map(|f| f.catch_all.as_ref());
             assert!(
-                opaque(captured(catch_all).get("live")),
+                withheld(captured(catch_all).get("live")),
                 "{arm} must scrub a handler frame's captured handle"
             );
-            let Some(Value::Native(_, args)) = env.get("nat") else {
-                panic!("{arm} must retain the partial builtin");
-            };
+            let residual = env.get("nat").expect("the partial builtin remains bound");
+            assert!(matches!(residual.view(), View::Thunk { .. }));
             assert!(
-                opaque(args.first()),
-                "{arm} must scrub a partial builtin's held handle"
+                withheld(captured(Some(residual)).get("%arg0")),
+                "{arm} must withhold the residual's captured handle"
             );
         }
 
@@ -745,8 +772,7 @@ mod tests {
             &mut shell,
         )
         .expect("define");
-        let seed = EngineSeed::encode(&shell.bequeath(SpawnGrant::Base("confined".to_string())))
-            .expect("encode");
+        let seed = EngineSeed::encode(&shell.bequeath(SpawnGrant::Base("confined".to_string())));
         let marked = seed
             .scope_table
             .iter()

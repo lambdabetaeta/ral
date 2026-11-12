@@ -1,9 +1,9 @@
 //! The quoting builtin emits source that preserves string values.
 
 use crate::common::top_level;
-use ral_core::Value;
 use ral_core::test_access::binding_scheme;
 use ral_core::test_helper::fresh_shell;
+use ral_core::{ValClos, shell::runtime::View};
 
 #[test]
 fn ral_quote_roundtrips_strings_through_normal_evaluation() {
@@ -37,14 +37,14 @@ fn ral_quote_roundtrips_strings_through_normal_evaluation() {
         "$[1 + 2]",
         "\t\r\\\"",
     ] {
-        shell.set_var("sample".into(), Value::string(input), scheme.clone());
+        shell.set_var("sample".into(), ValClos::string(input), scheme.clone());
         let emitted = top_level(&mut shell, "ral-quote $sample")
             .unwrap_or_else(|error| panic!("ral-quote failed for {input:?}: {error:?}"));
-        let Value::String(word) = emitted else {
+        let View::String(word) = emitted.view() else {
             panic!("ral-quote returned {emitted:?} for {input:?}, expected a string");
         };
         let actual = top_level(&mut fresh_shell(), &format!("return {word}"))
             .unwrap_or_else(|error| panic!("readback failed for {input:?}: {error:?}"));
-        assert_eq!(actual, Value::string(input), "roundtrip for {input:?}");
+        assert_eq!(actual, ValClos::string(input), "roundtrip for {input:?}");
     }
 }

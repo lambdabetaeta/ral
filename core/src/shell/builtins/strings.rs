@@ -8,19 +8,19 @@ use crate::fact::{
     ValueShape,
 };
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Settled, Value};
+use crate::shell::runtime::{Settled, ValClos, View};
 use std::borrow::Cow;
 
 use super::util::regex_failure;
 use super::util::{lossy_line_list, read_lines};
 
-/// Decode a `Value` as a `usize` index.
-pub(super) fn as_index(v: &Value, operation: &str, argument: usize) -> Settled<usize> {
-    let cause = match v {
-        Value::Int(n) => match usize::try_from(*n) {
+/// Decode a `ValClos` as a `usize` index.
+pub(super) fn as_index(v: &ValClos, operation: &str, argument: usize) -> Settled<usize> {
+    let cause = match v.view() {
+        View::Int(n) => match usize::try_from(n) {
             Ok(index) => return Ok(index),
             Err(_) => InvalidCause::Range(NumberRange {
-                value: Number::Int(*n),
+                value: Number::Int(n),
                 minimum: Number::Int(0),
                 maximum: Number::Int(i64::MAX),
             }),
@@ -36,13 +36,13 @@ pub(super) fn as_index(v: &Value, operation: &str, argument: usize) -> Settled<u
     .into())
 }
 
-pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_len(args: &[ValClos]) -> Settled<ValClos> {
     let val = &args[0];
-    let n = match val {
-        Value::String(s) => s.chars().count(),
-        Value::Bytes(b) => b.len(),
-        Value::List(items) => items.len(),
-        Value::Map(m) => m.len(),
+    let n = match val.view() {
+        View::String(s) => s.chars().count(),
+        View::Bytes(b) => b.len(),
+        View::List(items) => items.len(),
+        View::Map(m) => m.len(),
         _ => {
             return Err(val
                 .expected(
@@ -61,25 +61,25 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
         clippy::cast_possible_wrap,
         reason = "n is an in-memory char/byte/element count; a live collection cannot exceed i64::MAX"
     )]
-    Ok(Value::Int(n as i64))
+    Ok(ValClos::int(n as i64))
 }
 
-pub(super) fn builtin_upper(args: &[Value]) -> Settled<Value> {
-    Ok(Value::string(args[0].as_str("upper")?.to_uppercase()))
+pub(super) fn builtin_upper(args: &[ValClos]) -> Settled<ValClos> {
+    Ok(ValClos::string(args[0].as_str("upper")?.to_uppercase()))
 }
 
-pub(super) fn builtin_lower(args: &[Value]) -> Settled<Value> {
-    Ok(Value::string(args[0].as_str("lower")?.to_lowercase()))
+pub(super) fn builtin_lower(args: &[ValClos]) -> Settled<ValClos> {
+    Ok(ValClos::string(args[0].as_str("lower")?.to_lowercase()))
 }
 
-pub(super) fn builtin_dedent(args: &[Value]) -> Settled<Value> {
-    Ok(Value::string(dedent(args[0].as_str("dedent")?)))
+pub(super) fn builtin_dedent(args: &[ValClos]) -> Settled<ValClos> {
+    Ok(ValClos::string(dedent(args[0].as_str("dedent")?)))
 }
 
-pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_join(args: &[ValClos]) -> Settled<ValClos> {
     let sep = args[0].as_str("intercalate")?;
     let items = args[1].as_list("intercalate")?;
-    Ok(Value::string(
+    Ok(ValClos::string(
         items
             .iter()
             .map(|v| v.to_string())
@@ -88,30 +88,32 @@ pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
     ))
 }
 
-pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_slice(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("slice")?;
     let start = as_index(&args[1], "slice", 1)?;
     let length = as_index(&args[2], "slice", 2)?;
-    Ok(Value::string(
+    Ok(ValClos::string(
         s.chars().skip(start).take(length).collect::<String>(),
     ))
 }
 
 /// `from-lines` over the string's bytes rather than the channel.
-pub(super) fn builtin_lines(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_lines(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("lines")?;
     lossy_line_list(read_lines("lines", s.as_bytes()))
 }
 
-pub(super) fn builtin_posix_split(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_posix_split(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("posix-split")?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(s)
         .ok_or_else(|| invalid("posix-split", InvalidCause::Codec(CodecFailure::PosixSplit)))?;
-    Ok(Value::list(parts.into_iter().map(Value::string).collect()))
+    Ok(ValClos::list(
+        parts.into_iter().map(ValClos::string).collect(),
+    ))
 }
 
-pub(super) fn builtin_posix_quote(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_posix_quote(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("posix-quote")?;
     let quoted = shlex::try_quote(s).map_err(|error| {
         invalid(
@@ -122,12 +124,12 @@ pub(super) fn builtin_posix_quote(args: &[Value]) -> Settled<Value> {
             }),
         )
     })?;
-    Ok(Value::string(quoted))
+    Ok(ValClos::string(quoted))
 }
 
-pub(super) fn builtin_ral_quote(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_ral_quote(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("ral-quote")?;
-    Ok(Value::string(crate::syntax::quote_word(s).into_owned()))
+    Ok(ValClos::string(crate::syntax::quote_word(s).into_owned()))
 }
 
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
@@ -143,16 +145,16 @@ fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
 /// Compile `args[0]`, hand the regex to `f`.
 fn with_regex(
     ctx: &'static str,
-    args: &[Value],
-    f: impl FnOnce(&regex::Regex, &[Value]) -> Settled<Value>,
-) -> Settled<Value> {
+    args: &[ValClos],
+    f: impl FnOnce(&regex::Regex, &[ValClos]) -> Settled<ValClos>,
+) -> Settled<ValClos> {
     let re = compile_regex(ctx, args[0].as_str(ctx)?)?;
     f(&re, args)
 }
 
 /// Errors unless the pattern matches exactly once, like its literal counterpart
 /// [`builtin_string_replace`]; [`builtin_replace_all`] is the every-match variant.
-pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_replace(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-replace", args, |re, args| {
         let input = args[2].as_str("re-replace")?;
         let matches = re.find_iter(input).count();
@@ -161,7 +163,7 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
                 match_count("re-replace", LiteralOrRegex::Regex, re.as_str(), matches).into(),
             );
         }
-        Ok(Value::string(
+        Ok(ValClos::string(
             re.replace(input, args[1].as_str("re-replace")?),
         ))
     })
@@ -197,7 +199,7 @@ pub fn occurrence_starts(input: &str, from: &str) -> Vec<usize> {
 /// # Errors
 /// If given fewer than three arguments, if `from` is empty, or if `from` does not
 /// occur in `s` exactly once.
-pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
+pub(crate) fn builtin_string_replace(args: &[ValClos]) -> Settled<ValClos> {
     let from = args[0].as_str("string-replace")?;
     let to = args[1].as_str("string-replace")?;
     let input = args[2].as_str("string-replace")?;
@@ -212,48 +214,50 @@ pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     if matches != 1 {
         return Err(match_count("string-replace", LiteralOrRegex::Literal, from, matches).into());
     }
-    Ok(Value::string(input.replacen(from, to, 1)))
+    Ok(ValClos::string(input.replacen(from, to, 1)))
 }
 
-pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_replace_all(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-replace-all", args, |re, args| {
         let input = args[2].as_str("re-replace-all")?;
-        Ok(Value::string(
+        Ok(ValClos::string(
             re.replace_all(input, args[1].as_str("re-replace-all")?),
         ))
     })
 }
 
-pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_split(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-split", args, |re, args| {
         let input = args[1].as_str("re-split")?;
-        Ok(Value::list(re.split(input).map(Value::string).collect()))
+        Ok(ValClos::list(
+            re.split(input).map(ValClos::string).collect(),
+        ))
     })
 }
 
-pub(super) fn builtin_match(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_match(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-match", args, |re, args| {
         let matched = re.is_match(args[1].as_str("re-match")?);
-        Ok(Value::Bool(matched))
+        Ok(ValClos::bool(matched))
     })
 }
 
-pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_find_match(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-find-match", args, |re, args| {
         let input = args[1].as_str("re-find-match")?;
         match re.find(input) {
-            Some(m) => Ok(Value::string(m.as_str())),
+            Some(m) => Ok(ValClos::string(m.as_str())),
             None => Err(match_count("re-find-match", LiteralOrRegex::Regex, re.as_str(), 0).into()),
         }
     })
 }
 
-pub(super) fn builtin_find_matches(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_find_matches(args: &[ValClos]) -> Settled<ValClos> {
     with_regex("re-find-matches", args, |re, args| {
         let input = args[1].as_str("re-find-matches")?;
-        Ok(Value::list(
+        Ok(ValClos::list(
             re.find_iter(input)
-                .map(|m| Value::string(m.as_str()))
+                .map(|m| ValClos::string(m.as_str()))
                 .collect(),
         ))
     })
@@ -330,15 +334,15 @@ fn number_failure(operation: &str, text: &str, target: IntOrFloat, why: NumberFa
     )
 }
 
-pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
-    match &args[0] {
-        Value::Int(n) => Ok(Value::Int(*n)),
-        Value::Float(f) if f.get().fract() == 0.0 => f
+pub(super) fn builtin_to_int(args: &[ValClos]) -> Settled<ValClos> {
+    match args[0].view() {
+        View::Int(n) => Ok(ValClos::int(n)),
+        View::Float(f) if f.get().fract() == 0.0 => f
             .to_i64()
-            .map(Value::Int)
-            .ok_or_else(|| invalid("int", InvalidCause::IntegerRange(*f)).into()),
-        Value::Float(f) => Err(invalid("int", InvalidCause::NonIntegral(*f)).into()),
-        Value::String(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|error| {
+            .map(ValClos::int)
+            .ok_or_else(|| invalid("int", InvalidCause::IntegerRange(f)).into()),
+        View::Float(f) => Err(invalid("int", InvalidCause::NonIntegral(f)).into()),
+        View::String(s) => s.trim().parse::<i64>().map(ValClos::int).map_err(|error| {
             let why = match error.kind() {
                 std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
                     NumberFault::OutOfRange
@@ -347,7 +351,7 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
             };
             number_failure("int", s, IntOrFloat::Int, why).into()
         }),
-        other => Err(other
+        _ => Err(args[0]
             .expected(
                 "int",
                 Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
@@ -356,12 +360,12 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
     }
 }
 
-pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
-    match &args[0] {
-        Value::Int(n) => Ok(Value::Float(Finite::from(*n))),
-        Value::Float(f) => Ok(Value::Float(*f)),
-        Value::String(s) => match s.parse::<f64>().map(Finite::new) {
-            Ok(Some(f)) => Ok(Value::Float(f)),
+pub(super) fn builtin_to_float(args: &[ValClos]) -> Settled<ValClos> {
+    match args[0].view() {
+        View::Int(n) => Ok(ValClos::float(Finite::from(n))),
+        View::Float(f) => Ok(ValClos::float(f)),
+        View::String(s) => match s.parse::<f64>().map(Finite::new) {
+            Ok(Some(f)) => Ok(ValClos::float(f)),
             Ok(None) => {
                 Err(number_failure("float", s, IntOrFloat::Float, NumberFault::NonFinite).into())
             }
@@ -369,7 +373,7 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
                 Err(number_failure("float", s, IntOrFloat::Float, NumberFault::Syntax).into())
             }
         },
-        other => Err(other
+        _ => Err(args[0]
             .expected(
                 "float",
                 Expected::AnyOf(vec![ValueShape::String, ValueShape::Int, ValueShape::Float]),
@@ -378,12 +382,12 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
     }
 }
 
-/// The renderer `echo` lowers through ([`Value`]'s `Display`).  Bytes go lossy
+/// The renderer `echo` lowers through ([`ValClos`]'s `Display`).  Bytes go lossy
 /// here; `from-string` is the faithful decode, and errors on invalid UTF-8.
-pub(super) fn builtin_to_string(args: &[Value]) -> Value {
-    match &args[0] {
-        s @ Value::String(_) => s.clone(),
-        v => Value::string(v.to_string()),
+pub(super) fn builtin_to_string(args: &[ValClos]) -> ValClos {
+    match args[0].view() {
+        View::String(_) => args[0].clone(),
+        _ => ValClos::string(args[0].to_string()),
     }
 }
 
@@ -393,7 +397,7 @@ mod tests {
     use crate::fact::DataStep;
     use crate::shell::runtime::Break;
 
-    fn refusal(result: Settled<Value>) -> InvalidFailure {
+    fn refusal(result: Settled<ValClos>) -> InvalidFailure {
         let Err(Break::Error(error)) = result else {
             panic!("expected refusal")
         };
@@ -406,9 +410,9 @@ mod tests {
     #[test]
     fn slice_keeps_argument_position_separate_from_operation() {
         let failure = refusal(builtin_slice(&[
-            Value::string("hello"),
-            Value::string("1"),
-            Value::Int(3),
+            ValClos::string("hello"),
+            ValClos::string("1"),
+            ValClos::int(3),
         ]));
         assert_eq!(failure.operation, "slice");
         assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
@@ -420,9 +424,9 @@ mod tests {
             })
         ));
         let negative = refusal(builtin_slice(&[
-            Value::string("hello"),
-            Value::Int(0),
-            Value::Int(-1),
+            ValClos::string("hello"),
+            ValClos::int(0),
+            ValClos::int(-1),
         ]));
         assert_eq!(negative.path, vec![DataStep::Index(2usize.into())]);
         assert!(matches!(negative.cause, InvalidCause::Range(_)));
@@ -447,8 +451,8 @@ mod tests {
             ("1e999", IntOrFloat::Float, NumberFault::NonFinite),
         ] {
             let result = match target {
-                IntOrFloat::Int => builtin_to_int(&[Value::string(text)]),
-                IntOrFloat::Float => builtin_to_float(&[Value::string(text)]),
+                IntOrFloat::Int => builtin_to_int(&[ValClos::string(text)]),
+                IntOrFloat::Float => builtin_to_float(&[ValClos::string(text)]),
             };
             assert_eq!(
                 refusal(result).cause,
@@ -461,17 +465,17 @@ mod tests {
         }
         let f = Finite::new(3.7).unwrap();
         assert_eq!(
-            refusal(builtin_to_int(&[Value::Float(f)])).cause,
+            refusal(builtin_to_int(&[ValClos::float(f)])).cause,
             InvalidCause::NonIntegral(f)
         );
         let large = Finite::new(f64::MAX).unwrap();
         assert_eq!(
-            refusal(builtin_to_int(&[Value::Float(large)])).cause,
+            refusal(builtin_to_int(&[ValClos::float(large)])).cause,
             InvalidCause::IntegerRange(large)
         );
         for builtin in [builtin_to_int, builtin_to_float] {
             assert!(matches!(
-                refusal(builtin(&[Value::Bool(true)])).cause,
+                refusal(builtin(&[ValClos::bool(true)])).cause,
                 InvalidCause::Shape(_)
             ));
         }
@@ -480,23 +484,23 @@ mod tests {
     #[test]
     fn codec_refusals_distinguish_quotes_regex_and_literal_matches() {
         assert_eq!(
-            refusal(builtin_posix_split(&[Value::string("'")])).cause,
+            refusal(builtin_posix_split(&[ValClos::string("'")])).cause,
             InvalidCause::Codec(CodecFailure::PosixSplit)
         );
         assert_eq!(
-            refusal(builtin_posix_quote(&[Value::string("\0")])).cause,
+            refusal(builtin_posix_quote(&[ValClos::string("\0")])).cause,
             InvalidCause::Codec(CodecFailure::PosixQuoteNul)
         );
-        let invalid = builtin_match(&[Value::string("["), Value::string("x")]);
+        let invalid = builtin_match(&[ValClos::string("["), ValClos::string("x")]);
         assert!(
             matches!(refusal(invalid).cause, InvalidCause::Codec(CodecFailure::Regex(crate::fact::RegexFailure { pattern, cause: crate::fact::RegexCause::Syntax(_) })) if pattern == "[")
         );
         for (from, input, matches) in [("z", "abc", 0usize), ("aa", "aaa", 2usize)] {
             assert_eq!(
                 refusal(builtin_string_replace(&[
-                    Value::string(from),
-                    Value::string("x"),
-                    Value::string(input)
+                    ValClos::string(from),
+                    ValClos::string("x"),
+                    ValClos::string(input)
                 ]))
                 .cause,
                 InvalidCause::Codec(CodecFailure::MatchCount(CodecFailureMatchCount {
@@ -508,21 +512,21 @@ mod tests {
         }
         assert_eq!(
             refusal(builtin_string_replace(&[
-                Value::string(""),
-                Value::string("x"),
-                Value::string("abc")
+                ValClos::string(""),
+                ValClos::string("x"),
+                ValClos::string("abc")
             ]))
             .cause,
             InvalidCause::Codec(CodecFailure::EmptyReplacementPattern)
         );
         for (input, matches) in [("x", 0usize), ("aa", 2usize)] {
             assert!(
-                matches!(refusal(builtin_replace(&[Value::string("a"), Value::string("x"), Value::string(input)])).cause,
+                matches!(refusal(builtin_replace(&[ValClos::string("a"), ValClos::string("x"), ValClos::string(input)])).cause,
                 InvalidCause::Codec(CodecFailure::MatchCount(f)) if f.kind == LiteralOrRegex::Regex && f.matches == matches.into())
             );
         }
         assert!(
-            matches!(refusal(builtin_find_match(&[Value::string("a"), Value::string("x")])).cause,
+            matches!(refusal(builtin_find_match(&[ValClos::string("a"), ValClos::string("x")])).cause,
             InvalidCause::Codec(CodecFailure::MatchCount(f)) if f.matches == 0usize.into())
         );
     }

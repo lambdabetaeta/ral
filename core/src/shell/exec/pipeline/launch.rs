@@ -14,7 +14,7 @@ use crate::fact::AuditIo;
 use crate::io::child::Connection;
 use crate::io::{Source, SourceReader};
 use crate::process::{Placement, Scope, TerminalInput};
-use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{CommandOrigin, Env, Error, Mooring, Settled, Shell, ValClos};
 use crate::source::Span;
 use std::sync::Arc;
 
@@ -92,7 +92,7 @@ pub(super) fn spawn_stage(
 /// Spawn an external stage with no thread hosting it.
 fn launch_external_stage_direct(
     command: Command<Request>,
-    args: &[Value],
+    args: &[ValClos],
     span: Option<Span>,
     stdin: ByteIn,
     stdout: ByteOut,

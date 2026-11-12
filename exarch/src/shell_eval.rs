@@ -15,7 +15,7 @@ pub mod surface;
 use crate::bus::{AgentAddress, Input};
 use base64::Engine;
 use ral_core::Shell;
-use ral_core::Value as RalValue;
+use ral_core::ValClos;
 use ral_core::data::FOValue;
 use ral_core::shell::runtime::{CapturePolicy, DeferredSink, TitlePolicy};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 /// ral-call clock, two ledgers reading it for their own idle policy.
 pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 
-/// Soft threshold on a session-scope install's `Value::shallow_size`: meeting
+/// Soft threshold on a session-scope install's `ValClos::shallow_size`: meeting
 /// it queues a `LargeBindingNotice`, a nudge toward a file path over captured
 /// bytes, never an eviction.
 pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
@@ -156,7 +156,7 @@ pub(crate) fn ral_value_to_text(value: &FOValue) -> Option<String> {
         FOValue::String { value } => Some(value.clone()),
         FOValue::Bytes { value } => Some(String::from_utf8_lossy(value).into_owned()),
         other => Some(ral_core::shell::builtins::pretty_print(
-            &RalValue::from(other.clone()),
+            &ValClos::from(other.clone()),
             0,
             &VALUE_PRINT_PARAMS,
         )),

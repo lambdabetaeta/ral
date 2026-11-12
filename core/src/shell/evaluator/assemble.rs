@@ -2,48 +2,57 @@
 
 use crate::fact::{EvalFailure, Expected, Reason, ValueShape};
 use crate::ir::{MapEntryV, Name, Val, ValListElem};
-use crate::shell::runtime::{Break, Env, Error, List, Map, Settled, Signature, Value};
+use crate::shell::runtime::{Break, Env, Error, List, Map, Settled, Signature, ValClos, View};
 use crate::source::Spanned;
 
-use super::val::{form, spread_type_err};
+pub(super) fn spread_type_err(val: &ValClos) -> Error {
+    val.expected("spread", Expected::Shape(ValueShape::List))
+}
 
-/// Evaluates a list literal, splicing `...spread` elements inline. The
-/// cons and snoc shapes reuse the spread's persistent spine instead of
-/// rebuilding it, and still evaluate left to right.
-pub(super) fn eval_list(elems: &[ValListElem], env: &Env, sig: &Signature) -> Result<Value, Error> {
+/// Cons and snoc reuse the spread's persistent spine, evaluating left to right.
+pub(super) fn eval_list(
+    elems: &[ValListElem],
+    env: &Env,
+    sig: &Signature,
+) -> Result<ValClos, Error> {
     use ValListElem::{Single, Spread};
 
     if let [Single(sx), Spread(sxs)] = elems {
-        let x = form(&sx.item, env, sig)?;
-        let xs = form(&sxs.item, env, sig)?;
-        let Value::List(mut v) = xs else {
+        let x = ValClos::close(&sx.item, env, sig)?;
+        let xs = ValClos::close(&sxs.item, env, sig)?;
+        let View::List(v) = xs.view() else {
             return Err(spread_type_err(&xs));
         };
+        let mut v = v.to_list();
         v.push_front(x);
-        return Ok(Value::List(v));
+        return Ok(v.into());
     }
 
     if let [Spread(sxs), Single(sx)] = elems {
-        let xs = form(&sxs.item, env, sig)?;
-        let x = form(&sx.item, env, sig)?;
-        let Value::List(mut v) = xs else {
+        let xs = ValClos::close(&sxs.item, env, sig)?;
+        let x = ValClos::close(&sx.item, env, sig)?;
+        let View::List(v) = xs.view() else {
             return Err(spread_type_err(&xs));
         };
+        let mut v = v.to_list();
         v.push_back(x);
-        return Ok(Value::List(v));
+        return Ok(v.into());
     }
 
-    let mut items: List = List::new();
+    let mut items = List::new();
     for elem in elems {
         match elem {
-            Single(v) => items.push_back(form(&v.item, env, sig)?),
-            Spread(v) => match form(&v.item, env, sig)? {
-                Value::List(inner) => items.append(&inner),
-                val => return Err(spread_type_err(&val)),
-            },
+            Single(v) => items.push_back(ValClos::close(&v.item, env, sig)?),
+            Spread(v) => {
+                let val = ValClos::close(&v.item, env, sig)?;
+                match val.view() {
+                    View::List(inner) => items.append(inner.to_list()),
+                    _ => return Err(spread_type_err(&val)),
+                }
+            }
         }
     }
-    Ok(Value::List(items))
+    Ok(items.into())
 }
 
 pub(super) fn eval_update(
@@ -51,54 +60,58 @@ pub(super) fn eval_update(
     fields: &[(Name, Spanned<Val>)],
     env: &Env,
     sig: &Signature,
-) -> Result<Value, Error> {
+) -> Result<ValClos, Error> {
     let mut pairs = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (key, value) in fields {
         if !seen.insert(key.to_string()) {
             return Err(duplicate_key(key));
         }
-        pairs.push((key.to_string(), form(&value.item, env, sig)?));
+        pairs.push((key.to_string(), ValClos::close(&value.item, env, sig)?));
     }
-    for (key, value) in &form_map(base, env, sig)? {
+    let base = ValClos::close(&base.item, env, sig)?;
+    for (key, value) in base.as_map("spread")? {
         if seen.insert(key.to_string()) {
             pairs.push((key.to_string(), value.into_owned()));
         }
     }
-    Ok(Value::map(pairs))
+    Ok(ValClos::map(pairs))
 }
 
 pub(super) fn eval_map(
     entries: &[MapEntryV],
     env: &Env,
     shell: &crate::shell::runtime::Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let sig = &shell.sig;
     let mut explicit = std::collections::HashSet::new();
     let mut result = Map::new();
     for entry in entries {
         match entry {
             MapEntryV::Entry(key, value) => {
-                let formed = form(&key.item, env, sig)
+                let formed = ValClos::close(&key.item, env, sig)
                     .map_err(|error| Break::from(error).locate("map", key.span, shell))?;
-                let Value::String(label) = formed else {
+                let View::String(label) = formed.view() else {
                     return Err(Break::from(
                         formed.expected("map", Expected::Shape(ValueShape::String)),
                     )
                     .locate("map", key.span, shell));
                 };
-                let label = label.into_string();
+                let label = label.to_string();
                 if !explicit.insert(label.clone()) {
                     return Err(Break::from(duplicate_key(&label)).locate("map", key.span, shell));
                 }
-                let value = form(&value.item, env, sig)
+                let value = ValClos::close(&value.item, env, sig)
                     .map_err(|error| Break::from(error).locate("map", value.span, shell))?;
                 result.insert(label, value);
             }
             MapEntryV::Spread(value) => {
-                for (key, value) in &form_map(value, env, sig)
-                    .map_err(|error| Break::from(error).locate("map", value.span, shell))?
-                {
+                let formed = ValClos::close(&value.item, env, sig)
+                    .map_err(|error| Break::from(error).locate("map", value.span, shell))?;
+                let map = formed
+                    .as_map("spread")
+                    .map_err(|error| Break::from(error).locate("map", value.span, shell))?;
+                for (key, value) in map {
                     if !result.contains_key(key) {
                         result.insert(key.to_string(), value.into_owned());
                     }
@@ -106,14 +119,7 @@ pub(super) fn eval_map(
             }
         }
     }
-    Ok(Value::Map(result))
-}
-
-fn form_map(value: &Spanned<Val>, env: &Env, sig: &Signature) -> Result<Map, Error> {
-    match form(&value.item, env, sig)? {
-        Value::Map(map) => Ok(map),
-        value => Err(value.expected("spread", Expected::Shape(ValueShape::Map))),
-    }
+    Ok(result.into())
 }
 
 fn duplicate_key(key: &str) -> Error {

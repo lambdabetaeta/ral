@@ -4,7 +4,9 @@
 
 use crate::environ::EnvVars;
 use crate::fact::{Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape};
-use crate::shell::runtime::{Error, FrameHandle, HandlerEntry, Map, Settled, Shell, Value};
+use crate::shell::runtime::{
+    Error, FrameHandle, HandlerEntry, MapRef, Settled, Shell, ValClos, View,
+};
 
 use crate::path::{CwdPath, Reading};
 
@@ -12,15 +14,15 @@ use crate::path::{CwdPath, Reading};
 pub(crate) struct WithinScope {
     env_overrides: Option<EnvVars>,
     cwd: Option<CwdPath>,
-    handlers: Option<(Vec<HandlerEntry>, Option<Value>)>,
+    handlers: Option<(Vec<HandlerEntry>, Option<ValClos>)>,
 }
 
 impl WithinScope {
     /// `shell` resolves and permission-checks `dir:`. Handlers are statically checked.
-    pub(crate) fn parse(opts: &Map, shell: &mut Shell) -> Settled<Self> {
+    pub(crate) fn parse(opts: MapRef<'_>, shell: &mut Shell) -> Settled<Self> {
         let mut env_overrides = None;
         let mut cwd = None;
-        let mut catch_all: Option<Value> = None;
+        let mut catch_all: Option<ValClos> = None;
         // `handlers` and `handler` are independent: naming either installs a
         // frame, naming neither leaves the stack alone.
         let mut saw_handlers = false;
@@ -83,9 +85,9 @@ impl WithinScope {
 }
 
 /// `env:` — a map of scalar overrides.
-fn parse_env(v: &Value) -> Settled<EnvVars> {
+fn parse_env(v: &ValClos) -> Settled<EnvVars> {
     let mut env = EnvVars::new();
-    let Value::Map(values) = v else {
+    let View::Map(values) = v.view() else {
         return Err(Error::new(Reason::Invalid(Box::new(
             InvalidFailure::new(
                 "within".into(),
@@ -135,7 +137,7 @@ fn parse_env(v: &Value) -> Settled<EnvVars> {
 /// directory, and to be one a path can be read against ([`CwdPath`]), before
 /// the body runs rather than at the first command.  The cwd is where the
 /// directory is.
-fn parse_dir(v: &Value, shell: &mut Shell) -> Settled<CwdPath> {
+fn parse_dir(v: &ValClos, shell: &mut Shell) -> Settled<CwdPath> {
     let path = v.to_string();
     if path.is_empty() {
         return Err(Error::new(Reason::Invalid(Box::new(
@@ -184,19 +186,19 @@ impl WithinUndo {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::builtin::{BuiltinBody, BuiltinEntry};
     use crate::path::shown;
     use crate::protocol::Run;
     use crate::shell::run::RunReport;
     use crate::shell::runtime::Mooring;
-    use crate::shell::runtime::{BuiltinBody, BuiltinEntry};
     use crate::source::SourceOrigin;
 
     /// Every command observation's own `argv[0]`, in order, from an
     /// `audit { … }` report's flat `trail`.
-    fn command_argv0s(report: &Value) -> Vec<String> {
+    fn command_argv0s(report: &ValClos) -> Vec<String> {
         let map = report.as_map("test").expect("audit returns a map");
-        let trail_field = map.get("trail");
-        let Some(Value::List(trail)) = trail_field.as_deref() else {
+        let trail_field = map.get("trail").expect("trail field");
+        let View::List(trail) = trail_field.view() else {
             panic!("an audit report must have a list `trail` field");
         };
         trail
@@ -204,15 +206,19 @@ mod tests {
             .filter_map(|obs| {
                 let obs = obs.as_map("test").ok()?;
                 let what = obs.get("what")?;
-                let Value::Variant { label, payload } = what.as_ref() else {
+                let View::Variant { label, payload } = what.view() else {
                     return None;
                 };
-                let fact = payload.as_deref()?.as_map("test").ok()?;
-                match (label.as_ref(), fact.get("argv").as_deref()) {
-                    ("command", Some(Value::List(argv))) => match argv.iter().next().as_deref() {
-                        Some(Value::String(s)) => Some(s.to_string()),
-                        _ => None,
-                    },
+                if label.as_ref() != "command" {
+                    return None;
+                }
+                let payload = payload?;
+                let fact = payload.as_map("test").ok()?;
+                let argv = fact.get("argv")?;
+                let argv = argv.as_list("test").ok()?;
+                let first = argv.get(0)?;
+                match first.view() {
+                    View::String(s) => Some(s.to_string()),
                     _ => None,
                 }
             })
@@ -243,7 +249,7 @@ mod tests {
     }
 
     /// Stands in for any Rust panic a delimited body can raise mid-eval.
-    fn panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
+    fn panic_now(_args: &[ValClos], _mooring: &Mooring, _shell: &mut Shell) -> Settled<ValClos> {
         panic!("scope test: deliberate mid-body panic")
     }
 
@@ -389,9 +395,10 @@ mod tests {
             .into_settled()
             .expect("audit { echo hi } must succeed");
         let map = report.as_map("test").expect("audit returns a map");
-        match map.get("outcome").as_deref() {
-            Some(Value::Variant { label, .. }) => assert_eq!(label.as_ref(), "ok"),
-            other => panic!("a returning body must report `ok, got {other:?}"),
+        let outcome = map.get("outcome").expect("outcome field");
+        match outcome.view() {
+            View::Variant { label, .. } => assert_eq!(label.as_ref(), "ok"),
+            _ => panic!("a returning body must report `ok, got {outcome:?}"),
         }
         assert_eq!(command_argv0s(&report), ["/bin/echo"]);
     }
@@ -404,16 +411,19 @@ mod tests {
                    !$blk";
         let out = crate::shell::evaluator::run_source(src, &mut shell)
             .expect("a handler in a captured block must retain its session function");
-        assert_eq!(out, Value::Unit);
+        assert_eq!(out, ValClos::UNIT);
     }
 
     #[test]
     fn an_empty_handler_map_still_installs_a_scoped_frame() {
         let mut shell = crate::test_helper::core_shell();
-        let absent = WithinScope::parse(&Map::new(), &mut shell).expect("no options");
+        let opts = ValClos::map(vec![]);
+        let absent =
+            WithinScope::parse(opts.as_map("test").unwrap(), &mut shell).expect("no options");
         assert!(absent.handlers.is_none());
-        let opts = Map::from_iter([("handlers".into(), Value::map(vec![]))]);
-        let present = WithinScope::parse(&opts, &mut shell).expect("an empty handler map");
+        let opts = ValClos::map(vec![("handlers".into(), ValClos::map(vec![]))]);
+        let present = WithinScope::parse(opts.as_map("test").unwrap(), &mut shell)
+            .expect("an empty handler map");
         assert!(matches!(present.handlers, Some((entries, None)) if entries.is_empty()));
     }
 
@@ -425,8 +435,8 @@ mod tests {
         use crate::typecheck::table::{Form, declared};
         let mut shell = crate::test_helper::core_shell();
         for key in declared(Form::Within).keys {
-            let opts = Map::from_iter([(key.label.to_string(), Value::Unit)]);
-            let _ = WithinScope::parse(&opts, &mut shell);
+            let opts = ValClos::map(vec![(key.label.to_string(), ValClos::UNIT)]);
+            let _ = WithinScope::parse(opts.as_map("test").unwrap(), &mut shell);
         }
     }
     #[test]
@@ -443,12 +453,12 @@ mod tests {
             *f
         };
         assert_eq!(
-            failure(parse_env(&Value::Int(1))).path,
+            failure(parse_env(&ValClos::int(1))).path,
             vec![DataStep::Field("env".into())]
         );
-        let scalar = failure(parse_env(&Value::map(vec![(
+        let scalar = failure(parse_env(&ValClos::map(vec![(
             "X".into(),
-            Value::list(vec![]),
+            ValClos::list(vec![]),
         )])));
         assert_eq!(scalar.operation, "within");
         assert_eq!(
@@ -456,9 +466,9 @@ mod tests {
             vec![DataStep::Field("env".into()), DataStep::Field("X".into())]
         );
         assert!(matches!(scalar.cause, InvalidCause::Shape(_)));
-        let reserved = failure(parse_env(&Value::map(vec![(
+        let reserved = failure(parse_env(&ValClos::map(vec![(
             "PWD".into(),
-            Value::string("/tmp"),
+            ValClos::string("/tmp"),
         )])));
         assert_eq!(
             reserved.cause,
@@ -466,7 +476,7 @@ mod tests {
         );
         let mut shell = crate::test_helper::core_shell();
         let Err(crate::shell::runtime::Break::Error(error)) =
-            parse_dir(&Value::string(""), &mut shell)
+            parse_dir(&ValClos::string(""), &mut shell)
         else {
             panic!("empty directory")
         };

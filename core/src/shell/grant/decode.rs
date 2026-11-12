@@ -1,4 +1,4 @@
-//! Decode a capability `Value` (the argument of `grant [...]`, a
+//! Decode a capability `ValClos` (the argument of `grant [...]`, a
 //! `--capabilities` profile, or a grant value one host authored for another)
 //! into a resolved [`GrantLayer`]: the one grant front-end.
 //!
@@ -28,7 +28,7 @@ use crate::fact::{
 };
 
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
-use crate::shell::runtime::{List, Map, Value};
+use crate::shell::runtime::{ListRef, MapRef, ValClos, View};
 use crate::text::near_names;
 use crate::typecheck::table::{
     DIR_TARGET, EDITOR, EXEC_TARGET, Form as TableForm, GPU, Holds, NET, PLACE, SHELL, Table,
@@ -38,24 +38,24 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-fn found(value: &Value) -> Found {
-    match value {
-        Value::Unit => Found::Unit,
-        Value::Bool(v) => Found::Bool(*v),
-        Value::Int(v) => Found::Int(*v),
-        Value::Float(v) => Found::Float(*v),
-        Value::String(v) => Found::Text(TextPreview::new(v.as_str())),
-        Value::Bytes(_) => Found::Bytes,
-        Value::List(_) => Found::List,
-        Value::Map(_) => Found::Map,
-        Value::Variant { label, .. } => Found::Variant(label.to_string()),
-        Value::Thunk(c) if c.comp().lam().is_none() => Found::Block,
-        Value::Thunk(_) | Value::Native(..) => Found::Function,
-        Value::Handle(_) => Found::Handle,
+fn found(value: &ValClos) -> Found {
+    match value.view() {
+        View::Unit => Found::Unit,
+        View::Bool(v) => Found::Bool(v),
+        View::Int(v) => Found::Int(v),
+        View::Float(v) => Found::Float(v),
+        View::String(v) => Found::Text(TextPreview::new(v.as_str())),
+        View::Bytes(_) => Found::Bytes,
+        View::List(_) => Found::List,
+        View::Map(_) => Found::Map,
+        View::Variant { label, .. } => Found::Variant(label.to_string()),
+        View::Thunk { comp, .. } if comp.lam().is_none() => Found::Block,
+        View::Thunk { .. } | View::Builtin(_) => Found::Function,
+        View::Handle(_) => Found::Handle,
     }
 }
 
-fn shape(value: &Value, expected: Expected) -> Error {
+fn shape(value: &ValClos, expected: Expected) -> Error {
     invalid_error(InvalidCause::Shape(ShapeFailure {
         expected,
         found: found(value),
@@ -90,29 +90,28 @@ fn nested(key: &str) -> &'static Table {
 /// A tagged value: its label and payload.
 struct Tag<'a> {
     label: &'a str,
-    payload: Option<&'a Value>,
+    payload: Option<Cow<'a, ValClos>>,
 }
 
 impl<'a> Tag<'a> {
-    fn of(value: &'a Value) -> Option<Self> {
-        match value {
-            Value::Variant { label, payload } => Some(Self {
-                label,
-                payload: payload.as_deref(),
-            }),
+    fn of(value: &'a ValClos) -> Option<Self> {
+        match value.view() {
+            View::Variant { label, payload } => Some(Self { label, payload }),
             _ => None,
         }
     }
 
     /// The string payload; `vocab` supplies contextual surface advice.
-    fn text(&self, vocab: &Vocab) -> Result<&'a str, Error> {
-        match self.payload {
-            Some(Value::String(s)) => Ok(s.as_str()),
-            Some(other) => Err(at(
-                shape(other, Expected::Shape(ValueShape::String)),
-                DataStep::Payload(self.label.into()),
-            )
-            .with_hint(vocab.payload)),
+    fn text(&self, vocab: &Vocab) -> Result<&str, Error> {
+        match self.payload.as_deref() {
+            Some(value) => match value.view() {
+                View::String(s) => Ok(s.as_str()),
+                _ => Err(at(
+                    shape(value, Expected::Shape(ValueShape::String)),
+                    DataStep::Payload(self.label.into()),
+                )
+                .with_hint(vocab.payload)),
+            },
             None => Err(
                 invalid_error(InvalidCause::MissingPayload(self.label.into()))
                     .with_hint(vocab.payload),
@@ -121,7 +120,7 @@ impl<'a> Tag<'a> {
     }
 
     fn nullary(&self, vocab: &Vocab) -> Result<(), Error> {
-        match self.payload {
+        match self.payload.as_deref() {
             None => Ok(()),
             Some(value) => Err(
                 invalid_error(InvalidCause::UnexpectedPayload(UnexpectedPayload {
@@ -143,7 +142,7 @@ fn unknown_tag(vocab: &Vocab, tag: &str) -> Error {
     grant_error(vocab.refuse(tag))
 }
 
-fn untagged(vocab: &Vocab, value: &Value) -> Error {
+fn untagged(vocab: &Vocab, value: &ValClos) -> Error {
     shape(
         value,
         Expected::Tags((vocab.row)().into_iter().map(|(tag, _)| tag).collect()),
@@ -151,17 +150,17 @@ fn untagged(vocab: &Vocab, value: &Value) -> Error {
     .with_hint(vocab.untagged)
 }
 
-fn list_of(value: &Value) -> Result<List, Error> {
-    match value {
-        Value::List(items) => Ok(items.clone()),
-        other => Err(shape(other, Expected::Shape(ValueShape::List))),
+fn list_of(value: &ValClos) -> Result<ListRef<'_>, Error> {
+    match value.view() {
+        View::List(items) => Ok(items),
+        _ => Err(shape(value, Expected::Shape(ValueShape::List))),
     }
 }
 
-fn table_of<'a>(value: &'a Value, empty: &str) -> Result<&'a Map, Error> {
-    match value {
-        Value::Map(map) => Ok(map),
-        other => Err(shape(other, Expected::Shape(ValueShape::Map))
+fn table_of<'a>(value: &'a ValClos, empty: &str) -> Result<MapRef<'a>, Error> {
+    match value.view() {
+        View::Map(map) => Ok(map),
+        _ => Err(shape(value, Expected::Shape(ValueShape::Map))
             .with_hint(format!("for a table that admits nothing write `{empty}`"))),
     }
 }
@@ -185,14 +184,14 @@ fn selector_of(tag: &Tag) -> Result<Option<Selector>, Error> {
 }
 
 /// One entry of an fs list.
-fn decode_place(value: &Value) -> Result<Place, Error> {
+fn decode_place(value: &ValClos) -> Result<Place, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&PLACE, value))?;
     place_of(&tag)?.ok_or_else(|| unknown_tag(&PLACE, tag.label))
 }
 
 /// The places of an fs list, each walked as polarity `W` walks.
 fn freeze_places<W: Polar>(
-    list: &List,
+    list: ListRef<'_>,
     ctx: &FreezeCtx,
 ) -> Result<Vec<GrantPath<W::Grant>>, Error> {
     list.iter()
@@ -214,24 +213,24 @@ fn freeze_places<W: Polar>(
 
 /// `fs: [read: [...], write: [...], deny: [...]]`, lists of places, where
 /// `deny` carves holes inside the `read`/`write` prefix regions.
-fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
+fn decode_fs(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer, Error> {
     let at = |error| within(err_prefix)(error);
     let (mut read, mut write, mut deny) = (Vec::new(), Vec::new(), Vec::new());
     for (sub, paths) in table_of(value, "fs: [read: []]").map_err(at)? {
-        let list = |paths: &Value| list_of(paths).map_err(|e| at_field(e, sub)).map_err(at);
+        let list = |paths| list_of(paths).map_err(|e| at_field(e, sub)).map_err(at);
         match sub {
             "read" => {
-                read = freeze_places::<Trace>(&list(&paths)?, ctx)
+                read = freeze_places::<Trace>(list(&paths)?, ctx)
                     .map_err(|e| at_field(e, "read"))
                     .map_err(at)?;
             }
             "write" => {
-                write = freeze_places::<Trace>(&list(&paths)?, ctx)
+                write = freeze_places::<Trace>(list(&paths)?, ctx)
                     .map_err(|e| at_field(e, "write"))
                     .map_err(at)?;
             }
             "deny" => {
-                deny = freeze_places::<Excluded>(&list(&paths)?, ctx)
+                deny = freeze_places::<Excluded>(list(&paths)?, ctx)
                     .map_err(|e| at_field(e, "deny"))
                     .map_err(at)?;
             }
@@ -246,7 +245,7 @@ fn decode_fs(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<FsLayer
 }
 
 /// A nullary tag of `V`: its label names a `V` and carries no payload.
-fn nullary_tag<V: FromStr>(value: &Value, vocab: &Vocab) -> Result<V, Error> {
+fn nullary_tag<V: FromStr>(value: &ValClos, vocab: &Vocab) -> Result<V, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(vocab, value))?;
     let parsed = tag
         .label
@@ -257,13 +256,13 @@ fn nullary_tag<V: FromStr>(value: &Value, vocab: &Vocab) -> Result<V, Error> {
 }
 
 /// `net` and `gpu` each take their one restriction; omit one to inherit.
-fn decode_veto<V: FromStr>(value: &Value, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
+fn decode_veto<V: FromStr>(value: &ValClos, vocab: &Vocab, err_prefix: &str) -> Result<V, Error> {
     nullary_tag(value, vocab).map_err(within(err_prefix))
 }
 
 /// `editor`/`shell`: a list of verbs, each a nullary tag of `V`.
 fn decode_verbs<V: FromStr + Ord>(
-    value: &Value,
+    value: &ValClos,
     vocab: &Vocab,
     err_prefix: &str,
 ) -> Result<BTreeSet<V>, Error> {
@@ -320,7 +319,7 @@ fn file_rules<W: Keyed>(place: &Place, ctx: &FreezeCtx) -> Result<Vec<Rule>, Err
 
 /// `dir D`: every directory `D`, a place or a selector, resolves to.
 fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
-    let payload = tag.payload.ok_or_else(|| {
+    let payload = tag.payload.as_deref().ok_or_else(|| {
         invalid_error(InvalidCause::MissingPayload("dir".into())).with_hint(DIR_TARGET.untagged)
     })?;
     let inner = Tag::of(payload).ok_or_else(|| untagged(&DIR_TARGET, payload))?;
@@ -340,7 +339,7 @@ fn dir_rules<W: Keyed>(tag: &Tag, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
 
 /// One entry of an `allow` or `deny` list, as the rules polarity `W` makes
 /// of it.
-fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
+fn decode_target<W: Keyed>(value: &ValClos, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let tag = Tag::of(value).ok_or_else(|| untagged(&EXEC_TARGET, value))?;
     match tag.label {
         "name" => {
@@ -367,7 +366,7 @@ fn decode_target<W: Keyed>(value: &Value, ctx: &FreezeCtx) -> Result<Vec<Rule>, 
 }
 
 /// An `allow` or `deny` list, the rules of each target at polarity `W`.
-fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
+fn decode_targets<W: Keyed>(list: ListRef<'_>, ctx: &FreezeCtx) -> Result<Vec<Rule>, Error> {
     let rules: Vec<_> = list
         .iter()
         .enumerate()
@@ -380,7 +379,7 @@ fn decode_targets<W: Keyed>(list: &List, ctx: &FreezeCtx) -> Result<Vec<Rule>, E
 
 /// `exec: [allow: [...], deny: [...]]`.  Argument restrictions are gone: a
 /// target is admitted or denied whatever its arguments.
-fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
+fn decode_exec(value: &ValClos, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecRules, Error> {
     let at = |error| within(err_prefix)(error);
     let mut rules = Vec::new();
     for (key, targets) in table_of(value, "exec: [allow: []]").map_err(at)? {
@@ -393,7 +392,7 @@ fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecR
             .map_err(|e| at_field(e, key))
             .map_err(at)?;
         rules.extend(
-            decode(&list, ctx)
+            decode(list, ctx)
                 .map_err(|e| at_field(e, key))
                 .map_err(at)?,
         );
@@ -403,15 +402,15 @@ fn decode_exec(value: &Value, err_prefix: &str, ctx: &FreezeCtx) -> Result<ExecR
 
 /// Whether `value` has the shape of the old surface's per-command policy:
 /// `'allow'`, `'deny'`, or a list of subcommands.
-fn is_old_policy(value: &Value) -> bool {
-    match value {
-        Value::String(_) => true,
-        Value::List(items) => items.iter().all(|i| matches!(*i, Value::String(_))),
+fn is_old_policy(value: &ValClos) -> bool {
+    match value.view() {
+        View::String(_) => true,
+        View::List(items) => items.iter().all(|i| matches!(i.view(), View::String(_))),
         _ => false,
     }
 }
 
-fn unknown_exec_key(key: &str, value: &Value) -> Error {
+fn unknown_exec_key(key: &str, value: &ValClos) -> Error {
     let err = invalid_error(InvalidCause::UnknownField(nested("exec").unknown_key(key)));
     if !is_old_policy(value) || !near_names(key, ["allow", "deny"], 1).is_empty() {
         return err;
@@ -429,7 +428,7 @@ fn unknown_exec_key(key: &str, value: &Value) -> Error {
 /// Walk a capability record into a resolved [`GrantLayer`], walking every
 /// place against `ctx`.
 ///
-/// The single `Value → GrantLayer` constructor for a record; every spelling
+/// The single `ValClos → GrantLayer` constructor for a record; every spelling
 /// is walked against `ctx` right here, so "a `GrantLayer` has every spelling
 /// already resolved" holds by construction whoever comes through.  Unknown
 /// keys error here and in each dimension's decoder rather than being
@@ -440,13 +439,13 @@ fn unknown_exec_key(key: &str, value: &Value) -> Error {
 /// A [`Error`] naming the key whose shape or value it will not read, or
 /// the place that would not resolve absolute or whose walk failed.
 pub(crate) fn decode_capability_map(
-    value: &Value,
+    value: &ValClos,
     err_prefix: &str,
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, Error> {
-    let entries = match value {
-        Value::Map(entries) => Cow::Borrowed(entries),
-        Value::Unit => Cow::Owned(Map::new()),
+    let entries = match value.view() {
+        View::Map(entries) => Some(entries),
+        View::Unit => None,
         _ => {
             return Err(shape(
                 value,
@@ -457,7 +456,7 @@ pub(crate) fn decode_capability_map(
     };
     let (mut exec, mut fs, mut net, mut gpu, mut editor, mut shell) =
         (None, None, None, None, None, None);
-    for (k, v) in &*entries {
+    for (k, v) in entries.into_iter().flatten() {
         let context = format!("{err_prefix} {k}");
         let decoded = (|| -> Result<(), Error> {
             match k {
@@ -511,7 +510,7 @@ pub fn decode_grant(
     err_prefix: &str,
     ctx: &FreezeCtx,
 ) -> Result<GrantLayer, Error> {
-    decode_capability_map(&Value::from(record.clone()), err_prefix, ctx)
+    decode_capability_map(&ValClos::from(record.clone()), err_prefix, ctx)
 }
 
 /// As [`decode_grant`], read as an extension: an axis it omits states
@@ -539,20 +538,20 @@ mod tests {
     #[cfg(unix)]
     use crate::test_helper::{located, stack, trace};
 
-    fn bare(label: &str) -> Value {
-        Value::variant(label, None)
+    fn bare(label: &str) -> ValClos {
+        ValClos::variant(label, None)
     }
 
-    fn tagged(label: &str, payload: &str) -> Value {
-        Value::variant(label, Some(Value::string(payload)))
+    fn tagged(label: &str, payload: &str) -> ValClos {
+        ValClos::variant(label, Some(ValClos::string(payload)))
     }
 
-    fn dir(inner: Value) -> Value {
-        Value::variant("dir", Some(inner))
+    fn dir(inner: ValClos) -> ValClos {
+        ValClos::variant("dir", Some(inner))
     }
 
-    fn rec(entries: &[(&str, Value)]) -> Value {
-        Value::Map(
+    fn rec(entries: &[(&str, ValClos)]) -> ValClos {
+        ValClos::map(
             entries
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))
@@ -560,11 +559,11 @@ mod tests {
         )
     }
 
-    fn list(items: Vec<Value>) -> Value {
-        Value::list(items)
+    fn list(items: Vec<ValClos>) -> ValClos {
+        ValClos::list(items)
     }
 
-    fn exec(allow: Vec<Value>, deny: Vec<Value>) -> Value {
+    fn exec(allow: Vec<ValClos>, deny: Vec<ValClos>) -> ValClos {
         rec(&[("allow", list(allow)), ("deny", list(deny))])
     }
 
@@ -582,11 +581,11 @@ mod tests {
         )
     }
 
-    fn decode(value: &Value) -> Result<GrantLayer, Error> {
+    fn decode(value: &ValClos) -> Result<GrantLayer, Error> {
         decode_capability_map(value, "test", &ctx())
     }
 
-    fn rules_of(exec_value: Value) -> Result<ExecRules, Error> {
+    fn rules_of(exec_value: ValClos) -> Result<ExecRules, Error> {
         decode(&rec(&[("exec", exec_value)])).map(|layer| layer.exec().cloned().unwrap())
     }
 
@@ -653,7 +652,7 @@ mod tests {
             .collect()
     }
 
-    fn refusal(value: &Value) -> Error {
+    fn refusal(value: &ValClos) -> Error {
         decode(value).unwrap_err()
     }
 
@@ -682,11 +681,11 @@ mod tests {
         Expected::Tags((vocab.row)().into_iter().map(|(tag, _)| tag).collect())
     }
 
-    fn exec_refusal(exec_value: Value) -> Error {
+    fn exec_refusal(exec_value: ValClos) -> Error {
         refusal(&rec(&[("exec", exec_value)]))
     }
 
-    fn fs_refusal(read: Vec<Value>) -> Error {
+    fn fs_refusal(read: Vec<ValClos>) -> Error {
         refusal(&rec(&[("fs", rec(&[("read", list(read))]))]))
     }
 
@@ -924,7 +923,7 @@ mod tests {
         for payload in [
             tagged("name", "git"),
             dir(bare("path")),
-            Value::string("/x"),
+            ValClos::string("/x"),
         ] {
             let e = exec_refusal(exec(vec![dir(payload.clone())], vec![]));
             let path = vec![
@@ -962,13 +961,13 @@ mod tests {
     #[test]
     fn obsolete_exec_policies_are_refused() {
         for value in [
-            Value::string("allow"),
-            list(vec![Value::string("git")]),
-            rec(&[("git", Value::string("allow"))]),
-            rec(&[("cargo", list(vec![Value::string("build")]))]),
+            ValClos::string("allow"),
+            list(vec![ValClos::string("git")]),
+            rec(&[("git", ValClos::string("allow"))]),
+            rec(&[("cargo", list(vec![ValClos::string("build")]))]),
         ] {
             let e = exec_refusal(value.clone());
-            if let Value::Map(entries) = &value {
+            if let View::Map(entries) = value.view() {
                 let (key, _) = entries.iter().next().unwrap();
                 assert_invalid(
                     &e,
@@ -998,11 +997,14 @@ mod tests {
     /// any other value under an unknown key is a plain unknown key.
     #[test]
     fn the_per_command_hint_is_only_for_the_old_policy_shapes() {
-        for value in [Value::string("allow"), list(vec![Value::string("build")])] {
+        for value in [
+            ValClos::string("allow"),
+            list(vec![ValClos::string("build")]),
+        ] {
             let hint = exec_refusal(rec(&[("git", value)])).hints()[0].to_string();
             assert!(hint.contains("`` allow: [`name git] ``"), "{hint}");
         }
-        for value in [list(vec![bare("git")]), Value::Bool(true), rec(&[])] {
+        for value in [list(vec![bare("git")]), ValClos::bool(true), rec(&[])] {
             let e = exec_refusal(rec(&[("only", value)]));
             assert_invalid(
                 &e,
@@ -1033,9 +1035,9 @@ mod tests {
     fn a_nested_table_is_a_record() {
         // an empty map is a record at run time: it restricts to the baseline
         for (value, accepted) in [
-            (Value::Unit, false),
+            (ValClos::UNIT, false),
             (rec(&[]), true),
-            (Value::string("x"), false),
+            (ValClos::string("x"), false),
         ] {
             assert_eq!(decode(&rec(&[("fs", value)])).is_ok(), accepted);
         }
@@ -1078,7 +1080,7 @@ mod tests {
             assert!(e.to_string().contains("is not a place"), "{e}");
             assert!(e.reason.advice()[0].contains("fs lists take places"));
         }
-        let e = fs_refusal(vec![Value::string("/tmp")]);
+        let e = fs_refusal(vec![ValClos::string("/tmp")]);
         assert_shape(
             &e,
             vec![
@@ -1317,7 +1319,7 @@ mod tests {
     fn net_offline_decodes_and_nothing_else_does() {
         let layer = decode(&rec(&[("net", bare("offline"))])).unwrap();
         assert_eq!(layer.axes().net, Some(Net::Offline));
-        for value in [Value::Bool(true), Value::Bool(false)] {
+        for value in [ValClos::bool(true), ValClos::bool(false)] {
             let e = refusal(&rec(&[("net", value.clone())]));
             assert_shape(
                 &e,
@@ -1335,7 +1337,7 @@ mod tests {
         assert!(m.contains("`` `online `` is not a net mode"), "{m}");
         let m = refusal(&rec(&[(
             "net",
-            Value::variant("offline", Some(Value::Bool(true))),
+            ValClos::variant("offline", Some(ValClos::bool(true))),
         )]))
         .to_string();
         assert!(m.contains("takes no value"), "{m}");
@@ -1362,7 +1364,7 @@ mod tests {
     #[test]
     fn the_boolean_record_surface_is_refused() {
         for key in ["editor", "shell"] {
-            let e = refusal(&rec(&[(key, rec(&[("read", Value::Bool(true))]))]));
+            let e = refusal(&rec(&[(key, rec(&[("read", ValClos::bool(true))]))]));
             assert_shape(
                 &e,
                 vec![DataStep::Field(key.into())],
@@ -1371,7 +1373,7 @@ mod tests {
             );
             assert_eq!(e.context(), Some(format!("test {key}").as_str()));
         }
-        let e = refusal(&rec(&[("shell", list(vec![Value::string("chdir")]))]));
+        let e = refusal(&rec(&[("shell", list(vec![ValClos::string("chdir")]))]));
         assert_shape(
             &e,
             vec![
@@ -1384,7 +1386,7 @@ mod tests {
         assert!(e.hints()[0].contains("`shell` takes the list of verbs"));
         let m = refusal(&rec(&[(
             "editor",
-            list(vec![Value::variant("read", Some(Value::Bool(true)))]),
+            list(vec![ValClos::variant("read", Some(ValClos::bool(true)))]),
         )]))
         .to_string();
         assert!(m.contains("takes no value"), "{m}");
@@ -1392,7 +1394,7 @@ mod tests {
 
     #[test]
     fn detach_is_a_shell_verb_not_a_key() {
-        let e = refusal(&rec(&[("detach", Value::Bool(true))]));
+        let e = refusal(&rec(&[("detach", ValClos::bool(true))]));
         assert_invalid(
             &e,
             vec![],
@@ -1411,7 +1413,7 @@ mod tests {
     // ── drift ──
 
     /// A valid value for each key the grant table declares.
-    fn representative(key: &str) -> Value {
+    fn representative(key: &str) -> ValClos {
         match key {
             "exec" => exec(vec![tagged("name", "git")], vec![dir(bare("system"))]),
             "fs" => rec(&[("read", list(vec![tagged("cwd", ".")]))]),
@@ -1424,7 +1426,7 @@ mod tests {
     }
 
     /// A valid list entry for each key a nested table declares.
-    fn entry(table: &str) -> Value {
+    fn entry(table: &str) -> ValClos {
         match table {
             "exec" => tagged("name", "git"),
             "fs" => tagged("cwd", "."),
@@ -1440,7 +1442,7 @@ mod tests {
         for key in table.keys {
             match &key.holds {
                 Holds::Refused(cause) => {
-                    let e = refusal(&rec(&[(key.label, Value::Unit)]));
+                    let e = refusal(&rec(&[(key.label, ValClos::UNIT)]));
                     assert_invalid(
                         &e,
                         vec![],
@@ -1473,7 +1475,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_refused_in_its_tables_words_at_each_depth() {
         let table = declared(TableForm::Grant);
-        let e = refusal(&rec(&[("bogus", Value::Unit)]));
+        let e = refusal(&rec(&[("bogus", ValClos::UNIT)]));
         assert_invalid(
             &e,
             vec![],
@@ -1520,7 +1522,7 @@ mod tests {
     fn grant_decode_prefixes_only_present_payload_values_once() {
         for (value, cause, payload_path) in [
             (
-                Value::variant("cwd", Some(Value::Bool(true))),
+                ValClos::variant("cwd", Some(ValClos::bool(true))),
                 InvalidCause::Shape(ShapeFailure {
                     expected: Expected::Shape(ValueShape::String),
                     found: Found::Bool(true),
@@ -1549,7 +1551,7 @@ mod tests {
         }
         for (inner, cause, payload_path) in [
             (
-                Value::variant("cwd", Some(Value::Bool(true))),
+                ValClos::variant("cwd", Some(ValClos::bool(true))),
                 InvalidCause::Shape(ShapeFailure {
                     expected: Expected::Shape(ValueShape::String),
                     found: Found::Bool(true),
@@ -1567,7 +1569,7 @@ mod tests {
                 vec![],
             ),
             (
-                Value::variant("system", Some(Value::Bool(true))),
+                ValClos::variant("system", Some(ValClos::bool(true))),
                 InvalidCause::UnexpectedPayload(UnexpectedPayload {
                     tag: "system".into(),
                     found: Found::Bool(true),

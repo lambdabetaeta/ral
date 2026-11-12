@@ -91,6 +91,9 @@ fn reasons() -> Vec<Reason> {
             cause: InvalidCause::Empty,
         })),
         Reason::Evaluation(Box::new(EvalFailure::MissingBinding("binding".into()))),
+        Reason::Evaluation(Box::new(EvalFailure::WithheldHandle(
+            "parent worker".into(),
+        ))),
         Reason::State(Box::new(StateFailure::CaptureLimit(CaptureLimit {
             bytes: u64::MAX.into(),
         }))),
@@ -105,7 +108,7 @@ fn reasons() -> Vec<Reason> {
         Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
             BootFailure::AlreadyBooted,
         )))),
-        Reason::Invariant(Box::new(InvariantFailure::HandleInSeed)),
+        Reason::Invariant(Box::new(InvariantFailure::MissingEngineFactory)),
         Reason::Host(Box::new(HostFailure::Ral(RalFailure::Keybinding(
             KeybindingFailure::Notation(KeybindingFailureNotation {
                 key: "shift-alt-ß".into(),

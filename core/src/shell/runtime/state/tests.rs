@@ -1,4 +1,4 @@
-use super::super::value::Value;
+use super::super::value::ValClos;
 use super::*;
 use crate::shell::grant::SpawnGrant;
 use crate::shell::runtime::Nursery;
@@ -16,7 +16,7 @@ fn no_base(
 #[test]
 fn nursery_round_trips_a_forked_session() {
     let mut shell = crate::test_helper::core_shell();
-    crate::test_access::bind_untyped(&mut shell, "parent_binding", Value::Int(42));
+    crate::test_access::bind_untyped(&mut shell, "parent_binding", ValClos::int(42));
     let nursery = Nursery::default();
     let id = nursery.park(shell.bequeath(SpawnGrant::Inherit));
     let adopted = nursery
@@ -27,7 +27,7 @@ fn nursery_round_trips_a_forked_session() {
 
     assert_eq!(
         child.env.get("parent_binding"),
-        Some(&Value::Int(42)),
+        Some(&ValClos::int(42)),
         "the bequest must carry the parent's lexical scope"
     );
 }
@@ -35,8 +35,8 @@ fn nursery_round_trips_a_forked_session() {
 #[test]
 fn host_bindings_keep_the_declared_closed_scheme() {
     let mut shell = crate::test_helper::core_shell();
-    let value = Value::from(&crate::io::terminal::TerminalState::default());
-    let scheme = Value::terminal_scheme();
+    let value = ValClos::from(&crate::io::terminal::TerminalState::default());
+    let scheme = ValClos::terminal_scheme();
     shell.set_var("TERMINAL".into(), value.clone(), scheme.clone());
     assert_eq!(shell.scope_lookup("TERMINAL"), Some(&value));
     assert_eq!(
@@ -53,7 +53,7 @@ fn host_bindings_keep_the_declared_closed_scheme() {
 fn refused_host_blocks_install_no_hook() {
     use crate::fact::{BlockRole, InvalidCause, Reason};
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, Val, ValListElem};
-    use crate::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig};
+    use crate::shell::runtime::{DefaultPolicy, Env, HookName, HookSig};
     use crate::source::Spanned;
     let refused_as = |error: crate::error::Error, role: BlockRole| {
         let Reason::Invalid(failure) = error.reason else {
@@ -72,7 +72,7 @@ fn refused_host_blocks_install_no_hook() {
         redirects: crate::ir::Redirects::default(),
         site: None,
     }));
-    let value = Value::Thunk(Closure::closed(body));
+    let value = ValClos::thunk(std::sync::Arc::new(body), &Env::EMPTY);
     let name = HookName::session("refused");
     let error = shell
         .register_hook(name.clone(), value, HookSig::Block, DefaultPolicy::denied())

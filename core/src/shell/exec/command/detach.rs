@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::fact::Receipt;
 use crate::ir::CommandName;
 use crate::process::{Scope, StdioSpec, group::Survivor};
-use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell, ValClos};
 
 /// `detach <desc> <program> <args>`: resolve `program` as `^program` would,
 /// and return the receipt `[pid: Int, desc: String]`. The session never waits for,
@@ -15,10 +15,10 @@ use crate::shell::runtime::{CommandOrigin, Mooring, Settled, Shell, Value};
 pub(in crate::shell) fn detach(
     desc: &str,
     program: &str,
-    argv: &[Value],
+    argv: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     shell.check(Flag::Shell(ShellVerb::Detach), "detach")?;
     let command = Command::from_name(&CommandName::of(program), &shell.context)
         .lookup(&shell.context.grants, shell.baseline())
@@ -28,7 +28,7 @@ pub(in crate::shell) fn detach(
         let pid = command
             .prepare(argv, Ownership::Surrendered, shell)?
             .detach(&shell.scope)?;
-        Ok(Value::from_datum(Receipt {
+        Ok(ValClos::from_datum(Receipt {
             pid,
             desc: desc.into(),
         }))

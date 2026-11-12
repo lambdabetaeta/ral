@@ -609,8 +609,23 @@ mod typed_boundaries {
 
     #[test]
     fn first_order_keeps_the_opaque_leaf_and_root_or_nested_position() {
-        let native = Value::Native(Arc::new(HARNESS_BUILTINS[0].clone()), Arc::from([]));
-        for (value, nested) in [(native.clone(), false), (Value::list(vec![native]), true)] {
+        let native = ValClos::builtin(Arc::new(HARNESS_BUILTINS[0].clone()));
+        let mut shell = shell();
+        let residual = ral_core::shell::load::evaluate_closed(
+            &Mooring::adrift(),
+            &mut shell,
+            "let partial = has [:, key: 7]; return $partial",
+            &SourceOrigin::named("<typed-boundary:residual>"),
+            None,
+        )
+        .expect("a builtin's eta residual");
+        assert_eq!(residual.type_name(), "Lambda");
+        for (value, nested) in [
+            (native.clone(), false),
+            (ValClos::list(vec![native]), true),
+            (residual.clone(), false),
+            (ValClos::list(vec![residual]), true),
+        ] {
             let error = error(first_order("exarch-agents", &value));
             assert_eq!(
                 error.reason,
@@ -629,7 +644,7 @@ mod typed_boundaries {
     #[test]
     fn malformed_requests_keep_the_original_decode_path() {
         let mut shell = shell();
-        let word = Value::variant("remove", Some(Value::Int(7)));
+        let word = ValClos::variant("remove", Some(ValClos::int(7)));
         let cause = DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
             expected: ral_core::fact::Expected::Shape(ValueShape::String),
             found: Found::Int(7),
@@ -674,7 +689,7 @@ mod typed_boundaries {
                     DecodeFailure::new(DecodeCause::EmptyProviderRole).payload("role"),
                 ),
             ] {
-                let word = Value::from(tag(
+                let word = ValClos::from(tag(
                     "start",
                     Some(FOValue::Map {
                         entries: vec![
@@ -709,7 +724,7 @@ mod typed_boundaries {
         }
     }
 
-    fn enquire(answer: Settled<FOValue>) -> Settled<Value> {
+    fn enquire(answer: Settled<FOValue>) -> Settled<ValClos> {
         let request = RunRequest {
             desk: Some(Arc::new(Answers(answer))),
             ..Run::captured("exarch-pins `list", SourceOrigin::named("<typed-enquiry>")).into()

@@ -1,68 +1,41 @@
 //! Disposal of seed-created owners, not a global runtime destruction policy.
 
-use super::Value;
+use super::{Repr, ValClos};
 use crate::shell::runtime::{Binding, Env};
 use std::sync::Arc;
 
-pub(crate) fn drop_seed_value(value: Value) {
+pub(crate) fn drop_seed_value(value: ValClos) {
     drop_owned(Owned::Value(value));
 }
-
 pub(crate) fn drop_seed_env(env: Env) {
     drop_owned(Owned::Env(env));
 }
-
 enum Owned {
-    Value(Value),
+    Value(ValClos),
     Env(Env),
     Binding(Binding),
 }
-
 fn drop_owned(root: Owned) {
     let mut pending = vec![root];
     while let Some(owner) = pending.pop() {
         match owner {
             Owned::Binding(Binding { value, .. }) => pending.push(Owned::Value(value)),
-            Owned::Env(env) => {
-                match env.into_seed_bindings() {
-                    Ok(bindings) => pending.extend(bindings.into_iter().map(Owned::Binding)),
-                    // Ordinary nonempty Small is outside the seed-created owner boundary.
-                    Err(env) => drop(env),
-                }
-            }
-            Owned::Value(value) => match value {
-                Value::List(list) => {
-                    if let Some(values) = list.into_seed_values() {
-                        pending.extend(values.into_iter().map(Owned::Value));
+            Owned::Env(env) => match env.into_seed_bindings() {
+                Ok(bindings) => pending.extend(bindings.into_iter().map(Owned::Binding)),
+                Err(env) => drop(env),
+            },
+            Owned::Value(mut value) => match &mut value.0 {
+                Repr::List(items) => {
+                    if let Some(items) = Arc::into_inner(std::mem::take(items)) {
+                        pending.extend(items.into_iter().map(Owned::Value));
                     }
                 }
-                Value::Map(map) => {
-                    if let Some(values) = map.into_seed_values() {
-                        pending.extend(values.into_iter().map(|(_, v)| Owned::Value(v)));
+                Repr::Map(entries, _) => {
+                    if let Some(entries) = Arc::into_inner(std::mem::take(entries)) {
+                        pending.extend(entries.into_iter().map(|(_, v)| Owned::Value(v)));
                     }
                 }
-                Value::Variant { payload, .. } => {
-                    pending.extend(payload.map(|value| Owned::Value(*value)));
-                }
-                Value::Thunk(closure) => pending.push(Owned::Env(closure.into_env())),
-                Value::Native(_, mut args) => {
-                    match Arc::get_mut(&mut args) {
-                        Some(args) => pending.extend(
-                            args.iter_mut()
-                                .map(|value| Owned::Value(std::mem::replace(value, Value::Unit))),
-                        ),
-                        // Retain children before releasing a shared slice: a concurrent
-                        // release may make this its last owner.
-                        None => pending.extend(args.iter().cloned().map(Owned::Value)),
-                    }
-                }
-                Value::Unit
-                | Value::Bool(_)
-                | Value::Int(_)
-                | Value::Float(_)
-                | Value::String(_)
-                | Value::Bytes(_)
-                | Value::Handle(_) => {}
+                Repr::Syn(_, env) => pending.push(Owned::Env(std::mem::take(env))),
             },
         }
     }
@@ -71,19 +44,33 @@ fn drop_owned(root: Owned) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::{Closure, Map};
+    use crate::ir::{CompKind, Val};
+    use crate::shell::runtime::{Map, Mooring};
+    use crate::source::Spanned;
     use std::sync::Barrier;
 
-    #[test]
-    fn seed_cleanup_releases_native_argument_owners_concurrently_on_small_stacks() {
-        let shell = crate::test_helper::core_shell();
-        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
-        let marker = Arc::new(entry.as_ref().clone());
-        let weak = Arc::downgrade(&marker);
-        let mut value = Value::Native(marker, Arc::from([]));
-        for _ in 0..30_000 {
-            value = Value::Native(Arc::clone(&entry), Arc::from([value]));
-        }
+    fn seed_residual(
+        value: ValClos,
+        shell: &mut crate::Shell,
+        entry: &Arc<crate::builtin::BuiltinEntry>,
+    ) -> ValClos {
+        let partial = crate::shell::evaluator::apply(
+            &ValClos::builtin(Arc::clone(entry)),
+            vec![value],
+            &Mooring::adrift(),
+            shell,
+        )
+        .expect("partial builtin");
+        let (comp, env) = partial.expect_thunk("test").unwrap();
+        let (seed, displaced) = Env::from_seed_bindings(
+            env.iter()
+                .map(|(name, b)| (name.clone(), b.clone()))
+                .collect(),
+        );
+        assert!(displaced.is_empty());
+        ValClos::thunk(Arc::clone(comp), &seed)
+    }
+    fn release_concurrently(value: ValClos) {
         let aliases = [value.clone(), value.clone(), value.clone(), value];
         let barrier = Arc::new(Barrier::new(aliases.len()));
         let threads: Vec<_> = aliases
@@ -102,14 +89,25 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+    #[test]
+    fn seed_cleanup_releases_residual_argument_owners_concurrently_on_small_stacks() {
+        let mut shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
+        let marker = Arc::new(entry.as_ref().clone());
+        let weak = Arc::downgrade(&marker);
+        let mut value = ValClos::builtin(marker);
+        for _ in 0..30_000 {
+            value = seed_residual(value, &mut shell, &entry);
+        }
+        release_concurrently(value);
         assert!(weak.upgrade().is_none());
     }
-
     #[test]
     fn seed_cleanup_releases_shared_runtime_owners_concurrently_on_small_stacks() {
-        let mut value = Value::Int(1);
+        let mut value = ValClos::int(1);
         for _ in 0..30_000 {
-            value = Value::variant("deep", Some(value));
+            value = ValClos::variant("deep", Some(value));
         }
         let (env, displaced) = Env::from_seed_bindings(vec![(
             "deep".into(),
@@ -119,34 +117,16 @@ mod tests {
             },
         )]);
         assert!(displaced.is_empty());
-        let comp = Arc::new(crate::source::Spanned::synthetic(
-            crate::ir::CompKind::Return(crate::ir::Val::Unit),
-        ));
-        let value = Value::list(vec![Value::Map(Map::from_seed_values([(
+        let comp = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
+            "deep".into(),
+        ))));
+        let value = ValClos::list(vec![ValClos::from(Map::from_seed_values([(
             "closure".into(),
-            Value::Thunk(Closure::captured(comp, env)),
+            ValClos::thunk(comp, &env),
         )]))]);
-        let shell = crate::test_helper::core_shell();
+        drop(env);
+        let mut shell = crate::test_helper::core_shell();
         let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
-        let value = Value::Native(entry, Arc::from([value]));
-        let mut aliases: Vec<_> = (0..3).map(|_| value.clone()).collect();
-        aliases.push(value);
-        let barrier = Arc::new(Barrier::new(aliases.len()));
-        let threads: Vec<_> = aliases
-            .into_iter()
-            .map(|value| {
-                let barrier = Arc::clone(&barrier);
-                std::thread::Builder::new()
-                    .stack_size(256 * 1024)
-                    .spawn(move || {
-                        barrier.wait();
-                        value.drop_seed();
-                    })
-                    .unwrap()
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
+        release_concurrently(seed_residual(value, &mut shell, &entry));
     }
 }

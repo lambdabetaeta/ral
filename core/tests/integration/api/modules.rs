@@ -2,7 +2,6 @@
 
 use crate::common::top_level;
 
-use ral_core::Value;
 use ral_core::authority::policy::{Capabilities, FsPolicy};
 use ral_core::diagnostic::Rejection;
 use ral_core::fact::{Decision, Observed, Reason, Resource};
@@ -13,6 +12,7 @@ use ral_core::shell::runtime::{Break, CapturePolicy, Shell};
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::syntax::quote_word;
 use ral_core::test_helper::{fresh_shell, layer};
+use ral_core::{ValClos, shell::runtime::View};
 use std::path::{Path, PathBuf};
 
 fn scratch() -> (tempfile::TempDir, PathBuf) {
@@ -33,12 +33,12 @@ fn use_module(path: &Path) -> String {
     format!("use {}", quote_word(&shown(path)))
 }
 
-fn answer_of(module: &Value) -> i64 {
-    let Value::Map(record) = module else {
+fn answer_of(module: &ValClos) -> i64 {
+    let View::Map(record) = module.view() else {
         panic!("expected a module record, got {module:?}");
     };
-    match record.get("answer").as_deref() {
-        Some(Value::Int(answer)) => *answer,
+    match record.get("answer").as_deref().map(ValClos::view) {
+        Some(View::Int(answer)) => answer,
         other => panic!("expected an integer answer, got {other:?}"),
     }
 }
@@ -68,9 +68,9 @@ fn a_polymorphic_export_is_instantiated_at_each_call() {
     let value = top_level(&mut fresh_shell(), &source).expect("both instantiations are valid");
     assert_eq!(
         value,
-        Value::map(vec![
-            ("integer".into(), Value::Int(1)),
-            ("text".into(), Value::string("text")),
+        ValClos::map(vec![
+            ("integer".into(), ValClos::int(1)),
+            ("text".into(), ValClos::string("text")),
         ])
     );
 }
@@ -98,7 +98,7 @@ fn private_bindings_are_available_inside_the_module_but_not_exported() {
     let mut shell = fresh_shell();
     let module = top_level(&mut shell, &load).expect("private helpers stay in their unit");
     assert_eq!(answer_of(&module), 42);
-    let Value::Map(record) = module else {
+    let View::Map(record) = module.view() else {
         panic!("expected a module record");
     };
     assert!(record.get("_private").is_none());
@@ -157,7 +157,7 @@ fn a_shadowed_undecided_definition_is_not_a_public_export() {
     let source = format!("let m = {}; return $[$m[answer] + 1]", use_module(&module));
     let value = top_level(&mut fresh_shell(), &source)
         .expect("only the last binding is exported, both in the checker and at runtime");
-    assert_eq!(value, Value::Int(43));
+    assert_eq!(value, ValClos::int(43));
 }
 
 #[test]
@@ -199,9 +199,9 @@ fn a_closure_keeps_the_checked_type_and_value_of_an_earlier_shadowed_binding() {
         .expect("shadowing changes the export, not the closure's captured value or its type");
     assert_eq!(
         value,
-        Value::map(vec![
-            ("answer".into(), Value::Int(42)),
-            ("config".into(), Value::string("replacement")),
+        ValClos::map(vec![
+            ("answer".into(), ValClos::int(42)),
+            ("config".into(), ValClos::string("replacement")),
         ])
     );
 }
@@ -323,7 +323,7 @@ fn each_relative_path_is_anchored_at_its_containing_file() {
         .expect_ran()
         .into_settled()
         .expect("the nested import is relative to outer.ral");
-    assert_eq!(value, Value::Int(42));
+    assert_eq!(value, ValClos::int(42));
 }
 
 #[test]
@@ -393,7 +393,7 @@ fn separate_checks_reload_modules_but_a_checked_thunk_keeps_its_linked_ir() {
     assert_eq!(answer_of(&old), 1);
     let new = top_level(&mut shell, &format!("let m = {load}; upper $m[answer]"))
         .expect("a separate check reads the new export and its new type");
-    assert_eq!(new, Value::string("NEW"));
+    assert_eq!(new, ValClos::string("NEW"));
 
     std::fs::write(&module, "let =").unwrap();
     let old = top_level(&mut shell, "load").expect("even invalid disk contents do not relink IR");
@@ -629,7 +629,7 @@ fn closed_command_handlers_remain_callable_through_a_reexport() {
             );
             let value =
                 top_level(&mut fresh_shell(), &source).expect("the export is a command handler");
-            assert_eq!(value, Value::string(expected));
+            assert_eq!(value, ValClos::string(expected));
         }
     }
 }
@@ -662,7 +662,7 @@ fn an_exported_handler_map_is_checked_as_a_whole_when_bound() {
     };
     assert_eq!(
         ending.into_settled().expect("the handler runs"),
-        Value::Unit
+        ValClos::UNIT
     );
     let captured = captured.expect("the run captures the handler's output");
     assert_eq!(captured.stdout.bytes, b"handled\n");

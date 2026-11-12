@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -32,11 +32,11 @@ whatever its Rust body computed, so no builtin
 can hand a value of another type to a name the checker believes is `Unit`.
 The manifest is *authored as two*, and
 that authoring — not the arity — is the classification: a table entry seeds a
-`Value::Native` in the base scope, a base-frame row seeds a base handler frame
-(`native_value`, `Runtime::install_set` in `shell/runtime/state/construct.rs`;
+`ValClos::builtin` in Σ, a base-frame row seeds a base handler frame
+(`Runtime::install_set` in `shell/runtime/state/construct.rs`;
 [[design/builtins|builtins]], [[design/exec|exec]]).
-A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
-Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
+A body is a `BuiltinBody` — a `Static` `fn(&[ValClos], &Mooring, &mut Shell) ->
+Settled<ValClos>`, or a `Captured` closure of the same shape for a host frontend
 with state to carry — so the run's mooring arrives beside the shell
 ([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
 enquires, or starts a nested run parented under the run that called it. The
@@ -51,9 +51,16 @@ which is not a typing rule: it diagnoses a decoder handed an argument
 `typecheck/explain.rs`: it recognises the closed `ErrorRecord::ty()` shape by
 field labels and types, including `site`, regardless of row order, and points
 to `raise $e` or `$e[message]`.
-An entry's first-class
-form is its scheme, so it has one by construction, every entry in the table
+An entry's first-class type
+is its scheme, so it has one by construction, every entry in the table
 having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
+The public `ValClos::builtin` wraps an entry as `⟨Val::Builtin(entry),∅⟩`.
+Force enters `BuiltinEntry::eta`, a λ-chain ending in `CompKind::Builtin`
+(δ), over the captured entry. β binds supplied arguments; a partial is a boxed
+λ residual, not a separate native state. `Machine::call` invokes an entry
+at exactly its arity without entering η. Boundary partials retain their
+checked site in inference-expanded `Exec` blocks
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_SETS`
 (the core rows, the boundaries and the base frames, one list), and a host's
@@ -147,14 +154,14 @@ Bodies are grouped by concern, one submodule each:
   away before the common margin is stripped, while content-line whitespace is
   preserved;
 - `collections.rs`, `predicates.rs` (`keys`, `has`: ordering and equality are
-  `Value::compare` / `Value::equals`, and `lt`, `gt`, `is-empty`,
+  `ValClos::compare` / `ValClos::equals`, and `lt`, `gt`, `is-empty`,
   `sort-list`, `identity` are prelude one-liners over `<`, `>`, `length`
   and `sort-list-by`), `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
-  rendered through the total `to-string` — `Value`'s `Display`, mapped over the
+  rendered through the total `to-string` — `ValClos`'s `Display`, mapped over the
   argv — single-space intercalation, a newline to stdout.
   `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
-  `Value::Unit`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
+  `ValClos::UNIT`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
   `to-lines`, `to-json`, and `to-jsonl` are writers: each types
   `A → Command` at its own operand type, and its encoded bytes are what it
   writes. `to-bytes` takes `Bytes` and `ints-to-bytes` takes `[Int]` —
@@ -176,9 +183,9 @@ Bodies are grouped by concern, one submodule each:
   `builtin_is_done`, `builtin_first_settled`), and the one
   cancel-aware sweep (`first_ready`) under `await`, `race`, a gather's join and
   `first-settled` (`race` ends its losers and drains any already-`stopping`
-  handles through `stop_and_drain`, `shell/runtime/handle/brood.rs`), and `concurrency/tests.rs` the tests; the
-  worker's deferred surface lives in `shell/runtime/handle/surface.rs`, its
-  cradle, brood and `BroodGuard` in `shell/runtime/handle/brood.rs` (builtins under their bare
+  handles through `stop_and_drain`, `core/src/handle/brood.rs`), and `concurrency/tests.rs` the tests; the
+  worker's deferred surface lives in `core/src/handle/surface.rs`, its
+  cradle, brood and `BroodGuard` in `core/src/handle/brood.rs` (builtins under their bare
   names; `par`, `both` and `first-of` are prelude code over them,
   [[map/core/prelude|prelude]]). `spawn` and `gather` are control operators,
   not rows: the machine forms `spawn`'s operands and calls its door, and runs
@@ -240,7 +247,7 @@ Bodies are grouped by concern, one submodule each:
   worker's one-shot `CapturedBytes::take` at completion),
   `` `ready [stdout, stderr, elapsed, outcome: <ok: α | err: ErrorRecord>] ``
   (the ok/err half of `End::outcome`, its `` `err `` payload built through
-  `outcome_value` and `Value::failure`, the witnessed record `try` hands its
+  `outcome_value` and `ValClos::failure`, the witnessed record `try` hands its
   handler), or
   `` `consumed [elapsed] ``. A worker stopped from elsewhere settles with its
   own `cancelled`/`timed-out` error; on a `Ready` handle an `exit`, a
@@ -321,8 +328,8 @@ Bodies are grouped by concern, one submodule each:
   `Consumed`, so the sweep only catches `Ready` results nobody claimed. A worker
   runs its thunk on a fresh `std::thread` via `Shell::spawn_worker`
   ([[map/core/shell-state|shell-state]]), seeded from the parent's session;
-  `worker_body` hands the thunk, its capture riding in its closure, straight
-  to `machine::apply` with no arguments ([[map/core/evaluator|evaluator]]), deliberately
+  `worker_body` takes the thunk's `(Arc<Comp>, Env)` and enters
+  `machine::evaluate` directly ([[map/core/evaluator|evaluator]]), deliberately
   bypassing the `Toplevel`/`Phrase` boundary, because the worker's own `Shell`
   is the only one its bindings touch and they die with the thread. The worker
   carries the parent's grant stack, so a forced block *inside* the worker
@@ -343,12 +350,14 @@ Bodies are grouped by concern, one submodule each:
   (`HandleInner::snapshot`) without claiming it (`WorkerRow::ral_value`;
   the probe's eighth field, `retention-left`, is the host's alone). It holds
   no handle, so a top-level `workers` crosses the engine protocol. A `Handle`
-  is process-local: `Shell::bequeath` scrubs it from every fork, and a run
-  whose result is or holds one projects to `Err`, status 1
+  is shell-local: `Shell::bequeath` replaces every live one with a withheld
+  handle of the same title, position and type; all observations refuse it
+  with `withheld-handle`. A run
+  whose result is or holds any handle projects to `Err`, status 1
   (`core/src/shell/run/report.rs`);
 - `misc.rs` — `fail` takes a `String`, raising `Reason::raised` (a `Claim`
   of status 1); `raise` re-raises the `ErrorFact` a witnessed map holds
-  (`Map::witness`) and otherwise decodes the closed `[frame, message, status,
+  (`MapRef::witness`) and otherwise decodes the closed `[frame, message, status,
   site]` record into a claim, refusing status 0 (`InvalidCause::ZeroStatus`)
   and above 255. There is no `describe` builtin. `exit` refuses outside
   `0..=255`. See
@@ -381,8 +390,10 @@ Bodies are grouped by concern, one submodule each:
   naming the path as requested;
 - `print.rs` — the shell's runtime values as a `Printable` view onto the one
   value pretty-printer, which lives beneath the shell in `data/print.rs`
-  (`PrintParams`, `pretty_print`; re-exported here), and the REPL's numbers
-  (`REPL_PRINT_PARAMS`). The REPL, exarch's tool-result rendering and a grant
+  (`PrintParams`, `pretty_print`; re-exported here), with the REPL's numbers
+  in `REPL_PRINT_PARAMS`. `Printable::Child` carries variant payloads as well
+  as list/map children (`Cow<ValClos>` for runtime values, references for
+  `FOValue`). The REPL, exarch's tool-result rendering and a grant
   shown to its agent share it; a rendering utility, not a registered
   builtin. One printer, one policy, per-reader numbers: truncation preserves
   identity — the depth limit summarises (keys and heads) and only the floor
@@ -414,7 +425,7 @@ bindings. Modules carry no cache; cycles and depth are refused by a check-time
 chain, not runtime shell state. See
 [[decisions/260606_cacheless-module-loader|cacheless-module-loader]].
 
-The capability `Value`-map decoder is *not* a builtin: it lives at
+The capability `ValClos`-map decoder is *not* a builtin: it lives at
 `shell/grant/decode.rs` (`decode_capability_map`), consumed by the `grant`
 control operator (`shell/evaluator/machine.rs`), the `--capabilities` ceiling
 (`shell/load/profile.rs`) and spawn grants (`shell/grant/spawn.rs`) — see [[map/core/capabilities|capabilities]],

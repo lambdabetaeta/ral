@@ -8,6 +8,7 @@
 //! editor context is installed for the dispatch — inside a plugin handler.
 
 use ral_core::authority::policy::{EditorVerb, Flag};
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum;
 use ral_core::error::Error;
@@ -16,13 +17,13 @@ use ral_core::fact::{
     InvalidCause, InvalidFailure, ProtocolData, ProtocolFailure, ProtocolFailureDecode, RalFailure,
     Reason, ShapeFailure, UnexpectedPayload, UnknownTag, ValueShape,
 };
-use ral_core::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled};
+use ral_core::shell::runtime::{Break, Mooring, Settled};
 use ral_core::ty::Site;
 use ral_core::ty::{
     Binders, CompTy, Grade, Kind, Ty, Typed, closed_record, closed_variant, open_record,
 };
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{Shell, Value};
+use ral_core::{Shell, ValClos, View};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ use super::super::enquiry::{ClipboardReq, Data, EditorOp, EditorSnapshot, Gated,
 use super::super::highlight_style::{style_ansi, style_names};
 
 /// Put `op` to the host, which `name` may do under `op`'s grant only.
-fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<Value> {
+fn ask(shell: &Shell, mooring: &Mooring, name: &str, op: impl Gated) -> Settled<ValClos> {
     answer::<Data>(shell, mooring, name, op).map(|Data(v)| v.into())
 }
 
@@ -65,7 +66,7 @@ fn offset(n: i64) -> usize {
 // ─── State read ──────────────────────────────────────────────────────────────
 
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
-pub fn builtin_ed_get(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_get(_args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     ask(shell, mooring, "_ed-get", EditorOp::Get)
 }
 
@@ -79,7 +80,7 @@ fn invalid(operation: &str, path: Vec<DataStep>, cause: InvalidCause) -> Error {
     })))
 }
 
-fn shape(operation: &str, path: Vec<DataStep>, value: &Value, expected: Expected) -> Error {
+fn shape(operation: &str, path: Vec<DataStep>, value: &ValClos, expected: Expected) -> Error {
     invalid(
         operation,
         path,
@@ -91,23 +92,30 @@ fn shape(operation: &str, path: Vec<DataStep>, value: &Value, expected: Expected
 }
 
 /// `_ed-set`'s request: each field is `` `keep `` or `` `set v ``.
-fn set_op(arg: &Value) -> Settled<EditorOp> {
+fn set_op(arg: &ValClos) -> Settled<EditorOp> {
     let map = arg.as_map("_ed-set")?;
     let choice = |key: &str| {
         let path = vec![DataStep::Field(key.into())];
-        match map.get(key).as_deref() {
-            Some(Value::Variant {
+        let Some(value) = map.get(key) else {
+            return Err(invalid(
+                "_ed-set",
+                vec![],
+                InvalidCause::MissingField(key.into()),
+            ));
+        };
+        match value.view() {
+            View::Variant {
                 label,
                 payload: None,
-            }) if &**label == "keep" => Ok(None),
-            Some(Value::Variant {
+            } if &**label == "keep" => Ok(None),
+            View::Variant {
                 label,
                 payload: Some(v),
-            }) if &**label == "set" => Ok(Some((**v).clone())),
-            Some(Value::Variant {
+            } if &**label == "set" => Ok(Some(v.into_owned())),
+            View::Variant {
                 label,
                 payload: Some(v),
-            }) if &**label == "keep" => Err(invalid(
+            } if &**label == "keep" => Err(invalid(
                 "_ed-set",
                 path,
                 InvalidCause::UnexpectedPayload(UnexpectedPayload {
@@ -115,15 +123,15 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
                     found: v.found(),
                 }),
             )),
-            Some(Value::Variant {
+            View::Variant {
                 label,
                 payload: None,
-            }) if &**label == "set" => Err(invalid(
+            } if &**label == "set" => Err(invalid(
                 "_ed-set",
                 path,
                 InvalidCause::MissingPayload(label.to_string()),
             )),
-            Some(Value::Variant { label, .. }) => Err(invalid(
+            View::Variant { label, .. } => Err(invalid(
                 "_ed-set",
                 path,
                 InvalidCause::UnknownTag(UnknownTag {
@@ -131,63 +139,56 @@ fn set_op(arg: &Value) -> Settled<EditorOp> {
                     offered: vec!["keep".into(), "set".into()],
                 }),
             )),
-            Some(other) => Err(shape(
+            _ => Err(shape(
                 "_ed-set",
                 path,
-                other,
+                &value,
                 Expected::Tags(vec!["keep".into(), "set".into()]),
-            )),
-            None => Err(invalid(
-                "_ed-set",
-                vec![],
-                InvalidCause::MissingField(key.into()),
             )),
         }
     };
     let text = choice("text")?
-        .map(|v| match v {
-            Value::String(s) => Ok(s.to_string()),
-            other => Err(shape(
+        .map(|v| match v.view() {
+            View::String(s) => Ok(s.to_string()),
+            _ => Err(shape(
                 "_ed-set",
                 vec![
                     DataStep::Field("text".into()),
                     DataStep::Payload("set".into()),
                 ],
-                &other,
+                &v,
                 Expected::Shape(ValueShape::String),
             )),
         })
         .transpose()?;
-    let cursor = match choice("cursor")? {
-        Some(Value::Int(n)) => Some(offset(n)),
-        Some(other) => {
-            return Err(shape(
+    let cursor = choice("cursor")?
+        .map(|v| match v.view() {
+            View::Int(n) => Ok(offset(n)),
+            _ => Err(shape(
                 "_ed-set",
                 vec![
                     DataStep::Field("cursor".into()),
                     DataStep::Payload("set".into()),
                 ],
-                &other,
+                &v,
                 Expected::Shape(ValueShape::Int),
-            )
-            .into());
-        }
-        None => None,
-    };
+            )),
+        })
+        .transpose()?;
     Ok(EditorOp::Set { text, cursor })
 }
 
 /// `_ed-set [text: `keep|`set Str, cursor: `keep|`set Int]` — partial write.
-pub fn builtin_ed_set(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_set(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     ask(shell, mooring, "_ed-set", set_op(&args[0])?)
 }
 
 /// `_ed-set-lbuffer <l>` — replace text left of cursor; right side preserved.
 pub fn builtin_ed_set_lbuffer(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     ask(
         shell,
         mooring,
@@ -197,7 +198,11 @@ pub fn builtin_ed_set_lbuffer(
 }
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
-pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_insert(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     ask(
         shell,
         mooring,
@@ -207,22 +212,30 @@ pub fn builtin_ed_insert(args: &[Value], mooring: &Mooring, shell: &mut Shell) -
 }
 
 /// `_ed-push` — save buffer to stack, clear.
-pub fn builtin_ed_push(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_push(
+    _args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     ask(shell, mooring, "_ed-push", EditorOp::Push)
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
-pub fn builtin_ed_accept(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_accept(
+    _args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     ask(shell, mooring, "_ed-accept", EditorOp::Accept)
 }
 
 // ─── TUI ─────────────────────────────────────────────────────────────────────
 
 /// Build the `[output: .., status: Int]` record returned by `_ed-tui`.
-fn tui_result(output: Value, status: i64) -> Value {
-    Value::map(vec![
+fn tui_result(output: ValClos, status: i64) -> ValClos {
+    ValClos::map(vec![
         ("output".into(), output),
-        ("status".into(), Value::Int(status)),
+        ("status".into(), ValClos::int(status)),
     ])
 }
 
@@ -246,11 +259,11 @@ fn tui_result(output: Value, status: i64) -> Value {
 /// loaned mooring dies with the call — nothing to restore.  The loan exists
 /// only in a run holding the terminal, once, so `_ed-tui` reports status 1
 /// anywhere else or nested.
-pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_tui(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     shell.check(Flag::Editor(EditorVerb::Tui), "_ed-tui")?;
     let Some(loaned) = mooring.lend_terminal() else {
         return Ok(tui_result(
-            Value::string(
+            ValClos::string(
                 "_ed-tui: this run holds no terminal to lend (a TUI opens from a keybinding handler, and not inside another)",
             ),
             1,
@@ -262,9 +275,12 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         ral_core::shell::evaluator::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
-        Ok(_) => Ok(tui_result(Value::string(captured_line(&retained.bytes)), 0)),
+        Ok(_) => Ok(tui_result(
+            ValClos::string(captured_line(&retained.bytes)),
+            0,
+        )),
         Err(Break::Error(e)) => Ok(tui_result(
-            Value::string(e.describe().into_owned()),
+            ValClos::string(e.describe().into_owned()),
             i64::from(e.failure_code().get()),
         )),
         Err(other) => Err(other),
@@ -274,38 +290,46 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
 /// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
-pub fn builtin_ed_history(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_history(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let prefix = args[0].as_str("_ed-history")?;
-    let limit = match &args[1] {
-        Value::Int(n) => offset(*n),
-        other => {
+    let limit = match args[1].view() {
+        View::Int(n) => offset(n),
+        _ => {
             return Err(shape(
                 "_ed-history",
                 vec![DataStep::Index(1_usize.into())],
-                other,
+                &args[1],
                 Expected::Shape(ValueShape::Int),
             )
             .into());
         }
     };
     let history: Vec<String> = answer(shell, mooring, "_ed-history", EditorOp::History)?;
-    let mut results: Vec<Value> = Vec::new();
+    let mut results: Vec<ValClos> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in history {
         if !entry.starts_with(prefix) || !seen.insert(entry.clone()) {
             continue;
         }
-        results.push(Value::string(entry));
+        results.push(ValClos::string(entry));
         if limit > 0 && results.len() >= limit {
             break;
         }
     }
-    Ok(Value::list(results))
+    Ok(ValClos::list(results))
 }
 
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — the simple
 /// command at the cursor.  `words` is empty exactly when the buffer does not lex.
-pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_parse(
+    _args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let EditorSnapshot { text, cursor, .. } = answer(shell, mooring, "_ed-parse", EditorOp::Get)?;
     Ok(parse_at(&text, cursor).unwrap_or_default().encode().into())
 }
@@ -313,7 +337,11 @@ pub fn builtin_ed_parse(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -
 // ─── Output channels ─────────────────────────────────────────────────────────
 
 /// `_ed-ghost <text>` — set ghost text (empty string clears).
-pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_ghost(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     ask(
         shell,
         mooring,
@@ -334,10 +362,10 @@ pub fn builtin_ed_ghost(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
 /// No `editor.write` check: this is a string-shaping operation, not a
 /// side effect on editor or system state.
 pub fn builtin_ed_hyperlink(
-    args: &[Value],
+    args: &[ValClos],
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let uri = args[0].as_str("_ed-hyperlink")?;
     let text = args[1].as_str("_ed-hyperlink")?;
     let rendered = if shell.terminal().ui_hyperlinks_ok() {
@@ -345,7 +373,7 @@ pub fn builtin_ed_hyperlink(
     } else {
         text.to_owned()
     };
-    Ok(Value::string(rendered))
+    Ok(ValClos::string(rendered))
 }
 
 /// `_ed-clipboard <text>` — copy `text` to the system clipboard.
@@ -355,23 +383,23 @@ pub fn builtin_ed_hyperlink(
 /// `ui_clipboard_write_ok` capability surfaced by `$TERMINAL`).  Gated on
 /// `editor.write`.
 pub fn builtin_ed_clipboard(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let req = ClipboardReq {
         text: args[0].as_str("_ed-clipboard")?.to_owned(),
         osc52: shell.terminal().ui_clipboard_write_ok(),
     };
-    answer(shell, mooring, "_ed-clipboard", req).map(Value::Bool)
+    answer(shell, mooring, "_ed-clipboard", req).map(ValClos::bool)
 }
 
 /// `_ed-highlight <spans>` — set highlight spans (empty list clears).
 pub fn builtin_ed_highlight(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let spans = args[0]
         .as_list("_ed-highlight")?
         .iter()
@@ -382,27 +410,24 @@ pub fn builtin_ed_highlight(
 }
 
 /// One `_ed-highlight` span: row-polymorphic, its style checked here.
-fn highlight_req(index: usize, v: &Value) -> Settled<HighlightReq> {
-    let int_field = |v: &Value, field: &'static str| match v {
-        Value::Int(n) => Ok(offset(*n)),
-        other => Err(shape(
+fn highlight_req(index: usize, v: &ValClos) -> Settled<HighlightReq> {
+    let int_field = |v: &ValClos, field: &'static str| match v.view() {
+        View::Int(n) => Ok(offset(n)),
+        _ => Err(shape(
             "_ed-highlight",
             vec![DataStep::Index(index.into()), DataStep::Field(field.into())],
-            other,
+            v,
             Expected::Shape(ValueShape::Int),
         )),
     };
-    let m = match v {
-        Value::Map(m) => m,
-        other => {
-            return Err(shape(
-                "_ed-highlight",
-                vec![DataStep::Index(index.into())],
-                other,
-                Expected::Shape(ValueShape::Map),
-            )
-            .into());
-        }
+    let View::Map(m) = v.view() else {
+        return Err(shape(
+            "_ed-highlight",
+            vec![DataStep::Index(index.into())],
+            v,
+            Expected::Shape(ValueShape::Map),
+        )
+        .into());
     };
     let mut span = HighlightReq {
         start: 0,
@@ -441,16 +466,16 @@ fn highlight_req(index: usize, v: &Value) -> Settled<HighlightReq> {
 /// this call's type before the updater runs.  The updater's own result was
 /// produced by typed code and is stored as it is.
 pub fn builtin_ed_state(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     // Write is checked before the updater runs, not after it.
     shell.check(Flag::Editor(EditorVerb::Write), "_ed-state")?;
     let current = match answer::<Option<Data>>(shell, mooring, "_ed-state", EditorOp::StateGet)? {
         Some(Data(stored)) => {
-            let stored = Value::from(stored);
+            let stored = ValClos::from(stored);
             // The cell outlives each run, so what it holds was decided by
             // whichever run last wrote it.
             site.admit(&stored, shell.fixings())
@@ -687,7 +712,7 @@ mod tests {
 
     /// Run `run` against a cell holding `stored`; its result and how many
     /// requests the cell was asked.
-    fn run_with_cell(stored: FOValue, run: Run) -> (Result<Value, Break>, usize) {
+    fn run_with_cell(stored: FOValue, run: Run) -> (Result<ValClos, Break>, usize) {
         let cell = std::sync::Arc::new(Cell {
             stored,
             asked: std::sync::atomic::AtomicUsize::new(0),
@@ -737,7 +762,10 @@ mod tests {
     #[test]
     fn a_state_cell_of_the_right_type_reaches_the_updater() {
         let (result, asked) = run_with_cell(FOValue::Int { value: 4 }, line_run(BUMP));
-        assert!(matches!(result, Ok(Value::Int(5))), "{result:?}");
+        assert!(
+            matches!(result.as_ref().map(ValClos::view), Ok(View::Int(5))),
+            "{result:?}"
+        );
         assert_eq!(asked, 2, "the read, then the write");
     }
 
@@ -767,19 +795,37 @@ mod tests {
             ..line_run("_ed-tui { echo hi }")
         };
         let (result, asked) = run_with_cell(FOValue::Unit, run);
-        let Ok(Value::Map(m)) = result else {
-            panic!("_ed-tui reports rather than raises, got {result:?}");
-        };
-        assert!(matches!(m.get("status").as_deref(), Some(Value::Int(1))));
+        let value = result.expect("_ed-tui reports rather than raises");
+        let m = value.as_map("_ed-tui").expect("a result record");
+        assert!(matches!(
+            m.get("status").as_deref().map(ValClos::view),
+            Some(View::Int(1))
+        ));
         assert_eq!(asked, 0);
+    }
+
+    #[test]
+    fn ed_set_reads_a_literal_record_over_its_captures() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let arg = crate::repl::eval(
+            &mut shell,
+            "let text = 'edited'; let cursor = 4; return [text: `set $text, cursor: `set $cursor]",
+        );
+        assert!(matches!(
+            set_op(&arg),
+            Ok(EditorOp::Set { text: Some(text), cursor: Some(4) }) if text == "edited"
+        ));
     }
 
     /// A negative cursor floors at zero; the host clamps the rest.
     #[test]
     fn ed_set_floors_a_negative_cursor() {
-        let arg = Value::map(vec![
-            ("text".into(), Value::variant("keep", None)),
-            ("cursor".into(), Value::variant("set", Some(Value::Int(-4)))),
+        let arg = ValClos::map(vec![
+            ("text".into(), ValClos::variant("keep", None)),
+            (
+                "cursor".into(),
+                ValClos::variant("set", Some(ValClos::int(-4))),
+            ),
         ]);
         assert!(matches!(
             set_op(&arg),
@@ -840,11 +886,11 @@ mod tests {
 
     #[test]
     fn editor_shape_failures_keep_field_payload_and_index_paths() {
-        let arg = Value::map(vec![
-            ("text".into(), Value::variant("keep", None)),
+        let arg = ValClos::map(vec![
+            ("text".into(), ValClos::variant("keep", None)),
             (
                 "cursor".into(),
-                Value::variant("set", Some(Value::string("3"))),
+                ValClos::variant("set", Some(ValClos::string("3"))),
             ),
         ]);
         let Err(Break::Error(error)) = set_op(&arg) else {
@@ -864,10 +910,10 @@ mod tests {
             failure.cause,
             InvalidCause::Shape(ShapeFailure {
                 expected: Expected::Shape(ValueShape::Int),
-                found: Value::string("3").found()
+                found: ValClos::string("3").found()
             })
         );
-        let span = Value::map(vec![("end".into(), Value::Bool(false))]);
+        let span = ValClos::map(vec![("end".into(), ValClos::bool(false))]);
         let Err(Break::Error(error)) = highlight_req(2, &span) else {
             panic!("expected invalid end")
         };

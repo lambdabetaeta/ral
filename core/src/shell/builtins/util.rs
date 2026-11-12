@@ -7,21 +7,21 @@ use crate::fact::{
     ValueShape,
 };
 use crate::io::Source;
-use crate::shell::runtime::{Settled, Shell, Value};
+use crate::shell::runtime::{Settled, Shell, ValClos, View};
 
-/// Bytes written by number, one `Int` per byte — [`Value::as_bytes`] is the
+/// Bytes written by number, one `Int` per byte — [`ValClos::as_bytes`] is the
 /// other spelling, for a `Bytes` value already in hand.
-pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
+pub(crate) fn as_byte_list(val: &ValClos, ctx: &str) -> Settled<Vec<u8>> {
     let items = val.as_list(ctx)?;
     items
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let cause = match item.as_ref() {
-                Value::Int(n) => match u8::try_from(*n) {
+            let cause = match item.view() {
+                View::Int(n) => match u8::try_from(n) {
                     Ok(byte) => return Ok(byte),
                     Err(_) => InvalidCause::Range(NumberRange {
-                        value: Number::Int(*n),
+                        value: Number::Int(n),
                         minimum: Number::Int(0),
                         maximum: Number::Int(255),
                     }),
@@ -111,15 +111,15 @@ pub(crate) fn stdin_lines(
 ///
 /// # Errors
 /// The first failed read.
-pub(crate) fn lossy_line_list(lines: impl Iterator<Item = Settled<Vec<u8>>>) -> Settled<Value> {
+pub(crate) fn lossy_line_list(lines: impl Iterator<Item = Settled<Vec<u8>>>) -> Settled<ValClos> {
     let lines = lines
         .map(|line| {
             let line = String::from_utf8(line?)
                 .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-            Ok(Value::string(line))
+            Ok(ValClos::string(line))
         })
         .collect::<Settled<Vec<_>>>()?;
-    Ok(Value::list(lines))
+    Ok(ValClos::list(lines))
 }
 
 /// Classify the regex compiler's refusal before rendering it.

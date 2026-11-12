@@ -10,7 +10,7 @@
 mod fan_out;
 mod observation;
 
-use super::{Prov, Value, outcome_value};
+use super::{Prov, ValClos, outcome_value};
 use crate::fact::{ErrorFact, Observation};
 use crate::source::CallSite;
 use serde::{Deserialize, Serialize};
@@ -225,17 +225,17 @@ pub fn epoch_us() -> i64 {
 /// site of its own, only the outcome of what it forced into being recorded.
 /// Mirrored in the typechecker by `audit_record` in
 /// `core/src/typecheck/builtins.rs`.
-pub fn report_value(outcome: Result<Value, ErrorFact>, trail: Vec<Observation>) -> Value {
+pub fn report_value(outcome: Result<ValClos, ErrorFact>, trail: Vec<Observation>) -> ValClos {
     report_envelope(outcome_value(outcome), trail)
 }
 
 /// [`report_value`] over an outcome already a `` `ok``/`` `err `` value.
-pub fn report_envelope(outcome: Value, trail: Vec<Observation>) -> Value {
-    Value::map(vec![
+pub fn report_envelope(outcome: ValClos, trail: Vec<Observation>) -> ValClos {
+    ValClos::map(vec![
         ("outcome".into(), outcome),
         (
             "trail".into(),
-            Value::list(trail.into_iter().map(Value::from_datum).collect()),
+            ValClos::list(trail.into_iter().map(ValClos::from_datum).collect()),
         ),
     ])
 }

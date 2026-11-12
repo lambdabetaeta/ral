@@ -15,14 +15,14 @@ use crate::path::{
 };
 use crate::shell::exec::command::would_run;
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Mooring, Settled, Shell, ValClos};
 use crate::text::quote_native;
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_list_dir(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let rp = shell.resolve(args[0].as_str("list-dir")?);
     let dir = shell.locate_dir::<Reading>(&rp)?;
     let region = shell.context.grants.read_region(shell.baseline());
@@ -41,8 +41,8 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
         }
     }
     entries.sort_by(|a, b| a.name().cmp(b.name()));
-    Ok(Value::list(
-        entries.into_iter().map(Value::from_datum).collect(),
+    Ok(ValClos::list(
+        entries.into_iter().map(ValClos::from_datum).collect(),
     ))
 }
 
@@ -70,7 +70,7 @@ fn made_in(
     shell: &mut Shell,
     parent: &Dir<Judged<Writing>>,
     make: impl Fn(Located<Judged<Writing>>) -> io::Result<String>,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     loop {
         let name = EntryName::fresh("ral-tmp-").map_err(|e| {
             Error::io(
@@ -84,7 +84,7 @@ fn made_in(
         let target = shell.judge::<Writing>(target)?;
         let subject = IoSubject::Path(quote_native(target.real().as_path().as_os_str()));
         match make(target) {
-            Ok(made) => return Ok(Value::string(made)),
+            Ok(made) => return Ok(ValClos::string(made)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(Error::io(operation, subject, &e).with_context(ctx).into()),
         }
@@ -102,26 +102,26 @@ fn require_rm(ctx: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<()> {
 }
 
 pub(super) fn builtin_temp_dir(
-    _args: &[Value],
+    _args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     require_rm("temp-dir", mooring, shell)?;
     let parent = writable_temp_dir("temp-dir", shell)?;
     temp_dir_in(shell, &parent)
 }
 
 pub(super) fn builtin_temp_file(
-    _args: &[Value],
+    _args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     require_rm("temp-file", mooring, shell)?;
     let parent = writable_temp_dir("temp-file", shell)?;
     temp_file_in(shell, &parent)
 }
 
-fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Value> {
+fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<ValClos> {
     made_in(
         "temp-dir",
         IoOperation::CreateDirectory,
@@ -135,7 +135,7 @@ fn temp_dir_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Valu
     )
 }
 
-fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Value> {
+fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<ValClos> {
     made_in(
         "temp-file",
         IoOperation::CreateFile,
@@ -151,7 +151,7 @@ fn temp_file_in(shell: &mut Shell, parent: &Dir<Judged<Writing>>) -> Settled<Val
 
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
-pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_glob(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     let raw = args[0].as_str("glob")?;
     let glob = Arc::new(shell.context.resolver().glob(raw).map_err(|e| {
         invalid(
@@ -170,7 +170,9 @@ pub(super) fn builtin_glob(args: &[Value], shell: &Shell) -> Settled<Value> {
         }
     }
     hits.sort();
-    Ok(Value::list(hits.into_iter().map(Value::string).collect()))
+    Ok(ValClos::list(
+        hits.into_iter().map(ValClos::string).collect(),
+    ))
 }
 
 /// Label an `io::Error` with the operation and the path that provoked it.
@@ -187,7 +189,7 @@ fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Error {
 /// everywhere — mode bits, uid/gid, nlink and inode would want a `cfg(unix)`
 /// companion.  Stats the link itself, not its target; compose with
 /// `resolve-path` for the latter.
-pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_file_info(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let raw = args[0].as_str("file-info")?;
     let rp = shell.resolve(raw);
     let path = rp.as_path().to_path_buf();
@@ -208,10 +210,10 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
         .flatten()
         .map(|p| shown(&p));
     let name = file_name(&path).unwrap_or(path.as_os_str());
-    Ok(Value::from_datum(FileInfo::of(name, stat, target)))
+    Ok(ValClos::from_datum(FileInfo::of(name, stat, target)))
 }
 
-pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_resolve_path(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let s = args[0].as_str("resolve-path")?;
     let rp = shell.resolve(s);
     let located = shell
@@ -224,20 +226,20 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
             )
             .with_context("resolve-path")
         })?;
-    Ok(Value::string(shown(located.real().as_path())))
+    Ok(ValClos::string(shown(located.real().as_path())))
 }
 
 /// Lexical sibling of `resolve-path`: same anchoring, then the lexical fold
 /// where `resolve-path` reads the disk, so symlinks stand and the path need
 /// not exist — and no grant is asked, since that guard covers a stat this
 /// never does.
-pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_absolute_path(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     let resolved = shell.resolve(args[0].as_str("absolute-path")?).folded();
-    Ok(Value::string(shown(resolved.as_path())))
+    Ok(ValClos::string(shown(resolved.as_path())))
 }
 
-pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<Value> {
-    Ok(Value::string(crate::path::abbreviate_home(
+pub(super) fn builtin_abbreviate_home(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
+    Ok(ValClos::string(crate::path::abbreviate_home(
         args[0].as_str("abbreviate-home")?,
         shell.context.home().as_deref(),
     )))
@@ -251,14 +253,14 @@ pub(super) fn builtin_abbreviate_home(args: &[Value], shell: &Shell) -> Settled<
 /// name rather than raising.
 fn fs_probe(
     name: &str,
-    args: &[Value],
+    args: &[ValClos],
     shell: &mut Shell,
     leaf: LeafMode,
     probe: impl FnOnce(&Located<Judged<Reading>>) -> bool,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let rp = shell.resolve(args[0].as_str(name)?);
     let held = shell.locate_existing::<Reading>(&rp, leaf)?;
-    Ok(Value::Bool(held.is_some_and(|located| probe(&located))))
+    Ok(ValClos::bool(held.is_some_and(|located| probe(&located))))
 }
 
 /// A predicate on the kind the probe stated.
@@ -266,11 +268,11 @@ fn is_kind(kind: Kind) -> impl FnOnce(&Located<Judged<Reading>>) -> bool {
     move |located| located.stat().is_some_and(|stat| stat.kind == kind)
 }
 
-pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_exists(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe("exists", args, shell, LeafMode::NoFollow, |_| true)
 }
 
-pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_file(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe(
         "is-file",
         args,
@@ -280,11 +282,11 @@ pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Valu
     )
 }
 
-pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_dir(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe("is-dir", args, shell, LeafMode::Follow, is_kind(Kind::Dir))
 }
 
-pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_link(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe(
         "is-link",
         args,
@@ -294,13 +296,13 @@ pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Valu
     )
 }
 
-pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_readable(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe("is-readable", args, shell, LeafMode::Follow, |located| {
         located.may_read().is_ok()
     })
 }
 
-pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_writable(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     fs_probe("is-writable", args, shell, LeafMode::Follow, |located| {
         located.may_write().is_ok()
     })
@@ -357,10 +359,8 @@ mod tests {
         symlink(root.join("elsewhere"), root.join("repo/link")).unwrap();
         let shell = crate::test_helper::core_shell();
         let glob = |pattern: String| -> Vec<String> {
-            let found = builtin_glob(&[Value::string(pattern)], &shell).unwrap();
-            let Value::List(items) = found else {
-                panic!("a glob is a list");
-            };
+            let found = builtin_glob(&[ValClos::string(pattern)], &shell).unwrap();
+            let items = found.as_list("glob").expect("a glob is a list");
             items
                 .iter()
                 .map(|v| v.as_str("test").unwrap().to_string())
@@ -390,7 +390,7 @@ mod tests {
         let file = temp_file_in(&mut shell, &parent);
         unsafe { libc::umask(before) };
 
-        let mode = |made: Settled<Value>| {
+        let mode = |made: Settled<ValClos>| {
             let made = made.unwrap();
             let meta = std::fs::metadata(made.as_str("test").unwrap()).unwrap();
             meta.permissions().mode() & 0o777
@@ -412,10 +412,12 @@ mod tests {
         let file = tmp.path().join("f");
         std::fs::write(&file, "").unwrap();
         let mut shell = crate::test_helper::core_shell();
-        let arg = [Value::string(shown(&file))];
+        let arg = [ValClos::string(shown(&file))];
         let mut ask = |mode: u32| {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
-            let truth = |v: Settled<Value>| matches!(v, Ok(Value::Bool(true)));
+            let truth = |v: Settled<ValClos>| {
+                v.is_ok_and(|v| matches!(v.view(), crate::shell::runtime::View::Bool(true)))
+            };
             [
                 truth(builtin_exists(&arg, &mut shell)),
                 truth(builtin_is_readable(&arg, &mut shell)),
@@ -439,11 +441,11 @@ mod typed_failure_tests {
         let path = shown(dir.path().join("missing"));
         for (result, operation) in [
             (
-                builtin_file_info(&[Value::string(path.clone())], &mut shell),
+                builtin_file_info(&[ValClos::string(path.clone())], &mut shell),
                 "file-info",
             ),
             (
-                builtin_resolve_path(&[Value::string(path.clone())], &mut shell),
+                builtin_resolve_path(&[ValClos::string(path.clone())], &mut shell),
                 "resolve-path",
             ),
         ] {
@@ -456,7 +458,7 @@ mod typed_failure_tests {
             );
         }
         let Err(crate::shell::runtime::Break::Error(error)) =
-            builtin_glob(&[Value::string("*/..")], &shell)
+            builtin_glob(&[ValClos::string("*/..")], &shell)
         else {
             panic!("invalid glob")
         };

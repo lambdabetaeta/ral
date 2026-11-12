@@ -1,52 +1,42 @@
-//! [`Env`], the finite map a closure captures and carries itself.
+//! [`Env`], the finite map a value closure captures.
 
 use crate::ir::{Name, Occ};
-use crate::shell::runtime::Value;
+use crate::shell::runtime::ValClos;
 use crate::shell::runtime::signature::Signature;
 use crate::ty::Closed;
 use either::Either;
 use rustc_hash::FxBuildHasher;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+use triomphe::ThinArc;
 
-/// One scope entry: value and scheme are installed together, so the two
-/// never drift apart.
+/// A value and its scheme are installed together.
 #[derive(Debug, Clone)]
 pub struct Binding {
-    pub value: Value,
-    /// Shared, not owned: a scheme dwarfs the value it describes, and every
-    /// `bind` into a shared environment copies a whole node of these.
+    pub value: ValClos,
     pub(crate) scheme: Option<Closed>,
 }
 
-/// Past [`SMALL`] entries, ρ is a persistent hash map; every key here is a
-/// program identifier, never attacker-controlled input, so it uses a fast
-/// non-cryptographic hasher.
 type LargeMap =
     imbl::GenericHashMap<Name, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
-
-/// Up to this many entries ρ is one flat array; past it, a persistent hash
-/// map.  8 beat 16 and 32 on B6 and tied on B1 and B2.
 const SMALL: usize = 8;
 
-/// ρ's representations, chosen by size and invisible to `Env`'s users.
 #[derive(Debug, Clone)]
 enum Entries {
-    /// Sorted by name, distinct, one allocation.
-    Small(Arc<[(Name, Binding)]>),
+    Empty,
+    /// Sorted by name, distinct, one allocation, length in the header.
+    Small(ThinArc<(), (Name, Binding)>),
     Sized(Arc<SizedEntries>),
 }
-
 #[derive(Debug, Clone)]
 enum SizedEntries {
-    /// Same ordering as Small, but sized so seed rollback can take ownership.
     SeedSmall(Vec<(Name, Binding)>),
     Large(LargeMap),
 }
-
 impl Entries {
     fn parts(&self) -> Either<&[(Name, Binding)], &LargeMap> {
         match self {
-            Self::Small(entries) => Either::Left(entries),
+            Self::Empty => Either::Left(&[]),
+            Self::Small(entries) => Either::Left(&entries.slice),
             Self::Sized(entries) => match entries.as_ref() {
                 SizedEntries::SeedSmall(entries) => Either::Left(entries),
                 SizedEntries::Large(entries) => Either::Right(entries),
@@ -54,41 +44,28 @@ impl Entries {
         }
     }
 }
-
-/// One static empty `Small`, so a value capturing nothing allocates nothing.
-static EMPTY: LazyLock<Arc<[(Name, Binding)]>> = LazyLock::new(|| Arc::from(Vec::new()));
-
-/// `entries` as `Entries`, sharing the one static [`EMPTY`] when there are
-/// none — every path that could otherwise build a fresh empty `Small`
-/// (`extend`, `unset`, `restrict`) goes through here instead.
 fn small_or_large(entries: Vec<(Name, Binding)>) -> Entries {
     if entries.is_empty() {
-        Entries::Small(Arc::clone(&EMPTY))
+        Entries::Empty
     } else if entries.len() > SMALL {
         Entries::Sized(Arc::new(SizedEntries::Large(entries.into_iter().collect())))
     } else {
-        Entries::Small(entries.into())
+        Entries::Small(ThinArc::from_header_and_iter((), entries.into_iter()))
     }
 }
 
-/// ρ: a persistent map from names to bindings, read alone.
-///
-/// No Σ fallback — [`crate::shell::runtime::signature::lookup`] is the resolution rule
-/// that adds Σ. `restrict` is where a thunk value's capture is scrubbed to
-/// what it mentions; `bind`/`extend` are the write side, each producing a
-/// fresh environment so one a closure already captured is untouched.
+/// ρ alone; [`super::signature::lookup`] adds Σ's fallback.
 #[derive(Debug, Clone)]
 pub struct Env(Entries);
-
 const _: () = assert!(std::mem::size_of::<Env>() <= 16, "Env must fit in 16 bytes");
 
 impl Env {
-    /// The empty map — one static allocation, cloned.
+    pub const EMPTY: Self = Self(Entries::Empty);
     pub fn new() -> Self {
-        Self(Entries::Small(Arc::clone(&EMPTY)))
+        Self::EMPTY
     }
 
-    /// Match ordinary row normalization, retaining displaced owners for seed cleanup.
+    /// Retain displaced owners for seed cleanup.
     pub(crate) fn from_seed_bindings(bindings: Vec<(Name, Binding)>) -> (Self, Vec<Binding>) {
         let mut entries: Vec<(Name, Binding)> = Vec::with_capacity(bindings.len());
         let mut displaced = Vec::new();
@@ -102,7 +79,7 @@ impl Env {
             }
         }
         let env = if entries.is_empty() {
-            Self::new()
+            Self::EMPTY
         } else if entries.len() <= SMALL {
             Self(Entries::Sized(Arc::new(SizedEntries::SeedSmall(entries))))
         } else {
@@ -112,10 +89,10 @@ impl Env {
         };
         (env, displaced)
     }
-
     /// Only seed-created rows and their unmodified aliases are dismantled here.
     pub(crate) fn into_seed_bindings(self) -> Result<Vec<Binding>, Self> {
         match self.0 {
+            Entries::Empty => Ok(Vec::new()),
             Entries::Sized(entries) => Ok(match Arc::into_inner(entries) {
                 Some(SizedEntries::SeedSmall(entries)) => {
                     entries.into_iter().map(|(_, binding)| binding).collect()
@@ -125,32 +102,24 @@ impl Env {
                 }
                 None => Vec::new(),
             }),
-            Entries::Small(entries) if entries.is_empty() => Ok(Vec::new()),
             Entries::Small(entries) => Err(Self(Entries::Small(entries))),
         }
     }
-
     pub(crate) fn drop_seed(self) {
         super::value::drop_seed_env(self);
     }
-
     pub(crate) fn len(&self) -> usize {
         match self.0.parts() {
             Either::Left(entries) => entries.len(),
             Either::Right(entries) => entries.len(),
         }
     }
-
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    /// Look up `name`: ρ alone, no Σ fallback.
-    pub fn get(&self, name: &str) -> Option<&Value> {
+    pub fn get(&self, name: &str) -> Option<&ValClos> {
         self.binding(name).map(|b| &b.value)
     }
-
-    /// The whole [`Binding`] for `name`, ρ alone.
     pub(crate) fn binding(&self, name: &str) -> Option<&Binding> {
         match self.0.parts() {
             Either::Left(entries) => entries
@@ -160,13 +129,6 @@ impl Env {
             Either::Right(entries) => entries.get(name),
         }
     }
-
-    /// Bind `name` in ρ, replacing any existing binding — persistent, so an
-    /// environment a closure already captured is unaffected. The hot path,
-    /// every `let`: a `Small` below the cap builds its one fresh array
-    /// directly from the unaffected slices either side of the insertion
-    /// point, writing a `TrustedLen` iterator in place with no intermediate
-    /// `Vec`.
     pub(crate) fn bind(&mut self, name: Name, binding: Binding) {
         if let Either::Left(a) = self.0.parts() {
             let (i, j) = match a.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
@@ -174,31 +136,34 @@ impl Env {
                 Err(i) => (i, i),
             };
             if a.len() - (j - i) < SMALL {
-                self.0 = Entries::Small(
-                    a[..i]
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once((name, binding)))
-                        .chain(a[j..].iter().cloned())
-                        .collect(),
-                );
+                let len = a[..i].len() + 1 + a[j..].len();
+                let mut entries = a[..i]
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once((name, binding)))
+                    .chain(a[j..].iter().cloned());
+                // ThinArc requires ExactSizeIterator; Chain has only a size hint.
+                self.0 = Entries::Small(ThinArc::from_header_and_iter(
+                    (),
+                    (0..len).map(|_| {
+                        entries
+                            .next()
+                            .expect("the binding splice has its computed length")
+                    }),
+                ));
                 return;
             }
         }
         self.extend(std::iter::once((name, binding)));
     }
-
-    /// Bind every entry in one pass — a pattern's names, or a `Rec` group's
-    /// members — a later entry shadowing an earlier one, in this call or
-    /// already in `self`. `bind` is the one-entry fast path; this is the
-    /// general merge, past `SMALL` a unique `Large` updated in place.
+    /// A later entry shadows an earlier one, in this call or already in ρ.
     pub(crate) fn extend(&mut self, entries: impl ExactSizeIterator<Item = (Name, Binding)>) {
         if entries.len() == 0 {
             return;
         }
         match self.0.parts() {
             Either::Left(a) => {
-                let mut merged: Vec<(Name, Binding)> = Vec::with_capacity(a.len() + entries.len());
+                let mut merged = Vec::with_capacity(a.len() + entries.len());
                 merged.extend(a.iter().cloned());
                 for (name, binding) in entries {
                     match merged.binary_search_by(|(n, _)| n.as_ref().cmp(name.as_ref())) {
@@ -212,22 +177,20 @@ impl Env {
                 let Entries::Sized(sized) = &mut self.0 else {
                     unreachable!("large entries are sized")
                 };
-                let SizedEntries::Large(m) = Arc::make_mut(sized) else {
+                let SizedEntries::Large(map) = Arc::make_mut(sized) else {
                     unreachable!("large entries")
                 };
                 for (name, binding) in entries {
-                    m.insert(name, binding);
+                    map.insert(name, binding);
                 }
             }
         }
     }
-
-    /// Remove `name` from ρ, returning its value.
-    pub(crate) fn unset(&mut self, name: &str) -> Option<Value> {
+    pub(crate) fn unset(&mut self, name: &str) -> Option<ValClos> {
         match self.0.parts() {
             Either::Left(a) => {
                 let i = a.binary_search_by(|(n, _)| n.as_ref().cmp(name)).ok()?;
-                let mut kept: Vec<(Name, Binding)> = a.to_vec();
+                let mut kept = a.to_vec();
                 let (_, binding) = kept.remove(i);
                 self.0 = small_or_large(kept);
                 Some(binding.value)
@@ -239,33 +202,24 @@ impl Env {
                 let SizedEntries::Large(map) = Arc::make_mut(sized) else {
                     unreachable!("large entries")
                 };
-                let binding = map.remove(name)?;
-                Some(binding.value)
+                Some(map.remove(name)?.value)
             }
         }
     }
-
-    /// `self` narrowed to `occ`. Tested identity first: if `occ` covers every
-    /// name `self` binds, `self` is returned unchanged, the same allocation —
-    /// sound because an [`Occ`] is distinct by construction. Otherwise built
-    /// by walking `occ`, not `self`: a `Small` of the hits, or a `Large` past
-    /// [`SMALL`].
+    /// Restriction is the identity when it drops no binding.
     pub(crate) fn restrict(&self, occ: &Occ) -> Self {
         if occ.len() >= self.len() && self.names().all(|name| occ.contains(name)) {
             return self.clone();
         }
-        let hits: Vec<(Name, Binding)> = occ
+        let hits = occ
             .names()
             .filter_map(|n| self.binding(n).map(|b| (n.clone(), b.clone())))
             .collect();
-        // `occ` is sorted and distinct, so `hits` stays sorted: `Small`'s invariant holds with no further sort.
         Self(small_or_large(hits))
     }
-
     pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
         self.iter().map(|(name, _)| name)
     }
-
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Name, &Binding)> {
         match self.0.parts() {
             Either::Left(entries) => {
@@ -274,20 +228,17 @@ impl Env {
             Either::Right(entries) => Either::Right(entries.iter()),
         }
     }
-
-    /// The wire's and the fork scrub's interning key: two environments share
-    /// this identity exactly when they are the same allocation — the same
-    /// `Small` array or the same `Large` map.
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
-            (Entries::Small(a), Entries::Small(b)) => Arc::ptr_eq(a, b),
+            (Entries::Empty, Entries::Empty) => true,
+            (Entries::Small(a), Entries::Small(b)) => {
+                std::ptr::eq(&raw const a.slice, &raw const b.slice)
+            }
             (Entries::Sized(a), Entries::Sized(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
-
-    /// Walk ρ, then Σ's prelude, projecting each binding on first sight of
-    /// its name.  The single home of the shadowing rule.
+    /// ρ then Σ's prelude, projecting each name on first sight.
     pub(crate) fn fold_union<T>(
         &self,
         sig: &Signature,
@@ -308,121 +259,61 @@ impl Env {
         }
         result
     }
-
-    /// Largest binding's shallow byte estimate, ρ then Σ's prelude, no value
-    /// cloned.
     pub(crate) fn largest_shallow_size(&self, sig: &Signature) -> usize {
         let session = self.iter().map(|(_, b)| b.value.shallow_size());
-        let shadowed_prelude = sig
+        let prelude = sig
             .prelude_names()
             .filter(|name| self.binding(name).is_none())
             .filter_map(|name| sig.prelude_binding(name))
             .map(|b| b.value.shallow_size());
-        session.chain(shadowed_prelude).max().unwrap_or(0)
+        session.chain(prelude).max().unwrap_or(0)
     }
-
-    /// Every binding across ρ and Σ's prelude, ρ wins.
-    pub(crate) fn all_bindings(&self, sig: &Signature) -> Vec<(String, Value)> {
+    pub(crate) fn all_bindings(&self, sig: &Signature) -> Vec<(String, ValClos)> {
         self.fold_union(sig, |b| b.value.clone())
     }
-
-    /// Distinct bound names across ρ and Σ's prelude, a shadowed name counted
-    /// once.
     pub(crate) fn distinct_name_count(&self, sig: &Signature) -> usize {
         let mut seen: std::collections::HashSet<&str> = self.names().map(AsRef::as_ref).collect();
         seen.extend(sig.prelude_names());
         seen.len()
     }
-
-    /// Every bound name with its scheme, ρ then Σ's prelude, ρ wins.  Seeds
-    /// the next run's check: a name without a scheme is checked as a bare
-    /// name.
     pub(crate) fn binding_schemes(&self, sig: &Signature) -> Vec<(String, Option<Closed>)> {
         self.fold_union(sig, |b| b.scheme.clone())
     }
 }
-
 impl Default for Env {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-thread_local! {
-    /// `Some` while a dismantling [`Env::dismantle`] is looping on this
-    /// thread.  A closure dying inside that loop pushes its entries here
-    /// instead of letting drop glue recurse into them.
-    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<Entries>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-impl Env {
-    /// A stream is a chain of closures — block → captured env → binding →
-    /// block — so plain drop glue recurses once per link and bounds stream
-    /// length by the stack.  Every link passes through a closure, so
-    /// [`Closure`](super::Closure)'s drop cuts the chain here, with a
-    /// trampoline rather than a hand-rolled walk: glue still does all
-    /// traversal — a shared spine stays one refcount decrement, nothing is
-    /// cloned to be destroyed — but a closure dying *inside* another's
-    /// dismantling hands its entries to that dismantler's queue and returns,
-    /// keeping the stack between any two links constant.
-    pub(crate) fn dismantle(&mut self) {
-        if self.is_empty() {
-            return;
-        }
-        let entries = std::mem::replace(&mut self.0, Entries::Small(Arc::clone(&EMPTY)));
-        // Hand the entries to a dismantler above us, or become one.  If the
-        // queue is already torn down (a closure dying during thread-local
-        // destruction), the unrun closure drops `entries` — glue alone, the
-        // honest fallback.
-        let Ok(entries) = DISMANTLE_QUEUE.try_with(|slot| {
-            let mut q = slot.borrow_mut();
-            if let Some(queue) = q.as_mut() {
-                queue.push(entries);
-                None
-            } else {
-                *q = Some(Vec::new());
-                Some(entries)
-            }
-        }) else {
-            return;
-        };
-        // Enqueued: the dismantler above owns it now.
-        let Some(entries) = entries else { return };
-        /// Disarms the queue even on unwind; leftovers then elect fresh
-        /// leaders of their own.
-        struct Disarm;
-        impl Drop for Disarm {
-            fn drop(&mut self) {
-                let _ = DISMANTLE_QUEUE.try_with(|slot| slot.borrow_mut().take());
-            }
-        }
-        let _disarm = Disarm;
-        let mut next = Some(entries);
-        while let Some(e) = next {
-            drop(e);
-            next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(Vec::pop));
-        }
+        Self::EMPTY
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::runtime::signature::Signature;
-
+    fn binding(value: ValClos) -> Binding {
+        Binding {
+            value,
+            scheme: None,
+        }
+    }
+    fn env_of<const N: usize>(pairs: [(&str, i64); N]) -> Env {
+        let mut env = Env::EMPTY;
+        for (name, n) in pairs {
+            env.bind(name.into(), binding(ValClos::int(n)));
+        }
+        env
+    }
     #[test]
     fn seed_rows_preserve_iteration_wire_order_and_identity() {
         for count in [0, 1, SMALL, SMALL + 1] {
             for duplicate in [false, true] {
                 let mut pairs: Vec<(Name, Binding)> = (0..count)
                     .rev()
-                    .map(|index| (format!("key{index:02}").into(), binding(Value::Int(1))))
+                    .map(|index| (format!("key{index:02}").into(), binding(ValClos::int(1))))
                     .collect();
                 if duplicate && count > 0 {
-                    pairs.push(("key00".into(), binding(Value::Int(2))));
+                    pairs.push(("key00".into(), binding(ValClos::int(2))));
                 }
-                let mut ordinary = Env::new();
+                let mut ordinary = Env::EMPTY;
                 ordinary.extend(pairs.clone().into_iter());
                 let (seed, displaced) = Env::from_seed_bindings(pairs);
                 assert_eq!(displaced.len(), usize::from(duplicate && count > 0));
@@ -431,8 +322,7 @@ mod tests {
                     shell.env = env.clone();
                     let seed = crate::seed::EngineSeed::encode(
                         &shell.bequeath(crate::shell::grant::SpawnGrant::Inherit),
-                    )
-                    .unwrap();
+                    );
                     let bytes = crate::data::json::to_vec(&seed).unwrap();
                     serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["scope_table"]
                         .clone()
@@ -445,8 +335,7 @@ mod tests {
                 let clone = seed.clone();
                 assert!(seed.ptr_eq(&clone));
                 let names: Vec<&str> = seed.names().map(AsRef::as_ref).collect();
-                let occ = crate::ir::test_occ(&names);
-                let restricted = seed.restrict(&occ);
+                let restricted = seed.restrict(&crate::ir::test_occ(&names));
                 assert!(seed.ptr_eq(&restricted));
                 restricted.drop_seed();
                 seed.drop_seed();
@@ -454,47 +343,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn seed_small_mutations_follow_ordinary_small_paths() {
-        let (seed, displaced) = Env::from_seed_bindings(vec![
-            ("a".into(), binding(Value::Int(1))),
-            ("b".into(), binding(Value::Int(2))),
-        ]);
-        assert!(displaced.is_empty());
-        let mut mutated = seed.clone();
-        mutated.bind("a".into(), binding(Value::Int(3)));
-        assert!(matches!(mutated.0, Entries::Small(_)));
-        assert_eq!(seed.get("a"), Some(&Value::Int(1)));
-        assert_eq!(mutated.get("a"), Some(&Value::Int(3)));
-        let mut extended = seed.clone();
-        extended.extend(std::iter::once(("c".into(), binding(Value::Int(4)))));
-        assert!(matches!(extended.0, Entries::Small(_)));
-        let mut removed = seed.clone();
-        assert_eq!(removed.unset("a"), Some(Value::Int(1)));
-        assert!(matches!(removed.0, Entries::Small(_)));
-        let restricted = seed.restrict(&crate::ir::test_occ(&["a"]));
-        assert!(matches!(restricted.0, Entries::Small(_)));
-        seed.drop_seed();
-    }
-
-    fn binding(value: Value) -> Binding {
-        Binding {
-            value,
-            scheme: None,
-        }
-    }
-
-    fn env_of<const N: usize>(pairs: [(&str, i64); N]) -> Env {
-        let mut env = Env::new();
-        for (name, n) in pairs {
-            env.bind(name.into(), binding(Value::Int(n)));
-        }
-        env
-    }
-
-    /// (Regression: drop glue recursed once per link, and a sixty-thousand-link
-    /// lazy list aborted the process at teardown.)
     #[test]
     fn deep_closure_chain_drops_on_a_small_stack() {
         std::thread::Builder::new()
@@ -502,113 +350,80 @@ mod tests {
             .spawn(|| {
                 drop(crate::shell::runtime::deep_block_chain(
                     100_000,
-                    Value::Unit,
+                    ValClos::UNIT,
                 ));
             })
             .expect("spawn")
             .join()
-            .expect("a deep chain must drop without exhausting the stack");
+            .expect("a deep chain drops without exhausting the stack");
     }
-
-    /// A name a `let` shadows over a prelude binding of the same spelling
-    /// round-trips as the user's value, and `unset` reveals the prelude's
-    /// underneath through `lookup`.
     #[test]
     fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
         let mut sig = Signature::default();
         sig.install_prelude(Arc::new(
-            std::iter::once(("map".to_string(), binding(Value::string("prelude-map")))).collect(),
+            std::iter::once(("map".to_string(), binding(ValClos::string("prelude-map")))).collect(),
         ));
-        let mut env = Env::new();
+        let mut env = Env::EMPTY;
         assert_eq!(
             crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&Value::string("prelude-map"))
+            Some(&ValClos::string("prelude-map"))
         );
-
-        env.bind("map".into(), binding(Value::Int(3)));
+        env.bind("map".into(), binding(ValClos::int(3)));
         assert_eq!(
             crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&Value::Int(3))
+            Some(&ValClos::int(3))
         );
-
         env.unset("map");
         assert_eq!(
             crate::shell::runtime::signature::lookup("map", &env, &sig),
-            Some(&Value::string("prelude-map"))
+            Some(&ValClos::string("prelude-map"))
         );
     }
-
-    /// The same sequence of binds, shadowing included, gives equal
-    /// lookups, `names()` and `restrict` results whether `SMALL` is crossed or
-    /// not.
     #[test]
     fn small_and_large_agree() {
-        let small = env_of([("a", 0), ("b", 1), ("c", 2)]);
+        let mut small = env_of([("a", 0), ("b", 1), ("c", 2)]);
         let mut large = small.clone();
-        // Push `large` past `SMALL`, then shadow `a` again on both sides.
         for i in 0..(SMALL + 4) {
             let n = i64::try_from(i).expect("small test index");
-            large.bind(format!("pad{i}").into(), binding(Value::Int(100 + n)));
+            large.bind(format!("pad{i}").into(), binding(ValClos::int(100 + n)));
         }
-        let mut small = small;
-        small.bind("a".into(), binding(Value::Int(9)));
-        large.bind("a".into(), binding(Value::Int(9)));
-
+        small.bind("a".into(), binding(ValClos::int(9)));
+        large.bind("a".into(), binding(ValClos::int(9)));
         assert!(matches!(small.0, Entries::Small(_)));
-        assert!(matches!(&large.0, Entries::Sized(entries)
-            if matches!(entries.as_ref(), SizedEntries::Large(_))));
-        assert_eq!(small.get("a"), Some(&Value::Int(9)));
-        assert_eq!(large.get("a"), Some(&Value::Int(9)));
+        assert!(
+            matches!(&large.0, Entries::Sized(entries) if matches!(entries.as_ref(), SizedEntries::Large(_)))
+        );
+        assert_eq!(small.get("a"), Some(&ValClos::int(9)));
+        assert_eq!(large.get("a"), Some(&ValClos::int(9)));
         assert_eq!(small.get("b"), large.get("b"));
         assert_eq!(small.get("zzz"), None);
         assert_eq!(large.get("zzz"), None);
-
         let occ = crate::ir::test_occ(&["a", "b"]);
-        let (mut small_names, mut large_names): (Vec<_>, Vec<_>) = (
-            small
+        let names = |env: &Env| {
+            let mut names: Vec<_> = env
                 .restrict(&occ)
                 .names()
                 .map(ToString::to_string)
-                .collect(),
-            large
-                .restrict(&occ)
-                .names()
-                .map(ToString::to_string)
-                .collect(),
-        );
-        small_names.sort();
-        large_names.sort();
-        assert_eq!(small_names, large_names);
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&small), names(&large));
     }
-
-    /// An environment whose names occ covers returns itself
-    /// (`ptr_eq`); one name more than occ lists gives a fresh `Small` of the
-    /// hits; a name only Σ answers is never an entry.
     #[test]
     fn restrict_is_the_identity_when_it_drops_nothing() {
-        let mut sig = Signature::default();
-        sig.install_prelude(Arc::new(
-            std::iter::once(("map".to_string(), binding(Value::string("p")))).collect(),
-        ));
         let env = env_of([("a", 0), ("b", 1)]);
-
-        let covering = crate::ir::test_occ(&["a", "b", "zzz"]);
-        assert!(env.restrict(&covering).ptr_eq(&env));
-
-        let narrower = crate::ir::test_occ(&["a"]);
-        let narrowed = env.restrict(&narrower);
+        assert!(
+            env.restrict(&crate::ir::test_occ(&["a", "b", "zzz"]))
+                .ptr_eq(&env)
+        );
+        let narrowed = env.restrict(&crate::ir::test_occ(&["a"]));
         assert!(!narrowed.ptr_eq(&env));
         assert!(narrowed.binding("a").is_some());
         assert!(narrowed.binding("b").is_none());
-
-        let empty = crate::ir::test_occ(&[]);
-        assert!(
-            env.restrict(&empty).ptr_eq(&env.restrict(&empty)),
-            "every empty capture shares one root"
-        );
-        assert!(
-            !narrowed.names().any(|n| n.as_ref() == "map"),
-            "a name only Σ answers is never an entry"
-        );
+        let empty = env.restrict(&crate::ir::test_occ(&[]));
+        assert!(empty.ptr_eq(&Env::EMPTY));
+        assert!(matches!(empty.0, Entries::Empty));
+        assert!(!narrowed.names().any(|n| n.as_ref() == "map"));
     }
 }

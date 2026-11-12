@@ -12,7 +12,7 @@ A string argument stays one argument: its contents are never implicitly split, g
 
 ## Values and computations
 
-`ral` separates values from computations. `let x = …` always runs its right-hand side: it binds the value returned, or captures an output command's stdout. A call that runs out of arguments returns the remaining block: `let inc = add 1` binds a block of one parameter. An argument or record field needs a value. The forms to remember are:
+`ral` separates values from computations. `let x = …` always runs its right-hand side: it binds the value returned, or captures an output command's stdout. A call that runs out of arguments returns the remaining block: `let inc = add 1` binds a block of one parameter. This holds for builtins too: their bodies run only when all arguments arrive. An argument or record field needs a value. The forms to remember are:
 
 - `$x` retrieves a bound value.
 - `{ … }` packages a computation as a block, without running it.
@@ -336,6 +336,8 @@ You need not wait for it: end the turn when nothing else remains, and if its res
     try { await $h } { |e| echo "failed: $e[message]" }    # or this instead, to recover
 
 Retain the handle returned by `spawn` (or `watch`) whenever you will need its result or individual cancellation; a worker ID in `workers` or a completion notice is for observation only and cannot recover a handle.
+
+A helper agent's shell snapshot keeps inherited handles in place, with their titles and `Handle` type, but withholds access to their workers. `await`, `poll`, `is-done`, `first-settled`, `race` and `cancel` all refuse such a handle with `withheld-handle`. Await it in the shell that spawned it and pass its result instead.
 
 Every worker moves through one four-state lifecycle: `running` (executing, result unclaimed), `stopping` (cancellation requested, still executing, result claimed by cancel), `ready` (execution ended, result unclaimed), and `consumed` (execution ended and result claimed or discarded). `workers` lists `running`, `stopping`, and retained `ready` workers with their id, title, owner, state and timing; `stopping` is still live and counts against the admission cap until execution ends. `cancel $h` stops a block that is no longer needed, and everything it started. `is-done $h` is `true` in `ready` or `consumed`, without copying output or raising.
 

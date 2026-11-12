@@ -1,7 +1,7 @@
 ---
-verified_at_commit: ed1b37eb
+verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
-anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, install_set, coreutils_invoke, Convention, Arm::ty, handlers_ty, Decl::scheme]
+anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, BuiltinEntry::eta, ValClos::builtin, ValClos::residual, CompKind::Builtin, fixed_arity, install_set, coreutils_invoke, Convention, Arm::ty, handlers_ty, Decl::scheme]
 ---
 
 # Builtins: structure and registration
@@ -61,18 +61,28 @@ value and `$echo` is not, and `warn` curries where `echo` spreads
 
 **The manifest is a boot manifest; it is not a resolution layer.** It is
 authored as two, so installing a set is two installs rather than one sorting
-(`Runtime::install_set`, with `native_value` — total over the table — the one
-door onto an entry's value form, shared with wire hydration): a table entry
-becomes a `Value::Native` in the shell's *base scope*, reached as an ordinary
-binding; a base-frame row becomes a *base frame* under the handler stack's run
-frames ([[internals/handler-dispatch|handler-dispatch]], [[design/exec|exec]]).
+(`Runtime::install_set`): a table entry becomes a `ValClos::builtin` in
+Σ, reached by ordinary lookup after ρ and the frozen prelude; a base-frame
+row becomes a *base frame* under the handler stack's run frames ([[internals/handler-dispatch|handler-dispatch]], [[design/exec|exec]]).
 Dispatch consults no builtin table ([[design/builtins|builtins]]);
 the installed table remains as the manifest that the checker's rule side-table,
-`help`/`explain`, tab completion, and wire re-linking are read from. The base scope is
-reached by lookup after the user scopes and enumerated by no harvest — the
-binding harvests walk user scopes only, which is what keeps a pristine native
-typed by its `Sig` rule rather than as a binding, and its head a command rather
-than an application. `true` and `false` join it as language constants.
+`help`/`explain`, tab completion, and wire re-linking read. Binding harvests
+enumerate ρ and the prelude, not the builtin tier; the checker reads an
+unshadowed builtin's scheme from its manifest. `true` and `false` join Σ
+as language constants.
+
+**A builtin's value form is `⟨Val::Builtin(entry),∅⟩`.** The public
+`ValClos::builtin` serves installation, hosts and wire hydration.
+`BuiltinEntry::eta` caches `λa₀.…λaₙ₋₁.δ(b; a⃗)`; forcing binds `b` to the
+entry itself. β binds arguments and δ reads them from ρ, preserving the
+entry's identity rather than re-dispatching its name. An exact-arity call
+invokes the body directly. Under-application boxes the remaining λ at a
+value demand; its capture holds supplied arguments. The residual crosses
+as a thunk; a builtin constant crosses by name. Boundary partials retain
+their checked site in inference-expanded `Exec` blocks.
+`ValClos::residual` supports display and hook arity and prevents handing δ
+to handler or hook checking
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 
 **Bundled coreutils are not builtins.** They are exec images, so they live
 outside the manifest module: `core/src/uutils.rs` declares the vendored tools via

@@ -5,7 +5,7 @@
 use super::Error;
 use super::flow::Settled;
 use super::state::Bequest;
-use super::value::Value;
+use super::value::ValClos;
 use crate::fact::{Reason, StateFailure};
 use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode, TerminalAccess};
 use crate::sync::LockExt as _;
@@ -247,12 +247,12 @@ impl Mooring {
         self.surface.is_some()
     }
 
-    /// The sink entry for a runtime [`Value`], such as a host builtin with no
+    /// The sink entry for a runtime [`ValClos`], such as a host builtin with no
     /// vocabulary of its own hands in.  Encoded here into the first-order
     /// [`FOValue`](crate::data::FOValue) the sink carries; inert with no
     /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
     /// crosses as its `opaque` placeholder rather than being dropped.
-    pub fn surface(&self, ev: &Value) {
+    pub fn surface(&self, ev: &ValClos) {
         if let Some(sink) = self.surface.as_ref() {
             sink.emit(&crate::data::FOValue::scrubbed(ev));
         }
@@ -300,7 +300,7 @@ impl Drop for NurseryGuard {
 mod tests {
     use super::*;
     use crate::data::{FOValue, OPAQUE_TAG};
-    use crate::shell::runtime::idle_handle;
+    use crate::handle::idle_handle;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -325,7 +325,7 @@ mod tests {
         let recorder = Arc::new(RecordingSink::default());
         let mooring = mooring_with(recorder.clone());
 
-        mooring.surface(&Value::map(vec![("value".to_string(), idle_handle())]));
+        mooring.surface(&ValClos::map(vec![("value".to_string(), idle_handle())]));
 
         let emitted = recorder.0.lock().unwrap().clone();
         assert_eq!(emitted.len(), 1, "the emission must not be dropped");

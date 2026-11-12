@@ -1,10 +1,27 @@
 ---
 status: accepted
-generated_at_commit: 8aa9355b
-generated_at_date: 2026-10-13
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
+anchors: [SerialAtom, SerialValue, WireDecoder::for_runtime, Handle::Withheld, Shell::bequeath]
+amended_by: "[[261112_runtime-values-are-value-closures|runtime values are value closures]]"
 ---
 
 # The seed rides the protocol, sealed
+
+> **Amended 2026-11-12:**
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]]
+> makes the sealed value vocabulary `SerialValue = FOValue<SerialAtom>`:
+> thunks carry computation syntax and an environment reference, builtins
+> carry a name re-linked against the receiving runtime, and handles carry
+> a title and hydrate withheld. A partial builtin is a thunk containing an
+> η residual, not a separate entry-plus-arguments wire form. The bequest
+> scrub withholds live handles through data, captured environments and
+> handler arms without dropping bindings or positions. This applies before
+> `Fork::Park` as well as sealing: identity adoption shares memory but must
+> not share live worker capabilities. The opacity and factory laws stand;
+> the protocol version below records the original decision, not today's ABI.
 
 **A payload the host relays but never reads crosses as bytes; its content is a
 contract between the engines at its two ends, and the spawner is what makes
@@ -113,3 +130,12 @@ it must outlive.
 > **Amended 2026-10-27.** The guest factory now lives at `ral-guest/src/init/fleet.rs::make_engines`;
 > `init/halt.rs` owns its shutdown. Assembly and supervision share one PID 1,
 > and every engine still comes from the one installed engine path.
+
+## Where
+
+- `core/src/seed/{table,json}.rs`: `SerialAtom`, `SerialValue`,
+  `WireDecoder::for_runtime`; handles hydrate through `ValClos::withheld`.
+- `core/src/shell/runtime/state/scrub.rs`: `Shell::bequeath`;
+  `core/src/handle.rs`: `Handle::Withheld`.
+- `exarch/src/shell_eval/builtins/harness.rs`: `fork_then_enquire` passes
+  the scrubbed bequest to either `Fork::Park` or `Fork::Seal`.

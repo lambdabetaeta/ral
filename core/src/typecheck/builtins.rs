@@ -36,9 +36,7 @@ pub(crate) enum BuiltinDiagnostic {
 /// rather than from its arity.
 #[derive(Debug, Clone, Copy)]
 pub enum Convention {
-    /// Curried application at the arity the row's type declares, and
-    /// first-class as `$name`: the row seeds the base env scope as a
-    /// `Value::Native(entry, [])`; partial applications hold their arguments.
+    /// First-class as `$name`; curried application leaves an η residual while partial.
     Value(BuiltinTypeRule),
     /// An argv base frame: `[String] → Command`, intercepted, stacked, and
     /// never a value. `^name` bypasses it. Its argv words are gated, not
@@ -409,7 +407,7 @@ pub mod scheme {
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
     ///
-    /// `pub`: a host declares its own [`BuiltinEntry`](crate::shell::runtime::BuiltinEntry)
+    /// `pub`: a host declares its own [`BuiltinEntry`](crate::builtin::BuiltinEntry)
     /// over this scheme under its own name; see
     /// [`crate::shell::builtins::SURFACE_BUILTIN`].
     pub fn surface_op(binders: &mut Binders) -> Ty {

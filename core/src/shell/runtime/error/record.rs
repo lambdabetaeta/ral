@@ -2,14 +2,14 @@
 
 use crate::error::Error;
 use crate::fact::{ErrorFact, tag};
-use crate::shell::runtime::{Shell, Value};
+use crate::shell::runtime::{Shell, ValClos};
 
 /// `` `ok v | `err record ``: how `poll`'s settled arm and the report
 /// envelope read a body's end.
-pub fn outcome_value(outcome: Result<Value, ErrorFact>) -> Value {
+pub fn outcome_value(outcome: Result<ValClos, ErrorFact>) -> ValClos {
     match outcome {
-        Ok(v) => Value::variant(tag::OK, Some(v)),
-        Err(fact) => Value::variant(tag::ERR, Some(Value::failure(fact))),
+        Ok(v) => ValClos::variant(tag::OK, Some(v)),
+        Err(fact) => ValClos::variant(tag::ERR, Some(ValClos::failure(fact))),
     }
 }
 

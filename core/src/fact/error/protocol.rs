@@ -105,34 +105,12 @@ pub enum ProtocolFailure {
     UnresolvedScope(Count),
     CyclicScopes,
     UnknownNative(String),
-    InvalidNativeArguments(ProtocolFailureInvalidNativeArguments),
     Frame(ProtocolFailureFrame),
     Unencodable(ProtocolFailureUnencodable),
     ConnectionLostDuringEnquiry,
     Busy(ProtocolWork),
 }
-variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", WrongForkKind(ProtocolFailureWrongForkKind): "wrong-fork-kind", SeedFrame(SeedFrameFailure): "seed-frame", UnresolvedScope(Count): "unresolved-scope", CyclicScopes: "cyclic-scopes", UnknownNative(String): "unknown-native", InvalidNativeArguments(ProtocolFailureInvalidNativeArguments): "invalid-native-arguments", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtocolFailureInvalidNativeArguments {
-    pub name: String,
-    pub arity: Count,
-    pub actual: Count,
-}
-record!(ProtocolFailureInvalidNativeArguments {
-    name: "name",
-    arity: "arity",
-    actual: "actual"
-});
-
-impl ProtocolFailureInvalidNativeArguments {
-    pub fn describe(&self) -> String {
-        format!(
-            "native {:?} has arity {} but holds {} arguments; a partial native must hold fewer arguments than its arity (zero for arity 0); seal it before saturation",
-            self.name, self.arity, self.actual
-        )
-    }
-}
+variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", WrongForkKind(ProtocolFailureWrongForkKind): "wrong-fork-kind", SeedFrame(SeedFrameFailure): "seed-frame", UnresolvedScope(Count): "unresolved-scope", CyclicScopes: "cyclic-scopes", UnknownNative(String): "unknown-native", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -456,7 +434,6 @@ impl ProtocolFailure {
             Self::UnresolvedScope(value) => format!("unresolved scope: {value}"),
             Self::CyclicScopes => "cyclic scopes".to_owned(),
             Self::UnknownNative(value) => format!("unknown native {value:?}"),
-            Self::InvalidNativeArguments(value) => value.describe(),
             Self::Frame(value) => value.describe(),
             Self::Unencodable(value) => value.describe(),
             Self::ConnectionLostDuringEnquiry => "connection lost during enquiry".to_owned(),

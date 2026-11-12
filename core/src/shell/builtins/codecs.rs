@@ -19,7 +19,9 @@ use crate::fact::{
     Utf8Subject, ValueShape,
 };
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Mooring, Settled, Shell, Value, decode_utf8_strict, pointer_token};
+use crate::shell::runtime::{
+    Mooring, Settled, Shell, ValClos, View, decode_utf8_strict, pointer_token,
+};
 
 use crate::data::{FOValue, Finite};
 use crate::ty::Site;
@@ -47,7 +49,7 @@ fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
 /// cannot see ([`crate::ir::Argv::positional`] gives up on them).
-fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
+fn no_arguments(args: &[ValClos], name: &str) -> Settled<()> {
     if args.is_empty() {
         return Ok(());
     }
@@ -61,32 +63,32 @@ fn no_arguments(args: &[Value], name: &str) -> Settled<()> {
     .into())
 }
 
-fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
+fn input_bytes(args: &[ValClos], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     no_arguments(args, name)?;
     read_stdin_bytes(name, shell)
 }
 
 /// Channel text for a `from-X` decoder that needs real UTF-8: the same
 /// refusal, and the same way out of it, for every one of them.
-fn input_text(args: &[Value], name: &str, shell: &Shell) -> Settled<String> {
+fn input_text(args: &[ValClos], name: &str, shell: &Shell) -> Settled<String> {
     decode_utf8_strict(input_bytes(args, name, shell)?, name, Utf8Subject::Input)
 }
 
-pub(super) fn builtin_from_bytes(args: &[Value], shell: &Shell) -> Settled<Value> {
-    Ok(Value::bytes(input_bytes(args, "from-bytes", shell)?))
+pub(super) fn builtin_from_bytes(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
+    Ok(ValClos::bytes(input_bytes(args, "from-bytes", shell)?))
 }
 
-pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Value> {
-    Ok(Value::string(input_text(args, "from-string", shell)?))
+pub(super) fn builtin_from_string(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
+    Ok(ValClos::string(input_text(args, "from-string", shell)?))
 }
 
-pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_from_line(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     let mut text = input_text(args, "from-line", shell)?;
     text.truncate(crate::io::without_terminator(text.as_bytes()).len());
-    Ok(Value::string(text))
+    Ok(ValClos::string(text))
 }
 
-pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_from_lines(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     no_arguments(args, "from-lines")?;
     lossy_line_list(super::util::stdin_lines("from-lines", shell)?)
 }
@@ -130,16 +132,16 @@ fn json_to_fo(j: serde_json::Value) -> Result<FOValue, CodecJsonNumberFailure> {
     })
 }
 
-fn json_to_value(j: serde_json::Value) -> Result<Value, CodecJsonNumberFailure> {
-    json_to_fo(j).map(Value::from)
+fn json_to_value(j: serde_json::Value) -> Result<ValClos, CodecJsonNumberFailure> {
+    json_to_fo(j).map(ValClos::from)
 }
 
 pub(crate) fn builtin_from_json(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let text = input_text(args, "from-json", shell)?;
     let json = serde_json::from_str(&text)
         .map_err(|e| codec("from-json", CodecFailure::JsonSyntax(json_syntax(&e))))?;
@@ -196,24 +198,24 @@ fn json_shape(json: &serde_json::Value) -> JsonShape {
 /// tokens lead to.  The tokens are a list and not a pointer string, so a key
 /// holding a `/` or a `~` needs no escaping.
 pub(crate) fn builtin_from_json_at(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     const DOOR: &str = "from-json-at";
     let tokens: Vec<String> = args[0]
         .as_list(DOOR)?
         .iter()
         .enumerate()
-        .map(|(index, token)| match &*token {
-            Value::String(s) => Ok(s.to_string()),
-            other => Err(Error::new(Reason::Invalid(Box::new(
+        .map(|(index, token)| match token.view() {
+            View::String(s) => Ok(s.to_string()),
+            _ => Err(Error::new(Reason::Invalid(Box::new(
                 InvalidFailure::new(
                     DOOR.into(),
                     InvalidCause::Shape(ShapeFailure {
                         expected: Expected::Shape(ValueShape::String),
-                        found: other.found(),
+                        found: token.found(),
                     }),
                 )
                 .index(index.into())
@@ -240,11 +242,11 @@ pub(crate) fn builtin_from_json_at(
 /// holding none.  Each line parses alone, so the line an error names is the
 /// input's and serde's own position is only a column.
 pub(crate) fn builtin_from_jsonl(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     no_arguments(args, "from-jsonl")?;
     let mut records = Vec::new();
     for (index, line) in super::util::stdin_lines("from-jsonl", shell)?.enumerate() {
@@ -273,7 +275,7 @@ pub(crate) fn builtin_from_jsonl(
             )
         })?);
     }
-    site.admitted("from-jsonl", Value::list(records), shell)
+    site.admitted("from-jsonl", ValClos::list(records), shell)
 }
 
 fn codec(operation: &str, cause: CodecFailure) -> Error {
@@ -297,11 +299,11 @@ fn json_syntax(error: &serde_json::Error) -> JsonSyntaxFailure {
 
 /// CSV cells stay text; the site checks each row's required shape.
 pub(super) fn builtin_from_csv(
-    args: &[Value],
+    args: &[ValClos],
     site: &Arc<Site>,
     _mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::Reader::from_reader(bytes.as_slice());
     let headers: Vec<String> = rdr
@@ -324,10 +326,10 @@ pub(super) fn builtin_from_csv(
         let fields = headers
             .iter()
             .cloned()
-            .zip(record.iter().map(Value::string));
-        rows.push(Value::map(fields.collect()));
+            .zip(record.iter().map(ValClos::string));
+        rows.push(ValClos::map(fields.collect()));
     }
-    site.admitted("from-csv", Value::list(rows), shell)
+    site.admitted("from-csv", ValClos::list(rows), shell)
 }
 
 fn csv_position(position: &csv::Position) -> CsvPosition {
@@ -392,18 +394,18 @@ fn csv_deserialize(cause: &csv::DeserializeErrorKind) -> CsvDeserializeCause {
 }
 
 /// Records and maps share the key-ordered runtime carrier.
-pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_csv(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let rows = args[0].as_list("to-csv")?;
     let mut wtr = csv::Writer::from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
-        let header = first.as_ref().as_map_ref("to-csv")?;
+        let header = first.as_ref().as_map("to-csv")?;
         if header.is_empty() {
             return Err(codec("to-csv", CodecFailure::CsvNoColumns).into());
         }
         wtr.write_record(header.keys())
             .map_err(|e| codec("to-csv", CodecFailure::CsvRead(csv_failure(&e))))?;
         for (i, row) in rows.iter().enumerate() {
-            let map = row.as_ref().as_map_ref("to-csv")?;
+            let map = row.as_ref().as_map("to-csv")?;
             let stray = header
                 .keys()
                 .chain(map.keys())
@@ -441,7 +443,7 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     write_encoded(&bytes, shell)
 }
 
-fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
+fn csv_cell(value: &ValClos, row: usize, key: &str) -> Settled<String> {
     if let Some(text) = value.scalar_text() {
         return Ok(text);
     }
@@ -456,40 +458,40 @@ fn csv_cell(value: &Value, row: usize, key: &str) -> Settled<String> {
     .into())
 }
 
-fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<Value> {
+fn write_encoded(bytes: &[u8], shell: &mut Shell) -> Settled<ValClos> {
     shell.write_stdout(bytes)?;
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
-pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_bytes(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let bs = args[0].as_bytes("to-bytes")?;
     write_encoded(bs, shell)
 }
 
-pub(super) fn builtin_ints_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_ints_to_bytes(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let bs = as_byte_list(&args[0], "ints-to-bytes")?;
     write_encoded(&bs, shell)
 }
 
-pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_string(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     write_encoded(args[0].to_string().as_bytes(), shell)
 }
 
-pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_line(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let mut s = args[0].to_string();
     s.push('\n');
     write_encoded(s.as_bytes(), shell)
 }
 
-/// `echo`'s base-frame body: the argv rendered ([`Value::render_argv`]),
+/// `echo`'s base-frame body: the argv rendered ([`ValClos::render_argv`]),
 /// single-space intercalate, trailing newline to the byte channel.  `()` is
 /// nothing to print, which the checker refuses and this backstops.
 pub(super) fn builtin_echo(
-    args: &[Value],
+    args: &[ValClos],
     _mooring: &crate::shell::runtime::Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
-    if let Some(index) = args.iter().position(|arg| matches!(arg, Value::Unit)) {
+) -> Settled<ValClos> {
+    if let Some(index) = args.iter().position(|arg| matches!(arg.view(), View::Unit)) {
         return Err(Error::new(Reason::Invalid(Box::new(
             InvalidFailure::new(
                 "echo".into(),
@@ -514,14 +516,14 @@ pub(super) fn builtin_echo(
         )))
         .into());
     }
-    let mut s = Value::render_argv(args).join(" ");
+    let mut s = ValClos::render_argv(args).join(" ");
     s.push('\n');
     write_encoded(s.as_bytes(), shell)
 }
 
-pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_lines(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let mut text = String::new();
-    for item in &args[0].as_list("to-lines")? {
+    for item in args[0].as_list("to-lines")? {
         text.push_str(&item.to_string());
         text.push('\n');
     }
@@ -534,7 +536,7 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
 ///
 /// # Errors
 /// If `v` or anything nested within it is a block, function or handle.
-fn value_to_json(v: &Value) -> Result<serde_json::Value, CodecFailureNotJson> {
+fn value_to_json(v: &ValClos) -> Result<serde_json::Value, CodecFailureNotJson> {
     FOValue::try_from(v)
         .map(|fo| fo.to_json(|b| b.iter().map(|&byte| serde_json::json!(byte)).collect()))
         .map_err(|e| CodecFailureNotJson {
@@ -543,14 +545,14 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, CodecFailureNotJson> {
         })
 }
 
-pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_json(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let json = value_to_json(&args[0]).map_err(|e| codec("to-json", CodecFailure::NotJson(e)))?;
     write_encoded(json.to_string().as_bytes(), shell)
 }
 
 /// JSON Lines: each element as `to-json` writes it, compact and so free of
 /// LF, then a `\n`.  Every element encodes before any byte is written.
-pub(super) fn builtin_to_jsonl(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_to_jsonl(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let mut text = String::new();
     for (i, item) in args[0].as_list("to-jsonl")?.iter().enumerate() {
         let json = value_to_json(item.as_ref()).map_err(|e| {
@@ -590,7 +592,7 @@ mod tests {
         ))
     }
 
-    fn failure(result: Settled<Value>) -> InvalidFailure {
+    fn failure(result: Settled<ValClos>) -> InvalidFailure {
         let Err(Break::Error(error)) = result else {
             panic!("expected invalid input")
         };
@@ -650,7 +652,7 @@ mod tests {
         );
         let mut shell = input(b"{}");
         let failure = failure(builtin_from_json_at(
-            &[Value::list(vec![Value::Int(2)])],
+            &[ValClos::list(vec![ValClos::int(2)])],
             &site(&crate::ty::Ty::unit()),
             &Mooring::adrift(),
             &mut shell,
@@ -695,7 +697,7 @@ mod tests {
         let block = block_over(&Env::new());
         for (value, nested) in [
             (block.clone(), false),
-            (Value::list(vec![block.clone()]), true),
+            (ValClos::list(vec![block.clone()]), true),
         ] {
             let cause = value_to_json(&value).unwrap_err();
             assert_eq!(
@@ -708,7 +710,7 @@ mod tests {
         }
         let mut shell = input(b"");
         let failure = failure(builtin_to_jsonl(
-            &[Value::list(vec![Value::Int(1), block])],
+            &[ValClos::list(vec![ValClos::int(1), block])],
             &mut shell,
         ));
         assert_eq!(failure.path, vec![DataStep::Index(1usize.into())]);
@@ -749,15 +751,15 @@ mod tests {
         );
         assert_eq!(
             failure(builtin_to_csv(
-                &[Value::list(vec![Value::map(vec![])])],
+                &[ValClos::list(vec![ValClos::map(vec![])])],
                 &mut shell
             ))
             .cause,
             InvalidCause::Codec(CodecFailure::CsvNoColumns)
         );
-        let rows = Value::list(vec![
-            Value::map(vec![("a".into(), Value::Int(1))]),
-            Value::map(vec![]),
+        let rows = ValClos::list(vec![
+            ValClos::map(vec![("a".into(), ValClos::int(1))]),
+            ValClos::map(vec![]),
         ]);
         assert_eq!(
             failure(builtin_to_csv(&[rows], &mut shell)).cause,
@@ -768,7 +770,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            failure(csv_cell(&Value::Unit, 4, "a").map(Value::string)).cause,
+            failure(csv_cell(&ValClos::UNIT, 4, "a").map(ValClos::string)).cause,
             InvalidCause::Codec(CodecFailure::CsvCell(CodecFailureCsvCell {
                 row: 4usize.into(),
                 key: "a".into(),
@@ -779,7 +781,8 @@ mod tests {
 
     #[test]
     fn decoder_arity_and_echo_refusals_keep_counts_and_indices() {
-        let failure = failure(no_arguments(&[Value::Unit], "from-string").map(|()| Value::Unit));
+        let failure =
+            failure(no_arguments(&[ValClos::UNIT], "from-string").map(|()| ValClos::UNIT));
         assert_eq!(
             failure.cause,
             InvalidCause::Arity(ArityFailure {
@@ -795,7 +798,7 @@ mod tests {
         );
         let mut shell = input(b"");
         let failure = self::failure(builtin_echo(
-            &[Value::string("x"), Value::Unit],
+            &[ValClos::string("x"), ValClos::UNIT],
             &Mooring::adrift(),
             &mut shell,
         ));

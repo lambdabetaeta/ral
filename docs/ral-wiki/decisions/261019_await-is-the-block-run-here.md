@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: f1b0a4a4
-verified_at_commit: f1b0a4a4
-verified_at_date: 2026-11-06
+generated_at_commit: c0905f5e
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
 anchors: [await_handle, join, claim_first, claim_ready, claim_and_stop, CompletionPermit, Cradle, Brood, BroodGuard, Birth, convert_own_stop, TitlePolicy, Stamp, Owner, WorkerRow, spawn_form]
 ---
 
@@ -468,10 +468,10 @@ code renders anything.
 
 `await_handle`, `join`, `claim_first`, `builtin_poll`, `builtin_is_done` in
 `core/src/shell/builtins/concurrency/eliminate.rs`; `HandleState`, `Sample`,
-`CompletionPermit`, `Stamp` in `core/src/shell/runtime/handle.rs`; `Birth`,
+`CompletionPermit`, `Stamp` in `core/src/handle.rs`; `Birth`,
 `convert_own_stop`, `exit_brood` in `core/src/shell/builtins/concurrency/birth.rs`;
 `spawn_form` in `core/src/shell/builtins/concurrency.rs`; `Cradle`, `Brood`,
-`BroodGuard` in `core/src/shell/runtime/handle/brood.rs`; `Owner` in
+`BroodGuard` in `core/src/handle/brood.rs`; `Owner` in
 `core/src/shell/runtime/state/workers.rs`; `TitlePolicy` in
 `core/src/shell/runtime/mooring.rs`; `WorkerRow` in `core/src/protocol/probe.rs`. The
 runtime narrative is [[internals/cancellation|cancellation]] and

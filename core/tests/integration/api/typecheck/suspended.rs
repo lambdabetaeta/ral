@@ -433,65 +433,65 @@ fn capture_program_table_refused_rows_keep_join_and_argument_hints() {
 fn capture_program_table_accepted_rows_write_and_return_as_documented() {
     use ral_core::protocol::Run;
     use ral_core::shell::run::RunReport;
-    use ral_core::shell::runtime::Value;
+    use ral_core::shell::runtime::ValClos;
     use ral_core::source::SourceOrigin;
 
-    let units = || Value::list(vec![Value::Unit, Value::Unit]);
+    let units = || ValClos::list(vec![ValClos::UNIT, ValClos::UNIT]);
     // External names are handled so these examples need neither installed tools nor network.
     let cases = [
         (
             "within [handlers: [:, hostname: { |_| echo host }]] { let h = hostname; return $h }",
             "",
             "",
-            Value::string("host"),
+            ValClos::string("host"),
         ),
         (
             "within [handlers: [:, hostname: { |_| echo host }]] { let f = { hostname }; let h = f; return $h }",
             "",
             "",
-            Value::string("host"),
+            ValClos::string("host"),
         ),
         (
             "let c = true; let x = if $c { echo a } else { warn b }; return $x",
             "",
             "",
-            Value::string("a"),
+            ValClos::string("a"),
         ),
         (
             "within [handlers: [:, mkdir: { |_| return () }]] { try { mkdir d } { |e| warn no } }",
             "",
             "",
-            Value::Unit,
+            ValClos::UNIT,
         ),
         (
             "within [handlers: [:, curl: { |a| return () }]] { let x = curl foo; return $x }",
             "",
             "",
-            Value::string(""),
+            ValClos::string(""),
         ),
         (
             "within [handlers: [:, curl: { |_| echo fetched }]] { let u = 'url'; try { curl $u > $out } { |e| echo failed } }",
             "",
             "",
-            Value::Unit,
+            ValClos::UNIT,
         ),
         (
             "try { each-line { |l| warn $l } << 'line' } { |e| echo failed }",
             "",
             "line\n",
-            Value::Unit,
+            ValClos::UNIT,
         ),
         (
             "let c = true; let u = (); if $c { return $u } else { echo a }",
             "",
             "",
-            Value::Unit,
+            ValClos::UNIT,
         ),
         (
             "each { |b| !$b } [{ echo hi }, { return () }]",
             "hi\n",
             "",
-            Value::Unit,
+            ValClos::UNIT,
         ),
         ("map { |f| echo $f } [1, 2]", "1\n2\n", "", units()),
         (
@@ -526,7 +526,7 @@ fn capture_program_table_accepted_rows_write_and_return_as_documented() {
         let out = dir.path().join("out");
         shell.set_var(
             "out".into(),
-            Value::string(out.to_str().expect("UTF-8 test path")),
+            ValClos::string(out.to_str().expect("UTF-8 test path")),
             out_scheme.clone(),
         );
         match shell.run(Run::captured(

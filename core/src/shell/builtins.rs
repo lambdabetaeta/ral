@@ -11,7 +11,8 @@
 //! is authored beside it in [`CORE_BASE_FRAMES`]. Its convention fixes
 //! `[String] → Command`, with no type rule to supply.
 
-use crate::shell::runtime::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, Shell, Value};
+use crate::builtin::{BuiltinBody, BuiltinEntry};
+use crate::shell::runtime::{Break, Mooring, Settled, Shell, ValClos};
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
 use std::borrow::Cow;
 
@@ -82,11 +83,11 @@ macro_rules! builtin_registry {
                 $(#[$meta])*
                 #[allow(non_snake_case)]
                 pub(super) fn $variant(
-                    args: &[Value],
+                    args: &[ValClos],
                     mooring: &Mooring,
                     shell: &mut Shell,
-                ) -> Settled<Value> {
-                    let inner: fn(&[Value], &Mooring, &mut Shell) -> Settled<Value> = $call;
+                ) -> Settled<ValClos> {
+                    let inner: fn(&[ValClos], &Mooring, &mut Shell) -> Settled<ValClos> = $call;
                     inner(args, mooring, shell)
                 }
             )+
@@ -384,7 +385,7 @@ builtin_registry! {
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], ty: scheme::pure_bool,
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
-        call: |_args, _mooring, _shell| Ok(Value::Bool(crate::io::terminal::ui_color())), },
+        call: |_args, _mooring, _shell| Ok(ValClos::bool(crate::io::terminal::ui_color())), },
 }
 
 /// The argv half of core's manifest: names that take an argv rather than
@@ -487,7 +488,7 @@ pub static SURFACE_BUILTIN: &[BuiltinEntry] = &SURFACE_BUILTIN_ARR;
 /// question, asked of the live grant stack
 /// ([`crate::authority::policy::GrantStack::permits`]) and answered as a refusal.
 ///
-/// A first-class value returning a receipt rather than a [`Value::Handle`]:
+/// A first-class value returning a receipt rather than a handle:
 /// no eliminator here can reach what it births. The birth is a double-fork,
 /// which Windows has no analogue of.
 #[cfg(unix)]

@@ -21,7 +21,9 @@ use crate::ir::{CommandName, Redirects};
 use crate::path::{self, Candidate, CwdPath, Kind, failure_trace};
 use crate::process::launch::nul_free;
 use crate::process::{CancelCause, Group, Placement, Scope, Spawned, Unstarted, WaitOutcome};
-use crate::shell::runtime::{Break, CommandOrigin, Context, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{
+    Break, CommandOrigin, Context, Mooring, Settled, Shell, ValClos, View,
+};
 use crate::source::Span;
 use crate::ty::RefusedArg;
 use std::borrow::Cow;
@@ -433,7 +435,7 @@ impl Command<Result<Admitted, Error>> {
     /// session keeps the child. Cancellation is checked later, at start.
     pub(crate) fn prepare(
         self,
-        args: &[Value],
+        args: &[ValClos],
         ownership: Ownership,
         shell: &Shell,
     ) -> Settled<Prepared> {
@@ -480,7 +482,7 @@ impl Command<Result<Admitted, Error>> {
 
 /// Turn the arguments into strings. Refuse values an external cannot take;
 /// the type checker does the same, but cannot always know the type.
-fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Error> {
+fn check_argv<'a>(cmd: &str, args: &'a [ValClos]) -> Result<Vec<Cow<'a, str>>, Error> {
     args.iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -503,26 +505,26 @@ fn check_argv<'a>(cmd: &str, args: &'a [Value]) -> Result<Vec<Cow<'a, str>>, Err
                                 crate::fact::ValueShape::String,
                                 crate::fact::ValueShape::Variant,
                             ]),
-                            found: match arg {
-                                Value::Unit => crate::fact::Found::Unit,
-                                Value::Thunk(_) => crate::fact::Found::Block,
-                                Value::Native(..) => crate::fact::Found::Function,
-                                Value::Handle(_) => crate::fact::Found::Handle,
-                                Value::List(_) => crate::fact::Found::List,
-                                Value::Map(_) => crate::fact::Found::Map,
-                                Value::Bytes(_) => crate::fact::Found::Bytes,
-                                Value::Bool(_)
-                                | Value::Int(_)
-                                | Value::Float(_)
-                                | Value::String(_)
-                                | Value::Variant { .. } => unreachable!("scalar argv is admitted"),
+                            found: match arg.view() {
+                                View::Unit => crate::fact::Found::Unit,
+                                View::Thunk { .. } => crate::fact::Found::Block,
+                                View::Builtin(_) => crate::fact::Found::Function,
+                                View::Handle(_) => crate::fact::Found::Handle,
+                                View::List(_) => crate::fact::Found::List,
+                                View::Map(_) => crate::fact::Found::Map,
+                                View::Bytes(_) => crate::fact::Found::Bytes,
+                                View::Bool(_)
+                                | View::Int(_)
+                                | View::Float(_)
+                                | View::String(_)
+                                | View::Variant { .. } => unreachable!("scalar argv is admitted"),
                             },
                         }),
                     },
                 ))));
             }
-            let text = match arg {
-                Value::String(text) => Cow::Borrowed(text.as_ref()),
+            let text = match arg.view() {
+                View::String(text) => Cow::Borrowed(text.as_ref()),
                 _ => Cow::Owned(arg.to_string()),
             };
             // argv[0] is arg0, so the first argument is argument 1.
@@ -547,7 +549,7 @@ pub(crate) struct Prepared {
 
 impl Prepared {
     /// Run the command on the shell's streams and wait for it.
-    pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+    pub(crate) fn run(self, mooring: &Mooring, shell: &Shell) -> Settled<ValClos> {
         let placement = Placement::command(shell.group_owner(mooring));
         let io = Connection::new(
             shell.io.stdin.offered(placement.input()),
@@ -563,7 +565,7 @@ impl Prepared {
         self.start(io, placement, &shell.scope)
             .map_err(|failure| failure.settle(&shell.scope))?
             .collect(since, shell)
-            .map(|()| Value::Unit)
+            .map(|()| ValClos::UNIT)
     }
 
     /// Connect the streams, start the output drains, then spawn. If a drain
@@ -776,12 +778,12 @@ impl Command<Result<Admitted, Error>> {
     /// recorded, under `redirects`, on the shell's streams, and waited for.
     pub(crate) fn run(
         self,
-        args: &[Value],
+        args: &[ValClos],
         redirects: &Redirects<String>,
         span: Option<Span>,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         let origin = CommandOrigin::External;
         self.with_record(args, origin, span, mooring, shell, |command, shell| {
             with_redirects(redirects, span, mooring, shell, |shell| {
@@ -802,9 +804,9 @@ impl Shell {
     pub fn run_external(
         &mut self,
         program: &str,
-        args: &[Value],
+        args: &[ValClos],
         mooring: &Mooring,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         Command::from_name(&CommandName::of(program), &self.context)
             .lookup(&self.context.grants, self.baseline())
             .admit(mooring, self)?

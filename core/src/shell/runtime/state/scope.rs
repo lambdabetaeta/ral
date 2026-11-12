@@ -4,7 +4,7 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::shell::runtime::{Binding, Closure, Env, FrameHandle, HandlerEntry, Settled, Value};
+use crate::shell::runtime::{Binding, Env, FrameHandle, HandlerEntry, Settled, ValClos};
 use crate::ty::Closed;
 
 impl Shell {
@@ -18,7 +18,7 @@ impl Shell {
     /// # Errors
     /// `thunk` not an arm: a block of one parameter, the argv, producing what
     /// its head produces.
-    pub fn install_handler(&mut self, name: String, thunk: Value) -> Settled<FrameHandle> {
+    pub fn install_handler(&mut self, name: String, thunk: ValClos) -> Settled<FrameHandle> {
         self.vet_handler(name, thunk)
             .map(|entry| self.commit_handler(entry))
     }
@@ -27,7 +27,7 @@ impl Shell {
     ///
     /// # Errors
     /// As [`Self::install_handler`].
-    pub fn vet_handler(&self, name: String, thunk: Value) -> Settled<HandlerEntry> {
+    pub fn vet_handler(&self, name: String, thunk: ValClos) -> Settled<HandlerEntry> {
         HandlerEntry::vet(name, thunk, self)
     }
 
@@ -45,7 +45,7 @@ impl Shell {
 
     /// Bind `name` to `value` with its host-declared closed scheme.
     /// The host must supply the scheme that describes `value`.
-    pub fn set_var(&mut self, name: String, value: Value, scheme: Closed) {
+    pub fn set_var(&mut self, name: String, value: ValClos, scheme: Closed) {
         self.env.bind(
             name.into(),
             Binding {
@@ -58,7 +58,7 @@ impl Shell {
     /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
     /// fresh non-baseline name's lease and renews an existing one — writing
     /// a name is itself interest in it — and, when the lease is armed and
-    /// [`Value::shallow_size`] meets `large_binding_bytes`, queues a
+    /// [`ValClos::shallow_size`] meets `large_binding_bytes`, queues a
     /// residency notice.  Called from `run_phrases`'s `Define` arm alone,
     /// under `Mode::Session`.
     pub(crate) fn note_define(&mut self, name: &str, binding: &Binding) {
@@ -75,13 +75,13 @@ impl Shell {
 
     /// Look `name` up in the lexical scope chain, natives included.  The read
     /// dual of [`Self::set_var`].
-    pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
+    pub fn scope_lookup(&self, name: &str) -> Option<&ValClos> {
         crate::shell::runtime::lookup(name, &self.env, &self.sig)
     }
 
     /// Every lexical binding across the whole scope chain, innermost
     /// shadowing outermost.
-    pub fn bindings(&self) -> Vec<(String, Value)> {
+    pub fn bindings(&self) -> Vec<(String, ValClos)> {
         self.env.all_bindings(&self.sig)
     }
 
@@ -108,8 +108,8 @@ impl Shell {
 
     /// What a closure's body is checked against at an install door: what it
     /// captured, then Σ's prelude, beside the handlers in force.
-    pub(crate) fn closure_schemes(&self, closure: &Closure) -> crate::typecheck::SessionSchemes {
-        self.schemes_over(closure.env())
+    pub(crate) fn closure_schemes(&self, env: &Env) -> crate::typecheck::SessionSchemes {
+        self.schemes_over(env)
     }
 
     pub(crate) fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {

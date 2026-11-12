@@ -170,8 +170,7 @@ pub use protocol::{
     ConnectionFaultUnexpectedFrame, ConnectionOperation, ForkKind, FrameChannel,
     FrameEncodeFailure, FrameEncodeFailureTooLarge, FrameFailure, FrameFailurePartial,
     FrameFailureTooLarge, FrameKind, FramePart, ProbeFailure, ProbeSubject, ProtocolData,
-    ProtocolFailure, ProtocolFailureDecode, ProtocolFailureFrame,
-    ProtocolFailureInvalidNativeArguments, ProtocolFailureUnencodable,
+    ProtocolFailure, ProtocolFailureDecode, ProtocolFailureFrame, ProtocolFailureUnencodable,
     ProtocolFailureVersionMismatch, ProtocolFailureWrongForkKind, ProtocolOperation, ProtocolPeer,
     ProtocolPhase, ProtocolWork, SeedFrameFailure, SeedFrameFailureTrailing,
 };

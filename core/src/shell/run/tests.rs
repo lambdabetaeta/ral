@@ -3,7 +3,7 @@ use crate::fact::ExitCode as _;
 use crate::process::CancelCause;
 use crate::process::cancel::TestClock;
 use crate::protocol::Ran;
-use crate::shell::runtime::{Break, Escape};
+use crate::shell::runtime::{Break, Escape, View};
 use crate::source::SourceOrigin;
 use crate::test_helper::SLEEP;
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,7 @@ pub(crate) fn install_act(
 ) {
     install_body(runtime, name, move |mooring, shell| {
         act(mooring, shell);
-        Ok(Value::Unit)
+        Ok(ValClos::UNIT)
     });
 }
 
@@ -39,14 +39,14 @@ fn install_halting_act(
 fn install_body(
     runtime: &mut crate::Runtime,
     name: &'static str,
-    body: impl Fn(&Mooring, &mut Shell) -> Settled<Value> + Send + Sync + 'static,
+    body: impl Fn(&Mooring, &mut Shell) -> Settled<ValClos> + Send + Sync + 'static,
 ) {
     use crate::typecheck::builtins::{pure, thunk};
-    let entry = crate::shell::runtime::BuiltinEntry::new(
+    let entry = crate::builtin::BuiltinEntry::new(
         std::borrow::Cow::Borrowed(name),
         |_| thunk(pure(crate::ty::Ty::unit())),
         "test-only: act from inside the run.",
-        crate::shell::runtime::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
+        crate::builtin::BuiltinBody::Captured(Arc::new(move |_, mooring, shell| {
             body(mooring, shell)
         })),
     );
@@ -299,10 +299,10 @@ fn a_root_is_registered_before_its_modules_and_never_registered_twice() {
         let report = shell.run(Run::captured(program, test_origin()));
         match report {
             RunReport::Ran {
-                ending: End::Ok(Value::Int(7)),
+                ending: End::Ok(value),
                 ..
-            }
-            | RunReport::Checked { .. } => {}
+            } if matches!(value.view(), View::Int(7)) => {}
+            RunReport::Checked { .. } => {}
             _ => panic!("the linked program must succeed"),
         }
         assert_eq!(shell.sources().next_id().0, root.0 + 2);
@@ -830,10 +830,10 @@ fn inherit_leaves_session_streams_untouched() {
 
 /// Stands in for any Rust panic the evaluator can raise mid-run.
 fn builtin_panic_now(
-    _args: &[crate::shell::runtime::Value],
+    _args: &[crate::shell::runtime::ValClos],
     _mooring: &Mooring,
     _shell: &mut Shell,
-) -> crate::shell::runtime::Settled<crate::shell::runtime::Value> {
+) -> crate::shell::runtime::Settled<crate::shell::runtime::ValClos> {
     panic!("run-door test: deliberate mid-eval panic");
 }
 
@@ -842,14 +842,13 @@ fn scheme_panic_now(_: &mut crate::ty::Binders) -> crate::ty::Ty {
     thunk(pure(crate::ty::Ty::unit()))
 }
 
-static PANIC_BUILTINS_ARR: [crate::shell::runtime::BuiltinEntry; 1] =
-    [crate::shell::runtime::BuiltinEntry::new(
-        std::borrow::Cow::Borrowed("core-panic-now"),
-        scheme_panic_now,
-        "test-only: panic the evaluator mid-run.",
-        crate::shell::runtime::BuiltinBody::Static(builtin_panic_now),
-    )];
-static PANIC_BUILTINS: &[crate::shell::runtime::BuiltinEntry] = &PANIC_BUILTINS_ARR;
+static PANIC_BUILTINS_ARR: [crate::builtin::BuiltinEntry; 1] = [crate::builtin::BuiltinEntry::new(
+    std::borrow::Cow::Borrowed("core-panic-now"),
+    scheme_panic_now,
+    "test-only: panic the evaluator mid-run.",
+    crate::builtin::BuiltinBody::Static(builtin_panic_now),
+)];
+static PANIC_BUILTINS: &[crate::builtin::BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
 fn panicking_shell() -> Shell {
     crate::HostSurface {
@@ -978,7 +977,7 @@ fn rendered_fault(shell: &mut Shell, src: &str) -> String {
 /// `_narrowed` reports whether any ceiling holds.
 fn narrowing_shell() -> Shell {
     use crate::authority::policy::Capabilities;
-    use crate::shell::runtime::{BuiltinBody, BuiltinEntry};
+    use crate::builtin::{BuiltinBody, BuiltinEntry};
     let entries: Arc<[BuiltinEntry]> = vec![
         BuiltinEntry::new(
             "_narrow".into(),
@@ -989,7 +988,7 @@ fn narrowing_shell() -> Shell {
                     net: Some(crate::authority::policy::Net::Offline),
                     ..Capabilities::default()
                 }));
-                Ok(Value::Bool(true))
+                Ok(ValClos::bool(true))
             })),
         ),
         BuiltinEntry::new(
@@ -997,7 +996,7 @@ fn narrowing_shell() -> Shell {
             crate::typecheck::builtins::scheme::pure_bool,
             "",
             BuiltinBody::Captured(Arc::new(|_, _, s: &mut Shell| {
-                Ok(Value::Bool(s.has_active_capabilities()))
+                Ok(ValClos::bool(s.has_active_capabilities()))
             })),
         ),
     ]
@@ -1035,7 +1034,7 @@ fn assert_ceiling_survives(mut shell: Shell, narrow: Run) {
         panic!("the probe run must settle");
     };
     assert!(
-        matches!(value, Value::Bool(true)),
+        matches!(value.view(), View::Bool(true)),
         "the ceiling must narrow the next run"
     );
 }
@@ -1051,8 +1050,11 @@ fn a_session_ceiling_pushed_in_a_grant_block_outlives_it() {
 }
 
 fn caught_record(shell: &mut Shell, source: &str) -> crate::fact::ErrorFact {
-    let End::Ok(Value::Map(record)) = shell.run(Run::captured(source, test_origin())).expect_ran()
-    else {
+    let ending = shell.run(Run::captured(source, test_origin())).expect_ran();
+    let End::Ok(value) = ending else {
+        panic!("the handler must return the error record: {source}");
+    };
+    let View::Map(record) = value.view() else {
         panic!("the handler must return the error record: {source}");
     };
     record
@@ -1226,7 +1228,10 @@ fn visible_tail_calls_keep_a_bounded_stack_and_restore_the_register() {
             test_origin(),
         ))
         .expect_ran();
-    assert!(matches!(ending, End::Ok(Value::Int(0))), "{ending:?}");
+    assert!(
+        matches!(&ending, End::Ok(value) if matches!(value.view(), View::Int(0))),
+        "{ending:?}"
+    );
     assert_eq!(shell.local.audit.call_site(), &before);
 }
 
@@ -1242,7 +1247,7 @@ fn visible_non_tail_recursion_uses_the_computational_stack_budget() {
         ))
         .expect_ran();
     assert!(
-        matches!(ending, End::Ok(Value::Int(50_005_000))),
+        matches!(&ending, End::Ok(value) if matches!(value.view(), View::Int(50_005_000))),
         "{ending:?}"
     );
     assert_eq!(shell.local.audit.call_site(), &before);
@@ -1577,7 +1582,10 @@ fn a_guard_delivers_the_resource_and_each_ending_without_consuming_it() {
         let (ending, out) = ran(unstruck_runtime(), Run::captured(source, test_origin()));
         assert_eq!(out, expected, "{body}: {ending:?}");
         match body {
-            "return 42" => assert!(matches!(ending, End::Ok(Value::Int(42))), "{ending:?}"),
+            "return 42" => assert!(
+                matches!(&ending, End::Ok(value) if matches!(value.view(), View::Int(42))),
+                "{ending:?}"
+            ),
             "fail body" => assert!(
                 matches!(&ending, End::Err(e) if e.reason == crate::fact::Reason::raised("body")),
                 "{ending:?}"
@@ -1600,7 +1608,10 @@ fn a_guard_passes_its_resource_to_both_body_and_release() {
             test_origin(),
         ),
     );
-    assert!(matches!(ending, End::Ok(Value::Int(42))), "{ending:?}");
+    assert!(
+        matches!(&ending, End::Ok(value) if matches!(value.view(), View::Int(42))),
+        "{ending:?}"
+    );
     assert_eq!(out, "41\n");
 }
 
@@ -1614,7 +1625,7 @@ fn a_guard_preserves_the_bodys_capture_grade() {
         ),
     );
     assert!(
-        matches!(&ending, End::Ok(Value::String(s)) if s.as_ref() == "hi"),
+        matches!(&ending, End::Ok(value) if matches!(value.view(), View::String(s) if s.as_ref() == "hi")),
         "{ending:?}"
     );
     assert_eq!(out, "");
@@ -2069,7 +2080,7 @@ fn an_acquire_shields_a_worker_only_when_its_gather_is_opened_inside() {
                 .expect("the acquisition must resume its worker after the strike");
             let _clock = TestClock::enter(now);
             shell.poll()?;
-            Ok(Value::Unit)
+            Ok(ValClos::UNIT)
         });
         install_act(&mut runtime, "wait-worker", move |_, _| {
             ready_rx

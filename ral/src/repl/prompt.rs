@@ -8,8 +8,8 @@ use ral_core::carrier::Transport;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::errln;
-use ral_core::shell::runtime::{Closure, DefaultPolicy, HookName, HookSig};
-use ral_core::{Captured, Shell, Value};
+use ral_core::shell::runtime::{DefaultPolicy, Env, HookName, HookSig};
+use ral_core::{Captured, Shell, ValClos};
 use std::sync::Arc;
 
 use super::captured_line;
@@ -29,9 +29,12 @@ pub(crate) fn install_default_prompt(shell: &mut Shell) {
     if shell.has_hook(&name) {
         return;
     }
-    let block = Value::Thunk(Closure::closed(ral_core::source::Spanned::synthetic(
-        ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
-    )));
+    let block = ValClos::thunk(
+        Arc::new(ral_core::source::Spanned::synthetic(
+            ral_core::ir::CompKind::Return(ral_core::ir::Val::String(DEFAULT_PROMPT.into())),
+        )),
+        &Env::EMPTY,
+    );
     let _ = shell.register_hook(name, block, HookSig::Block, DefaultPolicy::denied_capture());
 }
 
@@ -67,7 +70,7 @@ fn prompt_text(value: FOValue, captured: Option<Captured>) -> String {
     match (value, captured) {
         (FOValue::Unit, Some(cap)) => captured_line(&cap.stdout.bytes),
         (FOValue::Unit, None) => DEFAULT_PROMPT.to_string(),
-        (value, _) => Value::from(value).to_string(),
+        (value, _) => ValClos::from(value).to_string(),
     }
 }
 

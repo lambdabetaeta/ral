@@ -16,23 +16,22 @@
 
 use crate::error::Error;
 use crate::fact::{Io, OperationState, Reason, StateFailure};
+use crate::handle::brood::stop_and_drain;
+use crate::handle::{CompletedHandle, HandleInner, Sample};
 use crate::io::{Retained, Streams};
-use crate::shell::runtime::{
-    CompletedHandle, HandleInner, Mooring, Owner, Sample, Settled, Shell, Value, outcome_value,
-    stop_and_drain,
-};
+use crate::shell::runtime::{Mooring, Owner, Settled, Shell, ValClos, View, outcome_value};
 
 /// `cancel <handle>` -- claim a concurrent block and stop it and everything it
 /// started; nothing if its result was already claimed.
-pub(crate) fn builtin_cancel(args: &[Value]) -> Settled<Value> {
+pub(crate) fn builtin_cancel(args: &[ValClos]) -> Settled<ValClos> {
     args[0].expect_handle("cancel")?.claim_and_stop();
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
 /// `workers` -- every registered worker, live or retained, as a row of data:
 /// never a handle, so the list crosses to a host whole.
-pub(crate) fn builtin_workers(shell: &Shell) -> Value {
-    Value::list(
+pub(crate) fn builtin_workers(shell: &Shell) -> ValClos {
+    ValClos::list(
         shell
             .workers()
             .iter()
@@ -76,7 +75,7 @@ fn already_claimed(verb: &str) -> Error {
 }
 
 /// Exact await of a claimed result: replay, then conclude.
-fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<Value> {
+fn exact(handle: &HandleInner, settle: CompletedHandle, shell: &mut Shell) -> Settled<ValClos> {
     replay(handle, &settle.written, shell)?;
     settle.end.into_settled()
 }
@@ -119,7 +118,7 @@ fn claim_first(
 /// Block until `handle` finishes, then, if this caller claims it, behave as if
 /// its block had run here.  `None` if another claimer has it: the owner's
 /// join, which skips such a child.
-pub(crate) fn join(handle: &HandleInner, shell: &mut Shell) -> Settled<Option<Value>> {
+pub(crate) fn join(handle: &HandleInner, shell: &mut Shell) -> Settled<Option<ValClos>> {
     claim_first(std::slice::from_ref(handle), shell)?
         .map(|(_, settle)| exact(handle, settle, shell))
         .transpose()
@@ -141,13 +140,17 @@ pub(crate) fn outlive(shell: &mut Shell) -> Settled<()> {
 }
 
 /// [`join`], for a caller to whom another claimer is `verb`'s failure.
-pub(crate) fn await_handle(handle: &HandleInner, verb: &str, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn await_handle(
+    handle: &HandleInner,
+    verb: &str,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     join(handle, shell)?.ok_or_else(|| already_claimed(verb).into())
 }
 
 /// `await <handle>` -- wait for a concurrent block, claim it, and behave as if
 /// it had run here.
-pub(crate) fn builtin_await(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn builtin_await(args: &[ValClos], shell: &mut Shell) -> Settled<ValClos> {
     let handle = args[0].expect_handle("await")?;
     await_handle(handle, "await", shell)
 }
@@ -155,9 +158,9 @@ pub(crate) fn builtin_await(args: &[Value], shell: &mut Shell) -> Settled<Value>
 /// `is-done <handle>` -- whether the worker's execution has ended (`ready` or
 /// `consumed`), without copying buffers, claiming a result, or re-raising a
 /// panic.
-pub(crate) fn builtin_is_done(args: &[Value]) -> Settled<Value> {
+pub(crate) fn builtin_is_done(args: &[ValClos]) -> Settled<ValClos> {
     let handle = args[0].expect_handle("is-done")?;
-    Ok(Value::Bool(handle.sample().has_ended()))
+    Ok(ValClos::bool(handle.sample().has_ended()))
 }
 
 /// `poll <handle>` -- non-blocking sample of a concurrent block:
@@ -177,16 +180,16 @@ pub(crate) fn builtin_is_done(args: &[Value]) -> Settled<Value> {
 /// In `ready`, an ordinary failure or the worker's own stop surfaces as
 /// `` `err ``; an `exit`, a foreign stop and a panic are re-raised, as `await`
 /// raises them.
-pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_poll(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     let handle = args[0].expect_handle("poll")?;
     let snap = handle.snapshot_io();
     let elapsed = snap.elapsed;
     match snap.state {
-        Sample::Running(io) => Ok(Value::variant(
+        Sample::Running(io) => Ok(ValClos::variant(
             "running",
-            Some(beside(io, [("elapsed", Value::Float(elapsed.into()))])),
+            Some(beside(io, [("elapsed", ValClos::float(elapsed.into()))])),
         )),
-        Sample::Stopping => Ok(Value::variant("stopping", Some(elapsed_record(elapsed)))),
+        Sample::Stopping => Ok(ValClos::variant("stopping", Some(elapsed_record(elapsed)))),
         Sample::Ready(settle) => {
             let outcome = match settle.end.outcome() {
                 Ok(Ok(v)) => Ok(v),
@@ -195,12 +198,12 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
             };
             let io: Io = settle.written.map(|retained| retained.bytes.into());
             let fields = [
-                ("elapsed", Value::Float(elapsed.into())),
+                ("elapsed", ValClos::float(elapsed.into())),
                 ("outcome", outcome_value(outcome)),
             ];
-            Ok(Value::variant("ready", Some(beside(io, fields))))
+            Ok(ValClos::variant("ready", Some(beside(io, fields))))
         }
-        Sample::Consumed => Ok(Value::variant("consumed", Some(elapsed_record(elapsed)))),
+        Sample::Consumed => Ok(ValClos::variant("consumed", Some(elapsed_record(elapsed)))),
     }
 }
 
@@ -209,7 +212,11 @@ pub(crate) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// conclude the winner as `await` does: when `race` returns, nothing it was
 /// given still runs on (within the grace).  A handle claimed by another is
 /// skipped for the result; with every one claimed, `race` fails.
-pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn builtin_race(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let handles = handles_of(&args[0], "race")?;
     let first = claim_first(&handles, shell);
     // Whatever ends the wait, nothing given to `race` runs on past it.
@@ -223,15 +230,17 @@ pub(crate) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell)
 /// `await` the one it names.  A handle another caller claimed (`stopping` or
 /// `consumed`) is skipped; with every handle claimed, it fails as `await`
 /// does.  An empty list is an error.
-pub(crate) fn builtin_first_settled(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_first_settled(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
     let handles = handles_of(&args[0], "first-settled")?;
     let (index, ()) = first_ready(&handles, HandleInner::sample, shell)?
         .ok_or_else(|| already_claimed("first-settled"))?;
-    Ok(Value::Int(index.try_into().expect("an index fits an Int")))
+    Ok(ValClos::int(
+        index.try_into().expect("an index fits an Int"),
+    ))
 }
 
 /// The handles in `verb`'s list argument; an empty list is `verb`'s failure.
-fn handles_of(list: &Value, verb: &str) -> Settled<Vec<HandleInner>> {
+fn handles_of(list: &ValClos, verb: &str) -> Settled<Vec<HandleInner>> {
     let handles = list
         .as_list(verb)?
         .iter()
@@ -250,17 +259,21 @@ fn handles_of(list: &Value, verb: &str) -> Settled<Vec<HandleInner>> {
 
 /// `io` as a record with more fields, the shape `Ty::extend` gives `poll`'s
 /// records: the checker's `poll_variant` is their type.
-fn beside<const N: usize>(io: Io, more: [(&str, Value); N]) -> Value {
-    let Value::Map(m) = Value::from_datum(io) else {
+fn beside<const N: usize>(io: Io, more: [(&str, ValClos); N]) -> ValClos {
+    let value = ValClos::from_datum(io);
+    let View::Map(m) = value.view() else {
         unreachable!("an Io encodes as a record");
     };
     let fields = m.iter().map(|(k, v)| (k.to_string(), v.into_owned()));
     let more = more.into_iter().map(|(k, v)| (k.to_string(), v));
-    Value::map(fields.chain(more).collect())
+    ValClos::map(fields.chain(more).collect())
 }
 
 /// The closed `[elapsed: Float]` record `poll` carries in its `stopping` and
 /// `consumed` arms.
-fn elapsed_record(elapsed: std::time::Duration) -> Value {
-    Value::map(vec![("elapsed".to_string(), Value::Float(elapsed.into()))])
+fn elapsed_record(elapsed: std::time::Duration) -> ValClos {
+    ValClos::map(vec![(
+        "elapsed".to_string(),
+        ValClos::float(elapsed.into()),
+    )])
 }

@@ -7,11 +7,10 @@ use crate::variant;
 pub enum InvariantFailure {
     AppliedUnforcedValue(ValueShape),
     CaptureNotBytes(ValueShape),
-    HandleInSeed,
     BoundaryWithoutSite(String),
     MissingEngineFactory,
 }
-variant!(InvariantFailure { AppliedUnforcedValue(ValueShape): "applied-unforced-value", CaptureNotBytes(ValueShape): "capture-not-bytes", HandleInSeed: "handle-in-seed", BoundaryWithoutSite(String): "boundary-without-site", MissingEngineFactory: "missing-engine-factory" });
+variant!(InvariantFailure { AppliedUnforcedValue(ValueShape): "applied-unforced-value", CaptureNotBytes(ValueShape): "capture-not-bytes", BoundaryWithoutSite(String): "boundary-without-site", MissingEngineFactory: "missing-engine-factory" });
 
 impl InvariantFailure {
     pub fn describe(&self) -> String {
@@ -26,7 +25,6 @@ impl InvariantFailure {
                     shape.describe()
                 )
             }
-            Self::HandleInSeed => "a live handle cannot be sealed into an engine seed".into(),
             Self::BoundaryWithoutSite(name) => {
                 format!("builtin {name:?} crossed a boundary without a call site")
             }
@@ -40,7 +38,7 @@ impl InvariantFailure {
         match self {
             Self::AppliedUnforcedValue(_) => vec!["the type checker forces every function before it is applied, so this is a fault in ral rather than in your program: please report the source that produced it".into()],
             Self::CaptureNotBytes(_) => vec!["only the type checker writes this step, so this is a fault in ral rather than in your program: please report the source that produced it".into()],
-            Self::HandleInSeed | Self::BoundaryWithoutSite(_) | Self::MissingEngineFactory => Vec::new(),
+            Self::BoundaryWithoutSite(_) | Self::MissingEngineFactory => Vec::new(),
         }
     }
 }

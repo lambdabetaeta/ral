@@ -7,18 +7,17 @@ use super::hooks::HookTable;
 use super::workers::Roster;
 use super::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 use crate::authority::policy::{Baseline, GrantStack};
+use crate::builtin::{BuiltinEntry, BuiltinTable, Set};
 use crate::environ::EnvVars;
 use crate::fact::{IoOperation, IoSubject, StandardStream};
+use crate::handle::brood::Cradle;
 use crate::io::terminal::TerminalState;
 use crate::io::{Io, Source, SourceReader};
 use crate::path::CwdPath;
 use crate::process::{DurableRoot, Scope, TerminalLease};
 use crate::shell::grant::{GrantNarrower, SpawnGrant};
 use crate::shell::runtime::handler::{HandlerFrame, HandlerStack};
-use crate::shell::runtime::{
-    Audit, BuiltinEntry, BuiltinTable, Convention, Cradle, Env, Error, ExitHints, Set, Signature,
-    Value,
-};
+use crate::shell::runtime::{Audit, Convention, Env, Error, ExitHints, Signature, ValClos};
 use crate::source::SourceDb;
 use crate::ty::Fixings;
 use serde::{Deserialize, Serialize};
@@ -175,14 +174,14 @@ fn dup_stdin() -> std::io::Result<std::fs::File> {
 /// is ([`Convention`]); the one place either is populated.
 pub(super) fn natives_and_base(
     entries: &[BuiltinEntry],
-) -> (Vec<(String, Value)>, Vec<BuiltinEntry>) {
+) -> (Vec<(String, ValClos)>, Vec<BuiltinEntry>) {
     let natives = entries
         .iter()
         .filter(|entry| matches!(entry.decl.convention, Convention::Value(_)))
         .map(|entry| {
             (
                 entry.decl.name.clone().into_owned(),
-                crate::shell::runtime::builtin::native_value(entry),
+                ValClos::builtin(Arc::new(entry.clone())),
             )
         })
         .collect();

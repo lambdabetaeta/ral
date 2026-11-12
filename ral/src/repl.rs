@@ -66,7 +66,7 @@ fn captured_line(bytes: &[u8]) -> String {
 
 /// Evaluate `src` on `shell` to its value.
 #[cfg(test)]
-pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::Value {
+pub(crate) fn eval(shell: &mut ral_core::Shell, src: &str) -> ral_core::ValClos {
     let run = exec::line_run(src);
     shell
         .run(run)

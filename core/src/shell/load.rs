@@ -8,7 +8,7 @@ use crate::fact::{InvalidCause, InvalidFailure, IoOperation, IoSubject, Reason};
 use crate::ir::{Module, Toplevel};
 use crate::path::{Judged, LeafMode, Located, Reading, walk_lenient};
 use crate::shell::evaluator::{Mode, Ran, run_phrases};
-use crate::shell::runtime::{Break, Env, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Break, Env, Error, Mooring, Settled, Shell, ValClos};
 use crate::source::{FileId, Source, SourceFile, SourceOrigin, Span};
 use crate::typecheck::{SessionSchemes, Table, Unit};
 use std::path::Path;
@@ -26,7 +26,7 @@ pub fn extend_session(
     source: &str,
     origin: &SourceOrigin,
     options: Option<&'static Table>,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let env = shell.env.clone();
     let top = check_source(source, origin, &env, shell, options)?;
     let ran = run_phrases(&top, env, Mode::Local, mooring, shell);
@@ -44,7 +44,7 @@ pub fn evaluate_closed(
     source: &str,
     origin: &SourceOrigin,
     options: Option<&'static Table>,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let top = check_source(source, origin, &Env::new(), shell, options)?;
     run_closed(&top, mooring, shell).outcome
 }
@@ -54,7 +54,11 @@ fn run_closed(top: &Toplevel, mooring: &Mooring, shell: &mut Shell) -> Ran {
 }
 
 /// Run a linked module under Σ and return its public bindings as a record.
-pub(crate) fn run_module(module: &Module, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn run_module(
+    module: &Module,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let ran = run_closed(&module.top, mooring, shell);
     ran.outcome.map_err(|b| {
         b.map_error(|error| {
@@ -65,7 +69,7 @@ pub(crate) fn run_module(module: &Module, mooring: &Mooring, shell: &mut Shell) 
             }
         })
     })?;
-    Ok(Value::map(
+    Ok(ValClos::map(
         crate::ir::public_exports(&module.top.phrases)
             .into_keys()
             .map(|name| {
@@ -316,7 +320,10 @@ mod tests {
         assert_eq!(source.as_str(), "let exported = 7\nlet _hidden = 8\n");
         std::fs::write(&path, "fail 'must not read this source'").unwrap();
         let value = run_module(&module, &Mooring::adrift(), &mut shell).expect("linked module");
-        assert_eq!(value, Value::map(vec![("exported".into(), Value::Int(7))]));
+        assert_eq!(
+            value,
+            ValClos::map(vec![("exported".into(), ValClos::int(7))])
+        );
         assert!(shell.env.get("exported").is_none());
     }
 
@@ -542,7 +549,7 @@ mod tests {
             None,
         )
         .expect("closed unit");
-        assert_eq!(value, Value::Int(7));
+        assert_eq!(value, ValClos::int(7));
         assert!(shell.env.get("private").is_none());
     }
 
@@ -557,7 +564,7 @@ mod tests {
             None,
         );
         assert!(outcome.is_err());
-        assert_eq!(shell.env.get("installed"), Some(&Value::Int(7)));
+        assert_eq!(shell.env.get("installed"), Some(&ValClos::int(7)));
         assert!(shell.env.binding("installed").unwrap().scheme.is_some());
     }
 }

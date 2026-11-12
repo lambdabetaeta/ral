@@ -18,7 +18,9 @@ use crate::ir::{Redirects, StderrTarget, StdinSource, WriteMode};
 use crate::path::{
     Kind, Reading, StagedWrite, Streamed, Streaming, Trace, Visibility, Writing, open_discard,
 };
-use crate::shell::runtime::{Bytes, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
+use crate::shell::runtime::{
+    Bytes, Error, Mooring, Observed, Settled, Shell, ValClos, WriteOutcome,
+};
 use crate::source::Span;
 use crate::text::quote_native;
 use std::ffi::OsStr;
@@ -37,8 +39,8 @@ pub(crate) fn with_redirects(
     span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
-    body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Settled<Value> {
+    body: impl FnOnce(&mut Shell) -> Settled<ValClos>,
+) -> Settled<ValClos> {
     if redirects.is_empty() {
         return body(shell);
     }

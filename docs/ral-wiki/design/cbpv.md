@@ -34,11 +34,12 @@ ones, including names introduced by destructuring.
 
 **The checked core is control syntax plus primitives on values.** `Extrinsic/`
 in Agda models this partition, not the new residual-function boxing rule:
-its Let-fun still suspends the whole RHS. Native terminals are not mechanised,
-and acquiring `guard` is owned divergence D4. Shell forms are a separate
-layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application pushes one
-argument frame per argument, then forces the head. A lambda terminal consumes
-an argument; a native terminal collects one until saturated. Returned-thunk
+its Let-fun still suspends the whole RHS. Runtime builtin η/δ is not
+mechanised, and acquiring `guard` is owned divergence D4. Shell forms are a
+separate layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application
+pushes one argument frame per argument, then evaluates its computation head.
+A λ consumes an argument. A builtin forces to its η-expansion: ordinary λs
+bind arguments before δ invokes the captured entry. Returned-thunk
 application follows the [[invariants/ir-pure-cbpv|IR invariant]]. A value head
 is hoisted before its arguments, as a `let` right-hand side is. A head that
 returns a function runs first, so
@@ -95,25 +96,28 @@ spawned block shares nothing mutable.
   re-lexed.
 - Closures observe the bindings in force where they were defined, not where they
   run.
-- A thunk value is `⟨M, ρ|occ(M)⟩` by construction: it holds only the session
-  bindings its body mentions. The machine's `⟨M, ρ⟩` in focus is a
-  *computation closure*, transient and holding the whole environment `M` was
-  reached in
-  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-- Every value is a closure over what it mentions, not a thunk alone: a list,
-  record or map literal is `⟨V, ρ|occ(V)⟩` too, formed by `form(val, env,
-  sig)` and read apart one layer at a time — `⟨[V₁…Vₙ], ρ⟩`'s *i*th element
-  is `⟨Vᵢ, ρ⟩` — a name lent from ρ, a constant built, a nested literal or
-  thunk closing over that same ρ rather than restricting again
+- Every runtime value is a *value closure* `⟨V,ρ⟩`, with nonvariable root
+  and every direct name bound in ρ. Scalar, byte-string, builtin and handle
+  constructors use empty captures; thunk formation gives `⟨thunk M,ρ↾occ(M)⟩`.
+  A machine computation closure `⟨M,ρ⟩` instead holds the whole environment
+  in which it is reached.
+- `ValClos::close` restricts at formation and pulls Σ's answers for missing
+  direct names into ρ. A name under a thunk is not direct: it resolves ρ
+  then Σ when the thunk runs. Σ is the shell's fixed builtin and prelude
+  signature, not a captured mutable store.
+- Reading a component distributes the saved environment one layer:
+  `read(x,ρ) = ρ(x)`; otherwise `read(V′,ρ) = ⟨V′,ρ⟩`. No re-restriction or
+  Σ lookup occurs. Built lists and maps realise closures over implicit fresh
+  variables using persistent vectors and ordered maps
   ([[internals/evaluator-machine|evaluator-machine]]).
-- ρ is a finite map from names to values; Σ, the natives and the frozen
-  prelude, is a shell's own constant and is never part of any ρ — a name
-  resolves in ρ, then Σ. A `Literal` value closure's inspection reads ρ
-  alone, so a name only Σ answers is never one of its entries; `form` checks
-  that before choosing the closure over building the literal eagerly.
-- **The cost model:** value operations cost O(program text) — occ is
-  computed once, where a node is built, and inspecting a literal shares its
-  ρ rather than recomputing; only computations cost O(data).
+- Machine state is a computation closure or `Err(Break)` only. A produced
+  value passes to frames through `settle` in the same step; it is never
+  stored as control or wrapped in newly constructed `return` syntax. See
+  [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]].
+- **The cost model:** collection nodes and captures are shared. Cloning a
+  runtime root tag spine costs O(n); a syntax-component read may clone its tag
+  suffix. Whole-value traversals peel consecutive tags rather than repeatedly
+  materialising suffixes.
 
 See also [[design/exec|exec]] (commands are the effect half this splits off),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],

@@ -95,6 +95,9 @@ pub(crate) fn reason_families() -> Vec<crate::fact::Reason> {
             cause: InvalidCause::Empty,
         })),
         Reason::Evaluation(Box::new(EvalFailure::MissingBinding("binding".into()))),
+        Reason::Evaluation(Box::new(EvalFailure::WithheldHandle(
+            "parent worker".into(),
+        ))),
         Reason::State(Box::new(StateFailure::CaptureLimit(CaptureLimit {
             bytes: u64::MAX.into(),
         }))),
@@ -109,7 +112,7 @@ pub(crate) fn reason_families() -> Vec<crate::fact::Reason> {
         Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
             BootFailure::AlreadyBooted,
         )))),
-        Reason::Invariant(Box::new(InvariantFailure::HandleInSeed)),
+        Reason::Invariant(Box::new(InvariantFailure::MissingEngineFactory)),
         Reason::Host(Box::new(HostFailure::Ral(RalFailure::Keybinding(
             KeybindingFailure::Notation(KeybindingFailureNotation {
                 key: "shift-alt-ß".into(),
@@ -185,7 +188,8 @@ pub(crate) fn assert_normalized(original: &Error, received: &Error) {
 
 /// A real engine-side enquiry door, for provenance/report fixtures.
 pub(crate) fn enquiring_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
-    use crate::shell::runtime::{BuiltinBody, BuiltinEntry, Value};
+    use crate::builtin::{BuiltinBody, BuiltinEntry};
+    use crate::shell::runtime::ValClos;
     use crate::typecheck::builtins::{pure, thunk};
     let mut runtime = crate::HostSurface::default().runtime(spec.terminal)?;
     let entry = BuiltinEntry::new(
@@ -194,7 +198,7 @@ pub(crate) fn enquiring_runtime(spec: &EngineSpec) -> Result<Runtime, Error> {
         "test-only: ask the host",
         BuiltinBody::Captured(std::sync::Arc::new(|_, mooring, shell| {
             shell.enquire(mooring, crate::data::FOValue::Unit)?;
-            Ok(Value::Unit)
+            Ok(ValClos::UNIT)
         })),
     );
     runtime.install_captured_builtins(&vec![entry].into());

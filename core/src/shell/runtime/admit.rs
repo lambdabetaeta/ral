@@ -10,19 +10,19 @@ use crate::fact::{
     Expected, Found, InvalidCause, ValueShape,
 };
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Break, Map, Settled, Shell, Value};
+use crate::shell::runtime::{Break, MapRef, Settled, Shell, ValClos, View};
 use crate::source::Span;
 use crate::sync::LockExt as _;
-use crate::ty::{Fields, Fixed, Fixings, Id, Kind, Shape, Side, Site, Tail, UnitId};
+use crate::ty::{Fields, Fixed, Fixings, Head, Id, Kind, Shape, Side, Site, Tail, UnitId};
 use std::fmt;
 
 // ── Fixings ─────────────────────────────────────────────────────────────
 
 /// Which side of the number/text line `value` is on, if it is on one.
-fn side(value: &Value) -> Option<Side> {
-    match value {
-        Value::Int(_) | Value::Float(_) => Some(Side::Number),
-        Value::String(_) => Some(Side::Text),
+fn side(value: &ValClos) -> Option<Side> {
+    match value.view() {
+        View::Int(_) | View::Float(_) => Some(Side::Number),
+        View::String(_) => Some(Side::Text),
         _ => None,
     }
 }
@@ -122,7 +122,7 @@ impl Site {
     ///
     /// # Errors
     /// The first place the value and the type disagree.
-    pub fn admit(&self, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
+    pub fn admit(&self, value: &ValClos, fixings: &Fixings) -> Result<(), Mismatch> {
         self.walk(self.root, value, fixings)
     }
 
@@ -130,13 +130,13 @@ impl Site {
     ///
     /// # Errors
     /// As [`Self::admit`], as [`Mismatch::refusal`] words it.
-    pub fn admitted(&self, door: &str, value: Value, shell: &Shell) -> Settled<Value> {
+    pub fn admitted(&self, door: &str, value: ValClos, shell: &Shell) -> Settled<ValClos> {
         self.admit(&value, shell.fixings())
             .map_err(|mismatch| mismatch.refusal(door))?;
         Ok(value)
     }
 
-    fn walk(&self, id: Id, value: &Value, fixings: &Fixings) -> Result<(), Mismatch> {
+    fn walk(&self, id: Id, value: &ValClos, fixings: &Fixings) -> Result<(), Mismatch> {
         Walk {
             site: self,
             fixings,
@@ -177,50 +177,123 @@ impl Walk<'_> {
         }
     }
 
-    fn uses(&self, value: &Value, expected: Expected, witness: Option<Span>) -> Mismatch {
+    fn uses(&self, value: &ValClos, expected: Expected, witness: Option<Span>) -> Mismatch {
+        self.uses_found(value.found(), expected, witness)
+    }
+
+    fn uses_found(&self, found: Found, expected: Expected, witness: Option<Span>) -> Mismatch {
         self.mismatch(
             witness,
-            AdmissionCause::Uses(AdmissionUses {
-                found: value.found(),
-                expected,
-            }),
+            AdmissionCause::Uses(AdmissionUses { found, expected }),
         )
     }
 
-    fn run(&mut self, id: Id, value: &Value, inherited: Option<Span>) -> Result<(), Mismatch> {
-        let node = &self.site.nodes[id];
-        let at = node.witness.or(inherited);
-        match (&node.shape, value) {
-            (Shape::Unit, Value::Unit)
-            | (Shape::Bool, Value::Bool(_))
-            | (Shape::Int, Value::Int(_))
-            | (Shape::Float, Value::Float(_))
-            | (Shape::String, Value::String(_))
-            | (Shape::Bytes, Value::Bytes(_))
-            | (Shape::Handle(..), Value::Handle(_))
-            | (Shape::Thunk(_), Value::Thunk(_) | Value::Native(..)) => Ok(()),
-            (Shape::List(elem), Value::List(items)) => {
-                for (index, item) in items.iter().enumerate() {
-                    self.below(Step::At(index), |w| w.run(*elem, &item, at))?;
+    fn run(
+        &mut self,
+        mut id: Id,
+        value: &ValClos,
+        inherited: Option<Span>,
+    ) -> Result<(), Mismatch> {
+        let (labels, terminal) = value.peel_variants();
+        let saved = self.path.len();
+        let result = (|| {
+            let mut at = inherited;
+            for (index, label) in labels.iter().enumerate() {
+                let node = &self.site.nodes[id];
+                at = node.witness.or(at);
+                match &node.shape {
+                    Shape::Variant(fields) => {
+                        if let Some((_, next)) = fields
+                            .labels
+                            .iter()
+                            .find(|(name, _)| name == label.as_ref())
+                        {
+                            self.path.push(Step::Key("payload".into()));
+                            id = *next;
+                            continue;
+                        }
+                        match fields.tail {
+                            Tail::Closed => {
+                                return Err(self.uses_found(
+                                    Found::Variant(label.to_string()),
+                                    Expected::Tags(
+                                        fields
+                                            .labels
+                                            .iter()
+                                            .map(|(name, _)| name.clone())
+                                            .collect(),
+                                    ),
+                                    at,
+                                ));
+                            }
+                            Tail::Open { deep: false, .. } => return Ok(()),
+                            Tail::Open { deep: true, .. } => {}
+                        }
+                    }
+                    Shape::Free { kind, .. } => {
+                        if !kind.admits(Head::Variant) {
+                            return Err(self.uses_found(
+                                Found::Variant(label.to_string()),
+                                Expected::Kind((*kind).into()),
+                                at,
+                            ));
+                        }
+                        if !kind.is_deep() {
+                            return Ok(());
+                        }
+                    }
+                    shape => {
+                        return Err(self.uses_found(
+                            Found::Variant(label.to_string()),
+                            expected(shape),
+                            at,
+                        ));
+                    }
                 }
-                Ok(())
+                self.path
+                    .extend((index..labels.len()).map(|_| Step::Key("payload".into())));
+                return self.data(&terminal, at);
             }
-            (Shape::Map(elem), Value::Map(entries)) => {
-                for (key, item) in entries {
-                    self.below(Step::Key(key.to_string()), |w| w.run(*elem, &item, at))?;
+            let node = &self.site.nodes[id];
+            let at = node.witness.or(at);
+            match (&node.shape, terminal.view()) {
+                (Shape::Unit, View::Unit)
+                | (Shape::Bool, View::Bool(_))
+                | (Shape::Int, View::Int(_))
+                | (Shape::Float, View::Float(_))
+                | (Shape::String, View::String(_))
+                | (Shape::Bytes, View::Bytes(_))
+                | (Shape::Handle(..), View::Handle(_))
+                | (Shape::Thunk(_), View::Thunk { .. } | View::Builtin(_)) => Ok(()),
+                (Shape::List(elem), View::List(items)) => {
+                    for (index, item) in items.iter().enumerate() {
+                        self.below(Step::At(index), |w| w.run(*elem, &item, at))?;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                (Shape::Map(elem), View::Map(entries)) => {
+                    for (key, item) in entries {
+                        self.below(Step::Key(key.to_string()), |w| w.run(*elem, &item, at))?;
+                    }
+                    Ok(())
+                }
+                (Shape::Record(fields), View::Map(entries)) => self.record(fields, entries, at),
+                (Shape::Free { var, kind, weak }, _) => {
+                    self.free(*var, *kind, *weak, &terminal, at)
+                }
+                (shape, _) => Err(self.uses(&terminal, expected(shape), at)),
             }
-            (Shape::Record(fields), Value::Map(entries)) => self.record(fields, entries, at),
-            (Shape::Variant(fields), Value::Variant { label, payload }) => {
-                self.variant(fields, label, payload.as_deref(), at)
-            }
-            (Shape::Free { var, kind, weak }, _) => self.free(*var, *kind, *weak, value, at),
-            (shape, _) => Err(self.uses(value, expected(shape), at)),
-        }
+        })();
+        self.path.truncate(saved);
+        result
     }
 
-    fn record(&mut self, fields: &Fields, entries: &Map, at: Option<Span>) -> Result<(), Mismatch> {
+    fn record(
+        &mut self,
+        fields: &Fields,
+        entries: MapRef<'_>,
+        at: Option<Span>,
+    ) -> Result<(), Mismatch> {
         for (name, id) in &fields.labels {
             let Some(item) = entries.get(name) else {
                 return Err(self.mismatch(at, AdmissionCause::NoField(name.clone())));
@@ -250,41 +323,12 @@ impl Walk<'_> {
         Ok(())
     }
 
-    fn variant(
-        &mut self,
-        fields: &Fields,
-        label: &str,
-        payload: Option<&Value>,
-        at: Option<Span>,
-    ) -> Result<(), Mismatch> {
-        let unit = Value::Unit;
-        let payload = payload.unwrap_or(&unit);
-        match fields.labels.iter().find(|(name, _)| name == label) {
-            Some((_, id)) => self.below(Step::Key("payload".into()), |w| w.run(*id, payload, at)),
-            None => match fields.tail {
-                Tail::Open { deep: false, .. } => Ok(()),
-                Tail::Open { deep: true, .. } => {
-                    self.below(Step::Key("payload".into()), |w| w.data(payload, at))
-                }
-                Tail::Closed => Err(self.mismatch(
-                    at,
-                    AdmissionCause::Uses(AdmissionUses {
-                        found: Found::Variant(label.to_owned()),
-                        expected: Expected::Tags(
-                            fields.labels.iter().map(|(name, _)| name.clone()).collect(),
-                        ),
-                    }),
-                )),
-            },
-        }
-    }
-
     fn free(
         &mut self,
         var: u32,
         kind: Kind,
         weak: bool,
-        value: &Value,
+        value: &ValClos,
         at: Option<Span>,
     ) -> Result<(), Mismatch> {
         if !value.heads().iter().any(|&head| kind.admits(head)) {
@@ -315,35 +359,37 @@ impl Walk<'_> {
     }
 
     /// No block or handle anywhere in `value`.
-    fn data(&mut self, value: &Value, at: Option<Span>) -> Result<(), Mismatch> {
-        match value {
-            Value::Thunk(_) | Value::Native(..) | Value::Handle(_) => {
-                Err(self.uses(value, Expected::Kind(Kind::DATA.into()), at))
+    fn data(&mut self, value: &ValClos, at: Option<Span>) -> Result<(), Mismatch> {
+        let (labels, terminal) = value.peel_variants();
+        let saved = self.path.len();
+        self.path
+            .extend(labels.iter().map(|_| Step::Key("payload".into())));
+        let result = (|| match terminal.view() {
+            View::Thunk { .. } | View::Builtin(_) | View::Handle(_) => {
+                Err(self.uses(&terminal, Expected::Kind(Kind::DATA.into()), at))
             }
-            Value::List(items) => {
+            View::List(items) => {
                 for (index, item) in items.iter().enumerate() {
                     self.below(Step::At(index), |w| w.data(&item, at))?;
                 }
                 Ok(())
             }
-            Value::Map(entries) => {
+            View::Map(entries) => {
                 for (key, item) in entries {
                     self.below(Step::Key(key.to_string()), |w| w.data(&item, at))?;
                 }
                 Ok(())
             }
-            Value::Variant {
-                payload: Some(payload),
-                ..
-            } => self.below(Step::Key("payload".into()), |w| w.data(payload, at)),
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::String(_)
-            | Value::Bytes(_)
-            | Value::Variant { payload: None, .. } => Ok(()),
-        }
+            View::Variant { .. } => unreachable!("peeling tags leaves a nonvariant terminal"),
+            View::Unit
+            | View::Bool(_)
+            | View::Int(_)
+            | View::Float(_)
+            | View::String(_)
+            | View::Bytes(_) => Ok(()),
+        })();
+        self.path.truncate(saved);
+        result
     }
 }
 

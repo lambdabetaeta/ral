@@ -7,11 +7,10 @@ pub(crate) mod expr;
 pub(crate) mod machine;
 pub(crate) mod pattern;
 pub(crate) mod scope;
-pub(crate) mod val;
 
 use crate::fact::{ApplyFailure, CallOrForce, EvalFailure, Reason};
 use crate::ir::{Comp, Pattern, Phrase, Toplevel};
-use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Binding, Break, Env, Error, Mooring, Settled, Shell, ValClos, View};
 use crate::ty::Closed;
 use std::sync::Arc;
 
@@ -27,7 +26,7 @@ pub(crate) struct Ran {
     /// first one halted — written into `shell.env` only under
     /// `Mode::Session`.
     pub env: Env,
-    pub(crate) outcome: Settled<Value>,
+    pub(crate) outcome: Settled<ValClos>,
 }
 
 /// Only `Session` leases bindings and writes each landed `Define` back to
@@ -61,7 +60,7 @@ pub(crate) fn run_phrases(
     }
     let mut ran = Ran {
         env,
-        outcome: Ok(Value::Unit),
+        outcome: Ok(ValClos::UNIT),
     };
     let last = top.phrases.len().saturating_sub(1);
     for (i, phrase) in top.phrases.iter().enumerate() {
@@ -119,7 +118,7 @@ impl Ran {
         mode: Mode,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         let session = matches!(mode, Mode::Session);
         let v = machine::evaluate(Arc::clone(comp), self.env.clone(), mooring, shell)?;
         for (name, value) in pattern::destructure(pattern, &v)? {
@@ -136,11 +135,11 @@ impl Ran {
         if session {
             shell.env = self.env.clone();
         }
-        Ok(Value::Unit)
+        Ok(ValClos::UNIT)
     }
 }
 
-/// Push `args` and force a `Thunk` or `Native`, with a run frame installed.
+/// Push `args` and force a thunk or builtin, with a run frame installed.
 ///
 /// Builtins that take function arguments call this, as does the run
 /// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
@@ -148,13 +147,13 @@ impl Ran {
 /// # Errors
 /// If `val` is not a function value, or the applied body fails.
 pub fn apply(
-    val: &Value,
-    args: Vec<Value>,
+    val: &ValClos,
+    args: Vec<ValClos>,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
-    match val {
-        Value::Thunk(_) | Value::Native(..) => machine::apply(val.clone(), args, mooring, shell),
+) -> Settled<ValClos> {
+    match val.view() {
+        View::Thunk { .. } | View::Builtin(_) => machine::apply(val.clone(), args, mooring, shell),
         _ => Err(Error::new(Reason::Evaluation(Box::new(EvalFailure::Apply(
             ApplyFailure {
                 operation: CallOrForce::Call,
@@ -184,7 +183,7 @@ fn readmit(top: &Toplevel, env: &Env, shell: &Shell) -> Settled<()> {
 
 /// `source` compiled against `shell`'s session and run as the session.
 #[cfg(test)]
-pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn run_source(source: &str, shell: &mut Shell) -> Settled<ValClos> {
     let top = crate::compile::compile_and_typecheck(
         source,
         shell.session_schemes(),
@@ -233,9 +232,9 @@ mod tests {
             &mut shell,
         );
         ran.outcome.expect("both defines must succeed");
-        assert_eq!(ran.env.get("rp_a"), Some(&Value::Int(1)));
-        assert_eq!(ran.env.get("rp_b"), Some(&Value::Int(2)));
-        assert_eq!(shell.env.get("rp_a"), Some(&Value::Int(1)));
+        assert_eq!(ran.env.get("rp_a"), Some(&ValClos::int(1)));
+        assert_eq!(ran.env.get("rp_b"), Some(&ValClos::int(2)));
+        assert_eq!(shell.env.get("rp_a"), Some(&ValClos::int(1)));
     }
 
     #[test]
@@ -250,7 +249,7 @@ mod tests {
             &mut shell,
         );
         assert!(ran.outcome.is_err(), "the run must halt at `exit 7`");
-        assert_eq!(ran.env.get("rp_before"), Some(&Value::Int(1)));
+        assert_eq!(ran.env.get("rp_before"), Some(&ValClos::int(1)));
         assert!(ran.env.get("rp_after").is_none());
     }
 
@@ -295,7 +294,7 @@ mod tests {
 
         let mut env = shell.env.clone();
         let mut binding = env.binding("d").expect("stored datum").clone();
-        binding.value = Value::string("bad");
+        binding.value = ValClos::string("bad");
         env.bind("d".into(), binding);
         let ran = run_phrases(
             &top,
@@ -306,20 +305,20 @@ mod tests {
         );
         let error = ran.outcome.expect_err("the supplied datum must be refused");
         assert!(error.to_string().contains("$d"), "{error}");
-        assert_eq!(ran.env.get("d"), Some(&Value::string("bad")));
+        assert_eq!(ran.env.get("d"), Some(&ValClos::string("bad")));
         assert!(ran.env.get("before").is_none());
         assert!(ran.env.get("result").is_none());
-        assert_eq!(shell.env.get("d"), Some(&Value::Int(1)));
+        assert_eq!(shell.env.get("d"), Some(&ValClos::int(1)));
         assert!(shell.env.get("before").is_none());
 
         let valid_env = shell.env.clone();
         shell.env = env;
         let ran = run_phrases(&top, valid_env, Mode::Local, &Mooring::adrift(), &mut shell);
         ran.outcome.expect("the supplied datum must be admitted");
-        assert_eq!(ran.env.get("d"), Some(&Value::Int(1)));
-        assert_eq!(ran.env.get("before"), Some(&Value::Int(7)));
-        assert_eq!(ran.env.get("result"), Some(&Value::Int(2)));
-        assert_eq!(shell.env.get("d"), Some(&Value::string("bad")));
+        assert_eq!(ran.env.get("d"), Some(&ValClos::int(1)));
+        assert_eq!(ran.env.get("before"), Some(&ValClos::int(7)));
+        assert_eq!(ran.env.get("result"), Some(&ValClos::int(2)));
+        assert_eq!(shell.env.get("d"), Some(&ValClos::string("bad")));
         assert!(shell.env.get("before").is_none());
     }
 

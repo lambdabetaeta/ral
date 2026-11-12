@@ -16,8 +16,8 @@ use crate::fact::{
 use crate::io::RunIo;
 use crate::process::RequestedTerminalAccess;
 use crate::shell::runtime::Binding;
-use crate::shell::runtime::Value;
 use crate::shell::runtime::{Shell, ill_typed};
+use crate::shell::runtime::{ValClos, View};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, hash_map::Entry};
@@ -170,7 +170,7 @@ impl DefaultPolicy {
 /// One entry in the hook table: a named, typechecked, policy-tagged run root.
 #[derive(Debug, Clone)]
 pub struct Hook {
-    /// Built by the same scheme-inference path an ordinary session `let` uses.
+    /// Non-builtin thunks carry their inferred scheme; residuals carry none.
     pub binding: Binding,
     pub(crate) sig: HookSig,
     pub(crate) policy: DefaultPolicy,
@@ -185,24 +185,28 @@ impl Hook {
     /// [`RegisterError::ArityMismatch`] if the parameter count differs.
     pub(crate) fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
-        let actual = match &self.binding.value {
-            Value::Thunk(_) => {
-                let scheme = self
-                    .binding
-                    .scheme
-                    .as_ref()
-                    .expect("vet_hook infers every block's scheme");
-                if crate::typecheck::takes(scheme, expected) {
-                    return Ok(());
+        let value = &self.binding.value;
+        let actual = if let Some((_, remaining)) = value.residual() {
+            remaining
+        } else {
+            match value.view() {
+                View::Thunk { .. } => {
+                    let scheme = self
+                        .binding
+                        .scheme
+                        .as_ref()
+                        .expect("vet_hook infers every non-builtin block's scheme");
+                    if crate::typecheck::takes(scheme, expected) {
+                        return Ok(());
+                    }
+                    scheme.arity()
                 }
-                scheme.arity()
-            }
-            Value::Native(entry, args) => entry.decl.fixed_arity() - args.len(),
-            other => {
-                return Err(RegisterError::NotFunction {
-                    name: name.clone(),
-                    actual: other.shape(),
-                });
+                _ => {
+                    return Err(RegisterError::NotFunction {
+                        name: name.clone(),
+                        actual: value.shape(),
+                    });
+                }
             }
         };
         if actual != expected {
@@ -303,23 +307,21 @@ impl Shell {
     pub fn vet_hook(
         &self,
         name: &HookName,
-        value: Value,
+        value: ValClos,
         sig: HookSig,
         policy: DefaultPolicy,
     ) -> Result<Hook, RegisterError> {
-        let scheme = match &value {
-            Value::Thunk(closure) => Some(
-                crate::typecheck::binding_value_scheme(
-                    closure.comp(),
-                    self.closure_schemes(closure),
+        let scheme = value
+            .block()
+            .map(|(comp, env)| {
+                crate::typecheck::binding_value_scheme(comp, self.closure_schemes(env)).map_err(
+                    |errors| RegisterError::Typecheck {
+                        name: name.clone(),
+                        errors,
+                    },
                 )
-                .map_err(|errors| RegisterError::Typecheck {
-                    name: name.clone(),
-                    errors,
-                })?,
-            ),
-            _ => None,
-        };
+            })
+            .transpose()?;
         let hook = Hook {
             binding: Binding { value, scheme },
             sig,
@@ -328,7 +330,7 @@ impl Shell {
         hook.validate(name).map(|()| hook)
     }
 
-    /// Register a function [`Value`] — a `Block`, `Lambda`, or builtin — as a
+    /// Register a function [`ValClos`] — a `Block`, `Lambda`, or builtin — as a
     /// named run root in the session hook table.
     ///
     /// It fires only on a host-dispatched `Program::Hook` run, never as `$name`
@@ -340,7 +342,7 @@ impl Shell {
     pub fn register_hook(
         &mut self,
         name: HookName,
-        value: Value,
+        value: ValClos,
         sig: HookSig,
         policy: DefaultPolicy,
     ) -> Result<(), RegisterError> {
@@ -450,9 +452,15 @@ mod tests {
 
     #[test]
     fn a_partial_native_hook_uses_its_residual_arity() {
-        let shell = crate::test_helper::core_shell();
+        let mut shell = crate::test_helper::core_shell();
         let entry = shell.lookup_builtin("has").expect("has builtin");
-        let native = Value::Native(entry.into(), [Value::map(vec![])].into());
+        let native = crate::shell::evaluator::machine::apply(
+            ValClos::builtin(entry.into()),
+            vec![ValClos::map(vec![])],
+            &crate::shell::runtime::Mooring::adrift(),
+            &mut shell,
+        )
+        .expect("one argument leaves has's η residual");
         shell
             .vet_hook(
                 &prompt(),

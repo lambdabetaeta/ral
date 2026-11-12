@@ -1,13 +1,11 @@
-//! `Value` and the first-order vocabulary: one walk each way.
-//!
-//! Every conversion differs from its siblings only at the leaves that are not
-//! data, so a leaf is a borrowed view handed to the caller, never a `&Value`.
+//! Value closures and the first-order vocabulary.
 
-use super::Value;
+use super::{ValClos, View};
 use crate::data::datum::Datum;
+use crate::data::json::drop_value;
 use crate::data::{FOValue, NoExt, NotData, Opaque};
 use crate::fact::{NonData, OpaqueKind};
-use crate::shell::runtime::Closure;
+use crate::ir::Comp;
 use std::convert::Infallible;
 
 impl From<Opaque> for OpaqueKind {
@@ -19,7 +17,6 @@ impl From<Opaque> for OpaqueKind {
         }
     }
 }
-
 impl From<NotData> for NonData {
     fn from(error: NotData) -> Self {
         Self {
@@ -29,163 +26,198 @@ impl From<NotData> for NonData {
     }
 }
 
-/// A `Value` that is not data.
 pub(crate) enum Leaf<'a> {
-    Thunk(&'a Closure),
-    Native,
+    Thunk(&'a Comp),
+    Builtin,
     Handle,
 }
-
 impl Leaf<'_> {
     pub(crate) fn kind(&self) -> Opaque {
         match self {
-            Self::Thunk(c) if c.comp().lam().is_none() => Opaque::Block,
-            Self::Thunk(_) | Self::Native => Opaque::Function,
+            Self::Thunk(comp) if comp.lam().is_none() => Opaque::Block,
+            Self::Thunk(_) | Self::Builtin => Opaque::Function,
             Self::Handle => Opaque::Handle,
         }
     }
 }
-
-impl Value {
+impl ValClos {
     fn leaf(&self) -> Option<Leaf<'_>> {
-        match self {
-            Self::Thunk(c) => Some(Leaf::Thunk(c)),
-            Self::Native(..) => Some(Leaf::Native),
-            Self::Handle(_) => Some(Leaf::Handle),
+        match self.view() {
+            View::Thunk { comp, .. } => Some(Leaf::Thunk(comp)),
+            View::Builtin(_) => Some(Leaf::Builtin),
+            View::Handle(_) => Some(Leaf::Handle),
             _ => None,
         }
     }
-
-    /// What this value is if it is not data.
     #[must_use]
     pub fn opacity(&self) -> Option<Opaque> {
         self.leaf().map(|l| l.kind())
     }
 }
-
 impl<X> FOValue<X> {
-    /// Fold a value into data, handing each leaf that is not data to `leaf`.
     pub(crate) fn walk<E>(
-        v: &Value,
+        v: &ValClos,
         leaf: &mut impl FnMut(Leaf<'_>) -> Result<Self, E>,
     ) -> Result<Self, E> {
-        Ok(match v {
-            Value::Unit => Self::Unit,
-            Value::Bool(v) => Self::Bool { value: *v },
-            Value::Int(v) => Self::Int { value: *v },
-            Value::Float(v) => Self::Float { value: *v },
-            Value::String(v) => Self::String {
-                value: v.to_string(),
+        let (labels, terminal) = v.peel_variants();
+        let head = terminal.view();
+        let is_unit = matches!(head, View::Unit);
+        let mut encoded = match head {
+            View::Unit => Self::Unit,
+            View::Bool(value) => Self::Bool { value },
+            View::Int(value) => Self::Int { value },
+            View::Float(value) => Self::Float { value },
+            View::String(value) => Self::String {
+                value: value.to_string(),
             },
-            Value::Bytes(v) => Self::Bytes { value: v.to_vec() },
-            Value::List(items) => Self::List {
-                items: items
-                    .iter()
-                    .map(|v| Self::walk(&v, leaf))
-                    .collect::<Result<_, _>>()?,
+            View::Bytes(value) => Self::Bytes {
+                value: value.to_vec(),
             },
-            Value::Map(items) => Self::Map {
-                entries: items
-                    .iter()
-                    .map(|(k, v)| Ok((k.to_string(), Self::walk(&v, leaf)?)))
-                    .collect::<Result<_, E>>()?,
-            },
-            Value::Variant { label, payload } => Self::Variant {
-                label: label.to_string(),
-                payload: payload
-                    .as_deref()
-                    .map(|p| Self::walk(p, leaf).map(Box::new))
-                    .transpose()?,
-            },
-            Value::Thunk(c) => leaf(Leaf::Thunk(c))?,
-            Value::Native(..) => leaf(Leaf::Native)?,
-            Value::Handle(_) => leaf(Leaf::Handle)?,
-        })
-    }
-
-    /// The inverse fold: `ext` rebuilds each extension.
-    pub(crate) fn unwalk<E>(self, ext: &mut impl FnMut(X) -> Result<Value, E>) -> Result<Value, E> {
-        Ok(match self {
-            Self::Unit => Value::Unit,
-            Self::Bool { value } => Value::Bool(value),
-            Self::Int { value } => Value::Int(value),
-            Self::Float { value } => Value::Float(value),
-            Self::String { value } => Value::string(value),
-            Self::Bytes { value } => Value::bytes(value),
-            Self::List { items } => Value::list(
-                items
-                    .into_iter()
-                    .map(|v| v.unwalk(ext))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            Self::Map { entries } => Value::Map(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| Ok((k, v.unwalk(ext)?)))
-                    .collect::<Result<_, E>>()?,
-            ),
-            Self::Variant { label, payload } => {
-                Value::variant(label, payload.map(|p| p.unwalk(ext)).transpose()?)
+            View::List(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for value in items {
+                    match Self::walk(&value, leaf) {
+                        Ok(value) => values.push(value),
+                        Err(error) => {
+                            values.into_iter().for_each(drop_value);
+                            return Err(error);
+                        }
+                    }
+                }
+                Self::List { items: values }
             }
+            View::Map(entries) => {
+                let mut values = Vec::with_capacity(entries.len());
+                for (name, value) in entries {
+                    match Self::walk(&value, leaf) {
+                        Ok(value) => values.push((name.to_string(), value)),
+                        Err(error) => {
+                            for (_, value) in values {
+                                drop_value(value);
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                Self::Map { entries: values }
+            }
+            View::Variant { .. } => unreachable!("the tag spine was peeled above"),
+            View::Thunk { comp, .. } => leaf(Leaf::Thunk(comp))?,
+            View::Builtin(_) => leaf(Leaf::Builtin)?,
+            View::Handle(_) => leaf(Leaf::Handle)?,
+        };
+        for (i, label) in labels.into_iter().rev().enumerate() {
+            encoded = Self::Variant {
+                label: label.to_string(),
+                payload: (!(i == 0 && is_unit)).then(|| Box::new(encoded)),
+            };
+        }
+        Ok(encoded)
+    }
+    pub(crate) fn unwalk<E>(
+        self,
+        ext: &mut impl FnMut(X) -> Result<ValClos, E>,
+    ) -> Result<ValClos, E> {
+        let mut labels = Vec::new();
+        let mut terminal = self;
+        while let Self::Variant { label, payload } = terminal {
+            labels.push(label);
+            terminal = payload.map_or(Self::Unit, |payload| *payload);
+        }
+        let mut value = match terminal {
+            Self::Unit => ValClos::UNIT,
+            Self::Bool { value } => ValClos::bool(value),
+            Self::Int { value } => ValClos::int(value),
+            Self::Float { value } => ValClos::float(value),
+            Self::String { value } => ValClos::string(value),
+            Self::Bytes { value } => ValClos::bytes(value),
+            Self::List { items } => {
+                let mut values = Vec::with_capacity(items.len());
+                let mut remaining = items.into_iter();
+                while let Some(value) = remaining.next() {
+                    match value.unwalk(ext) {
+                        Ok(value) => values.push(value),
+                        Err(error) => {
+                            remaining.for_each(drop_value);
+                            return Err(error);
+                        }
+                    }
+                }
+                ValClos::list(values)
+            }
+            Self::Map { entries } => {
+                let mut values = Vec::with_capacity(entries.len());
+                let mut remaining = entries.into_iter();
+                while let Some((name, value)) = remaining.next() {
+                    match value.unwalk(ext) {
+                        Ok(value) => values.push((name, value)),
+                        Err(error) => {
+                            for (_, value) in remaining {
+                                drop_value(value);
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                ValClos::map(values)
+            }
+            Self::Variant { .. } => unreachable!("the tag spine was peeled above"),
             Self::Ext(x) => ext(x)?,
-        })
+        };
+        for label in labels.into_iter().rev() {
+            value = ValClos::variant(label, Some(value));
+        }
+        Ok(value)
     }
 }
-
-impl TryFrom<&Value> for FOValue {
+impl TryFrom<&ValClos> for FOValue {
     type Error = NotData;
-
-    /// The first leaf that is not data, and whether it sat inside `v`.
-    fn try_from(v: &Value) -> Result<Self, NotData> {
+    fn try_from(v: &ValClos) -> Result<Self, NotData> {
         Self::walk(v, &mut |l| Err(l.kind())).map_err(|leaf| NotData {
             leaf,
             nested: v.opacity().is_none(),
         })
     }
 }
-
 impl FOValue {
-    /// [`FOValue::try_from`] made total: every leaf that is not data crosses
-    /// as its `` `opaque `` placeholder, as the flat wire needs.
-    pub(crate) fn scrubbed(v: &Value) -> Self {
+    pub(crate) fn scrubbed(v: &ValClos) -> Self {
         let Ok(fo) = Self::walk(v, &mut |l| Ok::<_, Infallible>(l.kind().placeholder()));
         fo
     }
 }
-
-impl Value {
-    /// A [`Datum`] as the value ral code reads.
+impl ValClos {
     pub fn from_datum(d: impl Datum) -> Self {
         Self::from(d.encode())
     }
 }
-
-impl From<FOValue> for Value {
+impl From<FOValue> for ValClos {
     fn from(fo: FOValue) -> Self {
         let Ok(v) = fo.unwalk(&mut |x: NoExt| -> Result<Self, Infallible> { match x {} });
         v
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shell::runtime::{Env, block_over};
-
     #[test]
     fn a_leaf_reports_whether_it_is_the_value_or_inside_it() {
-        let block = block_over(&Env::new());
+        let block = block_over(&Env::EMPTY);
         let top = FOValue::try_from(&block).unwrap_err();
         assert_eq!((top.leaf, top.nested), (Opaque::Block, false));
-        let inside = FOValue::try_from(&Value::list(vec![Value::Int(1), block])).unwrap_err();
+        let inside = FOValue::try_from(&ValClos::list(vec![ValClos::int(1), block])).unwrap_err();
         assert_eq!((inside.leaf, inside.nested), (Opaque::Block, true));
     }
-
     #[test]
     fn scrubbing_replaces_each_leaf_by_its_placeholder_and_data_round_trips() {
-        let data = Value::map(vec![("a".into(), Value::variant("x", Some(Value::Int(1))))]);
-        assert_eq!(Value::from(FOValue::scrubbed(&data)), data);
-        let scrubbed = FOValue::scrubbed(&block_over(&Env::new()));
-        assert_eq!(scrubbed, Opaque::Block.placeholder());
+        let data = ValClos::map(vec![(
+            "a".into(),
+            ValClos::variant("x", Some(ValClos::int(1))),
+        )]);
+        assert_eq!(ValClos::from(FOValue::scrubbed(&data)), data);
+        assert_eq!(
+            FOValue::scrubbed(&block_over(&Env::EMPTY)),
+            Opaque::Block.placeholder()
+        );
     }
 }

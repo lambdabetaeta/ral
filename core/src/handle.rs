@@ -1,16 +1,12 @@
-//! The shared cells behind [`Value::Handle`](super::Value): what a spawned
-//! worker writes and its observers read.
-//!
-//! **Module invariant.** [`HandleInner::new`] mints the sole
-//! [`CompletionPermit`] for each handle, and terminal publication (`publish` /
-//! `publish_abandoned`) is private to this module, so a handle's
-//! terminal transition is written at most once.
+//! Handle publication belongs to the sole completion permit.
 
-use super::flow::End;
-use super::value::Value;
-use crate::fact::{Io, WorkerId};
+use crate::data::Str;
+use crate::error::Error;
+use crate::fact::{EvalFailure, Io, Reason, WorkerId};
 use crate::io::{ByteBuffer, Retained, Streams};
 use crate::process::{CancelCause, ScopeNode};
+use crate::shell::runtime::End;
+use crate::shell::runtime::{ValClos, View};
 use crate::sync::LockExt as _;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,15 +33,13 @@ impl Stamp {
     }
 }
 
-/// Whether `v` structurally reaches a live (`running` or `stopping`) handle —
-/// the binding-lease reaper's pin check, so a name still holding live work is
-/// never pruned.  Closure captures are never descended, the same refusal
-/// [`Value::shallow_size`] makes: the worker registry retains the handle
-/// regardless, so nothing is stranded either way.
-pub(crate) fn pins_live_work(v: &Value) -> bool {
-    match v {
-        Value::Handle(h) => h.sample().is_live(),
-        _ => v
+/// Pins live work through data, never descending a capture.
+pub(crate) fn pins_live_work(v: &ValClos) -> bool {
+    let (_, terminal) = v.peel_variants();
+    match terminal.view() {
+        View::Handle(Handle::Live(h)) => h.sample().is_live(),
+        View::Handle(Handle::Withheld(_)) => false,
+        _ => terminal
             .try_for_each_child(&mut |c| {
                 if pins_live_work(c) {
                     ControlFlow::Break(())
@@ -54,6 +48,33 @@ pub(crate) fn pins_live_work(v: &Value) -> bool {
                 }
             })
             .is_break(),
+    }
+}
+
+/// Live in its spawning shell, withheld in a bequest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Handle {
+    Live(Box<HandleInner>),
+    Withheld(Str),
+}
+
+impl Handle {
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Live(handle) => &handle.title,
+            Self::Withheld(title) => title,
+        }
+    }
+
+    /// # Errors
+    /// A withheld handle cannot be observed in this shell.
+    pub(crate) fn live(&self) -> Result<&HandleInner, Error> {
+        match self {
+            Self::Live(handle) => Ok(handle),
+            Self::Withheld(title) => Err(Error::new(Reason::Evaluation(Box::new(
+                EvalFailure::WithheldHandle(title.to_string()),
+            )))),
+        }
     }
 }
 
@@ -302,14 +323,14 @@ impl Drop for CompletionPermit {
 /// A handle whose worker never ran, settled as a panic: for tests that only
 /// carry one.
 #[cfg(test)]
-pub(crate) fn idle_handle() -> Value {
+pub(crate) fn idle_handle() -> ValClos {
     let (handle, _) = HandleInner::new(
         WorkerId::mint(),
         "<test>",
         crate::process::DurableRoot::default().child(),
         Streams::default(),
     );
-    Value::Handle(Box::new(handle))
+    ValClos::handle(handle)
 }
 
 #[cfg(test)]
@@ -327,6 +348,21 @@ mod tests {
             buffers.clone(),
         );
         (handle, permit, buffers.stdout, buffers.stderr)
+    }
+
+    #[test]
+    fn live_work_is_pinned_through_data_until_it_settles() {
+        let (handle, permit, _, _) = make_handle();
+        let value = ValClos::map(vec![(
+            "work".into(),
+            ValClos::variant("worker", Some(ValClos::list(vec![ValClos::handle(handle)]))),
+        )]);
+        assert!(pins_live_work(&value));
+        permit.finish(End::Ok(ValClos::UNIT));
+        assert!(!pins_live_work(&value));
+        assert!(!pins_live_work(&ValClos::list(vec![ValClos::withheld(
+            "parent worker"
+        )])));
     }
 
     #[test]
@@ -349,7 +385,7 @@ mod tests {
         assert_eq!(io.stdout.as_slice(), b"stdout-bytes");
         assert_eq!(io.stderr.as_slice(), b"stderr-bytes");
 
-        let published_stamp = permit.finish(End::Ok(Value::Int(99)));
+        let published_stamp = permit.finish(End::Ok(ValClos::int(99)));
         assert_eq!(handle.sample(), Sample::Ready(()));
         assert!(!handle.sample().is_live());
         assert!(handle.sample().has_ended());
@@ -429,7 +465,7 @@ mod tests {
         // A stopping snapshot copies no bytes.
         assert!(matches!(handle.snapshot_io().state, Sample::Stopping));
 
-        let stamp = permit.finish(End::Ok(Value::Unit));
+        let stamp = permit.finish(End::Ok(ValClos::UNIT));
         assert_eq!(handle.sample(), Sample::Consumed);
         assert!(handle.sample().has_ended());
         assert!(handle.sample().is_claimed());
@@ -451,7 +487,7 @@ mod tests {
     fn claim_and_stop_on_ready_discards_result_into_consumed_preserving_stamp() {
         let (handle, permit, out, _err) = make_handle();
         out.append(b"discard-me");
-        let stamp = permit.finish(End::Ok(Value::Int(1)));
+        let stamp = permit.finish(End::Ok(ValClos::int(1)));
         let frozen_elapsed = handle.snapshot(|_| ()).elapsed;
 
         handle.claim_and_stop();
@@ -468,7 +504,7 @@ mod tests {
     fn competing_claimers_yield_exactly_one_winner() {
         let (handle, permit, out, _err) = make_handle();
         out.append(b"once");
-        permit.finish(End::Ok(Value::Int(7)));
+        permit.finish(End::Ok(ValClos::int(7)));
 
         let barrier = Arc::new(Barrier::new(2));
         let threads = std::array::from_fn::<_, 2, _>(|_| {
@@ -556,7 +592,7 @@ mod tests {
         assert!(handle.home.is_cancelled());
         // Not directly claimed: still Running, not Stopping.
         assert_eq!(handle.sample(), Sample::Running(()));
-        permit.finish(End::Ok(Value::Unit));
+        permit.finish(End::Ok(ValClos::UNIT));
         assert_eq!(handle.sample(), Sample::Ready(()));
     }
 }

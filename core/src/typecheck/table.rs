@@ -670,32 +670,32 @@ mod tests {
     #[test]
     fn contracts_reach_decoder_sites_before_freezing() {
         use crate::ir::{CompKind, Phrase};
-        use crate::shell::runtime::Value;
+        use crate::shell::runtime::ValClos;
         use crate::ty::Fixings;
         for (form, returned, accepted, use_text) in [
             (
                 Form::Rc,
                 rc_source(&[("umask", "$d")]),
-                Value::variant("set", Some(Value::string("022"))),
+                ValClos::variant("set", Some(ValClos::string("022"))),
                 "$d",
             ),
             (
                 Form::Rc,
                 rc_source(&[("handlers", "[:, foo: { |a| return $d }]")]),
-                Value::Unit,
+                ValClos::UNIT,
                 "return $d",
             ),
             (
                 Form::Manifest,
                 "return { |options| return [name: $d] }".into(),
-                Value::string("p"),
+                ValClos::string("p"),
                 "$d",
             ),
             (
                 Form::Manifest,
                 "return { |options| return [name: 'p', handlers: [:, foo: { |a| return $d }]] }"
                     .into(),
-                Value::Unit,
+                ValClos::UNIT,
                 "return $d",
             ),
         ] {
@@ -714,7 +714,7 @@ mod tests {
             site.admit(&accepted, &Fixings::default())
                 .unwrap_or_else(|error| panic!("{src}: {error}"));
             let mismatch = site
-                .admit(&Value::Int(5), &Fixings::default())
+                .admit(&ValClos::int(5), &Fixings::default())
                 .expect_err("the contract must constrain the decoder before execution");
             let witness = mismatch
                 .witness()

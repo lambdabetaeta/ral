@@ -18,7 +18,7 @@ use crate::process::{Deadline, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
     DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
-    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, Value, panic_text,
+    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, ValClos, panic_text,
 };
 use crate::source::FileId;
 use crate::typecheck::Unit;
@@ -276,7 +276,7 @@ impl Shell {
 
                 // The host conveys data, not closures: hook args are
                 // first-order by type (`FOValue`).
-                let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
+                let args: Vec<ValClos> = args.iter().cloned().map(ValClos::from).collect();
 
                 // Capture, terminal authority and aside are the registered
                 // hook's to decide, not the dispatching host's.
@@ -313,7 +313,7 @@ impl Shell {
         wall: Option<Deadline>,
         root: Option<Prov>,
         compact: Option<FileId>,
-        body: impl FnOnce(&Mooring, &mut Self) -> Settled<Value>,
+        body: impl FnOnce(&Mooring, &mut Self) -> Settled<ValClos>,
     ) -> RunReport {
         let base = resolved_base(&req.run);
         let site = root.unwrap_or_else(|| base.clone());
@@ -511,7 +511,7 @@ pub(crate) fn run_framed(
     run: &Run,
     wall: Option<Deadline>,
     site: Prov,
-    body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
+    body: impl FnOnce(&Mooring, &mut Shell) -> Settled<ValClos>,
 ) -> End {
     let root = site.span().map(|span| span.file);
     let boundary = root.is_some();

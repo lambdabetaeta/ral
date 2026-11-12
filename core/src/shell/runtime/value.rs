@@ -1,21 +1,19 @@
-//! Runtime values: what a variable holds, what a pipeline stage produces,
-//! what a builtin returns.
+//! Runtime values are value closures over the IR.
 
-use super::builtin::BuiltinEntry;
-use super::closure::Closure;
-#[cfg(test)]
-use super::env::Binding;
-#[cfg(test)]
-use super::env::Env;
-use super::handle::HandleInner;
-use super::list::List;
-use super::map::Map;
-use crate::data::Bytes;
-use crate::data::Finite;
-use crate::data::Str;
-use crate::fact::{Found, TextPreview, ValueShape};
+use super::Error;
+use super::env::{Binding, Env};
+use super::list::{List, ListRef};
+use super::map::{Map, MapRef};
+use super::signature::{Signature, lookup};
+use crate::builtin::BuiltinEntry;
+use crate::data::datum::Datum as _;
+use crate::data::{Bytes, FOValue, Finite, Str};
+use crate::fact::{ErrorFact, EvalFailure, Found, Reason, TextPreview, ValueShape};
+use crate::handle::{Handle, HandleInner};
 use crate::io::terminal::{InteractiveMode, TerminalState};
+use crate::ir::{Comp, CompKind, Name, Occ, Val};
 use crate::ty::{Binders, Closed, Head, TAG_PREFIX, Ty, closed_record};
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -25,303 +23,695 @@ mod first_order;
 mod seed;
 pub(super) use seed::{drop_seed_env, drop_seed_value};
 
-/// The runtime representation of every ral value.
-///
-/// There is one thunk value, `Thunk(Closure)`: a computation closed over the
-/// bindings it mentions. `{ |params| body }` and `{ body }` are one
-/// variant: `apply` and the machine's `force` rule never ask which, and only a
-/// description of a value reads the shape (`Comp::lam`).
-///
-/// Cloning copies no payload — `Str`, `Bytes`, `List`, `Map` and a closure's
-/// scope are all shared — and `Env` and variable lookup rely on it.
+/// A runtime value: ⟨V, ρ⟩, every direct name of V bound in ρ.
 #[derive(Debug, Clone)]
-pub enum Value {
+pub struct ValClos(Repr);
+
+#[derive(Debug)]
+enum Repr {
+    Syn(Val, Env),
+    List(Arc<imbl::Vector<ValClos>>),
+    Map(Arc<imbl::OrdMap<String, ValClos>>, Option<Arc<ErrorFact>>),
+}
+
+const _: () = assert!(
+    std::mem::size_of::<ValClos>() <= 48,
+    "ValClos must fit in 48 bytes"
+);
+
+impl Clone for Repr {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Syn(val, env) => Self::Syn(clone_tag_spine(val), env.clone()),
+            Self::List(items) => Self::List(Arc::clone(items)),
+            Self::Map(entries, fact) => Self::Map(Arc::clone(entries), fact.clone()),
+        }
+    }
+}
+
+impl Drop for Repr {
+    fn drop(&mut self) {
+        let owned = match self {
+            Self::Syn(val, env) => {
+                let mut val = std::mem::replace(val, Val::Unit);
+                while let Val::Variant { payload, .. } = val {
+                    val = *payload;
+                }
+                (!env.is_empty()).then(|| Owned::Env(std::mem::take(env)))
+            }
+            Self::List(items) => Arc::get_mut(items)
+                .filter(|items| !items.is_empty())
+                .map(|items| Owned::List(std::mem::take(items))),
+            Self::Map(entries, _) => Arc::get_mut(entries)
+                .filter(|entries| !entries.is_empty())
+                .map(|entries| Owned::Map(std::mem::take(entries))),
+        };
+        if let Some(owned) = owned {
+            dismantle(owned);
+        }
+    }
+}
+
+/// A dying value's sole owner of a capture or built container.
+enum Owned {
+    Env(Env),
+    List(imbl::Vector<ValClos>),
+    Map(imbl::OrdMap<String, ValClos>),
+}
+
+thread_local! {
+    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<Owned>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While one drop runs, a nested one queues its owner, bounding the stack.
+fn dismantle(owned: Owned) {
+    let Ok(Some(owned)) = DISMANTLE_QUEUE.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(queue) = slot.as_mut() {
+            queue.push(owned);
+            None
+        } else {
+            *slot = Some(Vec::new());
+            Some(owned)
+        }
+    }) else {
+        return;
+    };
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            let _ = DISMANTLE_QUEUE.try_with(|slot| slot.borrow_mut().take());
+        }
+    }
+    let _disarm = Disarm;
+    let mut next = Some(owned);
+    while let Some(owned) = next {
+        match owned {
+            Owned::Env(env) => drop(env),
+            Owned::List(items) => drop(items),
+            Owned::Map(entries) => drop(entries),
+        }
+        next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(Vec::pop));
+    }
+}
+
+/// A value's head, one layer read.
+#[derive(Debug)]
+pub enum View<'a> {
     Unit,
     Bool(bool),
     Int(i64),
     Float(Finite),
-    String(Str),
-    Bytes(Bytes),
-    List(List),
-    Map(Map),
-    /// `label` is stored without its leading backtick; `Display` puts it back.
+    String(&'a Str),
+    Bytes(&'a Bytes),
+    List(ListRef<'a>),
+    Map(MapRef<'a>),
     Variant {
-        label: crate::ir::Name,
-        payload: Option<Box<Self>>,
+        label: &'a Name,
+        /// `None` is the unit payload.
+        payload: Option<Cow<'a, ValClos>>,
     },
-    Thunk(Closure),
-    /// A builtin and the arguments it has been given; forcing it collects
-    /// the rest. For positive arity, held arguments are fewer than its arity;
-    /// zero arity holds none and runs on force.
-    Native(Arc<BuiltinEntry>, Arc<[Self]>),
-    /// A computation spawned onto a worker thread, not a subprocess.
-    /// Boxed: `HandleInner`'s eight `Arc` fields would otherwise be the
-    /// largest variant, inflating every `Value` move (`Focus`'s hot path
-    /// included) to its size.
-    Handle(Box<HandleInner>),
+    Thunk {
+        comp: &'a Arc<Comp>,
+        env: &'a Env,
+    },
+    Builtin(&'a Arc<BuiltinEntry>),
+    Handle(&'a Handle),
 }
 
-const _: () = assert!(
-    std::mem::size_of::<Value>() <= 32,
-    "Value must fit in 32 bytes"
-);
-
-impl Value {
-    /// Release seed-created data and captures without recursive drop glue.
-    pub(crate) fn drop_seed(self) {
-        drop_seed_value(self);
+impl ValClos {
+    pub const UNIT: Self = Self(Repr::Syn(Val::Unit, Env::EMPTY));
+    pub fn bool(b: bool) -> Self {
+        Self(Repr::Syn(Val::Bool(b), Env::EMPTY))
     }
-
-    /// An inert head summary; closures are never traversed.
-    pub fn shape(&self) -> ValueShape {
-        match self {
-            Self::Unit => ValueShape::Unit,
-            Self::Bool(_) => ValueShape::Bool,
-            Self::Int(_) => ValueShape::Int,
-            Self::Float(_) => ValueShape::Float,
-            Self::String(_) => ValueShape::String,
-            Self::Bytes(_) => ValueShape::Bytes,
-            Self::List(_) => ValueShape::List,
-            Self::Map(_) => ValueShape::Map,
-            Self::Variant { .. } => ValueShape::Variant,
-            Self::Thunk(c) if c.comp().lam().is_none() => ValueShape::Block,
-            Self::Thunk(_) | Self::Native(..) => ValueShape::Function,
-            Self::Handle(_) => ValueShape::Handle,
-        }
+    pub fn int(n: i64) -> Self {
+        Self(Repr::Syn(Val::Int(n), Env::EMPTY))
     }
-
-    /// Bounded evidence for a refusal, independent of runtime resources.
-    pub fn found(&self) -> Found {
-        match self {
-            Self::Unit => Found::Unit,
-            Self::Bool(b) => Found::Bool(*b),
-            Self::Int(n) => Found::Int(*n),
-            Self::Float(f) => Found::Float(*f),
-            Self::String(s) => Found::Text(TextPreview::new(s)),
-            Self::Bytes(_) => Found::Bytes,
-            Self::List(_) => Found::List,
-            Self::Map(_) => Found::Map,
-            Self::Variant { label, .. } => Found::Variant(label.to_string()),
-            Self::Thunk(c) if c.comp().lam().is_none() => Found::Block,
-            Self::Thunk(_) | Self::Native(..) => Found::Function,
-            Self::Handle(_) => Found::Handle,
-        }
+    pub fn float(f: Finite) -> Self {
+        Self(Repr::Syn(Val::Float(f), Env::EMPTY))
     }
-
-    /// `Int` only: the checker keeps `Int` and `Float` apart, and a
-    /// numeric-looking string is the `int` builtin's job.
-    pub fn as_int(&self) -> Option<i64> {
-        match self {
-            Self::Int(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    /// `Int` and `Float` only; strings go through the `float` builtin.
-    pub(crate) fn as_float(&self) -> Option<f64> {
-        match self {
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "Int→Float coercion; loss beyond 2^53 is intrinsic to representing i64 in an f64 mantissa"
-            )]
-            Self::Int(n) => Some(*n as f64),
-            Self::Float(f) => Some(f.get()),
-            _ => None,
-        }
-    }
-
-    /// Every list-construction site goes through here, so the persistent-vector
-    /// wrapping stays invisible to callers.
-    pub fn list(items: Vec<Self>) -> Self {
-        Self::List(items.into())
-    }
-
-    /// A tagged value; `Unit` is represented by an absent payload.
-    pub fn variant(label: impl Into<crate::ir::Name>, payload: Option<Self>) -> Self {
-        Self::Variant {
-            label: label.into(),
-            payload: payload.filter(|p| !matches!(p, Self::Unit)).map(Box::new),
-        }
-    }
-
-    /// Every string-construction site goes through here, so the shared buffer
-    /// stays invisible to callers.
     pub fn string(s: impl Into<Str>) -> Self {
-        Self::String(s.into())
+        Self(Repr::Syn(Val::String(s.into()), Env::EMPTY))
     }
-
-    /// Every bytes-construction site goes through here, so the shared buffer
-    /// stays invisible to callers.
     pub fn bytes(b: impl Into<Bytes>) -> Self {
-        Self::Bytes(b.into())
+        Self(Repr::Syn(Val::Bytes(b.into()), Env::EMPTY))
     }
-
-    /// The heads this value may be admitted at: a map is a `Map` or a
-    /// `Record`, which the runtime does not tell apart.
-    pub(crate) fn heads(&self) -> &'static [Head] {
-        match self {
-            Self::Unit => &[Head::Unit],
-            Self::Bool(_) => &[Head::Bool],
-            Self::Int(_) => &[Head::Int],
-            Self::Float(_) => &[Head::Float],
-            Self::String(_) => &[Head::String],
-            Self::Bytes(_) => &[Head::Bytes],
-            Self::List(_) => &[Head::List],
-            Self::Map(_) => &[Head::Map, Head::Record],
-            Self::Variant { .. } => &[Head::Variant],
-            Self::Thunk(_) | Self::Native(..) => &[Head::Thunk],
-            Self::Handle(_) => &[Head::Handle],
+    pub fn list(items: Vec<Self>) -> Self {
+        List::from(items).into()
+    }
+    /// The last pair wins on a duplicate key.
+    pub fn map(pairs: Vec<(String, Self)>) -> Self {
+        Map::from(pairs).into()
+    }
+    /// `None` is the unit payload. A builtin or handle never sits under a tag.
+    pub fn variant(label: impl Into<Name>, payload: Option<Self>) -> Self {
+        let (payload, env) = match payload {
+            None => (Val::Unit, Env::EMPTY),
+            Some(mut p) => match &mut p.0 {
+                Repr::Syn(Val::Builtin(_) | Val::Handle(_), _) | Repr::List(_) | Repr::Map(..) => {
+                    let name = crate::ir::synthetic("payload", 0);
+                    let mut env = Env::EMPTY;
+                    env.bind(
+                        name.clone(),
+                        Binding {
+                            value: p,
+                            scheme: None,
+                        },
+                    );
+                    (Val::Variable(name), env)
+                }
+                Repr::Syn(val, env) => (std::mem::replace(val, Val::Unit), std::mem::take(env)),
+            },
+        };
+        Self(Repr::Syn(
+            Val::Variant {
+                label: label.into(),
+                payload: Box::new(payload),
+            },
+            env,
+        ))
+    }
+    /// The record a program reads of `fact`; `raise` recovers `fact` from it.
+    pub fn failure(fact: ErrorFact) -> Self {
+        let FOValue::Map { entries } = fact.record().encode() else {
+            unreachable!("a record encodes as a map")
+        };
+        let entries = entries
+            .into_iter()
+            .map(|(k, v)| (k, Self::from(v)))
+            .collect();
+        Self(Repr::Map(Arc::new(entries), Some(Arc::new(fact))))
+    }
+    pub fn builtin(entry: Arc<BuiltinEntry>) -> Self {
+        Self(Repr::Syn(Val::Builtin(entry), Env::EMPTY))
+    }
+    pub(crate) fn handle(inner: HandleInner) -> Self {
+        Self(Repr::Syn(
+            Val::Handle(Handle::Live(Box::new(inner))),
+            Env::EMPTY,
+        ))
+    }
+    pub(crate) fn withheld(title: impl Into<Str>) -> Self {
+        Self(Repr::Syn(
+            Val::Handle(Handle::Withheld(title.into())),
+            Env::EMPTY,
+        ))
+    }
+    pub fn thunk(comp: Arc<Comp>, env: &Env) -> Self {
+        let val = Val::thunk(comp);
+        let Val::Thunk(node) = &val else {
+            unreachable!()
+        };
+        let env = env.restrict(node.occ());
+        Self(Repr::Syn(val, env))
+    }
+    /// Close one layer, pulling Σ's answers into ρ for direct names only.
+    pub(crate) fn close(val: &Val, env: &Env, sig: &Signature) -> Result<Self, Error> {
+        if let Val::Variable(name) = val {
+            return lookup(name, env, sig)
+                .cloned()
+                .ok_or_else(|| missing(name, env, sig));
+        }
+        let mut captured = match val {
+            Val::Thunk(node) => env.restrict(node.occ()),
+            Val::List(node) => env.restrict(node.occ()),
+            Val::Record(node) | Val::Map(node) => env.restrict(node.occ()),
+            Val::Variant { .. } => {
+                let mut terminal = val;
+                while let Val::Variant { payload, .. } = terminal {
+                    terminal = payload;
+                }
+                env.restrict(&Occ::of(terminal))
+            }
+            Val::Unit
+            | Val::Bool(_)
+            | Val::Int(_)
+            | Val::Float(_)
+            | Val::String(_)
+            | Val::Bytes(_)
+            | Val::Builtin(_)
+            | Val::Handle(_) => Env::EMPTY,
+            Val::Variable(_) => unreachable!("variables are resolved above"),
+        };
+        pull_direct(val, &mut captured, env, sig)?;
+        Ok(Self(Repr::Syn(clone_tag_spine(val), captured)))
+    }
+    pub fn view(&self) -> View<'_> {
+        match &self.0 {
+            Repr::List(items) => View::List(ListRef::built(items)),
+            Repr::Map(entries, fact) => View::Map(MapRef::built(entries, fact.as_deref())),
+            Repr::Syn(val, env) => match val {
+                Val::Unit => View::Unit,
+                Val::Bool(b) => View::Bool(*b),
+                Val::Int(n) => View::Int(*n),
+                Val::Float(f) => View::Float(*f),
+                Val::String(s) => View::String(s),
+                Val::Bytes(b) => View::Bytes(b),
+                Val::Builtin(entry) => View::Builtin(entry),
+                Val::Handle(handle) => View::Handle(handle),
+                Val::Thunk(node) => View::Thunk {
+                    comp: node.shape(),
+                    env,
+                },
+                Val::List(node) => View::List(ListRef::syn(node.shape(), env)),
+                Val::Record(node) | Val::Map(node) => View::Map(MapRef::syn(node.shape(), env)),
+                Val::Variant { label, payload } => View::Variant {
+                    label,
+                    payload: (!matches!(payload.as_ref(), Val::Unit))
+                        .then(|| read(payload, env))
+                        .filter(|p| !matches!(&p.as_ref().0, Repr::Syn(Val::Unit, _))),
+                },
+                Val::Variable(_) => unreachable!("a value closure's root is not a variable"),
+            },
         }
     }
-
-    /// The text of a scalar (`String`, `Int`, `Float`, `Bool`), the one
-    /// conversion an interpolation, an environment override and a printer share.
-    pub fn scalar_text(&self) -> Option<String> {
-        matches!(
-            self,
-            Self::String(_) | Self::Int(_) | Self::Float(_) | Self::Bool(_)
-        )
-        .then(|| self.to_string())
+    /// Read a whole tag spine without materialising its successive suffixes.
+    pub(crate) fn peel_variants(&self) -> (Vec<&Name>, Cow<'_, Self>) {
+        let mut labels = Vec::new();
+        let mut value = self;
+        loop {
+            let Repr::Syn(val @ Val::Variant { .. }, env) = &value.0 else {
+                return (labels, Cow::Borrowed(value));
+            };
+            let mut val = val;
+            while let Val::Variant { label, payload } = val {
+                labels.push(label);
+                val = payload;
+            }
+            match val {
+                Val::Variable(name) => {
+                    value = env
+                        .get(name)
+                        .expect("a value closure binds its direct names");
+                }
+                _ => return (labels, read(val, env)),
+            }
+        }
     }
-
-    /// Render an argv: every element through the total text conversion
-    /// [`Display`](fmt::Display) performs and `str` exposes.
-    ///
-    /// The one rendering every argv boundary *inside* the shell shares —
-    /// `echo`'s write, a handler arm's argument list, the audit trail's record
-    /// of a call — so an argv is a list of strings wherever it is read.  It is
-    /// total on purpose, and so is unlike the exec boundary, which refuses the
-    /// shapes [`crate::ty::RefusedArg`] names because it is heading for `execve(2)`:
-    /// total inside, gated at the OS call.
-    pub(crate) fn render_argv(args: &[Self]) -> Vec<String> {
-        args.iter().map(ToString::to_string).collect()
+    pub(crate) fn into_computation(mut self) -> Result<(Arc<Comp>, Env), Self> {
+        if let Repr::Syn(Val::Thunk(node), env) = &mut self.0 {
+            return Ok((Arc::clone(node.shape()), std::mem::take(env)));
+        }
+        if let View::Builtin(entry) = self.view() {
+            let (comp, name) = entry.eta();
+            let (comp, name) = (Arc::clone(comp), name.clone());
+            let mut env = Env::EMPTY;
+            env.bind(
+                name,
+                Binding {
+                    value: self,
+                    scheme: None,
+                },
+            );
+            return Ok((comp, env));
+        }
+        Err(self)
     }
-
-    /// The record a program reads of `fact`; `raise` recovers `fact` from it.
-    pub fn failure(fact: crate::fact::ErrorFact) -> Self {
-        Self::Map(Map::witnessed(fact))
+    pub(crate) fn captured_envs(&self, out: &mut Vec<Env>) {
+        match &self.0 {
+            Repr::Syn(_, env) => out.push(env.clone()),
+            Repr::List(items) => items.iter().for_each(|v| v.captured_envs(out)),
+            Repr::Map(entries, _) => entries.values().for_each(|v| v.captured_envs(out)),
+        }
     }
-
-    /// On duplicate keys the *last* pair wins; a caller needing first-wins
-    /// dedups beforehand, as `eval_map` does to keep explicit entries ahead
-    /// of spreads.
-    pub fn map(pairs: Vec<(String, Self)>) -> Self {
-        Self::Map(pairs.into())
+    pub(crate) fn scrubbed(&self, scope: &mut impl FnMut(&Env) -> Option<Env>) -> Option<Self> {
+        match &self.0 {
+            Repr::Syn(val, env) => {
+                let changed_val = withhold(val);
+                let changed_env = scope(env);
+                if changed_val.is_none() && changed_env.is_none() {
+                    return None;
+                }
+                Some(Self(Repr::Syn(
+                    changed_val.unwrap_or_else(|| clone_tag_spine(val)),
+                    changed_env.unwrap_or_else(|| env.clone()),
+                )))
+            }
+            Repr::List(items) => patched(
+                items,
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| v.scrubbed(scope).map(|v| (i, v))),
+                |items, i, v| {
+                    Arc::make_mut(items).set(i, v);
+                },
+            )
+            .map(|items| Self(Repr::List(items))),
+            Repr::Map(entries, fact) => patched(
+                entries,
+                entries
+                    .iter()
+                    .filter_map(|(k, v)| v.scrubbed(scope).map(|v| (k.clone(), v))),
+                |entries, k, v| {
+                    Arc::make_mut(entries).insert(k, v);
+                },
+            )
+            .map(|entries| Self(Repr::Map(entries, fact.clone()))),
+        }
     }
-
-    /// Visit each direct component of data: a list's elements, a record's
-    /// values, a variant's payload, a native's arguments. A closure has none:
-    /// its capture is never entered.
+    /// The builtin this value is, and the arguments its η residual still awaits.
+    pub(crate) fn residual(&self) -> Option<(&Arc<BuiltinEntry>, usize)> {
+        match self.view() {
+            View::Builtin(entry) => Some((entry, entry.decl.fixed_arity())),
+            View::Thunk { comp, env } => {
+                let mut comp = comp.as_ref();
+                let mut remaining = 0;
+                while let CompKind::Lam { body, .. } = &comp.item {
+                    remaining += 1;
+                    comp = body;
+                }
+                let CompKind::Builtin { builtin, .. } = &comp.item else {
+                    return None;
+                };
+                let View::Builtin(entry) = env.get(builtin)?.view() else {
+                    return None;
+                };
+                Some((entry, remaining))
+            }
+            _ => None,
+        }
+    }
+    /// A thunk whose body the checker reads: not a builtin's η residual.
+    pub(crate) fn block(&self) -> Option<(&Arc<Comp>, &Env)> {
+        match self.view() {
+            View::Thunk { comp, env } if self.residual().is_none() => Some((comp, env)),
+            _ => None,
+        }
+    }
     pub(crate) fn try_for_each_child<B>(
         &self,
         f: &mut impl FnMut(&Self) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
-        match self {
-            Self::List(items) => items.iter().try_for_each(|v| f(&v)),
-            Self::Map(pairs) => pairs.iter().try_for_each(|(_, v)| f(&v)),
-            Self::Variant { payload, .. } => payload.iter().try_for_each(|p| f(p)),
-            Self::Native(_, args) => args.iter().try_for_each(f),
-            Self::Unit
-            | Self::Bool(_)
-            | Self::Int(_)
-            | Self::Float(_)
-            | Self::String(_)
-            | Self::Bytes(_)
-            | Self::Thunk(_)
-            | Self::Handle(_) => ControlFlow::Continue(()),
+        match self.view() {
+            View::List(items) => items.iter().try_for_each(|v| f(&v)),
+            View::Map(entries) => entries.iter().try_for_each(|(_, v)| f(&v)),
+            View::Variant { payload, .. } => payload.iter().try_for_each(|v| f(v)),
+            _ => ControlFlow::Continue(()),
         }
     }
-
-    /// The name a diagnostic calls this value.
+    #[cfg(test)]
+    pub(crate) fn env(&self) -> Option<&Env> {
+        match &self.0 {
+            Repr::Syn(_, env) => Some(env),
+            _ => None,
+        }
+    }
+    pub(crate) fn drop_seed(self) {
+        drop_seed_value(self);
+    }
+    pub fn shape(&self) -> ValueShape {
+        match self.view() {
+            View::Unit => ValueShape::Unit,
+            View::Bool(_) => ValueShape::Bool,
+            View::Int(_) => ValueShape::Int,
+            View::Float(_) => ValueShape::Float,
+            View::String(_) => ValueShape::String,
+            View::Bytes(_) => ValueShape::Bytes,
+            View::List(_) => ValueShape::List,
+            View::Map(_) => ValueShape::Map,
+            View::Variant { .. } => ValueShape::Variant,
+            View::Thunk { comp, .. } if comp.lam().is_none() => ValueShape::Block,
+            View::Thunk { .. } | View::Builtin(_) => ValueShape::Function,
+            View::Handle(_) => ValueShape::Handle,
+        }
+    }
+    pub fn found(&self) -> Found {
+        match self.view() {
+            View::Unit => Found::Unit,
+            View::Bool(b) => Found::Bool(b),
+            View::Int(n) => Found::Int(n),
+            View::Float(f) => Found::Float(f),
+            View::String(s) => Found::Text(TextPreview::new(s)),
+            View::Bytes(_) => Found::Bytes,
+            View::List(_) => Found::List,
+            View::Map(_) => Found::Map,
+            View::Variant { label, .. } => Found::Variant(label.to_string()),
+            View::Thunk { comp, .. } if comp.lam().is_none() => Found::Block,
+            View::Thunk { .. } | View::Builtin(_) => Found::Function,
+            View::Handle(_) => Found::Handle,
+        }
+    }
+    pub fn as_int(&self) -> Option<i64> {
+        match self.view() {
+            View::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_float(&self) -> Option<f64> {
+        match self.view() {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "Int→Float loses precision beyond 2^53"
+            )]
+            View::Int(n) => Some(n as f64),
+            View::Float(f) => Some(f.get()),
+            _ => None,
+        }
+    }
+    pub(crate) fn heads(&self) -> &'static [Head] {
+        match self.view() {
+            View::Unit => &[Head::Unit],
+            View::Bool(_) => &[Head::Bool],
+            View::Int(_) => &[Head::Int],
+            View::Float(_) => &[Head::Float],
+            View::String(_) => &[Head::String],
+            View::Bytes(_) => &[Head::Bytes],
+            View::List(_) => &[Head::List],
+            View::Map(_) => &[Head::Map, Head::Record],
+            View::Variant { .. } => &[Head::Variant],
+            View::Thunk { .. } | View::Builtin(_) => &[Head::Thunk],
+            View::Handle(_) => &[Head::Handle],
+        }
+    }
+    pub fn scalar_text(&self) -> Option<String> {
+        matches!(
+            self.view(),
+            View::String(_) | View::Int(_) | View::Float(_) | View::Bool(_)
+        )
+        .then(|| self.to_string())
+    }
+    /// Render every argument through the total text conversion.
+    pub(crate) fn render_argv(args: &[Self]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
     pub fn type_name(&self) -> &'static str {
-        match self {
-            Self::Unit => "Unit",
-            Self::Bool(_) => "Bool",
-            Self::Int(_) => "Int",
-            Self::Float(_) => "Float",
-            Self::String(_) => "String",
-            Self::Bytes(_) => "Bytes",
-            Self::List(_) => "List",
-            Self::Map(_) => "Map",
-            Self::Variant { .. } => "Variant",
-            Self::Thunk(c) if c.comp().lam().is_some() => "Lambda",
-            Self::Thunk(_) => "Block",
-            Self::Native(..) => "Native",
-            Self::Handle(_) => "Handle",
+        match self.view() {
+            View::Unit => "Unit",
+            View::Bool(_) => "Bool",
+            View::Int(_) => "Int",
+            View::Float(_) => "Float",
+            View::String(_) => "String",
+            View::Bytes(_) => "Bytes",
+            View::List(_) => "List",
+            View::Map(_) => "Map",
+            View::Variant { .. } => "Variant",
+            View::Thunk { comp, .. } if comp.lam().is_some() => "Lambda",
+            View::Thunk { .. } => "Block",
+            View::Builtin(_) => "Native",
+            View::Handle(_) => "Handle",
         }
     }
-
-    /// A *shallow* size estimate in bytes, weighed against
-    /// `BindingLease::large_binding_bytes` whenever a session-scope name is
-    /// installed, so a heavy binding earns a residency nudge. Exact for
-    /// `String`/`Bytes`, and recursive through the *elements* of
-    /// `List`/`Map`/`Variant`, so a large collection of small values is
-    /// counted honestly. `Lambda`, `Block`, `Native` and `Handle` are never
-    /// descended: chasing a closure's captured `Env` or a handle's buffers is
-    /// the retained-size walk this design refuses throughout, `pins_live_work` in
-    /// `shell/runtime/handle.rs` refusing it identically. A nudge, then, not an
-    /// account — structure shared under `Arc` counts twice, captures not at all.
+    /// Estimate data bytes; never descends a capture or a handle's buffers.
     pub(crate) fn shallow_size(&self) -> usize {
-        /// Small and fixed rather than zero, so a binding full of closures
-        /// still moves the estimate without pretending to measure captures.
-        const OPAQUE_CONSTANT: usize = 32;
-        match self {
-            Self::Unit => 0,
-            Self::Bool(_) => 1,
-            Self::Int(_) | Self::Float(_) => 8,
-            Self::String(s) => s.len(),
-            Self::Bytes(b) => b.len(),
-            Self::List(items) => items.iter().map(|v| v.shallow_size()).sum(),
-            Self::Map(pairs) => pairs.iter().map(|(k, v)| k.len() + v.shallow_size()).sum(),
-            Self::Variant { label, payload } => {
-                label.len() + payload.as_deref().map_or(0, Self::shallow_size)
+        let (labels, terminal) = self.peel_variants();
+        labels.into_iter().map(|label| label.len()).sum::<usize>()
+            + match terminal.view() {
+                View::Unit => 0,
+                View::Bool(_) => 1,
+                View::Int(_) | View::Float(_) => 8,
+                View::String(s) => s.len(),
+                View::Bytes(b) => b.len(),
+                View::List(items) => items.iter().map(|v| v.shallow_size()).sum(),
+                View::Map(entries) => entries
+                    .iter()
+                    .map(|(k, v)| k.len() + v.shallow_size())
+                    .sum(),
+                View::Variant { .. } => unreachable!("the tag spine was peeled above"),
+                View::Thunk { .. } | View::Builtin(_) | View::Handle(_) => 32,
             }
-            Self::Thunk(_) | Self::Native(..) | Self::Handle(_) => OPAQUE_CONSTANT,
-        }
     }
 }
 
-/// Representational equality, the tests' oracle; ral's own `==` is [`Value::equals`].
-impl PartialEq for Value {
+impl From<List> for ValClos {
+    fn from(list: List) -> Self {
+        Self(Repr::List(list.0))
+    }
+}
+impl From<Map> for ValClos {
+    fn from(map: Map) -> Self {
+        Self(Repr::Map(map.0, None))
+    }
+}
+
+/// Component V′ of ⟨V, ρ⟩, read as ⟨V′, ρ⟩.
+pub(super) fn read<'a>(val: &'a Val, env: &'a Env) -> Cow<'a, ValClos> {
+    match val {
+        Val::Variable(name) => Cow::Borrowed(
+            env.get(name)
+                .expect("a value closure binds its direct names"),
+        ),
+        _ => Cow::Owned(ValClos(Repr::Syn(clone_tag_spine(val), env.clone()))),
+    }
+}
+
+fn clone_tag_spine(mut val: &Val) -> Val {
+    let mut labels = Vec::new();
+    while let Val::Variant { label, payload } = val {
+        labels.push(label.clone());
+        val = payload;
+    }
+    labels
+        .into_iter()
+        .rev()
+        .fold(val.clone(), |payload, label| Val::Variant {
+            label,
+            payload: Box::new(payload),
+        })
+}
+
+fn missing(name: &str, env: &Env, sig: &Signature) -> Error {
+    let hint = match name {
+        "STATUS" => None,
+        _ => crate::typecheck::hyphen_boundary(name, |p| lookup(p, env, sig).is_some())
+            .map(crate::typecheck::hyphen_boundary_hint),
+    };
+    let error = Error::new(Reason::Evaluation(Box::new(EvalFailure::MissingBinding(
+        name.to_string(),
+    ))));
+    match hint {
+        Some(hint) => error.with_hint(hint),
+        None => error,
+    }
+}
+
+fn pull_direct(mut val: &Val, captured: &mut Env, env: &Env, sig: &Signature) -> Result<(), Error> {
+    while let Val::Variant { payload, .. } = val {
+        val = payload;
+    }
+    match val {
+        Val::Variable(name) if captured.get(name).is_none() => {
+            let value = lookup(name, env, sig)
+                .cloned()
+                .ok_or_else(|| missing(name, env, sig))?;
+            captured.bind(
+                name.clone(),
+                Binding {
+                    value,
+                    scheme: None,
+                },
+            );
+        }
+        Val::Variant { .. } => unreachable!("the tag spine was peeled above"),
+        Val::List(node) => {
+            for elem in node.shape() {
+                pull_direct(&elem.item, captured, env, sig)?;
+            }
+        }
+        Val::Record(node) | Val::Map(node) => {
+            for (_, elem) in node.shape() {
+                pull_direct(&elem.item, captured, env, sig)?;
+            }
+        }
+        Val::Unit
+        | Val::Bool(_)
+        | Val::Int(_)
+        | Val::Float(_)
+        | Val::String(_)
+        | Val::Bytes(_)
+        | Val::Builtin(_)
+        | Val::Handle(_)
+        | Val::Thunk(_)
+        | Val::Variable(_) => {}
+    }
+    Ok(())
+}
+
+fn withhold(mut val: &Val) -> Option<Val> {
+    let mut labels = Vec::new();
+    while let Val::Variant { label, payload } = val {
+        labels.push(label);
+        val = payload;
+    }
+    let Val::Handle(Handle::Live(h)) = val else {
+        return None;
+    };
+    Some(labels.into_iter().rev().fold(
+        Val::Handle(Handle::Withheld(h.title.clone().into())),
+        |payload, label| Val::Variant {
+            label: label.clone(),
+            payload: Box::new(payload),
+        },
+    ))
+}
+
+fn patched<C: Clone, K, V>(
+    container: &C,
+    changes: impl IntoIterator<Item = (K, V)>,
+    mut put: impl FnMut(&mut C, K, V),
+) -> Option<C> {
+    let mut changes = changes.into_iter().peekable();
+    changes.peek()?;
+    let mut copy = container.clone();
+    for (key, new) in changes {
+        put(&mut copy, key, new);
+    }
+    Some(copy)
+}
+
+/// Representational equality; ral's `==` is [`ValClos::equals`].
+impl PartialEq for ValClos {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Unit, Self::Unit) => true,
-            (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::Int(a), Self::Int(b)) => a == b,
-            (Self::Float(a), Self::Float(b)) => a == b,
-            (Self::String(a), Self::String(b)) => a == b,
-            (Self::Bytes(a), Self::Bytes(b)) => a == b,
-            (Self::List(a), Self::List(b)) => a == b,
-            (Self::Map(a), Self::Map(b)) => a == b,
-            (
-                Self::Variant {
-                    label: la,
-                    payload: pa,
-                },
-                Self::Variant {
-                    label: lb,
-                    payload: pb,
-                },
-            ) => la == lb && pa == pb,
-            // Suspensions are never structurally equal.
+        let (left_labels, left) = self.peel_variants();
+        let (right_labels, right) = other.peel_variants();
+        if left_labels != right_labels {
+            return false;
+        }
+        match (left.view(), right.view()) {
+            (View::Unit, View::Unit) => true,
+            (View::Bool(a), View::Bool(b)) => a == b,
+            (View::Int(a), View::Int(b)) => a == b,
+            (View::Float(a), View::Float(b)) => a == b,
+            (View::String(a), View::String(b)) => a == b,
+            (View::Bytes(a), View::Bytes(b)) => a == b,
+            (View::List(a), View::List(b)) => a.iter().eq(b.iter()),
+            (View::Map(a), View::Map(b)) => a.len() == b.len() && a.iter().eq(b.iter()),
             _ => false,
         }
     }
 }
-
-impl fmt::Display for Value {
+impl fmt::Display for ValClos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unit => write!(f, "()"),
-            Self::Bool(b) => write!(f, "{b}"),
-            Self::Int(n) => write!(f, "{n}"),
-            Self::Float(n) => write!(f, "{n}"),
-            Self::String(s) => write!(f, "{s}"),
-            Self::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
-            Self::List(items) => {
-                if items.is_empty() {
-                    return write!(f, "[]");
-                }
+        let (labels, terminal) = self.peel_variants();
+        for (i, label) in labels.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{TAG_PREFIX}{label}")?;
+        }
+        if !labels.is_empty() {
+            if matches!(terminal.view(), View::Unit) {
+                return Ok(());
+            }
+            write!(f, " ")?;
+        }
+        if let Some((entry, remaining)) = terminal.residual() {
+            let arity = entry.decl.fixed_arity();
+            write!(f, "<native {}", entry.decl.name)?;
+            if remaining < arity {
+                write!(f, ", {} of {arity} arguments", arity - remaining)?;
+            }
+            return write!(f, ">");
+        }
+        match terminal.view() {
+            View::Unit => write!(f, "()"),
+            View::Bool(b) => write!(f, "{b}"),
+            View::Int(n) => write!(f, "{n}"),
+            View::Float(n) => write!(f, "{n}"),
+            View::String(s) => write!(f, "{s}"),
+            View::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
+            View::List(items) => {
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {
                     if i > 0 {
@@ -331,12 +721,12 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Self::Map(m) => {
-                if m.is_empty() {
+            View::Map(entries) => {
+                if entries.is_empty() {
                     return write!(f, "[:]");
                 }
                 write!(f, "[")?;
-                for (i, (k, v)) in m.iter().enumerate() {
+                for (i, (k, v)) in entries.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -344,35 +734,19 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Self::Variant { label, payload } => match payload {
-                None => write!(f, "{TAG_PREFIX}{label}"),
-                Some(p) => write!(f, "{TAG_PREFIX}{label} {p}"),
-            },
-            Self::Thunk(c) => match c.comp().lam() {
+            View::Variant { .. } => unreachable!("the tag spine was peeled above"),
+            View::Thunk { comp, .. } => match comp.lam() {
                 Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
                 None => write!(f, "<block>"),
             },
-            Self::Native(entry, args) => {
-                write!(f, "<native {}", entry.decl.name)?;
-                if !args.is_empty() {
-                    write!(
-                        f,
-                        ", {} of {} arguments",
-                        args.len(),
-                        entry.decl.fixed_arity()
-                    )?;
-                }
-                write!(f, ">")
-            }
-            Self::Handle(h) => write!(f, "<handle:{}>", h.title),
+            View::Builtin(_) => unreachable!("a builtin has a residual"),
+            View::Handle(h) => write!(f, "<handle:{}>", h.title()),
         }
     }
 }
 
-/// Format as `<|a b ...| block>`, flattening the curried `Lam` chain.
-fn fmt_lambda(param: &crate::ir::Name, body: &crate::ir::Comp) -> String {
-    use crate::ir::{CompKind, Val, is_synthetic};
-
+fn fmt_lambda(param: &Name, body: &Comp) -> String {
+    use crate::ir::is_synthetic;
     let mut names = vec![param];
     let mut comp = body;
     while let CompKind::Lam { param, body } = &comp.item {
@@ -404,19 +778,17 @@ enum TerminalField {
     Flag(fn(&TerminalState) -> bool),
     Mode,
 }
-
 impl TerminalField {
-    fn value(&self, terminal: &TerminalState) -> Value {
+    fn value(&self, terminal: &TerminalState) -> ValClos {
         match self {
-            Self::Flag(read) => Value::Bool(read(terminal)),
-            Self::Mode => Value::string(match terminal.mode {
+            Self::Flag(read) => ValClos::bool(read(terminal)),
+            Self::Mode => ValClos::string(match terminal.mode {
                 InteractiveMode::Auto => "auto",
                 InteractiveMode::Minimal => "minimal",
                 InteractiveMode::Full => "full",
             }),
         }
     }
-
     fn ty(&self) -> Ty {
         match self {
             Self::Flag(_) => Ty::bool(),
@@ -424,7 +796,6 @@ impl TerminalField {
         }
     }
 }
-
 const TERMINAL_FIELDS: &[(&str, TerminalField)] = &[
     ("stdin-tty", TerminalField::Flag(|t| t.startup_stdin_tty)),
     ("stdout-tty", TerminalField::Flag(|t| t.startup_stdout_tty)),
@@ -463,9 +834,7 @@ const TERMINAL_FIELDS: &[(&str, TerminalField)] = &[
     ),
     ("mode", TerminalField::Mode),
 ];
-
-impl Value {
-    /// The closed record scheme for [`Value::from`] a [`TerminalState`].
+impl ValClos {
     pub fn terminal_scheme() -> Closed {
         let fields = TERMINAL_FIELDS
             .iter()
@@ -474,9 +843,7 @@ impl Value {
         Binders::close(|_| closed_record(&fields))
     }
 }
-
-/// The `$TERMINAL` record bound for rc files and plugins.
-impl From<&TerminalState> for Value {
+impl From<&TerminalState> for ValClos {
     fn from(terminal: &TerminalState) -> Self {
         Self::map(
             TERMINAL_FIELDS
@@ -487,43 +854,34 @@ impl From<&TerminalState> for Value {
     }
 }
 
-/// A block mentioning every session name of `env`, so its capture is `env`
-/// itself.
 #[cfg(test)]
-pub(crate) fn block_over(env: &Env) -> Value {
-    use crate::ir::{CompKind, ThunkNode, Val};
-    use crate::source::Spanned;
+pub(crate) fn block_over(env: &Env) -> ValClos {
     let names = env
         .names()
-        .map(|n| Spanned::synthetic(Val::Variable(n.clone())))
+        .map(|n| crate::source::Spanned::synthetic(Val::Variable(n.clone())))
         .collect::<Vec<_>>();
-    let body = Spanned::synthetic(CompKind::Return(Val::list(names)));
-    let node = ThunkNode::new(Arc::new(body));
-    Value::Thunk(Closure::new(Arc::clone(node.shape()), node.occ(), env))
+    ValClos::thunk(
+        Arc::new(crate::source::Spanned::synthetic(CompKind::Return(
+            Val::list(names),
+        ))),
+        env,
+    )
 }
-
-/// The scope a block `v` captured.
 #[cfg(test)]
-pub(crate) fn captured(v: Option<&Value>) -> &Env {
-    match v {
-        Some(Value::Thunk(closure)) => closure.env(),
+pub(crate) fn captured(v: Option<&ValClos>) -> &Env {
+    match v.map(ValClos::view) {
+        Some(View::Thunk { env, .. }) => env,
         other => panic!("expected a block, got {other:?}"),
     }
 }
-
-/// A chain of `n` blocks over `foot`, each capturing the next in a one-binding
-/// env — the skeleton of a user-built lazy list.  Fixture for the walks that
-/// cross the captured-env seam once per link: the seed encoder, the fork's
-/// scrub, and `Env`'s drop.
 #[cfg(test)]
-pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
-    let body = Arc::new(crate::source::Spanned::synthetic(
-        crate::ir::CompKind::Return(crate::ir::Val::Variable("tail".into())),
-    ));
-    let node = crate::ir::ThunkNode::new(Arc::clone(&body));
+pub(crate) fn deep_block_chain(n: usize, foot: ValClos) -> ValClos {
+    let body = Arc::new(crate::source::Spanned::synthetic(CompKind::Return(
+        Val::Variable("tail".into()),
+    )));
     let mut v = foot;
     for _ in 0..n {
-        let mut env = Env::new();
+        let mut env = Env::EMPTY;
         env.bind(
             "tail".into(),
             Binding {
@@ -531,23 +889,19 @@ pub(crate) fn deep_block_chain(n: usize, foot: Value) -> Value {
                 scheme: None,
             },
         );
-        v = Value::Thunk(Closure::new(Arc::clone(&body), node.occ(), &env));
+        v = ValClos::thunk(Arc::clone(&body), &env);
     }
     v
 }
-
-/// A chain of `n` one-element list literals over `foot`, each capturing the
-/// next in a one-binding env — `acc = [$acc]`, run by a recursive function.
-/// The literal repr's captured `Env` must be cut by the same
-/// trampoline `Closure`'s drop uses, or a deep chain overflows the stack.
 #[cfg(test)]
-pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
-    let node = crate::ir::ListNode::new(Box::from([crate::source::Spanned::synthetic(
-        crate::ir::Val::Variable("acc".into()),
-    )]));
+pub(crate) fn deep_list_chain(n: usize, foot: ValClos) -> ValClos {
+    let val = Val::list(vec![crate::source::Spanned::synthetic(Val::Variable(
+        "acc".into(),
+    ))]);
+    let sig = Signature::default();
     let mut v = foot;
     for _ in 0..n {
-        let mut env = Env::new();
+        let mut env = Env::EMPTY;
         env.bind(
             "acc".into(),
             Binding {
@@ -555,7 +909,7 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
                 scheme: None,
             },
         );
-        v = Value::List(List::literal(&node, &env));
+        v = ValClos::close(&val, &env, &sig).unwrap();
     }
     v
 }
@@ -563,10 +917,9 @@ pub(crate) fn deep_list_chain(n: usize, foot: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn terminal_records_match_their_closed_scheme_in_every_mode() {
-        let scheme = Value::terminal_scheme();
+        let scheme = ValClos::terminal_scheme();
         let site = crate::ty::Site::snapshot(
             &crate::typecheck::Unifier::new(),
             &scheme.ty,
@@ -581,67 +934,99 @@ mod tests {
                 mode,
                 ..TerminalState::default()
             };
-            let value = Value::from(&terminal);
+            let value = ValClos::from(&terminal);
             site.admit(&value, &crate::ty::Fixings::default())
                 .expect("TERMINAL matches its scheme");
-            let Value::Map(fields) = value else {
-                panic!("TERMINAL is a record")
-            };
-            assert_eq!(fields.get("mode").as_deref(), Some(&Value::string(text)));
+            assert_eq!(
+                value.as_map("test").unwrap().get("mode").as_deref(),
+                Some(&ValClos::string(text))
+            );
         }
     }
-
     #[test]
-    fn native_display_reports_held_arguments() {
-        let shell = crate::test_helper::core_shell();
-        let entry = Arc::new(shell.lookup_builtin("has").expect("has builtin"));
+    fn a_literal_naming_a_signature_name_captures_its_value() {
+        let mut sig = Signature::default();
+        sig.install_prelude(Arc::new(
+            std::iter::once((
+                "k".into(),
+                Binding {
+                    value: ValClos::int(7),
+                    scheme: None,
+                },
+            ))
+            .collect(),
+        ));
+        let val = Val::list(vec![crate::source::Spanned::synthetic(Val::Variable(
+            "k".into(),
+        ))]);
+        let value = ValClos::close(&val, &Env::EMPTY, &sig).unwrap();
+        assert_eq!(value.env().unwrap().get("k"), Some(&ValClos::int(7)));
         assert_eq!(
-            Value::Native(Arc::clone(&entry), Arc::from([])).to_string(),
-            "<native has>"
-        );
-        assert_eq!(
-            Value::Native(entry, Arc::from([Value::map(vec![])])).to_string(),
-            "<native has, 1 of 2 arguments>"
+            value.as_list("test").unwrap().get(0).as_deref(),
+            Some(&ValClos::int(7))
         );
     }
-
-    /// Captures are invisible by construction, not merely usually small.
     #[test]
     fn shallow_size_never_descends_into_closure_captures() {
-        let block = block_over(&Env::new());
-        let block_size = block.shallow_size();
-        assert!(block_size > 0, "a closure is a small nonzero constant");
-
-        let mut heavy_env = Env::new();
-        heavy_env.bind(
+        let block = block_over(&Env::EMPTY);
+        let size = block.shallow_size();
+        assert!(size > 0);
+        let mut env = Env::EMPTY;
+        env.bind(
             "heavy".into(),
             Binding {
-                value: Value::string("x".repeat(10_000)),
+                value: ValClos::string("x".repeat(10_000)),
                 scheme: None,
             },
         );
-        let heavy_block = block_over(&heavy_env);
-        assert_eq!(
-            heavy_block.shallow_size(),
-            block_size,
-            "a closure's captured scope must never affect the estimate"
-        );
-
-        let list_of_one_closure = Value::list(vec![block]);
-        assert_eq!(list_of_one_closure.shallow_size(), block_size);
+        assert_eq!(block_over(&env).shallow_size(), size);
+        assert_eq!(ValClos::list(vec![block]).shallow_size(), size);
     }
-
-    /// A 10⁵-deep `acc = [$acc]` chain drops on a 256 KiB thread:
-    /// the literal repr's captured `Env` is cut by `Env::dismantle`'s
-    /// trampoline, the same one `Closure`'s drop uses, even though the chain
-    /// never passes through a `Closure`.
+    #[test]
+    fn a_component_shares_the_whole_capture() {
+        let mut env = Env::EMPTY;
+        for (name, n) in [("a", 1), ("b", 2)] {
+            env.bind(
+                name.into(),
+                Binding {
+                    value: ValClos::int(n),
+                    scheme: None,
+                },
+            );
+        }
+        let val = Val::list(vec![
+            crate::source::Spanned::synthetic(Val::list(vec![crate::source::Spanned::synthetic(
+                Val::Variable("a".into()),
+            )])),
+            crate::source::Spanned::synthetic(Val::Variable("b".into())),
+        ]);
+        let value = ValClos::close(&val, &env, &Signature::default()).unwrap();
+        let child = value.as_list("test").unwrap().get(0).unwrap();
+        assert!(child.env().unwrap().ptr_eq(value.env().unwrap()));
+        assert_eq!(child.env().unwrap().get("b"), Some(&ValClos::int(2)));
+    }
     #[test]
     fn a_deep_literal_chain_drops_on_a_small_stack() {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
-            .spawn(|| drop(deep_list_chain(100_000, Value::Unit)))
+            .spawn(|| drop(deep_list_chain(100_000, ValClos::UNIT)))
             .expect("spawn")
             .join()
-            .expect("a deep literal chain must drop without exhausting the stack");
+            .expect("a deep literal chain drops without exhausting the stack");
+    }
+    #[test]
+    fn deep_built_chains_drop_on_a_small_stack() {
+        let chains: [fn(ValClos) -> ValClos; 2] = [
+            |prev| ValClos::list(vec![prev]),
+            |prev| ValClos::map(vec![("k".into(), prev)]),
+        ];
+        for link in chains {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || drop((0..100_000).fold(ValClos::UNIT, |prev, _| link(prev))))
+                .expect("spawn")
+                .join()
+                .expect("a deep built chain drops without exhausting the stack");
+        }
     }
 }

@@ -8,16 +8,16 @@ use super::*;
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::path::{self, Excluded, FrozenPath, Trace};
 use crate::shell::grant::{decode_capability_map, decode_grant};
-use crate::shell::runtime::Value;
+use crate::shell::runtime::ValClos;
 use crate::test_helper::{self, Tree, layer, trace};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use strum::VariantArray;
 
-/// The `Value::Map` shape `decode_capability_map` receives in production.
-fn map(entries: Vec<(&str, Value)>) -> Value {
-    Value::Map(
+/// The map shape `decode_capability_map` receives in production.
+fn map(entries: Vec<(&str, ValClos)>) -> ValClos {
+    ValClos::map(
         entries
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
@@ -25,23 +25,23 @@ fn map(entries: Vec<(&str, Value)>) -> Value {
     )
 }
 
-fn tagged(label: &str, payload: &str) -> Value {
-    Value::variant(label, Some(Value::string(payload)))
+fn tagged(label: &str, payload: &str) -> ValClos {
+    ValClos::variant(label, Some(ValClos::string(payload)))
 }
 
 /// `xdg-KIND` place with a subpath.
 #[cfg(unix)]
-fn xdg(kind: &str, sub: &str) -> Value {
+fn xdg(kind: &str, sub: &str) -> ValClos {
     tagged(&format!("xdg-{kind}"), sub)
 }
 
 /// A list of `(tag, payload)` targets, the payload itself a tagged value.
 #[cfg(unix)]
-fn places(entries: &[(&str, Value)]) -> Value {
-    Value::list(
+fn places(entries: &[(&str, ValClos)]) -> ValClos {
+    ValClos::list(
         entries
             .iter()
-            .map(|(tag, inner)| Value::variant(*tag, Some(inner.clone())))
+            .map(|(tag, inner)| ValClos::variant(*tag, Some(inner.clone())))
             .collect(),
     )
 }
@@ -403,8 +403,8 @@ fn neutral_layers_leave_a_restrictive_stack_as_it_was() {
 #[cfg(unix)]
 #[test]
 fn exec_keys_follow_the_frozen_surface() {
-    let decode = |targets: Vec<Value>| {
-        let exec = map(vec![("allow", Value::list(targets))]);
+    let decode = |targets: Vec<ValClos>| {
+        let exec = map(vec![("allow", ValClos::list(targets))]);
         decode_capability_map(&map(vec![("exec", exec)]), "test", &test_ctx("/h"))
             .expect("places decode")
             .exec()
@@ -458,7 +458,7 @@ fn a_grant_value_refuses_an_unknown_key() {
     let stale = crate::data::FOValue::Map {
         entries: vec![("detach".into(), crate::data::FOValue::Bool { value: false })],
     };
-    let err = decode_capability_map(&Value::from(stale), "test", &test_ctx("/h"))
+    let err = decode_capability_map(&ValClos::from(stale), "test", &test_ctx("/h"))
         .expect_err("`detach` is no key of a grant");
     assert!(err.to_string().contains("detach"), "{err}");
 }
@@ -518,15 +518,15 @@ fn decode_accepts_known_places() {
             map(vec![
                 (
                     "read",
-                    Value::list(vec![
+                    ValClos::list(vec![
                         tagged("xdg-config", "."),
                         tagged("xdg-data", "agda"),
                         tagged("home", ".cache"),
                         tagged("absolute", "/etc"),
                     ]),
                 ),
-                ("write", Value::list(vec![tagged("xdg-cache", ".")])),
-                ("deny", Value::list(vec![tagged("xdg-config", "secret")])),
+                ("write", ValClos::list(vec![tagged("xdg-cache", ".")])),
+                ("deny", ValClos::list(vec![tagged("xdg-config", "secret")])),
             ]),
         ),
     ]);
@@ -540,7 +540,10 @@ fn decode_accepts_known_places() {
 fn decode_rejects_xdg_typo() {
     let v = map(vec![(
         "fs",
-        map(vec![("read", Value::list(vec![tagged("xdg-cofnig", ".")]))]),
+        map(vec![(
+            "read",
+            ValClos::list(vec![tagged("xdg-cofnig", ".")]),
+        )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h"))
         .unwrap_err()
@@ -574,7 +577,7 @@ fn decode_rewrites_places_to_concrete_paths() {
             "fs",
             map(vec![(
                 "read",
-                Value::list(vec![tagged("home", "notes"), tagged("absolute", "/etc")]),
+                ValClos::list(vec![tagged("home", "notes"), tagged("absolute", "/etc")]),
             )]),
         ),
     ]);
@@ -608,7 +611,7 @@ fn decode_rejects_directory_as_exec_file() {
         "exec",
         map(vec![(
             "allow",
-            Value::list(vec![tagged("absolute", "/etc")]),
+            ValClos::list(vec![tagged("absolute", "/etc")]),
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
@@ -623,7 +626,7 @@ fn decode_rejects_directory_as_exec_file() {
 fn decode_rejects_xdg_var_outside_home() {
     let v = map(vec![(
         "fs",
-        map(vec![("read", Value::list(vec![tagged("xdg-data", ".")]))]),
+        map(vec![("read", ValClos::list(vec![tagged("xdg-data", ".")]))]),
     )]);
     let err = with_var("XDG_DATA_HOME", Some("/etc"), || {
         decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err()
@@ -643,7 +646,7 @@ fn decode_rejects_xdg_var_outside_home() {
 fn decode_errors_when_there_is_no_home() {
     let v = map(vec![(
         "fs",
-        map(vec![("read", Value::list(vec![tagged("home", "x")]))]),
+        map(vec![("read", ValClos::list(vec![tagged("home", "x")]))]),
     )]);
     with_vars_cleared(&crate::host::HOME_VARS, || {
         for ctx in [test_ctx(""), no_home_ctx()] {
@@ -663,7 +666,7 @@ fn decode_rejects_relative_absolute_place() {
         "fs",
         map(vec![(
             "read",
-            Value::list(vec![tagged("absolute", "proj")]),
+            ValClos::list(vec![tagged("absolute", "proj")]),
         )]),
     )]);
     let err = decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err();
@@ -686,7 +689,7 @@ fn decode_rejects_dot_relative_absolute_places() {
     for p in ["./a", "../b"] {
         let v = map(vec![(
             "fs",
-            map(vec![("read", Value::list(vec![tagged("absolute", p)]))]),
+            map(vec![("read", ValClos::list(vec![tagged("absolute", p)]))]),
         )]);
         let err = decode_capability_map(&v, "test", &test_ctx("/h"))
             .unwrap_err()
@@ -703,7 +706,7 @@ fn decode_rejects_dot_relative_absolute_places() {
 fn decode_accepts_bare_exec_name() {
     let v = map(vec![(
         "exec",
-        map(vec![("allow", Value::list(vec![tagged("name", "sh")]))]),
+        map(vec![("allow", ValClos::list(vec![tagged("name", "sh")]))]),
     )]);
     let layer = decode_capability_map(&v, "test", &test_ctx("/h")).expect("a bare command name");
     let exec = layer.axes().exec.expect("exec supplied");
@@ -721,7 +724,7 @@ fn decode_accepts_bare_exec_name() {
 fn decode_accepts_cwd_relative_fs_place() {
     let v = map(vec![(
         "fs",
-        map(vec![("read", Value::list(vec![tagged("cwd", "proj")]))]),
+        map(vec![("read", ValClos::list(vec![tagged("cwd", "proj")]))]),
     )]);
     decode_capability_map(&v, "test", &test_ctx("/h"))
         .expect("a cwd place freezes to an absolute path");
@@ -732,7 +735,7 @@ fn decode_accepts_cwd_relative_fs_place() {
 #[test]
 fn decode_rejects_non_tag_verb() {
     for key in ["editor", "shell"] {
-        let v = map(vec![(key, Value::list(vec![Value::Int(5)]))]);
+        let v = map(vec![(key, ValClos::list(vec![ValClos::int(5)]))]);
         let err = decode_capability_map(&v, "test", &test_ctx("/h"))
             .unwrap_err()
             .to_string();
@@ -748,14 +751,17 @@ fn decode_accepts_verb_lists_offline_and_withheld() {
     let v = map(vec![
         (
             "editor",
-            Value::list(vec![
-                Value::variant("read", None),
-                Value::variant("tui", None),
+            ValClos::list(vec![
+                ValClos::variant("read", None),
+                ValClos::variant("tui", None),
             ]),
         ),
-        ("shell", Value::list(vec![Value::variant("chdir", None)])),
-        ("net", Value::variant("offline", None)),
-        ("gpu", Value::variant("withheld", None)),
+        (
+            "shell",
+            ValClos::list(vec![ValClos::variant("chdir", None)]),
+        ),
+        ("net", ValClos::variant("offline", None)),
+        ("gpu", ValClos::variant("withheld", None)),
     ]);
     let layer = decode_capability_map(&v, "test", &test_ctx("/h"))
         .expect("verbs, `offline` and `withheld`");
@@ -837,15 +843,15 @@ fn a_grant_value_spells_no_every_and_a_repeat_adds_nothing() {
     let every = map(vec![(
         "exec",
         map(vec![
-            ("every", Value::Bool(true)),
-            ("allow", Value::list(vec![])),
+            ("every", ValClos::bool(true)),
+            ("allow", ValClos::list(vec![])),
         ]),
     )]);
     let err = decode_capability_map(&every, "test", &test_ctx("/h")).unwrap_err();
     assert!(err.to_string().contains("every"), "{err}");
     let git = || tagged("name", "git");
-    let decode = |allow: Vec<Value>| {
-        let exec = map(vec![("exec", map(vec![("allow", Value::list(allow))]))]);
+    let decode = |allow: Vec<ValClos>| {
+        let exec = map(vec![("exec", map(vec![("allow", ValClos::list(allow))]))]);
         decode_capability_map(&exec, "test", &test_ctx("/h")).unwrap()
     };
     assert_eq!(decode(vec![git(), git()]), decode(vec![git()]));
@@ -1596,7 +1602,7 @@ fn a_root_directory_runs_files_not_tools_and_reads_what_it_runs() {
 #[test]
 fn the_root_key_resolves_with_no_walk() {
     let fs = |list: &str| {
-        let root = Value::list(vec![tagged("absolute", "/")]);
+        let root = ValClos::list(vec![tagged("absolute", "/")]);
         map(vec![("fs", map(vec![(list, root)]))])
     };
     let ctx = test_ctx("/h");

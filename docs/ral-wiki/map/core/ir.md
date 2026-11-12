@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -21,14 +21,16 @@ the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
 
 **The tree is indexed by a phase.** `Val`, `CompKind`, `Prim`, `Exec`, their
-operand types and shared-node aliases take `P: Phase = Checked`, a trait with
+operand types and shared-node aliases take `P: Phase = Explicit`, a trait with
 one associated type per annotated position: `Bind` (a `CompKind::Bind`'s or
 `Phrase::Define`'s right-hand side), `Call` (a `CompKind::App`),
-`BindingCall` (a `CompKind::BindingCall`), `Boundary` (`Exec.site`, an
-`Option<P::Boundary>`). `Checked`, the phase the evaluator runs, has
-`Bind = Call = ()`, an uninhabited `BindingCall` and `Boundary = Arc<Site>`.
+`BindingCall` (a `CompKind::BindingCall`) and `Boundary` (`Exec.site`, an
+`Option<P::Boundary>`). `Explicit` has `Bind = Call = ()`, an uninhabited
+`BindingCall` and `Boundary = Arc<Site>`: it holds no unknowns, so
+elaborator output, checked IR and runtime IR share it, and only checked IR
+carries sites.
 The checker's own `Inferring` phase holds holes and types there
-([[map/core/typecheck|typecheck]]); readback alone turns it into `Checked`.
+([[map/core/typecheck|typecheck]]); readback alone turns it into `Explicit`.
 `Serial` marks the phases whose trees serialise: the skipped annotations
 default, sites cross. `Toplevel` is always checked. `Prim::map_operands`
 converts `Prim<P>` to `Prim<Q>`, preserving operand spans; inference's individual
@@ -37,8 +39,11 @@ sub-rules retain their own operand order.
 Values, computations and shared nodes:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
-  maps, variants, thunks, variables. A value can never diverge or perform I/O,
-  and forming one costs O(text), never O(data): `Val::Thunk(Arc<ThunkNode>)`,
+  maps, variants, thunks, variables, and runtime constants `Bytes`, `Builtin`
+  and `Handle`. The elaborator writes none of those three; `Builtin` and
+  `Handle` are serde-skipped, crossing through `SerialValue` instead.
+  Forming a value executes no computation. Collection and thunk syntax share
+  their `Arc` nodes: `Val::Thunk(Arc<ThunkNode>)`,
   `Val::List(Arc<ListNode>)`, `Val::Record`, and `Val::Map` (each
   `Arc<FieldsNode>`, entries sorted by key, stably, at elaboration) hold only a
   **plain** literal — no spread, no computed key. `Val` itself stays
@@ -64,8 +69,9 @@ Values, computations and shared nodes:
   `CommandName::Bare`, and `Env`'s keys. A bind, a capture and a label clone a
   pointer.
 - `Val::Variant { label, payload: Box<Val> }` always carries a payload;
-  elaboration supplies `Unit` for a bare tag. Runtime `Value::variant`
-  normalises unit payloads to its compact bare-tag representation.
+  elaboration supplies `Unit` for a bare tag. Runtime `ValClos::variant`
+  shares its payload's syntax and capture; `View::Variant` omits a resolved
+  unit payload, including a variable bound to unit.
 - `CompKind::Prim(Prim)` computes on value operands only. `Prim::List`
   holds `ValListElem` entries or spreads; `Prim::Map` holds
   `MapEntryV::{Entry(Spanned<Val>, Spanned<Val>), Spread(Spanned<Val>)}`;
@@ -83,8 +89,9 @@ constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
 `Extrinsic.Prims.Op`. The acquiring `Guard` is owned Agda divergence D4
 ([[decisions/261111_a-guard-acquires|a-guard-acquires]]), pending the
 strong-model correspondence follow-up. Residual-function Box also awaits an
-Agda follow-up; Agda's Let-fun still suspends the whole RHS. Native terminals
-are runtime mechanisms, not IR constructors or mechanised rules.
+Agda follow-up; Agda's Let-fun still suspends the whole RHS. Runtime builtin
+η/δ requires its own correspondence follow-up; it is not a mechanised Rust
+refinement.
 `Prim::operands` and `map_operands` are the common operand traversals.
 
 - `Guard { acquire, body, release }` holds three `Val` operands.
@@ -101,9 +108,14 @@ are runtime mechanisms, not IR constructors or mechanised rules.
   `Audit`, `Tilde`, `Use` and `BindingCall` form the shell layer.
   `BindingCall` is the only skipped computation variant: a bare head bound in
   scope while the checker decides its splits. Readback makes it an `Exec`,
-  and it cannot occur in a checked tree. Builtin application never becomes IR;
-  partial builtins are runtime `Value::Native(entry, args)`. Boundary builtins
-  remain η-expanded over `Exec`, retaining their per-use checked site.
+  and it cannot occur in a checked tree. Runtime `CompKind::Builtin {
+  builtin, args }` is δ: a cached builtin η-expansion's λs bind `args`,
+  and its environment binds `builtin` to the entry itself. `Mentions` includes
+  all these names; readback copies δ through. The elaborator writes none, and
+  `ValClos::block` keeps η residuals from the checker.
+  Partial builtins are boxed λ residuals. Boundary partials remain expanded
+  over `Exec`, retaining their per-use checked site
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 - `Use(Arc<Module>)` holds a checked `Toplevel` and its `SourceOrigin`.
   Elaboration links the one written path at check time; no path lookup remains
   for evaluation. The module is checked and run under Σ alone, and its public
@@ -193,9 +205,9 @@ The IR owns the vocabulary it shares with the AST (`ir/pattern.rs`,
 `Display`), `BinaryOp` (`Arith`/`Compare`/`Eq`, each category its own enum), and
 `Redirects` with its stream-once binding. A pattern binds names, never carries
 a computation, so there is no parser syntax for elaboration to strip out
-([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, P = Checked>`
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, P = Explicit>`
 is indexed first by schemes, then phase: elaboration yields `Unchecked`
-(`Phrase<()>`, checked-phase terms without schemes); inference returns
+(`Phrase<()>`, explicit-phase terms without schemes); inference returns
 `Phrase<LiveSchemes, Inferring>` carrying unsettled schemes. `DefineSchemes`
 holds `Closed` schemes. Only successful readback makes a `Toplevel`, so the
 evaluator cannot be handed unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
@@ -212,8 +224,10 @@ referenced_names` (`pub(crate)`) is the same walk, run over a phrase's `Comp`
 top to bottom: the use-observation signal the
 [[map/core/shell-state|binding-lease ledger]] renews on
 ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]). What a
-closure keeps is no longer a walk of its own: `Closure::new` reads the occ
-already sitting on the node that owns its body
+value captures uses the same occurrence sets: `ValClos::close` and
+`ValClos::thunk` restrict at formation; `close` additionally pulls Σ-only
+direct names into ρ.
+Component reads share that ρ without another restriction
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
 
 This shape is what the prelude bake serialises with `postcard`; adding a field to

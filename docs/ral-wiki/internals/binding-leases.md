@@ -1,7 +1,7 @@
 ---
-verified_at_commit: ed1b37eb
+verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, Closure::new, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, ValClos::close, ValClos::thunk, ValClos::try_for_each_child, Handle::Withheld, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
@@ -54,8 +54,9 @@ occ is built from ([[map/core/ir|ir]]): a nested `Thunk`,
 list, record, map, or `Rec` group contributes its own already-computed occ
 rather than being walked again, so the harvest, like occ itself, is linear in
 the program's size and a stored body's names are counted once, at the run
-that compiled it, not on every later call. `Closure::new` keeps exactly what
-that occ names
+that compiled it, not on every later call. `ValClos::close` and
+`ValClos::thunk` restrict captures to that occ at formation; closing data also pulls missing direct names from Σ. Reading a
+component shares its saved ρ without another restriction
 ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Lookup during evaluation renews nothing: a bare head can only resolve to a
 binding the elaborator already saw — prelude, session, and lexical names are
 all in its bound set, and nothing installs into a running environment behind
@@ -75,8 +76,11 @@ notices wait for a run that has one. Every entry idle
 past the bound is examined: a name whose value still structurally reaches a
 live (`running` or `stopping`) worker handle is pinned and re-checked next
 boundary (`pins_live_work` — it recurses lists, maps, and variant payloads, and
-deliberately never looks inside a closure's captured environment);
-everything else is unset — value and type-scheme seed
+deliberately never looks inside a captured environment). A withheld handle
+pins nothing: bequests replace every live handle while preserving name,
+position and type, and observations fail `withheld-handle`
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+Everything else is unset — value and type-scheme seed
 in one act — and one `Notice::Prune` surfaces to the host, which records it as a
 `Forensic::Prune` naming what fell (`shell_eval::surface::record`), shown to
 no one. A pruned name cannot

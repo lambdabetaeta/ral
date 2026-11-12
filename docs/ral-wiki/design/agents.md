@@ -1,5 +1,6 @@
 ---
-generated_at_commit: 22b85799e5e435dff38ea1a2e7ec56d443d9f62b
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
 ---
 
 # Agents: one thread, one life, one conversation
@@ -216,14 +217,17 @@ asynchronous: construct, adopt and launch the child, then return a summary;
 agents sharing the reader's `founder`: the human's child it descends from,
 or itself when its parent is the human.
 
-- `Shell::bequeath` snapshots the **serialisable fragment** of lexical scope,
-  dynamic context and builtin table. Every handle becomes an opaque
-  placeholder, including in captured closures, partial native arguments and
-  handler arms. A partial user block crosses as the box of its residual λ,
-  closing over the arguments given; a partial builtin crosses by name with
-  its held arguments. Boundary builtins remain λ-closures over `Exec` with
-  their checked site. The scrub walks every such argument and capture.
-  Hooks do not cross. No terminal authority crosses.
+- `Shell::bequeath` snapshots lexical scope and dynamic context. Every live
+  handle becomes **withheld**, retaining its binding, data position, type
+  `Handle` and title, including through captures and handler arms. Every
+  handle eliminator and observer refuses it with `withheld-handle`: await it
+  where it was spawned and pass its result instead.
+  Partial user blocks and builtins cross as thunks of their residual λs,
+  capturing the arguments given. A builtin residual's `type_name` is
+  `Lambda`; it uses native display, and its builtin entry crosses by name.
+  Boundary builtins remain λ-closures over `Exec` with their checked site. The scrub
+  walks every capture under both carriers. Hooks and terminal authority do
+  not cross.
 - The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is
   the sole return path. The fork carries session policy, including inherited

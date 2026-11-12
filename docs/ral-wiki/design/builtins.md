@@ -72,9 +72,11 @@ The core entries group by what they compute:
   worker scheduler and the graded `Handle^ε α` values only the host runtime can
   mint. `await` behaves as the block run where it is written; `poll` is the
   non-blocking 4-state probe of a handle (`running`, `stopping`, `ready`,
-  `consumed`) — total over every handle state, reporting completion or failure
-  on `ready` as one outcome variant rather than blocking or re-raising, and
-  `is-done` is the boolean completion predicate over the same states
+  `consumed`) — total over live handles' lifecycle states, reporting completion
+  or failure on `ready` as one outcome variant rather than blocking or
+  re-raising. `is-done` is the boolean completion predicate over the same
+  states. A bequeathed handle is withheld; every observation fails
+  `withheld-handle`
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 - **Writes** — `echo`: every argument rendered through the total `to-string`,
@@ -166,21 +168,22 @@ lookup rather than as a runtime "unknown codec" string.
 **The set is not a third kind of name: the manifest is authored as two, one half
 for each of ral's two existing mechanisms**.
 
-- **A table entry → a *native* value.** It declares its arguments, so it has a
-  curried function type (arity 0: a thunk type) and is a first-class value bound
-  in the base scope. `$upper` *is* the entry, not a lambda around a
-  name-dispatched command. `Value::Native(entry, args)` holds the entry and
-  the arguments supplied so far, fewer than its arity for positive arity and
-  none for arity zero. Forcing it yields a native terminal that collects
-  ordinary argument frames; saturation runs the body, and arity zero runs
-  on force. No builtin application becomes IR.
-  It prints as `<native NAME>`, or `<native map, 1 of 2 arguments>` when
-  partial, and crosses by name with its arguments, re-linked against the
-  receiver's manifest. Its type is the η-equivalent lambda's, uncurried all
-  the way. A resolved `Exec` runs directly when held plus new arguments
-  saturate it. Boundary builtins are the exception: inference η-expands
-  them into blocks over `Exec` carrying the per-use checked site, which
-  crosses as IR. Neither natives nor thunks have language-level equality.
+- **A table entry → a builtin value closure `⟨c,∅⟩`.** It declares its
+  arguments, so it has a curried function type (arity 0: a thunk type) and
+  is first-class in the base signature. `$upper` is the entry itself, not a
+  name-dispatched command. `ValClos::builtin` is also public to hosts.
+  Force enters the cached η-expansion `λa₀.…λaₙ₋₁.δ(b; a⃗)` over `b ↦ c`;
+  δ reads that captured entry, never re-resolving its name. Partial application
+  is ordinary β and the remaining λ is boxed at a value demand. A call given
+  exactly a builtin's arity invokes its body directly; arity zero runs on
+  force too. This keeps residual functions applicable across provenance
+  frames ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+  A builtin prints `<native NAME>`; its residual prints
+  `<native map, 1 of 2 arguments>` and has type name `Lambda`. The constant
+  crosses the seed by name, re-linked against the receiver's manifest; its
+  residual crosses as a thunk over supplied arguments and the entry.
+  Boundary partials are inference-expanded blocks over `Exec`, retaining the
+  per-use checked site. Neither builtins nor thunks have language equality.
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,
   so there is no arity, nothing to curry, and no meaning for partial
   application: it is only interpretable as command syntax and lives at the

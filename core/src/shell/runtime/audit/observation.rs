@@ -44,7 +44,7 @@ mod tests {
     };
     use crate::io::Retained;
     use crate::ir::WriteMode;
-    use crate::shell::runtime::{Map, Value, WorkerId};
+    use crate::shell::runtime::{Map, ValClos, View, WorkerId};
     use std::collections::BTreeMap;
 
     fn site() -> CallSite {
@@ -182,22 +182,22 @@ mod tests {
     }
 
     /// The tag and the record behind it, out of an encoding's `what`.
-    fn fact_of(v: &Value) -> (String, Map) {
-        let Value::Map(m) = v else {
+    fn fact_of(v: &ValClos) -> (String, Map) {
+        let View::Map(m) = v.view() else {
             panic!("an observation encodes as a record")
         };
-        let what = m.get("what");
-        let Some(Value::Variant {
+        let what = m.get("what").expect("an observation has a `what` field");
+        let View::Variant {
             label,
             payload: Some(fact),
-        }) = what.as_deref()
+        } = what.view()
         else {
             panic!("`what` is a tagged fact")
         };
-        let Value::Map(fact) = fact.as_ref() else {
+        let View::Map(fact) = fact.view() else {
             panic!("a fact encodes as a record")
         };
-        (label.to_string(), fact.clone())
+        (label.to_string(), fact.to_map())
     }
 
     #[test]
@@ -250,16 +250,13 @@ mod tests {
             old_bytes: None,
         });
         let obs = Observation::instant(site(), None, what.clone());
-        let (_, fact) = fact_of(&Value::from(obs.encode()));
+        let (_, fact) = fact_of(&ValClos::from(obs.encode()));
         assert_eq!(
-            fact.get("new-bytes").as_deref(),
-            Some(&Value::variant("some", Some(Value::bytes(Vec::new())))),
+            fact.get("new-bytes"),
+            Some(&ValClos::variant("some", Some(ValClos::bytes(Vec::new())))),
             "an empty new side is known, and known-empty"
         );
-        assert_eq!(
-            fact.get("old-bytes").as_deref(),
-            Some(&Value::variant("none", None))
-        );
+        assert_eq!(fact.get("old-bytes"), Some(&ValClos::variant("none", None)));
         round_trips(what);
     }
 

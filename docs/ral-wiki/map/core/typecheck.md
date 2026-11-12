@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -52,7 +52,7 @@ are inspected only for cross-unit admissibility.
 
 - `generate.rs`: `Generator`, phrases, `let_`, patterns, lambdas,
   force/return, recursive groups, `check`, `region` and lexical scopes. Input
-  is a `Checked` tree, output an `Inferring` one. `let_` closes the
+  is an `Explicit` tree, output an `Inferring` one. `let_` closes the
   RHS/pattern region before `bind_pattern` generalises. `check` writes a
   lambda's arrow equation before checking its body. `rec_group` checks a
   group once in its own region and caches the members' generalised schemes
@@ -134,7 +134,7 @@ are inspected only for cross-unit admissibility.
   `Solution` exposes decisions, resolution, sites and scheme settlement,
   never constraints. Its `scratch` copy and `Unifier: Clone` are test-only;
   production table checks all run during generation.
-- `readback.rs`: `Readback` turns an `Inferring` tree into a `Checked` one. It
+- `readback.rs`: `Readback` turns an `Inferring` tree into an `Explicit` one. It
   applies each `BindHole`'s `Mode` (run or capture/decode) and each
   `CallHole`'s splits, turns a `BindingCall` into an `Exec`, snapshots sites,
   settles definition schemes into `Closed`, builds `Toplevel.admits`, and

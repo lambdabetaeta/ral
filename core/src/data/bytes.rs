@@ -1,4 +1,4 @@
-//! An immutable byte string: the inner of `Value::Bytes`, and the datum for
+//! An immutable byte string: the inner of `ir::Val::Bytes`, and the datum for
 //! `FOValue::Bytes`.
 
 use super::datum::Datum;

@@ -315,15 +315,15 @@ fn edit_hash_absence_and_duplicate_targets_refuse_before_writing() {
     std::fs::write(&file, "body").unwrap();
     let mut shell = dressed_shell(&[]);
     let edit = |hash: &str| {
-        Value::map(vec![
-            ("hash".into(), Value::string(hash)),
-            ("line".into(), Value::string("changed")),
+        ValClos::map(vec![
+            ("hash".into(), ValClos::string(hash)),
+            ("line".into(), ValClos::string("changed")),
         ])
     };
     let error = refusal(builtin_edit_hash(
         &[
-            Value::string(path.as_str()),
-            Value::list(vec![edit("stale")]),
+            ValClos::string(path.as_str()),
+            ValClos::list(vec![edit("stale")]),
         ],
         &Mooring::adrift(),
         &mut shell,
@@ -338,8 +338,8 @@ fn edit_hash_absence_and_duplicate_targets_refuse_before_writing() {
     let hash = window_hashes(&rows_of("body"))[0].clone();
     let error = refusal(builtin_edit_hash(
         &[
-            Value::string(path.as_str()),
-            Value::list(vec![edit(&hash), edit(&hash)]),
+            ValClos::string(path.as_str()),
+            ValClos::list(vec![edit(&hash), edit(&hash)]),
         ],
         &Mooring::adrift(),
         &mut shell,
@@ -389,9 +389,9 @@ fn literal_misses_keep_proven_evidence_and_distinct_match_counts() {
     assert_eq!(
         edit_cause(refusal(builtin_edit_replace(
             &[
-                Value::string("unread"),
-                Value::string(""),
-                Value::string("new")
+                ValClos::string("unread"),
+                ValClos::string(""),
+                ValClos::string("new")
             ],
             &Mooring::adrift(),
             &mut shell

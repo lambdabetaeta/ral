@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::error::Error;
 use ral_core::external_editor::{EditorCommand, admit_draft, after_cleanup, read_draft};
 use ral_core::fact::{
@@ -13,11 +14,9 @@ use ral_core::fact::{
     RalFailure, Reason, StateFailure,
 };
 use ral_core::path::{Dir, EntryName, Kind, LeafMode, Reading, ScopedDir, Visibility, Writing};
-use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
-};
+use ral_core::shell::runtime::{Break, DefaultPolicy, HookName, HookSig, Mooring, Settled};
 use ral_core::text::quote_native;
-use ral_core::{RegisterError, Shell, Value};
+use ral_core::{RegisterError, Shell, ValClos};
 
 const NAME: &str = "_external-editor";
 
@@ -44,7 +43,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
     shell
         .register_hook(
             HookName::session("external-editor"),
-            Value::Native(entry.into(), [].into()),
+            ValClos::builtin(entry.into()),
             HookSig::Hook {
                 kind: "external editor".into(),
             },
@@ -212,14 +211,14 @@ impl Workspace {
         program: &str,
         args: &[String],
         mooring: &Mooring,
-    ) -> Settled<Value> {
-        let args: Vec<Value> = args
+    ) -> Settled<ValClos> {
+        let args: Vec<ValClos> = args
             .iter()
-            .map(|arg| Value::string(arg.as_str()))
-            .chain([Value::string(self.path()?)])
+            .map(|arg| ValClos::string(arg.as_str()))
+            .chain([ValClos::string(self.path()?)])
             .collect();
         shell.run_external(program, &args, mooring)?;
-        self.readback(shell).map(Value::string)
+        self.readback(shell).map(ValClos::string)
     }
 
     fn readback(&self, shell: &mut Shell) -> Settled<String> {
@@ -280,7 +279,7 @@ impl Workspace {
     }
 }
 
-fn edit(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn edit(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     let text = args[0].as_str(NAME)?;
     let command = EditorCommand::select(
         shell.env_var("VISUAL").as_deref(),
@@ -296,7 +295,7 @@ fn edit_with(
     args: &[String],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let workspace = Workspace::create(shell, text)?;
     let edited = workspace.edit(shell, program, args, mooring);
     workspace.finish(shell, edited)
@@ -427,7 +426,7 @@ mod tests {
                 shell.with_layer(layer.clone(), |shell| {
                     workspace.finish(
                         shell,
-                        Err::<Value, _>(
+                        Err::<ValClos, _>(
                             Error::new(Reason::Process(Box::new(ral_core::fact::Process {
                                 program: "editor".into(),
                                 failure: ral_core::fact::Failure::Exited(7),
@@ -442,7 +441,7 @@ mod tests {
         shell
             .register_hook(
                 hook.clone(),
-                Value::Native(entry.into(), [].into()),
+                ValClos::builtin(entry.into()),
                 HookSig::Block,
                 DefaultPolicy::denied(),
             )
@@ -524,14 +523,14 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn child_edit(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    fn child_edit(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
         let script = args[0].as_str("test editor")?;
         let args = ["-c", script, "ral-editor-test"].map(str::to_owned);
         edit_with("original", "/bin/sh", &args, mooring, shell)
     }
 
     #[cfg(unix)]
-    fn run_child(script: &str) -> Settled<Value> {
+    fn run_child(script: &str) -> Settled<ValClos> {
         run_child_under(script, ral_core::authority::policy::Capabilities::default())
     }
 
@@ -539,7 +538,7 @@ mod tests {
     fn run_child_under(
         script: &str,
         caps: ral_core::authority::policy::Capabilities,
-    ) -> Settled<Value> {
+    ) -> Settled<ValClos> {
         static TEST_ENTRIES: [BuiltinEntry; 1] = [BuiltinEntry::new(
             Cow::Borrowed("test-editor"),
             scheme,
@@ -565,7 +564,7 @@ mod tests {
     fn successful_child_returns_the_replacement_text() {
         let result = run_child("printf edited > \"$1.new\"; /bin/mv \"$1.new\" \"$1\"");
         assert!(
-            matches!(result, Ok(Value::String(ref text)) if text.as_ref() == "edited"),
+            matches!(result.as_ref().map(ValClos::view), Ok(ral_core::View::String(text)) if text.as_str() == "edited"),
             "{result:?}"
         );
     }
@@ -683,7 +682,7 @@ mod tests {
                 )
                 .unwrap();
             let Err(Break::Error(error)) =
-                edit(&[Value::string("draft")], &Mooring::adrift(), &mut shell)
+                edit(&[ValClos::string("draft")], &Mooring::adrift(), &mut shell)
             else {
                 panic!("expected command refusal")
             };

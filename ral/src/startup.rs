@@ -141,11 +141,11 @@ pub(crate) mod engine {
     fn repl_root(_: &Root, shell: &mut ral_core::Shell) -> Result<(), Error> {
         shell.set_exit_hints(crate::platform::load_exit_hints());
         shell.set_interactive(true);
-        let terminal = ral_core::Value::from(&shell.terminal());
+        let terminal = ral_core::ValClos::from(&shell.terminal());
         shell.set_var(
             "TERMINAL".into(),
             terminal,
-            ral_core::Value::terminal_scheme(),
+            ral_core::ValClos::terminal_scheme(),
         );
         crate::repl::external_editor::register(shell)?;
         boot_builtin::register(shell)

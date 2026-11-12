@@ -1,7 +1,7 @@
 //! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::Shell;
-use super::value::Value;
+use super::value::ValClos;
 use crate::error::{Error, Prov};
 use crate::fact::{Done, Ending, ExitCode, FailureCode};
 use crate::io::Io;
@@ -186,7 +186,7 @@ impl From<Cancellation> for Break {
 /// itself, located, kept for its caret; an equal stop naming another owner is
 /// superseded, or a worker's switch would convert the wrong owner's stop.  An
 /// `exit` has already left.
-fn final_poll(settled: Settled<Value>, node: &Scope) -> Settled<Value> {
+fn final_poll(settled: Settled<ValClos>, node: &Scope) -> Settled<ValClos> {
     let Some(join) = node.in_force().map(Break::from) else {
         return settled;
     };
@@ -204,7 +204,7 @@ impl Shell {
     pub(crate) fn base(
         &mut self,
         home: &Scope,
-        body: impl FnOnce(&mut Self) -> Settled<Value>,
+        body: impl FnOnce(&mut Self) -> Settled<ValClos>,
     ) -> End {
         End::of(|| {
             let settled = final_poll(body(self), home);
@@ -217,10 +217,10 @@ impl Shell {
 pub(crate) const UNREPORTED: &str = "ended without reporting how it ended";
 
 /// How a thread's body, or a run, ended.
-pub type End = Ending<Value, Error, Stop>;
+pub type End = Ending<ValClos, Error, Stop>;
 
 impl End {
-    pub(crate) fn of(body: impl FnOnce() -> Settled<Value>) -> Self {
+    pub(crate) fn of(body: impl FnOnce() -> Settled<ValClos>) -> Self {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
             Ok(settled) => Self::settled(settled),
             Err(payload) => Self::Panic(panic_text(&*payload)),
@@ -234,7 +234,7 @@ impl End {
         Self::Panic(UNREPORTED.into())
     }
 
-    pub(crate) fn settled(settled: Settled<Value>) -> Self {
+    pub(crate) fn settled(settled: Settled<ValClos>) -> Self {
         match settled {
             Ok(value) => Self::Ok(value),
             Err(Break::Error(error)) => Self::Err(error),
@@ -250,7 +250,7 @@ impl End {
         for sink in [&mut io.stdout, &mut io.stderr] {
             let flushed = Self::of(|| {
                 sink.flush_pending();
-                Ok(Value::Unit)
+                Ok(ValClos::UNIT)
             });
             self = match (self, flushed) {
                 (panic @ Self::Panic(_), _) | (_, panic @ Self::Panic(_)) => panic,
@@ -276,7 +276,7 @@ impl End {
     ///
     /// # Errors
     /// A failure, exit or stop becomes the corresponding [`Break`].
-    pub fn into_settled(self) -> Settled<Value> {
+    pub fn into_settled(self) -> Settled<ValClos> {
         match self {
             Self::Ok(value) => Ok(value),
             Self::Err(error) => Err(error.into()),
@@ -336,7 +336,7 @@ mod tests {
         ));
     }
 
-    fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Prov>) -> Settled<Value> {
+    fn stopped(cause: C, owner: Option<ScopeId>, at: Option<Prov>) -> Settled<ValClos> {
         Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at })))
     }
 
@@ -353,13 +353,13 @@ mod tests {
             span: Span::new(FileId(1), 0, 4),
         };
         let node = node_under(C::Interrupted);
-        let cause = |r: Settled<Value>| match r {
+        let cause = |r: Settled<ValClos>| match r {
             Err(Break::Escape(Escape::Stopped(Stop { cause, owner, at }))) => (cause, owner, at),
             other => panic!("not a stop: {other:?}"),
         };
 
         assert_eq!(
-            cause(final_poll(Ok(Value::Unit), &node)),
+            cause(final_poll(Ok(ValClos::UNIT), &node)),
             (C::Interrupted, Some(node.id()), None)
         );
         assert_eq!(
@@ -406,7 +406,7 @@ mod tests {
         let node = DurableRoot::default().child();
         let ended = shell.base(&node, |_| {
             node.cancel(C::ReaderGone);
-            Ok(Value::Unit)
+            Ok(ValClos::UNIT)
         });
         assert!(matches!(
             ended,

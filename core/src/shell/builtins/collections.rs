@@ -12,7 +12,7 @@ use crate::fact::{
 };
 use crate::shell::evaluator::{apply, expr};
 use crate::shell::runtime::invalid;
-use crate::shell::runtime::{Break, Mooring, Settled, Shell, Value};
+use crate::shell::runtime::{Break, Mooring, Settled, Shell, ValClos, View};
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
 /// single push, which an unconditional poll would dominate.  The combinators
@@ -26,13 +26,13 @@ const RANGE_INITIAL_CAP: usize = 1 << 16;
 
 /// One element's application, each preceded by the cancellation poll that the
 /// combinators owe every element.
-fn call(func: &Value, item: Value, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn call(func: &ValClos, item: ValClos, mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     shell.poll()?;
     apply(func, vec![item], mooring, shell)
 }
 
 /// `nth i xs`: the position read, at a position computed at run time.
-pub(super) fn builtin_nth(args: &[Value]) -> Settled<Value> {
+pub(super) fn builtin_nth(args: &[ValClos]) -> Settled<ValClos> {
     let (i, xs) = (&args[0], &args[1]);
     let n = super::strings::as_index(i, "nth", 0)?;
     Ok(expr::position(xs, n)?)
@@ -41,48 +41,58 @@ pub(super) fn builtin_nth(args: &[Value]) -> Settled<Value> {
 /// The prelude spelling (`let for = { |list fn| each $fn $list }`) a loop is
 /// normally written in; either way the audit tree shows the real builtin
 /// that ran, `each`.
-pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_each(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let items = args[1].as_list("each")?;
     items
         .iter()
         .try_for_each(|item| call(&args[0], item.into_owned(), mooring, shell).map(drop))?;
-    Ok(Value::Unit)
+    Ok(ValClos::UNIT)
 }
 
-pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_map(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let items = args[1].as_list("map")?;
     let mapped = items
         .iter()
         .map(|item| call(&args[0], item.into_owned(), mooring, shell))
         .collect::<Settled<Vec<_>>>()?;
-    Ok(Value::list(mapped))
+    Ok(ValClos::list(mapped))
 }
 
 pub(super) fn builtin_filter(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let items = args[1].as_list("filter")?;
     let kept = items
         .iter()
         .filter_map(
             |item| match call(&args[0], item.as_ref().clone(), mooring, shell) {
-                Ok(Value::Bool(keep)) => keep.then(|| Ok(item.into_owned())),
-                Ok(other) => Some(Err(other
-                    .expected("filter", Expected::Shape(ValueShape::Bool))
-                    .into())),
+                Ok(result) => match result.view() {
+                    View::Bool(keep) => keep.then(|| Ok(item.into_owned())),
+                    _ => Some(Err(result
+                        .expected("filter", Expected::Shape(ValueShape::Bool))
+                        .into())),
+                },
                 Err(e) => Some(Err(e)),
             },
         )
         .collect::<Settled<Vec<_>>>()?;
-    Ok(Value::list(kept))
+    Ok(ValClos::list(kept))
 }
 
 /// Sort `keyed` by its keys and return the values.  `sort_by` demands an
 /// infallible comparator, so the first uncomparable pairing is parked in
 /// `err` and surfaces once the sort has settled.
-fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
+fn ordered_sort(mut keyed: Vec<(ValClos, ValClos)>, name: &str) -> Settled<ValClos> {
     let mut err: Option<Break> = None;
     keyed.sort_by(|(ka, _), (kb, _)| {
         ka.compare(kb, name).unwrap_or_else(|e| {
@@ -92,15 +102,15 @@ fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
     });
     match err {
         Some(e) => Err(e),
-        None => Ok(Value::list(keyed.into_iter().map(|(_, v)| v).collect())),
+        None => Ok(ValClos::list(keyed.into_iter().map(|(_, v)| v).collect())),
     }
 }
 
 pub(super) fn builtin_sort_by(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let items = args[1].as_list("sort-list-by")?;
     let keyed = items
         .iter()
@@ -112,15 +122,15 @@ pub(super) fn builtin_sort_by(
     ordered_sort(keyed, "sort-list-by")
 }
 
-pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
-    let integer = |index: usize| match &args[index] {
-        Value::Int(n) => Ok(*n),
-        other => Err(Error::new(Reason::Invalid(Box::new(
+pub(super) fn builtin_range(args: &[ValClos], shell: &Shell) -> Settled<ValClos> {
+    let integer = |index: usize| match args[index].view() {
+        View::Int(n) => Ok(n),
+        _ => Err(Error::new(Reason::Invalid(Box::new(
             InvalidFailure::new(
                 "range".into(),
                 InvalidCause::Shape(ShapeFailure {
                     expected: Expected::Shape(ValueShape::Int),
-                    found: other.found(),
+                    found: args[index].found(),
                 }),
             )
             .index(index.into()),
@@ -144,7 +154,7 @@ pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
     let mut i = start;
     let mut since_poll = 0usize;
     while i < end {
-        out.push(Value::Int(i));
+        out.push(ValClos::int(i));
         i += 1;
         since_poll += 1;
         if since_poll == INTERRUPT_POLL_CHUNK {
@@ -152,14 +162,18 @@ pub(super) fn builtin_range(args: &[Value], shell: &Shell) -> Settled<Value> {
             since_poll = 0;
         }
     }
-    Ok(Value::list(out))
+    Ok(ValClos::list(out))
 }
 
-pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_fold(
+    args: &[ValClos],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<ValClos> {
     let func = &args[0];
     let mut acc = args[1].clone();
     let items = args[2].as_list("fold")?;
-    for item in &items {
+    for item in items {
         shell.poll()?;
         acc = apply(func, vec![acc, item.into_owned()], mooring, shell)?;
     }
@@ -168,16 +182,16 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
 
 /// `fold` fed by the byte channel: one line at a time, no list in hand.
 pub(super) fn builtin_fold_lines(
-    args: &[Value],
+    args: &[ValClos],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<Value> {
+) -> Settled<ValClos> {
     let func = &args[0];
     let mut acc = args[1].clone();
     for line in super::util::stdin_lines("fold-lines", shell)? {
         let line =
             crate::shell::runtime::decode_utf8_strict(line?, "fold-lines", Utf8Subject::Input)?;
-        acc = apply(func, vec![acc, Value::string(line)], mooring, shell)?;
+        acc = apply(func, vec![acc, ValClos::string(line)], mooring, shell)?;
     }
     Ok(acc)
 }
@@ -187,11 +201,11 @@ mod tests {
     use super::*;
     use crate::fact::ExitCode as _;
 
-    /// Force a lambda literal to a `Value` so a combinator can be driven
+    /// Force a lambda literal to a `ValClos` so a combinator can be driven
     /// directly.  The bodies below are bare values, so applying one reaches
     /// no statement-level poll point: the only cancellation checkpoint left
     /// is the combinator's own, which is what these tests pin.
-    fn lambda(mooring: &Mooring, shell: &mut Shell, src: &str) -> Value {
+    fn lambda(mooring: &Mooring, shell: &mut Shell, src: &str) -> ValClos {
         let top = crate::compile::compile_and_typecheck(
             src,
             crate::test_helper::core_schemes(),
@@ -212,8 +226,8 @@ mod tests {
         .expect("lambda value")
     }
 
-    fn ints(n: i64) -> Value {
-        Value::list((0..n).map(Value::Int).collect())
+    fn ints(n: i64) -> ValClos {
+        ValClos::list((0..n).map(ValClos::int).collect())
     }
 
     #[test]
@@ -247,7 +261,7 @@ mod tests {
         let func = lambda(&m, &mut shell, "{ |acc x| $x }");
         shell.scope = crate::process::Scope::clone(&m.home);
         m.home.cancel(crate::process::CancelCause::Interrupted);
-        let err = builtin_fold(&[func, Value::Int(0), ints(500)], &m, &mut shell)
+        let err = builtin_fold(&[func, ValClos::int(0), ints(500)], &m, &mut shell)
             .expect_err("a cancelled scope must abort fold");
         assert_eq!(err.code(), 130);
     }
@@ -270,7 +284,7 @@ mod tests {
         let m = Mooring::adrift();
         shell.scope = crate::process::Scope::clone(&m.home);
         m.home.cancel(crate::process::CancelCause::Interrupted);
-        let err = builtin_range(&[Value::Int(0), Value::Int(4096)], &shell)
+        let err = builtin_range(&[ValClos::int(0), ValClos::int(4096)], &shell)
             .expect_err("a long range under a cancelled scope must abort");
         assert_eq!(err.code(), 130);
     }
@@ -283,7 +297,7 @@ mod tests {
         let m = Mooring::adrift();
         shell.scope = crate::process::Scope::clone(&m.home);
         m.home.cancel(crate::process::CancelCause::Interrupted);
-        let v = builtin_range(&[Value::Int(0), Value::Int(10)], &shell)
+        let v = builtin_range(&[ValClos::int(0), ValClos::int(10)], &shell)
             .expect("a short range pays no poll and completes");
         assert_eq!(v.as_list("range").expect("list").len(), 10);
     }
@@ -293,7 +307,7 @@ mod tests {
         let mooring = Mooring::adrift();
         let predicate = lambda(&mooring, &mut shell, "{ |x| $x }");
         let Err(Break::Error(error)) = builtin_filter(
-            &[predicate, Value::list(vec![Value::Int(1)])],
+            &[predicate, ValClos::list(vec![ValClos::int(1)])],
             &mooring,
             &mut shell,
         ) else {
@@ -301,7 +315,7 @@ mod tests {
         };
         assert_eq!(
             error.reason,
-            Value::Int(1)
+            ValClos::int(1)
                 .expected("filter", Expected::Shape(ValueShape::Bool))
                 .reason
         );
@@ -311,8 +325,8 @@ mod tests {
     fn range_start_and_end_shape_backstops_keep_the_argument_index() {
         let shell = crate::test_helper::core_shell();
         for (args, index) in [
-            ([Value::Unit, Value::Int(1)], 0usize),
-            ([Value::Int(1), Value::Unit], 1usize),
+            ([ValClos::UNIT, ValClos::int(1)], 0usize),
+            ([ValClos::int(1), ValClos::UNIT], 1usize),
         ] {
             let Err(Break::Error(error)) = builtin_range(&args, &shell) else {
                 panic!("invalid range operand")

@@ -11,7 +11,7 @@ use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
 use ral_core::protocol::{Ending, Ran, Report, Run};
 use ral_core::source::SourceOrigin;
-use ral_core::{HookName, Value, shell::builtins};
+use ral_core::{HookName, ValClos, View, shell::builtins};
 use ral_core::{err, errln, outln};
 use std::sync::Arc;
 
@@ -26,16 +26,16 @@ pub(super) enum Step {
     Exit(u8),
 }
 
-fn print_result(val: &Value, theme: &OutputTheme) {
-    match val {
-        Value::Unit => {}
-        Value::Bytes(b) => {
+fn print_result(val: &ValClos, theme: &OutputTheme) {
+    match val.view() {
+        View::Unit => {}
+        View::Bytes(b) => {
             use std::io::Write;
             let _ = std::io::stdout().write_all(b);
         }
         _ => {
-            let s = match val {
-                Value::List(_) | Value::Map(_) => {
+            let s = match val.view() {
+                View::List(_) | View::Map(_) => {
                     builtins::pretty_print(val, 0, &builtins::REPL_PRINT_PARAMS)
                 }
                 _ => val.to_string(),
@@ -159,7 +159,7 @@ pub(super) fn step(
             ending: Ending::Ok(value),
             ..
         }) => {
-            print_result(&Value::from(value), theme);
+            print_result(&ValClos::from(value), theme);
             Step::Continue
         }
         Report::Ran(Ran {
@@ -230,7 +230,7 @@ mod tests {
         run(line, &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::string(line), Value::Int(1)]
+            vec![ValClos::string(line), ValClos::int(1)]
         );
     }
 
@@ -251,7 +251,7 @@ mod tests {
             "{ |_ev| return 'record rewritten' }",
         )]);
         run("return ()", &t, &host);
-        assert_eq!(*sink.lock().unwrap(), vec![Value::string("rewritten")]);
+        assert_eq!(*sink.lock().unwrap(), vec![ValClos::string("rewritten")]);
     }
 
     /// Each `pre-exec` hook sees the line the one before it returned.
@@ -264,7 +264,7 @@ mod tests {
         run("record", &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::string("one"), Value::string("two")]
+            vec![ValClos::string("one"), ValClos::string("two")]
         );
     }
 
@@ -273,7 +273,7 @@ mod tests {
     fn failing_pre_exec_does_not_stop_the_line() {
         let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |_ev| fail 'boom' }")]);
         run("record ran", &t, &host);
-        assert_eq!(*sink.lock().unwrap(), vec![Value::string("ran")]);
+        assert_eq!(*sink.lock().unwrap(), vec![ValClos::string("ran")]);
     }
 
     /// A `pre-exec` hook returning neither a line nor `()` leaves the line.
@@ -281,7 +281,7 @@ mod tests {
     fn wrong_shaped_pre_exec_return_leaves_the_line() {
         let (t, host, sink) = dressed(&[("p", HookEvent::PreExec, "{ |_ev| return 7 }")]);
         run("record typed", &t, &host);
-        assert_eq!(*sink.lock().unwrap(), vec![Value::string("typed")]);
+        assert_eq!(*sink.lock().unwrap(), vec![ValClos::string("typed")]);
     }
 
     /// Refusing a line is rewriting it to a failing one, whose status reaches
@@ -304,7 +304,7 @@ mod tests {
         run("record never", &t, &host);
         assert_eq!(
             *sink.lock().unwrap(),
-            vec![Value::string(refusal), Value::Int(1)]
+            vec![ValClos::string(refusal), ValClos::int(1)]
         );
     }
 
@@ -337,8 +337,8 @@ mod tests {
         assert_eq!(
             *sink.lock().unwrap(),
             vec![
-                Value::string(ral_core::path::shown(root)),
-                Value::string(ral_core::path::shown(root.join("d"))),
+                ValClos::string(ral_core::path::shown(root)),
+                ValClos::string(ral_core::path::shown(root.join("d"))),
             ]
         );
     }

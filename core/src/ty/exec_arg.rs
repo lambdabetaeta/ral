@@ -10,7 +10,7 @@
 //! Stated once, as a verdict on a [`Head`], and read from both sides of that
 //! boundary.  The checker maps an argument's *type* into this set before the
 //! spawn (the argv rule in `typecheck::generate`) and `shell::exec::command::check_argv` maps
-//! the *value* at the spawn, through `Value::heads`.  Both say the same
+//! the *value* at the spawn, through `ValClos::heads`.  Both say the same
 //! [`RefusedArg::headline`] and [`RefusedArg::remedy`].  The one match is
 //! wildcard-free on purpose: a new head has to be given a verdict, so the
 //! static gate and its runtime backstop cannot disagree about one argument.

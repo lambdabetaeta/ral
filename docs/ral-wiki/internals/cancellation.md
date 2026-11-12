@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
-verified_at_date: 2026-11-11
-anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind, Frame::Acquire, Frame::Cleanup]
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
+anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind, Machine, settle, resume, unwind, Frame::Acquire, Frame::Cleanup]
 ---
 
 # Cancellation
@@ -262,7 +262,7 @@ delivered, so nothing can be lost.
 in force, at:
 
 - the **machine's step arms** (`shell/evaluator/machine.rs`) — the β-step, `Bind`,
-  `App`, `Rec`, `Source`, guard entry and the exec step each poll, so any loop of `ral`
+  `Seq`, `App`, `Rec`, guard entry and the exec step each poll, so any loop of `ral`
   calls is preemptible (the original
   [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] insight);
   a `?` chain's advance from one arm to the next is nested `try` applying a
@@ -282,6 +282,13 @@ in force, at:
   halted keeps the halt as its verdict. The
   run's wall is disarmed first, and a firing already claimed is waited for on
   its own `fired` flag, so nothing fires after this poll.
+
+**Settlement is not a new cancellation boundary.** Machine state is a
+computation closure or `Err(Break)` only. `settle` passes a produced value
+through frames immediately; `resume` and `unwind` retain their existing poll
+and scope-restoration sites. In particular the successful acquiring guard
+restores scope and installs release before its body's β-poll
+([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 
 **One base frame.** `Shell::base(home, body) -> End` is every base: the body
 under `catch_unwind`, the closing poll on `home`, and an unlocated failure *or
@@ -463,7 +470,7 @@ project status. `FailureCode::failure_code() -> NonZeroU8` belongs to what can
 only fail: a cause, a `Stop`, a `Reason`, an `Error`, an `ErrorFact`, an `ErrorRecord`.
 `ExitCode::code() -> u8` belongs to what can also succeed: an ending (`Ok` is
 0, an `exit n` is `n`, a panic 101, the rest delegate) and a `Break`. `Stop`
-holds cause, owner and `Option<Prov>`; `End = Ending<Value, Error, Stop>`
+holds cause, owner and `Option<Prov>`; `End = Ending<ValClos, Error, Stop>`
 holds the ending. Runtime error and wire fact share the one `Reason`:
 
     Reason  = Process(program, Failure) | Cancelled | TimedOut | Raised(Claim)

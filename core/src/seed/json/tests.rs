@@ -1,19 +1,20 @@
 use super::*;
 use crate::data::json::{from_slice, to_vec, to_vec_pretty};
 use crate::fact::{
-    Count, DataStep, DecodeCause, FrameFailure, FramePart, InvariantFailure, JsonInputFailure,
-    ProtocolFailure, Reason, SeedFrameFailure,
+    Count, DataStep, DecodeCause, FrameFailure, FramePart, JsonInputFailure, ProtocolFailure,
+    Reason, SeedFrameFailure,
 };
 #[cfg(unix)]
 use crate::fact::{FrameEncodeFailure, JsonEncodeCause, ProtocolOperation};
 use crate::ir::CompKind;
 use crate::seed::WireDecoder;
-use crate::seed::table::{SerialNative, SerialThunk};
+use crate::seed::table::SerialThunk;
+use crate::shell::runtime::{ValClos, View};
 use crate::source::Spanned;
 use serde_json::json;
 
 fn seed() -> EngineSeed {
-    EngineSeed::encode(&crate::test_helper::core_shell().bequeath(SpawnGrant::Inherit)).unwrap()
+    EngineSeed::encode(&crate::test_helper::core_shell().bequeath(SpawnGrant::Inherit))
 }
 
 fn envelope() -> serde_json::Value {
@@ -58,13 +59,13 @@ fn raw_engine_seed_preserves_successful_json_and_safe_metadata() {
     crate::test_access::bind_untyped(
         &mut shell,
         "finite",
-        crate::Value::Float(crate::data::Finite::new(-0.0).unwrap()),
+        crate::ValClos::float(crate::data::Finite::new(-0.0).unwrap()),
     );
     shell.install_script_context(
         &crate::source::SourceOrigin::Virtual("seed-source".into()),
         "echo source\n",
     );
-    let seed = EngineSeed::encode(&shell.bequeath(SpawnGrant::Base("unresolved".into()))).unwrap();
+    let seed = EngineSeed::encode(&shell.bequeath(SpawnGrant::Base("unresolved".into())));
     let compact = to_vec(&seed).unwrap();
     let pretty = to_vec_pretty(&seed).unwrap();
     assert_eq!(
@@ -227,7 +228,7 @@ fn raw_spawn_grant_preserves_authored_values_and_duplicate_map_entries() {
 fn raw_seed_json_does_not_resolve_scope_references_or_native_names() {
     for binding in [
         thunk(0, u32::MAX),
-        json!({"ext": {"Native": {"name": "not-a-native", "args": []}}}),
+        json!({"ext": {"Builtin": "not-a-native"}}),
     ] {
         let value = with_binding(envelope(), &binding);
         let bytes = serde_json::to_vec(&value).unwrap();
@@ -245,7 +246,7 @@ fn seed_hydration_keeps_unresolved_cyclic_and_native_causes_distinct() {
         ),
         (thunk(0, 0), ProtocolFailure::CyclicScopes),
         (
-            json!({"ext": {"Native": {"name": "not-a-native", "args": []}}}),
+            json!({"ext": {"Builtin": "not-a-native"}}),
             ProtocolFailure::UnknownNative("not-a-native".into()),
         ),
     ] {
@@ -261,19 +262,26 @@ fn seed_hydration_keeps_unresolved_cyclic_and_native_causes_distinct() {
 }
 
 #[test]
-fn seal_preserves_original_handle_invariant_without_protocol_wrapping() {
+fn even_an_unscrubbed_handle_crosses_withheld_by_title() {
+    use crate::handle::Handle;
     let mut bequest = crate::test_helper::core_shell().bequeath(SpawnGrant::Inherit);
     bequest.image.env.bind(
         "unscrubbed".into(),
         crate::shell::runtime::Binding {
-            value: crate::shell::runtime::idle_handle(),
+            value: crate::handle::idle_handle(),
             scheme: None,
         },
     );
-    assert_eq!(
-        super::super::seal(&bequest).unwrap_err().reason,
-        Reason::Invariant(Box::new(InvariantFailure::HandleInSeed))
-    );
+    let decoded = super::super::seal(&bequest)
+        .unwrap()
+        .unseal()
+        .unwrap()
+        .decode(&crate::test_helper::core_runtime())
+        .unwrap();
+    assert!(matches!(
+        decoded.image.env.get("unscrubbed").unwrap().view(),
+        View::Handle(Handle::Withheld(title)) if title.as_ref() == "<test>"
+    ));
 }
 
 #[test]
@@ -413,12 +421,8 @@ fn serial_binding(value: SerialValue) -> SerialBinding {
     }
 }
 
-fn unknown_native(name: &str) -> SerialValue {
-    native(name, vec![])
-}
-
 fn captured_row(bindings: u32) -> SerialValue {
-    SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+    SerialValue::Ext(SerialAtom::Thunk(SerialThunk {
         comp: Arc::new(Spanned::synthetic(CompKind::Return(crate::ir::Val::Unit))),
         env: SerialEnvSnapshot { bindings },
     }))
@@ -431,10 +435,7 @@ fn runtime_binding_prefix_cleanup_handles_deep_data_on_a_small_stack() {
         .spawn(|| {
             let table = vec![vec![
                 ("deep".into(), serial_binding(deep_runtime_data(30_000))),
-                (
-                    "bad".into(),
-                    serial_binding(unknown_native("missing-prefix")),
-                ),
+                ("bad".into(), serial_binding(builtin("missing-prefix"))),
             ]];
             let error = WireDecoder::for_runtime(&crate::test_helper::core_runtime(), &table)
                 .expect_err("later binding refuses");
@@ -473,7 +474,7 @@ fn runtime_handler_prefix_cleanup_handles_later_frame_and_env_failures_on_a_smal
                 }];
                 let expected = if later_handler {
                     seed.context.handlers.push(WireHandlerFrame {
-                        entries: vec![("bad".into(), unknown_native("missing-handler"))],
+                        entries: vec![("bad".into(), builtin("missing-handler"))],
                         catch_all: None,
                         kind: FrameKind::Within,
                     });
@@ -543,19 +544,16 @@ fn runtime_duplicate_map_replacement_releases_deep_data_on_a_small_stack() {
             }
             .into_runtime(&dec)
             .unwrap();
-            let crate::shell::runtime::Value::Map(map) = &value else {
+            let View::Map(map) = value.view() else {
                 panic!("map")
             };
-            assert_eq!(
-                map.get("same").unwrap().as_ref(),
-                &crate::shell::runtime::Value::Int(2)
-            );
+            assert_eq!(map.get("same").unwrap().as_ref(), &ValClos::int(2));
             value.drop_seed();
 
             // Discarded duplicate entries still validate in authored order.
             for (first, expected) in [
                 (
-                    unknown_native("discarded"),
+                    builtin("discarded"),
                     ProtocolFailure::UnknownNative("discarded".into()),
                 ),
                 (
@@ -564,10 +562,7 @@ fn runtime_duplicate_map_replacement_releases_deep_data_on_a_small_stack() {
                 ),
             ] {
                 let error = SerialValue::Map {
-                    entries: vec![
-                        ("same".into(), first),
-                        ("same".into(), unknown_native("later")),
-                    ],
+                    entries: vec![("same".into(), first), ("same".into(), builtin("later"))],
                 }
                 .into_runtime(&dec)
                 .unwrap_err();
@@ -606,16 +601,13 @@ fn runtime_duplicate_scope_bindings_release_displaced_deep_data_on_a_small_stack
                     .into_runtime(&dec)
                     .unwrap();
                 assert!(env.ptr_eq(&alias));
-                assert_eq!(env.get("same"), Some(&crate::shell::runtime::Value::Int(2)));
+                assert_eq!(env.get("same"), Some(&ValClos::int(2)));
                 env.drop_seed();
                 alias.drop_seed();
                 drop(dec);
             }
             let table = vec![vec![
-                (
-                    "same".into(),
-                    serial_binding(unknown_native("discarded-binding")),
-                ),
+                ("same".into(), serial_binding(builtin("discarded-binding"))),
                 ("same".into(), serial_binding(SerialValue::Unit)),
             ]];
             let error = WireDecoder::for_runtime(&runtime, &table).unwrap_err();
@@ -650,51 +642,42 @@ fn open_binding_scheme_is_refused_at_its_path() {
     assert!(matches!(*error.cause, DecodeCause::OpenScheme(_)));
 }
 
-fn native(name: &str, args: Vec<SerialValue>) -> SerialValue {
-    SerialValue::Ext(SerialClosure::Native(SerialNative {
-        name: name.into(),
-        args,
-    }))
+fn builtin(name: &str) -> SerialValue {
+    SerialValue::Ext(SerialAtom::Builtin(name.into()))
 }
 
 #[test]
-fn raw_seed_native_encoding_keeps_table_path_name_and_arguments() {
+fn raw_seed_builtin_encoding_keeps_table_path_and_name() {
     let mut seed = seed();
     seed.scope_table = vec![vec![(
         "native".into(),
         SerialBinding {
-            value: native("map", vec![SerialValue::Int { value: 17 }]),
+            value: builtin("map"),
             scheme: None,
         },
     )]];
     let bytes = to_vec(&seed).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        json["scope_table"][0][0][1]["value"]["ext"]["Native"],
-        json!({"name": "map", "args": [{"int": {"value": 17}}]})
+        json["scope_table"][0][0][1]["value"]["ext"]["Builtin"],
+        json!("map")
     );
     let back: EngineSeed = from_slice(&bytes).unwrap();
     assert_eq!(seed.scope_table, back.scope_table);
 }
 
 #[test]
-fn raw_handler_native_encoding_keeps_tuple_and_catch_all_slots() {
+fn raw_handler_builtin_encoding_keeps_tuple_and_catch_all_slots() {
     let frame = WireHandlerFrame {
-        entries: vec![("named".into(), native("map", vec![SerialValue::Unit]))],
-        catch_all: Some(native("map", vec![SerialValue::Bool { value: true }])),
+        entries: vec![("named".into(), builtin("map"))],
+        catch_all: Some(builtin("has")),
         kind: FrameKind::Within,
     };
     let bytes = to_vec(&frame).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["entries"][0][0], "named");
-    assert_eq!(
-        json["entries"][0][1]["ext"]["Native"],
-        json!({"name": "map", "args": ["unit"]})
-    );
-    assert_eq!(
-        json["catch_all"]["ext"]["Native"],
-        json!({"name": "map", "args": [{"bool": {"value": true}}]})
-    );
+    assert_eq!(json["entries"][0][1]["ext"]["Builtin"], json!("map"));
+    assert_eq!(json["catch_all"]["ext"]["Builtin"], json!("has"));
     let back: WireHandlerFrame = from_slice(&bytes).unwrap();
     assert_eq!(frame.entries, back.entries);
     assert_eq!(frame.catch_all, back.catch_all);
@@ -739,7 +722,6 @@ fn raw_seed_partial_encoding_cleanup_is_stack_safe() {
                     .unwrap(),
                 );
                 seed.context = EngineSeed::encode(&shell.bequeath(SpawnGrant::Inherit))
-                    .unwrap()
                     .context
                     .clone();
                 let error = to_vec(&seed).unwrap_err();
@@ -762,43 +744,17 @@ fn raw_seed_partial_encoding_cleanup_is_stack_safe() {
 }
 
 #[test]
-fn native_argument_validation_keeps_typed_leaf_paths() {
-    for (leaf, tag) in [
-        (
-            json!({"float": {"value": f64::INFINITY.to_bits()}}),
-            "float",
-        ),
-        (json!({"bytes": {"value": "!"}}), "bytes"),
-    ] {
-        let binding = json!({"ext": {"Native": {"name": "map", "args": [leaf]}}});
-        let error = value_failure(&with_binding(envelope(), &binding));
-        let mut path = table_path();
-        path.extend([
-            DataStep::Payload("ext".into()),
-            DataStep::Payload("Native".into()),
-            DataStep::Field("args".into()),
-            DataStep::Index(0usize.into()),
-            DataStep::Payload(tag.into()),
-            DataStep::Field("value".into()),
-        ]);
-        assert_eq!(error.path, path);
-        assert!(matches!(
-            (*error.cause, tag),
-            (DecodeCause::FiniteBits(_), "float") | (DecodeCause::Base64(_), "bytes")
-        ));
-    }
-}
-
-#[test]
 fn nested_native_names_are_validated_before_hydration() {
     let runtime = crate::test_helper::core_runtime();
     let dec = WireDecoder::for_runtime(&runtime, &vec![]).unwrap();
-    let value = native(
-        "map",
-        vec![SerialValue::List {
-            items: vec![unknown_native("missing-held-native")],
-        }],
-    );
+    let value = SerialValue::List {
+        items: vec![
+            builtin("map"),
+            SerialValue::List {
+                items: vec![builtin("missing-held-native")],
+            },
+        ],
+    };
     let value: SerialValue = from_slice(&to_vec(&value).unwrap()).unwrap();
     assert_eq!(
         value.into_runtime(&dec).unwrap_err().reason,
@@ -809,59 +765,19 @@ fn nested_native_names_are_validated_before_hydration() {
 }
 
 #[test]
-fn hydration_rejects_saturated_and_overfull_native_arguments() {
-    let runtime = crate::test_helper::core_runtime();
-    let dec = WireDecoder::for_runtime(&runtime, &vec![]).unwrap();
-    for arity_zero in [false, true] {
-        let entry = crate::shell::builtins::CORE_BUILTINS
-            .iter()
-            .find(|entry| {
-                (entry.decl.fixed_arity() == 0) == arity_zero
-                    && runtime.builtins.value(&entry.decl.name).is_some()
-            })
-            .expect("core has value builtins of both arities");
-        let name = entry.decl.name.as_ref();
-        let arity = entry.decl.fixed_arity();
-        let valid = arity.saturating_sub(1);
-        native(name, vec![SerialValue::Unit; valid])
-            .into_runtime(&dec)
-            .unwrap()
-            .drop_seed();
-        for actual in [arity.max(1), arity.max(1) + 1] {
-            let value = native(name, vec![SerialValue::Unit; actual]);
-            let value: SerialValue = from_slice(&to_vec(&value).unwrap()).unwrap();
-            let error = value.into_runtime(&dec).unwrap_err();
-            let expected = ProtocolFailure::InvalidNativeArguments(
-                crate::fact::ProtocolFailureInvalidNativeArguments {
-                    name: name.into(),
-                    arity: arity.into(),
-                    actual: actual.into(),
-                },
-            );
-            assert_eq!(error.reason, Reason::Protocol(Box::new(expected)));
-        }
-    }
-    let value = native("missing", vec![SerialValue::Unit; 10]);
-    assert_eq!(
-        value.into_runtime(&dec).unwrap_err().reason,
-        Reason::Protocol(Box::new(ProtocolFailure::UnknownNative("missing".into())))
-    );
-}
-
-#[test]
 fn partial_builtins_round_trip_and_apply_in_a_child() {
-    use crate::shell::runtime::{Mooring, Value};
+    use crate::shell::runtime::Mooring;
     for (source, name, expected) in [
         (
             "let offset = 1; let f = { |x| return $[$x + $offset] }; let m = map $f",
             "map",
-            Value::list(vec![Value::Int(2), Value::Int(3)]),
+            ValClos::list(vec![ValClos::int(2), ValClos::int(3)]),
         ),
         (
             // The input list constrains g before checking the callback's body.
             "let [m] = map { |g| let h = g 1; return $h } [$nth]",
             "nth",
-            Value::Int(2),
+            ValClos::int(2),
         ),
     ] {
         let mut parent = crate::test_helper::core_shell();
@@ -875,11 +791,11 @@ fn partial_builtins_round_trip_and_apply_in_a_child() {
         })
         .unwrap();
         let partial = child.env.get("m").unwrap().clone();
-        assert!(matches!(&partial, Value::Native(entry, args)
-            if entry.decl.name == name && args.len() == 1));
+        assert!(matches!(partial.view(), View::Thunk { .. }));
+        assert!(matches!(partial.residual(), Some((entry, 1)) if entry.decl.name == name));
         let result = crate::shell::evaluator::apply(
             &partial,
-            vec![Value::list(vec![Value::Int(1), Value::Int(2)])],
+            vec![ValClos::list(vec![ValClos::int(1), ValClos::int(2)])],
             &Mooring::adrift(),
             &mut child,
         )
@@ -888,24 +804,24 @@ fn partial_builtins_round_trip_and_apply_in_a_child() {
     }
 }
 
-fn alternating_native_json(depth: usize) -> String {
+fn nested_builtin_json(depth: usize) -> String {
     let mut value = String::new();
     for _ in 0..depth {
-        value.push_str(r#"{"ext":{"Native":{"name":"map","args":[{"list":{"items":["#);
+        value.push_str(r#"{"list":{"items":[{"ext":{"Builtin":"map"}},"#);
     }
     value.push_str(r#""unit""#);
     for _ in 0..depth {
-        value.push_str("]}}]}}}");
+        value.push_str("]}}");
     }
     value
 }
 
 #[test]
-fn alternating_native_cleanup_is_stack_safe_at_every_wire_stage() {
+fn nested_builtin_cleanup_is_stack_safe_at_every_wire_stage() {
     std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(|| {
-            let deep = alternating_native_json(10_000);
+            let deep = nested_builtin_json(10_000);
             let value: SerialValue = from_slice(deep.as_bytes()).unwrap();
             assert_eq!(to_vec(&value).unwrap(), deep.as_bytes());
             drop(serial_binding(value));
@@ -918,32 +834,25 @@ fn alternating_native_cleanup_is_stack_safe_at_every_wire_stage() {
             drop(raw);
             for tail in [r#"{"bytes":{"value":"!"}}"#, r#"{"bytes":{"value":false}}"#] {
                 // Completed raw and semantic prefixes outlive a failing sibling.
-                let bytes =
-                    format!(r#"{{"ext":{{"Native":{{"name":"map","args":[{deep},{tail}]}}}}}}"#);
-                assert!(from_slice::<SerialValue>(bytes.as_bytes()).is_err());
                 let bytes = format!(r#"{{"list":{{"items":[{deep},{tail}]}}}}"#);
                 assert!(from_slice::<SerialValue>(bytes.as_bytes()).is_err());
             }
-            // Runtime conversion failure disposes the entire alternating wire tree.
+            // A later invalid atom disposes the completed data prefix.
             let runtime = crate::test_helper::core_runtime();
             let dec = WireDecoder::for_runtime(&runtime, &vec![]).unwrap();
             let value: SerialValue = from_slice(deep.as_bytes()).unwrap();
-            let value = native("missing", vec![value]);
+            let value = SerialValue::List {
+                items: vec![value, builtin("missing")],
+            };
             assert!(value.into_runtime(&dec).is_err());
-            // A failed runtime encode owns both its completed prefix and its input.
-            use crate::shell::runtime::Value;
             let entry = Arc::new(runtime.builtins.value("map").unwrap());
-            let value = (0..10_000).fold(Value::Unit, |value, _| {
-                Value::Native(Arc::clone(&entry), vec![Value::list(vec![value])].into())
+            let value = (0..10_000).fold(ValClos::UNIT, |value, _| {
+                ValClos::list(vec![ValClos::builtin(Arc::clone(&entry)), value])
             });
-            let input = Value::Native(
-                entry,
-                vec![value, crate::shell::runtime::idle_handle()].into(),
-            );
-            assert!(
-                SerialValue::from_runtime(&input, &mut super::super::table::InternCtx::new())
-                    .is_err()
-            );
+            let input = ValClos::list(vec![value, crate::handle::idle_handle()]);
+            let wire =
+                SerialValue::from_runtime(&input, &mut super::super::table::InternCtx::new());
+            crate::data::json::drop_value(wire);
             input.drop_seed();
         })
         .unwrap()

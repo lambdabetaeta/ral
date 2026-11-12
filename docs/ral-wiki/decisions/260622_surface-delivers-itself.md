@@ -1,7 +1,7 @@
 ---
 status: active
-verified_at_commit: 96e103a5
-verified_at_date: 2026-11-01
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
 anchors: [DeferredSink, DeferredSurface, CompletionPermit, DoneEvent, SessionEvent::DeferredSurface, Mooring::for_thread, SurfacePoster, Input::Surface, Agent::admit]
 ---
 
@@ -109,7 +109,7 @@ a new scope makes a new channel ([[design/engine-protocol|engine-protocol]],
 ## Where
 
 - `core/src/shell/runtime/mooring.rs` — `DeferredSink`, `Mooring::for_thread`.
-- `core/src/shell/runtime/handle.rs` — `CompletionPermit`; `core/src/shell/runtime/handle/surface.rs` — `DeferredSurface`.
+- `core/src/handle.rs` — `CompletionPermit`; `core/src/handle/surface.rs` — `DeferredSurface`.
 - `core/src/shell/runtime/state/workers.rs` — `DoneEvent`.
 - `core/src/shell/builtins/concurrency/birth.rs` — `spawn_child`, `CompletionPermit::finish` publishing terminal state before `DeferredSurface::flush`.
 - `core/src/protocol.rs` — `SessionEvent::DeferredSurface`; carried by

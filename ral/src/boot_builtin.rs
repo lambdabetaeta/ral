@@ -3,6 +3,7 @@
 //! evaluate ral. Capability refusals are data whose host exit is 2;
 //! an rc failure remains an error ending.
 
+use ral_core::builtin::{BuiltinBody, BuiltinEntry};
 use ral_core::carrier::Severed;
 use ral_core::data::FOValue;
 use ral_core::data::datum::Datum as _;
@@ -16,12 +17,10 @@ use ral_core::fact::{
 use ral_core::path::{Resolver, is_absolute, shown, utf8};
 use ral_core::protocol::{Ending, Program, Ran, Report};
 use ral_core::record;
-use ral_core::shell::runtime::{
-    Break, BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring, Settled,
-};
+use ral_core::shell::runtime::{Break, DefaultPolicy, HookName, HookSig, Mooring, Settled};
 use ral_core::ty::{Binders, Row, Ty, Typed as _};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{RegisterError, Shell, Value};
+use ral_core::{RegisterError, Shell, ValClos};
 use ral_core::{err, errln};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -59,7 +58,7 @@ pub(crate) fn register(shell: &mut Shell) -> Result<(), Error> {
     shell
         .register_hook(
             hook(),
-            Value::Native(entry.into(), [].into()),
+            ValClos::builtin(entry.into()),
             HookSig::Hook {
                 kind: "boot".into(),
             },
@@ -142,7 +141,7 @@ impl Boot {
 /// Spent on first use: the hook goes, so a second call finds none. The CLI's
 /// overrides land after the rc, and `--capabilities` narrows from there: rc
 /// is operator-trusted bootstrap, the user's ceiling is the last word.
-fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn boot(args: &[ValClos], mooring: &Mooring, shell: &mut Shell) -> Settled<ValClos> {
     if !shell.unregister_hook(&hook()) {
         return Err(
             Error::new(Reason::Host(Box::new(HostFailure::Ral(RalFailure::Boot(
@@ -195,7 +194,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
             let diagnostic =
                 e.with_context("--capabilities")
                     .render(shell.sources(), None, shell.exit_hints());
-            return Ok(Value::from(
+            return Ok(ValClos::from(
                 BootAnswer::CapabilitiesRefused(diagnostic).encode(),
             ));
         }
@@ -204,7 +203,7 @@ fn boot(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> 
     if shell.is_interactive() {
         install_default_prompt(shell);
     }
-    Ok(Value::from(BootAnswer::Settled(settings).encode()))
+    Ok(ValClos::from(BootAnswer::Settled(settings).encode()))
 }
 
 fn invalid(cause: InvalidCause) -> Error {
@@ -321,7 +320,7 @@ mod tests {
             capabilities: vec![utf8(&profile).unwrap().to_owned()],
         };
         let answer = boot(
-            &[Value::from(request.encode())],
+            &[ValClos::from(request.encode())],
             &Mooring::adrift(),
             &mut shell,
         )
@@ -347,7 +346,7 @@ mod tests {
             register(&mut shell).unwrap();
             shell
         }
-        fn refused(args: &[Value]) -> Error {
+        fn refused(args: &[ValClos]) -> Error {
             let Err(Break::Error(error)) = boot(args, &Mooring::adrift(), &mut shell()) else {
                 panic!("expected boot refusal")
             };
@@ -365,7 +364,7 @@ mod tests {
         );
         let block = crate::repl::eval(&mut shell(), "{ return () }");
         assert_eq!(
-            refused(&[Value::list(vec![block])]).reason,
+            refused(&[ValClos::list(vec![block])]).reason,
             invalid(InvalidCause::NonData(ral_core::fact::NonData {
                 leaf: ral_core::fact::OpaqueKind::Block,
                 nested: true

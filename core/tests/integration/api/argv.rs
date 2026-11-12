@@ -2,7 +2,7 @@
 //! receives, and where an argv stops being text the shell may render freely.
 //!
 //! A handler arm, a base frame and an external are variadic over an argv, and
-//! one renderer serves all three inside the shell — `Value::render_argv`, total
+//! one renderer serves all three inside the shell — `ValClos::render_argv`, total
 //! by construction, so a map, a lambda and a block all have a text form.  The
 //! exec boundary is the one place that is *not* total: heading for `execve(2)`,
 //! it refuses the shapes an operating system has no argument for.  Total
@@ -26,7 +26,7 @@ use crate::common::under_grant;
 use ral_core::Settled;
 use ral_core::protocol::Run;
 use ral_core::shell::run::{RunReport, StaticDiagnostics};
-use ral_core::shell::runtime::{Break, Value};
+use ral_core::shell::runtime::{Break, ValClos};
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::fresh_shell;
 
@@ -37,7 +37,7 @@ fn report(src: &str) -> RunReport {
 }
 
 /// A run that must reach the evaluator, with what it wrote to stdout.
-fn run_capture(src: &str) -> (Settled<Value>, String) {
+fn run_capture(src: &str) -> (Settled<ValClos>, String) {
     match report(src) {
         RunReport::Ran {
             ending, captured, ..

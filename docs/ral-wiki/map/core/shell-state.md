@@ -1,7 +1,7 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: c0905f5e
 generated_at_date: 2026-11-12
-covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs]
+covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/builtin.rs, core/src/handle.rs, core/src/handle/]
 ---
 
 # Map: core / shell / runtime — runtime values & shell state
@@ -12,27 +12,37 @@ fact data are reached through their owning modules.
 
 ## Values
 
-- `value.rs` — `Value` (the runtime [[design/cbpv|value]] category); beside it
+- `value.rs` — `ValClos`, the runtime [[design/cbpv|value closure]] `⟨V,ρ⟩`,
+  with nonvariable root and every direct name bound in ρ. `View` reads one
+  layer. `ValClos::close` restricts at formation and pulls missing direct
+  names from Σ; component reads share ρ without another restriction.
+  Beside it
   `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
-  `FrameHandle`), `builtin.rs` (`BuiltinEntry` — a checker-owned `Decl` plus the body — and
+  `FrameHandle`), crate-root `core/src/builtin.rs` (`BuiltinEntry` — a checker-owned `Decl` plus the body — and
   `BuiltinTable`, which projects each set into the checker's `Manifest`; kept
   separate from the handler stack — a row whose result settles at `Unit`
   has its answer coerced to `Unit`, independent of grade,
   `Decl::settles_at_unit` reading the curry spine to decide and
-  debug-asserting the body agrees), and `handle.rs` (the concurrency
-  substrate behind `Value::Handle`: `HandleInner`, which carries its
+  debug-asserting the body agrees), and crate-root `core/src/handle.rs` (the concurrency
+  substrate behind `Val::Handle`: `Handle::{Live, Withheld}` and
+  `HandleInner`, which carries its
   worker's `WorkerId`, title and clock — a birth `Stamp` and an end `Stamp`,
   each one instant on a monotonic and a wall clock — and one lock over its
-  `HandleState` (`Running`, `Stopping`, `Ready`, `Consumed`), beside `CompletedHandle`,
+  `HandleState`, projected as `Sample::{Running, Stopping, Ready, Consumed}`,
+  beside `CompletedHandle`,
   the worker's `CompletionPermit` and its `DeferredSurface`).
-  `Value::Native(Arc<BuiltinEntry>, Arc<[Value]>)` holds the entry and arguments
-  supplied so far, fewer than its arity for positive arity. Zero arity holds
-  none and runs on force. Otherwise, forcing collects the rest in a native
-  terminal; saturation runs the body. It displays as `<native NAME>`, or
-  `<native map, 1 of 2 arguments>` when partial. Boundary builtins instead
-  remain inference-built λ-closures over `Exec` carrying their checked site.
-  Lambda display recovers lowered parameter patterns. `Value::variant`
-  normalises a unit payload to absence.
+  `ValClos::builtin` wraps an entry as `⟨Val::Builtin(entry),∅⟩` and is public
+  to hosts. Force enters `BuiltinEntry::eta` over the captured entry: a
+  λ-chain ending in δ. Partial application yields a boxed residual λ;
+  `residual` recovers its entry and remaining arity for display and hook
+  validation. An exact-arity call runs directly; arity zero runs on force too.
+  Display is `<native NAME>` or `<native map, 1 of 2 arguments>`; a residual's
+  type name is `Lambda`. Boundary partials remain inference-built λ-closures
+  over `Exec` carrying their checked site. Handler installation refuses
+  builtin residuals before checking their bodies.
+  Lambda display recovers lowered parameter patterns. `ValClos::variant`
+  shares the payload's syntax and capture; `View::Variant` omits a resolved
+  unit payload, including a variable bound to unit, without recursive `view`.
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
   A *handler* arm is a block whose type takes its slot's parameters:
@@ -47,23 +57,24 @@ fact data are reached through their owning modules.
   Scoped handlers and catch-alls are checked statically and not re-vetted;
   the calling convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
-- `value.rs`'s `Value::heads` gives the heads a value may be admitted at; the
+- `value.rs`'s `ValClos::heads` gives the heads a value may be admitted at; the
   shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
   one match on a head with one `remedy` each. Rendering an argv inside the shell
-  is total (`Value::render_argv`); this is the one gate, declared once so the
+  is total (`ValClos::render_argv`); this is the one gate, declared once so the
   static refusal and the pre-spawn one cannot disagree
   ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
-- `list.rs` / `map.rs` — `List` and `Map`, opaque over a private `Repr`
-  wrapping `Arc<imbl::Vector<Value>>` / `Arc<imbl::OrdMap<String, Value>>`;
-  `get`/`iter` lend a `Cow<'_, Value>` rather than `&Value`, so a caller
-  never knows whether an element is shared or freshly formed; the
-  `pub(crate)` mutators go through `Arc::make_mut`. `data/string.rs` /
-  `data/bytes.rs` — `data::{Str, Bytes}`, newtypes over `Arc<String>` /
-  `Arc<Vec<u8>>`, so an owned buffer
-  moves in without a copy. `Value::string` / `Value::bytes` are their one
-  constructor, as `Value::list` is a list's. **Cloning a `Value` copies
-  no payload**: a string, a byte string, a list or map spine and a closure's
-  scope are all shared, and `Env` and variable lookup rely on it.
+- `list.rs` / `map.rs` — `List` / `Map` build persistent
+  `Arc<imbl::Vector<ValClos>>` / `Arc<imbl::OrdMap<String, ValClos>>` values.
+  They realise value closures over implicit positional or keyed variables,
+  with logarithmic updates through `Arc::make_mut`. `ListRef` / `MapRef`
+  read syntax over ρ or built data; `get` / `iter` yield `Cow<ValClos>`.
+  `to_list` / `to_map` share built spines and materialise syntax once;
+  `to_map` drops an error witness. Builders lend `&ValClos` directly.
+  `data::{Str, Bytes}` share owned string and byte buffers without copying.
+  Scalar constructors use refcount-free `Env::EMPTY`; nonempty small captures use
+  `ThinArc`. Compiled upper bounds are `Env ≤ 16`, `ValClos ≤ 48`,
+  `Frame ≤ 128` bytes
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
 - `flow.rs` — `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable,
   `Escape` propagating), and `Escape` (`Exit`, `Stopped`).
   `From<process::Cancellation> for Break` preserves cause and owner as a
@@ -79,9 +90,13 @@ fact data are reached through their owning modules.
   `Audit` collector, holding one total `Prov` register, over
   `fact/observation.rs`'s `Observation` / `Observed`
   and `fact::AuditIo` (captured byte prefixes and totals) — data independent of
-  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire. `value.rs` — `Value` and, in `value/`, its two bridges: `first_order.rs` (the one walk each way to `FOValue`) and `compare.rs` (`Value::equals` and `Value::compare`, one equality and one order, exact across Int and Float). `closure.rs` — `Closure`, the thunk value `⟨M, ρ|occ(M)⟩`, its
-  fields private and `Closure::new` its one constructor, which `restrict`s
-  the environment to the names its body mentions
+  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire.
+  `value/first_order.rs` walks each way to `FOValue`; `compare.rs` supplies
+  `ValClos::equals` and `ValClos::compare`, exact across Int and Float.
+  `ValClos::thunk` forms `⟨thunk M,ρ↾occ(M)⟩`; `ValClos::block` is a thunk the
+  checker may read, never an η residual. Drop is trampolined: a dying value
+  queues the capture, built vector or built map it alone owns, bounding the
+  host stack while dropping capture chains
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
   `env.rs` — lexical `Env`, ρ alone; process-env overrides are
   `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
@@ -89,13 +104,14 @@ fact data are reached through their owning modules.
   rides next to the value. Every session binding has a scheme; block-local
   bindings may carry none
   ([[internals/type-inference|type-inference]]).
-  **A shared write clones a node, and a node clones cheaply**: `Env`'s
-  private `Entries` is a sorted array of at most `SMALL` (8) bindings, a persistent
+  **A shared write copies the touched nodes and their inline bindings**: `Env`'s
+  private `Entries` is refcount-free `Empty`, a sorted `ThinArc` array of at most
+  `SMALL` (8) bindings, or a persistent
   hash map past it, so a `bind` into an environment another holder still
   references copies only the touched node — the whole array up to `SMALL`,
   a path past it — and copying a node clones every `Binding` stored inline in
-  it. Each such clone is cheap, whatever the binding holds: `Closed` wraps
-  an `Arc<Scheme>`, and the value copies no payload (above).
+  it. `Closed` shares its `Arc<Scheme>`; values share collection nodes and
+  captures, but cloning a root tag spine copies its n tags in O(n).
   `binding_schemes` hands the next run's check those same shared schemes.
   Handler entries carry no schemes: `handled_names` supplies diagnostic names
   only. Their install check yields a verdict, not a type to persist.
@@ -103,9 +119,12 @@ fact data are reached through their owning modules.
   per `Shell`, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env,
   sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
   else in core spells the shadowing order out again.
-- `coerce.rs` — the `Value::as_str` / `as_list` / `as_map` / `expect_handle`
-  family of argument decoders, each failing with a bare `Error` in the one
-  wording of `Value::expected`, read by builtins and `shell::grant` through
+- `coerce.rs` — the `ValClos::as_str` / `as_list` / `as_map` / `expect_handle`
+  family of argument decoders. Container decoders lend `ListRef` / `MapRef`;
+  `expect_thunk` lends computation and environment. `expect_handle` calls
+  `Handle::live`, refusing withheld handles as `withheld-handle`.
+  Shape refusals use `ValClos::expected`; builtins and `shell::grant` read
+  these decoders through
   `crate::shell::runtime::*`.
 - `walk.rs` — `AdmittedWalk` and `Shell::admitted_walk`: the live stack's
   `ReadRegion` and current cancel scope handed to `path::tree::Walk`; unseen
@@ -118,7 +137,7 @@ fact data are reached through their owning modules.
 `authority/policy.rs` holds the resolved capability model and judgments;
 `authority/grant/` constructs it through authored resolution and host system-read
 discovery, while `authority/guard/` enforces it without runtime types.
-`shell/grant/` decodes `Value`s and adapts spawn grants;
+`shell/grant/` decodes `ValClos` values and adapts spawn grants;
 `Shell::freeze_ctx` builds a `FreezeCtx::at` from env and logical cwd, then
 adds scratch.
 The model includes: `GrantLayer` (resolved where decoded from a grant value),
@@ -194,7 +213,7 @@ checkpoint, since a run never writes it.
   trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
   `cradle`); the
   residue once run and session state are named. The `cradle`
-  (`shell/runtime/handle/brood.rs`) says where a loose birth hangs and who settles
+  (`core/src/handle/brood.rs`) says where a loose birth hangs and who settles
   it: loose under the root, answering for nothing, for a run and an aside
   (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
   scope and its `Brood`, paired with a unique `BroodGuard` holding the handles
@@ -256,12 +275,12 @@ checkpoint, since a run never writes it.
   mutually-recursive members alike — and never under `Mode::Local`. The host
   door `set_var` requires a `Closed` scheme and uses the raw `Env` primitive,
   since its host calls precede arming. Idleness is *use-observation*, not
-  re-installation: source and check dispatches tick the committed-run clock,
+  re-installation: source dispatches tick the committed-run clock; checks do not,
   and the root's compiled program renews leases by `ir::referenced_names`.
   Linked modules see Σ alone and renew no session lease
   ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
   check: `BindingLease` also carries `large_binding_bytes`, and an install
-  whose value's `Value::shallow_size` (a structural estimate — `String`/
+  whose value's `ValClos::shallow_size` (a structural estimate — `String`/
   `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
   `Lambda`/`Block`/`Native`/`Handle` a small fixed constant, never descended) meets it
   queues a `LargeBindingNotice` regardless of baseline status or idle age —
@@ -353,15 +372,15 @@ The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
 borrowed first-order `FOValue`
 ([[map/core/engine-protocol|engine-protocol]]); the `Mooring::surface`
-method takes a borrowed `Value`, encodes it once, in that method, and forwards onto
+method takes a borrowed `ValClos`, encodes it once, in that method, and forwards onto
 the installed sink — inert when none is present (a bare REPL).
 `Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
 already holds the wire form: `Shell::observe_stamped` (`shell/runtime/audit/fan_out.rs`) reaches it
 with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
-the tag alone without re-encoding a `Value` it never had. Run-scoped, not
+the tag alone without re-encoding a `ValClos` it never had. Run-scoped, not
 a persistent capability — a run installs it, so a clone of it has no
 liveness role and can never decide a run is over. A session worker does not receive the live sink: its surface is a
-`DeferredSurface` (`shell/runtime/handle/surface.rs`) that buffers and, through the
+`DeferredSurface` (`core/src/handle/surface.rs`) that buffers and, through the
 worker's `CompletionPermit` on every exit after the handle reaches its terminal
 state (`Ready` or `Consumed`), delivers the batch once to the session's
 `DeferredSink`; a mooring without that sink gives its workers no surface
@@ -524,15 +543,18 @@ an aside's writes where its parent does:
   `bequeath` is the function every sub-agent fork passes through: one
   `Scrub` over every root the fork holds — the session scope and each
   handler frame's arms (`HandlerFrame::values_mut`). A fork's hook table is
-  empty by construction: hooks are session state, never inherited. The scrub replaces each `Value::Handle` it reaches with an
-  `` `opaque `` placeholder, the binding's name and scheme surviving.
+  empty by construction: hooks are session state, never inherited. The scrub
+  replaces every reachable live handle with `Handle::Withheld(title)`, keeping
+  its name, position, type and scheme. Every observation refuses it with
+  `withheld-handle`; no live handle remains reachable in the bequest.
   - It walks *scopes*, not values: each scope the roots reach, once, by
     `ptr_eq` root identity, dependencies first, on an explicit stack — so a
     chain of closures costs no host stack, and a scope many closures share
     is visited once.
-  - Within a scope it recurses through lists, maps, variant payloads and a
-    partial native's held arguments. A closure is re-seated over its captured
-    scope's scrubbed replacement, including closures held by native arguments.
+  - `ValClos::captured_envs` supplies dependencies; `ValClos::scrubbed`
+    substitutes memoised captures, withholds handles on the syntax root or
+    variant spine, and patches built lists and maps. Supplied arguments of a
+    builtin residual are bindings in its captured environment.
   - A rebuilt scope or container is its original with only the changed
     entries overwritten, and one that reaches no handle is kept whole: a
     shell reaching no handle forks as itself, its session map `ptr_eq` to

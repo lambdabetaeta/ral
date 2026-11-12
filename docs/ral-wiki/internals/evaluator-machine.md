@@ -1,579 +1,453 @@
 ---
-verified_at_commit: ed1b37eb
+verified_at_commit: c0905f5e
 verified_at_date: 2026-11-12
-anchors: [Machine, step_eval, eval_rules, step_return, step_halt, Frame, Focus, Terminal, Closure, Closure::new, Node::new, Env, restrict, Signature, lookup, form, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
+anchors: [Machine, step, settle, eval, eval_rules, resume, unwind, Frame, ValClos, ValClos::close, ValClos::thunk, View, BuiltinEntry::eta, CompKind::Builtin, Node::new, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
 ---
 
 # The evaluator: a CEK machine for CBPV
 
-**The machine steps a computation closure against a continuation; lexical
-bindings travel with code, while shell effects act on the caller's live state.**
-This is a *CEK machine*: control, environment and continuation. For
-[[design/cbpv|call-by-push-value]], control must distinguish returning a value
-from reaching a lambda that awaits an argument.
+**The machine steps a computation closure or unwinds a break; a produced
+value meets its continuation in the same step.** Lexical bindings travel with
+code, while shell effects act on the caller's live state. This is a *CEK
+machine*: control, environment and continuation.
 
-- The rules below describe checked `Val` / `CompKind` IR, **not surface ral**.
-  Elaboration and checking have already made operand sequencing, capture and
-  returned-thunk application explicit
-  ([[internals/compilation-ladder|compilation ladder]],
+- These rules describe checked `Val` / `CompKind` IR, **not surface ral**.
+  Elaboration and checking make operand sequencing, capture and returned-thunk
+  application explicit ([[internals/compilation-ladder|compilation ladder]],
   [[invariants/ir-pure-cbpv|IR invariant]]).
-- `Machine { focus, stack }` steps against `&mut Shell` and `&Mooring`.
-  Its three modes are `Eval`, `Return` and `Halt`; `Return` has three terminals:
-  `Value`, `Lambda` and `Native`.
-- Read the rules as an operational account of current Rust, not a proof that
-  every Rust execution refines Agda. The substitution-based CK machine in
-  `dev/agda/Extrinsic/Semantics/Machine.agda` is the core correspondence
-  boundary; environments here implement lexical binding rather than literal
-  substitution. Host operations, dynamic shell state and resource limits need
-  their own account. Residual-function Box awaits an Agda follow-up, and native
-  terminals are not mechanised. The acquiring `guard` is owned Agda divergence D4
-  ([[decisions/261111_a-guard-acquires|a-guard-acquires]]). See the
-  [[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]].
+- `Machine { state, stack, mooring, … }` holds `Settled<(Arc<Comp>, Env)>`:
+  a computation closure or `Err(Break)`, never a persistent value register.
+  `settle` passes values through frames until one yields a closure or break,
+  or the run finishes. No rule constructs runtime `return V` syntax.
+- This is an operational account of Rust, not a refinement proof. Agda's
+  substitution-based CK machine is the core correspondence boundary;
+  environments implement lexical binding rather than literal substitution.
+  Residual-function boxing, runtime builtin η/δ and the acquiring `guard`
+  need their separate correspondence follow-ups
+  ([[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]],
+  [[decisions/261111_a-guard-acquires|a-guard-acquires]]).
+- The value and state representation is fixed by
+  [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]].
 
 ## Syntax and notation
 
-**Values are inert; computations either produce a value or await an argument.**
-The following is a reading key for the control fragment, not a replacement for
-`core/src/ir.rs` or `docs/SPEC.md` §17.
+**Values are inert; computations produce a value or await an argument.**
+This is a reading key, not a replacement for `core/src/ir.rs` or SPEC §17.
 
 ```text
 Value types       A, B ::= Unit | Bool | Integer | String | Bytes
                         | List A | Map A | Record r | Variant r
                         | U C | Handleᵍ A | …
 Computation types C    ::= Fᵍ A | A → C
-
-Value terms       V, W ::= c | x | thunk M | [V₁,…,Vₙ]
-                        | record{ℓᵢ:Vᵢ} | map{ℓᵢ:Vᵢ} | tag ℓ V | …
-Computations      M, N ::= return V | force V | λx. M | M · (V₁,…,Vₙ)
-                        | M to p. N | M ⨟ N | rec G i
+Value terms       V, W ::= x | () | scalar | bytes | builtin c | handle h
+                        | thunk M | [V₁,…,Vₙ] | record{ℓᵢ:Vᵢ}
+                        | map{ℓᵢ:Vᵢ} | tag ℓ V
+Computations      M, N ::= return V | force V | λx.M | M · (V₁,…,Vₙ)
+                        | M to p.N | M ⨟ N | rec G i
                         | if V then Wₜ else W𝒻 | case V of {ℓᵢ ↦ Wᵢ}
-                        | prim q(V⃗) | try V W | guard A V W | capture M
-                        | shell forms
+                        | prim q(V⃗) | δ(b; a⃗) | try V W | guard A V W
+                        | capture M | shell forms
 ```
 
-- `U C` is the value type of a suspended computation; `Fᵍ A` is a computation
-  producing `A`; `A → C` is a computation awaiting an `A`, **not a value type**.
-  A lambda is therefore not a thunk. `g` is a producer grade (`p`, `w`, or a
-  variable); it does not classify all effects. Output grade `w` pairs only
-  with `Unit` ([[design/capture|grades and capture]]).
-- `c` is a literal; `x` is a lexical name, with no surface `$` here. `p` is a
-  pattern (wildcard, name, list with optional rest, or record). `G` is a shared
-  group `[(x₀,M₀), …, (xₙ₋₁,Mₙ₋₁)]`. Static labels and primitive metadata are
-  implicit in `q`; admission sites and spans are omitted from this grammar.
-- Arms of `if` are values of type `U C`; a `case` arm is a thunk of a
-  payload-taking function. `try` and `guard` likewise take suspended bodies.
-  `capture`, `Bind`, `Seq`, `App` and redirects instead contain computation
-  syntax where their IR constructors say so.
+- `U C` suspends a computation; `Fᵍ A` produces `A`; `A → C` awaits an
+  argument and is **not a value type**. A lambda is not a thunk. The producer
+  grade `g` does not classify all effects; output grade `w` pairs only with
+  `Unit` ([[design/capture|grades and capture]]).
+- `x` is a name, without surface `$`; `p` is a wildcard, name, list or record
+  pattern. `G = [(x₀,M₀), …]` is a shared recursive group. Spans, admission
+  sites and primitive metadata are omitted.
+- Choice arms are thunks; a case arm takes the payload. `try` and `guard`
+  also take suspended operands. `Capture`, `Bind`, `Seq`, `App` and redirects
+  contain computation syntax where their constructors say so.
 
-A configuration makes the three distinct stores of information visible:
+**Only the following are machine configurations:**
 
 ```text
-⟨E(M,ρ), K; σ⟩       Eval: computation M in lexical environment ρ
-⟨R(t),   K; σ⟩       Return: terminal t meeting its continuation
-⟨H(b),   K; σ⟩       Halt: break b climbing its continuation
-
-t ::= Value(v) | Lambda(λx.M,ρ) | Native(b,v⃗)
+⟨M,ρ | K; σ⟩             computation closure
+⟨raise b | K; σ⟩         Err(b), not an IR constructor
 b ::= Error(e) | Escape(a)
-K ::= ε | F :: K                  leftmost frame is the TOP
+K ::= ε | F :: K         leftmost frame is the TOP
 ```
 
-- Lowercase `v` is a *formed runtime value*, uppercase `V` a value term.
-  `ρ[x ↦ v]` is a persistent extension, not mutation of any captured `ρ`.
-  Runtime `Binding` also carries an optional type scheme; the rules omit it.
-- `Σ` is the fixed `Signature` of natives and frozen prelude. Every rule is
-  parameterised by `Σ`; it is neither part of `ρ` nor mutable store `σ`.
-  `μ` denotes the run's fixed `Mooring` when cleanup grace or host work needs it.
-- `σ` abbreviates the relevant live `Shell` state: cwd, environment overrides,
-  handlers, grants, I/O sinks, scopes, workers, audit and session state.
-  It is not a heap captured in a closure. External effects are not rolled back
-  merely because a frame is popped.
-- `F :: K` is written top-first, opposite Rust's `Vec` display order: Rust
-  pushes at the end and pops the end. Unless shown, `σ` is unchanged.
+- Lowercase `v` is a runtime value closure `⟨V,ρ⟩`, with nonvariable root
+  and every direct name bound in `ρ`. A direct name is outside any thunk.
+  `ρ[x ↦ v]` is persistent extension. `Binding`'s optional scheme is omitted.
+- `Σ` is the fixed `Signature`: prelude then builtins. Lookup is `ρ` then
+  `Σ`. `μ` is the run's fixed `Mooring`; `σ` is live `Shell` state — cwd,
+  environment overrides, handlers, grants, sinks, scopes, workers and audit.
+  External effects are not rolled back merely because a frame is popped.
+- `F :: K` is top-first, opposite Rust's `Vec` order. Unless shown, `σ`
+  is unchanged.
 
-**The arrows expose control, not a cycle-accurate trace.** `→` is a displayed
-transition after erasing spans and provenance bookkeeping. `⇒*` combines
-transitions. `enter(v,K,σ)` and `enterᵥ(V,ρ,K,σ)` below are helper results,
-not additional `Focus` constructors or necessarily extra calls to `step`.
-Native and shell operations are opaque host computations: one `eval_rules`
-arm may do substantial work or re-enter another machine.
+**Rule results are not configurations.** Write `C(M,ρ)` for the next closure
+and `D(v)` for a value handed down now. `S(n,K;σ)` denotes `settle` on the
+result `n`; `meet(t,F,K;σ)` denotes `resume` after popping `F`, where `t` is
+`C(λx.M,ρ)` or `D(v)`. These are metanotation, not extra machine states:
 
-- Success rules presume formation, reservation and polling succeed.
-  The sections below state their failure behaviour, not an implicit rollback.
-- `step` pops a frame **before** `step_return` or `step_halt`. If any helper
-  returns a `Break`, `step` installs `H(b)` with the stack and shell state
-  **as they then stand**. Already pushed frames remain; already popped ones
-  do not reappear. This matters for failed forcing, matching and cleanup.
+```text
+S(C(M,ρ),K;σ) = ⟨M,ρ | K;σ⟩
+S(Err(b),K;σ) = ⟨raise b | K;σ⟩
+S(D(v),ε;σ) = finish Ok(v)
+S(D(v),F :: K;σ) = meet(D(v),F,K;σ)
+
+⟨λx.M,ρ | F :: K;σ⟩ → meet(C(λx.M,ρ),F,K;σ)
+⟨λx.M,ρ | ε;σ⟩ → finish Ok(⟨thunk (λx.M),ρ↾occ(λx.M)⟩)
+⟨raise b | F :: K;σ⟩ → unwind(F,b,K;σ)
+⟨raise b | ε;σ⟩ → finish Err(b)
+```
+
+- Arrows erase spans and provenance, not failures. `⇒*` combines transitions;
+  host operations may do substantial work or re-enter another machine.
+- `step` pops before `resume` or `unwind`. A helper failure installs `Err(b)`
+  with stack and shell **as they then stand**: pushed frames remain and popped
+  ones do not reappear. Success rules presume reservation and polling succeed.
+- `boxed(D(v)) = v`; `boxed(C(λx.M,ρ)) = ⟨thunk (λx.M),ρ↾occ(λx.M)⟩`.
+  Pass-through frames preserve `t`; value-demanding frames use `boxed(t)`.
 
 ## Values and environments
 
-**Forming a value does not execute a computation or read ambient shell state.**
-Write `⟦V⟧ρ,Σ = v` for `form(V, &env, &sig)`; formation can fail, notably on
-an undefined name.
+**Closing a value executes no computation and reads no ambient shell state.**
+Write `close(V,ρ,Σ)` for `ValClos::close`:
 
 ```text
-⟦c⟧ρ,Σ         = c
-⟦x⟧ρ,Σ         = ρ(x), otherwise Σ(x), otherwise Error(undefined x)
-⟦thunk M⟧ρ,Σ   = Thunk(M, ρ↾occ(M))
-⟦tag ℓ V⟧ρ,Σ   = Variant(ℓ, ⟦V⟧ρ,Σ)
+close(x,ρ,Σ) = lookup(x,ρ,Σ), or Error(undefined x)
+close(V,ρ,Σ) = ⟨V,ρc⟩                       V not a variable
+ρc = ρ↾occ(V), extended by Σ's answers for missing direct names
+read(x,ρ) = ρ(x)
+read(V′,ρ) = ⟨V′,ρ⟩                         V′ not a variable
 ```
 
-- `Node::new` computes `occ` once through `Occ::of`: the names mentioned,
-  including bound names, an over-approximation rather than exact free variables. `Closure::new`
-  restricts the captured environment to that set. The transient `E(M,ρ)`
-  instead holds the whole environment in which `M` was reached.
-- Plain list, record and map literals are value closures too. Inspection
-  distributes their saved environment one layer at a time. A directly
-  mentioned name answered only by `Σ` requires eager formation, because
-  literal inspection reads `ρ` alone. `Σ` lookup prefers prelude to natives.
-- `Prim` computes on values whose operand computations have already run in
-  surrounding binds. Ordinary value formation forces no arbitrary thunk;
-  data admission belongs at a boundary or before a unit's first phrase.
-- Sinks, cwd, handlers, worker ownership and leases never enter a closure.
-  Forcing restores lexical bindings, **not shell state**
+- `Node::new` stores `Occ::of`, an over-approximation of mentions including
+  bound names. `close` and `ValClos::thunk` restrict at formation; component
+  `read` shares the whole saved `ρ`, without restricting again or consulting
+  `Σ`. Names under a thunk resolve `ρ` then `Σ` when it runs.
+- Constructors for scalars, byte strings, builtins and handles use empty
+  captures; component reads may retain the container's ρ. `Env::EMPTY`
+  clones without a refcount operation; small nonempty environments use
+  `ThinArc`. Compiled upper bounds are `Env ≤ 16`, `ValClos ≤ 48` and
+  `Frame ≤ 128` bytes.
+- Built lists and maps are value closures over implicit fresh variables,
+  represented by persistent vectors and ordered maps for logarithmic updates.
+  `ListRef` / `MapRef` read either syntax over `ρ` or built data through
+  `Cow<ValClos>`. A variant shares its payload's syntax and capture, binding a
+  built container when needed. `View::Variant` omits a resolved unit payload,
+  including a variable bound to unit, without recursively calling `view`.
+- No sink, cwd, handler stack, worker ownership or lease enters a lexical
+  capture. Forcing restores bindings, **not shell state**
   ([[design/scoping|scoping]]).
 
 ## Application and force
 
-**Lambda and native terminals consume arguments; no returned value is auto-forced.**
-A residual function is boxed when it finds no argument.
+**A builtin forces to a λ-chain ending in δ; partial application is ordinary β.**
+For builtin value `c` of arity `n`, let
+`ηc = λa₀.…λaₙ₋₁.δ(b; a⃗)`, with `b ↦ c` in its environment.
 
 ```text
-⟦V⟧ρ,Σ = v
-──────────────────────────────────────────────────────── return
-⟨E(return V,ρ), K; σ⟩ → ⟨R(Value(v)), K; σ⟩
+⟨return V,ρ | K;σ⟩ → S(D(close(V,ρ,Σ)),K;σ)
+enter(⟨thunk M,ρc⟩,K;σ) = ⟨M,ρc | K;σ⟩
+enter(⟨builtin c,ρc⟩,K;σ) = ⟨ηc,{b ↦ ⟨builtin c,ρc⟩} | K;σ⟩
+enter(v,K;σ) = ⟨raise Error(cannot-force) | K;σ⟩        otherwise
+enterᵥ(thunk M,ρ,K;σ) = ⟨M,ρ | K;σ⟩
+enterᵥ(V,ρ,K;σ) = enter(close(V,ρ,Σ),K;σ)              otherwise
+⟨force V,ρ | K;σ⟩ → enterᵥ(V,ρ,K;σ)
 
-⟨E(λx.M,ρ), K; σ⟩ → ⟨R(Lambda(λx.M,ρ)), K; σ⟩        lambda
+vᵢ = close(Vᵢ,ρ,Σ)
+⟨M · (V₁,…,Vₙ),ρ | K;σ⟩
+  → ⟨M,ρ | Arg(v₁) :: … :: Arg(vₙ) :: K;σ⟩
+meet(C(λx.M,ρc),Arg(v),K;σ) = ⟨M,ρc[x ↦ v] | K;σ⟩   β
+meet(D(v),Arg(w),K;σ) = ⟨raise Error(not-a-function) | K;σ⟩
 
-enter(Thunk(M,ρc), K,σ) = ⟨E(M,ρc), K; σ⟩
-enter(NativeValue(b,v⃗),K,σ) = ⟨R(Native(b,v⃗)), K; σ⟩   |v⃗| < arity(b)
-enter(NativeValue(b,[]),K,σ) = invoke(b,[],K,σ)            arity(b) = 0
-enter(v,K,σ) = ⟨H(Error(cannot-force)), K; σ⟩             otherwise
-
-enterᵥ(thunk M,ρ,K,σ) = ⟨E(M,ρ), K; σ⟩                 literal force
-enterᵥ(V,ρ,K,σ) = enter(⟦V⟧ρ,Σ,K,σ)                    otherwise
-
-⟨E(force V,ρ), K; σ⟩ → enterᵥ(V,ρ,K,σ)                  force
-
-vᵢ = ⟦Vᵢ⟧ρ,Σ  (i = 1,…,n)
-──────────────────────────────────────────────────────── app
-⟨E(M · (V₁,…,Vₙ),ρ), K; σ⟩
-  → ⟨E(M,ρ), Arg(v₁) :: … :: Arg(vₙ) :: K; σ⟩
-
-⟨R(Lambda(λx.M,ρc)), Arg(v) :: K; σ⟩
-  → ⟨E(M,ρc[x ↦ v]), K; σ⟩                             β
-
-⟨R(Native(b,v⃗)), Arg(w) :: K; σ⟩
-  → ⟨R(Native(b,(v⃗,w))), K; σ⟩                         |v⃗| + 1 < arity(b)
-  → invoke(b,(v⃗,w),K,σ)                                |v⃗| + 1 = arity(b)
-
-⟨R(Value(v)), Arg(w) :: K; σ⟩
-  → ⟨H(Error(not-a-function)), K; σ⟩                    not β
-
-box(Value(v))         = v
-box(Lambda(λx.M,ρ))   = Thunk(λx.M,ρ↾occ(λx.M))
-box(Native(b,v⃗))     = NativeValue(b,v⃗)
-
-⟨R(Lambda(λx.M,ρc)), To(y,N,ρ) :: K; σ⟩
-  → ⟨E(N,ρ[y ↦ Thunk(λx.M,ρc↾occ(λx.M))]), K; σ⟩      Box
+view(ρ(b)) = Builtin(c)       v⃗ = ρ(a⃗)
+run_native(c,v⃗,μ,σ) = (Ok(v),σ′)
+⟨δ(b; a⃗),ρ | K;σ⟩ → S(D(v),K;σ′)
 ```
 
-- `force_val` recognises a **literal** `Val::Thunk` and enters its body in
-  the current `ρ`, without allocating a stored closure. `force` on an already
-  formed thunk enters its saved `ρc`. Neither pushes an argument or a shell
-  restoration frame. Provenance frames are discussed below.
-- `App` has `n ≥ 1` arguments. It forms them in order, pushes them
-  right-to-left, then evaluates its computation head. Operand effects have
-  already been sequenced by the checker. A call with `n` arguments reserves
-  all `n` frames together.
-- `Terminal::into_value` implements `box` for every value demand and the
-  end of a run. A residual λ holds the parameters already bound, restricted
-  by `Occ::of`; its body has not started. Pass-through frames preserve the
-  terminal. A tail call still consumes its caller's remaining arguments.
-- A native holds its entry and, for positive arity, fewer arguments than its
-  arity. Zero arity holds none and runs on force. Saturation invokes its body
-  without constructing IR. Boundary builtins instead stay
-  η-expanded by inference: a partial boundary is a λ-closure over an `Exec`
-  carrying its per-use checked site.
-- Calling a formed value is the helper `call(f,[v₁,…,vₙ])`: push arguments,
-  then `enter(f,…)`. A force failure leaves those arguments to unwind.
-  Bound command heads, handlers and host `apply` share this rule. A resolved
-  native `Exec` can dispatch directly when held plus new arguments saturate it.
-- A returned thunk is a `Value`, not a lambda. The checked split is
-  `M to h. (force h) · (V₁,…,Vₙ)`, never application through a returned
-  value. Every `let` runs its right-hand side; `To` receives the residual
-  function boxed ([[invariants/ir-pure-cbpv|IR invariant]]).
+- `force_val` enters a literal thunk in the current environment without
+  storing a value closure. `force` enters a saved thunk or builtin η-expansion;
+  it pushes no shell restoration frame and polls nothing.
+- `App` closes arguments in order and pushes right-to-left, reserving all
+  `n ≥ 1` frames together. β polls after consuming its argument. The remaining
+  λ crosses restoration frames as a computation, so a tail call consumes the
+  caller's remaining arguments. A value meeting `Arg` is a clean invariant
+  error, never an implicit force.
+- `call(f,args)` invokes a builtin directly when given **exactly** its arity;
+  otherwise it pushes arguments and forces `f`. Failure to force leaves those
+  arguments for unwinding. Bound heads, handlers and host `apply` share it.
+  Arity zero runs on force or the exact-arity call. `BuiltinEntry::eta` caches
+  synthetic syntax; δ reads the captured entry, not a name-dispatched `Σ` row.
+- Boundary calls run saturated with the checker's `Site`. Inference expands
+  partial boundaries over `Exec`, retaining their per-use site.
+- A residual λ is boxed only at a value demand or run end. Builtin residuals
+  display `<native NAME, k of n arguments>`, have type name `Lambda`, and
+  cross the seed as thunks. `ValClos::residual` recognises them for display,
+  hook arity and rejection as handler arms; δ is not sent to the checker.
+- `run_native` may write, fail, escape or apply a callback in a nested
+  machine. Its break settles as `Err(b)` after the host operation, located at
+  the builtin call. It is not a value-only primitive.
+- A returned thunk is data. Checked application through one is
+  `M to h. (force h) · V`, never application of the returned value itself.
+  Every `let` runs its RHS; a residual function is then boxed.
 
-Native invocation is deliberately not a value-only primitive:
+## Continuations, choice and recursion
 
-```text
-run_native(b,v⃗,μ,σ) = (Ok(v),σ′)
-──────────────────────────────────────────────────────── native
-invoke(b,v⃗,K,σ) = ⟨R(Value(v)), K; σ′⟩
-```
-
-A native may write, fail, escape or apply a callback on a nested machine.
-A `Break` result gives `H(b)` with the state after that host operation.
-`invoke` locates failures at the saturating call, named by the builtin.
-A partial native seals by name with its arguments; no builtin code enters IR.
-
-## Continuations
-
-**Syntax that resumes later carries its own environment.** `To` and `Seq`
-frames save the caller's `ρ`; bindings made while evaluating their first
-computation do not silently become the rest's environment.
+**Syntax that resumes later carries its own environment.** Only `To` and
+`Seq` frames carry a computation with its saved `ρ`.
 
 ```text
-⟨E(M to p. N,ρ), K; σ⟩ → ⟨E(M,ρ), To(p,N,ρ) :: K; σ⟩
+⟨M to p.N,ρ | K;σ⟩ → ⟨M,ρ | To(p,N,ρ) :: K;σ⟩
+match(p,boxed(t)) = θ
+meet(t,To(p,N,ρ),K;σ) = ⟨N,ρ ⊕ θ | K;σ⟩
+match(p,boxed(t)) = Error(e)
+meet(t,To(p,N,ρ),K;σ) = ⟨raise Error(e) | K;σ⟩
+⟨M ⨟ N,ρ | K;σ⟩ → ⟨M,ρ | Seq(N,ρ) :: K;σ⟩
+meet(t,Seq(N,ρ),K;σ) = ⟨N,ρ | K;σ⟩
 
-match(p,box(t)) = θ
-──────────────────────────────────────────────────────── bind
-⟨R(t), To(p,N,ρ) :: K; σ⟩ → ⟨E(N,ρ ⊕ θ), K; σ⟩
-
-match(p,box(t)) = Error(e)
-──────────────────────────────────────────────────────── mismatch
-⟨R(t), To(p,N,ρ) :: K; σ⟩ → ⟨H(Error(e)), K; σ⟩
-
-⟨E(M ⨟ N,ρ), K; σ⟩ → ⟨E(M,ρ), Seq(N,ρ) :: K; σ⟩
-⟨R(t), Seq(N,ρ) :: K; σ⟩ → ⟨E(N,ρ), K; σ⟩
-```
-
-- `match` means `pattern::destructure`: it collects **all** bindings before
-  installing any; `ρ ⊕ θ` extends in pattern order. A list without rest
-  requires exact length, a list with rest at least the named prefix. A length
-  mismatch can occur in checked code because list types do not encode length.
-- A mismatch occurs after `To` was popped: the tail is not run, no partial
-  binding is installed, and no resurrected `To` adds an abandoned-tail fact.
-  Destructuring lambda parameters is compiled as body binds at their own spans.
-- `To` binds `box(t)`; `Seq` discards it. Checked sequences demand producers,
-  so they do not receive residual functions. A written `let _` remains `Bind`
-  and therefore has the normal binding capture rule at checking time.
-- On an incoming halt, `Arg` simply propagates it; `To` and
-  `Seq` abandon the rest. Only written lets and sequences mark the
-  error's abandoned-tail fact; compiler-generated binds do not. Escapes have
-  no such report-only facts.
-
-## Choice, recursion and primitives
-
-**Choice selects suspended code; recursion re-enters a shared group rather
-than substituting rebuilt bodies.**
-
-```text
-⟦V⟧ρ,Σ = true
-⟨E(if V then T else F,ρ), K; σ⟩ → enterᵥ(T,ρ,K,σ)
-
-⟦V⟧ρ,Σ = false
-⟨E(if V then T else F,ρ), K; σ⟩ → enterᵥ(F,ρ,K,σ)
-
-⟦V⟧ρ,Σ = Variant(ℓ,v)       arm(ℓ) = W
-──────────────────────────────────────────────────────── case
-⟨E(case V of arms,ρ), K; σ⟩ → enterᵥ(W,ρ,Arg(v) :: K,σ)
+view(close(V,ρ,Σ)) = Bool(true)
+⟨if V then T else F,ρ | K;σ⟩ → enterᵥ(T,ρ,K;σ)
+view(close(V,ρ,Σ)) = Bool(false)
+⟨if V then T else F,ρ | K;σ⟩ → enterᵥ(F,ρ,K;σ)
+view(close(V,ρ,Σ)) = Variant(ℓ,v)       arm(ℓ) = W
+⟨case V of arms,ρ | K;σ⟩ → enterᵥ(W,ρ,Arg(v) :: K;σ)
 
 G = [(xⱼ,Mⱼ)]ⱼ       ρ₀ = ρ↾occ(G)
-ρG = ρ₀[xⱼ ↦ Thunk(rec G j,ρ₀)]ⱼ
-──────────────────────────────────────────────────────── rec
-⟨E(rec G i,ρ), K; σ⟩ → ⟨E(Mᵢ,ρG), K; σ⟩
+ρG = ρ₀[xⱼ ↦ ⟨thunk (rec G j),ρ₀⟩]ⱼ
+⟨rec G i,ρ | K;σ⟩ → ⟨Mᵢ,ρG | K;σ⟩
 
-v⃗ = ⟦V⃗⟧ρ,Σ       δq(v⃗) = Ok(v)
-──────────────────────────────────────────────────────── prim
-⟨E(prim q(V⃗),ρ), K; σ⟩ → ⟨R(Value(v)), K; σ⟩
+v⃗ = close(V⃗,ρ,Σ)       δq(v⃗) = Ok(v)
+⟨prim q(V⃗),ρ | K;σ⟩ → S(D(v),K;σ)
 ```
 
-- `if` checks for `Bool` and forces only its chosen arm; it does not form
-  the unchosen arm. `case` requires a variant and a matching label, pushes
-  the payload, then forces its arm. A bare tag supplies `Unit`. A malformed
-  condition, scrutinee or missing arm is an error; a failure forcing a
-  selected case arm retains the newly pushed `Arg`.
-- The recursive siblings share `ρ₀` and `G`; they do **not** capture a
-  cyclic environment containing themselves. Forcing a sibling enters
-  `rec G j`, which reinstalls the group bindings. The selected member reuses
-  its `Rec` node; other members get nodes referring to the same group.
-- `δq` abstracts arithmetic, comparison, indexing, rendering, decoding and
-  collection assembly. It may fail (`H(Error(e))` on the current stack) and
-  may cost O(data), but does not execute an operand computation. A primitive
-  is not command dispatch or native invocation. Runtime cancellation checks
-  inside value-processing helpers are also outside this pure `δq` notation.
-- `Decode` strips one trailing LF or CRLF and checks UTF-8 strictly. It drops
-  the environment before taking over the byte buffer. Capture insertion and
-  decoding policy belong to [[design/capture|grades and capture]], not to
-  an implicit action of `To`.
+- Destructuring collects **all** bindings before installing any, then extends
+  in pattern order. Lists require exact length without rest, at least the
+  prefix with rest. Mismatch occurs after `To` is popped: no partial binding,
+  tail execution or resurrected frame. Lambda patterns lower to body binds.
+- `To` boxes its input; `Seq` discards it. Checked sequences require producers.
+  On a break `Arg` propagates; `To` and `Seq` abandon the rest. Only errors
+  through written lets and sequences acquire the abandoned-tail fact;
+  compiler binds and escapes do not.
+- `if` forces only its selected arm. `case` pushes the payload before forcing;
+  a bare tag supplies unit. Malformed heads or missing arms fail, and a case
+  arm's force failure leaves its `Arg` on the stack.
+- Recursive siblings share `G` and `ρ₀`, not a cyclic environment containing
+  themselves. Force reinstalls the group. The selected member reuses its
+  `Rec` node; siblings have nodes over the same group.
+- `δq` is value-only arithmetic, indexing, rendering, decoding or assembly,
+  distinct from builtin δ. It may fail or cost O(data), but executes no
+  operand computation. Helpers may also poll cancellation.
+- `Decode` drops its environment before taking the bytes, removes one trailing
+  LF or CRLF and checks UTF-8 strictly. Capture policy is explicit syntax,
+  not an implicit action of `To` ([[design/capture|capture]]).
 
 ## Failure, recovery and cleanup
 
-**Errors and escapes share unwinding, but only errors are caught by `Try`.**
-`Error(e)` carries the language's failure; `Escape(a)` carries such control
-as exit or cancellation. Neither is an IR computation constructor.
+**Errors and escapes share unwinding; only errors are caught by `Try`.**
+Neither is an IR constructor.
 
 ```text
-v = ⟦V⟧ρ,Σ       h = ⟦W⟧ρ,Σ
-⟨E(try V W,ρ), K; σ⟩ → enter(v,Try(h) :: K,σ)
-
-⟨R(t), Try(h) :: K; σ⟩ → ⟨R(t), K; σ⟩
-⟨H(Error(e)), Try(h) :: K; σ⟩
-  → enter(h,Arg(record(e,σ)) :: K,σ)
-⟨H(Escape(a)), Try(h) :: K; σ⟩ → ⟨H(Escape(a)), K; σ⟩
+v = close(V,ρ,Σ)       h = close(W,ρ,Σ)
+⟨try V W,ρ | K;σ⟩ → enter(v,Try(h) :: K;σ)
+meet(t,Try(h),K;σ) = S(t,K;σ)
+unwind(Try(h),Error(e),K;σ) = call(h,[record(e,σ)],K;σ)
+unwind(Try(h),Escape(a),K;σ) = ⟨raise Escape(a) | K;σ⟩
 ```
 
-- Both body and handler are formed **before** installing `Try`. Once
-  installed, it can catch a failure forcing its body. On a catch, `Try` is
-  already popped before reserving the argument and forcing the handler:
-  **a handler's own failure is not caught by the same `Try`**.
-- `record(e,σ)` is the public `[frame, message, status, site]` value, a
-  witnessed map from which `raise` recovers the fact, not discarded bytes or
-  abandoned-tail accounting. `Try` passes a `Lambda` terminal
-  through unchanged on success, as it does `Value` or `Native`. A block that
-  leaves `try` unrun runs outside it; its later failures are not caught there.
+- Body and handler close **before** installing `Try`; thereafter it catches
+  a force failure too. The popped `Try` cannot catch its handler's failure.
+- `record` is a witnessed `[frame, message, status, site]` map, from which
+  `raise` recovers the fact, not discarded-byte or abandoned-tail accounting.
+  `Try` passes a λ unchanged. A returned block runs later outside the catch.
 
 **Guard shields acquisition and installs release before a body poll.** Let
-`o ::= Ok(v) | Err(b)`, `resume(Ok(v)) = R(Value(v))`,
-`resume(Err(b)) = H(b)`. Let `shield(σ,μ.grace) = (σs,s₀)` install a
-shielded scope and return the displaced scope `s₀`. `call` is the
-push-arguments-then-force helper above.
+`o ::= Ok(v) | Err(b)`; `restore(Ok(v)) = D(v)`, `restore(Err(b)) = Err(b)`.
+`shield(σ,μ.grace) = (σs,s₀)` installs a shield and saves the displaced scope.
+`call(f,args,K;σ)` includes the exact-arity builtin rule above.
 
 ```text
 room(3,K)       poll(σ) = ()
-a = ⟦A⟧ρ,Σ     k = ⟦V⟧ρ,Σ     r = ⟦W⟧ρ,Σ
+a = close(A,ρ,Σ)       k = close(V,ρ,Σ)       r = close(W,ρ,Σ)
 shield(σ,μ.grace) = (σs,s₀)
-⟨E(guard A V W,ρ), K; σ⟩ → enter(a,Acquire(k,r,s₀) :: K,σs)
+⟨guard A V W,ρ | K;σ⟩ → enter(a,Acquire(k,r,s₀) :: K;σs)
 
-v = box(t)
-⟨R(t), Acquire(k,r,s₀) :: K; σ⟩
-  → call(k,[v],Guard(r,v) :: K,σ[scope := s₀])
-⟨H(b), Acquire(k,r,s₀) :: K; σ⟩ → ⟨H(b), K; σ[scope := s₀]⟩
+v = boxed(t)
+meet(t,Acquire(k,r,s₀),K;σ)
+  = call(k,[v],Guard(r,v) :: K;σ[scope := s₀])
+unwind(Acquire(k,r,s₀),b,K;σ) = ⟨raise b | K;σ[scope := s₀]⟩
 
-shield(σ,μ.grace) = (σs,s₀)       v = box(t)
-⟨R(t), Guard(r,u) :: K; σ⟩
-  → call(r,[u,exit_case(Ok(v))],Cleanup(Ok(v),s₀) :: K,σs)
-
+shield(σ,μ.grace) = (σs,s₀)       v = boxed(t)
+meet(t,Guard(r,u),K;σ)
+  = call(r,[u,exit_case(Ok(v))],Cleanup(Ok(v),s₀) :: K;σs)
 shield(σ,μ.grace) = (σs,s₀)
-⟨H(b), Guard(r,u) :: K; σ⟩
-  → call(r,[u,exit_case(Err(b))],Cleanup(Err(b),s₀) :: K,σs)
-
-⟨R(t), Cleanup(o,s₀) :: K; σ⟩
-  → ⟨resume(o), K; σ[scope := s₀]⟩
-⟨H(b′), Cleanup(o,s₀) :: K; σ⟩
-  → ⟨H(b′), K; σ[scope := s₀]⟩
+unwind(Guard(r,u),b,K;σ)
+  = call(r,[u,exit_case(Err(b))],Cleanup(Err(b),s₀) :: K;σs)
+meet(t,Cleanup(o,s₀),K;σ) = S(restore(o),K;σ[scope := s₀])
+unwind(Cleanup(o,s₀),b′,K;σ) = ⟨raise b′ | K;σ[scope := s₀]⟩
 ```
 
-- Entry reserves room for the deepest stack: `Cleanup` and two `Arg`s.
-  Popping `Acquire` or `Guard` returns to entry depth; provenance frames do
-  not count. Every later guard reservation asserts that room rather than
-  providing a fallible exit while holding the resource.
-- A pending stop runs no acquisition. A halting acquisition restores scope
-  and runs no release. On success, scope restoration and `Guard` installation
-  have **no poll between them**; `force` polls nothing and the body's β-step
-  polls after its `Arg` is popped, with `Guard` already below it.
-- `guard_release` is shared by return and halt. `exit_case` borrows the saved
-  outcome and constructs `ExitCase<ErrorFact>` once: `ok` has no body value,
-  `err` is witnessed, `exited` carries the byte and `stopped` the cause.
-  Release cannot consume the ending; any release error or escape overrides it.
-- `Acquire` and `Guard` receive `box(t)`; `Cleanup` ignores its returned
-  terminal. Checked acquisition, body and release operands require producers,
-  so none receives a residual function in a well-typed execution.
-- `Acquire` and `Cleanup` restore scope on return, halt and abandonment.
-  Acquisition and release share one grace from the strike; a late acquisition
-  can leave release no time, and either phase can leak a held resource.
-  The shield is cooperative, not protection from terminal signals.
-- Shielding changes `scope`, not `cradle`: stages follow the current scope,
-  but a worker follows its owner's entry scope. A `gather` opened inside
-  acquisition or release captures the shield and owns masked workers;
-  births into an enclosing gather, worker's body or session do not acquire
-  this shield. See [[decisions/261111_a-guard-acquires|a-guard-acquires]] and
-  [[internals/cancellation|cancellation]].
+- Entry checks the deepest stack requirement: `Cleanup` plus two `Arg`s.
+  Popping `Acquire` or `Guard` returns to entry depth; later reservations
+  assert that room. Provenance frames do not count.
+- A pending stop runs no acquisition. A halting acquire restores scope and
+  runs no release. On success, restoration and installing `Guard` have **no
+  intervening poll**. Force polls nothing; the body's β polls with `Guard`
+  below its popped argument.
+- `guard_release` serves success and break. `exit_case` borrows the saved
+  outcome: `ok` omits the body value, `err` is witnessed, `exited` carries the
+  byte and `stopped` the cause. Release success restores the saved outcome;
+  any release error or escape overrides it.
+- `Acquire` and `Guard` box their inputs; `Cleanup` ignores its input.
+  Checked acquisition, body and release require producers. `Acquire` and
+  `Cleanup` restore scope on success, break and abandonment.
+- Acquisition and release share one grace from the strike; late acquisition
+  can leave release no time, and either can leak a resource. Shielding is
+  cooperative, not protection from terminal signals.
+- Shielding changes `scope`, not `cradle`. Stages follow scope; workers follow
+  their owner's entry scope. A `gather` opened inside either shield owns
+  masked workers; births into an outside owner do not inherit the shield
+  ([[internals/cancellation|cancellation]]).
 
-## Capture
+## Capture and shell frames
 
-**Capture yields bytes or no captured output: it never exposes a partial prefix.**
-Let `freshbuf()` return a buffer sink `β`; `s` is the displaced stdout sink.
-`take(β)` reports retained bytes, whether they are whole, and total byte count.
+**Capture returns whole bytes or fails; it exposes no partial prefix.** Let
+`freshbuf()` give sink `β`, and `take(β)` give bytes, completeness and total.
 
 ```text
 s = σ.stdout       β = freshbuf()
-⟨E(capture M,ρ), K; σ⟩
-  → ⟨E(M,ρ), Capture(s,β) :: K; σ[stdout := β]⟩
-
-take(β) = (bytes, whole, total)
-⟨R(t), Capture(s,β) :: K; σ⟩
-  → ⟨R(Value(Bytes(bytes))), K; σ[stdout := s]⟩          if whole
-  → ⟨H(Error(capture-overflow)), K; σ[stdout := s]⟩      otherwise
-
-⟨H(b), Capture(s,β) :: K; σ⟩
-  → ⟨H(discard(b,total(β))), K; σ[stdout := s]⟩
+⟨capture M,ρ | K;σ⟩ → ⟨M,ρ | Capture(s,β) :: K;σ[stdout := β]⟩
+take(β) = (bytes,whole,total)
+meet(t,Capture(s,β),K;σ)
+  = S(D(⟨bytes,∅⟩),K;σ[stdout := s])                  if whole
+  = ⟨raise Error(capture-overflow) | K;σ[stdout := s]⟩  otherwise
+unwind(Capture(s,β),b,K;σ)
+  = ⟨raise discard(b,total(β)) | K;σ[stdout := s]⟩
 ```
 
-- `Capture` ignores the entire returned terminal `t`, not just a value's
-  payload. Even a bare `Lambda` reaches this Rust return branch, although
-  checked capture operands are output computations. It captures **writes**,
-  not rendering of the body's result; returning a string writes no bytes.
-- On halt, the buffer is dropped without replay to `s`. `discard` adds the
-  actual byte count saturatingly to an error's unwind report; on an escape
-  it is the identity. No partial output enters the handler's error record.
-- On success with an overflowed buffer, stdout is restored first and a
-  capture error is raised; the prefix is not returned or replayed. The
-  `Capture` frame has already gone, so this is not a second pass through
-  that frame's halt rule.
-- This frame concerns one computation's byte channel. Process draining,
-  detached pumps and worker output have separate lifetimes; see
-  [[internals/output-capture-and-detachment|output capture and detachment]].
+- Capture ignores the entire input, including a λ, though checked operands
+  are output computations. It captures writes, not rendering of a result.
+- On break it drops bytes without replay. `discard` adds the actual count
+  saturatingly to an error's unwind report; escapes are unchanged. Overflow
+  restores stdout before failing, after the capture frame has gone.
+- Pumps, process drains and worker output have their own lifetimes
+  ([[internals/output-capture-and-detachment|output capture and detachment]]).
 
-## Shell frames and terminal handling
+**A shell frame owns its undo, not a snapshot of the whole shell.** Scope
+installation closes inputs, reserves, installs state, pushes undo, then forces
+its body. A force failure sees the frame. Redirects enter computation syntax.
 
-**A shell frame owns its undo, not a snapshot of the whole shell.** Installing
-`Within`, `Grant`, `Audit` or `Gather` forms its inputs, reserves its frame,
-installs the dynamic state, pushes the undo and then forces the body. A force
-failure therefore sees that frame. `Redirect` evaluates computation syntax
-directly after installing nonempty redirects.
-
-| Frame | On `R(t)` after pop | On `H(b)` after pop |
+| Frame | On `meet(t,…)` after pop | On `unwind(…,b,…)` after pop |
 | --- | --- | --- |
-| `Redirect` | Settle with commit; pass `t` if settlement succeeds | Settle with abort; ignore settlement failure and preserve `b` |
-| `Within`, `Grant`, `Unmask` | Apply undo; pass `t` | Apply undo; preserve `b` |
-| `Audit` | Close trail; return report of `box(t)` | Close trail; turn error into report, propagate escape |
-| `Gather` | Restore cradle; join `box(t)` through `exit_brood` | Restore cradle; end brood; preserve `b` |
-| `CallSite` | Restore provenance; pass `t` | Locate break if needed, restore provenance; preserve break |
+| `Redirect` | Commit; `S(t,K;σ′)` on success | Abort; preserve `b`, ignoring settlement failure |
+| `Within`, `Grant`, `Unmask` | Undo; `S(t,K;σ′)` | Undo; preserve `b` |
+| `Audit` | Close trail; settle report of `boxed(t)` | Close; report error, propagate escape |
+| `Gather` | Restore cradle; join `boxed(t)` through `exit_brood` | Restore cradle; end brood; preserve `b` |
+| `CallSite` | Restore provenance; `S(t,K;σ′)` | Locate if needed; restore provenance; preserve break |
 
-- `Within` restores environment overrides, cwd and handlers; `Grant` removes
-  its own layer by position; `Unmask` restores the temporarily removed handler
-  ([[internals/handler-dispatch|deep, self-masking dispatch]]). A lambda
-  passes through these frames and `Redirect`; value-demanding frames box it.
-  Checked scope bodies require producers, so an under-applied call cannot
-  leave them unrun. An explicitly returned block runs later outside the scope.
-- Redirect settlement does not undo bytes already streamed to a file. Atomic
-  writes can abort; streaming writes are already committed. Return-time
-  settlement failure becomes a halt on the remaining stack.
-- `Gather` holds a `BroodGuard` and displaced cradle, not a different evaluator.
-  It captures the current scope as the new cradle's `under`; its body runs on
-  this machine. Joining/stopping follows
+- `Within` restores cwd, overrides and handlers; `Grant` removes its own
+  layer by position; `Unmask` restores a temporarily removed handler
+  ([[internals/handler-dispatch|handler dispatch]]). These and redirects pass
+  λs through. Checked scope bodies require producers; a returned block runs
+  later outside the scope.
+- Redirect commit cannot undo streamed bytes. Atomic writes can abort.
+  Commit failure becomes a break on the remaining stack.
+- `Gather` owns a `BroodGuard` and displaced cradle on this machine, capturing
+  current scope as its new cradle's `under`. Joining/stopping follows
   [[invariants/a-worker-ends-with-its-children|worker ownership]].
-- `Exec` dispatch, `Pipeline` launch/join, `Spawn`, ambient `Tilde` and native
-  bodies are host operations rather than reductions of pure CBPV syntax.
-  `Pipeline` runs a `PipeNode` in one shell arm; ral stages get fresh machines
-  on their threads, external stages are processes
+- `Exec`, `Pipeline`, `Spawn`, ambient `Tilde` and builtin bodies are host
+  operations. A `PipeNode` runs in one shell arm; ral stages enter fresh
+  machines on threads and external stages are processes
   ([[internals/pipeline-execution|pipeline execution]]).
 
 ## Two reductions
 
-**Following the stack shows both lexical scope and outcome precedence.**
-These traces suppress unchanged `σ`, provenance, successful reservations and
-polls, using the helper conventions above.
+**The stack exposes lexical scope and outcome precedence without a value state.**
+These traces erase unchanged shell state, provenance, reservations and polls.
 
 ### A saved thunk keeps its lexical name
 
-Let `ρ₀ = [x ↦ 7]` and form `f = Thunk(λy.return x, [x ↦ 7])`.
-Now let `ρ₁ = ρ₀[x ↦ 99, f ↦ f]`:
+Let `ρ₀ = [x ↦ ⟨7,∅⟩]`, `f = ⟨thunk (λy.return x),ρ₀⟩` and
+`ρ₁ = ρ₀[x ↦ ⟨99,∅⟩, f ↦ f]`:
 
 ```text
-⟨E((force f) · (1),ρ₁), ε⟩
-→ ⟨E(force f,ρ₁), Arg(1) :: ε⟩
-→ ⟨E(λy.return x,[x ↦ 7]), Arg(1) :: ε⟩
-→ ⟨R(Lambda(λy.return x,[x ↦ 7])), Arg(1) :: ε⟩
-→ ⟨E(return x,[x ↦ 7,y ↦ 1]), ε⟩
-→ ⟨R(Value(7)), ε⟩
+⟨(force f) · (1),ρ₁ | ε⟩
+→ ⟨force f,ρ₁ | Arg(⟨1,∅⟩) :: ε⟩
+→ ⟨λy.return x,ρ₀ | Arg(⟨1,∅⟩) :: ε⟩
+→ ⟨return x,ρ₀[y ↦ ⟨1,∅⟩] | ε⟩
+→ S(D(⟨7,∅⟩),ε) = finish Ok(⟨7,∅⟩)
 ```
 
-- The caller's `x = 99` never substitutes for the captured `x = 7`.
-  A literal `force (thunk (return x))` in `ρ₁`, by contrast, immediately
-  enters `return x` in `ρ₁` and returns `99`.
-- If that saved thunk instead invokes `cwd`, it reads the **caller's current**
-  cwd from `σ`, not the directory at formation. A `cd` in the forced body
-  persists just as in a lambda body, unless an enclosing dynamic scope owns
-  an explicit restoration. Lexical closure is not an implicit subshell.
+- Caller `x = 99` never replaces captured `x = 7`. A literal
+  `force (thunk (return x))` enters `return x` in `ρ₁` and returns `99`.
+- If the thunk invokes `cwd`, it reads the caller's current cwd. A `cd`
+  persists unless an enclosing scope owns restoration: a lexical closure
+  is not a subshell.
 
 ### Release overrides the body before a catch
 
-Suppose a body has failed with `e₁` inside `guard`, inside `try`. Resource
-`u` is held; release `r` fails with `e₂` after receiving it and the ending:
+A body fails with `e₁` while resource `u` is held; release fails with `e₂`:
 
 ```text
-⟨H(Error(e₁)), Guard(r,u) :: Try(h) :: K; σ⟩
+⟨raise Error(e₁) | Guard(r,u) :: Try(h) :: K;σ⟩
 → call(r,[u,exit_case(Err(Error(e₁)))],
-        Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K,σs)
-⇒* ⟨H(Error(e₂)), Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K; σs′⟩
-→ ⟨H(Error(e₂)), Try(h) :: K; σs′[scope := s₀]⟩
-→ enter(h,Arg(record(e₂,σs′[scope := s₀])) :: K,σs′[scope := s₀])
+        Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K;σs)
+⇒* ⟨raise Error(e₂) | Cleanup(Err(Error(e₁)),s₀) :: Try(h) :: K;σs′⟩
+→ ⟨raise Error(e₂) | Try(h) :: K;σs′[scope := s₀]⟩
+→ call(h,[record(e₂,σs′[scope := s₀])],K;σs′[scope := s₀])
 ```
 
-Successful release would restore `Error(e₁)` instead. The handler sees the
-winning error, with the old scope restored and `Try` absent. If an enclosing
-capture is still on `K`, release and handler writes still go to that buffer;
-its eventual return/halt decides whether the bytes become a value or vanish.
+Successful release restores `e₁`. The handler sees the winning error with
+scope restored and `Try` absent. An enclosing capture still receives release
+and handler writes; its own outcome decides whether bytes survive.
 
 ## Run boundaries and space
 
-**The top level is a sequence of closed machines, not one growing continuation.**
-`run_phrases` runs `Phrase::{Define, Run}` against the session environment.
-Each landed `Define` is installed immediately; a later failure keeps earlier
-definitions. A block instead nests `Bind` and `Seq`, whose lexical bindings
-do not escape.
+**The top level is a sequence of closed machines, not a growing continuation.**
+`run_phrases` runs `Phrase::{Define, Run}`; landed definitions survive later
+failure. Block-local binds do not escape.
 
-Before the first phrase, the whole unit readmits imported residual data at
-its solved type. A stored name whose scheme reaches a weak residual beneath
-a thunk or handle is statically unusable in a later unit; reachability follows
-μ-equations in both data and delayed contexts. Thus admission need not run
-code or consume a handle, and no frame checks a returned value against a
-contract. A decided function beside undecided data needs only a head check:
-its defining unit checked its body, and boundaries return first-order data.
+- Before any phrase, imported residual data is readmitted at its solved type.
+  A stored name delaying a weak residual beneath a thunk or handle is
+  statically unusable in a later unit, following μ-equations. Admission
+  executes no code and consumes no handle; frames check no result contract.
+- `evaluate(M,ρ)` seeds `C(M,ρ)` over `ε`; `apply(f,args)` seeds `call`,
+  including with no arguments. `run` settles the seed before stepping.
+  A value finishes in `settle`; a λ finishes boxed in `step`; a break finishes
+  only after all frames unwind. An empty stack alone does not finish code.
+- β consumes its `Arg`; force and recursive entry retain no consumed call
+  frame. Tail recursion can use bounded computational stack, not necessarily
+  bounded data. Pending binds, cleanup and captures retain their work.
+- `Slot`, checked by `reserve` / `reserve_n`, guards every computational push
+  against `session.stack_limit` (default 100 000, `--recursion-limit`). Checks
+  precede installation; cap failures unwind the then-current stack.
+- Cancellation is cooperative at binds, sequences, application, β, recursion,
+  guard entry and host poll points. Neither an arrow nor a step promises
+  constant work or one poll. Fused settlement adds no poll of its own.
+- Higher-order builtins nest machines on the host stack;
+  `NESTED_MACHINE_LIMIT` bounds this independently. Builtin bodies receive no
+  caller lexical environment. No frame crosses a thread or sealed boundary.
 
-```text
-evaluate(M,ρ) starts at ⟨E(M,ρ), ε; σ⟩
-apply(f,v⃗) starts by pushing v⃗ and forcing f, even when v⃗ is empty
+**Provenance and panic undo are implementation work erased by the equations.**
 
-⟨R(Value(v)), ε; σ⟩           finishes with Ok(v)
-⟨R(Lambda(λx.M,ρ)), ε; σ⟩     finishes with Ok(Thunk(λx.M,ρ↾occ(λx.M)))
-⟨R(Native(b,v⃗)), ε; σ⟩       finishes with Ok(NativeValue(b,v⃗))
-⟨H(b), ε; σ⟩                 finishes with Err(b)
-```
-
-- An empty stack with `Eval` is **not** finished. The loop stops only at
-  `Return` or `Halt` with no frames. Returning a thunk finishes with that
-  thunk; it is never implicitly forced at the run boundary.
-- β consumes `Arg` before entering the body. Forcing and recursive entry
-  retain no consumed call frame. A tail-recursive loop can therefore use
-  bounded computational stack; a call under a pending bind, cleanup,
-  capture or other continuation still retains that pending work. This is a
-  stack claim, not a bound on data or captured environments.
-- Every computational push goes through `Slot`, checked by
-  `reserve`/`reserve_n` against `session.stack_limit` (default 100 000,
-  configurable by `--recursion-limit`). Installation is checked before its
-  effect; `push_args` reserves the whole argument vector. Cap failures enter
-  ordinary error unwinding on the then-current stack.
-- Cancellation is cooperative: binds, sequences, application, β, recursion
-  and guard entry poll at their designated points, as do host operations. The equations are
-  not a promise of one poll or constant work per displayed arrow.
-- Higher-order natives can enter nested `evaluate`/`apply` machines on the
-  **host** stack. `NESTED_MACHINE_LIMIT` bounds that independently of the
-  continuation cap. No native receives the caller's lexical environment.
-  No frame crosses a thread or sealed-engine boundary.
-
-**Provenance and panic undo are real implementation work erased by the core
-rules.** They cannot be inferred from the pure continuation equations alone.
-
-- Raising points locate errors with a visible operation name/span;
-  `Exec`/`App` use their innermost dispatch/admission rather than a fallback
-  stamp. The `frame` field names that operation, not necessarily a command.
-- `CallSite` restores the caller's provenance register on return, halt and
-  panic. Adjacent tail-call restorations coalesce and do not count toward the
-  computational stack cap. Synchronous operations use `at_site`; a run base
-  completes otherwise unclaimed sites
+- Raising points claim visible names and spans; `Exec` / `App` use innermost
+  dispatch or admission. `CallSite` restores provenance on success, break and
+  panic. Adjacent tail restorations coalesce and consume no computational
+  budget; synchronous operations use `at_site`; the run base completes sites
   ([[decisions/261105_the-error-record|the error record]]).
-- The loop catches panics, abandons remaining frames top-down and resumes the
-  panic. `Frame::abandon` restores sinks, scopes, handlers, grants and cradle,
-  abandons redirect state and closes audit scopes. It does **not** evaluate
-  arbitrary `Guard` release code during a panic. The framed run entry restores
-  its checkpoint; panics remain defects, not catchable language errors.
+- On panic, `run` abandons frames top-down and resumes the panic.
+  `Frame::abandon` restores sinks, scopes, handlers, grants, cradle and
+  provenance, abandons redirects and closes audits. It **does not run Guard
+  release code**. The framed entry restores its checkpoint; a panic remains
+  a defect, not a catchable error.
 
 ## Source anchors
 
-**The implementation map is the place to follow symbols beyond these rules.**
 See [[map/core/evaluator|evaluator]], [[map/core/ir|IR]] and
-[[map/core/shell-state|shell state]]; the load-bearing source seams are:
+[[map/core/shell-state|shell state]] for the symbol map:
 
-- `core/src/ir.rs`: `Val`, `CompKind`, `Prim`, `Node` and `GroupNode`.
-- `core/src/shell/evaluator/machine.rs`: `Focus`, `Terminal`, `Frame`,
-  `eval_rules`, `step_return`, `step_halt`, `force_val`, `force` and run entry.
-- `core/src/shell/evaluator/val.rs` and `pattern.rs`: formation and
-  all-or-nothing destructuring.
-- `core/src/shell/runtime/{env,closure,signature}.rs`: persistent `ρ`,
-  occurrence-restricted closures and separate `Σ`.
+- `ir.rs`: `Val`, `CompKind`, `Prim`, `Node`, `GroupNode`.
+- `shell/evaluator/machine.rs`: `State`, `Next`, `Machine`, `Frame`, `step`,
+  `settle`, `eval_rules`, `resume`, `unwind`, `boxed`, `force`, `force_val`.
+- `shell/evaluator/pattern.rs`: all-or-nothing destructuring.
+- `shell/runtime/{value,env,signature}.rs`, `core/src/builtin.rs`: value closures, persistent
+  `ρ`, separate `Σ`, cached η-expansions.
 
-The reason for the split is in [[design/cbpv|CBPV]]; the user-visible contract
-is `docs/SPEC.md` §§5, 7, 13 and 17.
+The rationale is [[design/cbpv|CBPV]]; SPEC §§5, 7, 13 and 17 state the
+user-visible contract.

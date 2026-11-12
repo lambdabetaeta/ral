@@ -5,11 +5,11 @@
 
 use super::command::{Command, Request};
 use crate::ir::{CommandName, CommandWord};
-use crate::shell::runtime::{Env, HandlerLookup, Shell, Value, lookup};
+use crate::shell::runtime::{Env, HandlerLookup, Shell, ValClos, lookup};
 
 /// What a command head names.
 pub(crate) enum Resolution {
-    Env(Value),
+    Env(ValClos),
     Handler(HandlerLookup),
     /// A program, not yet looked up.
     External(Command<Request>),

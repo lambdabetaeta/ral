@@ -283,6 +283,10 @@ impl Generator {
         match val {
             Val::Unit => (Ty::unit(), Val::Unit),
             Val::String(v) => (Ty::string(), Val::String(v.clone())),
+            Val::Bytes(v) => (Ty::bytes(), Val::Bytes(v.clone())),
+            Val::Builtin(_) | Val::Handle(_) => {
+                unreachable!("the elaborator writes no builtin or handle")
+            }
             Val::Int(v) => (Ty::int(), Val::Int(*v)),
             Val::Float(v) => (Ty::float(), Val::Float(*v)),
             Val::Bool(v) => (Ty::bool(), Val::Bool(*v)),

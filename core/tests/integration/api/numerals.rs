@@ -22,7 +22,7 @@ use ral_core::ir::Val;
 use ral_core::protocol::Run;
 use ral_core::shell::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::shell::run::RunReport;
-use ral_core::shell::runtime::Value;
+use ral_core::shell::runtime::ValClos;
 use ral_core::source::SourceOrigin;
 use ral_core::test_helper::fresh_shell;
 
@@ -108,7 +108,7 @@ fn a_canonical_spelling_is_a_fixed_point() {
 #[test]
 fn printing_a_float_then_classifying_returns_the_same_float() {
     for f in FLOAT_PROBES {
-        let spelling = Value::Float(finite(f)).to_string();
+        let spelling = ValClos::float(finite(f)).to_string();
         match ral_core::test_access::val_from_word(&spelling) {
             Val::Float(g) => assert_eq!(
                 g.get().to_bits(),
@@ -129,7 +129,7 @@ fn printing_a_float_then_classifying_returns_the_same_float() {
 #[test]
 fn the_renderer_and_the_classifier_agree_with_the_text_form() {
     assert_eq!(
-        pretty_print(&Value::Float(finite(3.0)), 0, &REPL_PRINT_PARAMS),
+        pretty_print(&ValClos::float(finite(3.0)), 0, &REPL_PRINT_PARAMS),
         "3.0"
     );
     assert_eq!(finite(f64::MAX).to_string(), "1.7976931348623157e308");
@@ -137,5 +137,5 @@ fn the_renderer_and_the_classifier_agree_with_the_text_form() {
         ral_core::test_access::val_from_word("unit"),
         Val::String("unit".into())
     );
-    assert_eq!(pretty_print(&Value::Unit, 0, &REPL_PRINT_PARAMS), "()");
+    assert_eq!(pretty_print(&ValClos::UNIT, 0, &REPL_PRINT_PARAMS), "()");
 }

@@ -1,10 +1,29 @@
 ---
 status: accepted
-generated_at_commit: 1dc7c6e715426917bb7a648cf6e67ea5945065b0
-amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
+anchors: [ValClos::close, ValClos::thunk, Env::restrict, Node::new, ListRef, MapRef]
+amended_by:
+  - "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
+  - "[[261112_runtime-values-are-value-closures|runtime values are value closures]]"
 ---
 
 # A closure keeps only what it mentions
+
+> **Amended 2026-11-12:**
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]]
+> places restriction at value formation: `ValClos::thunk` and `ValClos::close`
+> use occurrence sets, cached by `Node::new` for node forms. Closing data
+> additionally pulls every missing direct name's value from Σ into ρ;
+> names beneath a thunk still resolve ρ-then-Σ when it runs. Reading a
+> component V′ of ⟨V, ρ⟩ shares ρ without restriction or Σ lookup, so a
+> component may retain its siblings' names. Computation closures remain
+> transient and unrestricted except at explicit `Rec` formation. Empty
+> captures use refcount-free `Env::EMPTY`; nonempty restriction that drops
+> nothing preserves identity. The constructor and per-capture walk claims
+> below are historical, not requirements on observation.
 
 > **Amended 2026-11-02:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
@@ -88,3 +107,10 @@ type apart from the thunk value.
 Narrative:
 [[internals/evaluator-machine|evaluator-machine]]; residency:
 [[internals/binding-leases|binding-leases]].
+
+## Where
+
+- `core/src/shell/runtime/value.rs`: `ValClos::close`, `ValClos::thunk`,
+  one-layer `read`; `list.rs` and `map.rs`: `ListRef`, `MapRef`.
+- `core/src/shell/runtime/env.rs`: `Env::restrict`, `Env::EMPTY`;
+  `core/src/ir.rs`: `Node::new` caches occurrences.

@@ -1,8 +1,8 @@
 ---
-generated_at_commit: f2a121e88af273984c3777093eded870b1fe0070
-generated_at_date: 2026-11-05
-verified_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-verified_at_date: 2026-11-03
+generated_at_commit: c0905f5e
+generated_at_date: 2026-11-12
+verified_at_commit: c0905f5e
+verified_at_date: 2026-11-12
 covers_paths: [exarch/src/port.rs, exarch/src/lib.rs, exarch/src/bus.rs, exarch/src/bus/, exarch/src/record.rs, exarch/src/record/, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/host.rs, exarch/src/boot.rs, exarch/src/agent/engine.rs, exarch/src/agent/handle.rs, exarch/src/signals.rs, exarch/src/prompt/host.rs, vendor/edtui/, core/src/external_editor.rs, core/src/io/bounded.rs]
 ---
 
@@ -397,6 +397,6 @@ port, folds only that agent's records into one `Blocks` memo, and
 finishes on a watermark-covered `Control::Status` or terminal `Died`.
 Death/disconnection never promotes an unsynced buffered success. Helper facts do not print;
 helper faults remain visible and usage includes the fleet. `Replied(v)`
-writes faithful ral text or JSON to stdout; Failed, Stopped or death without
-a reply fail honestly. `lib::run` ends the host afterwards and includes
+writes its first-order `FOValue` as ral text or JSON to stdout; Failed,
+Stopped or death without a reply fail honestly. `lib::run` ends the host afterwards and includes
 teardown failures in the result.

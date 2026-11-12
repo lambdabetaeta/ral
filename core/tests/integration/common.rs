@@ -8,7 +8,7 @@ use ral_core::ir::Comp;
 use ral_core::protocol::Run;
 use ral_core::shell::boot::{BakedPrelude, HostSurface, boot_runtime};
 use ral_core::shell::run::{RunReport, RunRequest};
-use ral_core::shell::runtime::{Map, Observation, Settled, Shell, Value};
+use ral_core::shell::runtime::{Map, Observation, Settled, Shell, ValClos, View};
 use ral_core::source::SourceOrigin;
 use ral_core::{EventSink, SurfaceSink};
 use std::borrow::Cow;
@@ -34,7 +34,7 @@ pub fn prelude_shell() -> Shell {
 
 /// One top-level run of `source` through the public `run` entry, settled.
 /// Callers pick source that compiles: a static diagnostic is a test bug.
-pub fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+pub fn top_level(shell: &mut Shell, source: &str) -> Settled<ValClos> {
     shell
         .run(Run::foreground(source, SourceOrigin::named("<test>")))
         .expect_ran()
@@ -161,26 +161,33 @@ fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
         | Val::Int(_)
         | Val::Float(_)
         | Val::Bool(_)
-        | Val::Variable(_) => {}
+        | Val::Variable(_)
+        | Val::Bytes(_)
+        | Val::Builtin(_)
+        | Val::Handle(_) => {}
     }
 }
 
 /// A sink that records every surfaced observation as the record a trail
 /// carries.
-pub struct Recorder(pub Arc<Mutex<Vec<Value>>>);
+pub struct Recorder(pub Arc<Mutex<Vec<ValClos>>>);
 
 impl EventSink for Recorder {
     fn emit(&self, ev: &ral_core::data::FOValue) {
         if let Some(obs) = Observation::from_surface(ev) {
-            self.0.lock().unwrap().push(Value::from_datum(obs));
+            self.0.lock().unwrap().push(ValClos::from_datum(obs));
         }
     }
 }
 
 /// Run `source` on `shell`, with a recording surface sink installed or not,
 /// returning the settled value and whatever reached the sink.
-pub fn run_recorded(shell: &mut Shell, source: &str, sink: bool) -> (Settled<Value>, Vec<Value>) {
-    let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+pub fn run_recorded(
+    shell: &mut Shell,
+    source: &str,
+    sink: bool,
+) -> (Settled<ValClos>, Vec<ValClos>) {
+    let log: Arc<Mutex<Vec<ValClos>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
     let result = shell
         .run(RunRequest {
@@ -195,16 +202,16 @@ pub fn run_recorded(shell: &mut Shell, source: &str, sink: bool) -> (Settled<Val
 
 /// The `label` facts among a stream of observation records, in order, each
 /// with the site its observation carries.
-pub fn facts(observations: &[Value], label: &str) -> Vec<(Map, Option<Value>)> {
+pub fn facts(observations: &[ValClos], label: &str) -> Vec<(Map, Option<ValClos>)> {
     observations
         .iter()
-        .filter_map(|v| match v {
-            Value::Map(m) => match m.get("what").as_deref() {
-                Some(Value::Variant {
+        .filter_map(|v| match v.view() {
+            View::Map(m) => match m.get("what").as_deref().map(ValClos::view) {
+                Some(View::Variant {
                     label: kind,
                     payload: Some(fact),
-                }) if kind.as_ref() == label => match fact.as_ref() {
-                    Value::Map(fact) => Some((fact.clone(), m.get("site").map(Cow::into_owned))),
+                }) if kind.as_ref() == label => match fact.view() {
+                    View::Map(fact) => Some((fact.to_map(), m.get("site").map(Cow::into_owned))),
                     _ => None,
                 },
                 _ => None,
@@ -215,7 +222,7 @@ pub fn facts(observations: &[Value], label: &str) -> Vec<(Map, Option<Value>)> {
 }
 
 /// The `Command` facts among a stream of observation records, in order.
-pub fn commands(observations: &[Value]) -> Vec<ral_core::fact::Command> {
+pub fn commands(observations: &[ValClos]) -> Vec<ral_core::fact::Command> {
     use ral_core::data::FOValue;
     use ral_core::data::datum::Datum as _;
     observations
@@ -230,8 +237,8 @@ pub fn commands(observations: &[Value]) -> Vec<ral_core::fact::Command> {
 
 /// The `fields` of a check fact's payload, `{resource, decision, fields}`.
 pub fn check_fields(payload: &Map) -> Map {
-    match payload.get("fields").as_deref() {
-        Some(Value::Map(fields)) => fields.clone(),
+    match payload.get("fields").map(ValClos::view) {
+        Some(View::Map(fields)) => fields.to_map(),
         other => panic!("a check fact carries a fields map, got {other:?}"),
     }
 }
@@ -244,7 +251,7 @@ pub fn under_grant(body: &str) -> String {
 /// Evaluate `input` through the public run entry on an already-configured
 /// `shell` — parse, elaborate, typecheck against the prelude schemes, run
 /// the phrases.
-pub fn run_on(shell: &mut Shell, input: &str) -> Settled<Value> {
+pub fn run_on(shell: &mut Shell, input: &str) -> Settled<ValClos> {
     match shell.run(Run::foreground(input, SourceOrigin::named("<test>"))) {
         RunReport::Ran { ending, .. } => ending.into_settled(),
         RunReport::Checked { .. } => panic!("source fixture must run, not only check"),
@@ -258,7 +265,7 @@ pub fn run_on(shell: &mut Shell, input: &str) -> Settled<Value> {
 }
 
 /// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
-pub fn eval_on_path(input: &str, path: &str) -> Settled<Value> {
+pub fn eval_on_path(input: &str, path: &str) -> Settled<ValClos> {
     let mut shell = prelude_shell();
     shell.set_env_var("PATH", path).unwrap();
     run_on(&mut shell, input)
@@ -266,7 +273,7 @@ pub fn eval_on_path(input: &str, path: &str) -> Settled<Value> {
 
 /// Evaluate independently of whichever tools happen to be installed on the
 /// test host. Individual process tests supply an explicit path when needed.
-pub fn eval(input: &str) -> Settled<Value> {
+pub fn eval(input: &str) -> Settled<ValClos> {
     #[cfg(unix)]
     let path = "/bin:/usr/bin".to_string();
     #[cfg(windows)]
@@ -285,6 +292,6 @@ pub fn eval(input: &str) -> Settled<Value> {
     eval_on_path(input, &path)
 }
 
-pub fn must_succeed(input: &str) -> Value {
+pub fn must_succeed(input: &str) -> ValClos {
     eval(input).unwrap_or_else(|e| panic!("should succeed: {input:?}\n  error: {e:?}"))
 }

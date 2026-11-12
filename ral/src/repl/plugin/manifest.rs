@@ -15,7 +15,8 @@ use ral_core::fact::{
     KeybindingFailureSequencePrefix, KeybindingFailureUnguardedBuiltinShadow, PluginFailure,
     PluginFailureUnknownHookEvent, RalFailure, Reason, ShapeFailure, ValueShape,
 };
-use ral_core::{Map, Value, label, record};
+use ral_core::shell::runtime::MapRef;
+use ral_core::{ValClos, View, label, record};
 use std::collections::HashMap;
 use strum::{IntoStaticStr, VariantArray};
 
@@ -171,9 +172,9 @@ impl LoadedPlugin {
 /// into its hook table and persistent handler frames.
 #[derive(Debug)]
 pub(super) struct ManifestHandlers {
-    pub(super) hooks: Vec<(HookEvent, Value)>,
-    pub(super) keybindings: Vec<(String, Value)>,
-    pub(super) handlers: Vec<(String, Value)>,
+    pub(super) hooks: Vec<(HookEvent, ValClos)>,
+    pub(super) keybindings: Vec<(String, ValClos)>,
+    pub(super) handlers: Vec<(String, ValClos)>,
 }
 
 /// Parse a plugin manifest value into its first-order part plus the handler
@@ -192,7 +193,7 @@ fn invalid_at(path: Vec<DataStep>, cause: InvalidCause) -> Error {
     })))
 }
 
-fn expected_at(path: Vec<DataStep>, value: &Value, expected: Expected) -> Error {
+fn expected_at(path: Vec<DataStep>, value: &ValClos, expected: Expected) -> Error {
     invalid_at(
         path,
         InvalidCause::Shape(ShapeFailure {
@@ -202,49 +203,55 @@ fn expected_at(path: Vec<DataStep>, value: &Value, expected: Expected) -> Error 
     )
 }
 
-pub(super) fn parse(map: &Map) -> Result<(Manifest, ManifestHandlers), Error> {
-    let name = match map.get("name").as_deref() {
-        Some(Value::String(s)) => s.to_string(),
-        Some(other) => {
+pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Error> {
+    let value = map.get("name").expect("a manifest has a name (SPEC §15.5)");
+    let name = match value.view() {
+        View::String(s) => s.to_string(),
+        _ => {
             return Err(expected_at(
                 vec![DataStep::Field("name".into())],
-                other,
+                &value,
                 Expected::Shape(ValueShape::String),
             ));
         }
-        None => unreachable!("the manifest's required-key invariant guarantees name (SPEC §15.5)"),
     };
-    let handlers = match map.get("handlers").as_deref() {
-        Some(Value::Map(m)) => parse_handlers(m)?,
-        Some(other) => {
-            return Err(expected_at(
-                vec![DataStep::Field("handlers".into())],
-                other,
-                Expected::Shape(ValueShape::Map),
-            ));
-        }
+    let handlers = match map.get("handlers") {
+        Some(value) => match value.view() {
+            View::Map(m) => parse_handlers(m)?,
+            _ => {
+                return Err(expected_at(
+                    vec![DataStep::Field("handlers".into())],
+                    &value,
+                    Expected::Shape(ValueShape::Map),
+                ));
+            }
+        },
         None => Vec::new(),
     };
-    let hooks = match map.get("hooks").as_deref() {
-        Some(Value::Map(m)) => parse_hooks(m)?,
-        Some(other) => {
-            return Err(expected_at(
-                vec![DataStep::Field("hooks".into())],
-                other,
-                Expected::Shape(ValueShape::Map),
-            ));
-        }
+    let hooks = match map.get("hooks") {
+        Some(value) => match value.view() {
+            View::Map(m) => parse_hooks(m)?,
+            _ => {
+                return Err(expected_at(
+                    vec![DataStep::Field("hooks".into())],
+                    &value,
+                    Expected::Shape(ValueShape::Map),
+                ));
+            }
+        },
         None => Vec::new(),
     };
-    let (keybindings, keybinding_handlers) = match map.get("keybindings").as_deref() {
-        Some(Value::List(l)) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
-        Some(other) => {
-            return Err(expected_at(
-                vec![DataStep::Field("keybindings".into())],
-                other,
-                Expected::Shape(ValueShape::List),
-            ));
-        }
+    let (keybindings, keybinding_handlers) = match map.get("keybindings") {
+        Some(value) => match value.view() {
+            View::List(l) => parse_keybindings(l.iter().map(std::borrow::Cow::into_owned))?,
+            _ => {
+                return Err(expected_at(
+                    vec![DataStep::Field("keybindings".into())],
+                    &value,
+                    Expected::Shape(ValueShape::List),
+                ));
+            }
+        },
         None => (Vec::new(), Vec::new()),
     };
     let manifest = Manifest {
@@ -260,7 +267,7 @@ pub(super) fn parse(map: &Map) -> Result<(Manifest, ManifestHandlers), Error> {
     Ok((manifest, handlers))
 }
 
-fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
+fn parse_hooks(entries: MapRef<'_>) -> Result<Vec<(HookEvent, ValClos)>, Error> {
     entries
         .iter()
         .map(|(name, value)| {
@@ -280,7 +287,7 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
                         },
                     ))
                 })?;
-            if !matches!(value.as_ref(), Value::Thunk(_)) {
+            if !matches!(value.view(), View::Thunk { .. }) {
                 return Err(expected_at(
                     vec![
                         DataStep::Field("hooks".into()),
@@ -295,11 +302,11 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(HookEvent, Value)>, Error> {
         .collect()
 }
 
-type KeybindingHandlers = Vec<(String, Value)>;
+type KeybindingHandlers = Vec<(String, ValClos)>;
 
 fn parse_keybindings<I>(entries: I) -> Result<(Vec<KeySpec>, KeybindingHandlers), Error>
 where
-    I: Iterator<Item = Value>,
+    I: Iterator<Item = ValClos>,
 {
     let mut out = Vec::new();
     let mut handlers = Vec::new();
@@ -315,28 +322,34 @@ where
             path.push(DataStep::Field(field.into()));
             path
         };
-        let Value::Map(map) = entry else {
+        let View::Map(map) = entry.view() else {
             return Err(expected_at(
                 path(),
                 &entry,
                 Expected::Shape(ValueShape::Map),
             ));
         };
-        let key = match map.get("key").as_deref() {
-            Some(Value::String(s)) => s.to_string(),
-            Some(other) => {
-                return Err(expected_at(
-                    field_path("key"),
-                    other,
-                    Expected::Shape(ValueShape::String),
-                ));
-            }
+        let key = match map.get("key") {
+            Some(value) => match value.view() {
+                View::String(s) => s.to_string(),
+                _ => {
+                    return Err(expected_at(
+                        field_path("key"),
+                        &value,
+                        Expected::Shape(ValueShape::String),
+                    ));
+                }
+            },
             None => return Err(invalid_at(path(), InvalidCause::MissingField("key".into()))),
         };
-        let handler = match map.get("handler").as_deref() {
-            Some(h @ Value::Thunk(_)) => h.clone(),
+        let handler = match map.get("handler") {
+            Some(h) if matches!(h.view(), View::Thunk { .. }) => h.into_owned(),
             Some(other) => {
-                return Err(expected_at(field_path("handler"), other, Expected::Closure));
+                return Err(expected_at(
+                    field_path("handler"),
+                    &other,
+                    Expected::Closure,
+                ));
             }
             None => {
                 return Err(invalid_at(
@@ -345,15 +358,17 @@ where
                 ));
             }
         };
-        let guard = match map.get("guard").as_deref() {
-            Some(Value::String(g)) => Some(g.to_string()),
-            Some(other) => {
-                return Err(expected_at(
-                    field_path("guard"),
-                    other,
-                    Expected::Shape(ValueShape::String),
-                ));
-            }
+        let guard = match map.get("guard") {
+            Some(value) => match value.view() {
+                View::String(g) => Some(g.to_string()),
+                _ => {
+                    return Err(expected_at(
+                        field_path("guard"),
+                        &value,
+                        Expected::Shape(ValueShape::String),
+                    ));
+                }
+            },
             None => None,
         };
         let spec = KeySpec { key, guard };
@@ -364,11 +379,11 @@ where
     Ok((out, handlers))
 }
 
-fn parse_handlers(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
+fn parse_handlers(entries: MapRef<'_>) -> Result<Vec<(String, ValClos)>, Error> {
     entries
         .iter()
         .map(|(name, value)| {
-            if !matches!(value.as_ref(), Value::Thunk(_)) {
+            if !matches!(value.view(), View::Thunk { .. }) {
                 return Err(expected_at(
                     vec![
                         DataStep::Field("handlers".into()),
@@ -387,7 +402,8 @@ fn parse_handlers(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 #[allow(clippy::disallowed_methods, reason = "test code")]
 mod tests {
     use super::*;
-    use ral_core::shell::runtime::Closure;
+    use ral_core::shell::runtime::Env;
+    use std::sync::Arc;
 
     fn invalid_reason(error: &Error) -> &InvalidFailure {
         let Reason::Invalid(failure) = &error.reason else {
@@ -420,12 +436,13 @@ mod tests {
             if matches!(key.holds, Holds::Refused(_)) {
                 continue;
             }
-            let mut fields = vec![(key.label.into(), Value::Int(42))];
+            let mut fields = vec![(key.label.into(), ValClos::int(42))];
             if key.label != "name" {
-                fields.push(("name".into(), Value::string("p")));
+                fields.push(("name".into(), ValClos::string("p")));
             }
-            let manifest = Map::from(fields);
-            let error = parse(&manifest).expect_err("every admitted key must decode its value");
+            let manifest = ValClos::map(fields);
+            let error = parse(manifest.as_map("manifest").unwrap())
+                .expect_err("every admitted key must decode its value");
             let failure = invalid_reason(&error);
             assert_eq!(failure.path, vec![DataStep::Field(key.label.into())]);
             assert!(
@@ -473,7 +490,7 @@ mod tests {
             .expect("JSON contents must not be inspected at check time");
             let Err(Break::Error(error)) = ral_core::shell::evaluator::apply(
                 &factory,
-                vec![Value::Map(Map::new())],
+                vec![ValClos::map(Vec::new())],
                 &mooring,
                 &mut shell,
             ) else {
@@ -524,28 +541,55 @@ mod tests {
         .expect("the factory's written manifest must check");
         let value = ral_core::shell::evaluator::apply(
             &factory,
-            vec![Value::Map(Map::new())],
+            vec![ValClos::map(Vec::new())],
             &mooring,
             &mut shell,
         )
         .expect("the decoded string must meet name's admission");
-        let Value::Map(map) = value else {
+        let View::Map(map) = value.view() else {
             panic!("a checked factory returns its written manifest (SPEC §15.5)")
         };
-        let (manifest, _) = parse(&map).expect("the admitted name must parse");
+        let (manifest, _) = parse(map).expect("the admitted name must parse");
         assert_eq!(manifest.name, "p");
     }
 
     #[test]
+    fn a_literal_manifest_keeps_its_handlers_captures() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let value = crate::repl::eval(
+            &mut shell,
+            "let message = 'kept'; return [name: p, hooks: [prompt: { |_event| return $message }], keybindings: [[key: ctrl-t, handler: { |_event| return $message }]], handlers: [:, custom: { |args| return $message }]]",
+        );
+        let (manifest, handlers) = parse(value.as_map("manifest").unwrap()).unwrap();
+        assert_eq!(manifest.name, "p");
+        assert_eq!(manifest.hooks, [HookEvent::Prompt]);
+        assert_eq!(manifest.keybindings.len(), 1);
+        let (_, hook) = handlers.hooks.into_iter().next().unwrap();
+        let (_, keybinding) = handlers.keybindings.into_iter().next().unwrap();
+        let (_, handler) = handlers.handlers.into_iter().next().unwrap();
+        let mut shell = ral_core::test_helper::core_shell();
+        for handler in [hook, keybinding, handler] {
+            let result = ral_core::shell::evaluator::apply(
+                &handler,
+                vec![ValClos::UNIT],
+                &ral_core::shell::runtime::Mooring::adrift(),
+                &mut shell,
+            )
+            .unwrap();
+            assert_eq!(result, ValClos::string("kept"));
+        }
+    }
+
+    #[test]
     fn non_block_handler_member_is_a_runtime_decode_error() {
-        let manifest = Map::from(vec![
-            ("name".into(), Value::string("p")),
+        let manifest = ValClos::map(vec![
+            ("name".into(), ValClos::string("p")),
             (
                 "handlers".into(),
-                Value::map(vec![("foo".into(), Value::Int(3))]),
+                ValClos::map(vec![("foo".into(), ValClos::int(3))]),
             ),
         ]);
-        let error = parse(&manifest).unwrap_err();
+        let error = parse(manifest.as_map("manifest").unwrap()).unwrap_err();
         assert_eq!(
             invalid_reason(&error).path,
             vec![
@@ -562,23 +606,25 @@ mod tests {
         );
     }
 
-    /// A trivial block-shaped `Value::Thunk` handler for well-formed
-    /// keybinding entries.
-    fn dummy_block() -> Value {
-        Value::Thunk(Closure::closed(ral_core::source::Spanned::synthetic(
-            ral_core::ir::CompKind::Return(ral_core::ir::Val::Unit),
-        )))
+    /// A closed block handler for well-formed keybinding entries.
+    fn dummy_block() -> ValClos {
+        ValClos::thunk(
+            Arc::new(ral_core::source::Spanned::synthetic(
+                ral_core::ir::CompKind::Return(ral_core::ir::Val::Unit),
+            )),
+            &Env::EMPTY,
+        )
     }
 
-    fn keybinding_entry(key: &str, guard: Option<&str>) -> Value {
+    fn keybinding_entry(key: &str, guard: Option<&str>) -> ValClos {
         let mut fields = vec![
-            ("key".into(), Value::string(key)),
+            ("key".into(), ValClos::string(key)),
             ("handler".into(), dummy_block()),
         ];
         if let Some(g) = guard {
-            fields.push(("guard".into(), Value::string(g)));
+            fields.push(("guard".into(), ValClos::string(g)));
         }
-        Value::map(fields)
+        ValClos::map(fields)
     }
 
     /// Every manifest field with a declared type rejects a value of any
@@ -592,12 +638,12 @@ mod tests {
             ("hooks", ValueShape::Map),
             ("keybindings", ValueShape::List),
         ] {
-            let mut fields = vec![(field.into(), Value::Int(42))];
+            let mut fields = vec![(field.into(), ValClos::int(42))];
             if field != "name" {
-                fields.push(("name".into(), Value::string("p")));
+                fields.push(("name".into(), ValClos::string("p")));
             }
-            let manifest = Map::from(fields);
-            let err = parse(&manifest).unwrap_err();
+            let manifest = ValClos::map(fields);
+            let err = parse(manifest.as_map("manifest").unwrap()).unwrap_err();
             assert_eq!(
                 invalid_reason(&err).path,
                 vec![DataStep::Field(field.into())]
@@ -617,9 +663,9 @@ mod tests {
     /// warned about and skipped.
     #[test]
     fn non_block_handler_is_load_error() {
-        let entry = Value::map(vec![
-            ("key".into(), Value::string("ctrl-t")),
-            ("handler".into(), Value::Int(3)),
+        let entry = ValClos::map(vec![
+            ("key".into(), ValClos::string("ctrl-t")),
+            ("handler".into(), ValClos::int(3)),
         ]);
         let err = parse_keybindings(std::iter::once(entry)).unwrap_err();
         assert_eq!(
