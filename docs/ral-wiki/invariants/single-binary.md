@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 3dbbe8f3
+generated_at_commit: f9ac94f8
 ---
 
 # Single binary
@@ -32,8 +32,8 @@ serves it; a re-exec is launched from a `Role`, never a string
   [[design/grant|grant]];
 - the guest daemon spawns every engine under `--guest-engine <cgroup-root>`,
   named by `guest_abi::layout::ENGINE_FLAG`; core adopts the wire on
-  `layout::ENGINE_FD`, and a child's seed arrives sealed in its `Attach`
-  ([[map/core/transport|transport]]).
+  `layout::ENGINE_FD`, and a child's parent arrives as `Marshalled` in its
+  `Attach` ([[map/core/transport|transport]]).
 
 This in-process linking is also what routes the bundled tools through the same
 capability chokepoint as the structured primitives.

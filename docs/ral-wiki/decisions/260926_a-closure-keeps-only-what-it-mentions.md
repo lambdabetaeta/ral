@@ -1,8 +1,8 @@
 ---
 status: accepted
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
-verified_at_commit: c0905f5e
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
 anchors: [ValClos::close, ValClos::thunk, Env::restrict, Node::new, ListRef, MapRef]
 amended_by:
@@ -11,6 +11,13 @@ amended_by:
 ---
 
 # A closure keeps only what it mentions
+
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> writes each reached environment or built collection once, identified by
+> allocation, in dependencies-first rows. A closure retains its syntax and
+> row; shared captures and built data stay shared. This replaces the
+> transfer scrub and quadratic root scan, not formation-time restriction.
 
 > **Amended 2026-11-12:**
 > [[261112_runtime-values-are-value-closures|runtime values are value closures]]
@@ -53,10 +60,10 @@ observable changes; what changes is *residency*: a closure formed after
   binding named like a `^name` head, a sibling's session namesake — is kept
   and never read: it costs bytes, never meaning. Only the session tier is
   narrowed; the natives and prelude tiers stay shared whole.
-- **Narrowing that drops nothing is the identity, root included.** The wire
-  decode, the fork's scrub and `Rec`'s siblings are each handed an environment
-  already scrubbed for the same body, so each keeps the root the wire and the
-  scrub intern by; every empty capture is the one empty map.
+- **Narrowing that drops nothing is the identity, root included.**
+  `Rec`'s siblings keep an already restricted environment's allocation.
+  Marshalling identifies environments by that allocation; readback validates
+  direct names without restricting the row. Every empty capture is `Env::EMPTY`.
 - **The machine's ⟨M, ρ⟩ are computation closures, a type apart.**
   `Focus::Eval { comp, env }` and `Terminal::Lambda { comp, env }` hold the
   whole environment `M` was reached in. They are transient — never stored,
@@ -76,19 +83,20 @@ observable changes; what changes is *residency*: a closure formed after
   `shell.env` from the spawning shell's session; the body's capture rides in
   its closure. `use` and `explain` inside a worker read the session it was
   born into, so `spawn { explain x }` and `!{ explain x }` agree.
-- **Rows shrink; values are not shared across them.** A seed's rows are per
-  closure and hold what each mentions. A value two closures mention is
-  written in both rows: deduplicating it is the sharing-preserving encoding's
-  job, not this decision's.
+- **Restriction and wire sharing are separate laws.** Captures keep only
+  the names formation requires. Marshalling writes one row per reached
+  environment or built collection, preserving shared allocations rather
+  than copying them per closure. Code is written once per closure holding it.
 
 ## What it costs
 
-Every thunk value walks its body, looks up each occurrence and builds a small
-map where it once bumped an `Arc`: every thunk literal evaluated, every
-decoded and every scrubbed closure. Every recursive call builds one sibling
-per group member, each walking the whole group. The wire's root scan is
-linear, so interning is O(roots²) with roots about the closures in a message.
-No benchmark gates it.
+At this decision, every thunk value walked its body, looked up each occurrence
+and built a small map where it once bumped an `Arc`: every thunk literal
+evaluated, every decoded and every scrubbed closure. Every recursive call
+built one sibling per group member, each walking the whole group. The caching
+amendment above qualifies those formation costs. Marshalling's identity table
+takes O(rows) bookkeeping, with one expansion per allocation. No benchmark
+gates it.
 
 ## Alternatives rejected
 

@@ -310,8 +310,8 @@ impl Datum for Sample<()> {
     }
 }
 
-/// Opaque to ral, as a seed is: the stack crosses in the codec
-/// `Root.grants` and a sealed seed ride.
+/// Opaque to ral: the stack crosses in the codec `Root.grants` and a
+/// marshalled parent use.
 impl Datum for GrantStack {
     fn encode(self) -> FOValue {
         Bytes::from(crate::data::json::to_vec(&self).expect("grant paths use lossless OS strings"))

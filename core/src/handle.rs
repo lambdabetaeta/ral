@@ -51,7 +51,7 @@ pub(crate) fn pins_live_work(v: &ValClos) -> bool {
     }
 }
 
-/// Live in its spawning shell, withheld in a bequest.
+/// Live in its spawning shell, withheld in a marshalled parent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Handle {
     Live(Box<HandleInner>),

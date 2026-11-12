@@ -5,6 +5,7 @@ mod spawn;
 
 pub(crate) use decode::decode_capability_map;
 pub use decode::{decode_fragment, decode_grant};
+pub(crate) use spawn::RawSpawnGrant;
 pub use spawn::{GrantNarrower, SpawnGrant};
 
 use crate::authority::grant::freeze::FreezeCtx;

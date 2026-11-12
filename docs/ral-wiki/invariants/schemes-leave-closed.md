@@ -16,17 +16,27 @@ unifier can therefore silently alias *that* unifier's allocated variables;
 nothing at the import can tell a stale id from a live one.
 
 **Closedness is a type.** `Closed` (`core/src/ty/scheme.rs`) has three
-constructors, each checking `Scheme::foreign` is empty:
+construction routes, each checking `Scheme::foreign` is empty:
 
 - settlement, `settle_weak` (`core/src/typecheck/generalize.rs`), run on a
   successful unit's `Solution`;
 - `Binders::close`, a builtin's own binder supply, drawn from zero and
   borrowing no inference store;
-- deserialisation, which refuses a scheme that is not closed.
+- `Closed::new`, used by checked deserialisation and explicit raw-scheme
+  admission, which refuses a scheme that is not closed.
 
-Every carrier past a unit holds `Closed`: `Phrase::Define`'s schemes in a
-checked `Toplevel`, the present schemes in `SessionSchemes`, the build-time
-prelude bake and the seed's scope tables (`seed::table::SerialBinding`).
+Every runtime carrier past a unit holds `Closed`: `Phrase::Define`'s schemes
+in a checked `Toplevel`, the present schemes in `SessionSchemes` and the
+build-time prelude bake. The one generic IR grammar's independent `IrData`
+axis keeps runtime schemes `Closed` (`RuntimeData`) and raw schemes
+`Arc<Scheme>` (marshal-private `RawData`); runtime `Closed` is not weakened.
+The writer emits `Wire<RuntimeData>` directly; structural decoding and the
+reader use the same wire family as `Wire<RawData>`. The child reader admits
+environment binding schemes with `Closed::new`; `marshal/read/ir.rs` applies
+the same check to every definition scheme in every recursively linked
+module before `ValClos::closure`. An open scheme is `OpenScheme` at its
+complete JSON path, wrapped once as a parent decode failure. Linked modules
+remain `Explicit` independently of their containing tree's checking phase.
 Every session binding has a scheme; captured block locals may lack one and
 receive a fresh rank-zero monomorphic type (`WeakSource::Host`) when a hook
 or handler closure is inferred at installation. Live schemes exist only

@@ -17,7 +17,7 @@ status: superseded
 
 > **Amended 2026-10-13.** `EngineSeed`/`pack_seed` and the hatch they served are
 > gone too: the seed rides the protocol, sealed in `Attach.seed`
-> ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+> ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
 
 # One re-exec'd-child eval protocol
 

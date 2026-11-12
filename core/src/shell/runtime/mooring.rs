@@ -1,16 +1,13 @@
 //! [`Mooring`]: the frame a run fixes once and never changes — its
-//! structured-event sink, its enquiry desk, its session-[`Fork`] handle, and
-//! its terminal-foreground authority.
+//! structured-event sink, its enquiry desk, and its terminal-foreground
+//! authority.
 
 use super::Error;
 use super::flow::Settled;
-use super::state::Bequest;
 use super::value::ValClos;
 use crate::fact::{Reason, StateFailure};
 use crate::process::{DEFAULT_CLEANUP_GRACE, DurableRoot, ScopeNode, TerminalAccess};
-use crate::sync::LockExt as _;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A sink for structured host events: the value-typed dual of the byte
@@ -76,66 +73,6 @@ pub trait EnquiryDesk: Send + Sync {
 /// [`SurfaceSink`]; `None` outside a host that answers enquiries.
 pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
-/// Identifier for a shell session parked in a [`Nursery`], redeemed once by
-/// [`IdentityTransport::adopt_parked`](crate::carrier::IdentityTransport::adopt_parked).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NurseryId(pub u64);
-
-/// The parked bequests plus the counter [`Nursery::park`] mints ids from: a
-/// length-derived id would repeat once `adopt`/`clear` free a slot.
-#[derive(Default)]
-struct NurseryState {
-    next: u64,
-    parked: HashMap<u64, Bequest>,
-}
-
-/// Run-local holding pen for engine-side session forks, reached only through
-/// [`Fork::Park`] — an in-process desk and nothing else.
-///
-/// That arm exists for one reason: the reentrancy law bars a same-process desk
-/// handler from holding `&mut Shell`, so it cannot fork a session itself. The
-/// builtin body bequeaths through
-/// [`Shell::bequeath`](crate::shell::runtime::Shell::bequeath) and the bequest reaches
-/// the handler as a [`NurseryId`] its transport adopts.
-/// [`NurseryGuard`] empties it, so an unadopted bequest dies with its run.
-#[derive(Clone, Default)]
-pub struct Nursery(Arc<Mutex<NurseryState>>);
-
-impl Nursery {
-    /// Park `bequest` under a freshly minted id.
-    pub fn park(&self, bequest: Bequest) -> NurseryId {
-        let id = {
-            let mut state = self.0.lock_ignore_poison();
-            let id = state.next;
-            state.next += 1;
-            state.parked.insert(id, bequest);
-            id
-        };
-        NurseryId(id)
-    }
-
-    /// Remove and return the bequest parked under `id`, if one is still there.
-    pub(crate) fn adopt(&self, id: NurseryId) -> Option<Bequest> {
-        self.0.lock_ignore_poison().parked.remove(&id.0)
-    }
-
-    /// Drop every still-parked bequest.
-    pub fn clear(&self) {
-        self.0.lock_ignore_poison().parked.clear();
-    }
-}
-
-/// How a forked session reaches the desk that will adopt it.
-#[derive(Clone)]
-pub enum Fork {
-    /// In-process: the builtin parks a bequest, the handler adopts it by id.
-    Park(Nursery),
-    /// Across a wire: the builtin seals its bequest into its enquiry; the host
-    /// that answers makes the child engine and hands it the seal in its
-    /// `Attach`.
-    Seal,
-}
-
 /// Host-installed destination for deferred workers' surface.
 ///
 /// Session-lived, unlike [`SurfaceSink`], and cloned into spawned workers. It
@@ -176,8 +113,6 @@ pub struct Mooring {
     /// Never given to a deferred worker: a worker outlives its run's Report, so
     /// one that could enquire would break the ordering law.
     pub(crate) desk: Option<Desk>,
-    /// `None`: this host adopts no forked sessions.
-    pub(crate) fork: Option<Fork>,
     /// The owner's node: the base of this machine's tree (a run's, a
     /// worker's, a stage's).  What a key the terminal tenant heard is struck
     /// on, what a stage's group membership is judged by, what a host
@@ -202,14 +137,13 @@ impl Mooring {
     /// `node` is the child's own scope node; `surface` is selected explicitly
     /// by the caller (a session worker's buffered surface, or the parent's live
     /// surface for a gather child or pipeline stage).  The session's deferred
-    /// sink, cleanup grace, worker cap and title policy carry over, while desk,
-    /// fork and terminal authority are denied.
+    /// sink, cleanup grace, worker cap and title policy carry over, while desk
+    /// and terminal authority are denied.
     pub(crate) fn for_thread(parent: &Self, node: ScopeNode, surface: Option<SurfaceSink>) -> Self {
         Self {
             surface,
             deferred: parent.deferred.clone(),
             desk: None,
-            fork: None,
             home: node,
             cleanup_grace: parent.cleanup_grace,
             worker_cap: parent.worker_cap,
@@ -227,7 +161,6 @@ impl Mooring {
             surface: None,
             deferred: None,
             desk: None,
-            fork: None,
             home: DurableRoot::default().child(),
             cleanup_grace: DEFAULT_CLEANUP_GRACE,
             worker_cap: None,
@@ -236,9 +169,9 @@ impl Mooring {
         }
     }
 
-    /// How a forked session reaches this run's desk, if it has one.
-    pub fn fork(&self) -> Option<&Fork> {
-        self.fork.as_ref()
+    /// Whether this run has an enquiry desk.
+    pub fn has_desk(&self) -> bool {
+        self.desk.is_some()
     }
 
     /// Whether anything is on the other end — what lets a caller skip building
@@ -277,21 +210,6 @@ impl Mooring {
             terminal_access: TerminalAccess::ExplicitLoan,
             ..self.clone()
         })
-    }
-}
-
-/// Empties the run's nursery on `Drop`, so a fork never adopted — a refused
-/// enquiry, a run that ended before its handler ran — cannot outlive the run
-/// that parked it.  Holds an `Arc`-shared clone of the run's nursery, so it
-/// clears the same state every callee sees, and lives inside the run's
-/// `catch_unwind`, so it fires on the panic path too.
-pub(crate) struct NurseryGuard(pub(crate) Option<Fork>);
-
-impl Drop for NurseryGuard {
-    fn drop(&mut self) {
-        if let Some(Fork::Park(nursery)) = self.0.as_ref() {
-            nursery.clear();
-        }
     }
 }
 

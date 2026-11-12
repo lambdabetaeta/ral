@@ -5,7 +5,7 @@ use crate::agent::engine::{Engine, EngineKind};
 use crate::agent::roster::summary;
 use crate::agent::{Agent, Body};
 use crate::bus::{AgentMessage, Input, Refused};
-use crate::enquiry::{Deposit, ForkClaim, Message, Name, Selection, Start};
+use crate::enquiry::{Deposit, Message, Name, Selection, Start};
 use crate::provider::Provider;
 use crate::record::{Born, ChildFailure, ChildStatus, Memory};
 use crate::shell_eval;
@@ -17,17 +17,18 @@ use ral_core::fact::{
     AgentFailureNotOwned, AgentFailureQueuedUnsynced, AgentFailureReplyAbsent,
     AgentFailureReplyFailed, AgentFailureReplyPending, AgentFailureReplyStopped,
     AgentFailureReplyUnavailable, AgentFailureResting, AgentFailureSelfMessage, EngineCause,
-    EngineFailure, EngineStep, ExarchFailure, ForkKind, HelperFailure, InvariantFailure,
-    IoOperation, IoSubject, ProtocolFailure, ProtocolFailureWrongForkKind, Reason,
+    EngineFailure, EngineStep, ExarchFailure, HelperFailure, InvariantFailure, IoOperation,
+    IoSubject, Reason,
 };
+use ral_core::marshal::Marshalled;
 use ral_core::shell::runtime::no_desk;
 use std::sync::Arc;
 
 use super::{DeskAct, ExarchDesk};
 
 impl ExarchDesk {
-    /// Construction and adoption both run on the parent's thread.
-    pub(super) fn launch(&self, Start { spec, fork }: Start) -> Result<FOValue, Error> {
+    /// Child construction runs on the parent's thread.
+    pub(super) fn launch(&self, Start { spec, parent }: Start) -> Result<FOValue, Error> {
         let mut body = self.loan.get().ok_or_else(no_desk)?;
         let call = &self.call;
         body.log
@@ -48,7 +49,7 @@ impl ExarchDesk {
             &call.fleet,
             Parent::Agent(&call.handle, call.home.child()),
             reserved,
-            self.fork_engine(fork)?,
+            self.fork_engine(parent)?,
             provider,
             inherited,
         )
@@ -73,36 +74,21 @@ impl ExarchDesk {
         }
     }
 
-    /// Take up the fork a builtin body left for this desk: adopt it out of
-    /// the parent's own transport, or make an engine for the sealed bequest
-    /// across the wire.  The engine narrows by the bequest's grant on either
-    /// engine.
-    fn fork_engine(&self, fork: ForkClaim) -> Result<Engine, Error> {
-        let refused = |why: Error| why.with_context("`` exarch-agents `start `` refused");
-        match (&self.call.kind, fork) {
-            (EngineKind::Identity(parent), ForkClaim::Parked(id)) => parent
-                .adopt_parked(id)
-                .map(Engine::adopted)
-                .map_err(refused),
-            (EngineKind::Wire { engine }, ForkClaim::Sealed(seed)) => {
-                self.make_engine(engine, seed).map_err(refused)
-            }
-            (EngineKind::Identity(_), ForkClaim::Sealed(_)) => {
-                Err(refused(wrong_fork(ForkKind::Park, ForkKind::Seal)))
-            }
-            (EngineKind::Wire { .. }, ForkClaim::Parked(_)) => {
-                Err(refused(wrong_fork(ForkKind::Seal, ForkKind::Park)))
-            }
+    /// Build a child from the same parent bytes on either engine.
+    fn fork_engine(&self, parent: Marshalled) -> Result<Engine, Error> {
+        match &self.call.kind {
+            EngineKind::Identity(transport) => transport.child(&parent).map(Engine::adopted),
+            EngineKind::Wire { engine } => self.make_engine(engine, parent),
         }
+        .map_err(|why| why.with_context("`` exarch-agents `start `` refused"))
     }
 
-    /// The wire arm: one engine from the factory, attached as the parent was
-    /// plus its seal. The parent's enquiry is answered only once this returns,
-    /// so the child is attached before the roster names it.
+    /// The wire arm: one factory engine attached to the marshalled parent.
+    /// The child is attached before the roster names it.
     pub(super) fn make_engine(
         &self,
         engine: &ral_core::protocol::EngineSpec,
-        seal: ral_core::seed::Sealed,
+        parent: Marshalled,
     ) -> Result<Engine, Error> {
         let s = &self.call;
         let factory = s.fleet.launch.factory.as_ref().ok_or_else(|| {
@@ -128,7 +114,7 @@ impl ExarchDesk {
         })?;
         Engine::wire(
             transport,
-            ral_core::protocol::Attach::child(engine.clone(), seal),
+            ral_core::protocol::Attach::child(engine.clone(), parent),
         )
         .map_err(|lost| crate::agent::engine::failure(EngineStep::Attach, &lost))
     }
@@ -387,12 +373,6 @@ impl Said {
 
 fn agent_failure(cause: AgentFailure) -> Error {
     super::failure(ExarchFailure::Agent(cause))
-}
-
-fn wrong_fork(expected: ForkKind, actual: ForkKind) -> Error {
-    Error::new(Reason::Protocol(Box::new(ProtocolFailure::WrongForkKind(
-        ProtocolFailureWrongForkKind { expected, actual },
-    ))))
 }
 
 fn reply_failure(name: &str, failure: ChildFailure) -> Error {

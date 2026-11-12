@@ -1,10 +1,10 @@
 ---
 status: active
 amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]"
-generated_at_commit: c4bd558f
-generated_at_date: 2026-11-11
-verified_at_commit: c4bd558f
-verified_at_date: 2026-11-11
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
+verified_at_commit: f9ac94f8
+verified_at_date: 2026-11-12
 anchors: [Place, Selector, FreezeCtx, Shell::freeze_ctx, decode_capability_map, Shell::decode_grant, Net, EditorVerb, ShellVerb, Holds, Flag, Generator::check_options, Generator::check_option, Solver::close, Vocabulary]
 ---
 
@@ -378,9 +378,9 @@ named.
   offline or verb restriction keep their activation. Also accepted: an
   extension can add a verb its base lacks.
 - **The wire changed; the engine protocol was bumped** (15 to 16 here, 17 by the
-  Belnap decision). The seed and the warrant have one pinned binary at both
-  ends; the engine does not: `Run.caps` carries the grant stack to synod's
-  guest, whose engine ships in media built earlier. The bump plus rebuilt guest
+  Belnap decision). The marshalled parent and the warrant have one pinned
+  binary at both ends; the engine does not: `Run.caps` carries the grant stack
+  to synod's guest, whose engine ships in media built earlier. The bump plus rebuilt guest
   media makes a stale guest fail the packaging check and the attach handshake,
   not the first dispatch
   ([[design/engine-protocol|engine-protocol]]). `Capabilities` formerly ignored

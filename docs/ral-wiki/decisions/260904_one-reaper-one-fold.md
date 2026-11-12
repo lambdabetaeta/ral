@@ -1,10 +1,10 @@
 ---
 status: active
-generated_at_commit: f1b0a4a4
+generated_at_commit: f9ac94f8
 ---
 
 > **Amended 2026-10-13.** The accepted exception below is gone: the hatch and
-> its table were deleted ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]),
+> its table were deleted ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]),
 > as was `ChildHandle::try_reap`. The reaper now owns every child wait, with
 > no exception; the passages on `hatch.rs` are history.
 

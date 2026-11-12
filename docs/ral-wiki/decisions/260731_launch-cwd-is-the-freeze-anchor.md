@@ -4,6 +4,13 @@ status: active
 
 # An agent's authority freezes at the cwd it started from, not the cwd it stands in
 
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> carries the parent's cwd in its image and `SpawnGrant` unfrozen alongside
+> it. On either seat `Shell::child_of` restores that cwd, re-holds inherited
+> exclusions and freezes the new layer there, pushing it last. The launch
+> anchor law stands; the constructor names in the older amendment are history.
+
 **Exarch freezes an agent's authority against the cwd it was *started* at — the
 trunk against its launch cwd, a desk child against its session's live cwd at
 the instant it was spawned — and never re-freezes on a `cd`.** One captured cwd
@@ -32,15 +39,11 @@ the process's own." The live session shell is seeded at that identical spot
 free to drift: a model's `cd` moves the shell's own notion of "here" for
 every relative path it types next, and nothing in this list re-reads it.
 
-A desk-spawned child is the same shape from the child's side. `HostServices`
-is rebuilt fresh at every `ral` call from the *parent's* live directory —
-`Agent::cwd()` probes the running shell rather than reading the parent seat's
-stored `cwd`, "so a desk-spawned child starts where the model is." The desk's
-`fork_child` resolves the child's one grant layer against exactly that probed
-value — `policy::base_layer(spec.grant, &cwd)`, pushed onto a clone of the
-parent's own `GrantStack` — then `Seat::identity(shell, scratch, s.cwd.clone(), …)` seeds the
-new child's shell there and stores the same value as the new seat's own `cwd`
-field — the one `/clear` rebuilds from verbatim, never by probing again.
+A desk-spawned child is the same shape from the child's side. The builtin
+marshals the parent's image at the spawn, including its live cwd, together
+with the unfrozen grant. `Shell::child_of` reads that image on either seat
+and resolves `SpawnGrant::layer` against the child's restored cwd. No desk
+snapshot or host process cwd substitutes for the directory the parent held.
 
 ## Decision
 
@@ -58,10 +61,9 @@ field — the one `/clear` rebuilds from verbatim, never by probing again.
   chdirs its own process, so they can only restate the same value.
 - **A desk child's anchor is its session's live cwd, taken at the moment it is
   started** — the parent's cwd as the spawn sees it when it runs,
-  which is where the child's own existence begins. `Seat::identity` fixes that
-  reading into the child's own seat once, and `Seat::clear` (`/clear`'s engine
-  half) rebuilds from the same stored field rather than probing the live
-  shell again, so the child's own anchor does not drift either.
+  which is where the child's own existence begins. `Shell::child_of` freezes
+  the spawn layer against that restored cwd; a later `cd` changes neither
+  its frozen paths nor its authority.
 - **One rule, read from both ends: grants freeze where the agent was
   started.** A trunk's "started" is the process's launch; a child's is the
   spawn call that gave it its own identity.

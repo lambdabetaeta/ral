@@ -31,6 +31,14 @@ that the move is possible and states what it would take.
 > amended: `reply` migrated too, superseding the "two-tool provider surface"
 > end state below — see the landed note under "Scope widens".
 
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> defines the current handoff: the builtin checks for a desk, marshals its
+> image and grant, and enquires with `Start { spec, parent }`. Both seats
+> construct through `Shell::child_of`; the wire desk uses the factory.
+> The adoption-by-id and inherited-fd sketches below record the earlier
+> migration plan, not current transfer interfaces.
+
 The affordance under discussion is the one fixed by
 [[decisions/260617_async-agent-tool|async-agent-tool]]: launch-only, always
 asynchronous, forks a child from a value-snapshot of the parent shell, runs it on

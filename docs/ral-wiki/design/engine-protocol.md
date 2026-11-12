@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 ---
 
@@ -25,25 +25,25 @@ and a binding is only the carriage around it.
   answers a run and a probe. The identity carrier holds one behind its
   session lock and calls it on the dispatching thread; the wire carrier runs
   one on a worker thread behind a frame loop. They differ only in the
-  `Rails` each lays for a dispatch: where its events go, who answers its
-  enquiries, and how a session it forks is adopted.
-- **One construction.** Every engine is born from an `EngineInstaller` and
-  an `Attach`, and `Engine::boot` does it once for both carriers: resolve
-  the installer (version first, then tag), derive its `Runtime` once from
+  `Rails` each lays for a dispatch: where its events go and who answers its
+  enquiries.
+- **One session constructor.** `Engine::boot` reads an `Attach` under an
+  `EngineInstaller` for either carrier: resolve the installer (version first,
+  then tag), derive its `Runtime` once from
   the attach's `EngineSpec` (builtins live on it and nowhere else), then
   either `Shell::root` and the root recipe over the `Origin::Root` (seating
   its cwd and env), then re-hold and install its `Root::grants` as permanent
-  session layers, oldest first; or `Shell::child_of` over the `Bequest` a
-  `Origin::Child` seal decodes to.
-  The identity carrier constructs its child from the engine's `Arc<Runtime>`
-  and the parked bequest, so a fork too is the trivial instantiation of what
-  the wire encodes. Construction is attach: `IdentityTransport::boot`
+  session layers, oldest first; or `Shell::child_of` over the `Marshalled`
+  parent in `Origin::Child`.
+  `IdentityTransport::child` calls the same `Shell::child_of`, sharing the
+  parent's `Arc<Runtime>` while reading the same bytes a wire child reads.
+  Construction is attach: `IdentityTransport::boot`
   returns the verdict the wire's `await_attached` does — `Severed::Refused`,
   in the refusing step's own words — so a transport in hand is one its
   engine accepted. Every step of the attach (the runtime, the root recipe,
-  the seal, `Shell::child_of` and the host's `GrantNarrower`) refuses with an
-  `Error`, which crosses as a `WireError`, so a refusal's hints reach the
-  host on either carrier. `WireError` carries the typed `reason`, optional
+  the marshalled parent, `Shell::child_of` and the host's `GrantNarrower`)
+  refuses with an `Error`, which crosses as a `WireError`, so a refusal's
+  hints reach the host on either carrier. `WireError` carries the typed `reason`, optional
   report `context` and ordered stored `hints`. Reconstruction preserves that
   reason, so its code and intrinsic advice remain derivable; no rendered
   sentence becomes `Raised`. Host provenance, witnesses, compiler rejections
@@ -57,10 +57,10 @@ and a binding is only the carriage around it.
   probe, never a public method: `test_access::workers` reads through
   `IdentityTransport::inspect`, itself `test-util`-only, and core's own tests
   boot their engines as every engine is booted, through `carrier::testkit`.
-- **The carrier adopts the fork.** A run that forks its session parks it or
-  listens for it by the carrier's `Fork` arm, never by a `Host` method; both
-  arms push the child's one grant layer through the same step (*Two
-  bindings*, below).
+- **One parent-to-child route.** `Shell::marshal` writes the parent's image
+  and `SpawnGrant` to `Marshalled` bytes under either carrier. Both children
+  read them through `Shell::child_of`, which pushes the child's one grant
+  layer (*Two bindings*, below).
 - **One meaning per verb.** `Control`, reentrancy, and every probe class are
   defined once, and each carrier applies the same definition.
 
@@ -147,26 +147,46 @@ number, string, bytes, and lists/maps/variants thereof, data all the way
 down, its extension slot uninhabited by construction. The envelope's own
 fields (`Run`, `Ending`, `Control`, `Attach`) are closed Rust types, and
 nothing in either carries an fd, a handle, a closure, or a capability beyond
-the resolved grants a `Root` or a sealed `Child` already carries. `Attach`
-is `{ engine: EngineSpec, origin: Root | Child(Sealed) }` and carries only
+the resolved grants a `Root` or a marshalled `Child` already carries. `Attach`
+is `{ engine: EngineSpec, origin: Root | Child(Marshalled) }` and carries only
 what an engine reads. `EngineSpec` names the engine — protocol version,
 installer tag, terminal state, home. A `Root` is the session a root starts
 from — its cwd, the host's per-session env, `grants` installed after the
 recipe, and `config`, the installer's own settings as an `FOValue` its
-recipe decodes and core never reads. A `Child` is a sealed bequest the
-engine alone reads, carrying its own cwd and env. `SerialValue` — the
-closure-capable sibling `FOValue<SerialAtom>` that carries a forked session
-into a sealed child engine (*The factory*, below) — adds thunks, builtin names
-and withheld handle titles. Builtin residuals cross as thunks with their
-supplied arguments in ρ. A bequest withholds every live handle even for
-identity adoption: names, positions and `Handle` types survive, but every
-observation fails `withheld-handle`. The seed is a different domain
-([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]);
-only its sealed bytes reach the protocol, and the host never reads their
-contents. That is the **opacity law**: a payload the host relays but never reads
+recipe decodes and core never reads. A `Child` carries its parent's image
+and `SpawnGrant` as one JSON document, `Marshalled`, which the engine alone
+reads. The **opacity law** is that a payload the host relays but never reads
 crosses as bytes; its content is a contract between the engines at its two
-ends, and the spawner is what makes those ends one binary
-([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+ends, and the spawner makes those ends one binary
+([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+
+**Marshalling preserves how values are held and what they share.**
+
+- An explicit dependencies-first walk writes each environment and built
+  collection once, by allocation identity. Row `i` names only rows `j < i`;
+  the root environment and handler frames may name any row. No value nests
+  another wire value, and tag spines cross as flat lists.
+- Syntax crosses as a closure over its environment row; built lists and maps
+  cross as rows, without materialising literals. Shared environments and built
+  collections remain shared in the child. IR is copied once per closure that
+  holds it, not shared across closures.
+- Builtins cross by name. A residual crosses as a builtin name, an environment
+  row and a supplied-argument count; the receiving entry reconstructs its own
+  η suffix. δ is not wire syntax. Builtins, handles and residuals sit only at
+  a value closure's root, never beneath a tag.
+- Writing a live handle as its title withholds it in place, under both
+  carriers. Names, positions and `Handle` types survive; observations refuse
+  `withheld-handle`. A caught failure crosses with its typed `ErrorFact`
+  witness intact ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+- Reading checks and constructs each row in one pass, then the roots. Wrong
+  references, unknown builtins, bad residuals, open closures or schemes,
+  duplicate names or keys, malformed facts and unreadable syntax all refuse
+  as `DecodeFailure` at their JSON path, wrapped once as
+  `ProtocolFailure::Decode { kind: Parent, operation: "child" }`.
+- `Marshalled` has no inner length prefix: only its carrying protocol frame
+  delimits and bounds it. In-process construction still encodes and decodes
+  that same document, without a protocol frame. Writing refuses only a
+  non-Unicode cwd.
 
 The **envelope** — `Frame`, `Event`, `SessionEvent`, correlation ids,
 `Attach`'s handshake — stays a closed set of Rust types behind
@@ -274,8 +294,8 @@ answers its enquiries — is one object, `Host`, handed to each dispatch, so
 the rails a run speaks on can never be bound to two different hosts by
 accident. A host with nothing to offer hands over the mute `Host` `()` —
 renders nothing, refuses every enquiry with the honest absence error — which
-is batch's whole story. How a forked session is adopted is not the host's to
-say: it is carriage, and the carrier decides it.
+is batch's whole story. A helper's parent crosses as `Marshalled` under
+both bindings; the host relays it without reading the session it describes.
 
 - **Identity binding — a direct call.** `dispatch` runs the whole turn on
   the calling thread, and the front-end drains events only after `dispatch`
@@ -291,16 +311,14 @@ say: it is carriage, and the carrier decides it.
   front-end's own drain loop (`dispatch_to_report`) answers by calling the
   same `Host` and writing `Frame::Answer` back. Only who calls the `Host`,
   and when, differs between the two bindings.
-- **`Fork` is the carrier's arm.** The identity carrier lays `Fork::Park`
-  over a nursery it owns: a spawning builtin parks the fork there, and the
-  handler adopts it through the parent's own transport —
-  `IdentityTransport::adopt_parked(id)`, a new transport over the
-  child engine, so the host never holds a forked `Shell`. The wire carrier
-  lays `Fork::Seal` (see *The factory*): the builtin seals its bequest and
-  names the bytes in its enquiry, and the host makes the engine. Either way the child's one grant
-  layer is pushed by `Shell::child_of`, from the grant the `Bequest` carries,
-  under the parent installer's `narrow` and against the child's own cwd — the
-  one layering step an adopted fork and a sealed child share.
+- **The child reads one marshalled parent.** The spawning builtin puts
+  `Shell::marshal`'s bytes in its enquiry's `parent` field. Identity calls
+  `IdentityTransport::child(&parent)`; wire puts the same parent in the new
+  engine's `Attach` (see *The factory*). Neither gives the host a `Shell`.
+  `Shell::child_of` reads the image and pushes its `SpawnGrant` through
+  `SpawnGrant::narrow_onto`, under the parent's installer and against the
+  child's own cwd. The inherited grant stack is reheld on either carrier;
+  the new layer stays unfrozen until this construction step.
 
 ## Probes: boundary-time reads
 
@@ -372,12 +390,12 @@ effects. The isolation, scoped cancel and teardown a process also gives
 come along with it.
 
 - **No session is adopted into another's process.** In-process adoption of a
-  wire helper would delete the seal (*The factory*) but would lose that bound.
+  wire helper would avoid a process (*The factory*) but would lose that bound.
   Recovering it means one of two things. The first is ending the guest
   whenever a helper fails to settle, which turns one wedged helper into the
   loss of the whole conversation. The second is a contract that no effect
   outlives its session, and cooperative cancellation cannot give one. Either
-  way the adoption needs more machinery than the seal costs: a session
+  way the adoption needs more machinery than a child process costs: a session
   supervisor, a process cancel root, an audit of every process-global
   mutation, and a new handshake. The host's identity seats share exarch's
   process, and accept the weaker bound there.
@@ -385,11 +403,11 @@ come along with it.
 - **`/clear` is host lifecycle, not a frame**: drop the engine and boot a
   fresh one from the same `Attach`, onto the same interrupt target. A seat
   that cannot be reborn here — a wire seat, whose engine was not booted by
-  this process, or an adopted fork, whose authority a fresh boot would not
+  this process, or a child session, whose authority a fresh root boot would not
   carry — refuses `/clear` with a sentence.
 - **A sub-agent fork under the wire is a child engine spawned by the guest
   daemon**, on a connection the host dialled, born from an `Attach` that
-  carries the parent's seal. The parent's `Bequest` crosses sealed: bytes the
+  carries `Origin::Child(parent)`. The parent crosses as `Marshalled` bytes the
   host relays unread, interpreted only by two instances of one binary, both
   spawned by the daemon from one path. The first-order law governs the
   positions the host reads; this one it does not.
@@ -397,8 +415,8 @@ come along with it.
 ## The factory: the host dials the daemon
 
 A wire spawn is one exchange. **No engine spawns an engine**: the parent's
-fork builtin does no I/O, only `bequeath`, `seal`, and names the bytes in its
-enquiry as `` `sealed <bytes> ``.
+spawning builtin checks that it has a desk before marshalling, then puts
+`Shell::marshal`'s bytes in its start enquiry's `parent` field.
 
 - The host, *while still answering that enquiry*, asks its `Factory` for a
   connection: the desk dials `guest_abi::ports::FACTORY`, the one guest port, on which the
@@ -407,16 +425,18 @@ enquiry as `` `sealed <bytes> ``.
   anything else; a guest process cannot present the host's CID, since the
   guest kernel's transport writes the source. Each admitted connection is one
   engine, spawned exactly as the root is, on fd 3.
-- The desk builds the child's `Attach` from the parent's own plus the seal,
-  writes it, waits for `Attached`, and only then answers the enquiry. **The
+- The desk builds the child's `Attach` from the parent's engine specification
+  and `Origin::Child(parent)`, writes it, waits for `Attached`, and only then
+  answers the enquiry. **The
   child exists and is attached before the roster names it.** A refused attach
   reaches the parent as the desk's refusal, in the engine's words.
 
 The root keeps dialling out: its dial is the boot's readiness signal. Children
 are dialled in because the host already holds the spawn the connection is for,
-so no correlation is needed. The seal is a `Bequest` in wire form, carrying the
-parent's sources, terms and grant as well as its scope, and no recipe runs in a
-sealed child: it derives its runtime and constructs over the unsealed bequest.
+so no correlation is needed. `Marshalled` carries the parent's sources, terms,
+fixings and grant as well as its scope and context. No recipe runs in a child:
+the engine derives its runtime, then `Shell::child_of` reads the parent and
+constructs the session.
 A child ends when the host drops its connection (EOF on fd 3).
 
 ## Liveness and severance
@@ -446,7 +466,7 @@ protocol violation.
 
 Every terminal cause collapses into one type, **`Severed`**: the engine
 refused `Attach` in its own words (a version mismatch, an unknown installer,
-a seal it could not unseal); the stream closed or a frame failed to cross;
+a parent it could not read); the stream closed or a frame failed to cross;
 nothing arrived before the liveness deadline; or the engine answered outside
 the protocol — a reading outside its class's shape, a frame only a front-end
 sends — a fault the front-end observed for itself and records through

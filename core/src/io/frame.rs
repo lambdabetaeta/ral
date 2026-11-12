@@ -1,6 +1,4 @@
-//! Length-prefixed JSON frames: the one framing codec on every ral IPC
-//! channel — the sealed engine seed and the engine wire in
-//! [`crate::protocol::channel`].
+//! Length-prefixed JSON frames for the engine wire in [`crate::protocol::channel`].
 
 use crate::data::json::{self, JsonDecode, JsonEncode};
 use crate::fact::{

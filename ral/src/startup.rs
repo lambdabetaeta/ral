@@ -94,13 +94,13 @@ pub(crate) mod engine {
             tag: REPL,
             runtime: repl_runtime,
             root: repl_root,
-            narrow: no_seeded_children,
+            narrow: no_child_engines,
         },
         EngineInstaller {
             tag: BATCH,
             runtime: batch_runtime,
             root: batch_root,
-            narrow: no_seeded_children,
+            narrow: no_child_engines,
         },
     ];
 
@@ -183,9 +183,9 @@ pub(crate) mod engine {
     /// exarch has a base-tag lexicon to resolve a grant against — so this
     /// engine's grant policy is a refusal. Saying so is the point of
     /// `EngineInstaller`'s field: an engine with no policy is
-    /// unrepresentable, and a seeded child that reaches one is told why
+    /// unrepresentable, and a child reaching this policy is told why
     /// rather than silently admitted.
-    fn no_seeded_children(
+    fn no_child_engines(
         _grant: &str,
         _ctx: &ral_core::authority::grant::freeze::FreezeCtx,
     ) -> Result<ral_core::authority::policy::GrantLayer, Error> {

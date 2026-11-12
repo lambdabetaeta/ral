@@ -1,7 +1,7 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-verified_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
-verified_at_date: 2026-11-11
+generated_at_commit: f9ac94f8
+verified_at_commit: f9ac94f8
+verified_at_date: 2026-11-12
 anchors: [run, run_under, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck, Agent::ral, dispatch_to_report, Scopes::open, Scope::id]
 ---
 
@@ -101,7 +101,7 @@ module's framed scaffold:
   back, `Inherit` leaves the ambient streams to flow — then assembles the run's
   frame **in two halves, split by mutability**. What the run fixes once (the
   `surface` sink, the deferred rail with its `worker_cap`, `cleanup_grace` and `worker_title`,
-  the desk, the `Fork` arm, the foreground scope, and the run's terminal
+  the desk, the foreground scope, and the run's terminal
   authority) is a `Mooring`, an owned local on `run_built`'s own Rust stack
   frame; the surface has no liveness role, so a clone of it can never define
   run completion. What genuinely changes within the run is taken on loan: the
@@ -113,9 +113,8 @@ module's framed scaffold:
   `IoLoan`, and evaluates. The loan is RAII over that one swap: it moves the
   new streams onto `shell.io` and restores the previous ones on `Drop`, so
   teardown survives a caught worker panic. The mooring needs no guard — it
-  never moved, so an outer run's is back the instant this stack frame ends,
-  and the `NurseryGuard` beside it empties the nursery on the unwinding path
-  as surely as on the clean one. A source run registers its root
+  never moved, so an outer run's is back the instant this stack frame ends.
+  A source run registers its root
   (`register_root`) and installs a base `Prov` naming its whole-program span;
   a hook registers no text but installs its resolved name and origin at 1:1. Workers inherit
   the parent's register at spawn. The body runs under the session's stack. `audit_deputy_prefixes` reports its flagged

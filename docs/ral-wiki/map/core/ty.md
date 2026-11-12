@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
 
@@ -34,8 +34,11 @@ and skips every walk those answers make unnecessary.
   sort by construction. `Weak` records a rank-zero residual for reseeding;
   ranks themselves live in the checker. `Closed` is a scheme writing no variable it
   gives no role, constructed only by settlement, `Binders::close` (a builtin's
-  own binder supply) or checked deserialisation (`Closed::new`, refusing a scheme that
-  writes a free variable with `DecodeCause::OpenScheme`). Equality is structural.
+  own binder supply) or `Closed::new`, used by checked deserialisation and raw
+  scheme admission. The child reader checks environment schemes and every
+  recursively linked-module definition scheme, refusing a free variable with
+  `DecodeCause::OpenScheme` at its JSON path
+  ([[map/core/transport|transport]]). Equality is structural.
   There are no partial schemes or cached environment free variables
   ([[invariants/schemes-leave-closed|schemes leave closed]]).
 - `ty/exec_arg.rs`: `RefusedArg`, the shapes `execve(2)` has no argument for, one

@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ed1b37eb
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
 anchors: [walk, walk_excluded, failure_trace, holds_program, GrantStack::judge_failure, Shell::locate, check_exec_name, Trace, RealPath, Located, Dir, Hold, Excluded, Listed, ObjectId, Unjudged, Judged, Installing, InstallToken, Handle, Verdict, GrantStack::judge, GrantStack::locate, ReadRegion::judge, Ungoverned, Refused, Extent, decode_capability_map, rehold, LexicalPath::folded, collision_key, is_discard, check_device_name, admits_fs, Baseline, Walk, Cancellation, AdmittedWalk, Shell::admitted_walk, would_run]
 ---
@@ -178,11 +178,12 @@ function of its layers.**
   folded lexically. Where a `..` folds that name away, the walk resumes from
   the directory it holds, so `missing/../x` is walked to `x`, its link
   followed by the walk's mode, as though `missing` had never been spelled.
-- **Across a process boundary** a stack travels as its traces and the receiver
-  calls `GrantStack::rehold` (the seed's decode, `run_framed`): each exclusion is
-  walked again at its position and held where the object there is the one
-  recorded; otherwise its identities stand unheld. Nothing is refused. A stack
-  that is not `root()` is dispatched to a local engine only.
+- **At a child read, on either carrier,** the stack travels as its traces and
+  `marshal::read` calls `GrantStack::rehold`. Root construction also reholds
+  `Root.grants` in `Engine::boot`. Each exclusion is walked again at its
+  position and held where the object there is the one recorded; otherwise
+  its position and old identities still refuse, but stand unheld. Nothing is refused by reholding.
+  A stack that is not `root()` is dispatched to a local engine only.
 
 ## Use through the handle
 

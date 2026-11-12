@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/skill.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/src/enquiry.rs, exarch/src/library.rs, exarch/data/agent.ral]
 ---
@@ -401,11 +401,14 @@ and ends itself after its idle interval (five hours by default)
   [[map/exarch/policy|base]] names (`confined`, `read-only`, `edit-only`,
   `reasonable`), or `` `restrict R `` with `R` a capability record in
   `grant [...] { body }`'s own vocabulary; `Launch` splits the model's record
-  into that `Grant` and the remaining `Spec`; `fork_then_enquire` bequeaths
-  the grant onto the forked shell, and the desk's `Start` carries the `Spec`
-  with its `ForkClaim`. Parked and sealed bequests both withhold inherited
-  handles, including inside residual builtin thunks
-  ([[design/agents|the snapshot law]]). `Grant::decode` (`enquiry.rs`) closes the row,
+  into that `Grant` and the remaining `Spec`; `fork_then_enquire` checks
+  `Mooring::has_desk` first, refusing with the shared `no_desk()` before any
+  marshalling, then calls `Shell::marshal(grant)`. The desk's
+  `Start { spec, parent: Marshalled }` carries one opaque JSON document on
+  either seat. Handles cross as titles and arrive withheld, including inside
+  builtin residual arguments; built sharing and caught failure witnesses
+  survive ([[map/core/transport|marshalling]];
+  [[design/agents|the snapshot law]]). `Grant::decode` (`enquiry.rs`) closes the row,
   naming all six shapes and `R`'s own keys in its refusal and holding `R` to
   first-order data, since the ceiling crosses to the far side as data; the
   record itself is decoded by `decode_capability_map` off the `Form::Grant`

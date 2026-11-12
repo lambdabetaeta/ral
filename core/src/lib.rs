@@ -32,6 +32,7 @@ pub mod host;
 pub mod invocation;
 pub mod io;
 pub mod ir;
+pub mod marshal;
 pub mod own;
 pub mod path;
 /// Names exported by `prelude.ral`, harvested from its top-level `let`
@@ -42,7 +43,6 @@ pub(crate) mod prelude_manifest {
 pub mod process;
 pub mod protocol;
 mod role;
-pub mod seed;
 pub mod shell;
 mod site;
 pub mod source;
@@ -67,8 +67,8 @@ pub use role::{Invocation, Role, classify};
 pub use shell::boot::HostSurface;
 pub use shell::grant::SpawnGrant;
 pub use shell::runtime::{
-    Bequest, Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, List, ListRef, Map,
-    MapRef, RegisterError, Runtime, Settled, Shell, SurfaceSink, ValClos, View,
+    Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, List, ListRef, Map, MapRef,
+    RegisterError, Runtime, Settled, Shell, SurfaceSink, ValClos, View,
 };
 pub use ty::Scheme;
 pub use typecheck::{SessionSchemes, TypeError, bake_prelude, typecheck};

@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::test_helper::spawn_engine_on;
-use ral_core::seed::{Sealed, seal};
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex as StdMutex;
 
@@ -86,16 +85,13 @@ fn with_wire_desk<R>(
     )
 }
 
-/// The parent's bequest as a wire engine seals it, carrying `PARENT_MARK=1`.
-fn parent_seal() -> Sealed {
+/// The marshalled parent, carrying `PARENT_MARK=1`.
+fn parent_bytes() -> Marshalled {
     let mut shell = crate::boot::test_shell();
     shell.set_env_var("PARENT_MARK", "1").unwrap();
-    seal(&shell.bequeath(ral_core::SpawnGrant::Inherit)).expect("a bequest seals")
-}
-
-/// `` `exarch-agents `start `` as a wire engine sends it: its bequest, sealed.
-fn wire_start_req(name: &str, seed: Sealed) -> Request {
-    start(ForkClaim::Sealed(seed), spec("go", name))
+    shell
+        .marshal(ral_core::SpawnGrant::Inherit)
+        .expect("a test parent marshals")
 }
 
 /// An engine that died at birth leaves the host a connection and no child,
@@ -105,7 +101,7 @@ fn wire_spawn_refuses_when_the_engine_closes_before_attaching() {
     let factory = FakeFactory::new(Guest::Closes);
     with_wire_desk(factory, |desk, _fleet, _agent| {
         let err = desk
-            .ask(wire_start_req("unattached", parent_seal()))
+            .ask(start_req(parent_bytes(), "go", "unattached"))
             .expect_err("an engine that never attached must be refused");
         assert!(
             matches!(&err.reason, Reason::Host(host) if matches!(&**host,
@@ -128,7 +124,7 @@ fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
     )));
     with_wire_desk(factory, |desk, _fleet, _agent| {
         let err = desk
-            .ask(wire_start_req("never-made", parent_seal()))
+            .ask(start_req(parent_bytes(), "go", "never-made"))
             .expect_err("a refused factory must be refused");
         assert_eq!(
             err.reason,
@@ -146,50 +142,18 @@ fn wire_spawn_refuses_naming_the_factory_when_it_refuses() {
     });
 }
 
-/// The identity tag on a wire desk is a guest claiming to be in process.
-/// Refused, and before the factory is asked.
+/// The parent crosses the host unread; the child attaches before the desk answers.
 #[test]
-fn wire_spawn_refuses_a_parked_fork_without_asking_the_factory() {
-    let factory = FakeFactory::new(Guest::Spawns);
-    with_wire_desk(factory.clone(), |desk, _fleet, _agent| {
-        let err = desk
-            .ask(super::start_req(NurseryId(0), "go", "in-process"))
-            .expect_err("a wire desk has no nursery to adopt a parked fork from");
-        assert_eq!(
-            err.reason,
-            Reason::Protocol(Box::new(ral_core::fact::ProtocolFailure::WrongForkKind(
-                ral_core::fact::ProtocolFailureWrongForkKind {
-                    expected: ral_core::fact::ForkKind::Seal,
-                    actual: ral_core::fact::ForkKind::Park
-                }
-            )))
-        );
-        assert!(
-            err.plain().contains("`sealed <bytes>`"),
-            "must name the tag this host does take, got: {}",
-            err.describe()
-        );
-        assert_eq!(
-            factory.calls(),
-            0,
-            "a fork this desk cannot reach is refused before the factory is asked"
-        );
-    });
-}
-
-/// The seal crosses the host untouched: the engine the factory made is a
-/// child of the sealing parent, attached before the desk answers. The engine is
-/// taken straight off the desk, where it can be probed.
-#[test]
-fn a_sealed_bequest_reaches_the_child_engine() {
+fn a_marshalled_parent_reaches_the_child_engine() {
     let factory = FakeFactory::new(Guest::Spawns);
     with_wire_desk(factory.clone(), |desk, _fleet, _agent| {
         let EngineKind::Wire { engine } = &desk.call.kind else {
             panic!("a wire desk makes its children over a wire")
         };
+        let parent = parent_bytes();
         let child = desk
-            .make_engine(engine, parent_seal())
-            .expect("a sealed bequest makes a child engine");
+            .make_engine(engine, parent.clone())
+            .expect("a marshalled parent makes a child engine");
         assert_eq!(
             child
                 .read(
@@ -198,15 +162,15 @@ fn a_sealed_bequest_reaches_the_child_engine() {
                 )
                 .expect("the child engine answers a probe"),
             Some("1".to_string()),
-            "the parent's env var reached the child through the sealed bequest"
+            "the parent's env var reached the child through marshalling"
         );
         child.end().expect("the probed engine ends cleanly");
         drop(child);
 
-        desk.ask(wire_start_req("sealed-child", parent_seal()))
-            .expect("a sealed start makes and rosters a child engine");
+        desk.ask(start_req(parent, "go", "marshalled-child"))
+            .expect("a marshalled start makes and rosters a child engine");
         assert_eq!(factory.calls(), 2);
-        desk.agent_dismiss("sealed-child")
+        desk.agent_dismiss("marshalled-child")
             .expect("join before reaping the factory engines");
         factory.reap();
     });

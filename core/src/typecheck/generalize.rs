@@ -762,7 +762,7 @@ mod tests {
         assert!(u.is_deep_row(fresh));
     }
 
-    /// The seed bequest travels as JSON, whose map keys are strings.
+    /// A marshalled parent travels as JSON, whose map keys are strings.
     #[test]
     fn a_scheme_of_every_sort_and_role_round_trips_through_json() {
         let (bound, weak, root) = (TyVar(0), TyVar(1), TyVar(2));

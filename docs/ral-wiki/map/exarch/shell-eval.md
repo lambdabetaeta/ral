@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/surface.rs, exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/clip.rs, exarch/src/shell_eval/report.rs, exarch/data/agent.ral]
 ---
@@ -120,7 +120,7 @@ per-run policy, it is per-*shell* policy, armed once by
 the one root recipe both carriers boot through (`boot::engine_runtime` for the
 process half, `boot::engine_root` for the recipe, which refuses a `Root` that names no
 scratch: the host owns it); a fork
-keeps its terms through core's `Shell::bequeath` and `Shell::child_of`
+keeps its terms through core's `Shell::marshal` and `Shell::child_of`
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
@@ -138,7 +138,7 @@ from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Frame
 teardown is core's: `IoLoan` brackets the byte streams and registers a run takes
 on loan from the shell, self-healing on a caught worker panic as well as on the
 normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
-the run's invariant half — surface, deferred sink, desk, fork arm, cancel, the
+the run's invariant half — surface, deferred sink, desk, cancel, the
 worker cap — threads as an immutable `&Mooring` the stack itself restores. Exarch
 needs no bracket of its own: its `RunHost` is a plain `Arc` `Agent::ral`
 builds and passes to the dispatch, never installed as shared state, so an

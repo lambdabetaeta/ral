@@ -26,7 +26,7 @@ pub mod probe;
 /// Checked at every `Attach`; a mismatch refuses even development media.
 ///
 /// Packaging compares the recorded version in `vm-image/build-tools` (`check-media`).
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -126,12 +126,12 @@ pub struct EngineSpec {
 }
 
 /// How the engine's session comes to be: a root from a recipe, a child from
-/// its parent. A child's cwd and env ride its seal, so nothing else is named.
+/// its parent. A child's cwd and env are marshalled, so nothing else is named.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Origin {
     Root(Root),
-    /// A child's parent, sealed.
-    Child(crate::seed::Sealed),
+    /// A child's parent, marshalled.
+    Child(crate::marshal::Marshalled),
 }
 
 /// What only a root is told: the session it starts from.
@@ -212,11 +212,11 @@ impl Attach {
         }
     }
 
-    /// A child's attach: `engine`, then its parent's seal.
-    pub fn child(engine: EngineSpec, sealed: crate::seed::Sealed) -> Self {
+    /// A child's attach: `engine`, then its parent, marshalled.
+    pub fn child(engine: EngineSpec, parent: crate::marshal::Marshalled) -> Self {
         Self {
             engine,
-            origin: Origin::Child(sealed),
+            origin: Origin::Child(parent),
         }
     }
 

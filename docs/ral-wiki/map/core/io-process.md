@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40af72fb
-generated_at_date: 2026-11-09
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs]
 ---
 
@@ -19,9 +19,9 @@ The child keeps the process handle, and the spawning thread releases the thread 
 
 ## IO — `core/src/io/`
 
-`io/frame.rs` owns length-prefixed JSON framing for seeds and protocol
-channels ([[map/core/transport|transport]]). Process syscall-site declarations
-live in `process/site.rs`, beside the launch, wait and jail operations they name.
+`io/frame.rs` owns length-prefixed JSON framing for protocol channels;
+marshalled parents have no inner frame ([[map/core/transport|transport]]).
+Process syscall-site declarations live in `process/site.rs`, beside the launch, wait and jail operations they name.
 
 `io/state.rs` holds `Io`, the per-`Shell` streams (stdin / stdout / stderr),
 where `stdout` is wherever the running computation writes — a capture buffer,
@@ -380,7 +380,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   at boot; both use `layout::EXEC_CONTROLLERS`. The jail makes
   `engine-<pid>/exec-<seq>` below it, or the shared `detached` leaf for every
   survivor, and the daemon removes a dead engine's tree) and read by
-  `jail::guest()`; a sealed wire-seat child engine ([[design/agents|agents]]) is
+  `jail::guest()`; a wire-seat child engine ([[design/agents|agents]]) is
   its own process and installs its own, so the
   sequence number behind both the uid and the cgroup name is minted
   **guest-globally**, not per-engine: `linux::next_guest_seq` locks a

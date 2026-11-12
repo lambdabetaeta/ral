@@ -413,6 +413,38 @@ record!(OpenScheme {
     variable: "variable"
 });
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub enum RowKind {
+    Environment,
+    Built,
+}
+label!(RowKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRow {
+    pub row: Count,
+    pub wanted: RowKind,
+    pub before: Count,
+}
+record!(UnresolvedRow {
+    row: "row",
+    wanted: "wanted",
+    before: "before"
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidResidual {
+    pub name: String,
+    pub arity: Count,
+    pub supplied: Count,
+}
+record!(InvalidResidual {
+    name: "name",
+    arity: "arity",
+    supplied: "supplied"
+});
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimestampParseFailure {
     pub text: String,
@@ -459,6 +491,10 @@ pub enum DecodeCause {
     DurationOverflow(DurationOverflow),
     Timestamp(TimestampParseFailure),
     OpenScheme(OpenScheme),
+    UnresolvedRow(UnresolvedRow),
+    UnknownBuiltin(String),
+    InvalidResidual(InvalidResidual),
+    OpenClosure(String),
 }
 variant!(DecodeCause {
     Shape(ShapeFailure): "shape", MissingField(String): "missing-field", UnknownField(UnknownField): "unknown-field",
@@ -475,6 +511,8 @@ variant!(DecodeCause {
     Trace(TraceDecodeFailure): "trace", SealSpelling(SealSpellingFailure): "seal-spelling",
     ReservedEnvironment(ReservedEnvironmentFailure): "reserved-environment", Via(ViaFailure): "via",
     DurationOverflow(DurationOverflow): "duration-overflow", Timestamp(TimestampParseFailure): "timestamp", OpenScheme(OpenScheme): "open-scheme",
+    UnresolvedRow(UnresolvedRow): "unresolved-row", UnknownBuiltin(String): "unknown-builtin",
+    InvalidResidual(InvalidResidual): "invalid-residual", OpenClosure(String): "open-closure",
 });
 
 impl DecodeCause {
@@ -587,6 +625,23 @@ impl DecodeCause {
             ),
             Self::Timestamp(c) => format!("invalid timestamp {:?}: {}", c.text, c.detail),
             Self::OpenScheme(c) => c.describe(),
+            Self::UnresolvedRow(c) => format!(
+                "names row {} as {}, but it is not {} among the {} rows written before it",
+                c.row,
+                <&str>::from(c.wanted),
+                <&str>::from(c.wanted),
+                c.before
+            ),
+            Self::UnknownBuiltin(name) => {
+                format!("the receiving runtime has no builtin `{name}`; a builtin crosses by name")
+            }
+            Self::InvalidResidual(c) => format!(
+                "a residual of `{}` ({} arguments) holds {}; a residual holds fewer than all, over a row binding exactly the builtin and those",
+                c.name, c.arity, c.supplied
+            ),
+            Self::OpenClosure(name) => {
+                format!("a closure names `{name}`, which its row does not bind")
+            }
         }
     }
 }
@@ -794,7 +849,93 @@ impl std::error::Error for JsonEncodeFailure {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::datum::Datum;
+    use crate::data::FOValue;
+    use crate::data::datum::{Datum, tag};
+
+    fn check_projection(cause: &DecodeCause, expected: &FOValue, description: &str) {
+        assert_eq!(&cause.clone().encode(), expected);
+        assert_eq!(DecodeCause::decode(expected), Ok(cause.clone()));
+        assert_eq!(cause.describe(), description);
+    }
+
+    #[test]
+    fn unresolved_row_projects_reference_kind_and_bound() {
+        for (wanted, label) in [
+            (RowKind::Environment, "environment"),
+            (RowKind::Built, "built"),
+        ] {
+            check_projection(
+                &DecodeCause::UnresolvedRow(UnresolvedRow {
+                    row: Count::from_u64(u64::MAX),
+                    wanted,
+                    before: Count::from_u64(3),
+                }),
+                &tag(
+                    "unresolved-row",
+                    Some(FOValue::Map {
+                        entries: vec![
+                            ("before".into(), Count::from_u64(3).encode()),
+                            ("row".into(), Count::from_u64(u64::MAX).encode()),
+                            ("wanted".into(), tag(label, None)),
+                        ],
+                    }),
+                ),
+                &format!(
+                    "names row 18446744073709551615 as {label}, but it is not {label} among the 3 rows written before it"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_builtin_projects_its_name() {
+        check_projection(
+            &DecodeCause::UnknownBuiltin("has".into()),
+            &tag(
+                "unknown-builtin",
+                Some(FOValue::String {
+                    value: "has".into(),
+                }),
+            ),
+            "the receiving runtime has no builtin `has`; a builtin crosses by name",
+        );
+    }
+
+    #[test]
+    fn invalid_residual_projects_name_arity_and_supplied_count() {
+        check_projection(
+            &DecodeCause::InvalidResidual(InvalidResidual {
+                name: "has".into(),
+                arity: Count::from_u64(2),
+                supplied: Count::from_u64(u64::MAX),
+            }),
+            &tag(
+                "invalid-residual",
+                Some(FOValue::Map {
+                    entries: vec![
+                        ("arity".into(), Count::from_u64(2).encode()),
+                        (
+                            "name".into(),
+                            FOValue::String {
+                                value: "has".into(),
+                            },
+                        ),
+                        ("supplied".into(), Count::from_u64(u64::MAX).encode()),
+                    ],
+                }),
+            ),
+            "a residual of `has` (2 arguments) holds 18446744073709551615; a residual holds fewer than all, over a row binding exactly the builtin and those",
+        );
+    }
+
+    #[test]
+    fn open_closure_projects_its_unbound_name() {
+        check_projection(
+            &DecodeCause::OpenClosure("x".into()),
+            &tag("open-closure", Some(FOValue::String { value: "x".into() })),
+            "a closure names `x`, which its row does not bind",
+        );
+    }
 
     #[test]
     fn decode_and_encode_paths_prepend_outer_context() {

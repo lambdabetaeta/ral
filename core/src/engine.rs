@@ -2,8 +2,8 @@
 //! its runs.
 //!
 //! Two carriers drive it and differ only in carriage — how a dispatch's events
-//! leave, and how a forked session is adopted: [`IdentityTransport`] calls it
-//! in this process, the wire carrier frames it over a socket.
+//! leave: [`IdentityTransport`] calls it in this process, the wire carrier
+//! frames it over a socket.
 //!
 //! [`IdentityTransport`]: crate::carrier::IdentityTransport
 
@@ -22,7 +22,7 @@ use crate::protocol::{
     Attach, Control, DispatchId, EngineSpec, Event, Origin, PROTOCOL_VERSION, Report, Root, Run,
 };
 use crate::shell::grant::GrantNarrower;
-use crate::shell::runtime::{DeferredSink, Desk, Fork, Runtime, Shell};
+use crate::shell::runtime::{DeferredSink, Desk, Runtime, Shell};
 use crate::sync::LockExt as _;
 
 pub(crate) mod probe;
@@ -43,14 +43,14 @@ pub struct EngineInstaller {
     /// The root-only recipe over a root session: libraries, hints, seeds,
     /// ledgers. An `Err` refuses the attach, in the recipe's own words.
     pub root: fn(&Root, &mut Shell) -> Result<(), Error>,
-    /// How a seeded or adopted child's grant becomes a ceiling. A field and
+    /// How a child's grant becomes a ceiling. A field and
     /// not a registered hook: core has no base-tag lexicon to resolve a grant
     /// against, so a host that boots an engine must state the policy its
     /// children are held to.
     pub narrow: GrantNarrower,
 }
 
-/// One session's engine: its shell, the runtime every session it adopts
+/// One session's engine: its shell, the runtime every in-process child
 /// shares, the scopes that stop its runs, and the installer it was born from.
 pub(crate) struct Engine {
     pub(crate) shell: Shell,
@@ -68,7 +68,6 @@ pub(crate) struct Rails {
     pub(crate) outlet: Outlet,
     pub(crate) deferred: Option<Arc<dyn DeferredSink>>,
     pub(crate) desk: Desk,
-    pub(crate) fork: Fork,
 }
 
 /// A dispatch's live surface: every value leaves stamped with its dispatch.
@@ -113,12 +112,12 @@ fn resolve_installer<'a>(
 impl Engine {
     /// Become what `attach` names: resolve its installer, derive the runtime,
     /// then either run the root recipe (seating the root's cwd and env) and
-    /// install the root's grants, or unseal the child's seal and construct it.
-    /// No recipe runs in a child.
+    /// install the root's grants, or construct a child from its marshalled
+    /// parent. No recipe runs in a child.
     ///
     /// # Errors
-    /// The attach refusal, in the words of whichever step refused; a seal
-    /// that will not unseal refuses the attach.
+    /// The attach refusal, in the words of whichever step refused; a marshalled
+    /// parent that will not read refuses the attach.
     pub(crate) fn boot(
         installers: &'static [EngineInstaller],
         attach: &Attach,
@@ -139,7 +138,7 @@ impl Engine {
                 crate::shell::boot::seed_host_env(&mut shell);
                 (installer.root)(root, &mut shell)?;
                 shell.context.overlay_env(&root.env);
-                // Off a wire a hold arrives unheld; held again as a seed's are.
+                // Off a wire a hold arrives unheld; held again as a child's are.
                 let mut grants = root.grants.clone();
                 grants.rehold();
                 for layer in grants {
@@ -147,9 +146,8 @@ impl Engine {
                 }
                 shell
             }
-            Origin::Child(sealed) => {
-                let bequest = sealed.unseal()?.decode(&runtime)?;
-                Shell::child_of(Arc::clone(&runtime), bequest, installer.narrow)?
+            Origin::Child(parent) => {
+                Shell::child_of(Arc::clone(&runtime), parent, installer.narrow)?
             }
         };
         Ok(Self::new(shell, installer))
@@ -186,14 +184,13 @@ impl Engine {
     /// Run dispatch `id` under the scope [`Scopes::open`] minted for it.
     pub(crate) fn run(&mut self, id: DispatchId, run: Run, rails: Rails, scope: &Scope) -> Report {
         let req = crate::shell::run::RunRequest {
+            run,
             surface: Some(Arc::new(Surface {
                 id,
                 outlet: rails.outlet,
             })),
             deferred: rails.deferred,
             desk: Some(rails.desk),
-            fork: Some(rails.fork),
-            ..crate::shell::run::RunRequest::from(run)
         };
         self.shell.run_under(scope, req).into_report(&self.shell)
     }
@@ -345,39 +342,45 @@ mod tests {
     }
 
     #[test]
-    fn a_sealed_attach_runs_no_root_recipe() {
+    fn a_child_attach_runs_no_root_recipe() {
         static PANICKY: [EngineInstaller; 1] = [crate::carrier::testkit::installer(
             "panicky-root",
             |_| {
                 crate::HostSurface::default().runtime(crate::io::terminal::TerminalState::default())
             },
-            |_, _| panic!("a sealed child runs no root recipe"),
+            |_, _| panic!("a child runs no root recipe"),
         )];
-        let sealed = crate::seed::seal(
-            &crate::test_helper::core_shell().bequeath(crate::SpawnGrant::Inherit),
-        )
-        .expect("a scrubbed bequest seals");
+        let parent = crate::test_helper::core_shell()
+            .marshal(crate::SpawnGrant::Inherit)
+            .expect("a parent marshals");
         let mut attach = crate::carrier::testkit::attach(&PANICKY);
-        attach.origin = Origin::Child(sealed);
-        let engine = Engine::boot(&PANICKY, &attach)
-            .unwrap_or_else(|e| panic!("a sealed attach boots: {e}"));
+        attach.origin = Origin::Child(parent);
+        let engine =
+            Engine::boot(&PANICKY, &attach).unwrap_or_else(|e| panic!("a child attach boots: {e}"));
         assert!(engine.shell.session.hooks.is_none());
     }
 
     #[test]
-    fn a_seal_that_will_not_unseal_refuses_the_attach() {
+    fn a_parent_that_will_not_read_refuses_the_attach() {
         use crate::data::{Bytes, datum::Datum as _};
-        let garbage = Bytes::from(&b"not a frame"[..]).encode();
+        use crate::marshal::Marshalled;
+        let garbage = Bytes::from(&b"not JSON"[..]).encode();
         let mut attach = crate::carrier::testkit::attach(&crate::carrier::testkit::BARE);
-        attach.origin =
-            Origin::Child(crate::seed::Sealed::decode(&garbage).expect("bytes are a seal"));
+        attach.origin = Origin::Child(Marshalled::decode(&garbage).expect("bytes are marshalled"));
         let Err(why) = Engine::boot(&crate::carrier::testkit::BARE, &attach) else {
-            panic!("a seal that is not a frame must refuse the attach");
+            panic!("a parent that is not JSON must refuse the attach");
         };
-        let Origin::Child(seal) = &attach.origin else {
+        let Origin::Child(parent) = &attach.origin else {
             unreachable!()
         };
-        assert_eq!(why.reason, seal.unseal().unwrap_err().reason);
+        let expected = Shell::child_of(
+            crate::test_helper::core_runtime().into(),
+            parent,
+            crate::carrier::testkit::BARE[0].narrow,
+        )
+        .err()
+        .expect("the parent does not read");
+        assert_eq!(why.reason, expected.reason);
     }
 }
 

@@ -123,27 +123,6 @@ impl<H> Context<H> {
             args: self.args.clone(),
         }
     }
-
-    /// The same context over other handlers, if `f` can make them.
-    pub(crate) fn try_map_handlers<G, E>(
-        self,
-        f: impl FnOnce(H) -> Result<G, E>,
-    ) -> Result<Context<G>, E> {
-        let Self {
-            env_overrides,
-            cwd,
-            grants,
-            handlers,
-            args,
-        } = self;
-        Ok(Context {
-            env_overrides,
-            cwd,
-            grants,
-            handlers: f(handlers)?,
-            args,
-        })
-    }
 }
 
 #[cfg(test)]

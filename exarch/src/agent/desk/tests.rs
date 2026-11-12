@@ -12,7 +12,7 @@ use crate::bus::{Signal, channel};
 use crate::card::Card;
 use crate::enquiry::AgentInfo;
 use crate::enquiry::{
-    Add, Evict, ForkClaim, Grep, Message, Name, Note, Pin, Reading, Selection, Spec, Start, Turns,
+    Add, Evict, Grep, Message, Name, Note, Pin, Reading, Selection, Spec, Start, Turns,
 };
 use crate::provider::{
     Provider,
@@ -27,7 +27,7 @@ use crate::schedule::{Asked, parse_duration};
 use ral_core::data::datum::tag;
 use ral_core::fact::ExitCode as _;
 use ral_core::fact::{DecodeCause, DecodeFailure, UnknownField, UnknownTag};
-use ral_core::shell::runtime::NurseryId;
+use ral_core::marshal::Marshalled;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -171,13 +171,12 @@ pub(super) fn spec(prompt: &str, name: &str) -> Spec {
     }
 }
 
-pub(super) fn start(fork: ForkClaim, spec: Spec) -> Request {
-    Request::Agents(Agents::Start(Start { spec, fork }))
+pub(super) fn start(parent: Marshalled, spec: Spec) -> Request {
+    Request::Agents(Agents::Start(Start { spec, parent }))
 }
 
-/// The in-process shape: the fork waits in this host's own nursery.
-pub(super) fn start_req(session: NurseryId, prompt: &str, name: &str) -> Request {
-    start(ForkClaim::Parked(session), spec(prompt, name))
+pub(super) fn start_req(parent: Marshalled, prompt: &str, name: &str) -> Request {
+    start(parent, spec(prompt, name))
 }
 
 pub(super) fn message_req(to: &str, text: &str) -> Request {
@@ -258,57 +257,49 @@ fn wait_at_rest(helper: &crate::agent::AgentHandle) {
     }
 }
 
-type Parked<R> = Box<dyn FnOnce(&ExarchDesk, NurseryId) -> R + Send>;
+type WithParent<R> = Box<dyn FnOnce(&ExarchDesk, Marshalled) -> R + Send>;
 
-/// Answers the one fork a real run enquires of, `` `start ``,
-/// by running its `f` against the bequest that run parked, while it is still
-/// in its pen.
-struct Parking<R> {
+/// Hands the parent bytes from a real run's `start` enquiry to `f`.
+struct Capture<R> {
     desk: Arc<ExarchDesk>,
-    f: Mutex<Option<Parked<R>>>,
+    f: Mutex<Option<WithParent<R>>>,
     out: Mutex<Option<R>>,
 }
 
-impl<R: Send> Host for Parking<R> {
+impl<R: Send> Host for Capture<R> {
     fn surface(&self, _val: &FOValue) {}
 
     fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
-        let Ok(Request::Agents(Agents::Start(Start {
-            fork: ForkClaim::Parked(id),
-            ..
-        }))) = Request::decode(&req)
-        else {
-            panic!("an identity run parks its bequest")
+        let Ok(Request::Agents(Agents::Start(Start { parent, .. }))) = Request::decode(&req) else {
+            panic!("a start request carries its marshalled parent")
         };
         let f = self.f.lock().unwrap().take().expect("one enquiry per run");
-        *self.out.lock().unwrap() = Some(f(&self.desk, id));
+        *self.out.lock().unwrap() = Some(f(&self.desk, parent));
         Ok(FOValue::Unit)
     }
 }
 
-/// `f`'s answer about a fork a real run parked in the desk's own parent
-/// transport — the one door an identity fork reaches a desk by.
-fn with_parked<R: Send + 'static>(
+fn with_parent<R: Send + 'static>(
     desk: &Arc<ExarchDesk>,
-    f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
+    f: impl FnOnce(&ExarchDesk, Marshalled) -> R + Send + 'static,
 ) -> R {
-    parked_by(
+    parent_by(
         desk,
-        r"exarch-agents `start [prompt: #'go'#, name: 'parked', type: `amnemon, grant: `inherit, model: `inherit]",
+        r"exarch-agents `start [prompt: #'go'#, name: 'capture', type: `amnemon, grant: `inherit, model: `inherit]",
         f,
     )
 }
 
-/// [`with_parked`], the fork made by running `source`.
-fn parked_by<R: Send + 'static>(
+/// [`with_parent`], with the parent marshalled by running `source`.
+fn parent_by<R: Send + 'static>(
     desk: &Arc<ExarchDesk>,
     source: &str,
-    f: impl FnOnce(&ExarchDesk, NurseryId) -> R + Send + 'static,
+    f: impl FnOnce(&ExarchDesk, Marshalled) -> R + Send + 'static,
 ) -> R {
     let EngineKind::Identity(parent) = &desk.call.kind else {
-        panic!("an identity desk parks in process")
+        panic!("this fixture dispatches an identity engine")
     };
-    let host = Arc::new(Parking {
+    let host = Arc::new(Capture {
         desk: desk.clone(),
         f: Mutex::new(Some(Box::new(f))),
         out: Mutex::default(),
@@ -325,14 +316,6 @@ fn parked_by<R: Send + 'static>(
         .unwrap()
         .take()
         .unwrap_or_else(|| panic!("the run never enquired: {report:?}"))
-}
-
-/// Whether the fork `id` still waits in the desk's parent's pen.
-fn still_parked(desk: &ExarchDesk, id: NurseryId) -> bool {
-    let EngineKind::Identity(parent) = &desk.call.kind else {
-        panic!("an identity desk parks in process")
-    };
-    parent.adopt_parked(id).is_ok()
 }
 
 /// Nesting the tag under the family must not open a silent hole one level

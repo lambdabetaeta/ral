@@ -45,8 +45,9 @@ observation (`core/src/shell/runtime/audit/observation.rs`) — is an exhaustive
 unreachable arm. `WriteMode` is a write mode and nothing else, so a write
 observation cannot carry a read mode.
 
-**This closes the wire as well.** `Comp` crosses the wire (`core/src/seed/table.rs`)
-and derives `Deserialize`; since the IR's redirect is the sum, a peer cannot
+**This closes the wire as well.** `Comp` crosses inside marshalled closures
+(`core/src/marshal/wire.rs`) and derives `Deserialize`; since the IR's
+redirect is the sum, a peer cannot
 hand this process a redirect that names fd 7 — it fails to decode instead of
 reaching a runtime check.
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [ral/src/main.rs, ral/src/login.rs, core/src/host/login_env.rs, core/src/role.rs, core/src/invocation.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/boot_builtin.rs, ral/src/platform.rs, ral/build.rs]
 ---
@@ -76,9 +76,9 @@ dispositions. Then, per role:
     REPL surface, configured by nothing) and `batch` (`batch_runtime` and
     `batch_root` over the batch surface, decoding `BatchConfig {args}`), each
     registering the boot builtin; the REPL's also registers the
-    `external-editor` hook. Both share one grant policy, a refusal
-    (`no_seeded_children`), because the shell spawns no child engines and has
-    no base-tag lexicon to resolve a grant against.
+    `external-editor` hook. Both share a refusing `GrantNarrower`,
+    because the shell spawns no child engines and has no base-tag lexicon
+    to resolve a grant against.
   - **Bundled tool** (`serve_bundled_tool`, `--ral-bundled-tool <tool> …`) —
     then runs the bundled coreutils/ripgrep image in this child process
     (`uutils::serve`), under whatever sandbox the process inherited. Every bundled

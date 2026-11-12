@@ -511,7 +511,7 @@ impl GrantStack {
 
     /// Take hold again of every exclusion's object on this host: the one walk
     /// a received stack costs, and the only thing a receiver does to it.  A
-    /// seed's decode and a root's boot call it.  Never fails: an object not
+    /// parent's decode and a root's boot call it.  Never fails: an object not
     /// found at its position stays unheld.
     pub fn rehold(&mut self) {
         self.0.iter_mut().for_each(GrantLayer::rehold);

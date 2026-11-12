@@ -77,7 +77,7 @@ inbox routing) is unchanged beneath it.
   string namespaces, so a mistargeted call now fails to resolve loudly instead
   of doing nothing.
 - **Uniqueness is enforced twice.** The desk's `launch` pre-check refuses a
-  duplicate name didactically before ever forking a nursery session
+  duplicate name didactically before constructing a child engine
   (`AgentRegistry::name_live`); `AgentRegistry::register` closes the race
   authoritatively under the registry lock (`RegisterError::NameTaken`), so two
   same-name spawns within one turn cannot both succeed. The cheap didactic half

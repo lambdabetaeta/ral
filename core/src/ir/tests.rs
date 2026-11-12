@@ -24,8 +24,8 @@ fn ret(name: &str) -> Arc<Comp> {
     Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
 }
 
-/// Serializable forms: `r_*` labels references, `*_bound` mere binders.
-fn every_variant() -> Vec<Arc<Comp>> {
+/// IR forms: `r_*` labels references, `*_bound` mere binders.
+pub(crate) fn every_variant() -> Vec<Arc<Comp>> {
     let lam_param = "lam_param_bound".into();
     let lam = Spanned::synthetic(CompKind::Lam {
         param: lam_param,
@@ -280,11 +280,16 @@ fn every_variant() -> Vec<Arc<Comp>> {
 }
 
 #[test]
-fn every_variant_round_trips_through_postcard() {
+fn wire_variants_round_trip_and_delta_does_not_serialize() {
     for node in &every_variant() {
-        let bytes = postcard::to_allocvec(node).expect("serialize IR");
-        let decoded: Arc<Comp> = postcard::from_bytes(&bytes).expect("deserialize IR");
-        assert_eq!(node, &decoded);
+        let bytes = postcard::to_allocvec(node);
+        if matches!(node.item, CompKind::Builtin { .. }) {
+            assert!(bytes.is_err(), "δ is not wire syntax");
+        } else {
+            let decoded: Arc<Comp> =
+                postcard::from_bytes(&bytes.expect("serialize IR")).expect("deserialize IR");
+            assert_eq!(node, &decoded);
+        }
     }
 }
 

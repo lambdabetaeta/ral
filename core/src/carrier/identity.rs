@@ -11,12 +11,13 @@ use super::{
 use crate::data::FOValue;
 use crate::engine::{Engine, EngineInstaller, Rails, Scopes};
 use crate::error::Error;
-use crate::fact::{ConnectionFault, Reason, StateFailure};
+use crate::fact::ConnectionFault;
+use crate::marshal::Marshalled;
 use crate::process::Scope;
 use crate::protocol::channel::WriteError;
 use crate::protocol::probe::Probe;
 use crate::protocol::{Attach, DispatchId, Event, Run, WireError};
-use crate::shell::runtime::{Fork, Nursery, NurseryId, Runtime, Shell};
+use crate::shell::runtime::{Runtime, Shell};
 use crate::sync::LockExt as _;
 
 /// A session lock that cannot poison-panic, named for the one state it
@@ -40,11 +41,8 @@ pub struct IdentityTransport {
     scopes: Arc<Scopes>,
     installer: &'static EngineInstaller,
     /// The engine's runtime, shared out before it went behind the lock;
-    /// every child adopted here shares it.
+    /// every child built here shares it.
     runtime: Arc<Runtime>,
-    /// Where this transport's runs park their forks — outside the lock, so a
-    /// handler can adopt one mid-dispatch.
-    nursery: Nursery,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
     ends: Ends,
 }
@@ -71,25 +69,18 @@ impl IdentityTransport {
             runtime,
             scopes,
             engine: SessionLock(std::sync::Mutex::new(engine)),
-            nursery: Nursery::default(),
             event_tx,
             ends: Ends::new(control, EventReceiver::new(event_rx), Arc::default()),
         }
     }
 
-    /// Adopt the bequest a run parked under `id` as an engine of its own: a
-    /// child of this transport's runtime, its grant layer narrowed against its
-    /// own cwd under this transport's installer.
+    /// Build a child on this transport's runtime, its grant layer narrowed
+    /// against its own cwd under this transport's installer.
     ///
     /// # Errors
-    /// No bequest parked under `id`, or whatever narrowing its grant refuses.
-    pub fn adopt_parked(&self, id: NurseryId) -> Result<Self, Error> {
-        let bequest = self.nursery.adopt(id).ok_or_else(|| {
-            Error::new(Reason::State(Box::new(StateFailure::NurseryMissing(
-                id.0.into(),
-            ))))
-        })?;
-        let shell = Shell::child_of(Arc::clone(&self.runtime), bequest, self.installer.narrow)?;
+    /// The parent does not read, or narrowing its grant refuses it.
+    pub fn child(&self, parent: &Marshalled) -> Result<Self, Error> {
+        let shell = Shell::child_of(Arc::clone(&self.runtime), parent, self.installer.narrow)?;
         Ok(Self::over(Engine::new(shell, self.installer)))
     }
 
@@ -177,7 +168,6 @@ impl Transport for IdentityTransport {
                 host: host.clone(),
                 events: self.ends.events.clone(),
             }),
-            fork: Fork::Park(self.nursery.clone()),
         };
         let report = self.engine.lock().run(id, run, rails, &scope);
         let _ = self.event_tx.send((id, Event::Report(report)));

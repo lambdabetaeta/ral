@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 ---
 
@@ -217,28 +217,33 @@ asynchronous: construct, adopt and launch the child, then return a summary;
 agents sharing the reader's `founder`: the human's child it descends from,
 or itself when its parent is the human.
 
-- `Shell::bequeath` snapshots lexical scope and dynamic context. Every live
-  handle becomes **withheld**, retaining its binding, data position, type
-  `Handle` and title, including through captures and handler arms. Every
-  handle eliminator and observer refuses it with `withheld-handle`: await it
-  where it was spawned and pass its result instead.
-  Partial user blocks and builtins cross as thunks of their residual λs,
-  capturing the arguments given. A builtin residual's `type_name` is
-  `Lambda`; it uses native display, and its builtin entry crosses by name.
-  Boundary builtins remain λ-closures over `Exec` with their checked site. The scrub
-  walks every capture under both carriers. Hooks and terminal authority do
+- `Shell::marshal` writes lexical scope, dynamic context, sources, terms,
+  fixings and `SpawnGrant` as one `Marshalled` JSON document. Every live
+  handle is written as its title and arrives **withheld**, retaining its
+  binding, data position and type `Handle`, through captures, built collections,
+  residual arguments and handler arms. Observations refuse `withheld-handle`:
+  await it where it was spawned and pass its result instead.
+  Partial user blocks cross as closures; builtin residuals cross as a builtin
+  name, an environment row and a supplied-argument count, rebuilt from the
+  receiving entry's η suffix. Zero supplied is valid (`let g = has`);
+  δ never crosses. Boundary partials remain λ-closures over `Exec` with their
+  checked site. Built collections remain built and shared rows remain shared;
+  caught failures keep their typed witness. Hooks and terminal authority do
   not cross.
 - The child receives a fresh mailbox, life/exchange scopes, provider handle and
   engine. Its `cd`, environment and new bindings never flow back; reply is
   the sole return path. The fork carries session policy, including inherited
   bindings sealed as baseline and worker-retention terms.
-- Identity parks the bequest for `IdentityTransport::adopt_parked`; wire
-  seals it and names the bytes in an enquiry. The host asks its `Factory`
-  for a fresh engine stream, attaches the seal, waits for `Attached`, then
-  adopts the child. Engine/log preparation is outside every inbox lock.
-- Both carriers consume the same bequest and scrub, hence the same scope,
-  handlers, builtin table and policy. No engine spawns an engine; the host
-  relays the sealed bytes without interpreting the parent's session.
+- The spawning builtin refuses `NoDesk` before marshalling. The start
+  enquiry carries the bytes in `parent`. Identity calls
+  `IdentityTransport::child(&parent)`; wire asks its `Factory` for a fresh
+  engine stream, attaches `Origin::Child(parent)` and waits for `Attached`
+  before adopting the child. Engine/log preparation is outside every inbox lock.
+- Both carriers read the same bytes through `Shell::child_of`, preserving
+  scope, handlers and policy, and re-linking builtins against the receiving
+  runtime's table. Identity shares the parent's `Runtime`; wire derives its
+  own. No engine spawns an engine; the host relays the marshalled parent
+  without interpreting its session.
 - Synod's factory dials the guest daemon's host-CID-only listener, one
   engine per connection. A failed construction drops that stream; no birth
   token table, acknowledgement protocol or expiry is needed
@@ -300,7 +305,7 @@ Its mandatory `grant` is one of
 - Named profiles and explicit `R` are the same act: at most one layer atop
   the parent's whole stack. `` `inherit `` is the no-op top layer; there is
   no spawn `` `dangerous `` spelling.
-- The bequest carries `SpawnGrant`. Named bases resolve through
+- The marshalled parent carries `SpawnGrant`. Named bases resolve through
   `policy::base_layer`; explicit records remain undecoded until the child's
   engine freezes them against its own cwd. `SpawnGrant::narrow_onto` is the
   common layering point under either carrier.

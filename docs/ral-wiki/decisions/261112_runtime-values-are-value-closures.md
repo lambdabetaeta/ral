@@ -1,13 +1,20 @@
 ---
 status: active
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
-verified_at_commit: c0905f5e
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
-anchors: [Val, CompKind::Builtin, Explicit, ValClos, ValClos::close, ValClos::thunk, ValClos::view, ValClos::peel_variants, ValClos::residual, ValClos::block, BuiltinEntry::eta, Env::EMPTY, Machine::settle, Handle::Withheld, SerialAtom]
+anchors: [Val, CompKind::Builtin, Explicit, ValClos, ValClos::close, ValClos::thunk, ValClos::view, ValClos::peel_variants, ValClos::residual, ValClos::block, BuiltinEntry::eta, Env::EMPTY, Machine::settle, Handle::Withheld, Marshalled, BuiltinEntry::residual]
 ---
 
 # Runtime values are value closures
+
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> gives both seats one byte route. Writing handles as titles withholds them
+> in place; no separate scrub runs. Residuals cross by builtin, row and count;
+> built collections cross as shared rows, and caught records keep their
+> failure witness. The value-closure and η laws stand.
 
 **There is one value syntax: a runtime value is a value closure ⟨V, ρ⟩ over
 `ir::Val`, not a second calculus.** Its root is not a variable, and ρ binds
@@ -35,8 +42,8 @@ every *direct name*: an occurrence outside a thunk. A computation closure
   Persistent vectors and ordered maps represent their positional or keyed
   environments, retaining logarithmic updates without making keys lexical
   names. A variant shares its payload's syntax and environment, binding a
-  built collection, builtin or handle payload to one fresh name, so a
-  builtin or handle sits only at a closure's root.
+  built collection, builtin, handle or η residual payload to one fresh name,
+  so a builtin, handle or η residual sits only at a closure's root.
 - **Builtins force to η-expansions.** An arity-n entry forces to
   ⟨λa₀…λaₙ₋₁. δ(b; a⃗), {b ↦ c}⟩. β binds each argument; δ reads the
   entry and arguments from ρ. Partial application is an ordinary residual
@@ -62,8 +69,9 @@ meet `Arg xs` as a value, hence “not a function”. η leaves a λ, which cros
 keeps its own builtin identity. Residual inspection serves display and the
 hook/handler validation doors: `ValClos::block` hands the checker only a
 non-residual thunk, keeping runtime δ out of inference. A partial
-builtin has type name `Lambda` and crosses the wire as a thunk; its display
-still names the builtin and supplied argument count.
+builtin has type name `Lambda` and crosses as its builtin name, environment
+row and supplied argument count; the receiver rebuilds its own η suffix.
+Its display still names the builtin and supplied argument count.
 
 ## Why withheld, not omitted
 
@@ -74,11 +82,10 @@ also renumbers positions; removing a record field changes its shape.
 observing the worker fails `withheld-handle`, directing the caller to await
 it in its spawning shell and pass the result.
 
-The bequest scrub remains necessary even though the wire encodes every
-handle by title: `Fork::Park` adopts in process and shares memory with its
-parent. The memoised environment-DAG walk replaces live handles with
-withheld handles through data, captures and handler arms, sharing unchanged
-subgraphs. **No live handle remains reachable in the bequest.**
+Every child reads `Marshalled` bytes. The writer visits environments and
+built collections once, writing every handle as its title; the reader
+constructs withheld handles through data, captures and handler arms.
+**No live handle remains reachable in the child's inherited image.**
 
 ## Representation boundaries
 
@@ -95,16 +102,17 @@ subgraphs. **No live handle remains reachable in the bequest.**
   vector or built map it alone owns, so a value of any nesting drops in
   constant stack. Other walks over built data, and raw IR owners, make no
   stack-safety claim.
-- **The wire carries values, not runtime constants embedded in syntax.**
-  `SerialValue = FOValue<SerialAtom>` adds thunks, builtin names and handle
-  titles. Builtin names re-link against the receiving runtime's manifest;
-  handles hydrate withheld. `Val::Builtin` and `Val::Handle` skip serde;
-  δ carries names, not an entry. Built collections encode their contents.
+- **The wire carries values as held.** Closures keep their syntax and
+  environment row; built lists and maps name shared rows. Builtins cross by
+  name, handles by title, residuals by name, row and count, and caught failure
+  records by their fact. Tag spines cross flat. `Val::Builtin`, `Val::Handle`
+  and `CompKind::Builtin` skip serde in both directions; the reader rebuilds
+  residuals with `BuiltinEntry::residual`, never decoded δ syntax.
 - **Agda correspondence is a follow-up**, not a new mechanisation claim.
   This decision amends the representations in
   [[260826_the-evaluator-steps-closures|the evaluator steps closures]],
   [[260926_a-closure-keeps-only-what-it-mentions|a closure keeps only what it mentions]],
-  [[261013_the-seed-rides-the-protocol-sealed|the seed rides the protocol, sealed]]
+  [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
   and [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 ## Where
@@ -117,7 +125,8 @@ subgraphs. **No live handle remains reachable in the bequest.**
 - `core/src/shell/evaluator/machine.rs`: `State`, `Next`, `Machine::settle`,
   `Machine::resume`, `Machine::unwind`.
 - `core/src/handle.rs`: `Handle::Withheld`;
-  `core/src/shell/runtime/state/scrub.rs`: `Shell::bequeath`;
-  `core/src/seed/{table,json}.rs`: `SerialAtom`.
-- `exarch/src/shell_eval/builtins/harness.rs`: `fork_then_enquire` chooses
-  parked or sealed adoption of the same scrubbed bequest.
+  `core/src/marshal.rs`, `marshal/{wire,write,read}.rs`: `Marshalled`;
+  `core/src/builtin.rs`: `BuiltinEntry::residual`.
+- `core/src/shell/runtime/state/construct.rs`: `Shell::marshal`,
+  `Shell::child_of`; `exarch/src/shell_eval/builtins/harness.rs`:
+  `fork_then_enquire` marshals before enquiring.

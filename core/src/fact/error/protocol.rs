@@ -12,7 +12,6 @@ use strum::{IntoStaticStr, VariantArray};
 #[strum(serialize_all = "kebab-case")]
 pub enum FrameChannel {
     Wire,
-    Seed,
 }
 label!(FrameChannel);
 
@@ -56,8 +55,7 @@ pub enum ProtocolOperation {
     Control,
     Ping,
     Pong,
-    SealSeed,
-    UnsealSeed,
+    Marshal,
 }
 label!(ProtocolOperation);
 
@@ -67,16 +65,9 @@ pub enum ProtocolData {
     Request,
     Answer,
     RootConfig,
+    Parent,
 }
 label!(ProtocolData);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub enum ForkKind {
-    Park,
-    Seal,
-}
-label!(ForkKind);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -87,30 +78,17 @@ pub enum ProtocolWork {
 label!(ProtocolWork);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SeedFrameFailure {
-    Empty,
-    Trailing(SeedFrameFailureTrailing),
-    Frame(FrameFailure),
-}
-variant!(SeedFrameFailure { Empty: "empty", Trailing(SeedFrameFailureTrailing): "trailing", Frame(FrameFailure): "frame" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolFailure {
     VersionMismatch(ProtocolFailureVersionMismatch),
     UnknownInstaller(String),
     RootMissingScratch,
     Decode(ProtocolFailureDecode),
-    WrongForkKind(ProtocolFailureWrongForkKind),
-    SeedFrame(SeedFrameFailure),
-    UnresolvedScope(Count),
-    CyclicScopes,
-    UnknownNative(String),
     Frame(ProtocolFailureFrame),
     Unencodable(ProtocolFailureUnencodable),
     ConnectionLostDuringEnquiry,
     Busy(ProtocolWork),
 }
-variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", WrongForkKind(ProtocolFailureWrongForkKind): "wrong-fork-kind", SeedFrame(SeedFrameFailure): "seed-frame", UnresolvedScope(Count): "unresolved-scope", CyclicScopes: "cyclic-scopes", UnknownNative(String): "unknown-native", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
+variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -245,12 +223,6 @@ record!(FrameFailurePartial {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedFrameFailureTrailing {
-    pub bytes: Count,
-}
-record!(SeedFrameFailureTrailing { bytes: "bytes" });
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolFailureVersionMismatch {
     pub front: u32,
     pub engine: u32,
@@ -270,16 +242,6 @@ record!(ProtocolFailureDecode {
     kind: "kind",
     operation: "operation",
     cause: "cause"
-});
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtocolFailureWrongForkKind {
-    pub expected: ForkKind,
-    pub actual: ForkKind,
-}
-record!(ProtocolFailureWrongForkKind {
-    expected: "expected",
-    actual: "actual"
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,25 +362,9 @@ impl ProtocolData {
     }
 }
 
-impl ForkKind {
-    pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
-    }
-}
-
 impl ProtocolWork {
     pub fn describe(&self) -> String {
         <&str>::from(*self).replace('-', " ")
-    }
-}
-
-impl SeedFrameFailure {
-    pub fn describe(&self) -> String {
-        match self {
-            Self::Empty => "seed frame is empty".into(),
-            Self::Trailing(value) => value.describe(),
-            Self::Frame(value) => format!("invalid seed frame: {}", value.describe()),
-        }
     }
 }
 
@@ -429,11 +375,6 @@ impl ProtocolFailure {
             Self::UnknownInstaller(value) => format!("unknown installer {value:?}"),
             Self::RootMissingScratch => "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach".into(),
             Self::Decode(value) => value.describe(),
-            Self::WrongForkKind(value) => value.describe(),
-            Self::SeedFrame(value) => value.describe(),
-            Self::UnresolvedScope(value) => format!("unresolved scope: {value}"),
-            Self::CyclicScopes => "cyclic scopes".to_owned(),
-            Self::UnknownNative(value) => format!("unknown native {value:?}"),
             Self::Frame(value) => value.describe(),
             Self::Unencodable(value) => value.describe(),
             Self::ConnectionLostDuringEnquiry => "connection lost during enquiry".to_owned(),
@@ -575,15 +516,6 @@ impl FrameFailurePartial {
     }
 }
 
-impl SeedFrameFailureTrailing {
-    pub fn describe(&self) -> String {
-        format!(
-            "seed frame has {}",
-            crate::text::plural(self.bytes.to_u64(), "trailing byte")
-        )
-    }
-}
-
 impl ProtocolFailureVersionMismatch {
     pub fn describe(&self) -> String {
         format!(
@@ -601,29 +533,11 @@ impl ProtocolFailureDecode {
                 self.operation,
                 self.cause.describe()
             ),
-            ProtocolData::Request | ProtocolData::RootConfig => format!(
+            ProtocolData::Request | ProtocolData::RootConfig | ProtocolData::Parent => format!(
                 "{}: malformed {}: {}",
                 self.operation,
                 self.kind.describe(),
                 self.cause.describe()
-            ),
-        }
-    }
-}
-
-impl ProtocolFailureWrongForkKind {
-    pub fn describe(&self) -> String {
-        match (self.expected, self.actual) {
-            (ForkKind::Park, ForkKind::Seal) => {
-                "this host runs its children in its own process, but received a sealed fork".into()
-            }
-            (ForkKind::Seal, ForkKind::Park) => {
-                "this host makes its children over a wire, but received a parked fork".into()
-            }
-            _ => format!(
-                "expected {} fork, got {}",
-                self.expected.describe(),
-                self.actual.describe()
             ),
         }
     }
@@ -713,17 +627,6 @@ impl ProtocolFailure {
     pub fn advice(&self) -> Vec<String> {
         match self {
             Self::Decode(value) => value.advice(),
-            Self::WrongForkKind(value) => value.advice(),
-            _ => Vec::new(),
-        }
-    }
-}
-
-impl ProtocolFailureWrongForkKind {
-    pub fn advice(&self) -> Vec<String> {
-        match (self.expected, self.actual) {
-            (ForkKind::Park, ForkKind::Seal) => vec!["use `parked <nursery id>`; a sealed bequest names a wire this desk does not have".into()],
-            (ForkKind::Seal, ForkKind::Park) => vec!["use `sealed <bytes>`; a parked fork names an in-process nursery this desk does not have".into()],
             _ => Vec::new(),
         }
     }
@@ -807,6 +710,39 @@ mod payload_presentation_tests {
                 cause: Box::new(cause.clone()),
             },
         }
+    }
+
+    #[test]
+    fn marshal_and_parent_project_as_bare_labels() {
+        let marshal = crate::data::datum::tag("marshal", None);
+        assert_eq!(ProtocolOperation::Marshal.encode(), marshal);
+        assert_eq!(
+            ProtocolOperation::decode(&marshal),
+            Ok(ProtocolOperation::Marshal)
+        );
+        assert_eq!(ProtocolOperation::Marshal.describe(), "marshal");
+
+        let parent = crate::data::datum::tag("parent", None);
+        assert_eq!(ProtocolData::Parent.encode(), parent);
+        assert_eq!(ProtocolData::decode(&parent), Ok(ProtocolData::Parent));
+    }
+
+    #[test]
+    fn parent_decode_is_presented_as_malformed_parent_at_its_path() {
+        let value = ProtocolFailure::Decode(decode(
+            ProtocolData::Parent,
+            "child",
+            &[
+                DataStep::Field("rows".into()),
+                DataStep::Index(Count::from_u64(0)),
+            ],
+            &DecodeCause::OpenClosure("x".into()),
+        ));
+        check(
+            &value,
+            "child: malformed parent: field \"rows\": element 0: a closure names `x`, which its row does not bind",
+            &[],
+        );
     }
 
     #[test]

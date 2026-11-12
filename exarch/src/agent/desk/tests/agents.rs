@@ -30,8 +30,8 @@ fn agent_start_records_the_parent_task_and_reports_its_reply() {
         ));
         set_desk_provider(&desk, provider);
 
-        let answer = with_parked(&desk, |desk, session| {
-            desk.ask(start_req(session, TASK, "helper"))
+        let answer = with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, TASK, "helper"))
         })
         .expect("a valid `start must succeed");
 
@@ -254,8 +254,8 @@ fn start_answers_the_fleets_state_not_a_receipt() {
             .expect("a fresh child of a live parent");
 
         let (live, _) = summary_counts(
-            &with_parked(&desk, |desk, session| {
-                desk.ask(start_req(session, "go", "helper"))
+            &with_parent(&desk, |desk, parent| {
+                desk.ask(start_req(parent, "go", "helper"))
             })
             .expect("the spawn must succeed"),
         );
@@ -307,8 +307,7 @@ fn inherit_is_the_parents_provider_and_a_role_the_bound_one() {
     });
 }
 
-/// A role no one bound, or none bound at all, is refused before anything is
-/// adopted: no child is registered.
+/// An unbound role is refused before child construction.
 #[test]
 fn a_refused_role_never_registers_a_child() {
     let bound = Arc::new(Provider::scripted("role-model", Script::new()));
@@ -324,10 +323,11 @@ fn a_refused_role_never_registers_a_child() {
         (configured, vec!["cheap".into()]),
     ] {
         with_fleet_desk(3, launch, |desk, _, _agent| {
-            // Refused before any fork is taken up, so none need be parked.
             let err = desk
                 .ask(start(
-                    ForkClaim::Parked(NurseryId(0)),
+                    crate::boot::test_shell()
+                        .marshal(ral_core::SpawnGrant::Inherit)
+                        .expect("a test parent marshals"),
                     Spec {
                         model: Selection::Role("other".into()),
                         ..spec("go", "helper")
@@ -359,9 +359,8 @@ fn a_refused_role_never_registers_a_child() {
 #[test]
 fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
     with_spawnable_desk(0, |desk, _fleet, _agent| {
-        let (err, left_parked) = with_parked(&desk, |desk, session| {
-            let answer = desk.ask(start_req(session, "hi", "helper"));
-            (answer, still_parked(desk, session))
+        let err = with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "hi", "helper"))
         });
         let err = err.expect_err("zero fuel must refuse");
         assert!(
@@ -374,16 +373,10 @@ fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
             "must state that fuel bounds depth, not fan-out, got: {}",
             err.describe()
         );
-        assert!(
-            left_parked,
-            "a fuel refusal happens before adopt, so the parked fork must \
-         stay for the run guard to reap, never claimed by a refused call"
-        );
     });
 }
 
-/// [`Fleet::name`] refuses the name before the parked fork is ever
-/// adopted, so the refused spawn registers no child.
+/// A name collision is refused before child construction.
 #[test]
 fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
     with_spawnable_desk(3, |desk, _fleet, _agent| {
@@ -396,26 +389,19 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
         ));
         set_desk_provider(&desk, provider);
 
-        let answer = with_parked(&desk, |desk, session| {
-            desk.ask(start_req(session, "go", "helper"))
+        let answer = with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "go", "helper"))
         });
         assert!(answer.is_ok(), "the first spawn must succeed");
 
-        let (err, left_parked) = with_parked(&desk, |desk, session| {
-            let answer = desk.ask(start_req(session, "go again", "helper"));
-            (answer, still_parked(desk, session))
+        let err = with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "go again", "helper"))
         });
         let err = err.expect_err("a second spawn naming a live agent must be refused");
         assert!(
             err.describe().contains("already bears the name 'helper'"),
             "got: {}",
             err.describe()
-        );
-        assert!(
-            left_parked,
-            "a name-collision refusal happens before adopt, so the parked \
-         fork must stay for the run guard to reap, never claimed by a \
-         refused call"
         );
         assert_eq!(
             summary(&desk.call.handle, &desk.call.fleet).live,
@@ -429,22 +415,16 @@ fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
 /// through one — so the spawn spine checks it too, before a log is forked
 /// or a listener dialled, rather than leaving it all to the enrolment.
 #[test]
-fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
+fn agent_start_refuses_a_malformed_name_before_child_construction() {
     with_spawnable_desk(3, |desk, _fleet, _agent| {
-        let (err, left_parked) = with_parked(&desk, |desk, session| {
-            let answer = desk.ask(start_req(session, "go", "help/er"));
-            (answer, still_parked(desk, session))
+        let err = with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "go", "help/er"))
         });
         let err = err.expect_err("a malformed name must be refused");
         assert!(
             err.describe().contains("ASCII letters"),
             "the refusal must carry the name rule; got: {}",
             err.describe()
-        );
-        assert!(
-            left_parked,
-            "the name is refused before adopt, so the parked fork must stay \
-         for the run guard to reap"
         );
         assert_eq!(
             summary(&desk.call.handle, &desk.call.fleet).live,
@@ -479,8 +459,8 @@ fn fuel_bounds_depth_not_fanout() {
         set_desk_provider(&desk, provider);
 
         for i in 0..3 {
-            let answer = with_parked(&desk, move |desk, session| {
-                desk.ask(start_req(session, "go", &format!("t{i}")))
+            let answer = with_parent(&desk, move |desk, parent| {
+                desk.ask(start_req(parent, "go", &format!("t{i}")))
             });
             assert!(
                 answer.is_ok(),
@@ -501,20 +481,14 @@ fn fuel_bounds_depth_not_fanout() {
     });
 }
 
-/// A refusal at adoption: here, a restriction record the capability
-/// decoder will not read, which only the engine's own freeze discovers:
-/// drops the bequest rather than leaving it to be adopted twice.  The grant
-/// rides the bequest the run parked; the desk reads none of its own.
+/// The engine refuses a malformed grant carried in the marshalled parent.
 #[test]
-fn refused_enquiry_leaves_the_nursery_empty() {
+fn child_construction_refuses_a_malformed_grant() {
     with_spawnable_desk(3, |desk, _fleet, _agent| {
-        let (answer, left_parked) = parked_by(
+        let answer = parent_by(
             &desk,
             r"exarch-agents `start [prompt: #'go'#, name: 'helper', type: `amnemon, grant: `restrict [net: 'yes'], model: `inherit]",
-            |desk, session| {
-                let answer = desk.ask(start_req(session, "go", "helper"));
-                (answer, still_parked(desk, session))
-            },
+            |desk, parent| desk.ask(start_req(parent, "go", "helper")),
         );
         let err = answer.expect_err("a `net axis that is not a Bool must refuse");
         assert!(
@@ -522,11 +496,7 @@ fn refused_enquiry_leaves_the_nursery_empty() {
             "must name the axis it could not read, got: {}",
             err.describe()
         );
-        assert!(
-            !left_parked,
-            "a refusal downstream of adopt must not leave the bequest \
-         re-adoptable: it was already claimed and simply drops"
-        );
+        assert_eq!(summary(&desk.call.handle, &desk.call.fleet).live, 0);
     });
 }
 
@@ -756,7 +726,10 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
                     )])),
             )),
         );
-        with_parked(&desk, |desk, id| desk.ask(start_req(id, "go", "helper"))).unwrap();
+        with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "go", "helper"))
+        })
+        .unwrap();
         assert!(matches!(
             next_input(&agent.mailbox),
             Input::Child {
@@ -774,7 +747,10 @@ fn dismiss_joins_a_resting_helper_and_reuses_its_name() {
             fleet.registry.resolve("helper").is_none(),
             "dismiss returns only after the name is released"
         );
-        with_parked(&desk, |desk, id| desk.ask(start_req(id, "again", "helper"))).unwrap();
+        with_parent(&desk, |desk, parent| {
+            desk.ask(start_req(parent, "again", "helper"))
+        })
+        .unwrap();
         let newest = fleet.registry.resolve("helper").unwrap();
         assert_ne!(old.id(), newest.id());
         assert!(

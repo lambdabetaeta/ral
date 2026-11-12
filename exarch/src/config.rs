@@ -173,7 +173,7 @@ pub(crate) fn evaluate_no_authority(
     label: &str,
 ) -> Result<ValClos, String> {
     // No run is in hand — a throwaway shell computing a value — so nothing is
-    // installed: no surface, no desk, no nursery.
+    // installed: no surface, no desk.
     let mooring = Mooring::adrift();
     let nothing = shell
         .decode_grant(GrantValue::deny_all().as_ref(), "deny_all")

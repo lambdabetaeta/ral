@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/builtin.rs, core/src/handle.rs, core/src/handle/]
 ---
@@ -34,14 +34,19 @@ fact data are reached through their owning modules.
   `ValClos::builtin` wraps an entry as `⟨Val::Builtin(entry),∅⟩` and is public
   to hosts. Force enters `BuiltinEntry::eta` over the captured entry: a
   λ-chain ending in δ. Partial application yields a boxed residual λ;
-  `residual` recovers its entry and remaining arity for display and hook
-  validation. An exact-arity call runs directly; arity zero runs on force too.
+  `residual` recovers its entry and remaining arity for display, hook
+  validation and marshalling. `Held` exposes syntax/capture, built list,
+  built map or failure witness without materialising a value;
+  `ValClos::closure` checks direct names when reading a marshalled closure.
+  An exact-arity call runs directly; arity zero runs on force too.
   Display is `<native NAME>` or `<native map, 1 of 2 arguments>`; a residual's
   type name is `Lambda`. Boundary partials remain inference-built λ-closures
   over `Exec` carrying their checked site. Handler installation refuses
   builtin residuals before checking their bodies.
   Lambda display recovers lowered parameter patterns. `ValClos::variant`
-  shares the payload's syntax and capture; `View::Variant` omits a resolved
+  shares syntactic payloads and their capture, but binds builtin, handle,
+  η-residual and built-collection payloads to a fresh name, keeping runtime-only
+  roots out of tag spines; `View::Variant` omits a resolved
   unit payload, including a variable bound to unit, without recursive `view`.
   Handlers are deep and self-masking, with no
   `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
@@ -101,7 +106,9 @@ fact data are reached through their owning modules.
   `env.rs` — lexical `Env`, ρ alone; process-env overrides are
   `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
   `Binding { value, scheme: Option<Closed> }`, so the checker's verdict
-  rides next to the value. Every session binding has a scheme; block-local
+  rides next to the value. `Env::addr` identifies a nonempty allocation for
+  marshalling; `Env::from_bindings` refuses duplicate names on read.
+  Every session binding has a scheme; block-local
   bindings may carry none
   ([[internals/type-inference|type-inference]]).
   **A shared write copies the touched nodes and their inline bindings**: `Env`'s
@@ -302,13 +309,11 @@ values, and enumeration renews nothing.
 
 ### The mooring
 
-What a run *fixes* is not on the `Shell` at all. The nine run-invariant
+What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
-([[map/core/engine-protocol|engine-protocol]]), the `fork` route
-naming how a forked session reaches the desk that adopts it (`None` outside a
-host that installs one; like `desk`, never given to a deferred worker), the
+([[map/core/engine-protocol|engine-protocol]]), the
 owner's node `home` (the base of the run's scope tree: what a heard key, a
 wall or a `cancel` strikes, never what is polled), the
 `cleanup_grace` shared by a `guard`'s acquisition and release shields from
@@ -321,29 +326,14 @@ own Rust stack frame (`run_built`), and reaches every callee as an explicit
 `&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
 signature.
 
-The `fork` route is a two-armed sum, `Fork` (`mooring.rs`), read through
-`Mooring::fork`:
-
-- **`Fork::Park(Nursery)`** — in-process. The reentrancy law bars a
-  same-process desk handler from holding `&mut Shell`, so it cannot fork a
-  session itself: the builtin body parks `Shell::bequeath`'s `Bequest`,
-  the bequest waits in the `Nursery` the identity carrier owns and lays on each
-  dispatch, and the handler redeems its `NurseryId` through the parent's own
-  transport, `IdentityTransport::adopt_parked` — a new transport over a
-  `Shell::child_of` the bequest, never a `Shell` in the host's hands
-  (`Nursery::adopt` is `pub(crate)`).
-- **`Fork::Seal`** — across a wire. The builtin seals the `Bequest` and names
-  the bytes in its enquiry; the host makes the child engine and hands it the
-  seal in its `Attach` ([[map/core/transport|transport]]). The builtin does no
-  I/O and there is no pen.
-
-Both arms take the same `Shell::bequeath`, which is the whole of
-[[design/agents|agents]]'s one-snapshot law: `` exarch-agents `start `` means one
-thing regardless of seat.
+A child request carries `Shell::marshal`'s `Marshalled` bytes through the
+`desk` on either seat ([[map/core/transport|transport]]). The builtin can read
+its `&Shell` while marshalling; the desk constructs a child from those bytes
+without reaching back into the dispatching shell. `` exarch-agents `start ``
+refuses `NoDesk` before marshalling, through the shared `no_desk` wording.
 
 Immutability is what makes the frame free. A value that never moves needs no
-putting back: an outer run's mooring is restored by the stack unwinding, and
-a `NurseryGuard` beside it empties a `Park` arm's pen on that same unwinding.
+putting back: an outer run's mooring is restored by the stack unwinding.
 In effect terms the split separates a Reader (`&Mooring`, whose `local` is
 applying a function under the mooring it is handed) from State (`Io` under a
 loan). **Borrow when you can, loan when you must.**
@@ -351,19 +341,19 @@ loan). **Borrow when you can, loan when you must.**
 `&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
 an event while holding the shell mutably. A `Mooring` clone carries
 the authority the original has; `lend_terminal` is the one place
-`TerminalAccess` is raised, so the raise-never-mint rule lives in one function. Outside
-core only `home`, `Mooring::surface`, `Mooring::lend_terminal`,
-`Mooring::fork`, and `Mooring::adrift` are reachable —
+`TerminalAccess` is raised, so the raise-never-mint rule lives in one function.
+Hosts reach `home`, `Mooring::surface`, `Mooring::surface_data`,
+`Mooring::lend_terminal`, `Mooring::has_desk` and `Mooring::adrift` —
 `adrift()` being the mooring a host builds to call a builtin body outside any
-run (no surface, no rail, no desk, no fork route, and a scope under a root
+run (no surface, no rail, no desk, and a scope under a root
 nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
 A worker or stage thread *rebuilds* rather than sharing
 (`Mooring::for_thread(parent, node, surface)`): it keeps the deferred rail, cleanup
 grace, worker cap and title policy, takes the thread's own `home` scope node and `surface`
 (a buffering `DeferredSurface` for a session worker, the parent's live surface
-for a gather-owned worker or a pipeline stage thread), and gets neither desk
-nor fork route — both barred to a child thread.
+for a gather-owned worker or a pipeline stage thread), and gets no desk —
+enquiries are barred to a child thread.
 
 ### Surface
 
@@ -425,11 +415,12 @@ Methods on `Shell` live by concern, one submodule each:
   terminal state; from the installer, shared through its `Arc`s), `Image`
   (what a child can inherit: env, context, sources, `Terms`, fixings), `Terms`
   (the session's policy: stack limit, child limits, exit hints, lease, retention —
-  one type in memory and on the wire), and `Bequest` (`Image` and the
-  `SpawnGrant`). `Shell::construct(runtime, image, root)` is the one session
-  literal, with a root's hooks and terminal lease passed beside the image so a
-  bequest cannot express either; `Shell::root(runtime)` and
-  `Shell::child_of(runtime, bequest, narrow)` are its two instances;
+  one type in memory and on the wire). `Shell::marshal(grant)` snapshots the
+  image and writes it with the `SpawnGrant` through `crate::marshal`.
+  `Shell::construct(runtime, image, root)` is the one session literal, with a
+  root's hooks and terminal lease passed beside the image so a marshalled
+  parent cannot express either; `Shell::root(runtime, cwd)` and
+  `Shell::child_of(runtime, &parent, narrow)` are its two instances;
 - `host.rs` — the host-embedding accessor surface;
 - `context.rs` — the `Context` dynamic-context verbs;
 - `scope.rs` — lexical binding and persistent-handler doors. `set_var` installs
@@ -447,8 +438,7 @@ Methods on `Shell` live by concern, one submodule each:
   `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
   `seed_cwd` lets an in-process front end whose working directory is not the
   process cwd state it directly), `inherit.rs` (the
-  flow matrix, below), `scrub.rs` (`Shell::bequeath` and its `Scrub`,
-  the one snapshot law's whole mechanism, below), `hooks.rs` (the session-lived hook table of named
+  flow matrix, below), `hooks.rs` (the session-lived hook table of named
   run-entry points — prompt render, startup, plugin hooks — each a block, a
   lambda or a builtin, resolved by the `Program::Hook` arm of `Shell::run` under the hook's
   registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
@@ -457,18 +447,18 @@ Methods on `Shell` live by concern, one submodule each:
 
 **Module loading carries no runtime stack.** `shell::load::load_module`
 threads a check-time `SourceOrigin` chain for cycles and the depth bound.
-`Context` and its seed carry no module chain. `use` runs linked checked IR
-under Σ, as do closed host files; only the rc and exarch's agent library
+`Context` and its marshalled form carry no module chain. `use` runs linked
+checked IR under Σ, as do closed host files; only the rc and exarch's agent library
 extend the session through `extend_session`. Plugins, profiles, exarch's
 config and net policy use `evaluate_closed`, so their helper `let`s remain
 lexical to those units.
 
 ## The flow matrix
 
-`inherit.rs` centralises *what state crosses a parent→child shell boundary* —
-one file rather than a decision scattered across call sites, so no inheritable
-datum (the host builtin table among them) can be silently severed by a call site
-copying only the fields it happened to remember. There are two regimes.
+**Thread children and new sessions have separate constructors.** `inherit.rs`
+centralises thread-child state in `Shell::child`; `construct.rs` centralises
+new sessions over `Image` in `Shell::construct`. Exhaustive field literals
+keep inheritable state from depending on what each caller remembers.
 
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
 `force` and the lambda-meets-`Arg` rule in `shell::evaluator::machine`
@@ -490,11 +480,10 @@ manifest `handlers:` and `Shell::install_handler` /
 value changes persistent frames
 ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 
-The owned-`Shell` modes *are* genuine runtime forks — a different store — and are
-all built by the one exhaustive literal in `Shell::child`, so a field added to
-`Shell` cannot reach a child by defaulting. Each holds **no terminal
-authority**: no lease on the session, and the mooring the fork is handed
-carries `TerminalAccess::Denied` — the safe default for a store that is not
+The thread-child modes hold a distinct `Shell`, built by the one exhaustive
+literal in `Shell::child`, so a field added to `Shell` cannot reach one by
+defaulting. Each holds **no terminal authority**: no lease on the session,
+and the mooring the fork is handed carries `TerminalAccess::Denied` — the safe default for a store that is not
 the session's. Each also starts with no hooks and no control counters; a worker's and an
 aside's stdin is `Empty`, a stage's is whatever its pipeline hands it; what rides along is the scope, context, Σ, builtin table, source
 registry, root file, call site and exit hints. The kinds differ only in their
@@ -529,40 +518,31 @@ an aside's writes where its parent does:
   registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
   It shares the fixings too, but holds a roster of its own
   and an unarmed ledger.
-- `bequeath` / `child_of` — the host session fork (the sub-agent case): a new
-  session, holding its parent's policy and none of its state.
-  `Shell::bequeath(grant)` (`scrub.rs`) packages the parent's `Image` as a
-  `Bequest`; `Shell::child_of(runtime, bequest, narrow)` constructs over it
-  through `Shell::construct`. The child's durable root is its own, and its
-  roster carries the parent's retention. Its lease ledger runs on the parent's
-  terms and seals everything inherited as baseline
-  ([[internals/binding-leases|binding-leases]]). It gets the parent's `SourceDb`
-  and a snapshot of the fixings. A sealed child takes the same path: its `EngineSeed` is the
-  bequest in wire form ([[map/core/transport|transport]]), and no recipe runs.
-  The round-trip test is a codec test and a constructor test.
-  `bequeath` is the function every sub-agent fork passes through: one
-  `Scrub` over every root the fork holds — the session scope and each
-  handler frame's arms (`HandlerFrame::values_mut`). A fork's hook table is
-  empty by construction: hooks are session state, never inherited. The scrub
-  replaces every reachable live handle with `Handle::Withheld(title)`, keeping
-  its name, position, type and scheme. Every observation refuses it with
-  `withheld-handle`; no live handle remains reachable in the bequest.
-  - It walks *scopes*, not values: each scope the roots reach, once, by
-    `ptr_eq` root identity, dependencies first, on an explicit stack — so a
-    chain of closures costs no host stack, and a scope many closures share
-    is visited once.
-  - `ValClos::captured_envs` supplies dependencies; `ValClos::scrubbed`
-    substitutes memoised captures, withholds handles on the syntax root or
-    variant spine, and patches built lists and maps. Supplied arguments of a
-    builtin residual are bindings in its captured environment.
-  - A rebuilt scope or container is its original with only the changed
-    entries overwritten, and one that reaches no handle is kept whole: a
-    shell reaching no handle forks as itself, its session map `ptr_eq` to
-    the parent's.
 
-  See [[map/core/transport|transport]] and [[map/exarch/agent|agent]].
+A **new helper session** instead crosses `marshal` / `child_of` on both
+seats. `Shell::marshal(grant)` writes the parent's image and grant;
+`Shell::child_of(runtime, &parent, narrow)` reads it and constructs through
+`Shell::construct`, then pushes the grant layer against the child's cwd.
 
-Every genuine fork copies `session.builtins` (the dispatch table), so
-dispatch reaches the child; the same-thread β-step shares it by identity. The
+- The child inherits bindings and schemes, handlers, dynamic context,
+  `SourceDb`, terms and an independent fixings snapshot; no root recipe runs.
+  It owns a new durable root and empty roster with inherited retention, no
+  hooks or terminal lease, and empty stdin. Its binding lease uses inherited
+  terms and seals every inherited name as baseline
+  ([[internals/binding-leases|binding-leases]]).
+- The marshaller visits environments and built collections once, writing
+  dependencies-first rows from the session env and handler arms. Held syntax,
+  sharing within the image, residual arguments and failure witnesses survive;
+  every handle crosses as its title and arrives withheld. Observation refuses
+  `withheld-handle`, on either seat.
+- In-process children still share their parent's `Runtime`, but image state
+  crosses JSON on both seats. A non-Unicode cwd refuses writing; a builtin
+  absent from the receiving table refuses reading. Grant-stack exclusions
+  are re-held before construction.
+
+See [[map/core/transport|transport]] and [[map/exarch/agent|agent]].
+
+Thread children share the runtime's dispatch table; a new session uses the
+receiving runtime's table. The same-thread β-step uses the caller's table. The
 guest jail is not session state: it is process-global
 ([[map/core/io-process|io-process]]).

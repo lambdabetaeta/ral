@@ -165,9 +165,9 @@ not a refusal, and the `╳` is the only signal that the spawn died. It stays.
 ## Ruling: a refused spawn draws nothing
 
 `agent-start` raises *before* `spawn_async` emits its `HarnessCall`. Every guard
-— the stale fuel snapshot, exhausted spawn fuel, a name collision, no parked
-fork, policy narrowing, fork/import/assemble failure, the door's decode checks —
-therefore produces **no rail row at all**.
+— the stale fuel snapshot, exhausted spawn fuel, a name collision, malformed
+parent bytes, policy narrowing, child construction/assembly failure, the
+door's decode checks — therefore produces **no rail row at all**.
 
 This is correct and must not change. A spawn that never happened is not an act:
 nothing outside the turn moved, so there is nothing for the graphic to record.

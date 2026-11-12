@@ -359,7 +359,7 @@ pub(crate) fn chat_trunk() -> Agent {
 /// An unlaunched child carrying the parent's shell snapshot and narrowed grant.
 pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
     use crate::agent::engine::{Engine, EngineKind};
-    use crate::enquiry::{Agents, ForkClaim, Request, Start};
+    use crate::enquiry::{Agents, Request, Start};
     use crate::record::Memory;
     use ral_core::data::FOValue;
     use ral_core::data::datum::Datum as _;
@@ -376,19 +376,15 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         fn surface(&self, _val: &FOValue) {}
 
         fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
-            let Ok(Request::Agents(Agents::Start(Start {
-                spec,
-                fork: ForkClaim::Parked(id),
-            }))) = Request::decode(&req)
+            let Ok(Request::Agents(Agents::Start(Start { spec, parent }))) = Request::decode(&req)
             else {
-                panic!("an identity run parks its bequest")
+                panic!("a start request carries its marshalled parent")
             };
-            // Redeem before dispatch drops its unclaimed bequests.
             let engine = self
                 .transport
-                .adopt_parked(id)
+                .child(&parent)
                 .map(Engine::adopted)
-                .expect("the fork this run parked");
+                .expect("the parent this run marshalled");
             *self.child.lock().unwrap() = Some((engine, spec.memory));
             Ok(FOValue::Unit)
         }

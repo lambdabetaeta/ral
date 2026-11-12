@@ -25,11 +25,10 @@ mod inherit;
 pub(crate) mod json;
 pub(crate) mod notice;
 mod scope;
-mod scrub;
 pub(crate) mod workers;
 
 use self::bindings::BindingLedger;
-pub use self::construct::{Bequest, Runtime};
+pub use self::construct::Runtime;
 pub(crate) use self::construct::{Image, Terms};
 use self::workers::Roster;
 use super::audit::{Audit, DisplacedSite};
@@ -62,8 +61,8 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 /// session state — so a clone carries no render registry and no host
 /// dispatch.
 ///
-/// `H` is the handler stack's form: the live [`HandlerStack`], or the seed's
-/// interned frames, which is the only other shape the context takes.
+/// `H` is the handler stack's form: live [`HandlerStack`], image frames, or
+/// marshalled frames.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Context<H = HandlerStack> {
     // ── attenuable by within / grant ─────────────────────────────────────

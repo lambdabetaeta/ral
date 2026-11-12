@@ -1,8 +1,8 @@
 ---
 status: active
-generated_at_commit: bb5bc1a6
-verified_at_commit: 19bab4087d1253f3d0894a745beb916ff4dd5124
-verified_at_date: 2026-10-25
+generated_at_commit: f9ac94f8
+verified_at_commit: f9ac94f8
+verified_at_date: 2026-11-12
 anchors: [OwnDir, UserFile, OwnError, Ungoverned, read_named, create_named, walk_dir_made, lock_strict, AccountHome, GrantNarrower, FreezeCtx, Pointer]
 ---
 
@@ -201,9 +201,10 @@ sites that the new bans of `create_dir` and `remove_dir` bring make 21.
   `SessionState.scratch` holds the spelling; `FreezeCtx::with_scratch` takes one;
   `engine_root` sets it from the host-authored root attach's `$EXARCH_SCRATCH`, on
   host and guest alike, and never from the overlay, so `within [env: …]` cannot
-  redirect it; the wire seed carries it and decode restores it. `GrantNarrower`
-  becomes `fn(&str, &FreezeCtx)`, so a spawn base sees the scratch. Plain ral sets
-  none, and `scratch` is refused there with an error naming the place.
+  redirect it; `Marshalled` carries it and `Shell::child_of` restores it.
+  `GrantNarrower` becomes `fn(&str, &FreezeCtx)`, so a spawn base sees the
+  scratch. Plain ral sets none, and `scratch` is refused there with an error
+  naming the place.
 - **exarch's test doubles are test-only (A8).** `OwnDir` has no constructor from
   a path, so a production `pub fn` that opens own state at a path a test supplies
   cannot exist. The doubles (`AuditLog::for_test`, `Egress::for_test`,

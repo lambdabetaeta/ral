@@ -132,14 +132,6 @@ impl HandlerFrame {
     pub(crate) fn is_handler_for(&self, name: &str) -> bool {
         self.kind == FrameKind::Handler && self.entries.first().is_some_and(|e| e.name == name)
     }
-
-    /// Every value this frame holds: each entry's thunk, then the catch-all.
-    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut ValClos> {
-        self.entries
-            .iter_mut()
-            .map(|entry| &mut entry.thunk)
-            .chain(self.catch_all.as_mut())
-    }
 }
 
 /// One [`HandlerStack::lookup`] hit: a user frame, masked by depth and run
@@ -154,9 +146,7 @@ pub(crate) enum HandlerLookup {
 /// The handler stack: the innermost frame sits at the highest index, each
 /// beside the handle this stack minted for it.
 ///
-/// No `Serialize` / `Deserialize` — frames carry `ValClos`, whose captures must
-/// be interned through `seed`'s `InternCtx` to cross an IPC boundary, which
-/// `seed`'s `WireHandlerFrame` does field by field.
+/// No `Serialize` / `Deserialize`: `marshal` writes frames and their captures.
 ///
 /// `base` is a permanent layer below every run frame — manifest rows, not
 /// `HandlerFrame`s, so [`Self::strip_matched`] and [`Self::remove_handler`],

@@ -134,7 +134,6 @@ fn reasons() -> Vec<Reason> {
                 cause: EditorCommandCause::Unbalanced,
             }),
         )))),
-        Reason::State(Box::new(StateFailure::NurseryMissing(u64::MAX.into()))),
     ]
 }
 
@@ -795,19 +794,17 @@ fn authored_spawn_grants_remain_unresolved_and_keep_map_pair_duplicates() {
 }
 
 #[test]
-fn a_child_seal_stays_opaque_until_the_typed_seed_endpoint_unseals_it() {
-    let shell = crate::test_helper::core_shell();
-    let sealed = crate::seed::seal(&shell.bequeath(SpawnGrant::Inherit)).unwrap();
-    let attach = Attach::child(attach().engine, sealed);
+fn a_child_parent_stays_opaque_until_the_child_reads_it() {
+    use crate::marshal::Marshalled;
+    let parent = Marshalled::decode(&crate::data::Bytes::from(&b"not JSON"[..]).encode())
+        .expect("bytes are marshalled");
+    let attach = Attach::child(attach().engine, parent);
     let back: Attach = from_slice(&to_vec(&attach).unwrap()).unwrap();
     assert_eq!(back, attach);
-    let Origin::Child(sealed) = back.origin else {
+    let Origin::Child(parent) = back.origin else {
         panic!("child")
     };
-    let seed = sealed.unseal().unwrap();
-    let bytes = to_vec(&seed).unwrap();
-    let back: crate::seed::EngineSeed = from_slice(&bytes).unwrap();
-    assert_eq!(to_vec(&back).unwrap(), bytes);
+    assert!(crate::marshal::read(&crate::test_helper::core_runtime(), &parent).is_err());
     let error = failure::<Origin>(br#"{"Child":"!"}"#);
     assert_eq!(error.path, [DataStep::Payload("Child".into())]);
     assert!(matches!(*error.cause, DecodeCause::Base64(_)));
@@ -1015,8 +1012,7 @@ fn every_admitted_root_rejects_a_wrong_json_shape_without_a_semantic_serde_fallb
     root!(Probe);
     root!(SpawnGrant);
     root!(crate::authority::policy::GrantStack);
-    root!(crate::seed::EngineSeed);
-    root!(crate::seed::Sealed);
+    root!(crate::marshal::Marshalled);
     root!(FOValue);
     assert!(matches!(
         json::from_datum_slice::<Reason>(b"\"unit\""),

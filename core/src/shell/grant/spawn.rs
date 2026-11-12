@@ -11,7 +11,9 @@ use super::decode::decode_grant;
 use crate::authority::grant::freeze::FreezeCtx;
 use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
+use crate::data::json::RawFOValue;
 use crate::error::Error;
+use crate::fact::DecodeFailure;
 use crate::shell::runtime::Shell;
 
 /// A base tag and the anchor to freeze it against (the child's cwd and
@@ -22,8 +24,8 @@ use crate::shell::runtime::Shell;
 /// only needs to be resolved, not composed here. Evaluated where the host's
 /// own capability vocabulary lives, since core carries no base-tag lexicon. A
 /// field of [`crate::engine::EngineInstaller`] rather than a registered hook:
-/// an installer is chosen at `Attach`, before a seed is applied or a fork
-/// adopted, so the policy can be demanded of every host that dresses an engine
+/// an installer is chosen at `Attach`, before a parent is read, so the policy
+/// can be demanded of every host that dresses an engine
 /// instead of left in a slot one of them might forget to fill.
 pub type GrantNarrower = fn(&str, &FreezeCtx) -> Result<GrantLayer, Error>;
 
@@ -38,6 +40,35 @@ pub enum SpawnGrant {
     /// A restriction record, unfrozen: frozen against the child's own cwd,
     /// never the spawn site's.
     Restrict(FOValue),
+}
+
+/// Authored grants remain unresolved until the child is constructed.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum RawSpawnGrant {
+    Inherit,
+    Base(String),
+    Restrict(RawFOValue),
+}
+
+impl RawSpawnGrant {
+    pub(crate) fn validate(&self) -> Result<SpawnGrant, DecodeFailure> {
+        match self {
+            Self::Inherit => Ok(SpawnGrant::Inherit),
+            Self::Base(name) => Ok(SpawnGrant::Base(name.clone())),
+            Self::Restrict(value) => value
+                .validate()
+                .map(SpawnGrant::Restrict)
+                .map_err(|error| error.payload("Restrict")),
+        }
+    }
+
+    pub(crate) fn from_value(value: &SpawnGrant) -> Self {
+        match value {
+            SpawnGrant::Inherit => Self::Inherit,
+            SpawnGrant::Base(name) => Self::Base(name.clone()),
+            SpawnGrant::Restrict(value) => Self::Restrict(RawFOValue::from_value(value.clone())),
+        }
+    }
 }
 
 impl SpawnGrant {
@@ -55,7 +86,7 @@ impl SpawnGrant {
     }
 
     /// Push this grant's layer onto `shell`, frozen against the shell's own
-    /// anchor: the one resolution a sealed seed and an adopted fork share.
+    /// anchor.
     ///
     /// # Errors
     /// Whatever [`Self::layer`] refuses.
@@ -74,7 +105,7 @@ impl crate::data::json::JsonDecode for SpawnGrant {
     fn decode_json(
         value: crate::data::json::JsonRef<'_, '_>,
     ) -> Result<Self, crate::fact::DecodeFailure> {
-        crate::data::json::decode_structural::<crate::seed::json::RawSpawnGrant>(value)?.validate()
+        crate::data::json::decode_structural::<RawSpawnGrant>(value)?.validate()
     }
 }
 
@@ -84,7 +115,7 @@ impl crate::data::json::JsonEncode for SpawnGrant {
         format: crate::data::json::JsonFormat,
     ) -> Result<Vec<u8>, crate::fact::JsonEncodeFailure> {
         Ok(crate::data::json::serialize_structural(
-            &crate::seed::json::RawSpawnGrant::from_value(self),
+            &RawSpawnGrant::from_value(self),
             format,
         ))
     }

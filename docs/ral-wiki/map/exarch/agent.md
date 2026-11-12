@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1da6d2f91f3bffd25a41d4a75c0a662055955dd1
-generated_at_date: 2026-11-03
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/transaction.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -205,8 +205,15 @@ authority.
   `ExarchDesk::handle` syncs before both success and error answers. Reply is harvested
   after its batch only while the exchange remains live, then quiesced and
   reported. Failed mandatory protocol repair ends the session.
-- `desk/agents.rs` checks log availability, forks through `fork_engine`,
-  constructs the helper through `Agent::born(Parent::Agent, …)`, and launches
+- `enquiry.rs::Start { spec, parent: Marshalled }` carries the same parent
+  bytes on both seats. `desk/agents.rs::fork_engine` calls
+  `IdentityTransport::child(&parent)` in process, sharing the parent's
+  runtime, or `make_engine(engine, parent)`: the factory makes one engine,
+  attached with `Attach::child(engine, parent)`. The host relays the image
+  unread; core's `Shell::child_of` reads and narrows it, with no root recipe
+  ([[map/core/transport|transport]]).
+- `desk/agents.rs` checks log availability, constructs the helper through
+  `Agent::born(Parent::Agent, …)` over that child engine, and launches
   it with its parent's `Input::Task`. The nursery adopts its thread.
   Fuel decreases by one, bounding depth. `reply` reads `Mail::returns`
   through the address transaction; a conversing agent holds no reply.

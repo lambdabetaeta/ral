@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cb52d9d6
-generated_at_date: 2026-11-11
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
 
@@ -364,12 +364,11 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
-`core/src/seed.rs` (crate root, beside the wire layer it rides, *not*
-under `shell/exec/`) carries only `EngineSeed` and `seal`/`unseal`, the engine seat's
-own seed wire for a sealed child engine; a pipeline stage never
-crosses a wire at all and this module carries no pipeline-stage type
-([[decisions/260902_stages-are-threads|stages-are-threads]],
-[[decisions/260610_child-eval-unification|child-eval-unification]], superseded).
+`core/src/marshal.rs` and `marshal/` (crate root, not `shell/exec/`)
+encode and read a parent's `Image` and spawn grant as `Marshalled`. Every
+helper session, in process or in a VM, starts through `Shell::child_of` over
+those bytes. A pipeline stage instead shares memory on its own thread
+([[decisions/260902_stages-are-threads|stages-are-threads]]).
 
 The `Shell` state these thread is [[map/core/shell-state|shell-state]]; the serde
 mirror and wire envelope they ride is [[map/core/transport|transport]].

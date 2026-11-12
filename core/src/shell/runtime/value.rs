@@ -20,12 +20,22 @@ use std::sync::Arc;
 
 mod compare;
 mod first_order;
-mod seed;
-pub(super) use seed::{drop_seed_env, drop_seed_value};
 
 /// A runtime value: ⟨V, ρ⟩, every direct name of V bound in ρ.
 #[derive(Debug, Clone)]
 pub struct ValClos(Repr);
+
+/// How a value is held: what the marshaller writes.
+pub(crate) enum Held<'a> {
+    /// ⟨V, ρ⟩; V's root is not a variable.
+    Syn(&'a Val, &'a Env),
+    /// A built list; its address is its identity.
+    List(&'a imbl::Vector<ValClos>),
+    /// A built map without a witness; its address is its identity.
+    Map(&'a imbl::OrdMap<String, ValClos>),
+    /// A caught failure record.
+    Failure(&'a ErrorFact),
+}
 
 #[derive(Debug)]
 enum Repr {
@@ -164,12 +174,16 @@ impl ValClos {
     pub fn map(pairs: Vec<(String, Self)>) -> Self {
         Map::from(pairs).into()
     }
-    /// `None` is the unit payload. A builtin or handle never sits under a tag.
+    /// `None` is the unit payload. A builtin, handle or η residual never sits under a tag.
     pub fn variant(label: impl Into<Name>, payload: Option<Self>) -> Self {
         let (payload, env) = match payload {
             None => (Val::Unit, Env::EMPTY),
-            Some(mut p) => match &mut p.0 {
-                Repr::Syn(Val::Builtin(_) | Val::Handle(_), _) | Repr::List(_) | Repr::Map(..) => {
+            Some(mut p) => {
+                if matches!(
+                    &p.0,
+                    Repr::Syn(Val::Builtin(_) | Val::Handle(_), _) | Repr::List(_) | Repr::Map(..)
+                ) || (matches!(&p.0, Repr::Syn(Val::Thunk(_), _)) && p.residual().is_some())
+                {
                     let name = crate::ir::synthetic("payload", 0);
                     let mut env = Env::EMPTY;
                     env.bind(
@@ -180,9 +194,13 @@ impl ValClos {
                         },
                     );
                     (Val::Variable(name), env)
+                } else {
+                    let Repr::Syn(val, env) = &mut p.0 else {
+                        unreachable!("built payloads are bound above")
+                    };
+                    (std::mem::replace(val, Val::Unit), std::mem::take(env))
                 }
-                Repr::Syn(val, env) => (std::mem::replace(val, Val::Unit), std::mem::take(env)),
-            },
+            }
         };
         Self(Repr::Syn(
             Val::Variant {
@@ -257,6 +275,35 @@ impl ValClos {
         pull_direct(val, &mut captured, env, sig)?;
         Ok(Self(Repr::Syn(clone_tag_spine(val), captured)))
     }
+    pub(crate) fn held(&self) -> Held<'_> {
+        match &self.0 {
+            Repr::Syn(val, env) => Held::Syn(val, env),
+            Repr::List(items) => Held::List(items),
+            Repr::Map(entries, None) => Held::Map(entries),
+            Repr::Map(_, Some(fact)) => Held::Failure(fact),
+        }
+    }
+    /// ⟨`t₁ … `tₙ foot, env⟩, outermost tag first, `env` kept as given. A bare
+    /// variable is its binding. Refused with the first direct name of `foot`
+    /// that `env` does not bind.
+    pub(crate) fn closure(tags: Vec<Name>, foot: Val, env: Env) -> Result<Self, Name> {
+        if tags.is_empty()
+            && let Val::Variable(name) = &foot
+        {
+            return env.get(name).cloned().ok_or_else(|| name.clone());
+        }
+        for_each_direct(&foot, &mut |name| {
+            env.get(name).map(|_| ()).ok_or_else(|| name.clone())
+        })?;
+        let val = tags
+            .into_iter()
+            .rev()
+            .fold(foot, |payload, label| Val::Variant {
+                label,
+                payload: Box::new(payload),
+            });
+        Ok(Self(Repr::Syn(val, env)))
+    }
     pub fn view(&self) -> View<'_> {
         match &self.0 {
             Repr::List(items) => View::List(ListRef::built(items)),
@@ -328,49 +375,6 @@ impl ValClos {
         }
         Err(self)
     }
-    pub(crate) fn captured_envs(&self, out: &mut Vec<Env>) {
-        match &self.0 {
-            Repr::Syn(_, env) => out.push(env.clone()),
-            Repr::List(items) => items.iter().for_each(|v| v.captured_envs(out)),
-            Repr::Map(entries, _) => entries.values().for_each(|v| v.captured_envs(out)),
-        }
-    }
-    pub(crate) fn scrubbed(&self, scope: &mut impl FnMut(&Env) -> Option<Env>) -> Option<Self> {
-        match &self.0 {
-            Repr::Syn(val, env) => {
-                let changed_val = withhold(val);
-                let changed_env = scope(env);
-                if changed_val.is_none() && changed_env.is_none() {
-                    return None;
-                }
-                Some(Self(Repr::Syn(
-                    changed_val.unwrap_or_else(|| clone_tag_spine(val)),
-                    changed_env.unwrap_or_else(|| env.clone()),
-                )))
-            }
-            Repr::List(items) => patched(
-                items,
-                items
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| v.scrubbed(scope).map(|v| (i, v))),
-                |items, i, v| {
-                    Arc::make_mut(items).set(i, v);
-                },
-            )
-            .map(|items| Self(Repr::List(items))),
-            Repr::Map(entries, fact) => patched(
-                entries,
-                entries
-                    .iter()
-                    .filter_map(|(k, v)| v.scrubbed(scope).map(|v| (k.clone(), v))),
-                |entries, k, v| {
-                    Arc::make_mut(entries).insert(k, v);
-                },
-            )
-            .map(|entries| Self(Repr::Map(entries, fact.clone()))),
-        }
-    }
     /// The builtin this value is, and the arguments its η residual still awaits.
     pub(crate) fn residual(&self) -> Option<(&Arc<BuiltinEntry>, usize)> {
         match self.view() {
@@ -417,9 +421,6 @@ impl ValClos {
             Repr::Syn(_, env) => Some(env),
             _ => None,
         }
-    }
-    pub(crate) fn drop_seed(self) {
-        drop_seed_value(self);
     }
     pub fn shape(&self) -> ValueShape {
         match self.view() {
@@ -586,12 +587,40 @@ fn missing(name: &str, env: &Env, sig: &Signature) -> Error {
     }
 }
 
-fn pull_direct(mut val: &Val, captured: &mut Env, env: &Env, sig: &Signature) -> Result<(), Error> {
-    while let Val::Variant { payload, .. } = val {
-        val = payload;
+/// Visit names outside thunks, in syntax order.
+fn for_each_direct<E>(mut val: &Val, f: &mut impl FnMut(&Name) -> Result<(), E>) -> Result<(), E> {
+    let mut pending = Vec::new();
+    loop {
+        while let Val::Variant { payload, .. } = val {
+            val = payload;
+        }
+        match val {
+            Val::Variable(name) => f(name)?,
+            Val::List(node) => pending.extend(node.shape().iter().rev().map(|elem| &elem.item)),
+            Val::Record(node) | Val::Map(node) => {
+                pending.extend(node.shape().iter().rev().map(|(_, elem)| &elem.item));
+            }
+            Val::Variant { .. } => unreachable!("the tag spine was peeled above"),
+            Val::Unit
+            | Val::Bool(_)
+            | Val::Int(_)
+            | Val::Float(_)
+            | Val::String(_)
+            | Val::Bytes(_)
+            | Val::Builtin(_)
+            | Val::Handle(_)
+            | Val::Thunk(_) => {}
+        }
+        let Some(next) = pending.pop() else {
+            return Ok(());
+        };
+        val = next;
     }
-    match val {
-        Val::Variable(name) if captured.get(name).is_none() => {
+}
+
+fn pull_direct(val: &Val, captured: &mut Env, env: &Env, sig: &Signature) -> Result<(), Error> {
+    for_each_direct(val, &mut |name| {
+        if captured.get(name).is_none() {
             let value = lookup(name, env, sig)
                 .cloned()
                 .ok_or_else(|| missing(name, env, sig))?;
@@ -603,61 +632,8 @@ fn pull_direct(mut val: &Val, captured: &mut Env, env: &Env, sig: &Signature) ->
                 },
             );
         }
-        Val::Variant { .. } => unreachable!("the tag spine was peeled above"),
-        Val::List(node) => {
-            for elem in node.shape() {
-                pull_direct(&elem.item, captured, env, sig)?;
-            }
-        }
-        Val::Record(node) | Val::Map(node) => {
-            for (_, elem) in node.shape() {
-                pull_direct(&elem.item, captured, env, sig)?;
-            }
-        }
-        Val::Unit
-        | Val::Bool(_)
-        | Val::Int(_)
-        | Val::Float(_)
-        | Val::String(_)
-        | Val::Bytes(_)
-        | Val::Builtin(_)
-        | Val::Handle(_)
-        | Val::Thunk(_)
-        | Val::Variable(_) => {}
-    }
-    Ok(())
-}
-
-fn withhold(mut val: &Val) -> Option<Val> {
-    let mut labels = Vec::new();
-    while let Val::Variant { label, payload } = val {
-        labels.push(label);
-        val = payload;
-    }
-    let Val::Handle(Handle::Live(h)) = val else {
-        return None;
-    };
-    Some(labels.into_iter().rev().fold(
-        Val::Handle(Handle::Withheld(h.title.clone().into())),
-        |payload, label| Val::Variant {
-            label: label.clone(),
-            payload: Box::new(payload),
-        },
-    ))
-}
-
-fn patched<C: Clone, K, V>(
-    container: &C,
-    changes: impl IntoIterator<Item = (K, V)>,
-    mut put: impl FnMut(&mut C, K, V),
-) -> Option<C> {
-    let mut changes = changes.into_iter().peekable();
-    changes.peek()?;
-    let mut copy = container.clone();
-    for (key, new) in changes {
-        put(&mut copy, key, new);
-    }
-    Some(copy)
+        Ok(())
+    })
 }
 
 /// Representational equality; ral's `==` is [`ValClos::equals`].
@@ -917,6 +893,82 @@ pub(crate) fn deep_list_chain(n: usize, foot: ValClos) -> ValClos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closure_checks_direct_names_in_order_and_keeps_the_given_env() {
+        let env = Env::from_bindings(vec![
+            (
+                "bound".into(),
+                Binding {
+                    value: ValClos::int(7),
+                    scheme: None,
+                },
+            ),
+            (
+                "unused".into(),
+                Binding {
+                    value: ValClos::UNIT,
+                    scheme: None,
+                },
+            ),
+        ])
+        .unwrap();
+        let foot = Val::list(vec![
+            crate::source::Spanned::synthetic(Val::thunk(Arc::new(
+                crate::source::Spanned::synthetic(CompKind::Return(Val::Variable("inside".into()))),
+            ))),
+            crate::source::Spanned::synthetic(Val::Variable("bound".into())),
+        ]);
+        let value =
+            ValClos::closure(vec!["outer".into(), "inner".into()], foot, env.clone()).unwrap();
+        let Held::Syn(Val::Variant { label, payload }, held_env) = value.held() else {
+            panic!("a tagged syntax closure")
+        };
+        assert_eq!(label.as_ref(), "outer");
+        assert!(
+            matches!(payload.as_ref(), Val::Variant { label, .. } if label.as_ref() == "inner")
+        );
+        assert!(held_env.ptr_eq(&env));
+        assert_eq!(
+            ValClos::closure(vec![], Val::Variable("bound".into()), env.clone()).unwrap(),
+            ValClos::int(7),
+        );
+        let foot = Val::record(vec![(
+            "key".into(),
+            crate::source::Spanned::synthetic(Val::list(vec![
+                crate::source::Spanned::synthetic(Val::Variant {
+                    label: "tag".into(),
+                    payload: Box::new(Val::Variable("first".into())),
+                }),
+                crate::source::Spanned::synthetic(Val::Variable("second".into())),
+            ])),
+        )]);
+        assert_eq!(
+            ValClos::closure(vec![], foot, env).unwrap_err().as_ref(),
+            "first",
+        );
+    }
+    #[test]
+    fn a_tag_binds_a_residual_instead_of_embedding_its_syntax() {
+        let mut shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").unwrap());
+        let partial = crate::shell::evaluator::apply(
+            &ValClos::builtin(Arc::clone(&entry)),
+            vec![ValClos::string("key")],
+            &crate::shell::runtime::Mooring::adrift(),
+            &mut shell,
+        )
+        .unwrap();
+        let tagged = ValClos::variant("ok", Some(partial));
+        let Held::Syn(Val::Variant { payload, .. }, env) = tagged.held() else {
+            panic!("a tagged syntax closure")
+        };
+        let Val::Variable(name) = payload.as_ref() else {
+            panic!("a residual is bound, not embedded")
+        };
+        let (held_entry, remaining) = env.get(name).unwrap().residual().unwrap();
+        assert!(Arc::ptr_eq(held_entry, &entry));
+        assert_eq!(remaining, entry.decl.fixed_arity() - 1);
+    }
     #[test]
     fn terminal_records_match_their_closed_scheme_in_every_mode() {
         let scheme = ValClos::terminal_scheme();

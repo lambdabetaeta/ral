@@ -33,16 +33,6 @@ impl Map {
     pub(crate) fn insert(&mut self, key: String, v: ValClos) {
         Arc::make_mut(&mut self.0).insert(key, v);
     }
-    /// Hydrate every pair in order, releasing an earlier duplicate through `drop_seed`.
-    pub(crate) fn from_seed_values(values: impl IntoIterator<Item = (String, ValClos)>) -> Self {
-        let mut map = imbl::OrdMap::new();
-        for (key, value) in values {
-            if let Some(replaced) = map.insert(key, value) {
-                replaced.drop_seed();
-            }
-        }
-        Self(Arc::new(map))
-    }
 }
 impl FromIterator<(String, ValClos)> for Map {
     fn from_iter<I: IntoIterator<Item = (String, ValClos)>>(iter: I) -> Self {

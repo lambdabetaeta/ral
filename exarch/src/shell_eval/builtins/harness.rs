@@ -5,21 +5,17 @@
 //!
 //! Each builtin reads the model's argument as a [`Request`] before it enquires,
 //! so a malformed call never reaches the host, and is refused in the words
-//! the desk would use. `exarch-agents`'s `` `start `` tag forks this shell and
-//! tells the host how to reach the fork, which is what the run's [`Fork`]
-//! says: an in-process host adopts a bequest parked in the run's nursery,
-//! since the reentrancy law bars a desk handler from holding `&mut Shell` to
-//! fork one itself; a host across a wire is named a sealed bequest, and builds
-//! an engine around it while it answers. [`crate::agent::desk::ExarchDesk`]
-//! answers every enquiry on the other side.
+//! the desk would use. `exarch-agents`'s `` `start `` tag marshals this shell
+//! for the host to build a child, in process or across a wire.
+//! [`crate::agent::desk::ExarchDesk`] answers every enquiry on the other side.
 //!
 //! All but `exarch-transcript` name a state, and answer it afterwards.
 //! `exarch-transcript` names the record instead, which no tag of it writes,
 //! so its tags answer what they were asked for rather than a state.
 
 use crate::enquiry::{
-    Agents, Context, Evict, Family, ForkClaim, Launch, Pins, Reading, Request, Schedules, Start,
-    Survey, Transcript, Turns, Word, family,
+    Agents, Context, Evict, Family, Launch, Pins, Reading, Request, Schedules, Start, Survey,
+    Transcript, Turns, Word, family,
 };
 use crate::schedule::ScheduleInfo;
 use ral_core::builtin::{BuiltinBody, BuiltinEntry};
@@ -28,9 +24,10 @@ use ral_core::data::datum::Datum;
 use ral_core::error::Error;
 use ral_core::fact::{
     DecodeFailure, InvalidCause, InvalidFailure, ProtocolData, ProtocolFailure,
-    ProtocolFailureDecode, Reason, StateFailure,
+    ProtocolFailureDecode, Reason,
 };
-use ral_core::shell::runtime::{Fork, Mooring, Settled};
+use ral_core::marshal::Marshalled;
+use ral_core::shell::runtime::{Mooring, Settled, no_desk};
 use ral_core::ty::Site;
 use ral_core::ty::{Binders, Kind, Row, RowVar, Ty, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
@@ -91,7 +88,7 @@ fn boundary_family<F: Family>(
     site.admitted(&format!("exarch-{}", F::CLASS), answer, shell)
 }
 
-/// `exarch-agents <tag>`: `` `start `` forks before it enquires, every other
+/// `exarch-agents <tag>`: `` `start `` marshals before it enquires, every other
 /// tag is one enquiry.
 fn builtin_agents(
     args: &[ValClos],
@@ -108,29 +105,27 @@ fn agents(args: &[ValClos], mooring: &Mooring, shell: &Shell) -> Settled<ValClos
         .map_err(|cause| decode_error(AGENTS, ProtocolData::Request, cause))?
     {
         Word::Ask(request) => ask(AGENTS, Request::Agents(request), mooring, shell),
-        Word::Spawn(Launch { grant, spec }) => fork_then_enquire(grant.0, mooring, shell, |fork| {
-            Request::Agents(Agents::Start(Start { spec, fork }))
-        }),
+        Word::Spawn(Launch { grant, spec }) => {
+            fork_then_enquire(grant.0, mooring, shell, |parent| {
+                Request::Agents(Agents::Start(Start { spec, parent }))
+            })
+        }
     }
 }
 
-/// Fork this shell and enquire `request` of the fork's receipt, through the
-/// route this run's [`Fork`] names: parked in process, or sealed across a
-/// wire.
+/// Marshal this shell and enquire `request` of its parent bytes.
+/// Refuse an absent desk before marshalling.
 fn fork_then_enquire(
     grant: SpawnGrant,
     mooring: &Mooring,
     shell: &Shell,
-    request: impl FnOnce(ForkClaim) -> Request,
+    request: impl FnOnce(Marshalled) -> Request,
 ) -> Settled<ValClos> {
-    let claim = match mooring.fork() {
-        Some(Fork::Park(nursery)) => ForkClaim::Parked(nursery.park(shell.bequeath(grant))),
-        Some(Fork::Seal) => ForkClaim::Sealed(ral_core::seed::seal(&shell.bequeath(grant))?),
-        None => {
-            return Err(Error::new(Reason::State(Box::new(StateFailure::NoForks))).into());
-        }
-    };
-    ask(AGENTS, request(claim), mooring, shell)
+    if !mooring.has_desk() {
+        return Err(no_desk().into());
+    }
+    let parent = shell.marshal(grant)?;
+    ask(AGENTS, request(parent), mooring, shell)
 }
 
 /// A row a family's argument mentions.  `first_order` refuses a block or

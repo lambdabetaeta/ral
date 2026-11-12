@@ -288,7 +288,7 @@ impl RawOrigin {
                 .validate()
                 .map(Origin::Root)
                 .map_err(|e| e.payload("Root")),
-            Self::Child(sealed) => crate::seed::Sealed::from_base64(&sealed)
+            Self::Child(parent) => crate::marshal::Marshalled::from_base64(&parent)
                 .map(Origin::Child)
                 .map_err(|e| e.payload("Child")),
         }
@@ -298,7 +298,7 @@ impl RawOrigin {
             Origin::Root(root) => RawRoot::from_value(root)
                 .map(Self::Root)
                 .map_err(|e| e.payload("Root")),
-            Origin::Child(sealed) => Ok(Self::Child(sealed.to_base64())),
+            Origin::Child(parent) => Ok(Self::Child(parent.to_base64())),
         }
     }
 }

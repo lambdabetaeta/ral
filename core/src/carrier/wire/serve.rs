@@ -27,7 +27,7 @@ use crate::protocol::{
     Attach, DispatchId, EnquiryId, Event, Frame, Origin, Report, Root, Run, SessionEvent, WireError,
 };
 use crate::shell::run::ReportFault;
-use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Fork, Settled};
+use crate::shell::runtime::{Break, DeferredSink, EnquiryDesk, Settled};
 use crate::site::{Silent, site};
 use crate::sync::LockExt;
 
@@ -292,7 +292,7 @@ pub fn run_engine(installers: &'static [EngineInstaller]) -> ! {
 /// The process-level half of an attach, which only a carrier that owns its
 /// process may perform. Both restores skip when the value already holds: an
 /// in-process engine attaches with its host's own cwd and HOME, and must not
-/// disturb either. A child restores no cwd: its own rides its seal.
+/// disturb either. A child restores no cwd: its own crosses with its parent.
 fn restore_process_dirs(attach: &Attach) {
     if let Origin::Root(Root { cwd, .. }) = &attach.origin
         && let cwd = cwd.native()
@@ -324,7 +324,7 @@ fn restore_process_dirs(attach: &Attach) {
 /// a write that stalled past `patience.write_stall`: a front-end that stops
 /// reading is, within that bound, treated exactly as one that has gone
 /// silent. A refused attach — a version mismatch, an unknown installer tag, a
-/// recipe or seed that would not boot — is answered `Refused` and exits `1`.
+/// recipe or marshalled parent that would not boot — is answered `Refused` and exits `1`.
 ///
 /// # Panics
 /// Panics if the wire channel cannot be cloned for the writer.
@@ -438,7 +438,6 @@ fn engine_session(
                                 outlet: outlet.clone(),
                                 parks: parks.clone(),
                             }),
-                            fork: Fork::Seal,
                         };
                         Event::Report(engine.run(id, *run, rails, &scope))
                     }

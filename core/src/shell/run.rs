@@ -17,8 +17,8 @@ use crate::io::{Captured, Io, RunIo, RunStdin, Sink, Source, Streams, new_buffer
 use crate::process::{Deadline, Scope, ScopeNode, arm_lifetime};
 use crate::protocol::{Program, Run};
 use crate::shell::runtime::{
-    DeferredSink, Desk, DisplacedSite, End, Error, Fork, Mooring, Notice, NurseryGuard,
-    Observation, Prov, Settled, Shell, SurfaceSink, TrailScope, ValClos, panic_text,
+    DeferredSink, Desk, DisplacedSite, End, Error, Mooring, Notice, Observation, Prov, Settled,
+    Shell, SurfaceSink, TrailScope, ValClos, panic_text,
 };
 use crate::source::FileId;
 use crate::typecheck::Unit;
@@ -73,23 +73,20 @@ pub struct RunRequest {
     /// Session-lived destination a settling worker delivers its surface batch
     /// to; `None` drops a worker's surface.
     pub deferred: Option<Arc<dyn DeferredSink>>,
-    /// Run-local enquiry desk. Same-thread children inherit it, as they do the
-    /// fork handle below; deferred workers get neither.
+    /// Run-local enquiry desk. Same-thread children inherit it; deferred
+    /// workers do not.
     pub desk: Option<Desk>,
-    /// How a forked session reaches this run's desk; `None` adopts none.
-    pub fork: Option<Fork>,
 }
 
 impl From<Run> for RunRequest {
     /// A request lending the host's run nothing: no surface, deferred sink,
-    /// desk or fork handle.
+    /// or desk.
     fn from(run: Run) -> Self {
         Self {
             run,
             surface: None,
             deferred: None,
             desk: None,
-            fork: None,
         }
     }
 }
@@ -304,8 +301,7 @@ impl Shell {
     ///
     /// The [`Mooring`] is an owned local on *this* stack frame and is only ever
     /// lent onward, so an outer run's is restored by the unwinding rather than
-    /// by a guard; the [`NurseryGuard`] beside it empties its nursery on the
-    /// panic path too, both being locals inside `enter`'s `catch_unwind`.
+    /// by a guard, including on the panic path.
     fn run_built(
         &mut self,
         req: RunRequest,
@@ -322,7 +318,6 @@ impl Shell {
             surface,
             deferred,
             desk,
-            fork,
         } = req;
 
         let (sinks, buffers) = (run.io == RunIo::Capture)
@@ -346,12 +341,10 @@ impl Shell {
             RunStdin::Empty => Source::Empty,
         };
 
-        let _nursery_guard = NurseryGuard(fork.clone());
         let mooring = Mooring {
             surface,
             deferred,
             desk,
-            fork,
             home: foreground,
             cleanup_grace: run.cleanup_grace,
             worker_cap: run.worker_cap,

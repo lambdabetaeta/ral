@@ -234,8 +234,7 @@ impl Terms {
     }
 }
 
-/// What only a root session owns, beside its image: a bequest cannot express
-/// either.
+/// What only a root session owns, beside its image.
 pub(crate) struct RootOnly {
     hooks: HookTable,
     terminal_lease: Option<TerminalLease>,
@@ -261,13 +260,6 @@ pub(crate) struct Image {
     pub(crate) sources: SourceDb,
     pub(crate) terms: Terms,
     pub(crate) fixings: Fixings,
-}
-
-/// What a child takes from its parent: its image, scrubbed, and the spawn's
-/// grant.  The nursery parks one; the host relays one sealed as `EngineSeed`.
-pub struct Bequest {
-    pub(crate) image: Image,
-    pub(crate) grant: SpawnGrant,
 }
 
 impl Image {
@@ -362,18 +354,38 @@ impl Shell {
         }
     }
 
-    /// A child session over `runtime`, from `bequest`: the one constructor of
-    /// a child on either seat.  The grant's layer is pushed last, frozen
-    /// against the child's own cwd.
+    /// This session's image and `grant`, every live handle written as its title.
     ///
     /// # Errors
-    /// Whatever the grant's narrowing refuses.
+    /// The cwd is not Unicode.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "marshalling transfers the spawn's grant to its parent document"
+    )]
+    pub fn marshal(&self, grant: SpawnGrant) -> Result<crate::marshal::Marshalled, Error> {
+        let image = Image {
+            env: self.env.clone(),
+            context: self
+                .context
+                .with_handlers(self.context.handlers.iter().cloned().collect::<Vec<_>>()),
+            sources: self.session.sources.clone(),
+            terms: Terms::of(self),
+            fixings: self.session.fixings.snapshot(),
+        };
+        crate::marshal::write(&image, &grant)
+    }
+
+    /// A child on either seat: no recipe runs; the grant's layer is pushed last,
+    /// frozen against the child's own cwd.
+    ///
+    /// # Errors
+    /// The parent does not read back, or the grant's narrowing refuses it.
     pub(crate) fn child_of(
         runtime: Arc<Runtime>,
-        bequest: Bequest,
+        parent: &crate::marshal::Marshalled,
         narrow: GrantNarrower,
     ) -> Result<Self, Error> {
-        let Bequest { image, grant } = bequest;
+        let (image, grant) = crate::marshal::read(&runtime, parent)?;
         let mut child = Self::construct(runtime, image, None);
         grant.narrow_onto(&mut child, narrow)?;
         Ok(child)

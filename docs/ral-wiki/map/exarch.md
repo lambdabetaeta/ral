@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d56977ff
-generated_at_date: 2026-11-03
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/port.rs, exarch/src/record.rs, exarch/src/main.rs, exarch/src/lib.rs, exarch/src/host.rs, exarch/src/cli.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/agent/desk.rs, exarch/src/agent/desk/, exarch/data/system.md, exarch/data/agents.md, exarch/data/spawned.md, exarch/data/reply.md, exarch/data/roles.md, exarch/data/ral.md, exarch/data/context.md]
 ---
 
@@ -55,9 +55,9 @@ exit code.
   `ral_core::classify(argv)` names to core's one pre-`main` dispatch,
   `ral_core::invocation::serve_process` ([[map/repl/startup|startup]]), over
   exarch's `INSTALLERS` (whose `narrow` is `policy::base_layer`, since core
-  carries no base-tag lexicon of its own and a wire-seeded child resolves its own
-  layer while booting). A confined child is served before any pin, the anchor
-  unpinned; every other role — the `--engine` engine child
+  carries no base-tag lexicon of its own and a child resolves its spawn layer
+  against its own cwd after reading its marshalled parent). A confined child
+  is served before any pin, the anchor unpinned; every other role — the `--engine` engine child
   included — is pinned by [[map/core/capabilities|`authority::sandbox::boot`]] before it runs.
   `main` and **every test `#[ctor]` (`pre_main_ctor!`) share this dispatch and
   its exit** — they differ only in where argv comes from: a constructor calls

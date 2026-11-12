@@ -86,8 +86,8 @@ pub(crate) struct Fixed {
 }
 
 /// A compiled unit's name: unique in every process that meets it.  A baked
-/// unit's id is minted in the build script and travels with its IR, a seed's
-/// with its closures.
+/// unit's id is minted in the build script and travels with its IR; a
+/// marshalled parent's travels with its closures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct UnitId {
     process: u64,

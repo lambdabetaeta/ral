@@ -66,6 +66,23 @@ impl Phase for Explicit {
     type Boundary = Arc<Site>;
 }
 
+// ── Representations ─────────────────────────────────────────────────────
+
+/// The leaves an IR tree carries, independently of its checking phase.
+pub trait IrData: Debug + Clone + PartialEq {
+    type Bytes: Debug + Clone + PartialEq + Serialize + DeserializeOwned;
+    type Scheme: Debug + Clone + PartialEq + Serialize + DeserializeOwned;
+}
+
+/// Runtime byte strings and closed definition schemes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeData {}
+
+impl IrData for RuntimeData {
+    type Bytes = Bytes;
+    type Scheme = crate::ty::Closed;
+}
+
 // ── Values ──────────────────────────────────────────────────────────────
 
 /// An identifier the IR binds or mentions: a variable, a pattern name, a
@@ -177,19 +194,20 @@ impl<'de, S: Mentions + Deserialize<'de>> Deserialize<'de> for Node<S> {
     }
 }
 
-pub type ThunkNode<P = Explicit> = Node<Arc<Comp<P>>>;
-pub type GroupNode<P = Explicit> = Node<Box<[(Name, Arc<Comp<P>>)]>>;
-pub type ListNode<P = Explicit> = Node<Box<[Spanned<Val<P>>]>>;
+pub type ThunkNode<P = Explicit, D = RuntimeData> = Node<Arc<Comp<P, D>>>;
+pub type GroupNode<P = Explicit, D = RuntimeData> = Node<Box<[(Name, Arc<Comp<P, D>>)]>>;
+pub type ListNode<P = Explicit, D = RuntimeData> = Node<Box<[Spanned<Val<P, D>>]>>;
 /// Entries sorted by key, distinct; the checker refuses equal keys.
-pub type FieldsNode<P = Explicit> = Node<Box<[(Name, Spanned<Val<P>>)]>>;
+pub type Fields<P = Explicit, D = RuntimeData> = Box<[(Name, Spanned<Val<P, D>>)]>;
+pub type FieldsNode<P = Explicit, D = RuntimeData> = Node<Fields<P, D>>;
 
-impl<P: Phase> Mentions for Arc<Comp<P>> {
+impl<P: Phase, D: IrData> Mentions for Arc<Comp<P, D>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         self.as_ref().mentions(out);
     }
 }
 
-impl<P: Phase> Mentions for Box<[(Name, Arc<Comp<P>>)]> {
+impl<P: Phase, D: IrData> Mentions for Box<[(Name, Arc<Comp<P, D>>)]> {
     // Every member's: the group is one unit.
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for (_name, member) in self {
@@ -198,7 +216,7 @@ impl<P: Phase> Mentions for Box<[(Name, Arc<Comp<P>>)]> {
     }
 }
 
-impl<P: Phase> Mentions for Box<[Spanned<Val<P>>]> {
+impl<P: Phase, D: IrData> Mentions for Box<[Spanned<Val<P, D>>]> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for elem in self {
             elem.item.mentions(out);
@@ -206,7 +224,7 @@ impl<P: Phase> Mentions for Box<[Spanned<Val<P>>]> {
     }
 }
 
-impl<P: Phase> Mentions for Box<[(Name, Spanned<Val<P>>)]> {
+impl<P: Phase, D: IrData> Mentions for Box<[(Name, Spanned<Val<P, D>>)]> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for (_key, value) in self {
             value.item.mentions(out);
@@ -256,7 +274,7 @@ impl CommandName {
 /// than round-tripping through string parsing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Val<P: Phase = Explicit> {
+pub enum Val<P: Phase = Explicit, D: IrData = RuntimeData> {
     Unit,
     String(Str),
     Int(i64),
@@ -265,39 +283,39 @@ pub enum Val<P: Phase = Explicit> {
     Variable(Name),
     /// A suspended computation, eliminated by [`CompKind::Force`]: `⟨M,
     /// ρ|occ(M)⟩`.
-    Thunk(Arc<ThunkNode<P>>),
+    Thunk(Arc<ThunkNode<P, D>>),
     /// A plain list literal: no spread, so every element is here already.
-    List(Arc<ListNode<P>>),
+    List(Arc<ListNode<P, D>>),
     /// `[key: val, …]`: static labels, no spread.
-    Record(Arc<FieldsNode<P>>),
+    Record(Arc<FieldsNode<P, D>>),
     /// `[:, key: val, …]`: keys written out, no spread.
-    Map(Arc<FieldsNode<P>>),
+    Map(Arc<FieldsNode<P, D>>),
     /// The label has no leading backtick; a bare tag carries `Unit`.
     Variant {
         label: Name,
         payload: Box<Self>,
     },
     /// A byte string; the elaborator writes none.
-    Bytes(Bytes),
-    /// A builtin; the elaborator writes none.
+    Bytes(D::Bytes),
+    /// A builtin; only at a value closure's root.
     #[serde(skip)]
     Builtin(Arc<BuiltinEntry>),
-    /// A handle; the elaborator writes none.
+    /// A handle; only at a value closure's root.
     #[serde(skip)]
     Handle(Handle),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Key<P: Phase = Explicit> {
+pub enum Key<P: Phase = Explicit, D: IrData = RuntimeData> {
     Label(Str),
     Position(usize),
-    Data(Val<P>),
+    Data(Val<P, D>),
 }
 
-impl<P: Phase> Val<P> {
+impl<P: Phase, D: IrData> Val<P, D> {
     /// `thunk M`, from an already-built `M`.
-    pub(crate) fn thunk(comp: Arc<Comp<P>>) -> Self {
+    pub(crate) fn thunk(comp: Arc<Comp<P, D>>) -> Self {
         Self::Thunk(Node::new(comp))
     }
 
@@ -319,15 +337,15 @@ impl<P: Phase> Val<P> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum ValListElem<P: Phase = Explicit> {
-    Single(Spanned<Val<P>>),
+pub enum ValListElem<P: Phase = Explicit, D: IrData = RuntimeData> {
+    Single(Spanned<Val<P, D>>),
     /// `...x`, spliced into the surrounding list, its `...` included in an argument span.
-    Spread(Spanned<Val<P>>),
+    Spread(Spanned<Val<P, D>>),
 }
 
-impl<P: Phase> ValListElem<P> {
+impl<P: Phase, D: IrData> ValListElem<P, D> {
     /// The slot's value, whichever form the slot takes.
-    pub(crate) fn slot(&self) -> &Spanned<Val<P>> {
+    pub(crate) fn slot(&self) -> &Spanned<Val<P, D>> {
         match self {
             Self::Single(v) | Self::Spread(v) => v,
         }
@@ -336,9 +354,9 @@ impl<P: Phase> ValListElem<P> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum MapEntryV<P: Phase = Explicit> {
-    Entry(Spanned<Val<P>>, Spanned<Val<P>>),
-    Spread(Spanned<Val<P>>),
+pub enum MapEntryV<P: Phase = Explicit, D: IrData = RuntimeData> {
+    Entry(Spanned<Val<P, D>>, Spanned<Val<P, D>>),
+    Spread(Spanned<Val<P, D>>),
 }
 
 /// A command's argv — the same slots a list literal has, a `...` splicing a
@@ -346,18 +364,18 @@ pub enum MapEntryV<P: Phase = Explicit> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
 #[serde(transparent)]
-pub struct Argv<P: Phase = Explicit>(Vec<ValListElem<P>>);
+pub struct Argv<P: Phase = Explicit, D: IrData = RuntimeData>(Vec<ValListElem<P, D>>);
 
-impl<P: Phase> Default for Argv<P> {
+impl<P: Phase, D: IrData> Default for Argv<P, D> {
     fn default() -> Self {
         Self(Vec::new())
     }
 }
 
-impl<P: Phase> Argv<P> {
+impl<P: Phase, D: IrData> Argv<P, D> {
     /// The slots as a literal positional list, or `None` if any is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
-    pub(crate) fn positional(&self) -> Option<Vec<&Spanned<Val<P>>>> {
+    pub(crate) fn positional(&self) -> Option<Vec<&Spanned<Val<P, D>>>> {
         self.0
             .iter()
             .map(|e| match e {
@@ -373,42 +391,42 @@ impl<P: Phase> Argv<P> {
     }
 }
 
-impl<P: Phase> std::ops::Deref for Argv<P> {
-    type Target = [ValListElem<P>];
-    fn deref(&self) -> &[ValListElem<P>] {
+impl<P: Phase, D: IrData> std::ops::Deref for Argv<P, D> {
+    type Target = [ValListElem<P, D>];
+    fn deref(&self) -> &[ValListElem<P, D>] {
         &self.0
     }
 }
 
-impl<P: Phase> From<Vec<ValListElem<P>>> for Argv<P> {
-    fn from(elems: Vec<ValListElem<P>>) -> Self {
+impl<P: Phase, D: IrData> From<Vec<ValListElem<P, D>>> for Argv<P, D> {
+    fn from(elems: Vec<ValListElem<P, D>>) -> Self {
         Self(elems)
     }
 }
 
-impl<P: Phase> FromIterator<ValListElem<P>> for Argv<P> {
-    fn from_iter<I: IntoIterator<Item = ValListElem<P>>>(iter: I) -> Self {
+impl<P: Phase, D: IrData> FromIterator<ValListElem<P, D>> for Argv<P, D> {
+    fn from_iter<I: IntoIterator<Item = ValListElem<P, D>>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
     }
 }
 
-impl<P: Phase> Extend<ValListElem<P>> for Argv<P> {
-    fn extend<I: IntoIterator<Item = ValListElem<P>>>(&mut self, iter: I) {
+impl<P: Phase, D: IrData> Extend<ValListElem<P, D>> for Argv<P, D> {
+    fn extend<I: IntoIterator<Item = ValListElem<P, D>>>(&mut self, iter: I) {
         self.0.extend(iter);
     }
 }
 
-impl<P: Phase> IntoIterator for Argv<P> {
-    type Item = ValListElem<P>;
-    type IntoIter = std::vec::IntoIter<ValListElem<P>>;
+impl<P: Phase, D: IrData> IntoIterator for Argv<P, D> {
+    type Item = ValListElem<P, D>;
+    type IntoIter = std::vec::IntoIter<ValListElem<P, D>>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
 }
 
-impl<'a, P: Phase> IntoIterator for &'a Argv<P> {
-    type Item = &'a ValListElem<P>;
-    type IntoIter = std::slice::Iter<'a, ValListElem<P>>;
+impl<'a, P: Phase, D: IrData> IntoIterator for &'a Argv<P, D> {
+    type Item = &'a ValListElem<P, D>;
+    type IntoIter = std::slice::Iter<'a, ValListElem<P, D>>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
@@ -416,11 +434,16 @@ impl<'a, P: Phase> IntoIterator for &'a Argv<P> {
 
 // ── Phrases ─────────────────────────────────────────────────────────────
 
+/// A phrase of an explicit unit, with its representation's stored schemes.
+pub type UnitPhrase<D = RuntimeData> =
+    Spanned<Phrase<DefineSchemes<<D as IrData>::Scheme>, Explicit, D>>;
+
 /// A whole program (or `source`d file): the phrases run in order, each
 /// extending the environment the next one sees.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Toplevel {
-    pub phrases: Vec<Spanned<Phrase>>,
+#[serde(bound = "")]
+pub struct Toplevel<D: IrData = RuntimeData> {
+    pub phrases: Vec<UnitPhrase<D>>,
     /// Stored session data the checker solved this unit's uses of, each to be
     /// admitted against that type before the first phrase runs.
     pub admits: Vec<(String, Arc<crate::ty::Site>)>,
@@ -428,40 +451,41 @@ pub struct Toplevel {
 
 /// A checked module and where it was read from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Module {
-    pub top: Toplevel,
+#[serde(bound = "")]
+pub struct Module<D: IrData = RuntimeData> {
+    pub top: Toplevel<D>,
     pub origin: SourceOrigin,
 }
 
 /// A `Phrase::Define`'s names, each with its checker-closed scheme.
 pub type DefineSchemes<S = crate::ty::Closed> = Vec<(String, S)>;
 
-/// One top-level statement, checked unless `D` says it is not: the schemes
+/// One top-level statement, checked unless `S` says it is not: the schemes
 /// are the checker's, so elaboration holds none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
-    serialize = "D: Serialize, P: Serial",
-    deserialize = "D: Deserialize<'de>, P: Serial"
+    serialize = "S: Serialize, P: Serial",
+    deserialize = "S: Deserialize<'de>, P: Serial"
 ))]
-pub enum Phrase<D = DefineSchemes, P: Phase = Explicit> {
+pub enum Phrase<S = DefineSchemes, P: Phase = Explicit, D: IrData = RuntimeData> {
     /// `let p = M` at the top level: run M, extend the session environment.
     /// `schemes` has one entry per name `pattern` binds, closed and
     /// generalised by the checker — a destructuring `let` carries one per
     /// component.
     Define {
         pattern: Arc<Pattern>,
-        comp: Arc<Comp<P>>,
+        comp: Arc<Comp<P, D>>,
         #[serde(skip)]
         hole: P::Bind,
-        schemes: D,
+        schemes: S,
     },
     /// Any other statement.
-    Run(Arc<Comp<P>>),
+    Run(Arc<Comp<P, D>>),
 }
 
 /// Public bindings in the final environment, with their winning definition spans.
-pub(crate) fn public_exports<S, P: Phase>(
-    phrases: &[Spanned<Phrase<DefineSchemes<S>, P>>],
+pub(crate) fn public_exports<S, P: Phase, D: IrData>(
+    phrases: &[Spanned<Phrase<DefineSchemes<S>, P, D>>],
 ) -> std::collections::BTreeMap<&str, (&S, Option<Span>)> {
     phrases
         .iter()
@@ -479,14 +503,14 @@ pub(crate) fn public_exports<S, P: Phase>(
 }
 
 /// What elaboration yields, and the checker alone turns into a [`Toplevel`].
-pub type Unchecked = Vec<Spanned<Phrase<()>>>;
+pub type Unchecked<D = RuntimeData> = Vec<Spanned<Phrase<(), Explicit, D>>>;
 
-impl<P: Phase<Bind = ()>> CompKind<P> {
+impl<P: Phase<Bind = ()>, D: IrData> CompKind<P, D> {
     /// `comp` to `pattern`, then `rest`.
     pub(crate) fn bind(
         pattern: Pattern,
-        comp: impl Into<Arc<Comp<P>>>,
-        rest: impl Into<Arc<Comp<P>>>,
+        comp: impl Into<Arc<Comp<P, D>>>,
+        rest: impl Into<Arc<Comp<P, D>>>,
     ) -> Self {
         Self::Bind {
             comp: comp.into(),
@@ -497,7 +521,7 @@ impl<P: Phase<Bind = ()>> CompKind<P> {
     }
 }
 
-impl Toplevel {
+impl<D: IrData> Toplevel<D> {
     /// True if this is a single external/builtin command call.
     ///
     /// A fact about the input's shape, which hosts read to tailor what they say
@@ -515,7 +539,7 @@ impl Toplevel {
 
     /// The scheme each top-level name was closed at, the last `let` of a name
     /// winning as it does in the environment the phrases build.
-    pub(crate) fn exported_schemes(&self) -> Vec<(String, crate::ty::Closed)> {
+    pub(crate) fn exported_schemes(&self) -> Vec<(String, D::Scheme)> {
         let last: std::collections::BTreeMap<_, _> = self
             .phrases
             .iter()
@@ -546,9 +570,9 @@ impl Toplevel {
 
 /// A computation with the source span elaboration gave it — the type the
 /// evaluator interprets.
-pub type Comp<P = Explicit> = Spanned<CompKind<P>>;
+pub type Comp<P = Explicit, D = RuntimeData> = Spanned<CompKind<P, D>>;
 
-impl<P: Phase> Comp<P> {
+impl<P: Phase, D: IrData> Comp<P, D> {
     /// The λ this code opens with, through a `Rec` projection.  Syntax, not
     /// type: a block of function type need not open with one, so only a
     /// description of a value reads it.
@@ -561,7 +585,7 @@ impl<P: Phase> Comp<P> {
     }
 }
 
-impl<P: Phase> Mentions for Comp<P> {
+impl<P: Phase, D: IrData> Mentions for Comp<P, D> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match &self.item {
             CompKind::Lam { param: _, body } | CompKind::Capture(body) => body.mentions(out),
@@ -666,7 +690,7 @@ impl<P: Phase> Mentions for Comp<P> {
     }
 }
 
-impl<P: Phase> Mentions for Val<P> {
+impl<P: Phase, D: IrData> Mentions for Val<P, D> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || match self {
             Self::Unit
@@ -686,7 +710,7 @@ impl<P: Phase> Mentions for Val<P> {
     }
 }
 
-impl<P: Phase> Mentions for [ValListElem<P>] {
+impl<P: Phase, D: IrData> Mentions for [ValListElem<P, D>] {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for elem in self {
             elem.slot().item.mentions(out);
@@ -705,7 +729,7 @@ impl Mentions for CommandWord {
     }
 }
 
-impl<P: Phase> Mentions for Redirects<Val<P>> {
+impl<P: Phase, D: IrData> Mentions for Redirects<Val<P, D>> {
     fn mentions<'a>(&'a self, out: &mut Vec<&'a Name>) {
         for v in self.operands() {
             v.mentions(out);
@@ -717,16 +741,16 @@ impl<P: Phase> Mentions for Redirects<Val<P>> {
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum CompKind<P: Phase = Explicit> {
+pub enum CompKind<P: Phase = Explicit, D: IrData = RuntimeData> {
     // CBPV core.
     /// return V — produce a value.
-    Return(Val<P>),
+    Return(Val<P, D>),
     /// force V — run a thunk.
-    Force(Val<P>),
+    Force(Val<P, D>),
     /// λ — evaluates to a closure.
     Lam {
         param: Name,
-        body: Arc<Comp<P>>,
+        body: Arc<Comp<P, D>>,
     },
     /// `M V₁ … Vₙ`, `n ≥ 1`: the arguments are pushed, then `head` runs —
     /// taken when the head is a value (`$f x`, `{ |x| body } x`, a bound
@@ -734,125 +758,126 @@ pub enum CompKind<P: Phase = Explicit> {
     /// property of application; trailing ones become a
     /// [`CompKind::Redirect`] around it.
     App {
-        head: Arc<Comp<P>>,
-        args: Box<[Spanned<Val<P>>]>,
+        head: Arc<Comp<P, D>>,
+        args: Box<[Spanned<Val<P, D>>]>,
         #[serde(skip)]
         hole: P::Call,
     },
     /// M to p. N: run `comp`, bind its result, continue with `rest`.
     Bind {
-        comp: Arc<Comp<P>>,
+        comp: Arc<Comp<P, D>>,
         #[serde(skip)]
         hole: P::Bind,
         pattern: Arc<Pattern>,
-        rest: Arc<Comp<P>>,
+        rest: Arc<Comp<P, D>>,
     },
     /// M ⨟ N: run `first`, discard its result, continue with `rest`.
     Seq {
-        first: Arc<Comp<P>>,
-        rest: Arc<Comp<P>>,
+        first: Arc<Comp<P, D>>,
+        rest: Arc<Comp<P, D>>,
     },
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
     Rec {
-        group: Arc<GroupNode<P>>,
+        group: Arc<GroupNode<P, D>>,
         index: usize,
     },
     /// `if V T E` with `V : Bool` and `T, E : U C`; the chosen arm is forced.
     /// Every form that suspends a command takes a thunk, so an arm is a literal
     /// block or a thunk in hand.
     If {
-        cond: Spanned<Val<P>>,
-        then: Spanned<Val<P>>,
-        else_: Spanned<Val<P>>,
+        cond: Spanned<Val<P, D>>,
+        then: Spanned<Val<P, D>>,
+        else_: Spanned<Val<P, D>>,
     },
     /// Levy's sum eliminator: one arm per tag, each a thunk of a function of
     /// the payload.  The alternatives are a finite list fixed at parse time, so
     /// exhaustiveness is always decided statically.
     Case {
-        scrutinee: Spanned<Val<P>>,
-        arms: Vec<CaseArm<P>>,
+        scrutinee: Spanned<Val<P, D>>,
+        arms: Vec<CaseArm<P, D>>,
     },
     /// `try BODY HANDLER` — catch an error out of `body` and pass it to
     /// `handler`, a thunk of one argument.
     Try {
-        body: Val<P>,
-        handler: Val<P>,
+        body: Val<P, D>,
+        handler: Val<P, D>,
     },
     /// Shield `acquire`, then install the release before calling `body resource`.
     /// Shield `release resource exit_case`; preserve the body's outcome unless release halts.
     Guard {
-        acquire: Val<P>,
-        body: Val<P>,
-        release: Val<P>,
+        acquire: Val<P, D>,
+        body: Val<P, D>,
+        release: Val<P, D>,
     },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
-    Capture(Arc<Comp<P>>),
-    Prim(Prim<P>),
+    Capture(Arc<Comp<P, D>>),
+    Prim(Prim<P, D>),
     // Shell layer.
     /// Shell command invocation, and the effect boundary — nothing outside
     /// this variant reaches the dispatch chain or an external program.
     /// Redirects live on the call, not around it: they are installed once the
     /// head is admitted, and the capture wrap goes around them.
-    Exec(Exec<P>),
+    Exec(Exec<P, D>),
     /// Two or more concurrent stages: stdout of stage N feeds stdin of stage N+1.
     Pipeline {
-        stages: Vec<Arc<Comp<P>>>,
+        stages: Vec<Arc<Comp<P, D>>>,
     },
     /// Redirect frame for a body that cannot fuse its own redirects — a
     /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
     /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
     Redirect {
-        body: Arc<Comp<P>>,
-        redirects: Redirects<Val<P>>,
+        body: Arc<Comp<P, D>>,
+        redirects: Redirects<Val<P, D>>,
     },
     /// `within OPTS BODY` — install option overrides for the duration of `body`.
     /// `opts` is a spread-free record node, as `grant`'s capabilities are.
     Within {
-        opts: Arc<FieldsNode<P>>,
-        body: Val<P>,
+        opts: Arc<FieldsNode<P, D>>,
+        body: Val<P, D>,
     },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant {
-        caps: Arc<FieldsNode<P>>,
-        body: Val<P>,
+        caps: Arc<FieldsNode<P, D>>,
+        body: Val<P, D>,
     },
     /// `spawn [TITLE] BODY` — run `body` on a worker of its own and return its
     /// handle; the title names it to people.
     Spawn {
-        title: Option<Spanned<Val<P>>>,
-        body: Val<P>,
+        title: Option<Spanned<Val<P, D>>>,
+        body: Val<P, D>,
     },
     /// `gather BODY` — run `body`, owning the workers spawned inside it:
     /// they are joined at its return and ended at its halt.
     Gather {
-        body: Val<P>,
+        body: Val<P, D>,
     },
     /// `audit BODY` — record an audit subtree over `body` and reify it as a
     /// `[outcome: `ok v | `err e, trail]` record.
     Audit {
-        body: Val<P>,
+        body: Val<P, D>,
     },
     /// A `~` or `~/x` in value position: the home directory with the suffix
     /// appended. Never a value, since reading the store is an effect.
     Tilde(TildePath),
     /// A module linked at check time, run under the prelude alone.
-    Use(Arc<Module>),
+    Use(Arc<Module<D>>),
+    // Both skipped variants stay last so neither shifts a wire index.
     /// δ: run the builtin bound to `builtin` on the values its η's λs bind to `args`.
+    #[serde(skip)]
     Builtin {
         builtin: Name,
         args: Box<[Name]>,
     },
     /// A bare head bound in scope, called with `args` while the checker
-    /// decides its splits; readback makes it an [`Exec`]. The only skipped
-    /// variant, kept last so it does not shift any wire index.
+    /// decides its splits; readback makes it an [`Exec`].
     #[serde(skip)]
     BindingCall {
         head: Name,
-        args: Box<[Spanned<Val<P>>]>,
-        redirects: Redirects<Val<P>>,
+        args: Box<[Spanned<Val<P, D>>]>,
+        redirects: Redirects<Val<P, D>>,
         hole: P::BindingCall,
     },
 }
@@ -861,31 +886,31 @@ pub enum CompKind<P: Phase = Explicit> {
 /// it may fail.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub enum Prim<P: Phase = Explicit> {
+pub enum Prim<P: Phase = Explicit, D: IrData = RuntimeData> {
     /// Arithmetic, comparison, or equality.
-    Binary(BinaryOp, Val<P>, Val<P>),
+    Binary(BinaryOp, Val<P, D>, Val<P, D>),
     /// Numeric negation, without choosing a zero's type.
-    Negate(Val<P>),
-    Not(Val<P>),
+    Negate(Val<P, D>),
+    Not(Val<P, D>),
     /// Scalar rendering for interpolation.
-    Render(Val<P>),
-    Concat(Box<[Val<P>]>),
+    Render(Val<P, D>),
+    Concat(Box<[Val<P, D>]>),
     /// Drop one trailing line terminator, then decode strict UTF-8.
-    Decode(Val<P>),
+    Decode(Val<P, D>),
     Index {
-        target: Val<P>,
-        key: Spanned<Key<P>>,
+        target: Val<P, D>,
+        key: Spanned<Key<P, D>>,
     },
     Update {
-        base: Spanned<Val<P>>,
-        fields: Box<[(Name, Spanned<Val<P>>)]>,
+        base: Spanned<Val<P, D>>,
+        fields: Fields<P, D>,
     },
-    List(Box<[ValListElem<P>]>),
-    Map(Box<[MapEntryV<P>]>),
+    List(Box<[ValListElem<P, D>]>),
+    Map(Box<[MapEntryV<P, D>]>),
 }
 
-impl<P: Phase> Prim<P> {
-    pub fn operands(&self) -> impl Iterator<Item = &Val<P>> {
+impl<P: Phase, D: IrData> Prim<P, D> {
+    pub fn operands(&self) -> impl Iterator<Item = &Val<P, D>> {
         let mut operands = Vec::new();
         match self {
             Self::Binary(_, lhs, rhs) => operands.extend([lhs, rhs]),
@@ -918,10 +943,10 @@ impl<P: Phase> Prim<P> {
 
     pub(crate) fn map_operands<T: Phase>(
         &self,
-        mut f: impl FnMut(&Val<P>, Option<Span>) -> Val<T>,
-    ) -> Prim<T> {
+        mut f: impl FnMut(&Val<P, D>, Option<Span>) -> Val<T, D>,
+    ) -> Prim<T, D> {
         let mut spanned =
-            |value: &Spanned<Val<P>>| Spanned::with_span(value.span, f(&value.item, value.span));
+            |value: &Spanned<Val<P, D>>| Spanned::with_span(value.span, f(&value.item, value.span));
         match self {
             Self::Binary(op, lhs, rhs) => Prim::Binary(*op, f(lhs, None), f(rhs, None)),
             Self::Negate(value) => Prim::Negate(f(value, None)),
@@ -978,20 +1003,20 @@ impl<P: Phase> Prim<P> {
 /// string comparison and not a row-label round trip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub struct CaseArm<P: Phase = Explicit> {
+pub struct CaseArm<P: Phase = Explicit, D: IrData = RuntimeData> {
     pub tag: Spanned<String>,
-    pub(crate) body: Spanned<Val<P>>,
+    pub(crate) body: Spanned<Val<P, D>>,
 }
 
 /// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "P: Serial")]
-pub struct Exec<P: Phase = Explicit> {
+pub struct Exec<P: Phase = Explicit, D: IrData = RuntimeData> {
     pub(crate) head: CommandWord,
     /// Each element crosses rendered, whichever boundary it reaches — a
     /// handler arm, a base frame, or the syscall itself.
-    pub(crate) argv: Argv<P>,
-    pub(crate) redirects: Redirects<Val<P>>,
+    pub(crate) argv: Argv<P, D>,
+    pub(crate) redirects: Redirects<Val<P, D>>,
     /// The type the checker solved at a boundary call, which its door admits
     /// the value it lets in against.  Unchecked, `None` everywhere; checked,
     /// `None` means no boundary head, since that is decided by name resolution
@@ -1034,3 +1059,6 @@ pub(crate) fn test_occ(names: &[&str]) -> Occ {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::every_variant as test_comps;

@@ -10,6 +10,7 @@ pub(crate) mod signature;
 pub(crate) use signature::{PreludeMap, Signature, lookup};
 
 mod value;
+pub(crate) use value::Held;
 pub use value::{ValClos, View};
 #[cfg(test)]
 pub(crate) use value::{block_over, captured, deep_block_chain};
@@ -72,17 +73,16 @@ pub use crate::fact::{
 pub use crate::source::CallSite;
 
 mod mooring;
-pub(crate) use mooring::NurseryGuard;
 pub use mooring::{
-    DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_HINT, Nursery,
-    NurseryId, SurfaceSink, TitlePolicy, no_desk,
+    DeferredSink, Desk, EnquiryDesk, EventSink, Mooring, NO_DESK, NO_DESK_HINT, SurfaceSink,
+    TitlePolicy, no_desk,
 };
 
 mod state;
 pub(crate) use state::Context;
 pub use state::hooks::{DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError};
 pub(crate) use state::json::RawContext;
-pub use state::{Bequest, DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
+pub use state::{DEFAULT_STACK_LIMIT, LocalState, Runtime, SessionState, Shell};
 pub(crate) use state::{Image, Terms};
 
 pub use state::workers::{DoneEvent, Owner, ReapCause, ReapNotice, WatchEvent, WorkerEntry};

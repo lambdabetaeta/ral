@@ -16,6 +16,13 @@ status: 'superseded in part — the ledger, the single-writer argument, the inst
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
 
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> carries the binding lease in the image's terms. `Shell::child_of` reads
+> that image on either seat; `Shell::construct` arms a fresh ledger with
+> every inherited name exempt. No lease bookkeeping crosses, and the
+> baseline seal remains a lease term, not a transfer mechanism.
+
 > Amended 2026-10-19 by [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]: the
 > worker idle-observation lease is retired, so a worker lives as long as its
 > owner. The binding lease this page sets stands.
@@ -104,13 +111,12 @@ document a race that cannot happen.
 One host verb, `Shell::arm_binding_lease(lease: BindingLease)`, seals every
 name currently visible anywhere in the scope chain — prelude, agent library,
 rc bindings, host seed vars — as permanently exempt (`baseline`), then starts
-the ledger's own clock. Exarch calls it in the two places an agent's shell is
-installed — `Agent::assemble` (covering the trunk and every fork) and
-`Agent::replace_shell` (covering `/clear`) — exactly where the first durable
-`MobileSnapshot` is minted, so seeding, arming, and checkpointing stay one
-visible sequence. A shadowing model `let` at top level is itself a baseline
-name and therefore never pruned, so pruning can never un-shadow an older
-meaning. A forked child's baseline is *everything inherited* — the parent's
+the ledger's own clock. The engine's root recipe arms the trunk and a
+`/clear` reboot; a child is armed by `Shell::construct` from the marshalled
+image's terms. Construction owns the fresh ledger and its inherited baseline,
+not the host's agent assembly. A shadowing model `let` at top level is itself
+a baseline name and therefore never pruned, so pruning can never un-shadow
+an older meaning. A forked child's baseline is *everything inherited* — the parent's
 scope, prelude included — so a fork's lease only ever governs names the child
 itself writes, never a parent's scratch it happened to receive. **No
 `TurnRequest` field carries the lease**: worker leases ride the request because
@@ -232,13 +238,13 @@ conservatively skip, never the reverse.
 
 - **`/clear`** replaces the whole `Shell`, so the old ledger — and any notion
   of "expired" it held — dies with it; the rebuilt shell is re-armed and
-  re-sealed by `replace_shell`, the same call site that installs it. No
-  generation counter is needed here either: nothing can settle across a clear
+  sealed by the engine's root recipe. No generation counter is needed here
+  either: nothing can settle across a clear
   into a ledger that no longer exists.
-- **`fork_session`** hands the child a fresh, inert ledger and a snapshot of
-  the parent's whole scope; `assemble` then arms the child, sealing everything
-  inherited as its baseline, so a fork's lease governs only what the fork
-  itself writes.
+- **`Shell::child_of`** reads the parent's marshalled image, then
+  `Shell::construct` arms a fresh ledger from its terms, sealing everything
+  inherited as baseline. A child's lease governs only what the child itself
+  writes; the parent's ledger and clock do not cross.
 - **Panic recovery.** Two directions, both closed: a prune followed by a panic
   cannot resurrect anything, by the checkpoint-pairing rule above; an install
   followed by a panic rolls the scope back but leaves the ledger's entry

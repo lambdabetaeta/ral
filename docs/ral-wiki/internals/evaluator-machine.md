@@ -1,7 +1,7 @@
 ---
-verified_at_commit: c0905f5e
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
-anchors: [Machine, step, settle, eval, eval_rules, resume, unwind, Frame, ValClos, ValClos::close, ValClos::thunk, View, BuiltinEntry::eta, CompKind::Builtin, Node::new, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
+anchors: [Machine, step, settle, eval, eval_rules, resume, unwind, Frame, ValClos, ValClos::close, ValClos::thunk, View, BuiltinEntry::eta, BuiltinEntry::residual, CompKind::Builtin, Node::new, Env, restrict, Signature, lookup, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, NESTED_MACHINE_LIMIT, force, force_val, Occ::of, Frame::Gather, BroodGuard, exit_brood, Frame::Acquire, Frame::Guard, Frame::Cleanup, guard_release, exit_case, ExitCase]
 ---
 
 # The evaluator: a CEK machine for CBPV
@@ -130,8 +130,9 @@ read(V′,ρ) = ⟨V′,ρ⟩                         V′ not a variable
   represented by persistent vectors and ordered maps for logarithmic updates.
   `ListRef` / `MapRef` read either syntax over `ρ` or built data through
   `Cow<ValClos>`. A variant shares its payload's syntax and capture, binding a
-  built container when needed. `View::Variant` omits a resolved unit payload,
-  including a variable bound to unit, without recursively calling `view`.
+  built container, builtin, handle or η residual when needed. `View::Variant`
+  omits a resolved unit payload, including a variable bound to unit, without
+  recursively calling `view`.
 - No sink, cwd, handler stack, worker ownership or lease enters a lexical
   capture. Forcing restores bindings, **not shell state**
   ([[design/scoping|scoping]]).
@@ -179,8 +180,13 @@ run_native(c,v⃗,μ,σ) = (Ok(v),σ′)
   partial boundaries over `Exec`, retaining their per-use site.
 - A residual λ is boxed only at a value demand or run end. Builtin residuals
   display `<native NAME, k of n arguments>`, have type name `Lambda`, and
-  cross the seed as thunks. `ValClos::residual` recognises them for display,
-  hook arity and rejection as handler arms; δ is not sent to the checker.
+  cross as a builtin name, an environment row and a supplied-argument count,
+  not as thunk syntax. `BuiltinEntry::residual` rebuilds the receiving entry's
+  η suffix only for a count below its arity and a row binding exactly that
+  builtin and the supplied arguments; zero supplied is valid.
+  `ValClos::residual` recognises them for marshalling, display, hook arity and
+  rejection as handler arms. δ is neither wire syntax nor sent to the checker
+  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
 - `run_native` may write, fail, escape or apply a callback in a nested
   machine. Its break settles as `Err(b)` after the host operation, located at
   the builtin call. It is not a value-only primitive.
@@ -422,7 +428,7 @@ failure. Block-local binds do not escape.
   constant work or one poll. Fused settlement adds no poll of its own.
 - Higher-order builtins nest machines on the host stack;
   `NESTED_MACHINE_LIMIT` bounds this independently. Builtin bodies receive no
-  caller lexical environment. No frame crosses a thread or sealed boundary.
+  caller lexical environment. No frame crosses a thread or marshalling boundary.
 
 **Provenance and panic undo are implementation work erased by the equations.**
 

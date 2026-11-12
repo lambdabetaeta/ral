@@ -1,7 +1,7 @@
 ---
-generated_at_commit: e09e5acacd6c419dd33338be7efa6919a39901cf
-generated_at_date: 2026-11-10
-covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/seed.rs, core/src/shell/grant/spawn.rs]
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
+covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/marshal.rs, core/src/marshal/, core/src/shell/grant/spawn.rs]
 ---
 
 # Map: core / engine protocol
@@ -14,7 +14,7 @@ interpret the algebra — the identity transport in process, the wire
 transport's front-end half — with `carrier/wire/serve.rs` the wire's engine
 half; `core/src/shell/run/report.rs` projects a run onto the algebra; a wire-seat
 child is made by the host's factory and born from an `Attach` carrying its
-parent's seal, so core holds no spawn machinery for it.** The why is
+marshalled parent, so core holds no spawn machinery for it.** The why is
 [[design/engine-protocol|engine-protocol]]; this page only points at symbols.
 
 ## `core/src/engine.rs`
@@ -24,8 +24,9 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   is the process half (Σ, builtins, docs; a root and a child engine each
   derive their own, an in-process child shares its parent's); `root:
   fn(&Root, &mut Shell) -> Result<(), Error>` is the root-only recipe
-  (libraries, hints, seeds, ledgers), which refuses in its own words; `narrow: GrantNarrower` is the policy a seeded or adopted
-  child is held to. Only `tag` crosses `Attach`, never the function.
+  (libraries, hints, boot bindings, ledgers), which refuses in its own words;
+  `narrow: GrantNarrower` is the policy every child is held to. Only `tag`
+  crosses `Attach`, never the function.
 - `Runtime`: what the binary supplies, and the only place builtins are
   installed (`install_builtins`, `install_captured_builtins`); a `Shell` is
   built over one and cannot hand it back.
@@ -35,9 +36,8 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   check, then tag lookup), the installer's `runtime`, then by
   `attach.origin`: `Origin::Root(root)` is `Shell::root`, the root recipe,
   cwd and env, then `rehold` and permanent installation of `Root::grants`;
-  `Origin::Child(sealed)` is `Shell::child_of(runtime,
-  sealed.unseal()?.decode(&runtime)?, narrow)`, and no recipe runs. There is
-  no `Keep`: the attach is the birth, and the scratch is the host's, named
+  `Origin::Child(parent)` is `Shell::child_of(Arc::clone(&runtime),
+  parent, installer.narrow)`, and no recipe runs. There is no `Keep`: the attach is the birth, and the scratch is the host's, named
   in a root's env. `Engine::run` runs one dispatch under the view
   `Scopes::open` hands it; `Scopes` keeps the node, its one writer;
   `Engine::probe` (`engine/probe.rs`) answers one `Probe`.
@@ -49,7 +49,7 @@ parent's seal, so core holds no spawn machinery for it.** The why is
   mismatch. Version 31 requires the guest deny-set, including on development
   media ([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
 - `Rails` — one dispatch's host-facing rails as its carrier lays them: the
-  `Outlet` its events leave by, the deferred sink, the desk, the `Fork` arm.
+  `Outlet` its events leave by, the deferred sink and the desk.
   The carriers differ in these and nowhere else.
 - `Scopes` — what stops an engine's runs, shared with whichever thread
   carries `Control`: the dispatch scope root, the durable root, and a slot
@@ -66,7 +66,8 @@ parent's seal, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 45): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 47): checked at `Attach`; a mismatch refuses.
+  The contract includes `Start`'s `parent` record field and parent-decode facts.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.
 - build-tools' `manifest::check` compares the same number at *build* time,
@@ -82,7 +83,7 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   cwd, env, grants, config })` (`env`: per-session variables the host seeds;
   `grants`: host-resolved layers installed once after the recipe; `config`:
   the installer's own settings, an `FOValue` its recipe decodes) or
-  `Child(Sealed)` (a child's parent, sealed, carrying its own cwd and env).
+  `Child(Marshalled)` (a child's parent, carrying its own cwd and env).
   `home` and `cwd` are `path::EnginePath`s (`path/namespace.rs`): a path on
   the engine's machine, named in the namespace the front-end can name it in
   — `Host(PathBuf)` for an engine sharing the front-end's computer (in
@@ -95,7 +96,8 @@ The frame algebra. Everything on it is a wire type; nothing here carries.
   `with_grants` and `with_config` edit it. A root's env is an
   `environ::EnvVars`, so an attach binding `PWD` or `OLDPWD` does not
   decode; `Attach::child` pairs an
-  `EngineSpec` with a seal; `with_terminal` edits either.
+  `EngineSpec` with `parent: Marshalled`; `with_terminal` edits either.
+  `protocol/json.rs::RawOrigin::Child` carries those opaque bytes as base64.
 - `Run` / `Program` — one dispatch's payload: the policy fields plus
   `Program::Source`/`Program::Hook`. `Run`'s field types are the run regime,
   held by session state, and live below the wire: `RunIo` and `RunStdin`
@@ -186,7 +188,7 @@ The probe vocabulary, typed once for both ends.
   runs something), oldest first, as its `LayerValue` (the grant, and
   the fragment that extends it where the layer runs every program), and
   `withholds-gpu`, whether the engine's host holds a withheld GPU. Plain ral
-  data, not the opaque codec `Root.grants` and a sealed seed ride
+  data, not the opaque codec `Root.grants` and a marshalled parent ride
   ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
 
 ## `core/src/protocol/channel.rs`
@@ -276,16 +278,14 @@ The two interpretations of the algebra, and what they share.
 ### `carrier/identity.rs`
 
 - `IdentityTransport` / `SessionLock` — the in-process carrier: an `Engine`
-  behind a poison-recovering session lock, its `Scopes` and its `Nursery`
-  held outside the lock so a `Control` and an adoption land mid-dispatch.
-  Its public surface is `boot(installers, &attach)` — the same verdict as
-  the wire's attach — and `adopt_parked(id)`, which takes the `Bequest` a
-  run parked in this transport's nursery, builds `Shell::child_of` the
-  engine's `Arc<Runtime>`, under this transport's installer's
-  `narrow`, and answers a new transport over it. `over` takes the
-  engine's `Arc<Runtime>` before the session lock and keeps it. Nothing on it yields or accepts a `Shell`. Its
-  `dispatch` lays `Rails` whose outlet is an in-process channel, whose desk
-  is `IdentityDesk`, and whose fork arm is `Fork::Park` over its own nursery.
+  behind a poison-recovering session lock. `Scopes` and `Arc<Runtime>` are
+  held outside the lock, so control and child construction need not re-enter
+  a dispatching engine. `boot(installers, &attach)` gives the wire attach's
+  verdict; `child(&Marshalled)` reads a parent through `Shell::child_of`,
+  shares this runtime and applies this installer's `narrow`, returning a new
+  transport. `over` retains the runtime before locking the engine away.
+  Nothing yields or accepts a `Shell`. `dispatch` lays `Rails` with an
+  in-process outlet and `IdentityDesk`.
 - `IdentityDesk` — the identity binding's `EnquiryDesk`: drains queued
   `Surface` events before calling `host.enquire`, so a handler can never
   outrun its own run's earlier output.
@@ -332,8 +332,7 @@ The wire carrier's engine half: a connection-lived engine process.
   no writer to refuse into (a session frame, a `Pong`).
 - The worker's `Rails` — an outlet writing `Frame::Event` through
   `engine_write` (an `Outlet` answers `Result<(), WriteError>`), a
-  `ChannelDeferredSink` writing `Frame::Session`, a `WireDesk`, and
-  `Fork::Seal`.
+  `ChannelDeferredSink` writing `Frame::Session`, and a `WireDesk`.
 - `WorkItem` / `refusal` / `fault` — what the worker is handed, a run or a probe, and
   the refusal or fault in the shape each waits on: a busy engine's run ends in
   a `Report::refused`, a panicked worker's or fuse-refused one in a
@@ -373,8 +372,8 @@ own trees under no grant).
   unfrozen. `layer` resolves it against a `FreezeCtx`; `narrow_onto` pushes
   that layer onto a shell as a session frame, using `Shell::freeze_ctx` for
   the child's env, logical cwd and scratch — the one layering step, which
-  `Shell::child_of` takes for an adopted identity fork
-  (`IdentityTransport::adopt_parked`) and a sealed child alike, so neither seat
+  `Shell::child_of` takes for `IdentityTransport::child` and
+  `Engine::boot` alike, so neither seat
   holds a narrowing decision of its own
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). A
   `` `restrict `` record crosses undecoded and is decoded there, which keeps
@@ -386,15 +385,17 @@ own trees under no grant).
   demanded of every host that boots an engine instead of left in a slot one
   could forget to fill.
 
-The seal a child's `Attach` carries is an `EngineSeed` in bytes —
-[[map/core/transport|transport]]'s `core/src/seed.rs` section.
+A child's `Attach` carries `Marshalled`, one JSON document with no inner
+frame. `marshal::read` wraps every read refusal once as a path-bearing
+`ProtocolFailure::Decode { kind: Parent, operation: "child" }` —
+[[map/core/transport|transport]]'s marshalling section.
 
 ## See also
 
 [[design/engine-protocol|engine-protocol]] (the why — one engine and two
 carriers, the channel table, the laws of an enquiry, liveness and severance),
 [[map/core/transport|transport]] (`io/frame.rs`'s framing, `Datum`,
-`seal`/`Sealed`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
+`marshal`/`Marshalled`), [[map/exarch/agent|exarch / agent]] (the seat, the wire-seat
 spawn that dials the factory), [[map/repl/loop|repl / loop]] (the REPL as an
 identity front-end), [[map/synod|synod]] (`WireTransport::adopt` over a
 guest VM's virtual socket).

@@ -41,9 +41,12 @@ is separate from authoring policy.
   `GrantStack` (`core/src/protocol.rs`), not an authored grant value. The engine
   clones it, reholds its exclusions and installs its layers after the root
   recipe, without grant-value decoding (`core/src/engine.rs`). These layers
-  are resolved on the engine's host and mean nothing on another; like a sealed
-  child's grants, they are execution state
-  ([[design/engine-protocol|engine-protocol]]), not a second policy front-end.
+  are resolved on the engine's host and mean nothing on another. A marshalled
+  parent likewise carries its resolved stack as execution state; both identity
+  and wire children rehold its exclusions when they read it. The separate
+  `SpawnGrant` stays unfrozen until `Shell::child_of` narrows it against the
+  child's own cwd ([[design/engine-protocol|engine-protocol]]).
+  Neither transfer is a second policy front-end.
 - **Authored policy leaves as it came.** The wire form of a ceiling or a boot
   grant stays the author's value and is never derived from a layer. What a layer
   shows of itself is the value that decodes back to it, on the host that decoded it

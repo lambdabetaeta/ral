@@ -53,7 +53,7 @@ pub use wire::run_engine;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Severed {
     /// The engine refused `Attach`, in its own words: a protocol version
-    /// mismatch, an unknown installer, a seed it could not apply.
+    /// mismatch, an unknown installer, a parent it could not read.
     Refused(WireError),
     /// The stream closed or a frame failed to cross.
     Closed(#[serde(with = "crate::data::datum::as_datum")] ConnectionClosed),

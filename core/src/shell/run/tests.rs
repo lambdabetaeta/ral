@@ -485,49 +485,6 @@ fn a_settled_run_leaves_the_anchor_untouched() {
     );
 }
 
-/// The host's own `Nursery` clone is empty afterward: teardown reaches
-/// through the clone, not just the run's copy.
-fn assert_nursery_emptied(panic: bool) {
-    let mut runtime = crate::test_helper::core_runtime();
-
-    let nursery = crate::shell::runtime::Nursery::default();
-    let parked_id: Arc<Mutex<Option<crate::shell::runtime::NurseryId>>> =
-        Arc::new(Mutex::new(None));
-    let parked = parked_id.clone();
-    install_act(&mut runtime, "park-fork", move |mooring, shell| {
-        let Some(crate::shell::runtime::Fork::Park(nursery)) = mooring.fork() else {
-            panic!("a nursery is installed on this run");
-        };
-        let id = nursery.park(shell.bequeath(crate::SpawnGrant::Inherit));
-        *parked.lock().unwrap() = Some(id);
-        assert!(
-            !panic,
-            "run-door test: deliberate panic after parking a fork"
-        );
-    });
-    let mut shell = Shell::root(runtime.into(), crate::test_helper::process_cwd());
-
-    let _ = shell.run(RunRequest {
-        fork: Some(crate::shell::runtime::Fork::Park(nursery.clone())),
-        ..RunRequest::from(Run::captured("park-fork", test_origin()))
-    });
-
-    let id = parked_id
-        .lock()
-        .unwrap()
-        .expect("the run must fork into the nursery");
-    assert!(
-        nursery.adopt(id).is_none(),
-        "a fork parked during the run and never adopted must not survive the run's teardown"
-    );
-}
-
-#[test]
-fn nursery_is_emptied_at_run_teardown() {
-    assert_nursery_emptied(false);
-    assert_nursery_emptied(true);
-}
-
 /// A settled worker whose result outlives the retention bound is reaped at a
 /// run door, and its reap surfaces as a `` `notice `` at the next ready
 /// boundary.

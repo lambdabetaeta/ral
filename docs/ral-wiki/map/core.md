@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f1b0a4a4
-generated_at_date: 2026-11-07
+generated_at_commit: f9ac94f8
+generated_at_date: 2026-11-12
 covers_paths: [core/src/error.rs, core/src/protocol.rs, core/src/egress.rs, core/src/lib.rs, core/src/shell.rs, core/src/host.rs, core/src/host/, core/src/fact.rs, core/src/fact/]
 ---
 
@@ -69,7 +69,7 @@ reduction primitive behind it. A host states policy; core owns resources.
 - `shell::builtins`, `shell::run`, `shell::boot` and `shell::load` own primitives,
   the framed entry (including `shell/run/report.rs`), boot and loading;
   `shell/prelude.ral` is the embedded library.
-- `seed`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
+- `marshal`, `role`, `protocol`, `carrier` and `engine` stay at the crate root,
   alongside the other non-shell subjects.
 
 **`authority`, `egress`, `fact`, `host`, `io`, `own`, `path` and `process` cannot reach
@@ -155,8 +155,9 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   (`core/src/shell/builtins/`).
 - [[map/core/shell-state|shell-state]] — runtime values and the `Shell` interpreter state
   (`core/src/shell/runtime/`).
-- [[map/core/transport|transport]] — the serde mirror and wire envelope that carry a
-  shell across a process boundary (`core/src/seed.rs`, `seed/table.rs`, `io/frame.rs`).
+- [[map/core/transport|transport]] — the image codec every helper session reads
+  (`core/src/marshal.rs`, `marshal/`), first-order values and protocol framing
+  (`data/`, `io/frame.rs`).
 - [[map/core/diagnostics|diagnostics]] — the runtime `Error` value, source locations and error
   rendering (`core/src/error.rs`, `source.rs`, `diagnostic.rs`, `compile.rs`, `io/terminal.rs`, `io/ansi.rs`).
 - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library

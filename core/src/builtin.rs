@@ -16,7 +16,7 @@
 
 use crate::fact::{InvariantFailure, Reason};
 use crate::ir::{Comp, CompKind, Name, synthetic};
-use crate::shell::runtime::Settled;
+use crate::shell::runtime::{Env, Settled};
 use crate::shell::runtime::{Error, Mooring, Shell};
 use crate::shell::runtime::{ValClos, View};
 use crate::source::Spanned;
@@ -96,6 +96,35 @@ impl BuiltinEntry {
             });
             (eta, builtin)
         })
+    }
+
+    /// The η residual awaiting all but `supplied` arguments, over `env`; `None`
+    /// unless supplied < arity and `env` binds exactly δ's builtin (this entry)
+    /// and its first `supplied` arguments.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the decoder hands ownership of the residual's environment to this constructor"
+    )]
+    pub(crate) fn residual(self: &Arc<Self>, env: Env, supplied: usize) -> Option<ValClos> {
+        if supplied >= self.decl.fixed_arity() || env.len() != supplied + 1 {
+            return None;
+        }
+        let (eta, builtin) = self.eta();
+        let mut comp = eta;
+        let View::Builtin(entry) = env.get(builtin)?.view() else {
+            return None;
+        };
+        if !Arc::ptr_eq(self, entry) {
+            return None;
+        }
+        for _ in 0..supplied {
+            let CompKind::Lam { param, body } = &comp.item else {
+                return None;
+            };
+            env.get(param)?;
+            comp = body;
+        }
+        Some(ValClos::thunk(Arc::clone(comp), &env))
     }
 
     const fn row(
@@ -300,6 +329,85 @@ mod tests {
     use crate::shell::builtins::{
         BOUNDARY_BUILTINS, CORE_BASE_FRAMES, CORE_BUILTINS, SURFACE_BUILTIN, WATCH_BUILTIN,
     };
+
+    #[test]
+    fn residual_requires_exactly_this_builtin_and_the_supplied_prefix() {
+        use crate::shell::runtime::Binding;
+
+        let shell = crate::test_helper::core_shell();
+        let entry = Arc::new(shell.lookup_builtin("has").unwrap());
+        let (eta, builtin) = entry.eta();
+        let mut env = Env::from_bindings(vec![(
+            builtin.clone(),
+            Binding {
+                value: ValClos::builtin(Arc::clone(&entry)),
+                scheme: None,
+            },
+        )])
+        .unwrap();
+        let arity = entry.decl.fixed_arity();
+        let mut suffix = eta;
+        for supplied in 0..arity {
+            let value = entry.residual(env.clone(), supplied).unwrap();
+            let View::Thunk {
+                comp,
+                env: captured,
+            } = value.view()
+            else {
+                panic!("an η suffix")
+            };
+            assert!(Arc::ptr_eq(comp, suffix));
+            assert!(captured.ptr_eq(&env));
+            let (held_entry, remaining) = value.residual().unwrap();
+            assert!(Arc::ptr_eq(held_entry, &entry));
+            assert_eq!(remaining, arity - supplied);
+            assert!(entry.residual(Env::EMPTY, supplied).is_none());
+
+            let mut wrong = env.clone();
+            wrong.bind(
+                builtin.clone(),
+                Binding {
+                    value: ValClos::builtin(Arc::new(entry.as_ref().clone())),
+                    scheme: None,
+                },
+            );
+            assert!(entry.residual(wrong, supplied).is_none());
+            let mut wrong = env.clone();
+            wrong.bind(
+                "extra".into(),
+                Binding {
+                    value: ValClos::UNIT,
+                    scheme: None,
+                },
+            );
+            assert!(entry.residual(wrong, supplied).is_none());
+            if supplied > 0 {
+                let mut wrong = env.clone();
+                wrong.unset(&synthetic("arg", 0));
+                wrong.bind(
+                    "extra".into(),
+                    Binding {
+                        value: ValClos::UNIT,
+                        scheme: None,
+                    },
+                );
+                assert!(entry.residual(wrong, supplied).is_none());
+            }
+            let CompKind::Lam { param, body } = &suffix.item else {
+                panic!("η has one lambda per argument")
+            };
+            env.bind(
+                param.clone(),
+                Binding {
+                    value: ValClos::UNIT,
+                    scheme: None,
+                },
+            );
+            suffix = body;
+        }
+        assert!(entry.residual(env.clone(), arity).is_none());
+        assert!(entry.residual(env, arity + 1).is_none());
+    }
 
     /// The soundness perimeter: a value of a type the program did not decide
     /// enters typed code only through a boundary.  A row whose scheme

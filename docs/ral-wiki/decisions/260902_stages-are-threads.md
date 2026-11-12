@@ -4,9 +4,18 @@ status: active
 
 > **Amended 2026-10-13.** `pack_seed` and `hatch` are gone; `EngineSeed` survives
 > only as the codec of the sealed seed carried in `Attach.seed`
-> ([[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]).
+> ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
 
 # Stages are threads
+
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> gives helper-agent shells on both seats one `Marshalled` byte route,
+> read by `Shell::child_of`. The codec named by the 2026-10-13 amendment
+> is replaced by `marshal::{write,read}`. Pipeline stages remain local
+> threads; their shell construction does not marshal, so captured live
+> handles still belong to the same run. The stage and measurement history
+> below is unchanged.
 
 **A ral-written pipeline stage is an OS thread running its own CEK machine
 over a cloned `Shell`, wired to its neighbours by the same kernel pipes as

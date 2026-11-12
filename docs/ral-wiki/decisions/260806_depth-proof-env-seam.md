@@ -4,16 +4,22 @@ status: accepted
 
 # Stream depth must not be bounded by the stack
 
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> replaces the encoder with one dependencies-first walk over environments
+> and built collections. The reader builds rows in order, without Kahn's
+> algorithm. Both walks and tag spines are flat outside IR. The runtime drop
+> trampoline remains, extended to captures and built containers by
+> [[261112_runtime-values-are-value-closures|runtime values are value closures]];
+> the drop implementation and measurements below record the earlier decision.
+
 **A lazy stream is a chain of closures — block → captured env → scope →
 binding → block — so any walk that crosses the captured-env link recursively
-spends stack once per line. Exactly two walks cross it: the seed encoder
-(`seed::table`) and drop glue. Both now cross it flat.
-`intern_scope` only reserves an id and queues the scope; `InternCtx::finish` — the table's sole accessor — drains the
-queue. Teardown is cut by a thread-local drop trampoline on `Closure`: glue
-still does all traversal, but a closure dying inside another closure's drop
-hands its bindings to that dismantler's queue instead of letting glue recurse,
-keeping the stack between any two links constant. No wire change, no new
-dependency, no stream redesign.**
+spends stack once per line. Marshalling and drop glue cross it flat: the
+writer's explicit stack closes dependencies before writing each row, the
+reader builds those rows in order, and the runtime drop trampoline queues
+uniquely owned captures and built containers. None recurses through the
+value graph.**
 
 ## Context
 
@@ -28,7 +34,16 @@ a sixty-thousand-line stream aborted the process in drop glue at teardown.
 
 ## Decision
 
-- **Interning reserves; `finish` encodes.** The old `intern_scope` encoded a
+- **Dependencies close before their row is written.** The marshaller's
+  explicit Open/Close stack visits each environment, built list or built map
+  once, keyed by allocation address in one identity table. The image owns
+  those allocations throughout the borrowed walk. A row names only earlier
+  rows; root env and handler frames may name any row. Readback checks and
+  constructs each row against its prefix, in one pass. Tag spines are flat;
+  no built-data nesting consumes the host stack.
+
+  **Historical encoder, 2026-08-06.** The original decision was “interning
+  reserves; `finish` encodes”. The old `intern_scope` encoded a
   scope's bindings inline, and a binding holding a closure re-entered
   `from_runtime`, which re-entered `intern_scope` — one full cycle of frames
   per stream link. Now `intern_scope` is infallible: it assigns the id,
@@ -88,12 +103,12 @@ a sixty-thousand-line stream aborted the process in drop glue at teardown.
 
 ## Consequences
 
-- Pure-data depth (a deeply nested list/variant with no env links) still
-  recurses in every walk, this module's included — such values cannot be built
-  without tripping other recursion limits first.
-- `WireDecoder::for_shell` once built one row per pass over an n-link chain,
-  O(n²) passes. It is now Kahn's algorithm over the rows' dependency edges,
-  linear in the chain.
+- Built-data nesting and tag-spine depth do not consume marshalling or
+  runtime-drop stack. Other value walks and raw IR teardown retain the
+  stack-safety caveat of the value-closure decision.
+- The original decoder replaced repeated row scans with Kahn's algorithm,
+  linear in the chain. The dependencies-first reference law now makes
+  dependency recovery unnecessary: the reader constructs rows in order.
 - Every non-scalar binding death costs one thread-local access and branch;
   the leader additionally allocates one small queue. `scope_escapes` measures
   at or below its pre-change time.

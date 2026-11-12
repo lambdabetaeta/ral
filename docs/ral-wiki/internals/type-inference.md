@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c0905f5e
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
 anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, file_options, check_options, check_option, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
@@ -262,7 +262,13 @@ wraps the whole RHS. See
   function's head suffices because its own unit checked its body. Residual
   occurrences remain plain variables, with no delayed runtime contract.
 - Readback settles each definition's schemes into `Closed`. The prelude bake,
-  live scope and sealed seed transport those same schemes.
+  live scope and marshalled environment rows carry those same schemes.
+  Structural child decoding uses raw `Arc<Scheme>` leaves. The reader checks
+  environment schemes with `Closed::new`; IR admission checks every definition
+  scheme in every recursively linked module before closure construction.
+  Both refuse an open scheme at its complete JSON path. The IR representation axis does
+  not change checking phases: linked modules remain `Explicit` in every
+  outer phase ([[map/core/transport|transport]]).
 - Re-checking a checked tree accepts it and inserts no further elaboration
   (`readback.rs`: `elaborated_capture_and_repeated_splits_reinfer_unchanged`).
   Raw unifier ids in schemes and sites are not canonical, so a re-checked tree

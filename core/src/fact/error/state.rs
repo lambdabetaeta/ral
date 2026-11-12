@@ -124,11 +124,9 @@ pub enum StateFailure {
     HookRegistration(HookRegistrationFailure),
     HandlerConflict(String),
     NoDesk,
-    NoForks,
     NoChildEngines,
-    NurseryMissing(Count),
 }
-variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", HandlerConflict(String): "handler-conflict", NoDesk: "no-desk", NoForks: "no-forks", NoChildEngines: "no-child-engines", NurseryMissing(Count): "nursery-missing" });
+variant!(StateFailure { WorkerClaimed(OperationState): "worker-claimed", EmptyWait(OperationState): "empty-wait", WorkerCap(WorkerCap): "worker-cap", GatherClosed: "gather-closed", MissingAmbient(AmbientSetting): "missing-ambient", Depth(DepthFailure): "depth", CaptureLimit(CaptureLimit): "capture-limit", NoByteInput(OperationState): "no-byte-input", TerminalEof: "terminal-eof", MissingBuiltin(String): "missing-builtin", MissingHook(HookRef): "missing-hook", HookRegistration(HookRegistrationFailure): "hook-registration", HandlerConflict(String): "handler-conflict", NoDesk: "no-desk", NoChildEngines: "no-child-engines" });
 
 impl OperationState {
     pub fn describe(&self) -> String {
@@ -272,11 +270,7 @@ impl StateFailure {
             Self::HookRegistration(cause) => cause.describe(),
             Self::HandlerConflict(name) => format!("handler {name:?} is already installed"),
             Self::NoDesk => "this host answers no enquiries".into(),
-            Self::NoForks => "this host cannot fork an engine".into(),
             Self::NoChildEngines => "this host provides no child engines".into(),
-            Self::NurseryMissing(id) => {
-                format!("no forked session is parked under nursery id {id}")
-            }
         }
     }
 }
@@ -294,7 +288,6 @@ impl StateFailure {
             Self::Depth(DepthFailure { kind: DepthKind::NativeReentry, .. }) => vec!["a builtin such as `map` applied a function that itself applied `map`, too deep: restructure with a tail-recursive loop".into()],
             Self::CaptureLimit(_) => vec!["did you mean to write this to a file? `cmd > out.txt` keeps every byte".into()],
             Self::NoByteInput(_) => vec!["pipe bytes or redirect a file".into()],
-            Self::NurseryMissing(_) => vec!["was it adopted already, or has the run that forked it ended?".into()],
             _ => Vec::new(),
         }
     }
@@ -384,21 +377,6 @@ mod tests {
                 description,
                 &[],
             );
-        }
-    }
-
-    #[test]
-    fn nursery_missing_explains_once_only_adoption_without_losing_the_id() {
-        for id in [0, 7, u64::MAX] {
-            let failure = StateFailure::NurseryMissing(Count::from_u64(id));
-            let description = format!("no forked session is parked under nursery id {id}");
-            let advice = "was it adopted already, or has the run that forked it ended?";
-            projection(&failure, &description, &[advice]);
-            let reason = crate::fact::Reason::State(Box::new(failure));
-            assert_eq!(reason.advice(), [advice]);
-            let error = crate::error::Error::new(reason);
-            assert_eq!(error.hints(), []);
-            assert_eq!(error.plain(), format!("{description}\nhint: {advice}"));
         }
     }
 }

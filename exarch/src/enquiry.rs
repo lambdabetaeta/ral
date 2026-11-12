@@ -17,7 +17,7 @@ use ral_core::fact::{
     NoteFailureTooLong, RegexCause, RegexFailure, ShapeFailure, UnexpectedPayload, UnknownTag,
     ValueShape,
 };
-use ral_core::shell::runtime::NurseryId;
+use ral_core::marshal::Marshalled;
 use ral_core::ty::{Ty, Typed, closed_record};
 use ral_core::{memoized_ty, record, variant};
 use regex::Regex;
@@ -225,7 +225,7 @@ impl Family for Agents {
 }
 
 /// A model's own `exarch-agents` argument: a whole request, or a spawn's
-/// spec alone, since the fork it needs is its builtin's to mint.
+/// spec alone, since its builtin marshals the parent.
 pub(crate) enum Word {
     Ask(Agents),
     Spawn(Launch),
@@ -242,15 +242,15 @@ impl Word {
     }
 }
 
-/// `` `start ``: the model's spec, and how its forked session is reached.
+/// `` `start ``: the model's spec and its marshalled parent.
 pub(crate) struct Start {
     pub(crate) spec: Spec,
-    pub(crate) fork: ForkClaim,
+    pub(crate) parent: Marshalled,
 }
 
 record!(Start {
     spec: "spec",
-    fork: "fork",
+    parent: "parent",
 });
 
 /// The model's own spawn record: a flat record read as its grant and the rest.
@@ -286,7 +286,7 @@ impl Datum for Launch {
     }
 }
 
-/// A [`Launch`] as the desk sees it: the grant rides in the sealed bequest.
+/// A [`Launch`] as the desk sees it: the grant rides in the marshalled parent.
 pub(crate) struct Spec {
     pub(crate) prompt: String,
     pub(crate) name: Name,
@@ -424,35 +424,6 @@ impl Datum for Selection {
                 }
                 Ok(Self::Role(name))
             }
-            _ => Err(unknown(label, TAGS)),
-        }
-    }
-}
-
-/// How a fork its builtin minted reaches the desk. Which arm is legal is the
-/// host's fact, not the guest's.
-pub(crate) enum ForkClaim {
-    /// Parked in this host's own nursery, under this id.
-    Parked(NurseryId),
-    /// Sealed by a wire engine: the bytes the host builds a child engine
-    /// around without reading them.
-    Sealed(ral_core::seed::Sealed),
-}
-
-impl Datum for ForkClaim {
-    fn encode(self) -> FOValue {
-        match self {
-            Self::Parked(id) => tag("parked", Some(id.0.encode())),
-            Self::Sealed(seal) => tag("sealed", Some(seal.encode())),
-        }
-    }
-
-    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
-        const TAGS: &[&str] = &["parked", "sealed"];
-        let (label, payload) = tagged(v, TAGS)?;
-        match label {
-            "parked" => datum::<u64>(label, payload).map(|id| Self::Parked(NurseryId(id))),
-            "sealed" => datum(label, payload).map(Self::Sealed),
             _ => Err(unknown(label, TAGS)),
         }
     }
@@ -1339,27 +1310,21 @@ mod tests {
 
     #[test]
     fn every_agents_tag_round_trips() {
-        let start = |spec, fork| Request::Agents(Agents::Start(Start { spec, fork }));
+        let parent = ral_core::HostSurface::default()
+            .shell(
+                ral_core::io::terminal::TerminalState::default(),
+                ral_core::test_helper::process_cwd(),
+            )
+            .expect("a test host resolves its baseline")
+            .marshal(SpawnGrant::Inherit)
+            .expect("a test parent marshals");
+        let start = |spec, parent| Request::Agents(Agents::Start(Start { spec, parent }));
         round_trips([
             Request::Agents(Agents::List),
-            start(
-                spec(Memory::Amnemon, Selection::Inherit),
-                ForkClaim::Parked(NurseryId(3)),
-            ),
+            start(spec(Memory::Amnemon, Selection::Inherit), parent.clone()),
             start(
                 spec(Memory::Mnemon, Selection::Role("other-model".into())),
-                ForkClaim::Sealed(
-                    ral_core::seed::seal(
-                        &ral_core::HostSurface::default()
-                            .shell(
-                                ral_core::io::terminal::TerminalState::default(),
-                                ral_core::test_helper::process_cwd(),
-                            )
-                            .expect("a test host resolves its baseline")
-                            .bequeath(SpawnGrant::Inherit),
-                    )
-                    .expect("a bequest seals"),
-                ),
+                parent,
             ),
             Request::Agents(Agents::Message(Message {
                 to: "parent".into(),
@@ -1583,9 +1548,9 @@ mod tests {
         ]);
     }
 
-    /// A model's `start` names its spec alone: the fork is its builtin's.
+    /// A model's `start` names its spec alone: its builtin marshals the parent.
     #[test]
-    fn a_models_start_word_is_the_spec_awaiting_its_fork() {
+    fn a_models_start_word_is_the_spec_awaiting_its_parent() {
         let launch = launch(Memory::Amnemon, Selection::Inherit).encode();
         assert!(matches!(
             Word::decode(&tag("start", Some(launch))),

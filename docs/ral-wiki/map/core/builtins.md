@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -350,9 +350,9 @@ Bodies are grouped by concern, one submodule each:
   (`HandleInner::snapshot`) without claiming it (`WorkerRow::ral_value`;
   the probe's eighth field, `retention-left`, is the host's alone). It holds
   no handle, so a top-level `workers` crosses the engine protocol. A `Handle`
-  is shell-local: `Shell::bequeath` replaces every live one with a withheld
-  handle of the same title, position and type; all observations refuse it
-  with `withheld-handle`. A run
+  is shell-local: `Shell::marshal` writes its title, and a child on either
+  seat reads it as a withheld handle of the same title, position and type;
+  all observations refuse it with `withheld-handle`. A run
   whose result is or holds any handle projects to `Err`, status 1
   (`core/src/shell/run/report.rs`);
 - `misc.rs` — `fail` takes a `String`, raising `Reason::raised` (a `Claim`

@@ -75,8 +75,8 @@ The core entries group by what they compute:
   `consumed`) — total over live handles' lifecycle states, reporting completion
   or failure on `ready` as one outcome variant rather than blocking or
   re-raising. `is-done` is the boolean completion predicate over the same
-  states. A bequeathed handle is withheld; every observation fails
-  `withheld-handle`
+  states. A handle marshalled to a child arrives withheld; every observation
+  fails `withheld-handle`
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/261019_await-is-the-block-run-here|await-is-the-block-run-here]]).
 - **Writes** — `echo`: every argument rendered through the total `to-string`,
@@ -180,8 +180,14 @@ for each of ral's two existing mechanisms**.
   frames ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
   A builtin prints `<native NAME>`; its residual prints
   `<native map, 1 of 2 arguments>` and has type name `Lambda`. The constant
-  crosses the seed by name, re-linked against the receiver's manifest; its
-  residual crosses as a thunk over supplied arguments and the entry.
+  crosses by name, re-linked against the receiver's builtin table. Its
+  residual crosses as that name, an environment row and a supplied-argument
+  count. `BuiltinEntry::residual` reconstructs the receiving entry's η suffix
+  only when the count is less than its arity and the row binds exactly that
+  builtin and its supplied arguments. Zero is a real count (`let g = has`).
+  δ is not wire syntax; a builtin, handle or residual beneath a tag is bound
+  to a fresh name rather than nested in syntax
+  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
   Boundary partials are inference-expanded blocks over `Exec`, retaining the
   per-use checked site. Neither builtins nor thunks have language equality.
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,

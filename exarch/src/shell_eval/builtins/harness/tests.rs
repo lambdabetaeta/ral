@@ -584,7 +584,7 @@ fn index_and_grep_answer_their_own_shapes() {
 mod typed_boundaries {
     use super::super::*;
     use ral_core::fact::{
-        DataStep, DecodeCause, Found, NonData, OpaqueKind, ShapeFailure, ValueShape,
+        DataStep, DecodeCause, Found, NonData, OpaqueKind, ShapeFailure, StateFailure, ValueShape,
     };
     use ral_core::process::CancelCause;
     use ral_core::protocol::Run;
@@ -784,13 +784,24 @@ mod typed_boundaries {
     }
 
     #[test]
-    fn a_missing_fork_is_a_state_refusal_before_enquiry() {
+    fn a_missing_desk_is_refused_before_marshalling() {
+        let shell = shell();
+        #[cfg(unix)]
+        let shell = {
+            use std::os::unix::ffi::OsStringExt as _;
+            let mut shell = shell;
+            let cwd = std::ffi::OsString::from_vec(b"/non-unicode-\xff".to_vec());
+            shell.seed_cwd(ral_core::path::CwdPath::new(cwd.into()).unwrap());
+            assert!(shell.marshal(SpawnGrant::Inherit).is_err());
+            shell
+        };
         let error = error(fork_then_enquire(
             SpawnGrant::Inherit,
             &Mooring::adrift(),
-            &shell(),
-            |_| Request::Agents(Agents::List),
+            &shell,
+            |_| panic!("an absent desk refuses before building the request"),
         ));
-        assert_eq!(error.reason, Reason::State(Box::new(StateFailure::NoForks)));
+        assert_eq!(error.reason, no_desk().reason);
+        assert_eq!(error.hints(), no_desk().hints());
     }
 }

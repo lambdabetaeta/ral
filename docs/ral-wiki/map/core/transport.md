@@ -1,15 +1,15 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
-covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/seed.rs, core/src/seed/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
+covers_paths: [core/src/data.rs, core/src/data/, core/src/shell/runtime/value/first_order.rs, core/src/marshal.rs, core/src/marshal/, core/src/io/frame.rs, core/src/shell/grant/spawn.rs, core/src/protocol/json.rs, core/src/carrier/json.rs, exarch/src/record/json.rs, exarch/src/record/json/, exarch/src/record/log/raw.rs]
 ---
 
 # Map: core / transport
 
-The wire layer that carries a shell across a process boundary. Its one consumer
-is the sealed child engine a wire-seat agent spawns: a `Bequest` — the parent's `env`, `context`,
-sources, terms, fixings and the spawn's grant — is serialised to JSON, framed, and sealed into bytes, and reconstituted in a fresh
-engine process ([[map/core/shell-state|shell-state]]). A pipeline stage never
+**Every helper shell starts from its marshalled parent**, in process or in a
+VM. `Shell::marshal` writes the parent's image and the spawn's grant as one
+JSON document; `Shell::child_of` reads it against the receiving runtime
+([[map/core/shell-state|shell-state]]). A pipeline stage never
 rides it — stages are threads sharing the parent's memory
 ([[decisions/260902_stages-are-threads|stages-are-threads]]) — and neither does
 a [[design/grant|grant]] body, which evaluates locally while its external
@@ -21,42 +21,29 @@ value vocabulary and codec.
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop passes
 through a constructor that defaults a field the wire carries, and no kind
-round-trips through a string with a catch-all decode arm.** A sealed child is
-indistinguishable from an in-process fork exactly when no hop drops a field or
-collapses a variant. The discipline is mechanical — an exhaustive match makes a
+round-trips through a string with a catch-all decode arm.** Both seats read
+the same parent bytes. The discipline is mechanical — an exhaustive match makes a
 new variant fail the build, a field-complete struct literal a new field:
 
 - *value walks* (`shell/runtime/value/first_order.rs`) match `View` / `FOValue` exhaustively, once forward and once back;
-- *hydration* installs a complete `HandlerFrame` through
-  `HandlerStack::push_frame` rather than re-deriving fields like
-  its `FrameKind`; a persistent frame remains host-managed. A per-name entry
-  is unary by construction and hydration does not re-check its arity, validated
-  by the sender's static check or persistent-install vet
+- *marshalling* reconstructs a complete `HandlerFrame`, retaining its
+  `FrameKind`, per-name order and catch-all; a persistent frame remains
+  host-managed. A per-name entry is unary by construction and the reader
+  does not re-check its arity, validated by the sender's static check or
+  persistent-install vet
   ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]);
-- *kinds* ride as serde enums (`SerialAtom`, `SpawnGrant`), and *floats* by
+- *kinds* ride as serde enums (`marshal::wire::Value`, `RawSpawnGrant`), and *floats* by
   their IEEE-754 bits, total and exact where JSON's number turns NaN and ±∞
   into `null`.
 
-## Values — `core/src/data.rs`, `core/src/seed/table.rs`
+## Values — `core/src/data.rs`
 
 **`FOValue<X>` (`data.rs`, which knows no `ValClos`) is the one value
-vocabulary every seam speaks. The top-level `data` module is independent of
-runtime values and shared by protocols and snapshots: first-order by construction, over an extension
-slot `X` uninhabited by default (`NoExt`).** Externally tagged on the wire, with
-typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
+vocabulary for first-order seams. The top-level `data` module is independent of
+runtime values and shared by protocols and records: first-order by
+construction, over an extension slot `X` uninhabited by default (`NoExt`).**
+Externally tagged on the wire, with typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 
-- `SerialValue = FOValue<SerialAtom>` (`seed/table.rs`) adds `Thunk`,
-  `Builtin(name)` and `Handle(title)`. `SerialThunk` holds `comp` and a
-  `SerialEnvSnapshot` naming its capture's row. Builtins re-link by name
-  against the receiver's manifest; missing names fail `UnknownNative`.
-  A handle, live or withheld, encodes its title and hydrates withheld.
-  User and builtin partials cross as thunks of residual λs over supplied
-  arguments; the builtin entry is a binding in that capture. Boundary
-  partials cross as λ-closures over `Exec` with their checked site
-  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
-- `SerialBinding` mirrors a scope entry, value *and* scheme, so a sealed child
-  keeps each binding's type
-  ([[internals/type-inference|type-inference]]).
 - `data/datum.rs` — `Datum`, the one strict first-order codec every typed
   protocol payload goes through (`encode`; a `decode` naming what arrived
   ill-shaped), with `tag` / `untag` / `field` / `exact_keys` and the `record!`
@@ -92,9 +79,9 @@ typed accessors (`field`, `as_str`, `as_int`, …) for a host reading one.
 (`shell/runtime/value/first_order.rs`).** `FOValue::walk` reads `View` and
 hands non-data leaves to its caller as `Leaf`; `unwalk` is the reverse walk.
 `try_from` and `scrubbed` differ only in their leaf function; `From<FOValue>`
-uses `unwalk`. The seed's `from_runtime` instead preserves typed
-atoms and interns thunk environments. The reverse walks use `ValClos::variant`;
-`View::Variant` omits resolved unit payloads.
+uses `unwalk`. Marshalling instead reads `ValClos::held`, preserving syntax,
+captures, built collections and failure witnesses. The reverse first-order
+walks use `ValClos::variant`; `View::Variant` omits resolved unit payloads.
 
 **A leaf that is not data has three treatments, one per seam.** `ValClos::opacity`
 classifies it — a block, a function, a handle:
@@ -104,106 +91,107 @@ classifies it — a block, a function, a handle:
 - `FOValue::scrubbed` makes the conversion total by writing every such leaf as
   its `` `opaque [type: …] `` placeholder — the flat wire's treatment, taken by
   `Mooring::surface`;
-- the fork's scrub (`core/src/shell/runtime/state/scrub.rs`,
-  [[map/core/shell-state|shell-state]]) withholds every live handle while
-  preserving its binding, position and type. Every observation then fails
-  `withheld-handle`. It reaches captures, builtin residual arguments and
-  handler arms; no live handle remains reachable in the bequest. Closures
-  remain executable and hooks are absent by construction. This scrub is
-  required even on identity adoption, which shares the parent's memory.
+- the marshaller writes handles as titles wherever the image reaches them,
+  including captures, residual arguments, collection positions and handler
+  arms. The reader constructs `ValClos::withheld`; observation fails
+  `withheld-handle`. Closures remain executable, and hooks are absent from
+  the image by construction, on both seats.
 
-## Scopes — `InternCtx` and `WireDecoder`
+## Marshalling — `core/src/marshal.rs`, `core/src/marshal/`
 
-**Environments cross as rows of a table, one per distinct allocation, by
-`Env::ptr_eq` identity** — so a captured environment with shared structure
-cannot unfold into an O(2^N) tree. Captures are restricted at formation;
-component thunks may retain their container's other bindings. Every empty
-capture is one row,
-a `Rec` group's siblings share one, and the linear root scan makes interning
-O(roots²). A value two closures mention is written in both rows
-([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-Σ never crosses: a row is ρ alone, and the receiving shell's own natives and
-prelude answer for a decoded closure exactly as `crate::shell::runtime::lookup` reads
-them for any other, through the receiver's `Signature`.
+**`Marshalled` is one JSON document over `Image` and `SpawnGrant`; a value
+names rows rather than nesting runtime values.** `wire.rs` is the structural
+mirror: `rows`, root `env`, `context`, `sources`, `terms`, `fixings`, `grant`.
+One `Wire`/`Row`/`Value`/`Binding`/`Frame` family is generic over `D: IrData`:
+`Closure.val` is `Val<Explicit, D>`; `Binding.scheme` is `Option<D::Scheme>`.
+Writing emits `Wire<RuntimeData>` directly; structural decoding and reading
+use `Wire<RawData>`, with the same JSON spelling and no intermediate admitted
+wire graph. Both use the [[map/core/ir|one generic IR grammar]]: runtime leaves
+are `Bytes`/`Closed`, raw leaves `String`/`Arc<Scheme>`. Representation is
+independent of phase; linked modules remain `Explicit` in every outer phase.
+The [[internals/evaluator-machine|machine]] starts with an empty stack:
+store crosses, never continuation, hooks or terminal authority.
 
-- `InternCtx::intern_env` only *reserves* a row and queues the environment;
-  `finish`, the table's sole accessor, encodes the queue as a worklist, so
-  encoder stack depth is bounded by data nesting within one environment,
-  never by the length of a chain of closures
-  ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]). `finish`
-  encodes every binding. `SerialValue::from_runtime` materialises literal
-  data through `View`, interns thunk captures, and writes every handle as its
-  title; handles have no encoding refusal.
-- `WireDecoder::for_runtime` rebuilds the rows in dependency order by Kahn's
-  algorithm over `collect_scope_deps`' edges, so a stream chain decodes in
-  linear time, refusing an out-of-range reference or a cycle. It
-  carries the receiver's builtin manifest, for a decoded `Builtin` to re-link
-  its name against — nothing else, since neither Σ tier rides the wire.
-- `SerialEnvSnapshot::into_runtime`, given a `WireDecoder`, is the sole
-  wire→runtime conversion of an environment.
-
-## The seed — `core/src/seed.rs`, `core/src/shell/grant/spawn.rs`
-
-**`EngineSeed` is a `Bequest` in wire form, and a codec and nothing else:
-`scope_table`, `env`, `context`, the parent's `sources`, `terms`, `fixings` and
-the spawn's `grant`.** No frame crosses: a
-sealed child's [[internals/evaluator-machine|machine]] starts over the empty
-stack, so what rides is store, never continuation. The environment rides once,
-as the row of one [[design/scoping|`Env`]], ρ alone; the context is
-`Context<Vec<WireHandlerFrame>>`, the live `Context` with its handler stack
-swapped for interned frames (`Context::try_map_handlers`), so nothing mirrors
-a field and every other field crosses as itself — `env_overrides`, `cwd`,
-`grants`, `args`, `modules`. The fixings ride as the session's table of
-`(UnitId, var, Fixed)` triples, never inside a `Site`, which names only its
-unit: a shipped closure's sites name the parent's units, so their entries
-govern them in the child as in the parent. The `SourceDb` rides whole, so a
-parent closure's `FileId` resolves in the child to the file it named, and
-`terms` is the same `Terms` type the constructor destructures, so a term added
-to it rides or the build fails. A bequest cannot express a hook, and none
-rides.
-`WireHandlerFrame` is a [[internals/handler-dispatch|handler stack]] frame
-carrying its arms and frame kind, never handler schemes. Lexical bindings still
-carry their schemes; handler names contribute only diagnostic context to the
-next unit's check.
-
-- `EngineSeed::encode(&Bequest)` builds one from a bequest `Shell::bequeath`
-  produced — the package both seats take, so an identity fork and a sealed child
-  snapshot the same fragment and `` exarch-agents `start `` means one thing
-  regardless of seat ([[design/agents|agents]]'s one-snapshot law). `encode`
-  trusts that scrub rather than re-checking it. `decode(self, &Runtime)`
-  returns the `Bequest`, decoding everything through one `WireDecoder` built
-  `for_runtime`: constructible only from the `Runtime` whose builtin table
-  re-links the natives by name, so no call site picks a manifest of its own.
-  The decoded bequest goes to `Shell::child_of`, which pushes the grant
-  exactly as for a parked one; `bequeath` has already snapshotted the fixings
-  and construction takes ownership of them, and a sealed child runs no recipe.
-- `seal(&Bequest) -> Result<Sealed, Error>` encodes and frames one
-  `EngineSeed` into `Sealed`, preserving interning errors and projecting frame
-  encoding refusal to `Reason::Protocol`. The host relays these bytes unread (the
-  opacity law, [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
-  `Sealed::unseal` is `pub(crate)`, so only an engine can read one. `Sealed`
-  is a `Datum` over `Bytes`, which is how a seal rides the enquiry as
-  `FOValue::Bytes`, and is `Origin::Child`'s payload. `Engine::boot` unseals it
-  against the runtime it has just derived. `Bytes` serialises as base64 under a
-  human-readable serializer (`data/byte_encoding.rs`), so a seal also
-  crosses JSON.
-- `SpawnGrant` — `Inherit` (⊤), `Base(name)`, or `Restrict(record)` — crosses
-  **unfrozen**: a `` `cwd `` place in a grant names the cwd of the shell it
-  governs, so the freeze happens on the child's side. `SpawnGrant::narrow_onto`
-  uses `Shell::freeze_ctx` to resolve it against the child's environment, cwd
-  and scratch and pushes one session layer —
-  the step `Shell::child_of` takes for an adopted identity fork
-  (`IdentityTransport::adopt_parked`) and a sealed child alike.
-  `Base` reaches the host's `GrantNarrower`, since core has
-  no base-tag lexicon; `Restrict` goes through
-  `shell::grant::decode_capability_map`
+- `write.rs` borrows the image and visits environments and built lists/maps
+  dependencies-first on an explicit Open/Close stack. A `HashMap` keys
+  allocations by `Env::addr` or container address; the image keeps those
+  allocations alive. Each allocation gets one row at close; ∅ names no row.
+  The identity table is O(rows); each node's bindings or elements are visited
+  once for dependencies and once for encoding
+  ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
+- **Row `i` names only rows `j < i`; the root env and handler frames may
+  name any row.** `Row::{Env, List, Map}` preserves sharing within the child.
+  `read.rs::Reader` checks and constructs each row in wire order. References
+  must have the requested environment or built kind; `Env::from_bindings`
+  and map construction refuse duplicate names or keys.
+- `Value::Closure { tags, val, env }` preserves held syntax and its capture,
+  without materialising literal collections. The writer peels the root's
+  tag spine syntactically. Before `ValClos::closure` checks the foot's direct
+  names and folds the tags back, `read/ir.rs` admits raw IR through borrowed,
+  exhaustive `admit_val`, `admit_comp` and `admit_module` walks.
+  `Bytes::from_base64` checks byte leaves; `Closed::new` checks every
+  definition scheme in every recursively linked module. Environment binding
+  schemes also close through `Closed::new`. Runtime `Closed` remains checked.
+  Neither Σ tier crosses; the receiving `Runtime` supplies natives and prelude
+  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+- IR admission preserves spans, origins, sites, units, admits, annotations
+  and all other fields, rebuilding nodes through their constructors under
+  `on_json_stack`. Explicit primitive and redirect matches retain actual
+  enum payloads, fields and tuple/sequence indices in failure paths, including
+  `Spanned.item`, not `Node.shape`, `Arc` or `Option`. `Prim::Binary` operands
+  occupy indices 1 and 2; the phase-only `Prim::map_operands` cannot supply
+  these paths. Admission introduces no new IR validation policy.
+- `Value::Builtin(name)` re-links through the receiving builtin table, one
+  cached entry per name per read. `Residual { builtin, env, supplied }`
+  rebuilds the receiver's η suffix through `BuiltinEntry::residual`:
+  `supplied < arity`, including zero, and the row binds exactly that entry
+  and its first `supplied` arguments. The row's allocation is retained;
+  the rebuilt suffix has η's own spans, and β uses the argument frame's span.
+- Builtins, handles and η residuals sit only at a closure's root:
+  `ValClos::variant` binds such payloads to fresh names. `Val::{Builtin,
+  Handle}` and `CompKind::Builtin` (δ) are serde-skipped in both directions;
+  ordinary closure syntax therefore contains none. This is the writer's
+  structural-serialization totality argument.
+- `Value::Handle(title)` arrives withheld. `Failure(fact)` carries the
+  witnessed map's `ErrorFact`, validated and rebuilt with `ValClos::failure`,
+  so `raise` in the child keeps its typed reason, including under a tag.
+  Unwitnessed built maps and built lists cross once as rows. Captures,
+  residual chains, built nesting and tag spines cross without recursive
+  runtime-value nesting; shared IR is still copied once per closure.
+- The context crosses through `RawContext<Vec<wire::Frame>>`; frames retain
+  arms, catch-all and kind, never handler schemes. `SourceDb` keeps each
+  closure's `FileId` meaningful. `Terms` carries stack/child limits, exit
+  hints, scratch, lease and retention. Fixings cross as their own snapshot,
+  keyed by the parent's units rather than embedded in a `Site`.
+- `marshal::write` can refuse only a non-Unicode cwd, as `Unencodable` with
+  operation `Marshal`. `marshal::read` parses JSON, structurally decodes
+  `Wire<RawData>`, then admits IR and checks while building. Forward or
+  wrong-kind rows, unknown builtins, invalid residuals, invalid IR base64,
+  open closures or schemes (including nested linked modules), duplicates,
+  malformed facts, syntax and shape errors all become a `DecodeFailure`
+  at the refusing JSON path, wrapped once as `ProtocolFailure::Decode {
+  kind: Parent, operation: "child" }`.
+- `Marshalled` is a `Datum` over `Bytes`, relayed unread by the host; JSON
+  carriage uses base64. `IdentityTransport::child(&parent)` shares its
+  parent's `Arc<Runtime>`; `Engine::boot` reads `Origin::Child(parent)`
+  against its own runtime. Both call `Shell::child_of`, run no root recipe
+  and reconstruct the same image
+  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a-child-starts-from-its-parent-marshalled]]).
+- The reader re-holds the inherited grant stack's exclusions. An object
+  replaced between write and read arrives unheld, but its old identity and
+  position still refuse. `RawSpawnGrant` (`shell/grant/spawn.rs`) validates
+  to `Inherit` (⊤), `Base(name)` or `Restrict(record)`, still **unfrozen**.
+  `SpawnGrant::narrow_onto` freezes against the child's own env, cwd and
+  scratch and pushes one layer; `Base` uses the installer's `GrantNarrower`
+  and `Restrict` uses `decode_capability_map`
   ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]).
 
 ## Framing — `core/src/io/frame.rs`
 
-**`encode` + `put` / `read_frame` are length-prefixed JSON frames, carrying both
-the seal's one `EngineSeed` frame and the engine protocol's `WireChannel`
-frames (`core/src/protocol/channel.rs`).**
+**`encode` + `put` / `read_frame` delimit the engine protocol's `WireChannel`
+frames (`core/src/protocol/channel.rs`).** `Marshalled` has no inner length
+prefix: the carrying enquiry or attach owns the size limit, and in-process
+marshalling is unframed. `PROTOCOL_VERSION` is 47.
 
 - `fuse` is the one frame-size check both doors apply — `MAX_FRAME_LEN`, 256 MiB
   — before the reader allocates a body and before the writer sends one, so an
@@ -229,18 +217,15 @@ so validation can see duplicate keys and original numeric spellings instead
 of inferring causes from serde's diagnostic text.
 
 - `RawFOValue` and `RawDatum<T>` retain unchecked leaves until validation.
-  The raw graphs in `protocol/json.rs`, `seed/json.rs` and `carrier/json.rs`
-  validate their domain leaves before returning usable values; a wire reason
-  uses the same `Datum` as an error fact, not a second reason schema. The seed
-  has no mirror of the IR or of schemes: `Arc<Comp>` and `Arc<Scheme>` cross
-  through their own serde impls, and the semantic step closes each scheme
-  (`Closed::new`, refusing with `DecodeCause::OpenScheme` at its path; a
-  non-finite float is `DecodeCause::FiniteBits`). `RawSerialAtom` preserves
-  `Thunk`, `Builtin` and `Handle` until validation, with no separate native
-  argument payload or arity check. Arguments reside in residual thunk
-  environments, whose rows validate through the same decoder. Every sealed
-  thunk carries IR, never builtin code. Seed cleanup drains owned value and
-  environment spines iteratively.
+  The raw graphs in `protocol/json.rs` and `carrier/json.rs` validate their
+  domain leaves before returning usable values; a wire reason uses the same
+  `Datum` as an error fact, not a second reason schema. `marshal/wire.rs`
+  structurally decodes raw byte strings and schemes in the same generic IR
+  grammar; `marshal/read/ir.rs` admits byte and linked-module scheme leaves
+  before closure construction. `marshal/read.rs` checks closure names, closes
+  environment schemes and validates residuals while building rows. A non-finite
+  float is `DecodeCause::FiniteBits`. Runtime teardown of capture and built-container chains is the `ValClos` drop trampoline
+  ([[map/core/shell-state|shell-state]]).
 - `JsonEncode` returns `JsonEncodeFailure` before writing a frame. Audited raw
   representations serialize only after fallible leaves have been checked;
   `serialize_structural` is not a blanket encoding fallback.

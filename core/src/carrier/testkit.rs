@@ -9,8 +9,7 @@ use crate::protocol::{Attach, EngineSpec, Report, Root, Run};
 use crate::shell::runtime::{Runtime, Shell};
 use crate::source::SourceOrigin;
 
-/// An installer that never makes children, so it states the one policy a host
-/// with no grant lexicon can: no seeded child.
+/// An installer with no grant lexicon: it refuses every Base grant.
 pub(crate) const fn installer(
     tag: &'static str,
     runtime: fn(&EngineSpec) -> Result<Runtime, Error>,
@@ -138,7 +137,6 @@ pub(crate) fn reason_families() -> Vec<crate::fact::Reason> {
                 cause: EditorCommandCause::Unbalanced,
             }),
         )))),
-        Reason::State(Box::new(StateFailure::NurseryMissing(u64::MAX.into()))),
     ]
 }
 

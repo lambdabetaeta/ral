@@ -25,7 +25,7 @@ status: active
 >
 > Elaboration's loader links `Use(Arc<Module>)`, carrying checked `Toplevel`
 > and origin. A recursive check-time origin chain detects cycles and bounds
-> depth to 100; it is an argument, not shell state or seed data. Missing,
+> depth to 100; it is an argument, not shell state or marshalled data. Missing,
 > denied, ill-typed, cyclic and too-deep modules refuse the importer before
 > evaluation and cannot be caught by `try`. Read denials remain in the
 > dispatch trail at the `use`, including on static refusal.

@@ -647,36 +647,105 @@ mod probe_tests {
         assert_eq!(refused, Err(first));
     }
 
-    /// A parked fork is adopted once, and narrowed under the parent's own
-    /// installer — which, for a test engine, has no base lexicon to narrow by.
+    /// A child is narrowed under the parent's own installer, which here has
+    /// no base lexicon.
     #[test]
-    fn a_parked_fork_is_adopted_once_under_the_parent_installer() {
+    fn a_child_is_narrowed_under_the_parent_installer() {
         let transport = fresh();
-        let park = |grant| {
-            transport
-                .nursery
-                .park(crate::test_helper::core_shell().bequeath(grant))
-        };
-        let id = park(SpawnGrant::Inherit);
-        assert!(transport.adopt_parked(id).is_ok());
-        let again = transport
-            .adopt_parked(id)
-            .err()
-            .expect("a bequest adopts once");
-        assert_eq!(
-            again.reason,
-            crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NurseryMissing(
-                id.0.into()
-            ),))
-        );
+        let shell = crate::test_helper::core_shell();
+        let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+        let child = transport.child(&parent).expect("an inheriting child");
+        assert!(Arc::ptr_eq(&transport.runtime, &child.runtime));
         let based = transport
-            .adopt_parked(park(SpawnGrant::Base("confined".into())))
+            .child(&shell.marshal(SpawnGrant::Base("confined".into())).unwrap())
             .err()
             .expect("a bare engine has no base lexicon");
         assert_eq!(
             based.reason,
             crate::fact::Reason::State(Box::new(crate::fact::StateFailure::NoChildEngines))
         );
+    }
+
+    #[test]
+    fn identity_child_and_boot_read_the_same_parent() {
+        use crate::shell::runtime::{HandlerEntry, ValClos};
+
+        let transport = fresh();
+        let mut shell = crate::test_helper::core_shell();
+        shell
+            .run(Run::captured(
+                "let kept = 42; let arm = { |argv| return $kept }",
+                SourceOrigin::named("<parent>"),
+            ))
+            .expect_ran()
+            .into_settled()
+            .unwrap();
+        let arm = shell.env.get("arm").unwrap().clone();
+        shell.context.handlers.push(
+            vec![
+                HandlerEntry::ral_per_name("first".into(), arm.clone()),
+                HandlerEntry::ral_per_name("second".into(), arm.clone()),
+            ],
+            Some(arm.clone()),
+        );
+        shell
+            .context
+            .handlers
+            .push_handler(vec![HandlerEntry::ral_per_name("persistent".into(), arm)]);
+        shell.context.set_env_var("CHILD_CONTEXT", "kept").unwrap();
+        shell.context.args = vec!["first".into(), String::new()];
+        shell.seed_cwd(crate::path::CwdPath::new(std::env::temp_dir()).unwrap());
+        let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+        let child = transport.child(&parent).unwrap();
+        let booted = Engine::boot(&BARE, &Attach::child(attach(&BARE).engine, parent)).unwrap();
+        let identity = child.engine.lock();
+        let (a, b) = (&identity.shell, &booted.shell);
+
+        fn assert_arm(a: &ValClos, b: &ValClos) {
+            let (ac, ae) = a.block().expect("an arm");
+            let (bc, be) = b.block().expect("an arm");
+            assert_eq!(ac, bc);
+            assert_eq!(
+                ae.names().collect::<Vec<_>>(),
+                be.names().collect::<Vec<_>>()
+            );
+            for (name, binding) in ae.iter() {
+                assert_eq!(&binding.value, be.get(name).unwrap());
+                assert_eq!(binding.scheme, be.binding(name).unwrap().scheme);
+            }
+        }
+
+        assert_eq!(
+            a.env.names().collect::<Vec<_>>(),
+            b.env.names().collect::<Vec<_>>()
+        );
+        assert_eq!(a.env.get("kept"), b.env.get("kept"));
+        assert_arm(a.env.get("arm").unwrap(), b.env.get("arm").unwrap());
+        for (name, binding) in a.env.iter() {
+            assert_eq!(binding.scheme, b.env.binding(name).unwrap().scheme);
+        }
+        assert_eq!(
+            serde_json::to_value(a.context.with_handlers(())).unwrap(),
+            serde_json::to_value(b.context.with_handlers(())).unwrap()
+        );
+        let af = a.context.handlers.iter().collect::<Vec<_>>();
+        let bf = b.context.handlers.iter().collect::<Vec<_>>();
+        assert_eq!(af.len(), bf.len());
+        for (a, b) in af.into_iter().zip(bf) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.entries.len(), b.entries.len());
+            for (a, b) in a.entries.iter().zip(&b.entries) {
+                assert_eq!(a.name, b.name);
+                assert_eq!(a.arity, b.arity);
+                assert_arm(&a.thunk, &b.thunk);
+            }
+            match (&a.catch_all, &b.catch_all) {
+                (Some(a), Some(b)) => assert_arm(a, b),
+                (None, None) => {}
+                _ => panic!("catch-all presence differs"),
+            }
+        }
+        drop(identity);
     }
 }
 

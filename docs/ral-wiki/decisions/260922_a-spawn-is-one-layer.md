@@ -1,9 +1,17 @@
 ---
 status: active
-generated_at_commit: 451d1ab5
+generated_at_commit: f9ac94f8
 ---
 
 # A spawn is one layer, so `grant` is one field
+
+> **Amended 2026-11-12 — Marshalling:**
+> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> carries `SpawnGrant` unfrozen beside the image in `Marshalled` on both
+> seats. `Shell::child_of` re-holds inherited exclusions, constructs the
+> child, then resolves and pushes its one grant layer against its own cwd.
+> A replacement between writing and reading stays refused by the old
+> exclusion's identity and position. The one-layer and freeze laws stand.
 
 **At the root, `--base` and `--restrict` are two different acts; at a spawn they
 are the same act — pushing one layer onto a stack that is already there — so a
@@ -26,10 +34,10 @@ by pushing a layer the stack's per-check fold ANDs with the rest
 ([[map/exarch/policy|policy]]). Two acts, because at the root they have
 different effects.
 
-At a spawn they do not. `fork_child` (`exarch/src/fleet/desk.rs`) clones the
-parent's own `GrantStack` and pushes the named base onto the clone — a base
-pushed *as if it were a restrict*, with the parent's layers underneath it, so it
-can only narrow. `base_layer` already says this in its own doc comment: "the
+At a spawn they do not. `Shell::child_of` restores the parent's `GrantStack`
+from `Marshalled` and pushes the named base onto it — a base pushed *as if it
+were a restrict*, with the parent's layers underneath it, so it can only narrow.
+`base_layer` already says this in its own doc comment: "the
 stack is the meet, so a spawn narrowing a child only ever adds a layer; naming a
 base looser than the parent changes nothing once folded." There is therefore
 exactly one question at a spawn — *what single layer does this child get?* — and
@@ -82,9 +90,9 @@ declared table exists to prevent.
 
 ## The wire carries the record unfrozen
 
-`EngineSeed.grant` stops being a validated base tag and becomes
+`Marshalled` carries the image and
 `ral_core::SpawnGrant { Inherit, Base(String), Restrict(FOValue) }`. The
-`` `restrict `` arm crosses the wire as the **record**, undecoded.
+`` `restrict `` arm crosses as the **record**, undecoded, on either seat.
 
 That is not laziness about the wire format, it is where the freeze has to
 happen. A restriction record's `cwd:` / `~` / `tempdir:` sigils must resolve
@@ -97,12 +105,11 @@ the record preserves "a `Capabilities` has every path already resolved" as a
 **construction** invariant, which is exactly what licenses that type's
 unguarded `Serialize`.
 
-Both seats then resolve a grant through one function, `SpawnGrant::layer`:
-`` `inherit `` is no layer, `` `base `` reaches the host's own base lexicon
-(core has none — `policy::base_layer` on the desk, the `EngineInstaller`'s
-`GrantNarrower` in a guest), `` `restrict `` decodes the record against the
-child's cwd. Where the desk and `apply_seed` each held their own narrowing
-decision, there is now one.
+Both seats resolve a grant through `Shell::child_of` and
+`SpawnGrant::layer`: `` `inherit `` is no layer, `` `base `` reaches the
+host's own base lexicon through `GrantNarrower` (core has none), and
+`` `restrict `` decodes the record against the child's cwd. Construction
+pushes that layer last.
 
 ## No self-denial for a spawn's `` `restrict ``
 

@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c0905f5e
+verified_at_commit: f9ac94f8
 verified_at_date: 2026-11-12
 anchors: [Cancellation, Scope::poll, Break::stopped, Escape::Stopped, Shell::poll, Shell::scope, Shell::shield, Mooring::home, Scope::shielded, ScopeId, POLL_SLICE, final_poll, End, Stop, ExitCode, FailureCode, Break::cancelled, CollectState::recv, CollectState::cancel_all, ESCALATION, forward_ambient, Ambient, ControlSender::forward_signals, ControlSender::hear, ControlSender::aim, interrupt_epoch, Scope, ScopeNode, CancelCause, DurableRoot, request_interrupt, request_root_cancel, INTERRUPTS, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::join_session, Shell::cancel_handle, Disposition, install, RootCause, Control::End, grace_signal, signals_of, gesture_signal, GESTURES, gesture, TerminalHold, TerminalHold::hear, TerminalHold::reclaim, KeyAttribution, WaitOutcome::death, WaitOutcome::cancelled_by, ending, KILL_EXIT_CODE, Signal::of_status, Started::collect, CollectState::settle_lone, Group, Job::drain, JailCgroup::kill, Membership::owes, break_pipeline_group, escalation_pending, Cradle, Brood, BroodGuard, Frame::Gather, exit_brood, AgentHandle::stop, AgentMailbox, AgentAddress, Lease, Nursery, Joined, Host, JobId, dispatch_to_report, Scopes::open, Fatal, Transport::bind, Fatal::unbind, Machine, settle, resume, unwind, Frame::Acquire, Frame::Cleanup]
 ---
@@ -234,7 +234,7 @@ signal context. The two are different kinds of proposition.
   its parent; a call child hears the call.** `Terminated` reaches every one;
   an interrupt or a wall, striking a run's frame, reaches the run's call
   children and no session worker.
-- **A forked session** (`Shell::bequeath` and `Shell::child_of`) does not
+- **A child session** (`Shell::marshal` and `Shell::child_of`) does not
   independently subscribe to the host process's interrupts. Exarch supplies
   its exchange scope to each dispatch: identity parents beneath it; wire
   dispatchers translate its cause to an addressed `Control`. Engine drop

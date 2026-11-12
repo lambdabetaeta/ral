@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed1b37eb
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
@@ -87,9 +87,10 @@ working directory and scratch from its `FreezeCtx`, as one way of naming the sin
 [[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
 desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
 (`agent/desk/agents.rs`'s `fork_engine`, through core's
-`IdentityTransport::adopt_parked` or a sealed wire seed) takes the parent's forked shell — which
-carries the parent's own `GrantStack` — and pushes this layer onto it
-(`SpawnGrant::narrow_onto`), so the same stack that carries the root's
+`IdentityTransport::child(&parent)` or `Attach::child(engine, parent)`)
+relays `Marshalled` to `Shell::child_of`. The reader re-holds the inherited
+`GrantStack`; construction then pushes this layer through
+`SpawnGrant::narrow_onto`, so the same stack that carries the root's
 authority also carries a spawned child's attenuation. The stack's per-check
 fold ANDs every layer's evidence, so an added layer can only remove authority:
 a spawn can reduce a child's reach but never escalate it past the parent's —
@@ -152,7 +153,7 @@ via `include_str!`, ordered from most to least authority:
 - `edit-only` — reasonable's reads, writes to the working tree and scratch,
   network on; for patch/refactor jobs that never run a build;
 - `read-only` — reasonable's reads/exec, writes only to scratch;
-  the scratch and its tool homes are shared tree-wide, so a narrowed child can plant files a wider sibling runs (accepted; see [[decisions/261013_the-seed-rides-the-protocol-sealed|the-seed-rides-the-protocol-sealed]]);
+  the scratch and its tool homes are shared tree-wide, so a narrowed child can plant files a wider sibling runs (accepted; see [[decisions/261013_a-child-starts-from-its-parent-marshalled|a-child-starts-from-its-parent-marshalled]]);
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
   narrow base for additive `--extend`;
 - `confined` — offline build jail; host binaries by subpath, with explicit

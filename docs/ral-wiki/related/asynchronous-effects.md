@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 62f8f2a9
-verified_at_date: 2026-10-19
+verified_at_commit: f9ac94f8
+verified_at_date: 2026-11-12
 against: [design/engine-protocol, design/effects-handlers, design/agents]
 ---
 
@@ -53,7 +53,9 @@ adds a scope at which signals wait.**
   machinery ([[design/agents|agents]]).
 - **First-order payloads, not modal ones.** The sequel types code that may cross
   between processes with a modality. ral admits only first-order `FOValue`s at an
-  open payload position, and carries a forked session as opaque sealed bytes.
+  open payload position, and carries a child's parent as opaque `Marshalled`
+  bytes under either carrier. Only the receiving engine reads that image
+  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
 
 ## The same shape elsewhere
 

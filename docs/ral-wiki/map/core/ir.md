@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c0905f5e
+generated_at_commit: f9ac94f8
 generated_at_date: 2026-11-12
 covers_paths: [core/src/ir.rs, core/src/ir/]
 ---
@@ -10,9 +10,9 @@ covers_paths: [core/src/ir.rs, core/src/ir/]
 representation — the target of [[map/core/elaboration|elaboration]] and the input
 to the [[map/core/evaluator|evaluator]].
 
-A whole program is a `Toplevel { phrases, admits }`: `admits` holds imported
+A runtime program is a `Toplevel { phrases, admits }`: `admits` holds imported
 bindings' first-use contracts for readmission before execution; each
-`Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
+`Phrase` — `Define` (a top-level `let`, one `Closed` scheme per name the
 pattern binds,
 [[internals/type-inference|type-inference]]) or
 `Run` (anything else) — runs in order, extending the
@@ -20,8 +20,9 @@ session environment the next phrase sees. `Toplevel::referenced_names` is
 the phrase-level analogue of the `Comp`-level walk below, for the same lease
 ledger.
 
-**The tree is indexed by a phase.** `Val`, `CompKind`, `Prim`, `Exec`, their
-operand types and shared-node aliases take `P: Phase = Explicit`, a trait with
+**One IR grammar is indexed independently by phase and representation.**
+`Val`, `CompKind`, `Prim`, `Exec`, their operand types and shared-node aliases
+take `P: Phase = Explicit` and `D: IrData = RuntimeData`. `Phase` has
 one associated type per annotated position: `Bind` (a `CompKind::Bind`'s or
 `Phrase::Define`'s right-hand side), `Call` (a `CompKind::App`),
 `BindingCall` (a `CompKind::BindingCall`) and `Boundary` (`Exec.site`, an
@@ -32,16 +33,30 @@ carries sites.
 The checker's own `Inferring` phase holds holes and types there
 ([[map/core/typecheck|typecheck]]); readback alone turns it into `Explicit`.
 `Serial` marks the phases whose trees serialise: the skipped annotations
-default, sites cross. `Toplevel` is always checked. `Prim::map_operands`
-converts `Prim<P>` to `Prim<Q>`, preserving operand spans; inference's individual
-sub-rules retain their own operand order.
+default, sites cross. `Toplevel<D>` always uses `Explicit` phrases, regardless
+of the containing tree's phase. `Prim::map_operands` converts `Prim<P, D>`
+to `Prim<Q, D>` infallibly, preserving operand spans and the representation
+axis; inference's individual sub-rules retain their own operand order.
+
+`IrData` selects only the byte and scheme leaves: `RuntimeData` uses `Bytes`
+and `Closed`; marshal-private `RawData` uses `String` and `Arc<Scheme>`.
+`Val<P, D>::Bytes` holds `D::Bytes`; `DefineSchemes<D::Scheme>` holds the
+representation's definition schemes. Serde bounds terminate at these
+associated leaves, retaining explicit `P: Serial` and `Phrase`'s separate
+scheme bounds, without requiring serde on representation markers or recursive
+whole-tree bounds. Marshalling writes runtime IR directly and structurally
+decodes the same grammar as raw IR. `marshal/read/ir.rs` admits it before
+`ValClos::closure`, checking base64 and closing every nested linked-module
+scheme while preserving metadata and JSON paths
+([[map/core/transport|transport]]).
 
 Values, computations and shared nodes:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, records,
   maps, variants, thunks, variables, and runtime constants `Bytes`, `Builtin`
   and `Handle`. The elaborator writes none of those three; `Builtin` and
-  `Handle` are serde-skipped, crossing through `SerialValue` instead.
+  `Handle` are serde-skipped and occur only at a value closure's root,
+  crossing as `marshal::wire::Value::{Builtin, Handle}`.
   Forming a value executes no computation. Collection and thunk syntax share
   their `Arc` nodes: `Val::Thunk(Arc<ThunkNode>)`,
   `Val::List(Arc<ListNode>)`, `Val::Record`, and `Val::Map` (each
@@ -106,22 +121,27 @@ refinement.
   a computation's result without generalisation. Holes are skipped by serde.
 - `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`, `Gather`,
   `Audit`, `Tilde`, `Use` and `BindingCall` form the shell layer.
-  `BindingCall` is the only skipped computation variant: a bare head bound in
-  scope while the checker decides its splits. Readback makes it an `Exec`,
-  and it cannot occur in a checked tree. Runtime `CompKind::Builtin {
-  builtin, args }` is δ: a cached builtin η-expansion's λs bind `args`,
+  `BindingCall` and runtime `Builtin` are serde-skipped in both directions.
+  `BindingCall` is a bare head bound in scope while the checker decides its
+  splits. Readback makes it an `Exec`, and it cannot occur in a checked tree.
+  Runtime `CompKind::Builtin { builtin, args }` is δ: a cached builtin η-expansion's λs bind `args`,
   and its environment binds `builtin` to the entry itself. `Mentions` includes
   all these names; readback copies δ through. The elaborator writes none, and
   `ValClos::block` keeps η residuals from the checker.
-  Partial builtins are boxed λ residuals. Boundary partials remain expanded
-  over `Exec`, retaining their per-use checked site
+  Partial builtins are boxed λ residuals; marshalling writes their builtin
+  name, environment row and supplied count, then rebuilds the receiver's η
+  suffix through `BuiltinEntry::residual`. δ itself never crosses.
+  Boundary partials remain expanded over `Exec`, retaining their per-use
+  checked site
   ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
-- `Use(Arc<Module>)` holds a checked `Toplevel` and its `SourceOrigin`.
+- `Use(Arc<Module<D>>)` holds `Toplevel<D>` and its `SourceOrigin`; module
+  phrases remain `Explicit` even inside an `Inferring` tree.
   Elaboration links the one written path at check time; no path lookup remains
   for evaluation. The module is checked and run under Σ alone, and its public
-  schemes contain no weak variables. `Use` is total in every IR phase;
+  schemes contain no weak variables. Raw module schemes are admitted through
+  `Closed::new` recursively on child read. `Use` is total in every IR phase;
   `Toplevel::exported_schemes` supplies the importer's record type and the
-  evaluator's public-name projection. Seed encoding carries the linked tree
+  evaluator's public-name projection. Marshalling carries the linked tree
   and origin, so a closure containing `use` reads no file when resumed.
 - `Within { opts, body }` and `Grant { caps, body }` carry their options as
   one spread-free `Arc<FieldsNode>`, the same node as a record literal.
@@ -205,13 +225,15 @@ The IR owns the vocabulary it shares with the AST (`ir/pattern.rs`,
 `Display`), `BinaryOp` (`Arith`/`Compare`/`Eq`, each category its own enum), and
 `Redirects` with its stream-once binding. A pattern binds names, never carries
 a computation, so there is no parser syntax for elaboration to strip out
-([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). `Phrase<D = DefineSchemes, P = Explicit>`
-is indexed first by schemes, then phase: elaboration yields `Unchecked`
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+`Phrase<S = DefineSchemes, P = Explicit, D = RuntimeData>` keeps its scheme
+parameter independent of phase and representation: elaboration yields `Unchecked`
 (`Phrase<()>`, explicit-phase terms without schemes); inference returns
 `Phrase<LiveSchemes, Inferring>` carrying unsettled schemes. `DefineSchemes`
-holds `Closed` schemes. Only successful readback makes a `Toplevel`, so the
-evaluator cannot be handed unchecked IR. `Exec::argv` is `Argv`, a newtype over list slots admitting
-spreads (`positional()`, `arity()`). Value application instead has a fixed
+defaults to `Closed` schemes. Successful readback makes runtime `Toplevel`;
+child reads reconstruct it only after raw IR admission, so the evaluator
+cannot be handed unchecked IR. `Exec::argv` is `Argv`, a newtype over list
+slots admitting spreads (`positional()`, `arity()`). Value application instead has a fixed
 slice of arguments.
 
 `Mentions` (`pub(crate)`) is the trait a `Comp`, a `Val`, and each of the four
