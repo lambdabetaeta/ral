@@ -368,6 +368,7 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         (
             CompKind::Guard {
                 acquire: bytes(),
+                hole: (),
                 body: Val::Unit,
                 release: Val::Unit,
             },
@@ -376,6 +377,7 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         (
             CompKind::Guard {
                 acquire: Val::Unit,
+                hole: (),
                 body: bytes(),
                 release: Val::Unit,
             },
@@ -384,6 +386,7 @@ fn computation_fields_admit_nested_bytes_before_constructing_a_closure() {
         (
             CompKind::Guard {
                 acquire: Val::Unit,
+                hole: (),
                 body: Val::Unit,
                 release: bytes(),
             },

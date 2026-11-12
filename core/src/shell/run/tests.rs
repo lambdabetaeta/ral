@@ -1573,6 +1573,22 @@ fn a_guard_passes_its_resource_to_both_body_and_release() {
 }
 
 #[test]
+fn a_guard_binds_a_command_acquire_as_a_let_does() {
+    let (ending, out) = ran(
+        crate::test_helper::core_runtime(),
+        Run::captured(
+            "guard { echo res } { |r| return \"$r!\" } { |r _| echo $r }",
+            test_origin(),
+        ),
+    );
+    assert!(
+        matches!(&ending, End::Ok(value) if matches!(value.view(), View::String(s) if s.as_str() == "res!")),
+        "{ending:?}"
+    );
+    assert_eq!(out, "res\n");
+}
+
+#[test]
 fn a_guard_preserves_the_bodys_capture_grade() {
     let (ending, out) = ran(
         crate::test_helper::core_runtime(),

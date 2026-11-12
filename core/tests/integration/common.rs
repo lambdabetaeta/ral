@@ -102,6 +102,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             acquire,
             body,
             release,
+            ..
         } => {
             for v in [acquire, body, release] {
                 walk_val(v, visit);

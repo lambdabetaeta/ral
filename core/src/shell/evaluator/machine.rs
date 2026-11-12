@@ -732,6 +732,7 @@ impl<'m> Stack<'m> {
                 acquire,
                 body,
                 release,
+                ..
             } => {
                 // Acquire and Guard pop back to this depth; Cleanup and two Args need three slots.
                 self.room(3, shell)?;

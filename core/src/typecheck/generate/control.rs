@@ -200,7 +200,7 @@ impl Generator {
         release: &Val,
     ) -> (CompTy, CompKind<Inferring>) {
         let (acquired, acquire) = self.scope_body(acquire);
-        let resource = self.extract_return(&acquired);
+        let (resource, hole) = self.solver.binding(&acquired, None);
         let tail = self.solver.fresh_comp();
         let body = JoinArm::in_hand(body, None, vec![resource.clone()], Reason::GuardBody);
         let body = self.check_arm(&body, &body.shaped(tail.clone()));
@@ -218,6 +218,7 @@ impl Generator {
             tail,
             CompKind::Guard {
                 acquire,
+                hole,
                 body,
                 release,
             },

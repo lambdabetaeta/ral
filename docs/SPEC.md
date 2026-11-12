@@ -2193,7 +2193,9 @@ own failure.
 
 `guard ACQUIRE BODY RELEASE` runs in execution order. The acquisition returns
 a resource, the body receives it, and the release receives both the resource
-and how the body ended:
+and how the body ended. The resource is bound as `let` binds it (§17.5): a
+command's output is captured as a `String`, so `guard { mktemp -d } { |d| … }`
+receives the path:
 
 ```ral
 guard { temp-file } { |file|
@@ -6252,7 +6254,9 @@ The value-producing binding rules are CBPV's `to` and its boxing case:
 ```
 
 Both run `M`; `to-box` binds the residual function as a block. Output-producing
-bindings use capture below.
+bindings use capture below. A `guard`'s acquisition is the one other binding
+boundary: its resource is `bound τ C` without the `to-box` branch, so the
+checked `Guard` rule (§17.7) only ever sees `F_p R`.
 
 `bound τ C` relates the type C of a right-hand side to the type τ of its
 bound value. It never reads τ to decide a branch. For `F_ν A` with ν free,
@@ -6541,7 +6545,7 @@ body : U (F_ε A)
 within opts body : F_ε A
 grant  caps body : F_ε A
 
-acquire : U (F_ν R)    body : U (R -> F_ε A)
+acquire : U (F_p R)    body : U (R -> F_ε A)
 release : U (R -> ExitCase -> F_μ B)
 ------------------------------------------------ Guard
 guard acquire body release : F_ε A

@@ -169,6 +169,7 @@ impl Elaborator<'_> {
                     self,
                     CompKind::Guard {
                         acquire: self.to_val(acquire, binds),
+                        hole: (),
                         body: self.to_val(body, binds),
                         release: self.to_val(release, binds),
                     }

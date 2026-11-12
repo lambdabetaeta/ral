@@ -662,6 +662,7 @@ impl<P: Phase, D: IrData> Mentions for Comp<P, D> {
                 acquire,
                 body,
                 release,
+                ..
             } => {
                 acquire.mentions(out);
                 body.mentions(out);
@@ -805,8 +806,11 @@ pub enum CompKind<P: Phase = Explicit, D: IrData = RuntimeData> {
     },
     /// Shield `acquire`, then install the release before calling `body resource`.
     /// Shield `release resource exit_case`; preserve the body's outcome unless release halts.
+    /// `hole` binds the resource as a `let` does: a command acquire is captured.
     Guard {
         acquire: Val<P, D>,
+        #[serde(skip)]
+        hole: P::Bind,
         body: Val<P, D>,
         release: Val<P, D>,
     },

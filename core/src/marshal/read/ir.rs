@@ -213,10 +213,12 @@ fn admit_kind(kind: &CompKind<Explicit, RawData>) -> Result<CompKind, DecodeFail
         }),
         CompKind::Guard {
             acquire,
+            hole: (),
             body,
             release,
         } => Ok(CompKind::Guard {
             acquire: admit_val(acquire).map_err(|error| error.field("acquire").payload("Guard"))?,
+            hole: (),
             body: admit_val(body).map_err(|error| error.field("body").payload("Guard"))?,
             release: admit_val(release).map_err(|error| error.field("release").payload("Guard"))?,
         }),

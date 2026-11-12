@@ -138,6 +138,7 @@ pub(crate) fn every_variant() -> Vec<Arc<Comp>> {
     });
     let scope_guard = Spanned::synthetic(CompKind::Guard {
         acquire: var("r_guard_acquire"),
+        hole: (),
         body: var("r_guard_body"),
         release: var("r_guard_release"),
     });

@@ -195,10 +195,20 @@ impl<'a> Readback<'a> {
             },
             CompKind::Guard {
                 acquire,
+                hole,
                 body,
                 release,
             } => CompKind::Guard {
-                acquire: self.val(acquire),
+                acquire: match self.solution.mode(*hole) {
+                    Mode::Run => self.val(acquire),
+                    Mode::Capture => {
+                        let forced =
+                            Spanned::with_span(comp.span, CompKind::Force(self.val(acquire)));
+                        let captured = captured_string(forced, &mut self.synth_counter);
+                        Val::thunk(Arc::new(Spanned::with_span(comp.span, captured)))
+                    }
+                },
+                hole: (),
                 body: self.val(body),
                 release: self.val(release),
             },

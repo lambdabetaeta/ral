@@ -120,6 +120,7 @@ impl Generator {
                 acquire,
                 body,
                 release,
+                ..
             } => self.guard(acquire, body, release),
             CompKind::Audit { body } => self.audit(body),
             CompKind::Spawn { title, body } => self.spawn(title.as_ref(), body),

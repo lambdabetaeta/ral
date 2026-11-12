@@ -2,8 +2,8 @@
 status: active
 generated_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
 generated_at_date: 2026-11-11
-verified_at_commit: e67000a54ec3cbecefa1b52c3c593d70d98bc7f2
-verified_at_date: 2026-11-11
+verified_at_commit: c0905f5eb1a7b19494e55ecd15698ae4c07c5fd6
+verified_at_date: 2026-11-12
 anchors: [Frame::Acquire, Frame::Guard, Frame::Cleanup, ExitCase, guard_release, exit_case, would_run, Shell::shield, Scope::shielded, Cradle, spawn_child, launch_thread_stage]
 ---
 
@@ -72,6 +72,14 @@ Agreed 2026-11-10 and 2026-11-11. This amends
 The result is the body's `F^g α`; acquisition and release grades do not
 change it. In particular,
 `let x = guard { () } { |_| echo hi } { |_ _| () }` captures `hi`.
+
+> **Amended 2026-11-12.** The acquisition is a binding, so it binds as `let`
+> does ([[design/capture|grades and capture]]): a command acquisition is
+> captured, `guard { mktemp -d } { |d| … } …` giving `d` the path, and the
+> checked rule's acquire is `U (F^p R)`, not `U (F^ν R)` with ν free. A free
+> ν bound a `w` producer's `()` where `let` would have captured its output.
+> The checker shares `Solver::binding`; readback wraps a captured acquire as
+> `{ capture (force A) }`. `Ral/` Agda and the paper carry `F p R`.
 
 ## D5: bounds and evidence
 

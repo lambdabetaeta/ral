@@ -4,7 +4,8 @@ generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
 
 # Grades and capture: values at `let`
 
-**Only a `let` implicitly turns a command's output into a value.** A suspended
+**Only a binding — a `let`, or a `guard`'s acquisition — implicitly turns a
+command's output into a value.** A suspended
 match waits for the right-hand side's computation head and producer grade;
 successful unit readback inserts the chosen adaptation. It works through blocks, calls and names:
 `let f = { hostname }; let host = f` binds the host name.
@@ -46,6 +47,9 @@ A *grade* says how a computation produces its result, not whether it writes.
   `within` and `gather` preserve their body's type. `guard A K R` has `K`'s
   producer type and grade; acquisition and release contribute neither.
   `let x = guard { () } { |_| echo hi } { |_ _| () }` captures `hi`.
+- A `guard`'s acquisition binds its resource as a `let` does, through the same
+  suspended match minus boxing: `guard { mktemp -d } { |d| … } …` gives `d`
+  the path, and the checked core's acquire is always `F^p R`.
 
 A free unit producer can therefore stand as a command by unification, with no
 runtime conversion. A `let`-fixed `p` producer cannot. The rule reads types:
@@ -142,8 +146,8 @@ with `return ()` to supply a fresh unit producer.
 ## The whole computation is the buffer
 
 **Capture preserves exactly the bytes written by its body.** An inner `let`
-captures for itself; every other write, including a `guard` acquisition or
-release, goes to
+and a command `guard` acquisition capture for themselves; every other write,
+including a value-producing acquisition or any release, goes to
 the enclosing sink. `let x = !{ echo a; echo b }` binds `"a\nb"`, while
 `let x = !{ let y = echo a; echo b }` binds `"b"` and `y` is `"a"`.
 
