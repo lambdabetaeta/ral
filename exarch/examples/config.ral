@@ -20,6 +20,7 @@
 #     XAI_API_KEY           -> xai
 #     GEMINI_API_KEY        -> gemini
 #     DASHSCOPE_API_KEY     -> qwen
+#     META_API_KEY          -> meta
 #
 # This file is only for endpoints exarch cannot know: self-hosted or
 # non-famous.  The terminal expression must be a map

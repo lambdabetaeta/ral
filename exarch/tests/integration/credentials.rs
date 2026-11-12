@@ -111,6 +111,28 @@ fn available_service_resolves_trimmed_and_scrubs() {
     });
 }
 
+#[test]
+fn meta_key_is_captured_and_scrubbed() {
+    ral_core::isolated!(meta_key_is_captured_and_scrubbed, || {
+        with_env(&[("META_API_KEY", Some("  meta-secret  "))], || {
+            let store = CredentialStore::resolve_and_scrub(Vec::new());
+            assert!(matches!(
+                store.get(&fam("meta")),
+                Some(Credential::ApiKey(key)) if key == "meta-secret"
+            ));
+            assert!(std::env::var("META_API_KEY").is_err());
+            assert_eq!(
+                store
+                    .available()
+                    .into_iter()
+                    .map(|a| a.id)
+                    .collect::<Vec<_>>(),
+                vec![fam("meta")]
+            );
+        });
+    });
+}
+
 /// A set-but-malformed key (a pasted newline) does not become available,
 /// and — critically — is still scrubbed so the live secret cannot leak
 /// to a child a tool call spawns.

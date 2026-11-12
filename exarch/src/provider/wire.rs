@@ -1,20 +1,11 @@
 //! The wire door: the one place owned `genai` request values are made.
 //!
-//! Settled against the locked genai 0.7.0-beta.19 source
-//! (`adapter/adapters/anthropic/adapter_shared.rs:110-132,325-341`): the
-//! Anthropic adapter consumes the request by value and reads
-//! `msg.options.and_then(|o| o.cache_control)` purely as a value;
-//! `ChatMessage` carries no id, and neither the adapter (a unit struct)
-//! nor the client holds anything across calls. No behaviour is keyed on
-//! message identity, so marking a fresh clone per attempt is safe. On
-//! Anthropic the system prompt must stay an in-sequence `ChatMessage::system`
-//! rather than `ChatRequest.system`: the first system slot is barred from
-//! a cache-control mark (`:122-126`), while an in-sequence System-role
-//! message keeps one, and the request-level auto-mark defers to any
-//! message-level breakpoint (`:325-341`) — exactly what the last-two
-//! marks below guarantee. Every other adapter keeps the dedicated
-//! `system` field, untouched by any of this.
+//! In genai 0.7.3, Anthropic's `into_anthropic_request_parts` consumes
+//! message cache controls by value. Its dedicated system field loses the
+//! mark; an in-sequence system message preserves it. Explicit message marks
+//! suppress request-level auto-placement.
 
+use super::identity::HostedSearch;
 use super::request::Request;
 use genai::adapter::AdapterKind;
 use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool, ToolConfig};
@@ -68,12 +59,11 @@ pub(super) fn manufacture(
 /// The tools a request carries: the agent's own set, and the provider's
 /// built-in web search under `search`.
 ///
-/// Search rides only the adapters genai maps `Tool::new_web_search()` to a
-/// native tool for; the rest, plain `OpenAI` included, would serialise
-/// `ToolName::WebSearch` into the function-name slot as junk on the wire.
+/// Service policy grants search; the adapter whitelist only constrains its
+/// encoding. Plain `OpenAI` would encode it as a function name.
 pub(super) fn tool_defs(
     adapter: AdapterKind,
-    live_search: bool,
+    hosted_search: HostedSearch,
     request: Request<'_>,
 ) -> Vec<Tool> {
     let Request {
@@ -88,14 +78,16 @@ pub(super) fn tool_defs(
             AdapterKind::OpenAIResp | AdapterKind::Anthropic | AdapterKind::Gemini
         )
     {
-        let search = Tool::new_web_search();
-        tools.push(if live_search && adapter == AdapterKind::OpenAIResp {
-            search.with_config(ToolConfig::Custom(
-                serde_json::json!({"external_web_access": true}),
-            ))
-        } else {
-            search
-        });
+        let search = match hosted_search {
+            HostedSearch::None => return tools,
+            HostedSearch::ExternalAccess if adapter == AdapterKind::OpenAIResp => {
+                Tool::new_web_search().with_config(ToolConfig::Custom(
+                    serde_json::json!({"external_web_access": true}),
+                ))
+            }
+            HostedSearch::Native | HostedSearch::ExternalAccess => Tool::new_web_search(),
+        };
+        tools.push(search);
     }
     tools
 }
@@ -171,8 +163,10 @@ mod tests {
     }
 
     #[test]
-    fn live_search_enables_external_access_only_on_responses() {
-        let tools = tool_defs(AdapterKind::OpenAIResp, true, searching(true));
+    fn codex_enables_external_access_only_on_responses() {
+        let policy = crate::provider::Login::Codex.service().hosted_search;
+        assert_eq!(policy, HostedSearch::ExternalAccess);
+        let tools = tool_defs(AdapterKind::OpenAIResp, policy, searching(true));
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, ToolName::WebSearch);
         assert_eq!(
@@ -182,7 +176,7 @@ mod tests {
             )),
         );
         for adapter in [AdapterKind::Anthropic, AdapterKind::Gemini] {
-            let tools = tool_defs(adapter, true, searching(true));
+            let tools = tool_defs(adapter, policy, searching(true));
             assert_eq!(tools.len(), 1);
             assert_eq!(tools[0].name, ToolName::WebSearch);
             assert_eq!(tools[0].config, None);
@@ -190,10 +184,78 @@ mod tests {
     }
 
     #[test]
+    fn declared_protocols_and_scripted_service_grant_no_hosted_search() {
+        use crate::provider::{Auth, Service, ServiceName, scripted_service};
+
+        for adapter in [AdapterKind::OpenAIResp, AdapterKind::Anthropic] {
+            let service = Service::declared(
+                ServiceName::declared("local").unwrap(),
+                "https://local.example/v1/".into(),
+                adapter,
+                Auth::Keyless,
+            );
+            assert_eq!(service.hosted_search, HostedSearch::None);
+            assert!(tool_defs(adapter, service.hosted_search, searching(true)).is_empty());
+        }
+        let service = scripted_service();
+        assert!(
+            tool_defs(
+                service.model_protocol.default_adapter(),
+                service.hosted_search,
+                searching(true),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn first_party_hosted_search_is_preserved() {
+        use crate::provider::Account;
+
+        for name in ["openai", "anthropic", "gemini", "openai-chatgpt"] {
+            let service = Account::built_in(name).service;
+            assert_eq!(service.hosted_search, HostedSearch::Native);
+            let adapter = service.model_protocol.default_adapter();
+            let tools = tool_defs(adapter, service.hosted_search, searching(true));
+            assert_eq!(tools.len(), 1, "{name}");
+            assert_eq!(tools[0].name, ToolName::WebSearch);
+            assert_eq!(tools[0].config, None);
+            assert!(tool_defs(adapter, service.hosted_search, searching(false)).is_empty());
+        }
+    }
+
+    #[test]
+    fn unavailable_services_never_send_hosted_search() {
+        for name in [
+            "openrouter",
+            "deepseek",
+            "opencode-zen",
+            "opencode-go",
+            "xai",
+            "qwen",
+            "xai-grok",
+        ] {
+            let service = crate::provider::Account::built_in(name).service;
+            assert_eq!(service.hosted_search, HostedSearch::None);
+            for adapter in [
+                AdapterKind::OpenAIResp,
+                AdapterKind::Anthropic,
+                AdapterKind::Gemini,
+            ] {
+                assert!(tool_defs(adapter, service.hosted_search, searching(true)).is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_adapters_get_no_search_tool() {
         for adapter in [AdapterKind::OpenAI, AdapterKind::Xai] {
-            for live_search in [false, true] {
-                assert!(tool_defs(adapter, live_search, searching(true)).is_empty());
+            for policy in [
+                HostedSearch::None,
+                HostedSearch::Native,
+                HostedSearch::ExternalAccess,
+            ] {
+                assert!(tool_defs(adapter, policy, searching(true)).is_empty());
             }
         }
     }

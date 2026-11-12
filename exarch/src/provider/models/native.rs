@@ -8,6 +8,7 @@ use futures_util::{TryStreamExt, stream};
 use genai::adapter::AdapterKind;
 use reqwest::{Client, RequestBuilder};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const PAGE_SIZE: &str = "1000";
@@ -22,7 +23,7 @@ pub(super) struct Native {
     authorise: fn(RequestBuilder, &str) -> RequestBuilder,
     /// The page-size and cursor parameters; `None` for a listing that arrives whole.
     paging: Option<(&'static str, &'static str)>,
-    page: fn(&Value) -> Page,
+    page: fn(&Value) -> Result<Page, String>,
 }
 
 static ANTHROPIC: Native = Native {
@@ -66,13 +67,14 @@ impl Native {
         let client = &crate::provider::tls::client();
         // The cursor still to fetch (`None` before the first page); `None` once the last is in.
         stream::try_unfold(
-            Some(None),
-            move |pending: Option<Option<String>>| async move {
+            (Some(None), HashSet::new()),
+            move |(pending, mut seen): (Option<Option<String>>, HashSet<String>)| async move {
                 let Some(cursor) = pending else {
                     return Ok(None);
                 };
                 let (models, next) = self.fetch(client, account, key, cursor.as_deref()).await?;
-                Ok(Some((models, next.map(Some))))
+                record_cursor(next.as_deref(), &mut seen)?;
+                Ok(Some((models, (next.map(Some), seen))))
             },
         )
         .try_concat()
@@ -105,7 +107,7 @@ impl Native {
             .json()
             .await
             .map_err(|e| format!("unreadable listing: {e}"))?;
-        Ok((self.page)(&body))
+        (self.page)(&body)
     }
 
     /// The account's `models` URL — its declared endpoint, else this listing's
@@ -123,64 +125,98 @@ fn window(wire: &Value) -> Option<u64> {
     wire.as_u64().filter(|&n| n > 0)
 }
 
-fn id_of(entry: &Value, key: &str) -> Option<String> {
-    entry.get(key)?.as_str().map(str::to_owned)
+fn catalog<'a>(body: &'a Value, key: &str) -> Result<&'a [Value], String> {
+    body.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("invalid model listing: `{key}` must be an array"))
+}
+
+fn id_of(entry: &Value, key: &str) -> Result<String, String> {
+    entry
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("invalid model listing: `{key}` must be a non-empty string"))
+}
+
+fn record_cursor(cursor: Option<&str>, seen: &mut HashSet<String>) -> Result<(), String> {
+    if let Some(cursor) = cursor
+        && !seen.insert(cursor.to_owned())
+    {
+        return Err(
+            "invalid model listing: pagination cursor repeated; refusing to fetch the same page again"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// One page of Anthropic's `GET /models`, and the `after_id` of the next.
-fn anthropic_page(body: &Value) -> Page {
-    let listed = body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            Some(Listed {
+fn anthropic_page(body: &Value) -> Result<Page, String> {
+    let listed = catalog(body, "data")?
+        .iter()
+        .map(|m| {
+            Ok(Listed {
                 id: id_of(m, "id")?,
                 context_window: window(&m["max_input_tokens"]),
             })
         })
-        .collect();
-    let next = body["has_more"]
+        .collect::<Result<_, String>>()?;
+    let has_more = body["has_more"]
         .as_bool()
-        .unwrap_or(false)
-        .then(|| id_of(body, "last_id"))
-        .flatten();
-    (listed, next)
+        .ok_or("invalid model listing: `has_more` must be a boolean")?;
+    let next = has_more.then(|| id_of(body, "last_id")).transpose()?;
+    Ok((listed, next))
 }
 
 /// `DeepSeek`'s `GET /models`, which has no paging.
-fn deepseek_page(body: &Value) -> Page {
-    let listed = body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
-            Some(Listed {
+fn deepseek_page(body: &Value) -> Result<Page, String> {
+    let listed = catalog(body, "data")?
+        .iter()
+        .map(|m| {
+            Ok(Listed {
                 id: id_of(m, "id")?,
                 context_window: window(&m["context_window"]),
             })
         })
-        .collect();
-    (listed, None)
+        .collect::<Result<_, String>>()?;
+    Ok((listed, None))
 }
 
 /// One page of Gemini's `GET /models`, and the `pageToken` of the next.
-fn gemini_page(body: &Value) -> Page {
-    let listed = body["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| {
+fn gemini_page(body: &Value) -> Result<Page, String> {
+    let body = body
+        .as_object()
+        .ok_or("invalid model listing: Gemini response must be an object")?;
+    // ProtoJSON omits empty repeated fields and accepts null as unset.
+    let models = match body.get("models") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(models)) => models.as_slice(),
+        Some(_) => return Err("invalid model listing: `models` must be an array".into()),
+    };
+    let listed = models
+        .iter()
+        .map(|m| {
             let name = id_of(m, "name")?;
-            Some(Listed {
-                id: name
-                    .strip_prefix("models/")
-                    .map_or_else(|| name.clone(), str::to_owned),
+            let id = name.strip_prefix("models/").unwrap_or(&name);
+            if id.trim().is_empty() {
+                return Err("invalid model listing: `name` must contain a model ID".into());
+            }
+            Ok(Listed {
+                id: id.to_owned(),
                 context_window: window(&m["inputTokenLimit"]),
             })
         })
-        .collect();
-    (listed, id_of(body, "nextPageToken"))
+        .collect::<Result<_, String>>()?;
+    let next = match body.get("nextPageToken") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(token)) if token.is_empty() => None,
+        Some(Value::String(token)) => Some(token.clone()),
+        Some(_) => return Err("invalid model listing: `nextPageToken` must be a string".into()),
+    };
+    Ok((listed, next))
 }
 
 #[cfg(test)]
@@ -197,7 +233,7 @@ mod tests {
             "has_more": true,
             "last_id": "claude-old",
         });
-        let (listed, next) = anthropic_page(&body);
+        let (listed, next) = anthropic_page(&body).unwrap();
         assert_eq!(
             listed,
             vec![
@@ -210,7 +246,7 @@ mod tests {
         );
         assert_eq!(next.as_deref(), Some("claude-old"));
         let last = serde_json::json!({"data": [], "has_more": false, "last_id": "x"});
-        assert_eq!(anthropic_page(&last).1, None);
+        assert_eq!(anthropic_page(&last).unwrap().1, None);
     }
 
     #[test]
@@ -219,7 +255,7 @@ mod tests {
             {"id": "deepseek-flash", "context_window": 1_000_000},
             {"id": "deepseek-zero", "context_window": 0},
         ]});
-        let (listed, next) = deepseek_page(&body);
+        let (listed, next) = deepseek_page(&body).unwrap();
         assert_eq!(listed[0].context_window, Some(1_000_000));
         assert_eq!(listed[1], Listed::bare("deepseek-zero"));
         assert_eq!(next, None);
@@ -231,7 +267,7 @@ mod tests {
             "models": [{"name": "models/gemini-3-pro", "inputTokenLimit": 1_048_576}],
             "nextPageToken": "tok",
         });
-        let (listed, next) = gemini_page(&body);
+        let (listed, next) = gemini_page(&body).unwrap();
         assert_eq!(
             listed,
             vec![Listed {
@@ -240,5 +276,179 @@ mod tests {
             }]
         );
         assert_eq!(next.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn empty_catalogs_are_valid() {
+        for (native, body) in [
+            (
+                &ANTHROPIC,
+                serde_json::json!({"data": [], "has_more": false}),
+            ),
+            (&DEEPSEEK, serde_json::json!({"data": []})),
+            (&GEMINI, serde_json::json!({"models": []})),
+            (
+                &GEMINI,
+                serde_json::json!({"models": [], "nextPageToken": ""}),
+            ),
+        ] {
+            assert_eq!((native.page)(&body).unwrap(), (vec![], None));
+        }
+    }
+
+    #[test]
+    fn rest_catalog_arrays_are_required() {
+        for (native, key) in [(&ANTHROPIC, "data"), (&DEEPSEEK, "data")] {
+            assert!((native.page)(&serde_json::json!({"has_more": false})).is_err());
+            for invalid in [
+                Value::Null,
+                serde_json::json!(false),
+                serde_json::json!(0),
+                serde_json::json!("not an array"),
+                serde_json::json!({}),
+            ] {
+                let mut body = serde_json::json!({"has_more": false});
+                body[key] = invalid;
+                assert!((native.page)(&body).unwrap_err().contains(key));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ids_reject_the_whole_page() {
+        for (native, array, id) in [
+            (&ANTHROPIC, "data", "id"),
+            (&DEEPSEEK, "data", "id"),
+            (&GEMINI, "models", "name"),
+        ] {
+            for invalid in [
+                Value::Null,
+                serde_json::json!({}),
+                serde_json::json!({(id): null}),
+                serde_json::json!({(id): 42}),
+                serde_json::json!({(id): false}),
+                serde_json::json!({(id): []}),
+                serde_json::json!({(id): {}}),
+                serde_json::json!({(id): ""}),
+                serde_json::json!({(id): "   "}),
+            ] {
+                let mut body = serde_json::json!({"has_more": false});
+                body[array] = serde_json::json!([{(id): "valid-model"}, invalid]);
+                assert!((native.page)(&body).unwrap_err().contains(id));
+            }
+        }
+        for name in ["models/", "models/   "] {
+            let body = serde_json::json!({"models": [{"name": name}]});
+            assert!(gemini_page(&body).is_err());
+        }
+    }
+
+    #[test]
+    fn optional_windows_remain_unknown() {
+        for (native, array, id, window) in [
+            (&ANTHROPIC, "data", "id", "max_input_tokens"),
+            (&DEEPSEEK, "data", "id", "context_window"),
+            (&GEMINI, "models", "name", "inputTokenLimit"),
+        ] {
+            let mut body = serde_json::json!({"has_more": false});
+            body[array] = serde_json::json!([
+                {(id): "absent"},
+                {(id): "null", (window): null},
+                {(id): "zero", (window): 0},
+            ]);
+            let (listed, _) = (native.page)(&body).unwrap();
+            assert_eq!(listed.len(), 3);
+            assert!(listed.iter().all(|model| model.context_window.is_none()));
+        }
+    }
+
+    #[test]
+    fn anthropic_requires_complete_paging_metadata() {
+        assert!(anthropic_page(&serde_json::json!({"data": []})).is_err());
+        for has_more in [
+            Value::Null,
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let body = serde_json::json!({"data": [], "has_more": has_more});
+            assert!(anthropic_page(&body).unwrap_err().contains("has_more"));
+        }
+        assert!(anthropic_page(&serde_json::json!({"data": [], "has_more": true})).is_err());
+        for last_id in [
+            Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!("   "),
+        ] {
+            let body = serde_json::json!({"data": [], "has_more": true, "last_id": last_id});
+            assert!(anthropic_page(&body).unwrap_err().contains("last_id"));
+        }
+    }
+
+    #[test]
+    fn gemini_accepts_proto_json_defaults() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"models": null}),
+            serde_json::json!({"nextPageToken": null}),
+            serde_json::json!({"models": null, "nextPageToken": null}),
+            serde_json::json!({"models": [], "nextPageToken": null}),
+        ] {
+            assert_eq!(gemini_page(&body).unwrap(), (vec![], None));
+        }
+    }
+
+    #[test]
+    fn gemini_rejects_malformed_envelopes() {
+        for body in [Value::Null, serde_json::json!([]), serde_json::json!(42)] {
+            assert!(gemini_page(&body).unwrap_err().contains("object"));
+        }
+        for models in [
+            serde_json::json!(true),
+            serde_json::json!(42),
+            serde_json::json!("not an array"),
+            serde_json::json!({}),
+        ] {
+            let body = serde_json::json!({"models": models});
+            assert!(gemini_page(&body).unwrap_err().contains("models"));
+        }
+    }
+
+    #[test]
+    fn gemini_rejects_non_string_tokens() {
+        for token in [
+            serde_json::json!(42),
+            serde_json::json!(false),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let body = serde_json::json!({"models": [], "nextPageToken": token});
+            assert!(gemini_page(&body).unwrap_err().contains("nextPageToken"));
+        }
+    }
+
+    #[test]
+    fn repeated_cursors_are_rejected_without_disclosing_them() {
+        for cursors in [
+            vec!["secret-a", "secret-a"],
+            vec!["secret-a", "secret-b", "secret-a"],
+        ] {
+            let mut seen = HashSet::new();
+            record_cursor(None, &mut seen).unwrap();
+            for cursor in &cursors[..cursors.len() - 1] {
+                record_cursor(Some(cursor), &mut seen).unwrap();
+            }
+            let error = record_cursor(cursors.last().copied(), &mut seen).unwrap_err();
+            assert!(error.contains("cursor repeated"));
+            assert!(!error.contains("secret"));
+        }
+        let mut seen = HashSet::new();
+        record_cursor(Some("last"), &mut seen).unwrap();
+        record_cursor(None, &mut seen).unwrap();
     }
 }

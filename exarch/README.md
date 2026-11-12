@@ -98,9 +98,13 @@ environment at startup so no spawned child inherits them.
 | `opencode-go`  | `OPENCODE_API_KEY`   |
 | `xai`          | `XAI_API_KEY`        |
 | `qwen`         | `DASHSCOPE_API_KEY`  |
+| `meta`         | `META_API_KEY`       |
 | `openai-chatgpt` | OAuth browser sign-in |
 | `openai-codex` | OAuth browser or device sign-in |
 | `xai-grok` | OAuth device sign-in |
+
+`meta` uses the Meta Model API's Responses endpoint with an API key; no
+Meta sign-in is required or provided.
 
 `opencode-zen` and `opencode-go` share one `OPENCODE_API_KEY` — one account
 key, two endpoints — so setting it makes both available. A key value with a
@@ -111,7 +115,8 @@ A **custom or self-hosted endpoint** exarch has no built-in knowledge of is
 declared in `$XDG_CONFIG_HOME/exarch/config.ral` with its base URL and wire
 protocol, and `` key: `none `` if it checks no key. The file never holds a
 key: an endpoint named `groq` reads `GROQ_API_KEY`, else its saved key. See
-[`examples/config.ral`](examples/config.ral) for the format.
+[`examples/config.ral`](examples/config.ral) for the format. A protocol
+declaration does not enable provider-hosted search.
 
 **Three login services** keep credentials outside the environment, with
 multiple independently selectable accounts on each:

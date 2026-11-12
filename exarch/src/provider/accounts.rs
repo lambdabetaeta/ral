@@ -78,7 +78,11 @@ fn entry(store: &CredentialStore, account: &Account, available: &[Account]) -> E
     let (endpoint, protocol) = if withdrawable {
         (
             account.service.endpoint.clone(),
-            identity::protocol_for_adapter(account.service.adapter).map(str::to_string),
+            account
+                .service
+                .model_protocol
+                .declaration_protocol()
+                .map(str::to_string),
         )
     } else {
         (None, None)

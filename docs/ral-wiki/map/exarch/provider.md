@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c485695114d984277a516d253ba847ad19ef185d
-generated_at_date: 2026-11-11
+generated_at_commit: 365f671bc1f78830cbf6a986e67bf6473c53c374
+generated_at_date: 2026-11-12
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/wallet.rs, exarch/src/config.rs, exarch/src/tui/model_picker.rs, exarch/src/tui/login.rs, exarch/src/tui/providers.rs, exarch/src/tui/commands.rs]
 ---
 
@@ -54,18 +54,26 @@ borrows the service's name.
   actually present; there is no `from_str`, and adding one would reintroduce
   the ambiguity the type exists to prevent.
 
-`built_in_services()` is the table — nine key-bearing services (Anthropic,
-OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen, opencode Go, xAI, Qwen)
+`built_in_services()` is the table — ten key-bearing services (Anthropic,
+OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen, opencode Go, xAI, Qwen, Meta)
 plus `Login::ALL`'s `openai-chatgpt`, `openai-codex` and `xai-grok` — as struct literals rather than a value enum. A declared
 endpoint is the *same struct* parsed from a hand-written `config.ral`, with
 the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
 not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
 `Service::routes` is true for OpenRouter alone, and is what admits a `Via`, so
 no code compares a service name against the string `"openrouter"`.
+`Service::model_protocol` is `ModelProtocol::Fixed(adapter)` or `OpenAI`'s
+model-dependent Completions/Responses split; adapter selection never dispatches
+on a service name. `Service::hosted_search` separately states whether the
+service supplies native search or the external-access form Codex uses.
+Declared endpoints advertise no hosted search merely by sharing a protocol.
 `Service::auth` says how a service authenticates — `Key(var)`, `OAuth(Login)`,
 or `Keyless` — and never the secret itself. A declared endpoint's `var` is
 `identity::key_var`'s `{NAME}_API_KEY`, never written in the declaration;
 `Keyless` is the declaration's `` key: `none ``, a fact about the server.
+`meta` binds `META_API_KEY` to `https://api.meta.ai/v1/` with fixed Responses
+encoding, metered billing and no hosted search. Its authenticated model list
+uses the same endpoint's `/models` through genai; it adds no sign-in flow.
 
 **An account and its authentication have one home.** `CredentialStore` owns
 ordered `AccountEntry` values, each holding an account and `AccountAuth`: a
@@ -481,7 +489,10 @@ disk-caches both paths:
   `models/native.rs` — base URL, how the key is presented, paging, page
   parser — and `Native::of` is the only place an adapter picks one. Every
   listing is `Vec<Listed { id, context_window }>`, and the picker sees only
-  the names.
+  the names. Native parsers refuse malformed catalog envelopes, model IDs and
+  pagination metadata; repeated cursors fail instead of revisiting a page.
+  A legitimate empty array remains an empty catalog, not a parse failure;
+  Gemini's omitted or null fields retain their ProtoJSON default semantics.
 - `models::list_login` dispatches after the shared stale-token check.
   `plan_models` preserves server order, `visibility == "list"` and context
   windows for Chatgpt's `https://api.openai.com/v1/models` and Codex's backend
@@ -742,9 +753,10 @@ the ChatGPT plan route rejects outright (rust-genai #273),
 so every other adapter carries its system prompt in the request's own
 `system` field — where the Responses adapter's `instructions` string wants it
 anyway — and leans on the per-process `prompt_cache_key` alone, which genai
-reads as intent for the free implicit cache. `tool_defs` also receives the
-selected `Service`, so hosted search can distinguish the two Responses routes.
-Alongside the agent's [[map/exarch/tools|`Toolset`]], search is carried on
-`OpenAIResp`, `Anthropic` and `Gemini`; only Codex receives the legacy
-`external_web_access: true` configuration. Chatgpt retains its default search
-form. The bit is [[map/exarch/agent|agent]]'s `search`.
+reads as intent for the free implicit cache. `tool_defs` receives the selected
+service's `HostedSearch` policy through its transport. The policy admits
+search; the `OpenAIResp`, `Anthropic` and `Gemini` adapter whitelist only
+constrains its encoding. Codex receives `external_web_access: true` on
+Responses; Chatgpt uses the native form. Declared endpoints and services
+without hosted search send no search tool. The request bit is
+[[map/exarch/agent|agent]]'s `search`.

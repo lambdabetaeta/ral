@@ -103,7 +103,8 @@ impl std::fmt::Display for AccountId {
 pub struct Service {
     pub name: ServiceName,
     pub endpoint: Option<String>,
-    pub adapter: AdapterKind,
+    pub model_protocol: ModelProtocol,
+    pub hosted_search: HostedSearch,
     pub auth: Auth,
     /// The sole authority on whether this service's turns cost money.
     pub billing: Billing,
@@ -112,6 +113,53 @@ pub struct Service {
     /// below compares a service name against the string "openrouter".
     pub routes: bool,
     pub meter: Meter,
+}
+
+/// How a service selects its wire encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelProtocol {
+    Fixed(AdapterKind),
+    OpenAI,
+}
+
+impl ModelProtocol {
+    /// Only a fixed protocol can round-trip through a declaration.
+    pub fn declaration_protocol(self) -> Option<&'static str> {
+        match self {
+            Self::Fixed(adapter) => PROTOCOL_ADAPTERS
+                .iter()
+                .find(|(_, known)| *known == adapter)
+                .map(|(name, _)| *name),
+            Self::OpenAI => None,
+        }
+    }
+
+    /// The adapter used by default and for model listings.
+    pub fn default_adapter(self) -> AdapterKind {
+        match self {
+            Self::Fixed(adapter) => adapter,
+            Self::OpenAI => AdapterKind::OpenAIResp,
+        }
+    }
+
+    /// Vendor-name guesses outside `OpenAI`'s two encodings are discarded.
+    pub fn adapter_for_model(self, model: &str) -> AdapterKind {
+        match self {
+            Self::Fixed(adapter) => adapter,
+            Self::OpenAI => match AdapterKind::from_model(model) {
+                Ok(adapter @ (AdapterKind::OpenAI | AdapterKind::OpenAIResp)) => adapter,
+                _ => AdapterKind::OpenAIResp,
+            },
+        }
+    }
+}
+
+/// Hosted search capability, independent of wire encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedSearch {
+    None,
+    Native,
+    ExternalAccess,
 }
 
 /// Where this service publishes what is left of its allowance, or that it
@@ -154,19 +202,31 @@ impl Login {
     pub const ALL: [Self; 3] = [Self::Chatgpt, Self::Codex, Self::Grok];
 
     pub fn service(self) -> Service {
-        let (name, adapter, meter) = match self {
+        let (name, adapter, meter, hosted_search) = match self {
             Self::Chatgpt => (
                 "openai-chatgpt",
                 AdapterKind::OpenAIResp,
                 Meter::Unpublished,
+                HostedSearch::Native,
             ),
-            Self::Codex => ("openai-codex", AdapterKind::OpenAIResp, Meter::Codex),
-            Self::Grok => ("xai-grok", AdapterKind::Xai, Meter::Unpublished),
+            Self::Codex => (
+                "openai-codex",
+                AdapterKind::OpenAIResp,
+                Meter::Codex,
+                HostedSearch::ExternalAccess,
+            ),
+            Self::Grok => (
+                "xai-grok",
+                AdapterKind::Xai,
+                Meter::Unpublished,
+                HostedSearch::None,
+            ),
         };
         Service {
             name: ServiceName::built_in(name),
             endpoint: None,
-            adapter,
+            model_protocol: ModelProtocol::Fixed(adapter),
+            hosted_search,
             auth: Auth::OAuth(self),
             billing: Billing::FlatRate,
             routes: false,
@@ -225,7 +285,8 @@ impl Service {
         Self {
             name,
             endpoint: Some(endpoint),
-            adapter,
+            model_protocol: ModelProtocol::Fixed(adapter),
+            hosted_search: HostedSearch::None,
             auth,
             billing: Billing::Metered,
             routes: false,
@@ -344,93 +405,115 @@ fn unqualified(account: &Account) -> String {
     named
 }
 
-/// The built-in table: nine key-bearing services followed by sign-in routes.
+/// The built-in table: ten key-bearing services followed by sign-in routes.
 pub fn built_in_services() -> Vec<Service> {
-    let keyed = |name, endpoint: Option<&str>, adapter, env, billing, meter| Service {
-        name: ServiceName::built_in(name),
-        endpoint: endpoint.map(str::to_string),
-        adapter,
-        auth: Auth::Key(String::from(env)),
-        billing,
-        routes: false,
-        meter,
-    };
+    let keyed =
+        |name, endpoint: Option<&str>, model_protocol, env, billing, meter, hosted_search| {
+            Service {
+                name: ServiceName::built_in(name),
+                endpoint: endpoint.map(str::to_string),
+                model_protocol,
+                hosted_search,
+                auth: Auth::Key(String::from(env)),
+                billing,
+                routes: false,
+                meter,
+            }
+        };
     let mut services = vec![
         keyed(
             "anthropic",
             None,
-            AdapterKind::Anthropic,
+            ModelProtocol::Fixed(AdapterKind::Anthropic),
             "ANTHROPIC_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::Native,
         ),
         keyed(
             "openai",
             None,
-            AdapterKind::OpenAIResp,
+            ModelProtocol::OpenAI,
             "OPENAI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::Native,
         ),
         Service {
             routes: true,
             ..keyed(
                 "openrouter",
                 Some("https://openrouter.ai/api/v1/"),
-                AdapterKind::OpenAI,
+                ModelProtocol::Fixed(AdapterKind::OpenAI),
                 "OPENROUTER_API_KEY",
                 Billing::Metered,
                 Meter::OpenRouterBudget,
+                HostedSearch::None,
             )
         },
         keyed(
             "deepseek",
             None,
-            AdapterKind::DeepSeek,
+            ModelProtocol::Fixed(AdapterKind::DeepSeek),
             "DEEPSEEK_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::None,
         ),
         keyed(
             "gemini",
             None,
-            AdapterKind::Gemini,
+            ModelProtocol::Fixed(AdapterKind::Gemini),
             "GEMINI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::Native,
         ),
         // opencode issues one key per account; the endpoint alone tells Zen from Go.
         keyed(
             "opencode-zen",
             Some("https://opencode.ai/zen/v1/"),
-            AdapterKind::OpenAI,
+            ModelProtocol::Fixed(AdapterKind::OpenAI),
             "OPENCODE_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::None,
         ),
         keyed(
             "opencode-go",
             Some("https://opencode.ai/zen/go/v1/"),
-            AdapterKind::OpenAI,
+            ModelProtocol::Fixed(AdapterKind::OpenAI),
             "OPENCODE_API_KEY",
             Billing::FlatRate,
             Meter::Unpublished,
+            HostedSearch::None,
         ),
         keyed(
             "xai",
             None,
-            AdapterKind::Xai,
+            ModelProtocol::Fixed(AdapterKind::Xai),
             "XAI_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::None,
         ),
         keyed(
             "qwen",
             Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/"),
-            AdapterKind::OpenAI,
+            ModelProtocol::Fixed(AdapterKind::OpenAI),
             "DASHSCOPE_API_KEY",
             Billing::Metered,
             Meter::Unpublished,
+            HostedSearch::None,
+        ),
+        keyed(
+            "meta",
+            Some("https://api.meta.ai/v1/"),
+            ModelProtocol::Fixed(AdapterKind::OpenAIResp),
+            "META_API_KEY",
+            Billing::Metered,
+            Meter::Unpublished,
+            HostedSearch::None,
         ),
     ];
     services.extend(Login::ALL.map(Login::service));
@@ -447,32 +530,12 @@ pub fn scripted_service() -> Service {
     Service {
         name: ServiceName::built_in("scripted"),
         endpoint: None,
-        adapter: AdapterKind::OpenAIResp,
+        model_protocol: ModelProtocol::Fixed(AdapterKind::OpenAIResp),
+        hosted_search: HostedSearch::None,
         auth: Auth::Keyless,
         billing: Billing::Metered,
         routes: false,
         meter: Meter::Unpublished,
-    }
-}
-
-/// The wire adapter for a specific `model` under `service`.
-///
-/// Only `OpenAI` splits by model: some of its models still speak the classic
-/// Chat Completions API rather than Responses. `AdapterKind::from_model`
-/// name-sniffs across every vendor, so a verdict outside the two `OpenAI`
-/// adapters is a coincidental match on another vendor's convention, not
-/// `OpenAI`'s own split, and is discarded.
-///
-/// This is the one place a service is compared against a name string, because
-/// that split is a fact about one vendor's models rather than a property any
-/// declaration could carry.
-pub(super) fn adapter_for_model(service: &Service, model: &str) -> AdapterKind {
-    if service.name.as_str() != "openai" {
-        return service.adapter;
-    }
-    match AdapterKind::from_model(model).unwrap_or(AdapterKind::OpenAIResp) {
-        adapter @ (AdapterKind::OpenAI | AdapterKind::OpenAIResp) => adapter,
-        _ => AdapterKind::OpenAIResp,
     }
 }
 
@@ -508,18 +571,6 @@ pub fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind,
         })
 }
 
-/// The protocol keyword an adapter was decoded from.
-///
-/// `None` for an adapter no declaration could have named: [`crate::config::save_declared`]
-/// refuses to write one rather than silently filing it under the wrong
-/// protocol.
-pub fn protocol_for_adapter(adapter: AdapterKind) -> Option<&'static str> {
-    PROTOCOL_ADAPTERS
-        .iter()
-        .find(|(_, known)| *known == adapter)
-        .map(|(name, _)| *name)
-}
-
 /// The protocol keywords a window offers, most familiar first — the one table
 /// above, read as a list.
 pub fn protocols() -> Vec<&'static str> {
@@ -531,16 +582,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn openai_service_keeps_openai_adapter_split() {
-        let openai = Account::built_in("openai").service;
-        assert_eq!(adapter_for_model(&openai, "gpt-4.1"), AdapterKind::OpenAI);
+    fn openai_model_split_survives_service_renaming() {
+        let mut service = Account::built_in("openai").service;
+        service.name = ServiceName::declared("renamed").unwrap();
+        let protocol = service.model_protocol;
+        assert_eq!(protocol.default_adapter(), AdapterKind::OpenAIResp);
+        assert_eq!(protocol.adapter_for_model("gpt-4.1"), AdapterKind::OpenAI);
         assert_eq!(
-            adapter_for_model(&openai, "gpt-5.5"),
+            protocol.adapter_for_model("gpt-5.5"),
             AdapterKind::OpenAIResp
         );
+        for model in ["claude-opus-4", "gemini-2.5-pro", "unknown-model"] {
+            assert_eq!(protocol.adapter_for_model(model), AdapterKind::OpenAIResp);
+        }
+        let mut fixed = Account::built_in("deepseek").service;
+        fixed.name = ServiceName::declared("openai").unwrap();
         assert_eq!(
-            adapter_for_model(&Account::built_in("deepseek").service, "gpt-5.5"),
+            fixed.model_protocol.adapter_for_model("gpt-5.5"),
             AdapterKind::DeepSeek
+        );
+    }
+
+    #[test]
+    fn meta_uses_fixed_responses_and_metered_key_policy() {
+        let service = Account::built_in("meta").service;
+        assert_eq!(service.endpoint.as_deref(), Some("https://api.meta.ai/v1/"));
+        assert_eq!(service.auth, Auth::Key("META_API_KEY".into()));
+        assert_eq!(
+            service.model_protocol,
+            ModelProtocol::Fixed(AdapterKind::OpenAIResp)
+        );
+        for model in ["gpt-4.1", "claude-opus-4", "unfamiliar-meta-model"] {
+            assert_eq!(
+                service.model_protocol.adapter_for_model(model),
+                AdapterKind::OpenAIResp
+            );
+        }
+        assert_eq!(service.billing, Billing::Metered);
+        assert_eq!(service.meter, Meter::Unpublished);
+        assert!(!service.routes);
+        assert_eq!(service.hosted_search, HostedSearch::None);
+    }
+
+    #[test]
+    fn declarations_name_fixed_protocols_only() {
+        for (name, adapter) in PROTOCOL_ADAPTERS {
+            assert_eq!(
+                ModelProtocol::Fixed(*adapter).declaration_protocol(),
+                Some(*name)
+            );
+        }
+        assert_eq!(ModelProtocol::OpenAI.declaration_protocol(), None);
+        assert_eq!(
+            ModelProtocol::Fixed(AdapterKind::Gemini).declaration_protocol(),
+            None
         );
     }
 

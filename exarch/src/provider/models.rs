@@ -203,7 +203,7 @@ impl ModelSource for LiveSource {
 impl LiveSource {
     fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<Listed>, ListFailure> {
         let runtime = blocking_runtime("listing").map_err(ListFailure::Runtime)?;
-        match Native::of(account.service.adapter) {
+        match Native::of(account.service.model_protocol.default_adapter()) {
             Some(native) => runtime
                 .block_on(native.list(account, key))
                 .map_err(ListFailure::Request),
@@ -220,7 +220,10 @@ impl LiveSource {
             auth: Some(AuthData::from_single(key.to_owned())),
         };
         self.client
-            .all_model_names(account.service.adapter, provider_config)
+            .all_model_names(
+                account.service.model_protocol.default_adapter(),
+                provider_config,
+            )
             .await
             .map(|names| names.into_iter().map(Listed::bare).collect())
             .map_err(|e| ListFailure::Request(e.to_string()))

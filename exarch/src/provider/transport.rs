@@ -1,7 +1,7 @@
 //! Credential binding and the per-process transport cache.
 
 use super::credential::Credential;
-use super::identity::{Account, AccountId, Auth, Billing, Login, Service, adapter_for_model};
+use super::identity::{Account, AccountId, Billing, HostedSearch, Service};
 use super::oauth;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
@@ -28,7 +28,7 @@ impl TransportKey {
         Self {
             account: account.id.clone(),
             fingerprint: CredFingerprint::of(credential),
-            adapter: adapter_for_model(&account.service, model),
+            adapter: account.service.model_protocol.adapter_for_model(model),
         }
     }
 }
@@ -62,7 +62,7 @@ pub(super) struct Transport {
     adapter: AdapterKind,
     credential: Option<oauth::CredentialHandle>,
     billing: Billing,
-    live_search: bool,
+    hosted_search: HostedSearch,
 }
 
 impl Transport {
@@ -76,7 +76,7 @@ impl Transport {
                 Credential::ApiKey(_) => None,
             },
             billing: service.billing,
-            live_search: matches!(service.auth, Auth::OAuth(Login::Codex)),
+            hosted_search: service.hosted_search,
         })
     }
 
@@ -107,8 +107,8 @@ impl Transport {
         self.adapter
     }
 
-    pub(super) fn live_search(&self) -> bool {
-        self.live_search
+    pub(super) fn hosted_search(&self) -> HostedSearch {
+        self.hosted_search
     }
 
     /// The sole authority on whether this transport's turns cost money —
@@ -174,16 +174,13 @@ fn make_runtime() -> tokio::runtime::Runtime {
 }
 
 fn build_client(service: &Service, model: &str, credential: &Credential) -> (Client, AdapterKind) {
+    let adapter = service.model_protocol.adapter_for_model(model);
     let key = match credential {
         Credential::ApiKey(key) => key.clone(),
         Credential::OAuth(cell) => {
-            return (
-                build_oauth_client(service.adapter, cell.clone()),
-                service.adapter,
-            );
+            return (build_oauth_client(adapter, cell.clone()), adapter);
         }
     };
-    let adapter = adapter_for_model(service, model);
     // An explicit endpoint needs a service-target resolver to repoint genai at
     // it; otherwise genai knows the default, so auth keyed on the adapter is all.
     let client = if let Some(base_url) = service.endpoint.clone() {
@@ -289,7 +286,7 @@ mod loopback {
                 adapter: AdapterKind::Anthropic,
                 credential: None,
                 billing,
-                live_search: false,
+                hosted_search: account.service.hosted_search,
             });
             let selected = Selected {
                 label: account.service.name.as_str().into(),
@@ -314,6 +311,7 @@ mod loopback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Login;
 
     fn token(login: Login, access_token: &str) -> oauth::OAuthToken {
         let grant = match login {
@@ -381,7 +379,7 @@ mod tests {
     #[test]
     fn oauth_resolver_reads_the_current_cell_and_refuses_other_adapters() {
         for login in Login::ALL {
-            let adapter = login.service().adapter;
+            let adapter = login.service().model_protocol.default_adapter();
             let state = ral_core::own::OwnDir::for_test("auth-resolver").unwrap();
             let cell = oauth::commit_for_test(&state, &token(login, "old"));
             let AuthResolver::ResolverFn(resolver) = oauth_auth_resolver(adapter, cell.clone())

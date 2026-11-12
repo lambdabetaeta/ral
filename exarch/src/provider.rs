@@ -38,7 +38,10 @@ pub use error::{
     CancelSite, CutShort, Limit, ProviderError, Refusal, provider_stop, reqwest_failure,
     service_from_reqwest,
 };
-pub use identity::{Account, AccountId, Auth, Billing, Login, Meter, Service, ServiceName};
+pub use identity::{
+    Account, AccountId, Auth, Billing, HostedSearch, Login, Meter, ModelProtocol, Service,
+    ServiceName,
+};
 pub use identity::{built_in, built_in_services, scripted_service};
 pub use rations::Rations;
 pub(crate) use request::Request;

@@ -94,7 +94,7 @@ impl Pool {
     ) -> Result<StepOut, ProviderError> {
         let model = selected.model.as_str();
         let adapter = transport.adapter();
-        let tools = tool_defs(adapter, transport.live_search(), request);
+        let tools = tool_defs(adapter, transport.hosted_search(), request);
         let options = complete_options(self.cache_key(), selected);
 
         let mut heard = false;

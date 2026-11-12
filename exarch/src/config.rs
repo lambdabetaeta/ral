@@ -16,7 +16,7 @@
 //! write, and it evaluates under [`GrantValue::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process guard suffices.
 
-use crate::provider::identity::{adapter_for_protocol, key_var, protocol_for_adapter, protocols};
+use crate::provider::identity::{adapter_for_protocol, key_var, protocols};
 use crate::provider::{Auth, Service, ServiceName, built_in};
 use ral_core::Shell;
 use ral_core::authority::grant::value::GrantValue;
@@ -110,14 +110,17 @@ fn declarations_source(services: &[Service], label: &str) -> Result<String, Stri
                 Auth::Keyless => ", key: `none",
                 Auth::Key(_) | Auth::OAuth(_) => "",
             };
-            let protocol = protocol_for_adapter(service.adapter).ok_or_else(|| {
-                format!(
-                    "{label}: '{}' speaks a protocol this file has no name for; \
+            let protocol = service
+                .model_protocol
+                .declaration_protocol()
+                .ok_or_else(|| {
+                    format!(
+                        "{label}: '{}' speaks a protocol this file has no name for; \
                      it can only hold one of {}.",
-                    service.name,
-                    protocols().join(", ")
-                )
-            })?;
+                        service.name,
+                        protocols().join(", ")
+                    )
+                })?;
             Ok(format!(
                 "  {name}: [endpoint: {endpoint}{key}, protocol: '{protocol}'],\n"
             ))
@@ -310,6 +313,22 @@ mod tests {
         assert_eq!(parse(&source), Ok(written));
     }
 
+    #[test]
+    fn model_dependent_protocol_is_not_written_as_a_fixed_protocol() {
+        let mut service = Service::declared(
+            ServiceName::declared("house-llm").unwrap(),
+            "https://llm.house.example/v1/".into(),
+            AdapterKind::OpenAIResp,
+            Auth::Keyless,
+        );
+        service.model_protocol = crate::provider::ModelProtocol::OpenAI;
+        let error = declarations_source(&[service], LABEL).unwrap_err();
+        assert!(
+            error.contains("protocol this file has no name for"),
+            "{error}"
+        );
+    }
+
     /// A name with a quote in it is asked about, not escaped into the file.
     #[test]
     fn a_quote_in_a_name_is_refused_with_a_question() {
@@ -339,11 +358,20 @@ mod tests {
         .expect("valid config should parse");
         assert_eq!(services.len(), 3);
         assert_eq!(services[0].name.as_str(), "a-anthropic");
-        assert_eq!(services[0].adapter, AdapterKind::Anthropic);
+        assert_eq!(
+            services[0].model_protocol.default_adapter(),
+            AdapterKind::Anthropic
+        );
         assert_eq!(services[0].auth, Auth::Key("A_ANTHROPIC_API_KEY".into()));
         assert_eq!(services[0].endpoint.as_deref(), Some("https://a.example/"));
-        assert_eq!(services[1].adapter, AdapterKind::OpenAI);
-        assert_eq!(services[2].adapter, AdapterKind::OpenAIResp);
+        assert_eq!(
+            services[1].model_protocol.default_adapter(),
+            AdapterKind::OpenAI
+        );
+        assert_eq!(
+            services[2].model_protocol.default_adapter(),
+            AdapterKind::OpenAIResp
+        );
     }
 
     #[test]
