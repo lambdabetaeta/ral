@@ -1458,6 +1458,33 @@ fn shared_registration_addresses_only_a_payload_outside_the_collectors_group() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn sequential_pipelines_release_every_stage_ticket_before_returning() {
+    let mut shell = crate::test_helper::core_shell();
+    let scope = shell.run_cancel_handle();
+    for iteration in 0..10 {
+        let ending = shell
+            .run_under(
+                &scope,
+                crate::shell::run::RunRequest::from(crate::protocol::Run::captured(
+                    "/bin/echo hello | !{filter-lines { |_| true }} | !{from-lines}",
+                    crate::source::SourceOrigin::named("<test>"),
+                )),
+            )
+            .expect_ran();
+        assert!(
+            matches!(ending, End::Ok(_)),
+            "pipeline {iteration} failed: {ending:?}"
+        );
+        assert_eq!(
+            shell.local.workers.live_workers(),
+            0,
+            "pipeline {iteration} returned with live stage threads"
+        );
+    }
+}
+
 /// The lines a trapper appended to `hits`, one per signal it heard.
 #[cfg(unix)]
 fn heard(hits: &std::path::Path) -> usize {

@@ -89,7 +89,7 @@ wiki *args:
     bash scripts/wiki/build.sh {{args}}
 
 # Everything GitHub CI runs that this host can.
-ci: lint test test-types docs ui editors
+ci: lint test test-types docs ui
 
 # Run recipes in the Linux container, e.g. `just box lint test`.
 [unix]

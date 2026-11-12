@@ -1,10 +1,11 @@
 use super::*;
 use crate::data::json::{from_slice, to_vec, to_vec_pretty};
 use crate::fact::{
-    Count, DataStep, DecodeCause, FrameEncodeFailure, FrameFailure, FramePart, InvariantFailure,
-    JsonEncodeCause, JsonInputFailure, ProtocolFailure, ProtocolOperation, Reason,
-    SeedFrameFailure,
+    Count, DataStep, DecodeCause, FrameFailure, FramePart, InvariantFailure, JsonInputFailure,
+    ProtocolFailure, Reason, SeedFrameFailure,
 };
+#[cfg(unix)]
+use crate::fact::{FrameEncodeFailure, JsonEncodeCause, ProtocolOperation};
 use crate::ir::CompKind;
 use crate::seed::WireDecoder;
 use crate::seed::table::{SerialNative, SerialThunk};

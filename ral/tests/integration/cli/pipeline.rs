@@ -310,69 +310,21 @@ fn a_producer_that_never_writes_is_never_cut_and_keeps_its_status() {
 // ── Stress: many sequential pipelines ───────────────────────────────────────
 
 #[test]
-fn many_sequential_pipelines_no_leak() {
-    // Run 10 pipelines in sequence, each with a ral-written stage thread in
-    // the middle.  If file descriptors, process groups, or stage threads
-    // leak, this will exhaust them and start failing.
-    //
-    // On Linux, also probe the process's own thread count before and after
-    // (`/proc/$PPID/status` read by a nested external, since that external's
-    // parent is ral itself) and assert it returns to baseline — every stage
-    // thread this loop spawns must actually join.
-    // The probe reads `/proc`, which only Linux has; elsewhere the stress
-    // loop runs on its own.
-    let (open, close) = if cfg!(target_os = "linux") {
-        (
-            r#"
-let probe = { /bin/sh -c 'grep Threads: /proc/$PPID/status' | !{from-line} }
-let before = !{probe}
-echo "threads:before=$before"
-"#,
-            r#"
-let after = !{probe}
-echo "threads:after=$after"
-"#,
-        )
-    } else {
-        ("", "")
-    };
-    let script = format!(
-        r"{open}
-let _go = {{ |n|
-    if $[$n <= 0] {{}} else {{
-        /bin/echo $n | !{{filter-lines {{ |_| true }}}} | grep . > /dev/null
+fn many_sequential_pipelines_complete() {
+    let script = r"
+let _go = { |n|
+    if $[$n <= 0] {} else {
+        /bin/echo $n | !{filter-lines { |_| true }} | grep . > /dev/null
         _go $[$n - 1]
-    }}
-}}
-_go 10
-{close}
-echo done
-"
-    );
-    let o = run_with_timeout(&[], &script, Duration::from_mins(1))
-        .expect("sequential pipeline stress timed out");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("done"));
-
-    if cfg!(target_os = "linux") {
-        let before = parse_tagged_field(&o.stdout, "threads:before=")
-            .expect("baseline thread count missing");
-        let after =
-            parse_tagged_field(&o.stdout, "threads:after=").expect("final thread count missing");
-        assert_eq!(
-            before, after,
-            "stage-thread count did not return to baseline; stdout: {}",
-            o.stdout
-        );
     }
 }
-
-/// Pull `<prefix><rest of the line>` out of some text — the little-sibling
-/// of `parse_tagged_pgid`, for tags this file only ever prints once.
-fn parse_tagged_field(text: &str, prefix: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.strip_prefix(prefix))
-        .map(str::to_string)
+_go 10
+echo done
+";
+    let o = run_with_timeout(&[], script, Duration::from_mins(1))
+        .expect("sequential pipeline stress timed out");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "done\n");
 }
 
 // ── Exit-status classification and group edge cases ──────────────────────────

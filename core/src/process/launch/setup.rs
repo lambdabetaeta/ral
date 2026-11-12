@@ -1,9 +1,10 @@
 //! Parent-owned context; a failed hook writes only an index and errno.
 
+#[cfg(target_os = "linux")]
+use crate::fact::{JailFailure, JailFailureMembership, MembershipStep, OsFailure};
 use crate::fact::{
-    JailFailure, JailFailureMembership, LaunchFailure, MembershipStep, OsFailure, ParcelCause,
-    ParcelFailure, ParcelRole, ParcelStep, PrepareCause, PrepareFailure, PrepareStep,
-    PrepareSubject,
+    LaunchFailure, ParcelCause, ParcelFailure, ParcelRole, ParcelStep, PrepareCause,
+    PrepareFailure, PrepareStep, PrepareSubject,
 };
 use std::io;
 use std::os::fd::AsRawFd;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub(crate) enum Context {
     Prepare(PrepareStep, PrepareSubject),
     Parcel(ParcelRole, ParcelStep),
+    #[cfg(target_os = "linux")]
     Jail(String, MembershipStep),
 }
 
@@ -29,6 +31,7 @@ impl Context {
                 step,
                 cause: ParcelCause::Io(Box::new(crate::io::failure(error))),
             }),
+            #[cfg(target_os = "linux")]
             Self::Jail(cgroup, step) => {
                 LaunchFailure::Jail(JailFailure::Membership(JailFailureMembership {
                     cgroup,

@@ -189,7 +189,7 @@ const SEALS: rustix::fs::SealFlags = rustix::fs::SealFlags::SHRINK
 pub(in crate::authority::sandbox) fn parcel(
     name: &str,
     bytes: &[u8],
-    role: ParcelRole,
+    role: &ParcelRole,
 ) -> Result<OwnedFd, ParcelFailure> {
     use rustix::fs::{MemfdFlags, fcntl_add_seals, memfd_create};
     use std::io::{Read, Seek};
@@ -209,7 +209,7 @@ pub(in crate::authority::sandbox) fn parcel(
         .map_err(|e| failed(ParcelStep::ReadBack, e))?;
     if sealed != bytes {
         return Err(ParcelFailure {
-            role,
+            role: role.clone(),
             step: ParcelStep::ReadBack,
             cause: ParcelCause::ChangedBytes,
         });
@@ -223,7 +223,7 @@ pub(in crate::authority::sandbox) fn parcel(
 pub(in crate::authority::sandbox) fn parcel(
     _name: &str,
     bytes: &[u8],
-    role: ParcelRole,
+    role: &ParcelRole,
 ) -> Result<OwnedFd, ParcelFailure> {
     use rustix::net::sockopt::{set_socket_recv_buffer_size, set_socket_send_buffer_size};
     const SLACK: usize = 64 << 10;

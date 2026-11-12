@@ -1,5 +1,5 @@
 ---
-generated_at_commit: becc34179cf764c11ef623c65e88f8f3d1006b57
+generated_at_commit: cb52d9d6
 generated_at_date: 2026-11-11
 covers_paths: [core/src/shell/exec.rs, core/src/shell/exec/]
 ---
@@ -254,7 +254,10 @@ closures, so the mutual recursion is irreducible, though `shell::exec` names no
     reaped pid, and releases the held-open edge, leaving an `ExternalEnd
     { drain: Drain, settlement: Settlement }` to the fold: `Drain` is the jail
     and the pumps, which wait on the group kill; `Settlement` is what the
-    ending reads.
+    ending reads. `file_thread_end` joins before releasing the held edge;
+    `collect/tests.rs` checks that repeated pipelines return with no live
+    stage tickets. These tickets outlive the stage's child shell, so they
+    measure stage teardown without counting unrelated process-wide threads.
   - `group.rs` — `PipelineGroup` is `Owns { anchor, .. }` or `Joins(Membership)`.
     `prepare` spawns the pgid anchor (`--ral-pipeline-anchor`, ignoring
     `SIGTSTP`/`SIGTTIN`/`SIGTTOU` and immune to termination signals) on every

@@ -107,8 +107,6 @@ pub(crate) use namespace::RawEnginePath;
 pub use namespace::{EnginePath, GuestPath};
 #[cfg(target_os = "linux")]
 pub(crate) use procfs::proc_fd_path;
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) use render::proper_ancestors;
 #[cfg(unix)]
 pub(crate) use render::render_real;
 #[cfg(target_os = "macos")]

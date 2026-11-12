@@ -13,9 +13,8 @@
 use super::super::launch::Image;
 use super::{Confined, Slots, Warrant};
 use crate::fact::{
-    HandoffField, LaunchFailure, LaunchImageSubject, LauncherFailure, LauncherFailureChildFork,
-    LauncherFailureChildPipe, LauncherFailureChildSetup, LauncherFailureNonNativeExecError,
-    LauncherFailureSpawnBeforeSetup, OsFailure, WarrantFailure, WarrantFailureMissingDescriptor,
+    HandoffField, LaunchFailure, LaunchImageSubject, WarrantFailure,
+    WarrantFailureMissingDescriptor,
 };
 use crate::path::RealPath;
 #[cfg(target_os = "linux")]
@@ -28,6 +27,11 @@ use std::path::Path;
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use {
+    crate::fact::{
+        LauncherFailure, LauncherFailureChildFork, LauncherFailureChildPipe,
+        LauncherFailureChildSetup, LauncherFailureNonNativeExecError,
+        LauncherFailureSpawnBeforeSetup, OsFailure,
+    },
     libc::c_int,
     rustix::process::Pid,
     std::io::{self, Read},

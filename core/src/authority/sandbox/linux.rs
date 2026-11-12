@@ -177,7 +177,7 @@ pub(crate) fn bwrap_command(
         .map_err(|e| refused(LaunchFailure::Parcel(e)))?
         .unzip();
     let mut lend_parcel = |name: &str, bytes: &[u8], role: ParcelRole| {
-        let parcel = parcel(name, bytes, role.clone())?;
+        let parcel = parcel(name, bytes, &role)?;
         handoff.lend(parcel.as_fd(), role)
     };
     let seccomp = seccomp_programs()

@@ -155,7 +155,7 @@ impl<'a> Warrant<'a> {
         parcel(
             "ral-warrant",
             &self.encode().map_err(LaunchFailure::Warrant)?,
-            ParcelRole::Warrant,
+            &ParcelRole::Warrant,
         )
         .map_err(LaunchFailure::Parcel)
     }
