@@ -3,6 +3,7 @@
 //! The walk that builds it and the door that admits against it are in
 //! `shell::runtime::site`; this is the vocabulary, with no `ValClos` or unifier in it.
 
+use crate::fact::{DanglingNode, DecodeCause, DecodeFailure};
 use crate::source::Span;
 use crate::sync::LockExt as _;
 use crate::ty::Kind;
@@ -147,4 +148,60 @@ pub struct Site {
     pub(crate) nodes: std::sync::Arc<[Node]>,
     pub(crate) root: Id,
     pub(crate) unit: UnitId,
+}
+
+impl Shape {
+    /// The nodes this one names.
+    fn ids(&self) -> Vec<Id> {
+        let labelled = |fields: &Fields| fields.labels.iter().map(|&(_, id)| id).collect();
+        match self {
+            Self::Unit
+            | Self::Bytes
+            | Self::Bool
+            | Self::Int
+            | Self::Float
+            | Self::String
+            | Self::Free { .. }
+            | Self::FreeComp { .. } => Vec::new(),
+            Self::List(id)
+            | Self::Map(id)
+            | Self::Handle(_, id)
+            | Self::Thunk(id)
+            | Self::Return(_, id) => vec![*id],
+            Self::Fun(domain, codomain) => vec![*domain, *codomain],
+            Self::Record(fields) | Self::Variant(fields) => labelled(fields),
+        }
+    }
+}
+
+impl Site {
+    /// A decoded site names only its own nodes, which a door indexes unchecked.
+    ///
+    /// # Errors
+    /// The first node id, root or within a node, with no node.
+    pub(crate) fn check(&self) -> Result<(), DecodeFailure> {
+        let dangling = |id: Id| {
+            DecodeFailure::new(DecodeCause::DanglingNode(DanglingNode {
+                id: id.into(),
+                nodes: self.nodes.len().into(),
+            }))
+        };
+        if self.root >= self.nodes.len() {
+            return Err(dangling(self.root).field("root"));
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if let Some(id) = node
+                .shape
+                .ids()
+                .into_iter()
+                .find(|&id| id >= self.nodes.len())
+            {
+                return Err(dangling(id)
+                    .field("shape")
+                    .index(index.into())
+                    .field("nodes"));
+            }
+        }
+        Ok(())
+    }
 }

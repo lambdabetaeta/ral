@@ -356,8 +356,8 @@ pub(crate) fn chat_trunk() -> Agent {
     .expect("chat test trunk")
 }
 
-/// An unlaunched child carrying the parent's shell snapshot and narrowed grant.
-pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
+/// An unlaunched child built from its parent's marshalled shell and narrowed grant.
+pub(crate) fn marshalled_child(parent: &Agent, name: &str, grant: &str) -> Agent {
     use crate::agent::engine::{Engine, EngineKind};
     use crate::enquiry::{Agents, Request, Start};
     use crate::record::Memory;
@@ -383,7 +383,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
             let engine = self
                 .transport
                 .child(&parent)
-                .map(Engine::adopted)
+                .map(Engine::child)
                 .expect("the parent this run marshalled");
             *self.child.lock().unwrap() = Some((engine, spec.memory));
             Ok(FOValue::Unit)
@@ -414,7 +414,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         .lock()
         .unwrap()
         .take()
-        .unwrap_or_else(|| panic!("the run never forked a child: {report:?}"));
+        .unwrap_or_else(|| panic!("the run never marshalled a child: {report:?}"));
     Agent::born(
         &parent.fleet,
         Parent::Agent(&parent.handle, parent.mailbox.home().child()),
@@ -423,7 +423,7 @@ pub(crate) fn forked_child(parent: &Agent, name: &str, grant: &str) -> Agent {
         parent.body.client.clone(),
         (memory == Memory::Mnemon).then(|| parent.body.log.inherited_context()),
     )
-    .expect("an adopted child is born")
+    .expect("a marshalled child is born")
 }
 
 /// An unlaunched child of the human, with a fresh engine.

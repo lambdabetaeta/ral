@@ -3,13 +3,16 @@
 use super::super::wire::RawData;
 use crate::data::Bytes;
 use crate::data::json::on_json_stack;
-use crate::fact::{DecodeCause, DecodeFailure};
+use crate::fact::{DecodeCause, DecodeFailure, RecIndex, SchemeNames};
 use crate::ir::{
     Argv, CaseArm, Comp, CompKind, DefineSchemes, Exec, Explicit, Fields, Key, MapEntryV, Module,
-    Name, Node, Phrase, Prim, Redirects, StderrTarget, StdinSource, Toplevel, Val, ValListElem,
+    Name, Node, Pattern, Phrase, Prim, Redirects, StderrTarget, StdinSource, Toplevel, Val,
+    ValListElem,
 };
 use crate::source::Spanned;
-use crate::ty::{Closed, Scheme};
+use crate::ty::{Closed, Scheme, Site};
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(super) fn admit_val(value: &Val<Explicit, RawData>) -> Result<Val, DecodeFailure> {
@@ -33,10 +36,10 @@ pub(super) fn admit_val(value: &Val<Explicit, RawData>) -> Result<Val, DecodeFai
             .collect::<Result<Box<[_]>, _>>()
             .map(Val::list)
             .map_err(|error| error.payload("List")),
-        Val::Record(node) => admit_fields(node.shape())
+        Val::Record(node) => admit_sorted_fields(node.shape())
             .map(Val::record)
             .map_err(|error| error.payload("Record")),
-        Val::Map(node) => admit_fields(node.shape())
+        Val::Map(node) => admit_sorted_fields(node.shape())
             .map(Val::map)
             .map_err(|error| error.payload("Map")),
         Val::Variant { label, payload } => Ok(Val::Variant {
@@ -63,9 +66,40 @@ fn admit_spanned_val(
     })
 }
 
-fn admit_fields(
-    fields: &[(Name, Spanned<Val<Explicit, RawData>>)],
-) -> Result<Fields, DecodeFailure> {
+type RawFields = [(Name, Spanned<Val<Explicit, RawData>>)];
+
+/// The fields of a record or map, which `MapRef::get` binary-searches.
+fn admit_sorted_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
+    let keys = fields.iter().map(|(key, _)| key);
+    for (index, (before, key)) in keys.clone().zip(keys.skip(1)).enumerate() {
+        let cause = match before.cmp(key) {
+            Ordering::Less => continue,
+            Ordering::Equal => DecodeCause::DuplicateField(key.to_string()),
+            Ordering::Greater => DecodeCause::UnorderedField(key.to_string()),
+        };
+        return Err(DecodeFailure::new(cause)
+            .index(0usize.into())
+            .index((index + 1).into()));
+    }
+    admit_fields(fields)
+}
+
+/// The fields of a record update: written order, each key once.
+fn admit_update_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
+    let mut seen = HashSet::with_capacity(fields.len());
+    for (index, (key, _)) in fields.iter().enumerate() {
+        if !seen.insert(key) {
+            return Err(
+                DecodeFailure::new(DecodeCause::DuplicateField(key.to_string()))
+                    .index(0usize.into())
+                    .index(index.into()),
+            );
+        }
+    }
+    admit_fields(fields)
+}
+
+fn admit_fields(fields: &RawFields) -> Result<Fields, DecodeFailure> {
     on_json_stack(|| {
         fields
             .iter()
@@ -132,22 +166,32 @@ fn admit_kind(kind: &CompKind<Explicit, RawData>) -> Result<CompKind, DecodeFail
             ),
             rest: Arc::new(admit_comp(rest).map_err(|error| error.field("rest").payload("Seq"))?),
         }),
-        CompKind::Rec { group, index } => Ok(CompKind::Rec {
-            group: Node::new(
-                group
-                    .shape()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (name, comp))| {
-                        admit_comp(comp)
-                            .map(|comp| (name.clone(), Arc::new(comp)))
-                            .map_err(|error| error.index(1usize.into()).index(index.into()))
-                    })
-                    .collect::<Result<Box<[_]>, _>>()
-                    .map_err(|error| error.field("group").payload("Rec"))?,
-            ),
-            index: *index,
-        }),
+        CompKind::Rec { group, index } => {
+            if *index >= group.shape().len() {
+                return Err(DecodeFailure::new(DecodeCause::RecIndex(RecIndex {
+                    index: (*index).into(),
+                    members: group.shape().len().into(),
+                }))
+                .field("index")
+                .payload("Rec"));
+            }
+            Ok(CompKind::Rec {
+                group: Node::new(
+                    group
+                        .shape()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, comp))| {
+                            admit_comp(comp)
+                                .map(|comp| (name.clone(), Arc::new(comp)))
+                                .map_err(|error| error.index(1usize.into()).index(index.into()))
+                        })
+                        .collect::<Result<Box<[_]>, _>>()
+                        .map_err(|error| error.field("group").payload("Rec"))?,
+                ),
+                index: *index,
+            })
+        }
         CompKind::If { cond, then, else_ } => Ok(CompKind::If {
             cond: admit_spanned_val(cond).map_err(|error| error.field("cond").payload("If"))?,
             then: admit_spanned_val(then).map_err(|error| error.field("then").payload("If"))?,
@@ -206,14 +250,15 @@ fn admit_kind(kind: &CompKind<Explicit, RawData>) -> Result<CompKind, DecodeFail
         }),
         CompKind::Within { opts, body } => Ok(CompKind::Within {
             opts: Node::new(
-                admit_fields(opts.shape())
+                admit_sorted_fields(opts.shape())
                     .map_err(|error| error.field("opts").payload("Within"))?,
             ),
             body: admit_val(body).map_err(|error| error.field("body").payload("Within"))?,
         }),
         CompKind::Grant { caps, body } => Ok(CompKind::Grant {
             caps: Node::new(
-                admit_fields(caps.shape()).map_err(|error| error.field("caps").payload("Grant"))?,
+                admit_sorted_fields(caps.shape())
+                    .map_err(|error| error.field("caps").payload("Grant"))?,
             ),
             body: admit_val(body).map_err(|error| error.field("body").payload("Grant"))?,
         }),
@@ -239,12 +284,7 @@ fn admit_kind(kind: &CompKind<Explicit, RawData>) -> Result<CompKind, DecodeFail
             builtin: builtin.clone(),
             args: args.clone(),
         }),
-        CompKind::BindingCall {
-            head: _,
-            args: _,
-            redirects: _,
-            hole: _,
-        } => unreachable!("a binding call is not explicit IR"),
+        &CompKind::BindingCall { hole, .. } => match hole {},
     })
 }
 
@@ -270,9 +310,18 @@ fn admit_exec(exec: &Exec<Explicit, RawData>) -> Result<Exec, DecodeFailure> {
             head: head.clone(),
             argv: admit_argv(argv).map_err(|error| error.field("argv"))?,
             redirects: admit_redirects(redirects).map_err(|error| error.field("redirects"))?,
-            site: site.clone(),
+            site: site
+                .as_ref()
+                .map(admit_site)
+                .transpose()
+                .map_err(|error| error.field("site"))?,
         })
     })
+}
+
+/// A decoded site names only its own nodes, which a door indexes unchecked.
+fn admit_site(site: &Arc<Site>) -> Result<Arc<Site>, DecodeFailure> {
+    site.check().map(|()| Arc::clone(site))
 }
 
 fn admit_argv(argv: &Argv<Explicit, RawData>) -> Result<Argv, DecodeFailure> {
@@ -318,7 +367,7 @@ fn admit_prim(prim: &Prim<Explicit, RawData>) -> Result<Prim, DecodeFailure> {
         }),
         Prim::Update { base, fields } => Ok(Prim::Update {
             base: admit_spanned_val(base).map_err(|error| error.field("base").payload("Update"))?,
-            fields: admit_fields(fields)
+            fields: admit_update_fields(fields)
                 .map_err(|error| error.field("fields").payload("Update"))?,
         }),
         Prim::List(elems) => elems
@@ -436,7 +485,16 @@ fn admit_top(top: &Toplevel<RawData>) -> Result<Toplevel, DecodeFailure> {
                 })
                 .collect::<Result<_, _>>()
                 .map_err(|error| error.field("phrases"))?,
-            admits: admits.clone(),
+            admits: admits
+                .iter()
+                .enumerate()
+                .map(|(index, (name, site))| {
+                    admit_site(site)
+                        .map(|site| (name.clone(), site))
+                        .map_err(|error| error.index(1usize.into()).index(index.into()))
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.field("admits"))?,
         })
     })
 }
@@ -450,29 +508,56 @@ fn admit_phrase(
             comp,
             hole: (),
             schemes,
-        } => Ok(Phrase::Define {
-            pattern: Arc::clone(pattern),
-            comp: Arc::new(
-                admit_comp(comp).map_err(|error| error.field("comp").payload("Define"))?,
-            ),
-            hole: (),
-            schemes: schemes
-                .iter()
-                .enumerate()
-                .map(|(index, (name, scheme))| {
-                    Closed::new(Arc::clone(scheme))
-                        .map(|scheme| (name.clone(), scheme))
-                        .map_err(|open| {
-                            DecodeFailure::new(DecodeCause::OpenScheme(open))
-                                .index(1usize.into())
-                                .index(index.into())
-                        })
-                })
-                .collect::<Result<_, _>>()
-                .map_err(|error| error.field("schemes").payload("Define"))?,
-        }),
+        } => {
+            bind_exactly(pattern, schemes)
+                .map_err(|error| error.field("schemes").payload("Define"))?;
+            Ok(Phrase::Define {
+                pattern: Arc::clone(pattern),
+                comp: Arc::new(
+                    admit_comp(comp).map_err(|error| error.field("comp").payload("Define"))?,
+                ),
+                hole: (),
+                schemes: schemes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, scheme))| {
+                        Closed::new(Arc::clone(scheme))
+                            .map(|scheme| (name.clone(), scheme))
+                            .map_err(|open| {
+                                DecodeFailure::new(DecodeCause::OpenScheme(open))
+                                    .index(1usize.into())
+                                    .index(index.into())
+                            })
+                    })
+                    .collect::<Result<_, _>>()
+                    .map_err(|error| error.field("schemes").payload("Define"))?,
+            })
+        }
         Phrase::Run(comp) => admit_comp(comp)
             .map(|comp| Phrase::Run(Arc::new(comp)))
             .map_err(|error| error.payload("Run")),
     })
+}
+
+/// A module's exports are read off its schemes and looked up in the
+/// environment its patterns bind.
+fn bind_exactly(
+    pattern: &Pattern,
+    schemes: &DefineSchemes<Arc<Scheme>>,
+) -> Result<(), DecodeFailure> {
+    let bound: Vec<String> = pattern.names().iter().map(ToString::to_string).collect();
+    let schemed: Vec<String> = schemes.iter().map(|(name, _)| name.clone()).collect();
+    let sorted = |names: &[String]| {
+        let mut names = names.to_vec();
+        names.sort_unstable();
+        names
+    };
+    if sorted(&bound) == sorted(&schemed) {
+        Ok(())
+    } else {
+        Err(DecodeFailure::new(DecodeCause::SchemeNames(SchemeNames {
+            bound,
+            schemed,
+        })))
+    }
 }

@@ -44,10 +44,6 @@ in the body ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 
 ## The families
 
-`Extrinsic.Prims` gives the core operations a value-or-error semantics and
-models resolved `fail`, `echo` and `nth` calls. It does not cover the builtin
-library; see the [[decisions/261102_the-checked-ir-is-the-calculus|correspondence and gaps]].
-
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`

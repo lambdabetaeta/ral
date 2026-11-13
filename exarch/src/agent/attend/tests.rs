@@ -127,8 +127,8 @@ fn a_severed_engine_ends_the_life_and_records_its_cause() {
 #[test]
 fn failed_mandatory_repair_ends_the_child_not_its_parent() {
     let parent = Agent::for_test("system").unwrap();
-    let mut child = parent.fork().unwrap();
-    let descendant = child.fork().unwrap();
+    let mut child = parent.fresh_child().unwrap();
+    let descendant = child.fresh_child().unwrap();
     take_task(&child.handle(), &child.mailbox);
     leave_tool_owed(&mut child);
     child.recorder().fail_after(0);
@@ -155,7 +155,7 @@ fn failed_mandatory_repair_ends_the_child_not_its_parent() {
 fn a_recording_failure_is_announced_even_when_the_life_was_already_ended() {
     for ended in [false, true] {
         let mut parent = trunk(false);
-        let child = parent.fork().unwrap();
+        let child = parent.fresh_child().unwrap();
         let handle = child.handle();
         take_task(&handle, &child.mailbox);
         let recorder = child.recorder();
@@ -295,7 +295,7 @@ fn reply_is_refused_identically_for_every_conversing_root() {
 #[test]
 fn a_child_without_reply_is_renudged_then_publishes_failure_at_rest() {
     let parent = trunk(false);
-    let mut child = parent.fork().unwrap();
+    let mut child = parent.fresh_child().unwrap();
     let script = (0..4).fold(Script::new(), |script, _| {
         script.then(Reply::text("prose, no reply"))
     });
@@ -571,7 +571,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     crate::agent::testkit::schedule(
         &mut child,
@@ -637,7 +637,7 @@ fn a_returning_agent_waits_for_armed_schedules_and_reports_clear_them() {
 #[test]
 fn a_grandchild_report_wakes_a_reported_child_without_nudging_it() {
     let parent = trunk(false);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(FOValue::Unit));
     assert_eq!(parent.mailbox.drain().len(), 1);
@@ -713,7 +713,7 @@ mod probe;
 fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
     for owed in [false, true] {
         let parent = trunk(false);
-        let mut child = parent.fork().unwrap();
+        let mut child = parent.fresh_child().unwrap();
         let handle = child.handle();
         take_task(&handle, &child.mailbox);
         if !owed {
@@ -763,7 +763,7 @@ fn a_failed_status_append_delivers_one_terminal_failure_only_when_owed() {
 #[test]
 fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
     let parent = trunk(false);
-    let mut child = parent.fork().unwrap();
+    let mut child = parent.fresh_child().unwrap();
     let handle = child.handle();
     take_task(&handle, &child.mailbox);
     let crate::agent::engine::EngineKind::Identity(engine) = child.engine().kind() else {
@@ -802,7 +802,7 @@ fn a_poison_report_then_owner_teardown_delivers_only_one_failure() {
 #[test]
 fn cell_poison_does_not_replace_an_earlier_recording_failure() {
     let parent = trunk(false);
-    let mut child = parent.fork().unwrap();
+    let mut child = parent.fresh_child().unwrap();
     let handle = child.handle();
     take_task(&handle, &child.mailbox);
     let recorder = child.recorder();

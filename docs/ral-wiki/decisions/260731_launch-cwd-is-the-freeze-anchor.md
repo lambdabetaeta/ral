@@ -5,7 +5,7 @@ status: active
 # An agent's authority freezes at the cwd it started from, not the cwd it stands in
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > carries the parent's cwd in its image and `SpawnGrant` unfrozen alongside
 > it. On either seat `Shell::child_of` restores that cwd, re-holds inherited
 > exclusions and freezes the new layer there, pushing it last. The launch
@@ -99,7 +99,7 @@ snapshot or host process cwd substitutes for the directory the parent held.
 ## See also
 
 [[design/capability-freeze|capability-freeze]], [[design/grant|grant]],
-[[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]].
+[[internals/exec-judgment|exec-judgment]].
 
 Cite: `exarch/src/lib.rs` (`run`), `exarch/src/policy.rs` (`for_invocation`,
 `base_layer`), `exarch/src/agent/seat.rs` (`boot_root_shell`, `Seat::identity`,

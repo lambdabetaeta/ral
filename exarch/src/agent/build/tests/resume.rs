@@ -90,7 +90,7 @@ fn resume_seeds_child_ids_past_existing_session_directories() {
     )
     .unwrap()
     .remove(0);
-    let child = root.fork().unwrap();
+    let child = root.fresh_child().unwrap();
     assert!(child.id().get() >= 2);
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }

@@ -16,7 +16,6 @@ generated_at_commit: 139f52303ff16cc119b223be82ec79ceac41ec91
 
 # Exec rules: one table, one function
 
-Supersedes [[decisions/260806_a-head-has-three-identities|a-head-has-three-identities]].
 [[decisions/260906_object-not-name|object-not-name]] made the `fs` guard
 authorise the object; this does the same for exec.
 

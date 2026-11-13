@@ -49,7 +49,7 @@ impl ExarchDesk {
             &call.fleet,
             Parent::Agent(&call.handle, call.home.child()),
             reserved,
-            self.fork_engine(parent)?,
+            self.child_engine(parent)?,
             provider,
             inherited,
         )
@@ -74,10 +74,10 @@ impl ExarchDesk {
         }
     }
 
-    /// Build a child from the same parent bytes on either engine.
-    fn fork_engine(&self, parent: Marshalled) -> Result<Engine, Error> {
+    /// Build the child from the marshalled parent on either engine.
+    fn child_engine(&self, parent: Marshalled) -> Result<Engine, Error> {
         match &self.call.kind {
-            EngineKind::Identity(transport) => transport.child(&parent).map(Engine::adopted),
+            EngineKind::Identity(transport) => transport.child(&parent).map(Engine::child),
             EngineKind::Wire { engine } => self.make_engine(engine, parent),
         }
         .map_err(|why| why.with_context("`` exarch-agents `start `` refused"))

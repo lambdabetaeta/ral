@@ -20,6 +20,7 @@
 use super::FOValue;
 use crate::syntax::lexer::{fence_admits, is_bidi_control, is_ident};
 use crate::syntax::quote::quote_word;
+use crate::ty::TAG_PREFIX;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::Deref;
@@ -112,7 +113,10 @@ impl Printable for FOValue {
                     labels.push(label.as_str());
                     payload = next.as_deref();
                 }
-                Shape::Variant { labels, payload }
+                Shape::Variant {
+                    labels,
+                    payload: payload.filter(|payload| !matches!(payload, Self::Unit)),
+                }
             }
             #[allow(
                 clippy::uninhabited_references,
@@ -121,6 +125,15 @@ impl Printable for FOValue {
             Self::Ext(x) => match *x {},
         }
     }
+}
+
+/// Consecutive tags, space-separated: `` `a `b ``.
+pub(crate) fn tag_run(labels: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
+    labels
+        .into_iter()
+        .map(|label| format!("{TAG_PREFIX}{label}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn pretty_print<V: Printable + ?Sized>(val: &V, indent: usize, params: &PrintParams) -> String {
@@ -163,14 +176,7 @@ fn full<V: Printable + ?Sized>(
             bracketed(&parts, indent, params)
         }
         Shape::Variant { labels, payload } => {
-            let mut text = String::new();
-            for label in labels {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push('`');
-                text.push_str(label);
-            }
+            let mut text = tag_run(&labels);
             if let Some(p) = payload {
                 text.push(' ');
                 text.push_str(&full(&*p, indent, params, budget));
@@ -298,14 +304,7 @@ fn shallow<V: Printable + ?Sized>(val: &V, params: &PrintParams) -> String {
         Shape::Map { len: 0, .. } => "[:]".into(),
         Shape::Map { len, .. } => format!("[:...{len} pairs]"),
         Shape::Variant { labels, payload } => {
-            let mut text = String::new();
-            for label in labels {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push('`');
-                text.push_str(label);
-            }
+            let mut text = tag_run(&labels);
             if let Some(p) = payload {
                 text.push(' ');
                 text.push_str(&shallow(&*p, params));
@@ -469,7 +468,7 @@ mod tests {
     fn variants_keep_optional_payloads_in_full_and_shallow_forms() {
         for (payload, full, shallow_text) in [
             (None, "`tag", "`tag"),
-            (Some(FOValue::Unit), "`tag ()", "`tag ()"),
+            (Some(FOValue::Unit), "`tag", "`tag"),
             (
                 Some(FOValue::String {
                     value: "a#'b".into(),

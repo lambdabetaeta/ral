@@ -86,10 +86,7 @@ ownership, listing, cancellation, and lifetime policy," and it **rejected a
 - **Born into a durable-job registry → listable.** This is the management surface
   the concurrency ADR reserved. It is load-bearing: across context compaction the
   model loses the handle's *binding name*, so it must rediscover its jobs by
-  *listing* and then `poll`/`cancel` by id rather than by name. A born-durable
-  handle must therefore be *pinned* against
-  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]], so its
-  binding is not pruned out from under it.
+  *listing* and then `poll`/`cancel` by id rather than by name.
 
 ## The open decision: which regime(s)?
 
@@ -150,6 +147,4 @@ appears. Do not fuse the two: they share almost no implementation.
 the root/foreground split the death-clock rides),
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] (the core-mechanism /
 host-affordance registration principle this reuses),
-[[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (a born-durable
-handle must be pinned against the reaper),
 [[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11.

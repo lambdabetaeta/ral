@@ -106,12 +106,8 @@ impl Shell {
         self.schemes_over(&self.env)
     }
 
-    /// What a closure's body is checked against at an install door: what it
-    /// captured, then Σ's prelude, beside the handlers in force.
-    pub(crate) fn closure_schemes(&self, env: &Env) -> crate::typecheck::SessionSchemes {
-        self.schemes_over(env)
-    }
-
+    /// What a body over `env` is checked against: what `env` captured with its
+    /// installed schemes, then Σ's prelude, beside the handlers in force.
     pub(crate) fn schemes_over(&self, env: &Env) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
             bindings: env.binding_schemes(&self.sig),

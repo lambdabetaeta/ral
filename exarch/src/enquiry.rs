@@ -1316,7 +1316,7 @@ mod tests {
                 ral_core::test_helper::process_cwd(),
             )
             .expect("a test host resolves its baseline")
-            .marshal(SpawnGrant::Inherit)
+            .marshal(&SpawnGrant::Inherit)
             .expect("a test parent marshals");
         let start = |spec, parent| Request::Agents(Agents::Start(Start { spec, parent }));
         round_trips([

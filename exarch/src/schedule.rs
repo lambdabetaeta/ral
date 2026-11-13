@@ -1439,7 +1439,7 @@ mod tests {
     fn report_withdraws_a_queued_recurring_or_already_retired_one_shot_wakeup() {
         for family in [Terminal::After, Terminal::ExhaustedCron] {
             let parent = trunk(false);
-            let mut helper = parent.fork_named("scheduled-helper").unwrap();
+            let mut helper = parent.fresh_child_named("scheduled-helper").unwrap();
             let handle = helper.handle();
             crate::agent::testkit::take_task(&handle, &helper.mailbox);
             let mailbox = &helper.mailbox;

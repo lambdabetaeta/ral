@@ -21,9 +21,6 @@ amended_by: "[[261112_runtime-values-are-value-closures|runtime values are value
 > `Machine::settle` without a persistent register. This withdraws the native
 > terminal, separate runtime value syntax and “no builtin code enters IR”
 > representation claims below, not the control/primitive/shell partition.
-> Agda still substitutes where Rust carries environments; η now agrees in
-> shape, but correspondence for the new representation remains a follow-up.
-> The other standing gaps, including acquiring-guard divergence D4, remain.
 
 > **Amended 2026-11-12 — `Use` is shell IR.** The shell layer additionally
 > contains `Use(Arc<Module>)`: a checked `Toplevel` and its `SourceOrigin`,
@@ -32,56 +29,42 @@ amended_by: "[[261112_runtime-values-are-value-closures|runtime values are value
 > runs that tree under Σ and returns the public bindings as a record.
 > A module is checked against Σ alone, with no importer or session bindings.
 > `Use` is total in every phase and needs no new phase-associated type.
-> Its source reads, cycle and depth checks belong to linking, not evaluation;
-> the shell interpretation is outside the Agda core. The control/primitive
-> partition and standing correspondence gaps below are unchanged.
+> Its source reads, cycle and depth checks belong to linking, not evaluation.
+> The control/primitive partition below is unchanged.
 
 > **Amended 2026-11-11 — Written host options.** Host-file and nested-table
 > fields are checked key by written key during generation (SPEC §15.3).
 > Readback freezes sites and settles schemes after `Solver::close` succeeds,
 > without a separate live return-contract phase (SPEC §17.5); this supersedes
-> that phase's mention in `Where`. The calculus partition and standing gaps
-> below are unchanged.
+> that phase's mention in `Where`. The calculus partition below is unchanged.
 
 > Amended 2026-11-11 by
-> [[decisions/261111_a-guard-acquires|a-guard-acquires]]: the acquiring `guard`
-> is **owned divergence D4** from `Extrinsic/`'s two-operand rule. The
-> strong-model Agda follow-up owns syntax, substitution, typing, machine
-> correspondence and affected examples; it must re-establish type safety
-> and retire the divergence. The core partition below stands, but its guard
-> correspondence claim is suspended until that work lands.
+> [[decisions/261111_a-guard-acquires|a-guard-acquires]]: `guard` acquires a
+> resource and passes it to the body and release; release also observes the
+> body's ending. The core partition below stands.
 
 # The checked IR is the calculus
 
-**The checked Rust IR and `Extrinsic/` share the CBPV partition.** Control is
-syntax, operations on values are primitives, and shell interpretation is a
-separate layer. The standing gaps below delimit correspondence; Box and
-native terminals are not mechanised.
+**The checked Rust IR has the CBPV partition.** Control is syntax, operations
+on values are primitives, and shell interpretation is a separate layer.
 
 ## Decision
 
 - **Control:** `return`, `force`, lambda, application, pattern bind, sequence,
-  recursion, `if`, `case`, `try`, `guard`, `capture`. Rust's CEK
-  machine and Agda's substitution-based CK machine have corresponding rules
-  apart from the standing gaps below;
-  failure is a register in both. Application pushes one argument frame per
+  recursion, `if`, `case`, `try`, `guard`, `capture`. Failure is a register
+  in the CEK machine. Application pushes one argument frame per
   argument, then forces. Lambda and native terminals consume arguments;
   residual functions box when none remain. Every `let` runs its RHS.
 - **Primitives:** arithmetic, comparison, negation, rendering, concatenation,
   decoding, indexing, record update, list and map assembly. Operands are
-  values; no primitive runs a computation or consults shell state. Each
-  `ir::Prim` has an `Extrinsic.Prims.Op`, scheme and interpretation.
+  values; no primitive runs a computation or consults shell state.
 - **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
   `Gather`, `Audit`, `Tilde` and protection membranes.
-  Agda's sample `Builtin`s model resolved full-arity calls, not resolution.
   A native holds its entry and supplied arguments; forcing collects the rest
   in a native terminal. No builtin code enters IR. Boundary builtins remain
   η-expanded by inference over `Exec` with their per-use checked site.
 
-**Every new IR form is classified into these layers.** A core control form
-must be mirrored in Agda's syntax, typing and machine; a primitive in its
-signature, interpretation and soundness proof. A shell form must state its
-modelling boundary.
+**Every new IR form is classified into these layers.**
 
 ## Consequences
 
@@ -108,25 +91,16 @@ This amends the coercion representation of [[260811_a-coercion-is-syntax|a coerc
 and the application and sequencing rules of
 [[260826_the-evaluator-steps-closures|the evaluator steps closures]].
 
-## Standing gaps
+## Runtime boundaries
 
-- **Substitution vs environments.** Agda's `Val` represents both `ir::Val`
-  and runtime `Value`, hence `bytes`; a native is
-  `thunk (ƛⁿ prim (builtin b) x̄)`. Rust uses a native terminal and seals a
-  partial builtin by name with its arguments, not as lambda code.
-- **Boxing residual functions.** Rust boxes a λ that finds no argument,
-  including at a binding or run boundary; the Agda Let-fun elaboration still
-  suspends the whole RHS. This correspondence awaits its own follow-up.
 - **Higher-order natives** (`map`, `each`, …) run their function arguments
   through a nested machine (`machine::apply`), a host function rather than
-  a machine rule. Not modelled.
-- **Errors and numbers:** `Err` is `String` in `Extrinsic.Prims`, a data
-  record in Rust; Agda uses ℤ/`Float`, Rust checked `i64`/finite `f64`.
-  `Intrinsic.Arithmetic` has the checked arithmetic model.
+  a machine rule.
+- **Errors and numbers:** errors are data records; numbers use checked
+  `i64` and finite `f64`.
 - **Shell-layer execution outside the machine:** `Pipeline` stages use
   nested `evaluate`, `Spawn` bodies use `machine::apply` on a worker,
   session hooks use `evaluator::apply`, and `Gather` joins its children.
-  These nested-machine, thread and join behaviours are not modelled.
 
 ## Where
 
@@ -141,6 +115,3 @@ and the application and sequencing rules of
 - `core/src/shell/evaluator/machine.rs`: `Machine::settle`, `Frame`, `State`,
   `Next`; `core/src/shell/runtime/value.rs`: `ValClos`;
   `core/src/builtin.rs`: `BuiltinEntry::eta`.
-- `dev/agda/Extrinsic/{Syntax/Term,Prims,Semantics/Machine}.agda`:
-  corresponding syntax, primitives and CK rules.
-- `dev/agda/README.md`: correspondence tables and standing gaps.

@@ -1,259 +1,135 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 3fcae877
+generated_at_date: 2026-11-13
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
 # Map: exarch / policy
 
-`policy/` composes the session's effective [[design/grant|grant]] —
-[[map/core/capabilities|ral's capability lattice]] — from the CLI flags. The
-boundary *is* ral's grant: exarch never invents its own sandbox, it just
-hands a frozen `GrantStack` to the host, whose root engine installs it once
-at boot. There is no meet of two layers into a third: composition is layering, and the
-stack's own per-check fold is the one meet that ever runs
-([[decisions/260906_object-not-name|object-not-name]],
-[[map/core/capabilities|capabilities]]).
+**exarch's sandbox is ral's [[design/grant|grant]]: `policy/` composes the
+CLI flags into a frozen `GrantStack`, and the stack's per-check fold is the one
+meet that ever runs** ([[map/core/capabilities|capabilities]],
+[[decisions/260906_object-not-name|object-not-name]]).
 
 ```text
   ceiling = base ◁ extension?
-  stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?, self]
+  stack   = [ceiling, restrict₁, …, restrictₙ, deny(restricts)?, deny(credentials)?, self?]
 ```
 
-`Invocation::stack` contains only the invocation's own layers, with no
-ambient root prefix. `for_invocation` takes a validated `&CwdPath` and
-builds that stack in a fixed order — **a single optional extension adds to
-the ceiling, once, in its own layer; every other attenuation is its own
-pushed layer**:
+## Composition — `policy.rs`
 
-- resolves the named base (`resolve_base`, over the `Base` enum: its names, the unknown-base message and the spawnable subset all read off `Base::VARIANTS`) as the ceiling;
-- loads an optional `--extend` file as a `Fragment` and computes
-  `base.extend(fragment)` as the ceiling (`◁`: an allowance never removes
-  authority, an exclusion always wins, an axis the base leaves unrestricted
-  stays so less the fragment's exclusions; still one layer;
-  [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]);
-- pushes each `--restrict` file as its own layer (attenuates);
-- pushes a deny layer carving out each restrict file's own path (below);
-- pushes a deny layer for
-  [[invariants/a-grant-never-reaches-its-own-key|exarch's and synod's own credential files]]
-  the same way, wherever some layer's fs restricts (the layer is pushed on the
-  denotation, so `dangerous` extended with a positive-only fs gets none);
-- pushes last the *self layer*: `self_layer(own, ctx)` excludes the
-  supplied binary, `[exec: [deny: [`absolute own]]]` read as an extension of
-  the top (every program less it), wherever
-  some layer's exec restricts, so every spawned agent of a restricted session
-  inherits it. The agent cannot start
-  exarch as a process there; `dangerous` is ambient authority, its stack
-  restricts nothing, and it needs no OS sandbox.
+`for_invocation(cwd, scratch, base_name, extension, restrict_files, own)`
+builds a `FreezeCtx` over the cwd and scratch, reads
+`provider::credential_files()`, and calls `compose`. It returns
+`Invocation { stack, restricts }`: the invocation's own layers and the
+restrict files' absolute paths. `lib.rs::run` passes
+`sandbox::pinned_arg0()` as `own`.
 
-`for_invocation(cwd, scratch, base_name, extension, restrict_files, own)` takes
-the binary path explicitly. `lib.rs::run` supplies `sandbox::pinned_arg0()`;
-composition reads no global binary identity. It reads the two host facts and
-nothing else: the anchor (`FreezeCtx` over the process env, the cwd and the
-scratch) and `provider::credential_files()`, then calls `compose`, which a
-test drives on a host all fixture to pin the grant section the agent reads
-(`policy/golden/default-boot-grant.md`; the host's own tool roots, which a
-selector or literal root chooses, are left out of the golden). Restricted exec with `own: None`
-refuses with the startup pinning diagnostic; an unrestricted `dangerous`
-session composes without a pin. `Invocation` holds only `stack` and `restricts`.
+- **Ceiling.** `resolve_base` loads the named base; an `--extend` file loads as
+  a `Fragment` and `GrantLayer::extend` adds it, still one layer (`◁`: an
+  allowance never removes authority, an exclusion always wins;
+  [[decisions/261012_authority-is-belnap-evidence|authority-is-belnap-evidence]]).
+- **Restricts.** Each `--restrict` file is pushed as its own layer.
+- **Deny layers**, only when `!stack.fs_is_top()`: one over the restrict files'
+  own paths (if any), then one over exarch's and synod's credential files
+  ([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
+  As separate layers no profile can omit them and no `--extend` can widen them.
+  The `--extend` file is not denied.
+- **Self layer**, only when `!stack.exec_is_top()`: `self_layer` excludes the
+  binary `own` names from exec, so no agent of a restricted session, nor any
+  child, starts exarch. `own: None` here refuses as
+  `PolicyFailure::OwnBinaryUnpinned`.
+- `dangerous` with no restrict restricts no axis: no layer is added and no
+  launch needs an OS sandbox.
 
-Composition emits no confused-deputy warning naming every prefix both
-exec-admitted and writable. That predicate is not the one that matters —
-in-projection overlap escalates nothing: `reasonable`, `minimal` and
-`confined` deliberately admit both writing and running in `` `cwd `` and
-`` `scratch `` ([[design/grant|grant]] §Concessions). The report lives
-where it is asked for rather than announced: `ral`'s audit trail records
-one `deputy` check per flagged prefix when a grant frame is entered
-([[map/core/capabilities|capabilities]]).
-
-Every profile is *resolved* as it loads — resolving each place (`` `home ``, `` `xdg-* ``, `` `cwd ``,
-`` `tempdir ``, `` `scratch ``, `` `gitdir ``) and the `dir` selectors against the session's home, working
-directory, scratch, and the host's live tool roots through
-the one grant decoder (`ral_core::shell::grant`, `decode.rs`).
-Substantive freezing, authored resolution and host system-read discovery stay in
-`authority::grant` (`authority/grant/freeze.rs`); `authority::policy` owns the
-resolved model and judgments. Composition runs entirely on resolved `GrantLayer`s ([[design/capability-freeze|freeze boundary]]).
-An `` `xdg-* `` place escaping `HOME` is rejected at the profile that names it, before
-composition could discard it. Loading reuses
-`ral_core::shell::load::profile::load_capabilities_from_*` — the same surface as ral's
-`--capabilities <path>.ral` (`policy/load.rs` puts its refusal under the flag
-that named the file, as context, and holds the `absolute_in` cwd-join helper).
-The module's refusals are `Error`s, the decoder's hints kept, through
-`for_invocation` and `base_layer` (the installer's `GrantNarrower`); `run`
-flattens them only at the command line, hints rendered (`Error::plain`).
-
-`base_layer(base_name, ctx)` resolves a bake-in base against the child's
-working directory and scratch from its `FreezeCtx`, as one way of naming the single layer a
-[[design/agents|sub-agent]] spawn pushes. It does not take the parent: the
-desk behind the [[map/exarch/builtins|`` exarch-agents `start `` tag]]
-(`agent/desk/agents.rs`'s `fork_engine`, through core's
-`IdentityTransport::child(&parent)` or `Attach::child(engine, parent)`)
-relays `Marshalled` to `Shell::child_of`. The reader re-holds the inherited
-`GrantStack`; construction then pushes this layer through
-`SpawnGrant::narrow_onto`, so the same stack that carries the root's
-authority also carries a spawned child's attenuation. The stack's per-check
-fold ANDs every layer's evidence, so an added layer can only remove authority:
-a spawn can reduce a child's reach but never escalate it past the parent's —
-naming a base looser than the parent changes nothing (a network-off parent
-stays offline even under `minimal`).
-
-**A spawn's `grant` is one field with six spellings**, because at a spawn
-`--base` and `--restrict` are the same act — the parent's stack is already
-underneath, so a base pushed here can only narrow, exactly as a restrict does
-([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]). The layer is
-resolved by `SpawnGrant::layer` (`core/src/shell/grant/spawn.rs`), which both seats
-call: `` `inherit `` is ⊤, a layer the fold leaves no trace of;
-`` `confined ``/`` `read-only ``/`` `edit-only ``/`` `reasonable `` reach
-`base_layer` through the `GrantNarrower` the resolution is handed; and
-`` `restrict R `` hands the record to
-`ral_core::shell::grant::decode_grant`, the same decoder, off the same
-`Form::Grant` declared table, that `grant [...] { body }` and each bake-in
-profile below already pass through, so one keyset earns one wording.
-`` `dangerous `` is a `--base` name only: at a spawn the lattice top is a layer
-that says nothing, which *means* inherit-the-parent, and `` `inherit `` says
-that without borrowing the root's reading of ⊤. A spawn's `R` gets no
-self-denial layer either — it is a value computed in the parent's shell, with
-no file on disk for the child to rewrite.
-
-`deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
-fresh `GrantLayer` holding only those paths as its fs exclusions, for the
-caller to push, rather than folding them into whatever layer already carries
-an `fs` opinion. It builds typed `Axes` (`FsTable { deny: [Anchor::Absolute.place(p) …] }`),
-and `carve_out(Axes, ctx)` encodes them as a `GrantValue`, decodes that with
-`decode_fragment` and extends the top by the fragment
-(`GrantLayer::root().extend(..)`), as the self layer does: a carve-out is a grant
-value like any other, decoded by the one front-end
+`deny_layer` and `self_layer` are constructors: each builds typed `Axes`, and
+`carve_out` encodes them as a `GrantValue`, decodes it with `decode_fragment`
+and returns `GrantLayer::root().extend(fragment)` — a grant value decoded by
+the one front end
 ([[invariants/a-grant-is-decoded-where-it-lands|a-grant-is-decoded-where-it-lands]]).
-Each path is first held by `freeze::host_absolute`, and one it
-refuses — not UTF-8, or not absolute under this host's rules — fails the
-layer whole, since a deny that named nothing would fail open.
-`for_invocation` pushes two such layers, each making a kind
-of bytes structurally unreachable: a restrict file's own path, so the agent
-cannot edit the file that shapes its authority, and — once some layer already
-holds an `fs` opinion — `provider::credential_files()`, so the agent cannot
-read the credentials that authorise its own turn
-([[invariants/a-grant-never-reaches-its-own-key|a-grant-never-reaches-its-own-key]]).
-Pushed as its own layer, a credential deny is one no profile can omit by
-neglect and no `--extend` can widen back open — the stack's fold can
-only narrow past it. **Only the user-supplied lexical form is pushed** — both
-capability enforcers expand a deny entry to its canonical (and, on macOS,
-firmlink) variants themselves, so canonicalising here would duplicate, less
-completely, work that belongs to core. Each path is an `absolute` place the
-grant decoder walks, so deny entries land as the objects their walks held. The `--extend` file is *not* denied: it
-extends the ceiling, so denying writes to it is a trust-source concern, not a
-self-protection one. The credential deny is pushed only where some layer's fs restricts: for plain
-`dangerous` it would confine a session that asked not to be, against an agent
-that can read the same bytes a hundred other ways.
+Every path is held by `freeze::host_absolute` first; one it refuses fails the
+layer whole, since a deny naming nothing would fail open.
 
-`policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
-via `include_str!`, ordered from most to least authority:
+## Loading — `policy/load.rs`, `policy/base.rs`
 
-- `dangerous` — the lattice top, no attenuation;
-- `reasonable` — default; everyday tooling + standard binary dirs;
-- `edit-only` — reasonable's reads, writes to the working tree and scratch,
-  network on; for patch/refactor jobs that never run a build;
-- `read-only` — reasonable's reads/exec, writes only to scratch;
-  the scratch and its tool homes are shared tree-wide, so a narrowed child can plant files a wider sibling runs (accepted; see [[decisions/261013_a-child-starts-from-its-parent-marshalled|a-child-starts-from-its-parent-marshalled]]);
-- `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
-  narrow base for additive `--extend`;
-- `confined` — offline build jail; host binaries by subpath, with explicit
-  bare-name entries for core's bundled tools (which have no path to match).
+- Profiles load through `ral_core::shell::load::profile::load_capabilities_from_*`
+  (`load_fragment_from_*` for `--extend`), the surface of ral's
+  `--capabilities`. That runs `evaluate_closed` with the
+  `typecheck::table::declared(Form::Grant)` options table: a profile is a
+  closed unit checked and run under Σ, seeing no session bindings.
+- Places (`` `home ``, `` `xdg-* ``, `` `cwd ``, `` `scratch ``, `` `gitdir ``)
+  and `dir` selectors resolve as the profile loads, through
+  `ral_core::shell::grant`'s decoder; composition sees only resolved
+  `GrantLayer`s ([[design/capability-freeze|capability-freeze]]).
+- `load` puts a refusal under the flag that named the file, keeping its hints;
+  an `exit` or stop inside a profile becomes `PolicyFailure::EscapedLoad`.
+  `absolute_in` anchors a command-line path at the cwd.
+- The decoder drops dead grants: a bare exec name found neither on `PATH` nor
+  among the platform's bundled tools (`name_rules`), and a path rooted in a
+  foreign platform's convention.
 
-`confined`, `minimal`, `read-only` and `edit-only` withhold the GPU (on Linux
-and macOS; on Windows the prompt says it stays in reach); `reasonable` and
-`dangerous` leave it.
+## Spawned children
 
-**Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
-— coreutils, and diffutils/ripgrep under their features). `Command::from_name` makes
-those a `Program::Tool` and skips the `PATH` walk entirely, so they reach the
-in-process guard as a tool with no place on disk: a directory prefix cannot
-match one, and silence denies it. That is why `read-only`, `edit-only`,
-`reasonable` and `confined` each carry a per-name coreutils block that looks
-redundant beside their `` `dir `system `` rule and is not.
-`every_grantable_base_settles_the_bundled_tools` pins it, per build
-configuration — turn on the `ripgrep` feature without naming `rg` in a profile
-and it fails, naming the tool.
+`base_layer(base_name, ctx)` is exarch's `GrantNarrower`, installed as the
+engine installer's `narrow`. It resolves a base against the child's cwd and
+scratch.
 
-The consequence for spawning: a base whose `exec` is prefixes alone is
-unusable as a child's `grant`, since the child cannot widen its own ceiling to
-recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`Base::spawnable` withholds it from `` exarch-agents `start ``,
-as it does `dangerous` ([[design/agents|agents]]).
+- A spawn's grant is one layer
+  ([[decisions/260922_a-spawn-is-one-layer|a-spawn-is-one-layer]]):
+  `SpawnGrant::layer` (`core/src/shell/grant/spawn.rs`) maps `Inherit` to ⊤,
+  `Base(name)` to the narrower, and `Restrict(record)` to `decode_grant`.
+- `enquiry.rs::Grant::decode` admits `` `inherit ``, the spawnable bases and
+  `` `restrict R `` with `R` a map; `Base::spawnable` excludes `dangerous`
+  (⊤ is spelled `` `inherit ``) and `minimal` (it names no bundled tool).
+- The desk's `child_engine` (`agent/desk/agents.rs`) hands the `Marshalled`
+  parent to `IdentityTransport::child` or `Attach::child`; core's
+  `Shell::child_of` reads the image with the parent's stack and pushes the
+  grant's layer with `SpawnGrant::narrow_onto`
+  ([[map/core/transport|transport]]).
+- The fold ANDs every layer, so a spawn only narrows: a network-off parent
+  stays offline under a child's `minimal`. A spawn's `R` gets no self-deny
+  layer; it has no file on disk.
 
-**Profiles, exarch's config and its net policy are closed lexical units.**
-`evaluate_closed` checks them against Σ and runs them under Σ; they see
-neither session bindings nor rc helpers, and their helper `let`s never reach
-the session. Config and net policy retain their no-authority evaluation.
-Shared helpers are explicit modules linked at check time under the authority
-then in force. Only exarch's agent library and the rc extend the session
-through `extend_session`.
+## The six bases — `exarch/data/*.exarch.ral`
 
-Each profile is a ral script ending in `grant`'s options written out (SPEC §15.3),
-loaded through `ral_core::shell::load::profile::load_capabilities_from_str` —
-the same surface `--capabilities <path>.ral` consumes at the ral CLI.
-`typecheck::table::declared(Form::Grant)` checks keys during generation,
-including written nested `exec:` and `fs:` tables. Values may be computed;
-the tables themselves may not. No key is required: `dangerous` ends in
-`return ()`, stating no restriction, and an empty file means the same.
-The grant decoder retains runtime shape, keyset and domain checks for grants
-received as data as well as source profiles. The host reads the resulting
-authority only through core's accessors, never its representation
+Embedded by `include_str!`; `Base` lists them loosest first.
+
+| base | fs write | net | gpu | exec |
+|---|---|---|---|---|
+| `dangerous` | ⊤ | ⊤ | ⊤ | ⊤ (`return ()`) |
+| `reasonable` (default) | `cwd`, `scratch`, `gitdir` | on | on | `dir `path`, every `dir` selector, `cwd`, `scratch`, everyday names |
+| `edit-only` | `cwd`, `scratch` | on | withheld | `dir` `xdg-bin`, `system`, `homebrew`, `/usr/local/bin` and the sbin dirs, everyday names; no writable dir; denies `git` |
+| `read-only` | `scratch` | on | withheld | `edit-only`'s dirs plus `cwd`, everyday names; denies `kill` |
+| `minimal` | `cwd`, `scratch` | on | withheld | `dir `system`, `cwd`, `scratch` |
+| `confined` | `cwd`, `scratch` | offline | withheld | `dir `system`, `dir `homebrew`, `/usr/local/bin`, `cwd`, `scratch`, bundled names |
+
+- **Every spawnable base names each bundled tool** (`core/src/uutils.rs`):
+  `Command::from_name` makes one a `Program::Tool` with no path, so no `dir`
+  prefix matches it. `every_grantable_base_settles_the_bundled_tools` pins this
+  per build configuration.
+- `minimal`, `read-only` and `edit-only` deny `bash`, `zsh`, `cmd`,
+  `powershell` and `pwsh` by name; `sh` stays admitted.
+- `reasonable`, `read-only` and `edit-only` read the XDG dirs and named
+  toolchain caches and deny `xdg-config` `gh`, `op`, `gcloud`; `reasonable` also
+  denies `~/.dotnet/corefx`.
+- No base writes `xdg-cache`; exarch points `XDG_CACHE_HOME`, `TMPDIR` and the
+  legacy tool homes into the scratch ([[map/exarch|exarch]]).
+- Where the engine host cannot withhold the GPU, the prompt says so.
+
+Tests in `policy/base.rs` pin these per base: `dangerous_is_root`,
+`confined_is_offline_subpath_only_no_home_reads`,
+`read_only_does_not_write_cwd`, `reasonable_lists_every_selector`,
+`the_narrow_bases_withhold_the_gpu`, `reasonable_and_read_only_admit_git`,
+`minimal_admits_system_git_not_homebrew`,
+`every_exec_base_admits_live_system_tool_roots`. `policy.rs`'s
+`the_default_boot_grant_reads_as_pinned` pins the boot grant the agent reads
+against `policy/golden/default-boot-grant.md`.
+`exarch/examples/git.exarch.ral` is the canonical `--extend`;
+`git_extension_extends_into_git_capable_profile` pins that extending `minimal`
+with it admits `git` and `~/.gitconfig`, and that extending `reasonable`
+keeps its credential denies (deny sets union).
+
+The prompt prints each layer in `grant` syntax
+([[map/exarch|exarch]], [[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).
+The host reads authority only through core's accessors
 ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]).
-
-**The bake-ins name exec authority portably through the `dir` selectors** —
-[[map/core/capabilities|core]]'s spelling of live tool roots, each a row of one
-table (`ral_core::authority::grant::toolchains`, rules in [[design/grant|grant]]
-§Selectors). `` `dir `system `` is the standard binary dirs on Unix (Homebrew is
-its own selector, `` `dir `homebrew ``, expanding to the prefixes that exist,
-`HOMEBREW_PREFIX` first); `%SystemRoot%\System32`, the PowerShell home, and
-Git-for-Windows' `usr\bin` on Windows. `reasonable` lists a selector for every
-package manager in the table and writes no read entry for what one runs;
-running reads cover it. It excludes `~/.dotnet/corefx` from `fs`. No profile
-writes `xdg-cache`: `reasonable` and `minimal` write the working tree and scratch only,
-and exarch points `XDG_CACHE_HOME` and the legacy tool homes into the scratch
-([[map/exarch|exarch]]). `RUSTUP_HOME` is not redirected, since it holds what
-runs. Two consequences ride the selectors:
-
-- interactive shells are denied by literal override in every attenuated
-  profile — `bash`/`zsh` and their Windows analogues `cmd`/`powershell`/`pwsh`
-  (which `` `dir `system `` would otherwise admit via `System32`); `sh` stays allowed
-  for `configure`/`make` shell-outs;
-- `minimal` leaves Homebrew unlisted, so brew tools are opt-in through
-  `--extend`; `reasonable`, `confined`, `edit-only` and `read-only` add
-  `` `dir `homebrew ``.
-
-The decoder drops *dead grants* as a profile loads: a bare exec name that finds
-neither a file on the decoding `PATH` nor a tool this platform bundles (the
-Unix-only coreutils off Unix) makes no allowance and keeps its veto
-(`name_rules`), and a path rooted under a foreign platform's convention, a Unix
-literal on Windows, is discarded — a rendered profile never advertises authority
-the platform cannot back.
-
-The in-module tests pin the load-bearing per-profile properties so a future edit
-can't silently widen a jail, reading each layer as the grant it writes
-(`GrantLayer::axes`, typed `Target`s and `Place`s):
-
-- `dangerous` is the lattice top;
-- `git` admitted in `reasonable`/`read-only` (commit flows work without
-  `--extend`); `minimal` admits only the *system* git under `/usr/bin/`
-  (a brew git is opt-in via the git extension);
-- every exec-declaring base carries an `Allow` for each live system tool root;
-- `read-only` reads but does not write `` `cwd ``;
-- `confined` is net-off, admits host execs by subpath and only bundled tools by
-  bare name, and has no home-reaching prefixes;
-- `` `cwd ``/`` `scratch `` places freeze into the per-invocation working
-  and scratch dirs without exarch injecting them dynamically: the scratch is
-  made before the policy freezes, and `FreezeCtx::with_scratch` carries its spelling.
-  The five restrictive bases write only `cwd`, `gitdir` and `scratch`;
-  the environment variable `TMPDIR` points to the scratch's `tmp` directory.
-  They grant neither `/tmp` nor `tempdir`; `dangerous` leaves fs unrestricted.
-
-`exarch/examples/git.exarch.ral` is the canonical `--extend` that lifts
-`minimal`/`confined` into a git-capable shape; a test pins that extending `minimal` with it keeps `git` admitted and adds
-`~/.gitconfig`, and that extension
-**unions** deny sets — a one-sided veto survives the join, so an overlay stays
-purely additive without re-stating the base's credential denies.
-
-The system-prompt assembly that prints this frozen authority, each layer's value
-in `grant` syntax, lives on [[map/exarch|exarch]], which owns `prompt.rs` and
-`data/` ([[invariants/a-grant-has-one-outward-form|a-grant-has-one-outward-form]]).

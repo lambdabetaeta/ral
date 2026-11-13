@@ -16,7 +16,7 @@ use ral_core::fact::{
 };
 use ral_core::path::{EntryName, Judged, Kind, Located, Reading};
 use ral_core::shell::runtime::{
-    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Mooring, Settled,
+    Break, DefaultPolicy, Escape, FrameHandle, HookName, HookSig, Map, Mooring, Settled,
 };
 use ral_core::source::{SourceFile, SourceOrigin};
 use ral_core::{RegisterError, Shell, ValClos, View};
@@ -49,7 +49,7 @@ fn read_source(located: Located<Judged<Reading>>) -> Settled<(SourceFile, String
 /// plugin configured by nothing but its own defaults.
 pub(crate) fn load_plugin(
     name_or_path: &str,
-    options: &ValClos,
+    options: Map,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
@@ -200,21 +200,22 @@ fn install_bindings(
 fn instantiate(
     plugin: &str,
     val: ValClos,
-    options: &ValClos,
+    options: Map,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<ValClos> {
-    match val.view() {
-        View::Thunk { .. } => {
-            ral_core::shell::evaluator::apply(&val, vec![options.clone()], mooring, shell)
-        }
-        _ if !options.as_map("load-plugin")?.is_empty() => Err(super::refusal(
-            PluginFailure::OptionsWithoutFactory(PluginFailureOptionsWithoutFactory {
+    if !matches!(val.view(), View::Map(_)) {
+        return ral_core::shell::evaluator::apply(&val, vec![options.into()], mooring, shell);
+    }
+    if options.is_empty() {
+        Ok(val)
+    } else {
+        Err(super::refusal(PluginFailure::OptionsWithoutFactory(
+            PluginFailureOptionsWithoutFactory {
                 plugin: plugin.into(),
-            }),
-        )
-        .into()),
-        _ => Ok(val),
+            },
+        ))
+        .into())
     }
 }
 
@@ -290,8 +291,7 @@ mod tests {
             },
             "_test-load: load a plugin under the dispatch's mooring.",
             BuiltinBody::Captured(std::sync::Arc::new(move |_, mooring, shell| {
-                load_plugin(&path, &ValClos::map(Vec::new()), mooring, shell)
-                    .map(|()| ValClos::UNIT)
+                load_plugin(&path, Map::new(), mooring, shell).map(|()| ValClos::UNIT)
             })),
         )
     }
@@ -318,6 +318,24 @@ mod tests {
             &mut shell,
         )
         .expect("two bindings on one key must not collide");
+    }
+
+    /// A non-function handler is refused by the install check, naming the handler.
+    #[test]
+    fn non_function_handler_is_refused_at_install() {
+        let mut shell = ral_core::test_helper::core_shell();
+        let Err(error) = install_bindings(
+            &[("foo".into(), ValClos::int(3))],
+            &mut Vec::new(),
+            &mut shell,
+        ) else {
+            panic!("an Int handler must be refused")
+        };
+        assert!(
+            error.describe().contains("handler: field \"foo\""),
+            "{}",
+            error.describe()
+        );
     }
 
     /// A two-parameter lifecycle handler is rejected at load, with an error

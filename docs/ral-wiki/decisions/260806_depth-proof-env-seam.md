@@ -5,7 +5,7 @@ status: accepted
 # Stream depth must not be bounded by the stack
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > replaces the encoder with one dependencies-first walk over environments
 > and built collections. The reader builds rows in order, without Kahn's
 > algorithm. Both walks and tag spines are flat outside IR. The runtime drop

@@ -3,14 +3,15 @@
 //! then Σ's prelude, then Σ's natives.
 
 use super::env::{Binding, Env};
-use crate::shell::runtime::ValClos;
+use crate::shell::runtime::{ValClos, View};
+use crate::ty::{Binders, Ty};
 use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Every key here is a program identifier, never attacker-controlled input,
 /// so both tiers use a fast non-cryptographic hasher.
-pub(crate) type NativeMap = HashMap<String, ValClos, FxBuildHasher>;
+pub(crate) type NativeMap = HashMap<String, Binding, FxBuildHasher>;
 pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
 
 /// Σ: language-given constants (seeded once at boot,
@@ -28,11 +29,17 @@ pub struct Signature {
 impl Signature {
     /// Σ alone: prelude first, since a prelude name shadows a native of the
     /// same spelling.
+    pub(crate) fn binding(&self, name: &str) -> Option<&Binding> {
+        self.prelude.get(name).or_else(|| self.natives.get(name))
+    }
+
     pub(crate) fn get(&self, name: &str) -> Option<&ValClos> {
-        self.prelude
-            .get(name)
-            .map(|b| &b.value)
-            .or_else(|| self.natives.get(name))
+        self.binding(name).map(|b| &b.value)
+    }
+
+    /// The native tier alone, ignoring a prelude name of the same spelling.
+    pub(crate) fn native(&self, name: &str) -> Option<&ValClos> {
+        self.natives.get(name).map(|b| &b.value)
     }
 
     /// The prelude [`Binding`] for `name`; it carries the checker's harvested
@@ -46,10 +53,21 @@ impl Signature {
     }
 
     /// Seed the native tier — a value manifest row's `ValClos`, or a
-    /// language-given constant.  Called only at boot, beside builtin-table
+    /// language-given constant.  Each keeps the type its row declares; a
+    /// boundary row has none.  Called only at boot, beside builtin-table
     /// installation.
     pub(crate) fn install_natives(&mut self, entries: impl IntoIterator<Item = (String, ValClos)>) {
-        self.natives.extend(entries);
+        self.natives
+            .extend(entries.into_iter().map(|(name, value)| {
+                let scheme = match value.view() {
+                    View::Builtin(entry) => {
+                        (!entry.decl.is_boundary()).then(|| entry.decl.scheme().clone())
+                    }
+                    View::Bool(_) => Some(Binders::close(|_| Ty::bool())),
+                    _ => None,
+                };
+                (name, Binding { value, scheme })
+            }));
     }
 
     /// Seat the baked prelude tier — once per shell, right after the bake, an

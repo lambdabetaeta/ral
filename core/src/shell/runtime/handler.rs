@@ -4,7 +4,9 @@
 use super::value::ValClos;
 use super::{Break, Env, Shell, ill_typed};
 use crate::builtin::BuiltinEntry;
-use crate::fact::{BlockRole, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure};
+use crate::fact::{
+    BlockRole, Expected, InvalidCause, InvalidFailure, Reason, ShapeFailure, ValueShape,
+};
 use crate::ir::Comp;
 use std::borrow::Cow;
 use std::fmt;
@@ -57,7 +59,7 @@ impl HandlerEntry {
     /// argv, producing what its head produces (`crate::typecheck::arm_stands_in`).
     pub(crate) fn vet(name: String, thunk: ValClos, shell: &Shell) -> Settled<Self> {
         let (comp, env) = arm_closure(&thunk, &name)?;
-        crate::typecheck::arm_stands_in(&name, comp, shell.closure_schemes(env))
+        crate::typecheck::arm_stands_in(&name, comp, shell.schemes_over(env))
             .map_err(|errors| refused_arm(&name, &errors, comp.span, shell))?;
         Ok(Self::ral_per_name(name, thunk))
     }
@@ -82,14 +84,22 @@ fn refused_arm(
 /// An arm's thunk, excluding builtin η residuals before checking its type.
 ///
 /// # Errors
-/// `value` is not a non-builtin block.
+/// `value` is not a block the checker can read; a builtin is named, with the
+/// block that wraps it.
 fn arm_closure<'a>(value: &'a ValClos, subject: &str) -> Settled<(&'a Arc<Comp>, &'a Env)> {
     value.block().ok_or_else(|| {
+        // Only a bare builtin's wrapper can be spelled from its name alone.
+        let expected = match value.residual() {
+            Some((entry, remaining)) if remaining == entry.decl.fixed_arity() => {
+                Expected::BlockNotBuiltin(entry.decl.name.to_string())
+            }
+            _ => Expected::Shape(ValueShape::Block),
+        };
         super::Error::new(Reason::Invalid(Box::new(
             InvalidFailure::new(
                 "handler".into(),
                 InvalidCause::Shape(ShapeFailure {
-                    expected: Expected::Closure,
+                    expected,
                     found: value.found(),
                 }),
             )
@@ -355,7 +365,7 @@ mod tests {
         assert_eq!(
             failure.cause,
             InvalidCause::Shape(ShapeFailure {
-                expected: Expected::Closure,
+                expected: Expected::Shape(ValueShape::Block),
                 found: residual.found(),
             })
         );
@@ -378,7 +388,7 @@ mod tests {
         assert_eq!(
             failure.cause,
             InvalidCause::Shape(ShapeFailure {
-                expected: Expected::Closure,
+                expected: Expected::BlockNotBuiltin("length".into()),
                 found: native.found(),
             })
         );

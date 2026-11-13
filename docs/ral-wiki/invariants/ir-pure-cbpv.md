@@ -1,16 +1,7 @@
 # The checked IR is pure CBPV
 
 **The checked IR has three layers: control, primitives on values, and shell.**
-The core is read against `dev/agda/Extrinsic/`;
-the evaluator is a CEK machine for [[design/cbpv|call-by-push-value]], and the
-Agda machine its substitution-based CK counterpart. **Owned divergence D4:**
-the acquiring `guard` and its ending-reading release await the strong-model
-Agda follow-up ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
-The correspondence excludes that rule until the follow-up re-establishes it.
-Residual-function boxing also awaits an Agda follow-up: its Let-fun still
-suspends the whole RHS, without Box. Runtime builtin η-expansion and δ
-require their own correspondence follow-up
-([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+The evaluator is a CEK machine for [[design/cbpv|call-by-push-value]].
 
 - **Control:** `Return`, `Force`, `Lam`, `App`, `Bind`, `Seq`, `Rec`, `If`,
   `Case`, `Try`, `Guard`, `Capture`. A lambda binds one name;
@@ -25,9 +16,7 @@ require their own correspondence follow-up
 - **Shell:** `Exec`, `Pipeline`, `Redirect`, `Within`, `Grant`, `Spawn`,
   `Gather`, `Audit`, `Tilde`, `Use`. `Use` holds
   a linked checked module, closed under Σ; evaluation runs that tree and
-  never resolves or reads a module file. Resolved full-arity
-  sample builtins correspond to Agda's `prim (builtin b)`; the shell forms
-  themselves are outside the core.
+  never resolves or reads a module file.
 
 **Surface conveniences unfold before evaluation.**
 
@@ -73,12 +62,9 @@ require their own correspondence follow-up
   is an ordinary map-valued field; command names are data, with no
   handler-specific syntax, AST or IR node.
 
-**A new IR form must be classified as control, primitive, or shell.** A core
-form requires an Agda counterpart, including its typing and machine rule or
-primitive signature and interpretation; the standing gaps above remain open.
-The correspondence and its standing gaps are recorded in
-[[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
-and `dev/agda/README.md`.
+**A new IR form must be classified as control, primitive, or shell.**
+The partition is fixed by
+[[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 See [[map/core/ir|IR]], [[internals/compilation-ladder|the compilation ladder]],
 [[internals/evaluator-machine|the evaluator machine]],

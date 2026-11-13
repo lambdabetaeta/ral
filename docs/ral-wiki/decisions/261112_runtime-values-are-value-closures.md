@@ -108,12 +108,12 @@ constructs withheld handles through data, captures and handler arms.
   records by their fact. Tag spines cross flat. `Val::Builtin`, `Val::Handle`
   and `CompKind::Builtin` skip serde in both directions; the reader rebuilds
   residuals with `BuiltinEntry::residual`, never decoded δ syntax.
-- **Agda correspondence is a follow-up**, not a new mechanisation claim.
-  This decision amends the representations in
-  [[260826_the-evaluator-steps-closures|the evaluator steps closures]],
-  [[260926_a-closure-keeps-only-what-it-mentions|a closure keeps only what it mentions]],
-  [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
-  and [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
+
+This decision amends the representations in
+[[260826_the-evaluator-steps-closures|the evaluator steps closures]],
+[[260926_a-closure-keeps-only-what-it-mentions|a closure keeps only what it mentions]],
+[[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+and [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 ## Where
 

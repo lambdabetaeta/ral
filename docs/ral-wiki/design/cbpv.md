@@ -32,11 +32,8 @@ name-binding lambdas, followed by pattern binds for destructuring parameters,
 so partial and under-application are uniform. Later parameters shadow earlier
 ones, including names introduced by destructuring.
 
-**The checked core is control syntax plus primitives on values.** `Extrinsic/`
-in Agda models this partition, not the new residual-function boxing rule:
-its Let-fun still suspends the whole RHS. Runtime builtin η/δ is not
-mechanised, and acquiring `guard` is owned divergence D4. Shell forms are a
-separate layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application
+**The checked core is control syntax plus primitives on values.** Shell forms
+are a separate layer ([[invariants/ir-pure-cbpv|the IR invariant]]). Application
 pushes one argument frame per argument, then evaluates its computation head.
 A λ consumes an argument. A builtin forces to its η-expansion: ordinary λs
 bind arguments before δ invokes the captured entry. Returned-thunk
@@ -48,40 +45,6 @@ and a failing head runs no argument. This holds for a function computation too:
 a `let` always runs its right-hand side. A λ that finds no argument returns
 itself as a block, restricted to the names it mentions and holding the
 arguments already supplied.
-
-**A mechanised core calculus models ral; it is not a refinement of Rust.**
-It is Agda (`--safe --without-K`, no postulates): extrinsically typed call-by-push-value over
-well-scoped terms, with grades (`F^ε A`, value/output), kinds as head sets, scoped rows up to
-permutation, and Hindley–Milner let-polymorphism generalising at `bind` with no value restriction
-(proper kinds only). Its CK machine, with an output sink, `capture` and failure, is deterministic
-and type-safe (preservation and progress). Unification terminates and is most general; inference
-is sound, complete and principal relative to proper kinds, and refuses only untypable terms.
-The grade invariant (inferred types pair `output` only with `Unit`) is stated and proved in
-`Extrinsic/Infer/Grades`, but that module's bounded check currently exhausts the heap, so it is
-not yet validated; `Core.agda` checks that successful inference yields target typing and machine
-safety ([[design/types|types]], [[internals/type-inference|type-inference]]).
-
-The calculus contains binding capture and returned-thunk splits; their
-insertion is mechanised in components, not yet end-to-end. Equi-recursive types through data,
-concurrency and authority are not covered by this core. The correspondence's
-standing gaps are listed in
-[[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
-
-An older, monomorphic, intrinsically typed model still covers threads and authority:
-
-- preservation is by indexing; handle-ranking and pool progress rule out waiting cycles;
-- round-robin gives an enabled thread an eventual turn, or main-thread finality, not a numerical
-  waiting bound;
-- workers inherit ambient grants; external requests carry admission evidence;
-- cancellation ancestry is separate from handle visibility and result claiming; await/join poll,
-  cleanup shields, and gathers drain all accepted children;
-- failed captures flush their output before resuming the break (ral now drops it,
-  [[design/capture|capture]]); worker output replays on await/join.
-
-Cleanup grace is unbounded, stop causes are collapsed, and bytes are text. Its big-step semantics
-has no general adequacy proof. A separate trace semantics gives finite behaviours, capture and
-least fixed points of continuous process operators; no adequacy result connects it to either
-machine yet. Contextual equivalence and the βη laws are not mechanised.
 
 Bindings are immutable. Re-`let` introduces a fresh binding that shadows the
 outer one within its lexical scope; closures capture at definition time. This

@@ -160,7 +160,7 @@ graduates from, and its full context/alternatives),
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (the handle model; the job-table separation this restates at the listing
 layer), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
-(the deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]
+(the deferred survivor warning), [[internals/binding-leases|binding-leases]]
 (the binding chapter), [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]
 (the schedules chapter), [[decisions/260619_terminal-lease|terminal-lease]]
 (why `fg` is a host affordance), [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]

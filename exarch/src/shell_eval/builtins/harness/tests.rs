@@ -785,6 +785,8 @@ mod typed_boundaries {
 
     #[test]
     fn a_missing_desk_is_refused_before_marshalling() {
+        use ral_core::data::datum::tag;
+
         let shell = shell();
         #[cfg(unix)]
         let shell = {
@@ -792,15 +794,22 @@ mod typed_boundaries {
             let mut shell = shell;
             let cwd = std::ffi::OsString::from_vec(b"/non-unicode-\xff".to_vec());
             shell.seed_cwd(ral_core::path::CwdPath::new(cwd.into()).unwrap());
-            assert!(shell.marshal(SpawnGrant::Inherit).is_err());
+            assert!(shell.marshal(&ral_core::SpawnGrant::Inherit).is_err());
             shell
         };
-        let error = error(fork_then_enquire(
-            SpawnGrant::Inherit,
-            &Mooring::adrift(),
-            &shell,
-            |_| panic!("an absent desk refuses before building the request"),
+        let word = ValClos::from(tag(
+            "start",
+            Some(FOValue::Map {
+                entries: vec![
+                    ("prompt".into(), "hi".to_string().encode()),
+                    ("name".into(), "helper".to_string().encode()),
+                    ("type".into(), tag("amnemon", None)),
+                    ("grant".into(), tag("inherit", None)),
+                    ("model".into(), tag("inherit", None)),
+                ],
+            }),
         ));
+        let error = error(agents(&[word], &Mooring::adrift(), &shell));
         assert_eq!(error.reason, no_desk().reason);
         assert_eq!(error.hints(), no_desk().hints());
     }

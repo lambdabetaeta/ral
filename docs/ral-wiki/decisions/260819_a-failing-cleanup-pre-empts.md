@@ -63,18 +63,6 @@ it.
 The asymmetry was unmotivated besides. The two signals differ in what *catches*
 them, not in whether the cleanup got to the end of its work.
 
-## The kernel already said this
-
-`guard M ∶ N` reduces by resuming its cleanup in front of the outcome it found,
-as a discarded statement — `βguard-halt`, whose whole content is the detour
-through `؛`. One rule covers both signals there because the rule never inspects
-the signal: the cleanup runs for its effects, and the halt it found is back in
-focus when `β؛` fires. This was the Agda kernel's one standing *owned*
-divergence from the shell, and the shell's side is the side that moved. (The CK development cited here was retired on 2026-10-23.)
-Retiring it also retires the mortgage the divergence carried — a machine-own
-stderr writer plus a rendering `Err → 𝔹*` that the abstract `Err` declines to
-give, owed to no other clause.
-
 ## Consequences
 
 - A failing cleanup is now catchable by `try`, visible in an `audit` tree, and

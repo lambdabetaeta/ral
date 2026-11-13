@@ -82,15 +82,6 @@ tail into the parent is explicitly deferred to a separate decision; this ADR
 does not change that boundary. See [[map/core/runtime|runtime]] and
 [[map/core/typecheck|typecheck]].
 
-## Formal-model witness
-
-The Agda model no longer presents a second surface value pipe. The retained
-composite is named `bind-apply`: it derives bind-then-apply in the value
-calculus while preserving the producer's `⟨input, output⟩` grade through
-`bind-ty`. Its grade-action proof remains attached;
-the rename removes the obsolete surface claim rather than deleting the proof.
-(The CK development cited here was retired on 2026-10-23.)
-
 The old equations in [[decisions/260609_pure-pipe-equation|pure-pipe-equation]]
 and [[decisions/260610_value-edge-locality|value-edge-locality]] are superseded
 by this decision. Future work may decide whether the final value tail can be

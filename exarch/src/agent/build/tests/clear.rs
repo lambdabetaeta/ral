@@ -45,7 +45,7 @@ fn identity(agent: &Agent) -> Arc<ral_core::carrier::IdentityTransport> {
 #[test]
 fn clear_dismisses_and_joins_helpers_drops_reports_and_keeps_human_and_peer_input() {
     let mut parent = Agent::for_test("system").unwrap();
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     let child_engine = identity(&child);
     let (emit, _rx) = crate::bus::dummy_emitter();
     let helper = launch_child(&mut parent, child, None, &emit);
@@ -148,7 +148,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
     assert!(!result.failed, "{}", result.text);
     let entries = workers(&agent);
     assert_eq!(entries.len(), 1);
-    let child = agent.fork_named("helper").unwrap();
+    let child = agent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     let helper_engine = identity(&child);
     let helper = launch_child(&mut agent, child, None, &emit);
@@ -341,9 +341,9 @@ fn failed_clear_commit_keeps_the_outgoing_engine_and_ends_the_life() {
 }
 
 #[test]
-fn clear_refuses_an_adopted_engine_before_dismissing_its_helper() {
+fn clear_refuses_a_marshalled_child_engine_before_dismissing_its_helper() {
     let parent = Agent::for_test("system").unwrap();
-    let mut child = forked_child(&parent, "adopted", "`inherit");
+    let mut child = marshalled_child(&parent, "marshalled", "`inherit");
     let (emit, _rx) = crate::bus::dummy_emitter();
     let result = child.ral(
         &DurableRoot::default().child(),
@@ -353,7 +353,7 @@ exarch-pins `set [key: "goal", body: `text [spans: [[text: "keep this pin"]]]]"#
         &emit,
     );
     assert!(!result.failed, "{}", result.text);
-    let grandchild = child.fork_named("grandchild").unwrap();
+    let grandchild = child.fresh_child_named("grandchild").unwrap();
     take_task(&grandchild.handle(), &grandchild.mailbox);
     let helper = launch_child(&mut child, grandchild, None, &emit);
     child.seed("keep queued".into());

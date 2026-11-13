@@ -55,7 +55,7 @@ adds a scope at which signals wait.**
   between processes with a modality. ral admits only first-order `FOValue`s at an
   open payload position, and carries a child's parent as opaque `Marshalled`
   bytes under either carrier. Only the receiving engine reads that image
-  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+  ([[design/engine-protocol|the engine protocol]]).
 
 ## The same shape elsewhere
 

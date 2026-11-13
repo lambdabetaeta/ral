@@ -196,7 +196,6 @@ Audit remains a property of the parent command boundary.
   argv[0]; diffutils/coreutils expect the tool name in argv slot 0.
 
 See also [[decisions/260610_value-edge-locality|value-edge-locality]],
-[[decisions/260610_child-eval-unification|child-eval-unification]],
 [[internals/pipeline-execution|pipeline-execution]], [[map/core/runtime|map: runtime]],
 [[map/core/builtins|map: builtins]], and [[map/core/io-process|map: io-process]].
 

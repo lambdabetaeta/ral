@@ -1,8 +1,7 @@
 //! One borrowed DAG walk, with row identities assigned after their dependencies.
 
 use super::wire::{self, Frame, Row, RowId, Value, Wire};
-use crate::data::datum::Datum as _;
-use crate::data::json::RawFOValue;
+use crate::data::json::RawDatum;
 use crate::fact::JsonEncodeFailure;
 use crate::ir::{RuntimeData, Val};
 use crate::shell::grant::{RawSpawnGrant, SpawnGrant};
@@ -10,14 +9,21 @@ use crate::shell::runtime::{Env, Held, Image, RawContext, ValClos};
 use std::collections::HashMap;
 
 pub(super) fn wire(
-    image: &Image,
+    image: Image,
     grant: &SpawnGrant,
 ) -> Result<Wire<RuntimeData>, JsonEncodeFailure> {
+    let Image {
+        env,
+        context,
+        sources,
+        terms,
+        fixings,
+    } = image;
     let mut writer = Writer::default();
-    if let Some(root) = Node::env(&image.env) {
+    if let Some(root) = Node::env(&env) {
         writer.visit(root);
     }
-    for frame in &image.context.handlers {
+    for frame in &context.handlers {
         for value in frame
             .entries
             .iter()
@@ -29,7 +35,7 @@ pub(super) fn wire(
             }
         }
     }
-    let context = RawContext::from_value_with(&image.context, |frames| {
+    let raw_context = RawContext::from_value_with(&context, |frames| {
         Ok(frames
             .iter()
             .map(|frame| Frame {
@@ -45,12 +51,12 @@ pub(super) fn wire(
     })
     .map_err(|error| error.field("context"))?;
     Ok(Wire {
-        env: Node::env(&image.env).map(|node| writer.id(node)),
+        env: Node::env(&env).map(|node| writer.id(node)),
         rows: writer.rows,
-        context,
-        sources: image.sources.clone(),
-        terms: image.terms.clone(),
-        fixings: image.fixings.snapshot(),
+        context: raw_context,
+        sources,
+        terms,
+        fixings,
         grant: RawSpawnGrant::from_value(grant),
     })
 }
@@ -207,7 +213,7 @@ impl Writer {
             Held::List(_) | Held::Map(_) => {
                 Value::Built(reference.expect("a built collection names its row"))
             }
-            Held::Failure(fact) => Value::Failure(RawFOValue::from_value(fact.clone().encode())),
+            Held::Failure(fact) => Value::Failure(RawDatum::from_datum(fact.clone())),
         }
     }
 }

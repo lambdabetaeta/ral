@@ -46,7 +46,7 @@ fn done_surface(id: u64, title: &str) -> ral_core::data::FOValue {
 fn arrival_records_display_facts() {
     let mut session = Agent::for_test("system").unwrap();
     let rx = attach_sink(&session);
-    let helper = session.fork_named("helper").unwrap();
+    let helper = session.fresh_child_named("helper").unwrap();
     assert!(
         session
             .admit(Input::Child {

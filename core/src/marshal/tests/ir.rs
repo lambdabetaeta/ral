@@ -71,7 +71,7 @@ fn definition() -> Spanned<Phrase> {
 
 fn envelope(value: &Val) -> Json {
     let parent = crate::test_helper::core_shell()
-        .marshal(SpawnGrant::Inherit)
+        .marshal(&SpawnGrant::Inherit)
         .unwrap();
     let mut document: Json = serde_json::from_slice(&parent.0).unwrap();
     document["rows"] = json!([{"Env": [["ir", {
@@ -758,7 +758,7 @@ fn round_trip(body: Arc<Comp>) -> Arc<Comp> {
             scheme: Some(closed()),
         },
     );
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let (image, grant) = marshal::read(&shell.session.runtime, &parent).unwrap();
     assert!(matches!(grant, SpawnGrant::Inherit));
     let binding = image.env.binding("ir").unwrap();
@@ -848,7 +848,7 @@ fn recursive_ir_admission_grows_its_json_stack_at_bounded_depth() {
                     scheme: None,
                 },
             );
-            let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+            let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
             // Leave room for bounded raw-IR drop, independently of admission's guard.
             let (image, _) = stacker::grow(2 * 1024 * 1024, || {
                 marshal::read(&shell.session.runtime, &parent).unwrap()

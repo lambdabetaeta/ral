@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 3fcae877
+generated_at_date: 2026-11-13
 covers_paths: [exarch/src/port.rs, exarch/src/agent.rs, exarch/src/agent/, exarch/src/host.rs, exarch/src/bus/mailbox.rs, exarch/src/bus/transaction.rs, exarch/src/bus/lease.rs, exarch/src/latch.rs, exarch/src/app.rs, exarch/src/boot.rs, exarch/src/signals.rs, exarch/src/schedule.rs, exarch/src/enquiry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/]
 ---
 
@@ -110,20 +110,21 @@ authority.
   reports `Failed` directly to its parent. A failed append or sync notifies iff
   the captured pre-commit mail owed; failed append leaves the folds unchanged,
   while a successful `Status` fold already cleared debt before a failed sync. `AgentAddress::report`
-  owns both fallback paths, guarded by `Shared.failure_noticed`:
+  owns both fallback paths, guarded by the mailbox's `Shared.failure_noticed`:
   at most one `Failed` reaches the parent, however often teardown retries.
   `AgentAddress::try_transact` is `transact` for closures returning
   `Result<_, Unavailable>`. `failure_noticed` exists because a failed `Status`
   append leaves the mail owing: teardown's report would fail again and post a
   second `Failed`.
   `Agent::report` drops its timers.
-- `Rest::pending` (A10) snapshots `Nursery::owing`: an unjoined helper is
+- `Rest::pending` snapshots `Nursery::owing`: an unjoined helper is
   pending exactly while `Status.owes` is true. An ended reported helper
   owes nothing, even before `Gone` is joined. `Status::working` is a view:
   parent obligation or open job.
-- A12 reminds an owing agent when no worker runs, `Rest` is empty and no
-  `Human`, `Task`, `Message` or `Child` is queued. Reading `Rest` before the
-  queue prevents a reminder from overtaking a helper's report.
+- An owing agent is reminded only when no worker runs, `Rest` is empty, no
+  returning schedule is armed and no `Human`, `Task`, `Message` or `Child` is
+  queued. `Rest` is read before the queue, so a reminder never overtakes a
+  helper's report.
 - `Agent::admit` on `Input::Child` records `Display::SubagentDone` and
   supplies the model notice only for an adopted, unjoined helper.
   `Next::Gone` and `Drained::Gone` join and collect failures without a model prompt. `read` reaches the newest own helper by name and refuses only while
@@ -158,9 +159,9 @@ authority.
   syncs the sessions directory after making a session. `Log::create` syncs
   the session after making `record.jsonl`.
 - `agent/build.rs::Agent::born` mints the id, computes `Parent::terms`,
-  resolves the prompt and opens `AgentLog::create` with `Opening`. Born and
-  reopen share private `hatch` and `assemble`, binding writer failure and
-  transport severance to home, then the address to its reserved name.
+  resolves the prompt and opens `AgentLog::create` with `Opening` (private
+  `hatch`). Born and reopen meet in `assemble`, which binds writer failure
+  and transport severance to home, then the address to its reserved name.
   `Parent::terms` is the one construction case split: human children take
   launch fuel, search, admission and `returns`, with home under the fleet
   root; helpers take their parent's search and one less fuel, nested home,
@@ -185,9 +186,10 @@ authority.
   usage meter, never the fleet or its engine factory.
 - `spawn::human_child` makes `/new` and `/branch` births through
   `Agent::born(Parent::Human, …)` with fresh engines; branch imports context, not
-  shell state. `AgentLog::reopen` folds context and control before quarantine,
-  quiesces and commits one resume line withdrawing pending posts, settling
-  the open job and retiring bookings, with a note naming withdrawn inputs.
+  shell state. `AgentLog::reopen` folds context and control, quiesces an
+  unready context and commits one resume line withdrawing pending posts,
+  settling the open job and retiring bookings, with a note naming withdrawn
+  inputs.
   It returns reconciled folds for a fresh cell, preserving only taken debt
   and a same-model narrowing. Engines and working memory are fresh.
   Headless reopens exactly one session; the run lock belongs to the launcher.
@@ -206,7 +208,7 @@ authority.
   after its batch only while the exchange remains live, then quiesced and
   reported. Failed mandatory protocol repair ends the session.
 - `enquiry.rs::Start { spec, parent: Marshalled }` carries the same parent
-  bytes on both seats. `desk/agents.rs::fork_engine` calls
+  bytes on both seats. `desk/agents.rs::child_engine` calls
   `IdentityTransport::child(&parent)` in process, sharing the parent's
   runtime, or `make_engine(engine, parent)`: the factory makes one engine,
   attached with `Attach::child(engine, parent)`. The host relays the image
@@ -226,7 +228,8 @@ authority.
   retires the prepared engine and ends life. Success transfers the home
   binding, replaces/retires the outgoing engine, advances generation, resets
   registers, commits queued-report/wakeup/surface withdrawals and schedule
-  retirements through `Txn::clear`, then drops timers and joined `Gone`s.
+  retirements through `Txn::clear`, then drops timers and queued `Gone`s
+  (dismissal already joined them).
   Human text, messages
   and commands survive; preparation failure changes nothing.
 - `agent/command.rs::Agent::switch_model` handles `Command::Model(Pick)`

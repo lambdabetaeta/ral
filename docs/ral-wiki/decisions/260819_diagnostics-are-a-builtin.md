@@ -45,22 +45,6 @@ which is a fact about the call site, not about the redirect.
 The golden rule applies straightforwardly: fifty years of shells have taught
 people to write two-descriptor arithmetic where one verb would do.
 
-## What it buys the model
-
-The Agda kernel's stderr-redirect parcel (the CK development was retired on 2026-10-23), revised the same day, is smaller by
-exactly this redirect:
-
-- no `cross!` frame and no `crosses` constructor of `AnswerErr` — the
-  fd-1-onto-fd-2 answer had no other client;
-- the two routing walks stay **one-directional**. `answer-err`'s surviving
-  `rejoins` sends the merged word on through `route` on the *tail*, so `route`
-  never calls back into the err walk. With `crosses` present the two would have
-  had to be mutually recursive, and every proof over them a mutual induction.
-
-The retirement lands before that parcel, so the measured corpus and the
-calculus agree on what exists rather than the model carrying a former the shell
-has stopped accepting.
-
 ## Consequences
 
 - The corpus is swept: every `echo … 1>&2` in `examples/`, `tests/`,

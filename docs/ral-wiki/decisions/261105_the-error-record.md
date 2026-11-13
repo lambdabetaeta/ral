@@ -242,7 +242,6 @@ TypeDiagnostic = [code: String, message: String]                       -- "T0057
 - `exited n` is an ending (the computation ran `exit n`) and, separately, a
   process `Failure`; the reason is `process [...]`, so the two never share a
   sum.
-- The Agda halt carries an opaque value; its error payload is unchanged.
 
 See [[design/failure|failure]], [[design/endings|endings]],
 [[design/capture|capture]], [[map/core/diagnostics|diagnostics]] and

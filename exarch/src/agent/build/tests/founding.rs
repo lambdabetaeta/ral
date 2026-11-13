@@ -77,7 +77,7 @@ fn a_founded_agents_prompt_carries_its_own_name_grant_and_scratch() {
 #[test]
 fn each_agent_resolves_the_template_under_its_own_name_and_grants() {
     let parent = launched(Toolset::offered(false), false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     let (parent_system, child_system) = (system_of(&parent), system_of(&child));
     for system in [&parent_system, &child_system] {
         assert!(!system.contains(PLACEHOLDER_PREFIX), "{system}");

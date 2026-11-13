@@ -26,12 +26,11 @@ use ral_core::fact::{
     DecodeFailure, InvalidCause, InvalidFailure, ProtocolData, ProtocolFailure,
     ProtocolFailureDecode, Reason,
 };
-use ral_core::marshal::Marshalled;
 use ral_core::shell::runtime::{Mooring, Settled, no_desk};
 use ral_core::ty::Site;
 use ral_core::ty::{Binders, Kind, Row, RowVar, Ty, Typed as _, closed_record, open_variant};
 use ral_core::typecheck::builtins::{fun, pure, thunk};
-use ral_core::{Shell, SpawnGrant, ValClos};
+use ral_core::{Shell, ValClos};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -106,26 +105,18 @@ fn agents(args: &[ValClos], mooring: &Mooring, shell: &Shell) -> Settled<ValClos
     {
         Word::Ask(request) => ask(AGENTS, Request::Agents(request), mooring, shell),
         Word::Spawn(Launch { grant, spec }) => {
-            fork_then_enquire(grant.0, mooring, shell, |parent| {
-                Request::Agents(Agents::Start(Start { spec, parent }))
-            })
+            if !mooring.has_desk() {
+                return Err(no_desk().into());
+            }
+            let parent = shell.marshal(&grant.0)?;
+            ask(
+                AGENTS,
+                Request::Agents(Agents::Start(Start { spec, parent })),
+                mooring,
+                shell,
+            )
         }
     }
-}
-
-/// Marshal this shell and enquire `request` of its parent bytes.
-/// Refuse an absent desk before marshalling.
-fn fork_then_enquire(
-    grant: SpawnGrant,
-    mooring: &Mooring,
-    shell: &Shell,
-    request: impl FnOnce(Marshalled) -> Request,
-) -> Settled<ValClos> {
-    if !mooring.has_desk() {
-        return Err(no_desk().into());
-    }
-    let parent = shell.marshal(grant)?;
-    ask(AGENTS, request(parent), mooring, shell)
 }
 
 /// A row a family's argument mentions.  `first_order` refuses a block or

@@ -69,8 +69,6 @@ No pass recovers the form from a value's shape. Only `Data` is traversed by
 freeze and name collection. Each read unifies at once: no disjunction,
 shape default, deferred read constraint or index-made weak variable.
 `let lookup = { |m k| $m[$k] }` therefore generalises over map element types.
-These reads are the formal core's `prim` operations `index (fld ℓ)`,
-`index (pos k)` and `index key`.
 
 ## Data is checked at the door
 
@@ -132,8 +130,8 @@ spread in place. An operand failure stops the remaining operands; a repeated
 computed key is refused by `Prim::Map` only after every operand has run.
 Explicit entries beat spreads, and the first spread wins.
 
-Assembly is a primitive on values in Rust and in `Extrinsic.Prims`; operand
-effects are represented by the surrounding binds, not by assembly transitions.
+Assembly is a primitive on values; operand effects are represented by the
+surrounding binds, not by assembly transitions.
 See [[decisions/261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]].
 
 See [[internals/type-inference|type inference]], [[design/row-types|row types]],

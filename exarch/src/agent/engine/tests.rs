@@ -18,7 +18,7 @@ fn read_rejection_keeps_its_actual_probe_subject_and_cause() {
             "/scratch",
         ))),
     ] {
-        let engine = Engine::adopted(crate::boot::test_transport());
+        let engine = Engine::child(crate::boot::test_transport());
         let failure = engine
             .read::<()>(subject.clone(), |_| {
                 Err(ProbeError::Rejected(ProbeFailure::Busy))
@@ -54,7 +54,7 @@ fn read_severance_and_computation_refusal_keep_the_original_envelope() {
     .with_hint("second");
     let wire = WireError::of(&original);
     let lost = Severed::Refused(wire);
-    let engine = Engine::adopted(crate::boot::test_transport());
+    let engine = Engine::child(crate::boot::test_transport());
     assert_eq!(
         engine.read::<()>(ProbeSubject::Workers, |_| Err(ProbeError::Severed(
             lost.clone()

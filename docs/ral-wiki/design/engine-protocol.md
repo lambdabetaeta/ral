@@ -158,7 +158,9 @@ and `SpawnGrant` as one JSON document, `Marshalled`, which the engine alone
 reads. The **opacity law** is that a payload the host relays but never reads
 crosses as bytes; its content is a contract between the engines at its two
 ends, and the spawner makes those ends one binary
-([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+([[invariants/single-binary|single-binary]]). The document therefore carries
+no build-id, which would check what the spawner already guarantees;
+host/guest skew is gated by `PROTOCOL_VERSION` at attach.
 
 **Marshalling preserves how values are held and what they share.**
 
@@ -178,15 +180,16 @@ ends, and the spawner makes those ends one binary
   carriers. Names, positions and `Handle` types survive; observations refuse
   `withheld-handle`. A caught failure crosses with its typed `ErrorFact`
   witness intact ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
-- Reading checks and constructs each row in one pass, then the roots. Wrong
-  references, unknown builtins, bad residuals, open closures or schemes,
-  duplicate names or keys, malformed facts and unreadable syntax all refuse
-  as `DecodeFailure` at their JSON path, wrapped once as
-  `ProtocolFailure::Decode { kind: Parent, operation: "child" }`.
+- Reading admits and constructs each row in one pass, then the roots: a
+  structural decode, then a semantic admission of every IR leaf and node,
+  since the structural decoder admits no semantic serde validators. Every
+  refusal is a `DecodeFailure` at its JSON path, wrapped once as
+  `ProtocolFailure::Decode { kind: Parent, operation: "child" }`; the checks
+  are listed in [[map/core/transport|transport]].
 - `Marshalled` has no inner length prefix: only its carrying protocol frame
   delimits and bounds it. In-process construction still encodes and decodes
   that same document, without a protocol frame. Writing refuses only a
-  non-Unicode cwd.
+  non-Unicode cwd (`ProtocolFailure::Marshal`).
 
 The **envelope** — `Frame`, `Event`, `SessionEvent`, correlation ids,
 `Attach`'s handshake — stays a closed set of Rust types behind
@@ -438,6 +441,13 @@ fixings and grant as well as its scope and context. No recipe runs in a child:
 the engine derives its runtime, then `Shell::child_of` reads the parent and
 constructs the session.
 A child ends when the host drops its connection (EOF on fd 3).
+
+**The scratch belongs to the host.** The root attach names
+`$EXARCH_SCRATCH`; a child inherits its spelling in `Terms`, and no engine
+mints a scratch or moves its lock. Agents in one tree therefore share the
+scratch and the tool homes under it, and trust one another: a narrowed child
+may plant tool configuration a wider relative later runs. A grant bounds
+access to the user's world, not trust within the tree.
 
 ## Liveness and severance
 

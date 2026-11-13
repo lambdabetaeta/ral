@@ -1,548 +1,293 @@
 ---
-generated_at_commit: f9ac94f8
-generated_at_date: 2026-11-12
+generated_at_commit: 3fcae877
+generated_at_date: 2026-11-13
 covers_paths: [core/src/shell/runtime/, core/src/shell/runtime.rs, core/src/builtin.rs, core/src/handle.rs, core/src/handle/]
 ---
 
 # Map: core / shell / runtime — runtime values & shell state
 
-`core/src/shell/runtime/` defines what the [[map/core/evaluator|evaluator]] manipulates
-at runtime. `shell/runtime.rs` re-exports its runtime types; shared host and
-fact data are reached through their owning modules.
+**A runtime value is a value closure `⟨V,ρ⟩`; a `Shell` is its state partitioned
+by lifetime, and what a run fixes rides beside it as an immutable `Mooring`.**
+`core/src/shell/runtime.rs` re-exports the types; the [[map/core/evaluator|evaluator]]
+steps over them.
 
 ## Values
 
-- `value.rs` — `ValClos`, the runtime [[design/cbpv|value closure]] `⟨V,ρ⟩`,
-  with nonvariable root and every direct name bound in ρ. `View` reads one
-  layer. `ValClos::close` restricts at formation and pulls missing direct
-  names from Σ; component reads share ρ without another restriction.
-  Beside it
-  `handler.rs` (the user handler stack: `HandlerFrame`, `HandlerStack`,
-  `FrameHandle`), crate-root `core/src/builtin.rs` (`BuiltinEntry` — a checker-owned `Decl` plus the body — and
-  `BuiltinTable`, which projects each set into the checker's `Manifest`; kept
-  separate from the handler stack — a row whose result settles at `Unit`
-  has its answer coerced to `Unit`, independent of grade,
-  `Decl::settles_at_unit` reading the curry spine to decide and
-  debug-asserting the body agrees), and crate-root `core/src/handle.rs` (the concurrency
-  substrate behind `Val::Handle`: `Handle::{Live, Withheld}` and
-  `HandleInner`, which carries its
-  worker's `WorkerId`, title and clock — a birth `Stamp` and an end `Stamp`,
-  each one instant on a monotonic and a wall clock — and one lock over its
-  `HandleState`, projected as `Sample::{Running, Stopping, Ready, Consumed}`,
-  beside `CompletedHandle`,
-  the worker's `CompletionPermit` and its `DeferredSurface`).
-  `ValClos::builtin` wraps an entry as `⟨Val::Builtin(entry),∅⟩` and is public
-  to hosts. Force enters `BuiltinEntry::eta` over the captured entry: a
-  λ-chain ending in δ. Partial application yields a boxed residual λ;
-  `residual` recovers its entry and remaining arity for display, hook
-  validation and marshalling. `Held` exposes syntax/capture, built list,
-  built map or failure witness without materialising a value;
-  `ValClos::closure` checks direct names when reading a marshalled closure.
-  An exact-arity call runs directly; arity zero runs on force too.
-  Display is `<native NAME>` or `<native map, 1 of 2 arguments>`; a residual's
-  type name is `Lambda`. Boundary partials remain inference-built λ-closures
-  over `Exec` carrying their checked site. Handler installation refuses
-  builtin residuals before checking their bodies.
-  Lambda display recovers lowered parameter patterns. `ValClos::variant`
-  shares syntactic payloads and their capture, but binds builtin, handle,
-  η-residual and built-collection payloads to a fresh name, keeping runtime-only
-  roots out of tag spines; `View::Variant` omits a resolved
-  unit payload, including a variable bound to unit, without recursive `view`.
-  Handlers are deep and self-masking, with no
-  `resume` ([[design/effects-handlers|effects-handlers]], [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
-  A *handler* arm is a block whose type takes its slot's parameters:
-  `HandlerEntry` carries its `HandlerArity` (`Unary` for a per-name arm, `CatchAll` for `within [handler: …]`) fixed by the surface form, and
-  persistent installation refuses a value that is no block (`arm_closure`) or
-  whose type takes other parameters (`arm_stands_in`,
-  inferred over the closure's own capture by `Shell::closure_schemes`), as one
-  `InvalidCause::IllTyped` fact naming the handler and every checker diagnostic.
-  Every named handler has `U([String] → Command)` and every catch-all
-  `U(String → [String] → Command)`, independent of names and Σ. Argv rows
-  carry no type rule and fix `[String] → Command` by construction.
-  Scoped handlers and catch-alls are checked statically and not re-vetted;
-  the calling convention is never inferred from the runtime shape
-  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
-- `value.rs`'s `ValClos::heads` gives the heads a value may be admitted at; the
-  shapes `execve(2)` has no argument for are `RefusedArg` (`ty/exec_arg.rs`),
-  one match on a head with one `remedy` each. Rendering an argv inside the shell
-  is total (`ValClos::render_argv`); this is the one gate, declared once so the
-  static refusal and the pre-spawn one cannot disagree
-  ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
-- `list.rs` / `map.rs` — `List` / `Map` build persistent
-  `Arc<imbl::Vector<ValClos>>` / `Arc<imbl::OrdMap<String, ValClos>>` values.
-  They realise value closures over implicit positional or keyed variables,
-  with logarithmic updates through `Arc::make_mut`. `ListRef` / `MapRef`
-  read syntax over ρ or built data; `get` / `iter` yield `Cow<ValClos>`.
-  `to_list` / `to_map` share built spines and materialise syntax once;
-  `to_map` drops an error witness. Builders lend `&ValClos` directly.
-  `data::{Str, Bytes}` share owned string and byte buffers without copying.
-  Scalar constructors use refcount-free `Env::EMPTY`; nonempty small captures use
-  `ThinArc`. Compiled upper bounds are `Env ≤ 16`, `ValClos ≤ 48`,
-  `Frame ≤ 128` bytes
-  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
-- `flow.rs` — `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable,
-  `Escape` propagating), and `Escape` (`Exit`, `Stopped`).
-  `From<process::Cancellation> for Break` preserves cause and owner as a
-  non-catchable `Stopped`; the process domain knows no runtime control flow
-  ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
-  optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
-- `error.rs` — the *rendering* of a runtime `Error` and its minting as a
-  record (`outcome_value`); the type itself is `core/src/error.rs`, described
-  in [[map/core/diagnostics|diagnostics]]. A loaded file's compile failure is
-  attached to an `Error` by `load::check_source` with `with_rejection`, so
-  `compile` has no runtime dependency.
-  `audit.rs` — the
-  `Audit` collector, holding one total `Prov` register, over
-  `fact/observation.rs`'s `Observation` / `Observed`
-  and `fact::AuditIo` (captured byte prefixes and totals) — data independent of
-  runtime, shared by the trail, the surface rail, `--audit`'s JSON, and the wire.
-  `value/first_order.rs` walks each way to `FOValue`; `compare.rs` supplies
-  `ValClos::equals` and `ValClos::compare`, exact across Int and Float.
-  `ValClos::thunk` forms `⟨thunk M,ρ↾occ(M)⟩`; `ValClos::block` is a thunk the
-  checker may read, never an η residual. Drop is trampolined: a dying value
-  queues the capture, built vector or built map it alone owns, bounding the
-  host stack while dropping capture chains
+**`ValClos` (`value.rs`) is `⟨V,ρ⟩` with a non-variable root and every direct
+name of `V` bound in ρ** ([[design/cbpv|cbpv]],
+[[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+
+- *Representation.* Syntax over ρ, a built `List`, or a built `Map` (optionally
+  carrying a caught failure's `ErrorFact`). `Held` exposes exactly this to the
+  marshaller.
+- *Formation.* `ValClos::close` restricts ρ to the value's occurrences and
+  pulls each missing direct name from Σ with its scheme (`pull_direct`).
+  `ValClos::thunk` forms `⟨thunk M, ρ↾occ(M)⟩`. Reading a component shares ρ
+  without restricting again
   ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
-  `env.rs` — lexical `Env`, ρ alone; process-env overrides are
-  `environ::EnvVars` (`core/src/environ.rs`), not runtime values. A scope entry is
-  `Binding { value, scheme: Option<Closed> }`, so the checker's verdict
-  rides next to the value. `Env::addr` identifies a nonempty allocation for
-  marshalling; `Env::from_bindings` refuses duplicate names on read.
-  Every session binding has a scheme; block-local
-  bindings may carry none
-  ([[internals/type-inference|type-inference]]).
-  **A shared write copies the touched nodes and their inline bindings**: `Env`'s
-  private `Entries` is refcount-free `Empty`, a sorted `ThinArc` array of at most
-  `SMALL` (8) bindings, or a persistent
-  hash map past it, so a `bind` into an environment another holder still
-  references copies only the touched node — the whole array up to `SMALL`,
-  a path past it — and copying a node clones every `Binding` stored inline in
-  it. `Closed` shares its `Arc<Scheme>`; values share collection nodes and
-  captures, but cloning a root tag spine copies its n tags in O(n).
-  `binding_schemes` hands the next run's check those same shared schemes.
-  Handler entries carry no schemes: `handled_names` supplies diagnostic names
-  only. Their install check yields a verdict, not a type to persist.
-  `signature.rs` — `Signature`, Σ: the natives and the frozen prelude, one
-  per `Shell`, `Arc`-shared into every fork. `crate::shell::runtime::lookup(name, env,
-  sig)` is the one resolution rule, ρ then Σ's prelude then Σ's natives; nothing
-  else in core spells the shadowing order out again.
-- `coerce.rs` — the `ValClos::as_str` / `as_list` / `as_map` / `expect_handle`
-  family of argument decoders. Container decoders lend `ListRef` / `MapRef`;
-  `expect_thunk` lends computation and environment. `expect_handle` calls
-  `Handle::live`, refusing withheld handles as `withheld-handle`.
-  Shape refusals use `ValClos::expected`; builtins and `shell::grant` read
-  these decoders through
-  `crate::shell::runtime::*`.
-- `walk.rs` — `AdmittedWalk` and `Shell::admitted_walk`: the live stack's
-  `ReadRegion` and current cancel scope handed to `path::tree::Walk`; unseen
-  entries skipped, domain cancellation converted to `Break`, and unnameable
-  entries raised with the caller's name. Relative requests take their naming
-  base directly from `Context::cwd`, preserving its exact path spelling.
+  `ValClos::closure` rebuilds a marshalled closure and refuses an unbound
+  direct name.
+- *Reading.* `View` reads one layer. `View::Variant` omits a unit payload,
+  including a variable bound to unit.
+- *Classification.* **`ValClos::shape` is the one classification.** A builtin
+  is classified as its η-expansion: arity 0 is a `Block`, otherwise a
+  `Function`. `type_name`, `found` and `heads` all derive from it.
+- *Builtins.* `ValClos::builtin` is `⟨Val::Builtin(entry), ∅⟩`. Forcing or
+  applying it enters `BuiltinEntry::eta`, a λ-chain ending in δ. A partial
+  application is that chain's residual thunk; `residual` recovers the entry
+  and the arguments still awaited. `block` is a thunk the checker may read,
+  never a residual. Display is `<native NAME>` or `<native NAME, k of n
+  arguments>`.
+- *Tags.* `ValClos::variant` binds a builtin, handle, residual or built
+  collection payload to a fresh name, so a tag spine holds only syntax.
+- *Exec arguments.* `heads` gives the heads a value is admitted at; the shapes
+  `execve(2)` cannot take are `RefusedArg` (`ty/exec_arg.rs`), each with one
+  `remedy`. `render_argv` is total
+  ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
+- *Size.* `shallow_size` sums string and byte lengths, recurses lists, maps
+  and tag labels, and charges 32 for a thunk, builtin or handle, never
+  descending a capture.
+- *Drop is trampolined:* a dying value queues the capture or built container it
+  alone owns, bounding the host stack.
+- Compile-time bounds: `ValClos ≤ 48`, `Env ≤ 16` and machine `Frame ≤ 128`
+  bytes.
 
-## Capabilities
+Beside it:
 
-`authority/policy.rs` holds the resolved capability model and judgments;
-`authority/grant/` constructs it through authored resolution and host system-read
-discovery, while `authority/guard/` enforces it without runtime types.
-`shell/grant/` decodes `ValClos` values and adapts spawn grants;
-`Shell::freeze_ctx` builds a `FreezeCtx::at` from env and logical cwd, then
-adds scratch.
-The model includes: `GrantLayer` (resolved where decoded from a grant value),
-`EditorVerb` and `ShellVerb` sets, `GrantStack` (`Vec<GrantLayer>`, a *stack* of
-layers rather than a folded aggregate — attenuation is the fold over the
-stack's verdicts, not a meet of layers into a layer
-([[decisions/260906_object-not-name|object-not-name]]); a scoped push —
-`with_layer`, `Frame::Grant` — removes its own frames by
-position (`GrantStack::remove`) rather than popping the top, so a session
-frame `push_session_capabilities` lays inside it, as the boot builtin's
-`--capabilities` (`apply_session_profiles`) does inside its run, survives it), `SandboxProjection`,
-and `GrantLayer::extend`, which adds an `--extend` `Fragment` to a base once (tested in
-`authority/policy/lattice_tests.rs`). `Meet` survives only where evidence genuinely narrows by
-intersection, not as a whole-layer operation.
+- `list.rs` / `map.rs` — persistent `Arc<imbl::Vector<ValClos>>` /
+  `Arc<imbl::OrdMap<String, ValClos>>`. `ListRef` / `MapRef` read syntax over ρ
+  or built data alike; `to_list` / `to_map` share built spines.
+- `env.rs` — `Env` is ρ alone. A scope entry is `Binding { value, scheme:
+  Option<Closed> }`. Entries are `Empty`, a sorted `ThinArc` array of at most
+  8, or a persistent hash map, so a shared write copies only the touched node.
+  Session bindings always carry a scheme; block-local ones may not
+  ([[internals/type-inference|type-inference]]). `Env::from_bindings` refuses
+  duplicate names.
+- `signature.rs` — **Σ, the natives and the frozen prelude, stored as typed
+  `Binding`s**, one `Signature` per shell, `Arc`-shared into every child. A
+  native builtin carries its declared scheme (none for a boundary row).
+  `lookup` is the one resolution rule: ρ, then Σ's prelude, then Σ's natives.
+- `flow.rs` — `Settled<T> = Result<T, Break>`; `Break` is `Error`
+  (catchable) or `Escape` (`Exit`, `Stopped`). A process `Cancellation`
+  becomes a non-catchable `Stopped`
+  ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+- `error.rs` — rendering of runtime `Error` and `outcome_value`, its record
+  form; the type is `core/src/error.rs` ([[map/core/diagnostics|diagnostics]]).
+- `audit.rs` — the `Audit` collector over `fact/observation.rs`.
+- `value/compare.rs` — `equals` and `compare`, exact across `Int` and `Float`.
+  `value/first_order.rs` converts to and from `FOValue`.
+- `coerce.rs` — argument decoders (`as_str`, `as_list`, `as_map`,
+  `expect_handle`, `expect_thunk`); shape refusals go through
+  `ValClos::expected`. `expect_thunk` accepts a builtin through its η.
+  `expect_handle` refuses a withheld handle as `withheld-handle`.
+- `walk.rs` — `Shell::admitted_walk` hands `path::tree::Walk` the live grant
+  and cancel scope, skipping unadmitted entries.
+
+`core/src/builtin.rs`:
+
+- `BuiltinEntry` is a checker-read `Decl` plus a body; `BuiltinTable`
+  projects installed sets into the checker's `Manifest`.
+- A row that settles at `Unit` has its answer coerced to `Unit`; debug builds
+  assert the body agrees (`Decl::settles_at_unit`).
+
+`core/src/handle.rs`:
+
+- `Handle` is `Live(HandleInner)` or `Withheld(title)`. A marshalled parent's
+  handles arrive withheld; `Handle::live` refuses observing one.
+- `HandleInner` carries `WorkerId`, title, birth `Stamp` (monotonic and wall),
+  `home` node and one lock over its state, sampled as `Sample::{Running,
+  Stopping, Ready, Consumed}`. The sole `CompletionPermit` publishes the end.
+- **`pins_live_work` recurses lists, maps, tag spines and a partial builtin's
+  supplied arguments, never a block's capture**
+  ([[internals/binding-leases|binding-leases]]).
+- `handle/brood.rs` — `Cradle`, `Brood`, `BroodGuard`; `handle/surface.rs` —
+  `DeferredSurface`.
+
+## Handlers
+
+**Handlers are deep and self-masking, with no `resume`**
+([[design/effects-handlers|effects-handlers]],
+[[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]]).
+`handler.rs` holds `HandlerStack`, `HandlerFrame` and `FrameHandle`.
+
+- `HandlerEntry` carries `HandlerArity`, fixed by the surface form: `Unary`
+  for a named arm, `CatchAll` for `within [handler: …]`. The calling
+  convention is never inferred from the value
+  ([[decisions/260619_handlers-are-lambdas|handlers-are-lambdas]]).
+- A named arm has `U([String] → Command)`; a catch-all
+  `U(String → [String] → Command)`. Base-frame builtins (`Convention::Argv`)
+  have that type by construction.
+- Persistent installation (`Shell::install_handler` = `vet_handler` +
+  `commit_handler`) vets each arm once:
+  - `arm_closure` refuses anything but a block the checker can read; a bare
+    builtin is named, with the block that wraps it
+    (`Expected::BlockNotBuiltin`);
+  - `arm_stands_in` checks the block against its slot, inferred over its own
+    capture by `Shell::schemes_over`, refusing as one `IllTyped` fact.
+- Scoped arms are checked statically and never re-vetted. No statement or
+  builtin changes persistent frames; only the host installs them between units
+  ([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
 
 ## Shell
 
-`shell/runtime/state/` partitions the interpreter state into fields by lifetime — the
-field name *is* the invariant — joined by `Shell`
-([[decisions/260617_turn-local-state|turn-local-state]],
-[[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
-`env` (ρ, the session environment, extended by every `Define` that lands),
-`sig` (Σ — natives and the frozen prelude, `Arc<Signature>`, one per shell,
-never checkpointed since nothing but boot and the one prelude bake ever
-writes it) and `context` (dynamic context — `cd`, handlers) — three
-flat fields, since a step's focus carries its own environment and there is no
-ambient `scope` for a bundle to snapshot — plus `Io`, `SessionState`, and
-`LocalState` below. `Shell::run_under` checkpoints and rolls back the `(env,
-context)` pair around every run, so a panicking run
-reports as a failed run instead of corrupting the store; `sig` needs no
-checkpoint, since a run never writes it.
-- **`Io`** — the run's *byte streams*, and the only part of the frame the
-  `Shell` carries (as the field `io`): stdin / stdout / stderr and nothing
-  else ([[map/core/io-process|io-process]]); the terminal snapshot is the
-  `Runtime`'s, and interactivity and stage membership are `SessionState`'s. These
-  genuinely change *within* a run — a redirect frame swaps the sinks — so
-  they are taken on **loan** and repaid: `shell::run::IoLoan` swaps a fresh `Io` in
-  at install and restores the previous one on `Drop`, carrying the two
-  registers the run's frame also owns for its life (`session.root_file` and
-  the total `Prov` register in `local.audit`, entered for a `DisplacedSite`)
-  with it, so an unwinding evaluation cannot leave a
-  stale register behind. The loan carries the current cancel scope too.
-- **`scope`** — the cancel scope the computation in focus polls
-  (`Shell::poll`), which also genuinely changes within a run: a thread base
-  sets it to its mooring's node, and `Frame::Acquire` / `Frame::Cleanup`
-  restore it after a `guard`'s shielded acquisition / release. `Shell::shield`
-  swaps only this cell, not the worker cradle. A `gather` opened inside the
-  shield captures it as the cradle's entry scope; a birth into an outside
-  owner does not inherit the shield. It is a `Scope`, read, never written:
-  writes aim at `Mooring::home`, a `ScopeNode`
+**`Shell` (`state/mod.rs`) partitions interpreter state by lifetime; the field
+name is the invariant**
+([[decisions/260617_turn-local-state|turn-local-state]]). Every field is
+`pub(crate)`: hosts use the verbs in `host.rs`, `scope.rs`, `context.rs`.
+
+- `env` — ρ of the session, extended by every session `Define`.
+- `sig` — `Arc<Signature>`, never written after boot, so never checkpointed.
+- `context` — `Context`: env overrides, cwd, `GrantStack`, handler stack,
+  args. Clones wholesale into every child.
+- `io` — the three byte streams, swapped within a run by redirect frames.
+- `scope` — the cancel scope the focus polls (`Shell::poll`). A thread base sets
+  it to its mooring's node; `Shell::shield` swaps it for a `guard`'s
+  acquisition or release. It is read, never written: strikes aim at
+  `Mooring::home`
   ([[decisions/261016_delimiters-are-handlers-for-poll|delimiters-are-handlers-for-poll]]).
-- **`SessionState`** — what survives every run's teardown: the durable cancel
-  `root` that a run's loose workers parent under (`Shell::join_session` *shares*
-  it, for a second
-  `Shell` the engine runs beside that session — an aside hook,
-  [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]), the
-  `anchor` a run entered through `Shell::run` nests its foreground frame
-  under — minted once, from the session's own root, and shared by an aside,
-  so the scope tree is the
-  LIFO extent it claims to be — the `sources`
-  registry rendered against after a run returns (append-only for the session,
-  so a nested run's spans can never alias an outer run's `FileId`) and the
-  `root_file` naming the current run's root source, the `exit_hints` table
-  (one `Arc`, shared by every child), the `fixings` store (what each unit's
-  `comparable` variables were fixed to: the session's threads share it, a new
-  session snapshots it, [[map/core/ty|ty]]), the host-installed
-  `builtins` with the session's `library_docs`, the session's
-  `terminal_lease`, `stack_limit` (no machine push exceeds that frame count),
-  and `child_limits` (soft resource ceilings for launched children, leaving
-  ral's own limits unchanged), and
-  the `hooks` table (a worker or a stage dispatches none; a hook registered by a run that then panics is not rolled back with the `(env, context)` checkpoint).
-- **`LocalState`** — host-local scratch carrying its own flow rules (audit
-  trail, REPL scratch, the `workers` registry, the `bindings` ledger, the
-  `cradle`); the
-  residue once run and session state are named. The `cradle`
-  (`core/src/handle/brood.rs`) says where a loose birth hangs and who settles
-  it: loose under the root, answering for nothing, for a run and an aside
-  (`Shell::construct`, `Shell::join_session`); inside a gather, its entry
-  scope and its `Brood`, paired with a unique `BroodGuard` holding the handles
-  of every `spawn`/`watch` born inside it (`Cradle::owning`) — set first thing
-  in the worker closure for a worker's body, and by `Frame::Gather` for the
-  extent of a `gather { … }`; a stage shares its parent's, so a `spawn` in a
-  stage inside a gather is that gather's
-  ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]). The worker registry
-  (`shell/runtime/state/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
-  worker, one per agent: a `WorkerEntry` is the `HandleInner` and its
-  `Owner` (the session, the worker whose body it was born in, or a
-  `gather`), the id, title and clock being the handle's own; `Shell::spawn_thread` shares it by `Arc` into
-  a spawned worker's or a pipeline stage's own shell (so a nested `spawn`
-  registers alongside its parent), but a sub-agent fork or an aside starts
-  with a fresh, empty one carrying the parent's retention. Beside the entries it keeps the `ReapNotice` ledger the reap policies
-  write — one compact record per entry removed by policy, atomic with the
-  removal under the registry's one lock — pushed by the engine as
-  `` `notice `` surface events at each settled source run's ready boundary
-  (`emit_ready_boundary_notices`; `take_worker_reap_notices` is
-  crate-private, that push its one caller). Which entries belong to which
-  dispatch is not the registry's question to answer — a `spawn` observes its
-  birth into the dispatch's own trail ([[map/exarch/shell-eval|shell-eval]]),
-  and a reader joins that trail against the registry (or the `` `workers ``
-  probe, whose rows carry the same `id`) to ask what became of it. A `Ready`
-  entry carries a `settled_epoch` stamp too: retention is armed once at boot
-  (`Shell::arm_worker_retention`, beside the binding lease), the
-  registry's own clock ticks once per source dispatch (`tick_epoch`), and
-  the ready-boundary sweep (`sweep_retention`) stamps an entry at the
-  first sweep that observes it `Ready` while its parent worker (if any) is no
-  longer live (`Running` or `Stopping`) and expires it (a `Retention`
-  notice) once its unclaimed result has sat a full retention of ral calls
-  — a host that never arms (the REPL) retains `Ready` entries
-  indefinitely. Worker teardown is structural: dropping the shell cancels
-  every registered worker's scope through the `Drop` of `Roster`, so a
-  session's workers die with its store — a host's `/clear`, which replaces
-  the outgoing shell wholesale, needs no cancel call site, and no worker
-  outlives its session's store. The
-  `Roster::Owned`/`Roster::Shared` split is what keeps that edge honest: a
-  `spawn_thread` child holds a `Shared` roster over its *parent's* registry,
-  so its own drop must not reap the parent's. A wipe (`cancel_all`) waits
-  for live worker threads until a deadline the first wipe fixes (default
-  `DEFAULT_CLEANUP_GRACE` + `TEARDOWN_GRACE`, 5.5 s), so a certifying `IdentityTransport::end` and the later `Drop`
-  share one grace.
+- `session: SessionState` — survives every run: durable cancel `root` and
+  `anchor`, the append-only `sources` and `root_file`, `exit_hints`, `scratch`,
+  `fixings` ([[map/core/ty|ty]]), `runtime` (`Arc<Runtime>`: Σ, builtin
+  table, base handler layer, library docs, terminal state), `terminal_lease`,
+  `stack_limit`, `child_limits`, `interactive`, `stage`, and `hooks`
+  (`Some` only on the booted session).
+- `local: LocalState` — host-local, each member with its own rule: `audit`,
+  the `workers` roster, the `cradle`, the `bindings` ledger, `machine_depth`.
 
-  The binding-lease ledger (`shell/runtime/state/bindings.rs`,
-  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits
-  beside the worker registry but needs no lock: it has exactly one writer,
-  the thread that owns `&mut Shell` for every run, install, and prune
-  (verified in the module's own doc comment). Inert (`BindingLedger::
-  default()`) until `Shell::arm_binding_lease` seals every name then visible
-  in the scope chain as permanently-exempt baseline and starts the
-  committed-run clock. Every persistent top-level scope write funnels
-  through one fused chokepoint, `Shell::note_define` (`scope.rs`,
-  beside `set_var`), so "write a scope entry" and "stamp the
-  ledger" can never be pulled apart: `Ran::define`'s single per-name
-  loop over `pattern::destructure` calls it for every name a
-  `Define` phrase installs under `Mode::Session` — a plain `let`, a
-  destructuring pattern's `Name`/`...rest` arms, or a `Rec` group's
-  mutually-recursive members alike — and never under `Mode::Local`. The host
-  door `set_var` requires a `Closed` scheme and uses the raw `Env` primitive,
-  since its host calls precede arming. Idleness is *use-observation*, not
-  re-installation: source dispatches tick the committed-run clock; checks do not,
-  and the root's compiled program renews leases by `ir::referenced_names`.
-  Linked modules see Σ alone and renew no session lease
-  ([[map/core/ir|ir]]). The same chokepoint runs a second, orthogonal
-  check: `BindingLease` also carries `large_binding_bytes`, and an install
-  whose value's `ValClos::shallow_size` (a structural estimate — `String`/
-  `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
-  `Lambda`/`Block`/`Native`/`Handle` a small fixed constant, never descended) meets it
-  queues a `LargeBindingNotice` regardless of baseline status or idle age —
-  residency and lifetime are independent axes.
-  `Shell::leased_binding_count` rounds out the accessor surface — a probe
-  figure, like the `` `largest-binding-bytes `` probe's
-  `largest_binding_shallow_size`; large-binding notices ride the same
-  ready-boundary `` `notice `` push as the reap ledger's
-  (`take_large_binding_notices` is crate-private).
-
-Every `Shell` field — `env`, `sig`, and `context` included — is `pub(crate)`: the
-partition encodes run safety, capability attenuation, and wire framing, and
-is core's invariant to keep, not an API a host may reach past. Hosts drive a
-session through the intent verbs gathered in `host.rs`, plus the scope and
-context verbs. `Shell::binding_count` sits there too — the lexical scope's
-probe figure for a host's `/resources` fold
-([[invariants/probe-convention|probe-convention]]): a count, never the
-values, and enumeration renews nothing.
+**A run checkpoints `(env, context)` and restores it on panic**
+(`Shell::run_under`). The hooks table and `local.audit` are outside the
+checkpoint. Within the run, `IoLoan` (`shell/run.rs`) swaps in `io`, `scope`,
+`root_file` and the audit call site, restoring them on `Drop`, so an unwinding
+run leaves nothing stale.
 
 ### The mooring
 
-What a run *fixes* is not on the `Shell` at all. The eight run-invariant
-members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
-worker's completion delivery — `None` outside an agent host), the
-`desk` answering the run's enquiries
-([[map/core/engine-protocol|engine-protocol]]), the
-owner's node `home` (the base of the run's scope tree: what a heard key, a
-wall or a `cancel` strikes, never what is polled), the
-`cleanup_grace` shared by a `guard`'s acquisition and release shields from
-the strike (the host's policy, from `Run::cleanup_grace`), the
-`worker_cap` admission bound (`Some(cap)` refuses a spawn while
-`cap` workers are `running`, `stopping`, or reserved; `None` admits freely), the
-`worker_title` `TitlePolicy` (`Required` refuses an untitled spawn), and the run's
-`terminal_access`. It is an owned local on the run's
-own Rust stack frame (`run_built`), and reaches every callee as an explicit
-`&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
-signature.
+**What a run fixes is a `Mooring` (`mooring.rs`), an owned local on the run's
+stack frame passed as `&Mooring` beside `&mut Shell`.** Being immutable it needs
+no restoring; the two borrows are disjoint.
 
-A child request carries `Shell::marshal`'s `Marshalled` bytes through the
-`desk` on either seat ([[map/core/transport|transport]]). The builtin can read
-its `&Shell` while marshalling; the desk constructs a child from those bytes
-without reaching back into the dispatching shell. `` exarch-agents `start ``
-refuses `NoDesk` before marshalling, through the shared `no_desk` wording.
+- Fields: `surface`, `deferred`, `desk`, `home`, `cleanup_grace`,
+  `worker_cap`, `worker_title` (`TitlePolicy`), `terminal_access`.
+- `worker_cap` refuses a spawn while live plus reserved seats reach it.
+- `Mooring::for_thread` rebuilds one for a worker or stage: same deferred
+  sink, grace, cap and title policy; its own `home` and `surface`; no desk;
+  `TerminalAccess::Denied`.
+- `Mooring::adrift` runs a builtin body outside any run: nothing installed,
+  `home` under a root nothing holds.
+- `has_desk` gates enquiries; `no_desk` is the shared refusal.
 
-Immutability is what makes the frame free. A value that never moves needs no
-putting back: an outer run's mooring is restored by the stack unwinding.
-In effect terms the split separates a Reader (`&Mooring`, whose `local` is
-applying a function under the mooring it is handed) from State (`Io` under a
-loan). **Borrow when you can, loan when you must.**
-
-`&Mooring` and `&mut Shell` are disjoint borrows, so a builtin body can surface
-an event while holding the shell mutably. A `Mooring` clone carries
-the authority the original has; `lend_terminal` is the one place
-`TerminalAccess` is raised, so the raise-never-mint rule lives in one function.
-Hosts reach `home`, `Mooring::surface`, `Mooring::surface_data`,
-`Mooring::lend_terminal`, `Mooring::has_desk` and `Mooring::adrift` —
-`adrift()` being the mooring a host builds to call a builtin body outside any
-run (no surface, no rail, no desk, and a scope under a root
-nothing else holds, so cancelling it is how such a caller drives the body's poll points).
-
-A worker or stage thread *rebuilds* rather than sharing
-(`Mooring::for_thread(parent, node, surface)`): it keeps the deferred rail, cleanup
-grace, worker cap and title policy, takes the thread's own `home` scope node and `surface`
-(a buffering `DeferredSurface` for a session worker, the parent's live surface
-for a gather-owned worker or a pipeline stage thread), and gets no desk —
-enquiries are barred to a child thread.
-
-### Surface
-
-The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
-`SurfaceSink = Arc<dyn EventSink>`) is the value-typed dual of the byte
-[[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
-borrowed first-order `FOValue`
-([[map/core/engine-protocol|engine-protocol]]); the `Mooring::surface`
-method takes a borrowed `ValClos`, encodes it once, in that method, and forwards onto
-the installed sink — inert when none is present (a bare REPL).
-`Mooring::surface_data` is its `FOValue`-typed sibling, for a caller that
-already holds the wire form: `Shell::observe_stamped` (`shell/runtime/audit/fan_out.rs`) reaches it
-with `Observation::to_surface`, tagged `` `observed `` so a host dispatches on
-the tag alone without re-encoding a `ValClos` it never had. Run-scoped, not
-a persistent capability — a run installs it, so a clone of it has no
-liveness role and can never decide a run is over. A session worker does not receive the live sink: its surface is a
-`DeferredSurface` (`core/src/handle/surface.rs`) that buffers and, through the
-worker's `CompletionPermit` on every exit after the handle reaches its terminal
-state (`Ready` or `Consumed`), delivers the batch once to the session's
-`DeferredSink`; a mooring without that sink gives its workers no surface
+**Surface.** `Mooring::surface` encodes a `ValClos` to `FOValue` once and
+forwards to the `SurfaceSink`; `surface_data` takes `FOValue` directly. Both are
+inert without a sink. A session worker gets a `DeferredSurface`, delivered once
+through its `CompletionPermit` to the `DeferredSink`; a gather child or stage
+gets the parent's live sink
 ([[decisions/260622_surface-delivers-itself|surface-delivers-itself]]).
 
-### Terminal handoff
-
-**A run reaches terminal authority through a permit, not a resource getter.**
-The private process terminal module owns both the authority gate and the
-restoration protocol ([[map/core/io-process|io-process]]).
-
-- `SessionState::terminal_lease` holds the opaque `TerminalLease`, minted at
-  startup from `tcgetpgrp == getpgrp` on Unix or console attachment on Windows.
-  Hosts request `RequestedTerminalAccess`; they cannot mint or obtain a lease.
-- `Mooring::terminal_access` carries process-layer `TerminalAccess`: `Denied`
-  (the safe default), `Leased` (REPL and batch), or within-run `ExplicitLoan`.
-  `TerminalAccess::reach` requires the session lease in every permitted case:
-  `Denied` yields none, `Leased` requires `Sink::Stdout`, and `ExplicitLoan`
-  ignores stdout. Its affine `TerminalPermit` permits one pre-spawn capture.
-- `Shell::group_owner` asks the stage question once: a stage returns its
-  `Membership` and reaches no permit; otherwise it gathers the session permit
-  and interactivity. Commands and pipelines consume this same owner decision;
-  neither shell nor io can extract saved state or key attribution from the
-  resulting `TerminalHold`.
-
-Because the mooring is invariant, a raise is not a mutation but a derivation:
-`Mooring::lend_terminal` returns a *new* mooring with `Leased` raised to
-`ExplicitLoan` for `_ed-tui`, and the borrow ends when that value goes out of
-scope. It is `None` from `Denied` and from `ExplicitLoan`: a loan raises only
-a run that holds the terminal, never mints authority, and is never lent twice.
-
-### Method modules
-
-Methods on `Shell` live by concern, one submodule each:
-
-- `construct.rs` — construction (`Shell::construct`, `Shell::root`, `Shell::child_of`). The startup seeding is not here but in `shell::boot::seed_host_env`: the env-var pass into
-  `context.env_overrides` ([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]];
-  a default fills only an absent variable, and one the host binds in bytes
-  that are not UTF-8 gets no entry, so children inherit it untouched),
-  and the machine facts (`OS_NAME` / `OS_ARCH` / `OS_FAMILY`) seeded into the environment (`env`). `construct.rs` also holds the construction's types: `Runtime` (the process
-  half: Σ, the builtin table with its base handler layer, library docs, the
-  terminal state; from the installer, shared through its `Arc`s), `Image`
-  (what a child can inherit: env, context, sources, `Terms`, fixings), `Terms`
-  (the session's policy: stack limit, child limits, exit hints, lease, retention —
-  one type in memory and on the wire). `Shell::marshal(grant)` snapshots the
-  image and writes it with the `SpawnGrant` through `crate::marshal`.
-  `Shell::construct(runtime, image, root)` is the one session literal, with a
-  root's hooks and terminal lease passed beside the image so a marshalled
-  parent cannot express either; `Shell::root(runtime, cwd)` and
-  `Shell::child_of(runtime, &parent, narrow)` are its two instances;
-- `host.rs` — the host-embedding accessor surface;
-- `context.rs` — the `Context` dynamic-context verbs;
-- `scope.rs` — lexical binding and persistent-handler doors. `set_var` installs
-  a value with its explicit `Closed` scheme. The host's `TERMINAL` record and
-  scheme derive from one field table in `value.rs`. Rc lexical names use
-  top-level `let`s above the options `return`, checked and installed through
-  `Ran::define`;
-- `checks.rs` — the [[map/core/capabilities|authority adapter]]: hands the live
-  `GrantStack` to `authority::guard`, whose `Denial` carries only portable
-  request/cause facts. `Shell::refused` records its derived check and constructs
-  `Reason::Denied` (an exec refusal, with its mooring, through
-  `Shell::exec_refused`); also owns the judged path
-  doors, sandbox projection and grant-layer scope guards;
-- `cwd.rs` (the one working-directory cell, a `CwdPath` on `Context`: `cd` sets it,
-  `enter_cwd`/`restore_cwd` save and restore it whole for `within [dir:]`, and
-  `seed_cwd` lets an in-process front end whose working directory is not the
-  process cwd state it directly), `inherit.rs` (the
-  flow matrix, below), `hooks.rs` (the session-lived hook table of named
-  run-entry points — prompt render, startup, plugin hooks — each a block, a
-  lambda or a builtin, resolved by the `Program::Hook` arm of `Shell::run` under the hook's
-  registered `DefaultPolicy`: terminal authority, capture, and `aside`; a
-  fault in a hook run is labelled by `HookName::fault_label`, and a hook run
-  is no ready boundary); the table is an `Option<HookTable>`, `Some` only on the booted session (every child holds `None`), and carries the [[map/repl|REPL]]'s plugin ledger beside the hooks.
-
-**Module loading carries no runtime stack.** `shell::load::load_module`
-threads a check-time `SourceOrigin` chain for cycles and the depth bound.
-`Context` and its marshalled form carry no module chain. `use` runs linked
-checked IR under Σ, as do closed host files; only the rc and exarch's agent library
-extend the session through `extend_session`. Plugins, profiles, exarch's
-config and net policy use `evaluate_closed`, so their helper `let`s remain
-lexical to those units.
-
-## The flow matrix
-
-**Thread children and new sessions have separate constructors.** `inherit.rs`
-centralises thread-child state in `Shell::child`; `construct.rs` centralises
-new sessions over `Image` in `Shell::construct`. Exhaustive field literals
-keep inheritable state from depending on what each caller remembers.
-
-A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
-`force` and the lambda-meets-`Arg` rule in `shell::evaluator::machine`
-put the body in focus *in* the
-caller's `Shell`, no snapshot or restore around the call ([[map/core/evaluator|evaluator]]).
-The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
-caller's `&Mooring` is passed along, so the body observes the caller's audit
-trail, byte sinks, builtin table, cancel scope, and terminal lease without any
-of them being copied — there is no second store to drift from the first.
-Block and lambda entry are uniform: an unbracketed store write in either
-body (`cd`, a hook registration) persists to the caller, no snapshot
-standing between the body and the store
-([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);
-`within [dir:]` is the working directory's local-state handler, undoing a `cd`
-in its body, and `within [handlers:]` the scoped form for handlers. Persistent
-handlers come only from host installation between units, through rc and
-manifest `handlers:` and `Shell::install_handler` /
-`vet_handler` / `remove_handler_frame`; no statement or builtin
-value changes persistent frames
-([[decisions/260925_within-dir-is-local-state|within-dir-is-local-state]]).
-
-The thread-child modes hold a distinct `Shell`, built by the one exhaustive
-literal in `Shell::child`, so a field added to `Shell` cannot reach one by
-defaulting. Each holds **no terminal authority**: no lease on the session,
-and the mooring the fork is handed carries `TerminalAccess::Denied` — the safe default for a store that is not
-the session's. Each also starts with no hooks and no control counters; a worker's and an
-aside's stdin is `Empty`, a stage's is whatever its pipeline hands it; what rides along is the scope, context, Σ, builtin table, source
-registry, root file, call site and exit hints. The kinds differ only in their
-`Holding` — cancel root and anchor, roster, cradle, and the `Seat` each birth
-states: its `Io`, interactivity and stage membership. A
-worker's seat reads nothing, is not interactive and joins no group, so its
-externals lead sessions of their own; a stage's joins its pipeline's group;
-an aside's writes where its parent does:
-
-- `spawn_worker` / `spawn_stage`, over the one `spawn_thread` — a spawned worker (`spawn`, `watch`) *and* a ral-written pipeline stage
-  ([[map/core/runtime|shell/exec]]'s `shell/exec/pipeline/thread.rs`) — a pipeline never
-  rides a re-exec'd child — on a fresh OS thread that owns its own IO, seeded
-  from the spawning shell's session, built on the spawning thread; the body's
-  capture rides in its closure, and nothing flows back. Both rebuild their
-  mooring through `Mooring::for_thread` on the calling thread
-  (so the caller keeps the child's scope) and move it into the
-  thread: a worker's `home` is a child of its cradle — the durable root in a
-  run, so a run timeout or Esc does not reach it; inside a gather its entry
-  scope, the parent worker's node inside a worker or the scope current when a
-  `gather` opened, which they do reach — and its `surface` is a fresh
-  `DeferredSurface` for a session worker or the parent's live surface inside a
-  gather; a stage thread's `home` is a child of the *current* cancel scope,
-  so it shares an acquisition or release shield and a pipeline-wide cancel
-  reaches every stage transitively, and its `surface`
-  is the pipeline's own. It shares the session's root, roster,
-  and fixings; its lease ledger is unarmed.
-- `join_session` — an aside: an independent sibling that clones the parent's
-  `context`, source cursor, builtin table, and Σ (`sig`, by `Arc` clone)
-  without touching its IO / audit / REPL scratch; no flow-back. It shares the
-  parent's cancel root, so code there is interruptible while it runs and older
-  interrupts stay out of its reach; the `Program::Hook` arm of `Shell::run` runs a hook there when its
-  registered `DefaultPolicy` says `aside` (the REPL's buffer-change hooks).
-  It shares the fixings too, but holds a roster of its own
-  and an unarmed ledger.
-
-A **new helper session** instead crosses `marshal` / `child_of` on both
-seats. `Shell::marshal(grant)` writes the parent's image and grant;
-`Shell::child_of(runtime, &parent, narrow)` reads it and constructs through
-`Shell::construct`, then pushes the grant layer against the child's cwd.
-
-- The child inherits bindings and schemes, handlers, dynamic context,
-  `SourceDb`, terms and an independent fixings snapshot; no root recipe runs.
-  It owns a new durable root and empty roster with inherited retention, no
-  hooks or terminal lease, and empty stdin. Its binding lease uses inherited
-  terms and seals every inherited name as baseline
-  ([[internals/binding-leases|binding-leases]]).
-- The marshaller visits environments and built collections once, writing
-  dependencies-first rows from the session env and handler arms. Held syntax,
-  sharing within the image, residual arguments and failure witnesses survive;
-  every handle crosses as its title and arrives withheld. Observation refuses
-  `withheld-handle`, on either seat.
-- In-process children still share their parent's `Runtime`, but image state
-  crosses JSON on both seats. A non-Unicode cwd refuses writing; a builtin
-  absent from the receiving table refuses reading. Grant-stack exclusions
-  are re-held before construction.
-
-See [[map/core/transport|transport]] and [[map/exarch/agent|agent]].
-
-Thread children share the runtime's dispatch table; a new session uses the
-receiving runtime's table. The same-thread β-step uses the caller's table. The
-guest jail is not session state: it is process-global
+**Terminal.** Authority is a permit, never a resource getter
 ([[map/core/io-process|io-process]]).
+
+- `SessionState::terminal_lease` is minted once at startup when ral owns the
+  foreground; hosts request `RequestedTerminalAccess` and cannot mint one.
+- `TerminalAccess` is `Denied`, `Leased` or `ExplicitLoan`. `reach` yields a
+  `TerminalPermit` only with the lease, and for `Leased` only when stdout is
+  the terminal.
+- `Mooring::lend_terminal` derives a new mooring raising `Leased` to
+  `ExplicitLoan`, and is `None` otherwise: authority is raised, never minted,
+  and never lent twice.
+- `Shell::group_owner` decides once: a stage answers its `Membership`; a
+  session gathers its permit and interactivity.
+
+### Workers and the cradle
+
+- **`Roster`** (`state/workers.rs`) is a per-session `WorkerRegistry` of
+  `WorkerEntry` (handle, `Owner`, `settled_epoch`). Threads share it
+  (`Roster::Shared`); a session owns it (`Roster::Owned`), and dropping an
+  owned roster cancels every worker (`cancel_all`), waiting up to
+  `DEFAULT_CLEANUP_GRACE + TEARDOWN_GRACE`.
+- **Retention.** `Shell::arm_worker_retention` arms it; each source dispatch
+  ticks the epoch; `sweep_retention` stamps a `Ready` entry and expires it
+  after the retention, leaving entries of a live parent worker or a gather
+  alone. Expiry queues a `ReapNotice`. Unarmed (the REPL), `Ready` entries
+  stay.
+- **`Cradle`** says where a loose birth hangs: under the durable root for a
+  run or aside (`Cradle::loose`), or inside a gather with its `Brood`
+  (`Cradle::owning`). A stage keeps its parent's
+  ([[invariants/a-worker-ends-with-its-children|a-worker-ends-with-its-children]]).
+
+### Binding lease
+
+**`BindingLedger` (`state/bindings.rs`) has one writer, the thread owning
+`&mut Shell`, so it takes no lock**
+([[internals/binding-leases|binding-leases]]).
+
+- Inert until `Shell::arm_binding_lease` seals every visible name as baseline.
+- `Shell::note_define` is the one write path for session names, called only
+  from `Ran::define` under `Mode::Session`. It renews the lease and queues a
+  large-binding notice when `shallow_size` meets `large_binding_bytes`.
+- `Shell::set_var` binds a host value with an explicit `Closed` scheme and
+  bypasses the ledger.
+
+**Ready boundary.** `emit_ready_boundary_notices` (`shell/run.rs`) runs after
+each settled source run:
+
+1. `sweep_retention`, always;
+2. large-binding notices to stderr, always;
+3. only with a surface sink: reap notices and `BindingLedger::prune`, each as
+   a `` `notice `` surface event. Without a sink both ledgers wait.
+
+## Method modules (`state/`)
+
+- `construct.rs` — `Runtime`, `Image` (env, handler frames, sources, `Terms`,
+  fixings), `Terms` (stack and child limits, exit hints, scratch, lease,
+  retention; one type in memory and on the wire). `Shell::construct` is the
+  one session literal; `Shell::root` and `Shell::child_of` are its two uses.
+  `Shell::marshal(&grant)` writes the image and `SpawnGrant`.
+- `inherit.rs` — `Shell::child`, the one literal for thread children.
+- `host.rs` — host accessors, probe counts (`binding_count`,
+  `leased_binding_count`), `group_owner`.
+- `scope.rs` — handler install/vet/remove, `set_var`, `note_define`,
+  `schemes_over`.
+- `checks.rs` — the [[map/core/capabilities|authority adapter]]: judged path
+  lookups, `with_layer` (pushes, then removes its own layers by position with
+  `GrantStack::remove`), `push_session_capabilities`, sandbox projection.
+- `cwd.rs` — the cwd cell: `enter_cwd` / `restore_cwd` for `within [dir:]`,
+  `seed_cwd` for an in-process front end.
+- `hooks.rs` — the hook table: named run roots (block, lambda or builtin),
+  `vet_hook` / `register_hook`, plugin ledger, dispatched by `Program::Hook`
+  under each hook's `DefaultPolicy`.
+- `context.rs`, `json.rs`, `notice.rs`, `workers.rs`, `bindings.rs`.
+
+Startup seeding is `shell::boot::seed_host_env`: env overrides
+([[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]]) and
+`OS_NAME` / `OS_ARCH` / `OS_FAMILY`.
+
+## Children
+
+**Thread children share the session's memory and are built by `Shell::child`;
+a new session crosses `marshal` / `child_of`.** Exhaustive literals keep a new
+field from reaching either by default.
+
+- **Same-thread β-step.** Forcing a block or applying a lambda runs the body in
+  the caller's `Shell` under the caller's `&Mooring`; nothing is copied, so an
+  unbracketed `cd` persists. `within [dir:]` restores the cwd
+  ([[map/core/evaluator|evaluator]]).
+- **Thread children** inherit env, context, Σ, runtime, sources, root file,
+  call site, exit hints, scratch and fixings, and hold no hooks, no terminal
+  lease and an unarmed ledger. They differ in their `Holding`:
+  - `spawn_worker` — empty stdin, not interactive, no group; shared root and
+    roster; the body replaces the inherited cradle with its own;
+  - `spawn_stage` — the pipeline's `Io` and group; shared root, roster and
+    cradle. Both go through `spawn_thread`, with `home` minted by the caller
+    via `Mooring::for_thread`;
+  - `join_session` — an aside: shares root and anchor, writes where the parent
+    does, reads nothing, and holds a fresh roster with the parent's retention.
+- **New session.** `Shell::child_of(runtime, &parent, narrow)` reads the
+  marshalled image, constructs through `Shell::construct` with no root recipe,
+  then pushes the grant layer against the child's cwd.
+  - It inherits bindings with schemes, handlers, context, sources, terms and a
+    fixings snapshot; it owns a fresh durable root and roster, no hooks, no
+    terminal lease, and seals every inherited name as lease baseline.
+  - Handles cross as titles and arrive withheld; held syntax, sharing,
+    residual arguments and failure witnesses survive. A non-Unicode cwd
+    refuses writing; a builtin the receiver lacks refuses reading
+    ([[map/core/transport|transport]], [[map/exarch/agent|agent]]).

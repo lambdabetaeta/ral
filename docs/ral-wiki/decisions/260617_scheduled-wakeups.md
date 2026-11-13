@@ -171,8 +171,7 @@ long sleep past several occurrences fires at most once on wake, not a burst).
   one. This is load-bearing for the same reason it is in
   [[decisions/260617_long-running-work|long-running-work]]: auto-compaction loses
   the *binding name* that held the `ScheduleId`, so the model rediscovers its
-  schedules by listing and acts by id. A live `ScheduleId` is pinned against
-  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]].
+  schedules by listing and acts by id.
 
 ## The delivery seam: one inbox, many producers
 
@@ -298,8 +297,7 @@ ephemerally.
   (overlap-skip, the recommendation) or fire each missed occurrence.
 - **Runaway bounds** — a per-session fire budget or minimum-interval floor beyond
   the `schedule` grant gate.
-- **Compaction interaction** — a wakeup arriving mid-`compact`, and pinning the
-  `ScheduleId` against [[decisions/260629_agent-binding-reaping|binding-reaping]].
+- **Compaction interaction** — a wakeup arriving mid-`compact`.
 - **Grant for a scheduled turn** — the ordinary per-turn profile, or a distinct
   (perhaps narrower) scheduled-turn profile?
 - **The inbox as its own `design/` page** — the `(trigger, effect, target)`
@@ -324,8 +322,7 @@ host-affordance registration principle),
 per-message drain boundary it carries),
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]] (the
 missing-type discipline that keeps a cancellation unconstructable as a message),
-[[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (pin the
-`ScheduleId`), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
+[[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
 (the frame, the root/foreground cancel scopes the control plane rides, and the
 idle loop's home), [[design/exarch-architecture|exarch-architecture]], and
 `docs/SPEC.md` §11.

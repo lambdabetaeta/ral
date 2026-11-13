@@ -121,7 +121,7 @@ the one root recipe both carriers boot through (`boot::engine_runtime` for the
 process half, `boot::engine_root` for the recipe, which refuses a `Root` that names no
 scratch: the host owns it); a fork
 keeps its terms through core's `Shell::marshal` and `Shell::child_of`
-([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
+([[map/exarch/agent|agent]]; [[internals/binding-leases|binding-leases]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
 clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
 (1 MiB) rides the same `BindingLease` at the same arming site — a

@@ -1,149 +1,114 @@
 ---
-verified_at_commit: f9ac94f8
-verified_at_date: 2026-11-12
-anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, ValClos::close, ValClos::thunk, ValClos::try_for_each_child, Handle::Withheld, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
+verified_at_commit: 3fcae877
+verified_at_date: 2026-11-13
+anchors: [BindingLedger, arm_binding_lease, note_define, referenced_names, Mentions, ValClos::close, ValClos::thunk, Handle::Withheld, BindingLedger::prune, pins_live_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS]
 ---
 
 # Binding leases
 
-**An exarch agent's top-level scratch names expire when the model stops using
-them; nothing else about binding does.** The model treats top-level `let` as
-scratch paper and never erases, so a long session accumulates dead strings,
-forgotten closures, and settled handles still holding captured output. The
-binding-lease ledger (`core/src/shell/runtime/state/bindings.rs`, armed only by
-exarch) removes a name once it has gone 256 ral calls without use — and does
-nothing else: ral's semantics are untouched, the REPL never expires anything,
-and a pruned name afterwards reads exactly like a name that was never bound.
-[[decisions/260629_agent-binding-reaping|agent-binding-reaping]] is the
-decision record; this page is how it runs.
+**An exarch agent's top-level names expire after `BINDING_IDLE_CALLS` (256)
+source runs without use; nothing else about binding changes.** A model treats
+top-level `let` as scratch and never erases it. The ledger
+(`core/src/shell/runtime/state/bindings.rs`, `BindingLedger`) removes such a
+name at a ready boundary; afterwards the name reads exactly as one never bound.
+ral's semantics are untouched, and a host that never arms the ledger (the REPL)
+never expires anything.
 
-## What is leased, and what never is
+## What is leased
 
-Only names the model itself binds at the session's top level — residency is
-by ρ, and a name only Σ answers (a native, a prelude function) is never a ρ
-entry at all, so it is not a candidate to prune rather than merely exempt
-from it. Everything else visible when exarch arms the ledger — agent
-library, rc and host seeds — is sealed as baseline, permanently exempt
-(`Shell::arm_binding_lease`, armed once by `shell_eval::arm_session_ledgers`
-in the engine's own boot recipe, so `/clear`'s rebooted engine re-seals for
-free). A fork seals its entire inherited scope on the parent's terms, in core
-rather than by the host: `Shell::construct` arms the child's ledger from the
-marshalled parent's terms, sealing every inherited name as baseline, the same
-code on either seat. So a fork's lease governs only the names the child
-itself writes. Its baseline read, `Env::all_bindings`, still folds in Σ's
-prelude beside ρ, so a prelude name that has not been shadowed is sealed as a
-harmless redundancy over a name the ledger could never reach.
-Bindings made inside blocks, lambdas, `use` bodies, or letrec fixpoint frames
-are invisible to the ledger, since its one chokepoint, `note_define`, is
-reached from `run_phrases`'s `Define` arm alone, under `Mode::Session`: they
-are not session names, even when a returned closure keeps their values.
+**Only names the model binds in ρ at session scope after arming.**
 
-## The clock, and what counts as use
+- `Shell::arm_binding_lease` seals every name then visible
+  (`Env::all_bindings`: ρ and Σ's prelude) as *baseline*, permanently exempt.
+  exarch arms it in `boot::engine_root` through
+  `shell_eval::arm_session_ledgers`, after the agent library and host seeds
+  are in place, so a rebooted engine reseals.
+- A child built by `Shell::construct` arms from the parent's marshalled
+  `Terms.lease` and seals every inherited name as baseline. Its lease governs
+  only names the child writes.
+- A name only Σ answers (a native, an unshadowed prelude function) is never a ρ
+  entry, so it is never a candidate.
+- `Shell::note_define` is the one stamp, called from `run_phrases`'s `Define`
+  arm under `Mode::Session`, for every name a top-level `let`, pattern or
+  recursive group installs, and never under `Mode::Local`. Bindings inside
+  blocks, lambdas and `use` bodies are not session names.
+- `BindingLedger::prune` ends with an adoption sweep: an unstamped,
+  non-baseline ρ name gains a lease late rather than living forever.
 
-The ledger ticks once per `Program::Source` dispatch, even when checking
-refuses it — in exarch, exactly once per `ral` tool call. `Program::Check`
-neither ticks nor renews leases. No wall clock anywhere: a quiet weekend ages
-nothing.
+## The clock and use
 
-Use is read off the program text, never off the running lookup path. Before
-a successfully compiled source runs, `Toplevel::referenced_names` collects its
-variable occurrences and command heads and renews those entries. A linked
-module sees Σ alone, so its names contribute no session references. There is
-no mid-run module compilation. This is the same `Mentions` walk a node's own
-occ is built from ([[map/core/ir|ir]]): a nested `Thunk`,
-list, record, map, or `Rec` group contributes its own already-computed occ
-rather than being walked again, so the harvest, like occ itself, is linear in
-the program's size and a stored body's names are counted once, at the run
-that compiled it, not on every later call. `ValClos::close` and
-`ValClos::thunk` restrict captures to that occ at formation; closing data also pulls missing direct names from Σ. Reading a
-component shares its saved ρ without another restriction
-([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]). Lookup during evaluation renews nothing: a bare head can only resolve to a
-binding the elaborator already saw — prelude, session, and lexical names are
-all in its bound set, and nothing installs into a running environment behind
-its back — so the harvest is complete by construction. Writing a name is
-also using it — a rebind restamps at the chokepoint. A run that fails to
-parse or typecheck ticks the clock but renews nothing: failed runs age your
-scratch. Listing (`/resources`, any enumeration) renews nothing either —
-enumeration is not observation.
+**The clock counts source runs; use is read off program text.**
 
-## What pruning does — and deliberately does not do
+- Each `Program::Source` dispatch ticks once before compiling, so a run that
+  fails to parse or check ages leases without renewing them.
+  `Program::Check` neither ticks nor renews. No wall clock exists.
+- After a successful compile, `Toplevel::referenced_names` renews every name
+  the program mentions. It is the `Mentions` walk that builds each node's
+  `Occ`: a nested node contributes its stored occ, so the harvest is linear
+  and a stored body's names count once, on the run that compiled it.
+- Evaluation renews nothing. The elaborator saw every name a run can resolve,
+  so the harvest is complete; it over-approximates, which only lengthens a
+  lease.
+- A rebind restamps through `note_define`. Enumeration (`/resources`,
+  `Shell::leased_binding_count`) renews nothing.
 
-At each ready boundary — the tail of every run door —
-`Shell::emit_ready_boundary_notices` calls `BindingLedger::prune`
-beside the worker-reap drain (`take_worker_reap_notices`), both only when a
-surface sink is installed — absent one the ledgers are left untouched, so the
-notices wait for a run that has one. Every entry idle
-past the bound is examined: a name whose value still structurally reaches a
-live (`running` or `stopping`) worker handle is pinned and re-checked next
-boundary (`pins_live_work` — it recurses lists, maps, and variant payloads, and
-deliberately never looks inside a captured environment). A withheld handle
-pins nothing: marshalling withholds every live handle while preserving name,
-position and type, and observations fail `withheld-handle`
-([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
-Everything else is unset — value and type-scheme seed
-in one act — and one `Notice::Prune` surfaces to the host, which records it as a
-`Forensic::Prune` naming what fell (`shell_eval::surface::record`), shown to
-no one. A pruned name cannot
-come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
-at *run entry*, after any earlier prune, so the rollback target
-already excludes what fell. Pruning is the ready boundary's own door — reached
-only between runs, on the session scope by construction — so a mid-frame caller
-such as a builtin body is refused rather than allowed to unset from a
-transient frame.
+## Pruning
 
-What it does not do: it never touches a closure, so it frees a value's bytes
-only when no live closure mentions its name, and it never tells the
-model anything at prune time — the only model-visible consequence is an
-ordinary `undefined variable` diagnostic, refused before it runs, if the model names the binding again, with the
-paper trail waiting in `record.jsonl`'s `Forensic::Prune` breadcrumb.
+**`Shell::emit_ready_boundary_notices` prunes once per settled source run,
+while the run's frame is still installed.** A hook run and a panicked run are
+no ready boundary.
 
-## The capture scenario, worked
+- Prune runs only when the mooring has a surface sink; otherwise the ledger is
+  left untouched for a later run.
+- Each name idle past the bound is examined in sorted order:
+  - absent from ρ (a rolled-back install): its entry is dropped silently;
+  - its value reaches a live (`running` or `stopping`) handle by
+    `pins_live_work`: kept and re-examined next boundary;
+  - otherwise unset, value and scheme together, and reported as one
+    `Notice::Prune` of `Pruned { name, idle_calls, kind }`.
+- `pins_live_work` recurses lists, maps, tag spines and a partial builtin's
+  supplied arguments, never a block's capture. A `Handle::Withheld` (every
+  handle in a marshalled image) pins nothing
+  ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).
+- exarch records the notice as `Forensic::Prune` (`shell_eval/surface.rs`);
+  the model is told nothing. Naming the name again is an ordinary static
+  `undefined variable` error.
+- `Shell::run_under` checkpoints `(env, context)` at run entry, after any
+  earlier prune, so a panic rollback cannot restore a pruned name.
 
-The case that looks alarming and isn't:
+**Large bindings are a separate axis.** `note_define` queues a
+`LargeBindingNotice` whenever `ValClos::shallow_size` meets
+`large_binding_bytes` (1 MiB in exarch), whatever the name's age or baseline
+status. The ready boundary writes it to stderr, sink or no sink, so it reaches
+the model in its tool result.
+
+## Captured values
+
+**Pruning a name never touches a closure that captured it.**
 
 ```
 let big = <5 MB of text>
-let f = { … $big … }        # then f is called every run
+let f = { … $big … }        # f is called every run
 ```
 
-`f` renews every call — its name is in each run's text. `big` does not: its
-reference lives inside `f`'s stored body, compiled once on the run that
-defined `f`; later calls recompile nothing, so nothing harvests `big` again.
-After 256 idle calls the live name `big` is pruned — and `f` keeps working,
-forever. A closure keeps, at creation, the session bindings its body mentions
-— `big` among `f`'s — and resolves its body against that scope; the session
-scope is copy-on-write, so unsetting `big` there cannot reach what `f`
-already holds.
+- `ValClos::thunk` and `ValClos::close` restrict a capture to the body's occ at
+  formation; `close` also pulls a missing direct name from Σ with its scheme
+  ([[decisions/260926_a-closure-keeps-only-what-it-mentions|a-closure-keeps-only-what-it-mentions]]).
+- Every run that calls `f` mentions `f`, never `big`; `big`'s mention was
+  harvested once, when `f` was compiled. `big` expires and `f` keeps working:
+  its capture holds `big`'s value, and the session ρ is persistent, so the
+  unset cannot reach it.
+- The bytes stay resident until `f` itself is pruned or rebound. The
+  large-binding notice exists to steer the model toward binding a path
+  instead.
 
-This is correct, not a near-miss: once captured, the top-level name `big`
-routes nothing. The value's real owner is `f`'s capture, and `f` — the thing
-actually being used — is the thing whose lease renews. The cost is memory,
-not correctness: a closure keeps only what it mentions, so pruning `big`
-frees its bytes unless a live closure mentions `big`; `f`'s capture keeps them
-resident until `f`'s own name falls or is rebound and the capture drops.
-That residency is exactly what the large-binding warning exists to head off
-— bind a file path, not five megabytes of captured text.
+## Decay
 
-There is no command-position exception: `big args` inside hot `f` compiles
-to an application of the bound variable, exactly like `$big`, resolves
-through the captured chain, and touches nothing. What a stored body mentions
-is harvested once, on the run that compiled it. A false renewal only ever
-lengthens a lease; the harvest over-approximates in the safe direction
-throughout.
+A settled worker's registry entry expires after `SETTLED_WORKER_RETENTION`
+(256) calls unclaimed, on the same clock. A name holding a finished handle is
+ordinary scratch; one holding a live handle is pinned. Each removal leaves a
+record in `record.jsonl`.
 
-## Where it sits in the decay ladder
-
-Abandonment decays in layers, each with its own bound and its own log line: a
-worker's `ready` registry entry expires after 256 calls unclaimed; and a name
-holding a finished (`ready` or `consumed`) handle — live (`running` or
-`stopping`) handles stay pinned by `pins_live_work`, while finished handles are
-ordinary scratch — prunes after 256 idle calls on the same clock.
-The model's later "where did my job go?", at every layer, has an answer in
-the log.
-
-See also [[map/core/shell-state|shell-state]] (the ledger's home on
-`LocalState`), [[map/exarch/agent|agent]] (arming sites and the boundary
-drain), [[invariants/probe-convention|probe-convention]] (the `/resources`
-rows the ledger answers), and
-[[internals/output-capture-and-detachment|output-capture-and-detachment]]
-(the worker half of the same story).
+See [[map/core/shell-state|shell-state]],
+[[map/exarch/agent|agent]], [[invariants/probe-convention|probe-convention]]
+and [[internals/output-capture-and-detachment|output-capture-and-detachment]].

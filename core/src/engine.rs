@@ -351,7 +351,7 @@ mod tests {
             |_, _| panic!("a child runs no root recipe"),
         )];
         let parent = crate::test_helper::core_shell()
-            .marshal(crate::SpawnGrant::Inherit)
+            .marshal(&crate::SpawnGrant::Inherit)
             .expect("a parent marshals");
         let mut attach = crate::carrier::testkit::attach(&PANICKY);
         attach.origin = Origin::Child(parent);

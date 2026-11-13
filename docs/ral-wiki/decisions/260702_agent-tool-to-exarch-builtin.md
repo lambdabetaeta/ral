@@ -32,7 +32,7 @@ that the move is possible and states what it would take.
 > end state below — see the landed note under "Scope widens".
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > defines the current handoff: the builtin checks for a desk, marshals its
 > image and grant, and enquires with `Start { spec, parent }`. Both seats
 > construct through `Shell::child_of`; the wire desk uses the factory.

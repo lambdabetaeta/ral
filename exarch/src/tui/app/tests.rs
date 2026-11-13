@@ -310,7 +310,7 @@ fn resting_helper_delivers_late_write_failure_and_poison_before_death() {
     for poison in [false, true] {
         let mut parent = trunk(false);
         let fleet = parent.fleet.clone();
-        let mut child = parent.fork_named("failing").unwrap();
+        let mut child = parent.fresh_child_named("failing").unwrap();
         let id = child.id();
         let recorder = child.recorder();
         let handle = child.handle();

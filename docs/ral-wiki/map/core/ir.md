@@ -99,14 +99,8 @@ Values, computations and shared nodes:
 
 **Computations partition into control, primitives and shell.** The core
 constructors are the control forms `Return`, `Force`, `Lam`, `App`, `Bind`,
-`Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, corresponding to
-`Extrinsic/Syntax/Term` constructors, and `Prim`, each of whose variants is an
-`Extrinsic.Prims.Op`. The acquiring `Guard` is owned Agda divergence D4
-([[decisions/261111_a-guard-acquires|a-guard-acquires]]), pending the
-strong-model correspondence follow-up. Residual-function Box also awaits an
-Agda follow-up; Agda's Let-fun still suspends the whole RHS. Runtime builtin
-η/δ requires its own correspondence follow-up; it is not a mechanised Rust
-refinement.
+`Seq`, `Rec`, `If`, `Case`, `Try`, `Guard`, `Capture`, and the value-only
+operations in `Prim`.
 `Prim::operands` and `map_operands` are the common operand traversals.
 
 - `Guard { acquire, body, release }` holds three `Val` operands.
@@ -149,7 +143,7 @@ refinement.
   survives. Readback traverses that field through the option record. An absent
   field and `handlers: [:]` still install different scopes.
 
-See [[invariants/ir-pure-cbpv|the IR invariant]] for the correspondence rule.
+See [[invariants/ir-pure-cbpv|the IR invariant]] for the classification rule.
 
 **The checker builds explicit verdicts into the IR.** Inference constructs
 nodes beside their types; readback applies the solution's decisions,

@@ -526,12 +526,12 @@ impl Agent {
         let _ = self.handle.steer(prompt);
     }
     #[cfg(test)]
-    pub(crate) fn fork(&self) -> Result<Self, String> {
+    pub(crate) fn fresh_child(&self) -> Result<Self, String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        self.fork_named(&format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+        self.fresh_child_named(&format!("fresh-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
     }
     #[cfg(test)]
-    pub(crate) fn fork_named(&self, name: &str) -> Result<Self, String> {
+    pub(crate) fn fresh_child_named(&self, name: &str) -> Result<Self, String> {
         let name = self
             .fleet
             .registry

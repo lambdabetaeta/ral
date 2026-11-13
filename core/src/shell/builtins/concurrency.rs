@@ -35,9 +35,10 @@ use std::sync::Arc;
 /// from that shell's session; a worker forces the thunk it was handed, whose
 /// capture travels in its closure.
 fn worker_body(
-    closure: (Arc<Comp>, Env),
+    comp: Arc<Comp>,
+    env: Env,
 ) -> impl FnOnce(&Mooring, &mut Shell) -> Settled<ValClos> + Send + 'static {
-    move |mooring, child| machine::evaluate(closure.0, closure.1, mooring, child)
+    move |mooring, child| machine::evaluate(comp, env, mooring, child)
 }
 
 /// `spawn [TITLE] BODY` -- run `body` on a worker of its own and return its
@@ -61,7 +62,7 @@ pub(crate) fn spawn_form(
         mooring,
         shell,
         Birth::Spawn { title },
-        worker_body((Arc::clone(comp), env.clone())),
+        worker_body(comp, env),
     )?))
 }
 
@@ -109,7 +110,7 @@ pub(super) fn builtin_watch(
         mooring,
         shell,
         Birth::Watch { label },
-        worker_body((Arc::clone(comp), env.clone())),
+        worker_body(comp, env),
     )?))
 }
 

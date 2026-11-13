@@ -14,7 +14,7 @@
 //! row's type rule or fixes an argv row at `[String] → Command`.
 //! `BuiltinBody` has no bodiless variant, so every entry has a live body.
 
-use crate::fact::{InvariantFailure, Reason};
+use crate::fact::{InvariantFailure, Reason, ResidualDefect};
 use crate::ir::{Comp, CompKind, Name, synthetic};
 use crate::shell::runtime::{Env, Settled};
 use crate::shell::runtime::{Error, Mooring, Shell};
@@ -98,33 +98,38 @@ impl BuiltinEntry {
         })
     }
 
-    /// The η residual awaiting all but `supplied` arguments, over `env`; `None`
-    /// unless supplied < arity and `env` binds exactly δ's builtin (this entry)
-    /// and its first `supplied` arguments.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "the decoder hands ownership of the residual's environment to this constructor"
-    )]
-    pub(crate) fn residual(self: &Arc<Self>, env: Env, supplied: usize) -> Option<ValClos> {
-        if supplied >= self.decl.fixed_arity() || env.len() != supplied + 1 {
-            return None;
+    /// The η residual awaiting all but `supplied` arguments, over `env`.
+    ///
+    /// # Errors
+    /// Unless supplied < arity and `env` binds exactly δ's builtin (this
+    /// entry) and its first `supplied` arguments, which part does not hold.
+    pub(crate) fn residual(
+        self: &Arc<Self>,
+        env: &Env,
+        supplied: usize,
+    ) -> Result<ValClos, ResidualDefect> {
+        if supplied >= self.decl.fixed_arity() {
+            return Err(ResidualDefect::Saturated);
+        }
+        if env.len() != supplied + 1 {
+            return Err(ResidualDefect::EnvironmentSize(env.len().into()));
         }
         let (eta, builtin) = self.eta();
-        let mut comp = eta;
-        let View::Builtin(entry) = env.get(builtin)?.view() else {
-            return None;
-        };
-        if !Arc::ptr_eq(self, entry) {
-            return None;
+        let bound = env.get(builtin).ok_or(ResidualDefect::BuiltinUnbound)?;
+        match bound.view() {
+            View::Builtin(entry) if Arc::ptr_eq(self, entry) => {}
+            _ => return Err(ResidualDefect::BuiltinForeign),
         }
+        let mut comp = eta;
         for _ in 0..supplied {
             let CompKind::Lam { param, body } = &comp.item else {
-                return None;
+                unreachable!("η has one λ per argument")
             };
-            env.get(param)?;
+            env.get(param)
+                .ok_or_else(|| ResidualDefect::ArgumentUnbound(param.to_string()))?;
             comp = body;
         }
-        Some(ValClos::thunk(Arc::clone(comp), &env))
+        Ok(ValClos::thunk(Arc::clone(comp), env))
     }
 
     const fn row(
@@ -306,15 +311,6 @@ impl BuiltinTable {
     pub fn get(&self, name: &str) -> Option<BuiltinEntry> {
         self.rows().find(|entry| entry.decl.name == name).cloned()
     }
-
-    /// The *value* row for `name`, with its body.
-    pub(crate) fn value(&self, name: &str) -> Option<BuiltinEntry> {
-        self.rows()
-            .find(|entry| {
-                entry.decl.name == name && matches!(entry.decl.convention, Convention::Value(_))
-            })
-            .cloned()
-    }
 }
 
 pub(crate) fn language_constants() -> impl Iterator<Item = (String, ValClos)> {
@@ -348,7 +344,7 @@ mod tests {
         let arity = entry.decl.fixed_arity();
         let mut suffix = eta;
         for supplied in 0..arity {
-            let value = entry.residual(env.clone(), supplied).unwrap();
+            let value = entry.residual(&env, supplied).unwrap();
             let View::Thunk {
                 comp,
                 env: captured,
@@ -361,7 +357,10 @@ mod tests {
             let (held_entry, remaining) = value.residual().unwrap();
             assert!(Arc::ptr_eq(held_entry, &entry));
             assert_eq!(remaining, arity - supplied);
-            assert!(entry.residual(Env::EMPTY, supplied).is_none());
+            assert_eq!(
+                entry.residual(&Env::EMPTY, supplied).unwrap_err(),
+                ResidualDefect::EnvironmentSize(0usize.into())
+            );
 
             let mut wrong = env.clone();
             wrong.bind(
@@ -371,7 +370,10 @@ mod tests {
                     scheme: None,
                 },
             );
-            assert!(entry.residual(wrong, supplied).is_none());
+            assert_eq!(
+                entry.residual(&wrong, supplied).unwrap_err(),
+                ResidualDefect::BuiltinForeign
+            );
             let mut wrong = env.clone();
             wrong.bind(
                 "extra".into(),
@@ -380,7 +382,23 @@ mod tests {
                     scheme: None,
                 },
             );
-            assert!(entry.residual(wrong, supplied).is_none());
+            assert_eq!(
+                entry.residual(&wrong, supplied).unwrap_err(),
+                ResidualDefect::EnvironmentSize((supplied + 2).into())
+            );
+            let mut wrong = env.clone();
+            wrong.unset(builtin);
+            wrong.bind(
+                "extra".into(),
+                Binding {
+                    value: ValClos::UNIT,
+                    scheme: None,
+                },
+            );
+            assert_eq!(
+                entry.residual(&wrong, supplied).unwrap_err(),
+                ResidualDefect::BuiltinUnbound
+            );
             if supplied > 0 {
                 let mut wrong = env.clone();
                 wrong.unset(&synthetic("arg", 0));
@@ -391,7 +409,10 @@ mod tests {
                         scheme: None,
                     },
                 );
-                assert!(entry.residual(wrong, supplied).is_none());
+                assert_eq!(
+                    entry.residual(&wrong, supplied).unwrap_err(),
+                    ResidualDefect::ArgumentUnbound(synthetic("arg", 0).to_string())
+                );
             }
             let CompKind::Lam { param, body } = &suffix.item else {
                 panic!("η has one lambda per argument")
@@ -405,8 +426,12 @@ mod tests {
             );
             suffix = body;
         }
-        assert!(entry.residual(env.clone(), arity).is_none());
-        assert!(entry.residual(env, arity + 1).is_none());
+        for supplied in [arity, arity + 1] {
+            assert_eq!(
+                entry.residual(&env, supplied).unwrap_err(),
+                ResidualDefect::Saturated
+            );
+        }
     }
 
     /// The soundness perimeter: a value of a type the program did not decide

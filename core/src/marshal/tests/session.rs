@@ -3,8 +3,8 @@ use crate::authority::policy::GrantLayer;
 use crate::data::FOValue;
 use crate::data::json::{JsonDocument, JsonFormat, decode_structural, serialize_structural};
 use crate::fact::{
-    Count, DataStep, DecodeCause, DecodeFailure, FrameEncodeFailure, JsonEncodeCause, ProtocolData,
-    ProtocolFailure, ProtocolOperation, Reason, ReservedVar,
+    Count, DataStep, DecodeCause, DecodeFailure, JsonEncodeCause, ProtocolData, ProtocolFailure,
+    Reason, ReservedVar,
 };
 use crate::ir::{Comp, CompKind, Module, Phrase, Toplevel, Val};
 use crate::marshal::{self, Marshalled, wire};
@@ -204,7 +204,7 @@ fn the_whole_image_and_each_unfrozen_spawn_grant_round_trip() {
         SpawnGrant::Base("not-resolved-by-the-codec".into()),
         cwd_grant(),
     ] {
-        let bytes = marshal::write(&sent, &grant).unwrap();
+        let bytes = marshal::write(image(&parent), &grant).unwrap();
         let (back, back_grant) = marshal::read(&runtime(), &bytes).unwrap();
         assert_env(&sent.env, &back.env);
         assert_frames(&sent.context.handlers, &back.context.handlers);
@@ -233,7 +233,7 @@ fn the_whole_image_and_each_unfrozen_spawn_grant_round_trip() {
 fn a_child_inherits_terms_but_no_host_local_authority() {
     let parent = parent();
     assert!(parent.session.hooks.is_some());
-    let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+    let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
     let child = Shell::child_of(runtime().into(), &bytes, no_base).unwrap();
     assert!(child.session.hooks.is_none());
     assert!(child.session.terminal_lease.is_none());
@@ -294,7 +294,9 @@ fn a_base_grant_runs_the_narrower_with_the_childs_anchors() {
         })
     }
     let parent = parent();
-    let bytes = parent.marshal(SpawnGrant::Base("confined".into())).unwrap();
+    let bytes = parent
+        .marshal(&SpawnGrant::Base("confined".into()))
+        .unwrap();
     let child = Shell::child_of(runtime().into(), &bytes, narrow).unwrap();
     assert_eq!(child.context.grants.len(), parent.context.grants.len() + 1);
     assert_eq!(
@@ -314,7 +316,7 @@ fn a_restriction_freezes_against_the_childs_inherited_cwd() {
     std::fs::write(dir.join("outside"), "").unwrap();
     let mut parent = parent();
     parent.seed_cwd(crate::path::CwdPath::new(cwd.clone()).unwrap());
-    let bytes = parent.marshal(cwd_grant()).unwrap();
+    let bytes = parent.marshal(&cwd_grant()).unwrap();
     let child = Shell::child_of(runtime().into(), &bytes, no_base).unwrap();
     assert_eq!(child.context.cwd().as_path(), cwd);
     assert_eq!(child.context.grants.len(), parent.context.grants.len() + 1);
@@ -342,7 +344,7 @@ fn a_linked_module_keeps_its_checked_top_and_origin_without_loading_again() {
             crate::syntax::quote_word(file.to_str().unwrap())
         ),
     );
-    let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+    let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
     std::fs::write(&file, "fail 'must not read this source'").unwrap();
     let mut child = Shell::child_of(runtime().into(), &bytes, no_base).unwrap();
     let (before, _) = parent.env.get("linked").unwrap().block().unwrap();
@@ -388,7 +390,7 @@ fn nested_linked_modules_round_trip_as_ir() {
         ValClos::thunk(comp.clone(), &Env::EMPTY),
     );
     let (back, _) =
-        marshal::read(&runtime(), &parent.marshal(SpawnGrant::Inherit).unwrap()).unwrap();
+        marshal::read(&runtime(), &parent.marshal(&SpawnGrant::Inherit).unwrap()).unwrap();
     assert_eq!(back.env.get("nested").unwrap().block().unwrap().0, &comp);
 }
 
@@ -429,7 +431,7 @@ fn checker_written_capture_and_boundary_sites_keep_their_unit() {
         let mut parent = parent();
         run(&mut parent, source);
         let (before, _) = parent.env.get("f").unwrap().block().unwrap();
-        let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+        let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
         let (back, _) = marshal::read(&runtime(), &bytes).unwrap();
         let (after, _) = back.env.get("f").unwrap().block().unwrap();
         assert_eq!(before, after);
@@ -455,7 +457,7 @@ fn checker_written_capture_and_boundary_sites_keep_their_unit() {
 
 fn envelope() -> serde_json::Value {
     let bytes = crate::test_helper::core_shell()
-        .marshal(SpawnGrant::Inherit)
+        .marshal(&SpawnGrant::Inherit)
         .unwrap();
     serde_json::from_slice(&bytes.0).unwrap()
 }
@@ -835,16 +837,12 @@ fn a_nonunicode_cwd_is_the_writers_only_typed_refusal() {
             .unwrap_err();
     assert_eq!(error.path, [DataStep::Field("cwd".into())]);
     assert!(matches!(error.cause, JsonEncodeCause::NonUnicodePath(_)));
-    let error = parent.marshal(SpawnGrant::Inherit).unwrap_err();
+    let error = parent.marshal(&SpawnGrant::Inherit).unwrap_err();
     let Reason::Protocol(protocol) = error.reason else {
         panic!("protocol")
     };
-    let ProtocolFailure::Unencodable(error) = *protocol else {
-        panic!("encoding")
-    };
-    assert_eq!(error.operation, ProtocolOperation::Marshal);
-    let FrameEncodeFailure::Json(error) = error.cause else {
-        panic!("JSON encoding")
+    let ProtocolFailure::Marshal(error) = *protocol else {
+        panic!("marshal")
     };
     assert_eq!(
         error.path,
@@ -883,7 +881,7 @@ fn grant_stack_traces_cross_unheld_then_the_reader_holds_them_again() {
     parent.context.grants.push(denying(&secret));
     let held = parent.context.grants.held_ids();
     assert_eq!(held, [Some(crate::test_helper::trace(&secret).last_id())]);
-    let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+    let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
     let document = JsonDocument::parse(&bytes.0).unwrap();
     let wire: wire::Wire = decode_structural(document.root()).unwrap();
     let raw_context = wire.context.validate_with(Ok).unwrap();
@@ -904,7 +902,7 @@ fn a_replaced_exclusion_keeps_its_position_and_its_old_identity() {
     std::fs::hard_link(&secret, &kept).unwrap();
     let mut parent = parent();
     parent.context.grants.push(denying(&secret));
-    let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+    let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
     std::fs::rename(&secret, dir.join("old-secret")).unwrap();
     std::fs::write(&secret, "new").unwrap();
     let (back, _) = marshal::read(&runtime(), &bytes).unwrap();
@@ -948,7 +946,7 @@ fn a_child_with_a_retargeted_allowance_link_admits_only_the_old_target() {
             }),
             ..Capabilities::default()
         }));
-    let bytes = parent.marshal(SpawnGrant::Inherit).unwrap();
+    let bytes = parent.marshal(&SpawnGrant::Inherit).unwrap();
     std::fs::rename(dir.join("alink"), dir.join("old-link")).unwrap();
     std::os::unix::fs::symlink("new", dir.join("alink")).unwrap();
     let child = Shell::child_of(runtime().into(), &bytes, no_base).unwrap();

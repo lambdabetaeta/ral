@@ -142,16 +142,6 @@ mask for life. The time bound would survive — no shield masks past
   responsibility. Filesystem races, removal failures and grace expiry remain
   possible; the rule prevents creation under an already known launch refusal.
 
-## D4: owned Agda divergence
-
-**The acquiring guard is not yet represented in Agda.** The strong-model
-follow-up owns `dev/agda/Extrinsic/Typing.agda`'s two-operand rule,
-`Extrinsic/Syntax/{Term,TermSubst}.agda`, the machine rules and affected
-`Intrinsic/ConcurrencyExamples.agda` examples. It must add acquisition and
-an ending-reading release, re-establish type safety and retire this note.
-Until then, the correspondence claim explicitly excludes this guard rule;
-no Agda change is part of this decision's implementation.
-
 ## Where
 
 - `core/src/shell/evaluator/machine.rs`: `Frame::{Acquire, Guard, Cleanup}`,

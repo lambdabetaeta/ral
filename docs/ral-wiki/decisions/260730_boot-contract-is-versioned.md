@@ -126,7 +126,7 @@ Cite: `guest-abi/src/boot.rs` (`CONTRACT`, `Boot::read`, `command_line`),
 
 ## Amendment, 2026-10-13
 
-The contract is at 3: the factory port, on which the daemon listens for the host's engine dials ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+The contract is at 3: the factory port, on which the daemon listens for the host's engine dials ([[design/engine-protocol|the engine protocol]]).
 
 ## Amendment, 2026-10-14
 

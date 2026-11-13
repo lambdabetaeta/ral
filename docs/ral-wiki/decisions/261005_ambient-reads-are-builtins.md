@@ -101,5 +101,5 @@ Amends [[decisions/260531_env-is-dynamic-only|env-is-dynamic-only]] (the
 environment is read through `env`),
 [[decisions/261005_one-tilde-rule|one-tilde-rule]] (`$HOME` is not a
 register; `~` abbreviates `home`) and
-[[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]
+the [[map/core/evaluator|evaluator]]
 (the one store read left in the IR is `~`). See [[design/scoping|scoping]].

@@ -1,7 +1,7 @@
 use crate::data::json::{JsonDocument, JsonFormat, decode_structural, serialize_structural};
 use crate::fact::{
     DataStep, DecodeCause, DecodeFailure, EvalFailure, InvalidResidual, ProtocolData,
-    ProtocolFailure, Reason, RowKind, UnresolvedRow,
+    ProtocolFailure, Reason, ResidualDefect, RowDefect, RowKind, UnresolvedRow,
 };
 use crate::ir::{Comp, CompKind, Val};
 use crate::marshal::wire::{self, Row, Value, Wire};
@@ -23,7 +23,7 @@ fn no_base(
 fn child(parent: &Shell) -> Shell {
     Shell::child_of(
         Arc::new(crate::test_helper::core_runtime()),
-        &parent.marshal(SpawnGrant::Inherit).unwrap(),
+        &parent.marshal(&SpawnGrant::Inherit).unwrap(),
         no_base,
     )
     .unwrap()
@@ -46,7 +46,7 @@ fn error(result: Settled<ValClos>) -> Error {
 
 fn raw() -> Wire {
     let parent = crate::test_helper::core_shell()
-        .marshal(SpawnGrant::Inherit)
+        .marshal(&SpawnGrant::Inherit)
         .unwrap();
     let document = JsonDocument::parse(&parent.0).unwrap();
     decode_structural(document.root()).unwrap()
@@ -140,14 +140,15 @@ fn live_handles_cross_withheld_in_every_value_position() {
     bind_untyped(
         &mut parent,
         "tagged",
-        ValClos::variant("worker", Some(live.clone())),
+        ValClos::variant("worker", Some(live)),
     );
+    // An arm is a thunk, so a handle reaches a frame only through a capture.
     parent.context.handlers.push(
-        vec![
-            crate::shell::runtime::HandlerEntry::ral_per_name("direct".into(), live.clone()),
-            crate::shell::runtime::HandlerEntry::ral_per_name("captured".into(), capture),
-        ],
-        Some(live),
+        vec![crate::shell::runtime::HandlerEntry::ral_per_name(
+            "captured".into(),
+            capture.clone(),
+        )],
+        Some(capture),
     );
 
     let mut child = child(&parent);
@@ -181,14 +182,9 @@ fn live_handles_cross_withheld_in_every_value_position() {
     );
     handles.push(payload.into_owned());
     let frame = child.context.handlers.iter().last().unwrap();
-    handles.push(frame.entries[0].thunk.clone());
-    handles.push(
-        captured(Some(&frame.entries[1].thunk))
-            .get("live")
-            .unwrap()
-            .clone(),
-    );
-    handles.push(frame.catch_all.clone().unwrap());
+    for arm in [&frame.entries[0].thunk, frame.catch_all.as_ref().unwrap()] {
+        handles.push(captured(Some(arm)).get("live").unwrap().clone());
+    }
 
     let await_builtin = builtin(&child, "await");
     for handle in handles {
@@ -252,9 +248,9 @@ fn bare_zero_supplied_and_partial_builtins_saturate_in_the_child() {
 
 #[test]
 fn unknown_builtins_are_refused_at_the_value_that_names_them() {
-    let table = crate::test_helper::core_runtime().builtins;
-    assert!(table.get("echo").is_some());
-    assert!(table.value("echo").is_none());
+    let runtime = crate::test_helper::core_runtime();
+    assert!(runtime.builtins.get("echo").is_some());
+    assert!(runtime.sig.native("echo").is_none());
     for (name, residual) in [
         ("not-installed", false),
         ("not-installed", true),
@@ -305,11 +301,25 @@ fn residuals_require_fewer_than_arity_arguments_and_the_exact_eta_environment() 
     let mut extra = entries(1);
     extra.push(("extra".into(), binding(unit())));
     let cases = [
-        (0, Vec::new()),
-        (0, vec![("%builtin".into(), binding(unit()))]),
+        (
+            0,
+            Vec::new(),
+            ResidualDefect::EnvironmentSize(0usize.into()),
+        ),
+        (
+            0,
+            vec![("%builtin".into(), binding(unit()))],
+            ResidualDefect::BuiltinForeign,
+        ),
         (
             0,
             vec![("%builtin".into(), binding(Value::Builtin("keys".into())))],
+            ResidualDefect::BuiltinForeign,
+        ),
+        (
+            0,
+            vec![("other".into(), binding(unit()))],
+            ResidualDefect::BuiltinUnbound,
         ),
         (
             0,
@@ -317,20 +327,26 @@ fn residuals_require_fewer_than_arity_arguments_and_the_exact_eta_environment() 
                 ("%builtin".into(), binding(Value::Builtin("has".into()))),
                 ("%arg0".into(), binding(unit())),
             ],
+            ResidualDefect::EnvironmentSize(2usize.into()),
         ),
-        (1, entries(0)),
+        (
+            1,
+            entries(0),
+            ResidualDefect::EnvironmentSize(1usize.into()),
+        ),
         (
             1,
             vec![
                 ("%builtin".into(), binding(Value::Builtin("has".into()))),
                 ("%arg1".into(), binding(unit())),
             ],
+            ResidualDefect::ArgumentUnbound("%arg0".into()),
         ),
-        (1, extra),
-        (2, entries(2)),
-        (3, entries(3)),
+        (1, extra, ResidualDefect::EnvironmentSize(3usize.into())),
+        (2, entries(2), ResidualDefect::Saturated),
+        (3, entries(3), ResidualDefect::Saturated),
     ];
-    for (supplied, env) in cases {
+    for (supplied, env, defect) in cases {
         let mut wire = raw();
         wire.rows = vec![
             Row::Env(env),
@@ -354,6 +370,7 @@ fn residuals_require_fewer_than_arity_arguments_and_the_exact_eta_environment() 
                     name: "has".into(),
                     arity: 2usize.into(),
                     supplied: u64::from(supplied).into(),
+                    defect,
                 })),
             },
             "supplied={supplied}"
@@ -405,7 +422,12 @@ fn row_references_refuse_forward_out_of_range_and_wrong_kinds_at_their_paths() {
                         } else {
                             RowKind::Environment
                         },
-                        before: 1usize.into(),
+                        defect: match row {
+                            0 if built => RowDefect::WrongKind(RowKind::Environment),
+                            0 => RowDefect::WrongKind(RowKind::Built),
+                            u32::MAX => RowDefect::Absent(3usize.into()),
+                            _ => RowDefect::Forward(1usize.into()),
+                        },
                     })),
                 }
             );
@@ -422,7 +444,10 @@ fn row_references_refuse_forward_out_of_range_and_wrong_kinds_at_their_paths() {
                 cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
                     row: u64::from(row).into(),
                     wanted: RowKind::Environment,
-                    before: 1usize.into(),
+                    defect: match row {
+                        0 => RowDefect::WrongKind(RowKind::Built),
+                        _ => RowDefect::Absent(1usize.into()),
+                    },
                 })),
             }
         );
@@ -457,7 +482,11 @@ fn residual_environment_references_obey_the_same_reference_law() {
                 cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
                     row: u64::from(row).into(),
                     wanted: RowKind::Environment,
-                    before: 1usize.into(),
+                    defect: match row {
+                        0 => RowDefect::WrongKind(RowKind::Built),
+                        1 => RowDefect::Forward(1usize.into()),
+                        _ => RowDefect::Absent(2usize.into()),
+                    },
                 })),
             }
         );
@@ -496,7 +525,11 @@ fn built_collection_rows_obey_the_same_reference_law() {
                     cause: Box::new(DecodeCause::UnresolvedRow(UnresolvedRow {
                         row: u64::from(row).into(),
                         wanted: RowKind::Built,
-                        before: 1usize.into(),
+                        defect: match row {
+                            0 => RowDefect::WrongKind(RowKind::Environment),
+                            1 => RowDefect::Forward(1usize.into()),
+                            _ => RowDefect::Absent(2usize.into()),
+                        },
                     }))
                 }
             );
@@ -659,4 +692,48 @@ fn builtin_delta_is_skipped_by_serde_in_both_directions() {
     assert!(
         matches!(*failure.cause, DecodeCause::UnknownTag(ref unknown) if unknown.tag == "Builtin")
     );
+}
+
+#[test]
+fn a_document_nested_past_the_limit_is_refused_before_it_is_decoded() {
+    let nested = |levels: usize| {
+        Marshalled(
+            format!("{}{}", "[".repeat(levels), "]".repeat(levels))
+                .into_bytes()
+                .into(),
+        )
+    };
+    let limit = marshal::read::NESTING_LIMIT;
+    assert_ne!(
+        *refused(&nested(limit)).cause,
+        DecodeCause::TooDeep(limit.into())
+    );
+    assert_eq!(
+        refused(&nested(limit + 1)),
+        DecodeFailure::new(DecodeCause::TooDeep(limit.into()))
+    );
+}
+
+#[test]
+fn a_failure_that_is_no_error_fact_is_refused_at_its_value() {
+    use crate::data::FOValue;
+    use crate::data::json::{RawDatum, RawFOValue};
+    let mut wire = raw();
+    wire.rows = vec![Row::Env(vec![(
+        "failure".into(),
+        binding(Value::Failure(RawDatum::new(RawFOValue::from_value(
+            FOValue::Unit,
+        )))),
+    )])];
+    wire.env = Some(0);
+    let error = refused(&encoded(&wire));
+    assert_eq!(
+        error.path,
+        [
+            binding_path(0, 0),
+            vec![DataStep::Payload("Failure".into())]
+        ]
+        .concat()
+    );
+    assert!(matches!(*error.cause, DecodeCause::Shape(_)));
 }

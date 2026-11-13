@@ -94,7 +94,7 @@ fn one_report_answers_every_parent_message_taken_up() {
 #[test]
 fn owner_drop_reports_failure_for_a_queued_parent_follow_up() {
     let parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     child
         .handle()
         .message(&parent.handle(), "follow up".into())
@@ -240,7 +240,7 @@ fn a_poisoned_helpers_report_delivers_its_failure_once_and_the_parent_settles() 
 fn an_ended_helper_commits_status_and_withdrawal_in_the_same_line() {
     use crate::record::{Control, RECORD, Record, read_records};
     let parent = trunk(false);
-    let helper = parent.fork_named("ended-helper").unwrap();
+    let helper = parent.fresh_child_named("ended-helper").unwrap();
     let handle = helper.handle();
     handle.message(&parent.handle(), "unread".into()).unwrap();
     let pending = handle.0.address.queued_posts();

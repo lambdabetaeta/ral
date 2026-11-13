@@ -71,7 +71,8 @@ impl Engine {
             }),
         })
     }
-    pub(crate) fn adopted(transport: IdentityTransport) -> Self {
+    /// An engine over a child transport; it cannot be reborn.
+    pub(crate) fn child(transport: IdentityTransport) -> Self {
         Self::Identity {
             transport: Arc::new(transport),
             rebirth: None,

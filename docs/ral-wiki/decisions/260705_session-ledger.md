@@ -59,7 +59,7 @@ structs.**
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]): cron and
   `after` wakeups, listable, cancellable by id, dead on `/clear`.
 - **The binding ledger**
-  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]): leases
+  ([[internals/binding-leases|binding-leases]]): leases
   over top-level scratch names, renewed by use.
 
 Each solved listing, cancellation, expiry, and `/clear` locally, and each
@@ -281,7 +281,7 @@ Every open question on this page was settled before implementation began.
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
 (the handle model; the job-table separation restated here at the listing
 layer), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the
-deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]
+deferred survivor warning), [[internals/binding-leases|binding-leases]]
 (the binding chapter), [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]
 (the schedules chapter), [[decisions/260619_terminal-lease|terminal-lease]]
 (why `fg` is a host affordance), [[decisions/260614_structural-bug-prevention|structural-bug-prevention]]

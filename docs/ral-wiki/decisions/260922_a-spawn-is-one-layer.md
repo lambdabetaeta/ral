@@ -6,7 +6,7 @@ generated_at_commit: f9ac94f8
 # A spawn is one layer, so `grant` is one field
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > carries `SpawnGrant` unfrozen beside the image in `Marshalled` on both
 > seats. `Shell::child_of` re-holds inherited exclusions, constructs the
 > child, then resolves and pushes its one grant layer against its own cwd.

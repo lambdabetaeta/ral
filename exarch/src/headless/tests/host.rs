@@ -348,7 +348,7 @@ fn a_helper_without_a_reply_reports_failure_before_the_parent_settles() {
             .then(Reply::text("thanks for the update")),
         false,
     );
-    let mut child = testkit::forked_child(&root, "flaky", "`inherit");
+    let mut child = testkit::marshalled_child(&root, "flaky", "`inherit");
     set_provider(&mut child, scripted("test-model", no_reply_script()));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     testkit::take_task(&child.handle(), &child.mailbox);
@@ -395,7 +395,7 @@ fn stop_keeps_helpers_working_and_their_report_in_the_same_job() {
             .then(Reply::text("thanks for the update")),
         false,
     );
-    let mut child = testkit::forked_child(&root, "helper", "`inherit");
+    let mut child = testkit::marshalled_child(&root, "helper", "`inherit");
     set_provider(&mut child, scripted("test-model", reply_script("42")));
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     testkit::take_task(&child.handle(), &child.mailbox);
@@ -472,7 +472,7 @@ fn host_end_joins_other_roots_and_helpers_and_releases_their_names() {
         Some("other-root".into()),
     )
     .unwrap();
-    let child = testkit::forked_child(&root, "helper", "`inherit");
+    let child = testkit::marshalled_child(&root, "helper", "`inherit");
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     let fleet = root.fleet.clone();
@@ -557,7 +557,7 @@ fn a_reused_helper_keeps_its_thread_and_live_feed() {
         parent_script = parent_script.then(Reply::text("thanks for the second reply"));
     }
     let mut root = frontend_root(parent_script, false);
-    let mut child = testkit::forked_child(&root, "helper", "`inherit");
+    let mut child = testkit::marshalled_child(&root, "helper", "`inherit");
     set_provider(
         &mut child,
         scripted(

@@ -3,7 +3,7 @@ got 3.5 {"a":1}
 second
 [a: 1] <|x| block> <block> 3.5 [1, 2]
 cannot pass a record as argument at index 0 to `cat`
-cannot pass a block as argument at index 0 to `cat`
+cannot pass a function as argument at index 0 to `cat`
 cannot pass a list as argument at index 0 to `cat`
 reads its stdin
 mocked hi there

@@ -342,7 +342,7 @@ fn parent_prose_is_copyable_while_its_helper_still_owes_a_report() {
         ),
     );
     // The conversing parent may finish prose without replying or settling.
-    let mut helper = testkit::forked_child(&parent, "held-helper", "`inherit");
+    let mut helper = testkit::marshalled_child(&parent, "held-helper", "`inherit");
     set_provider(
         &mut helper,
         scripted(

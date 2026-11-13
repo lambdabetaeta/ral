@@ -505,20 +505,7 @@ fn check_argv<'a>(cmd: &str, args: &'a [ValClos]) -> Result<Vec<Cow<'a, str>>, E
                                 crate::fact::ValueShape::String,
                                 crate::fact::ValueShape::Variant,
                             ]),
-                            found: match arg.view() {
-                                View::Unit => crate::fact::Found::Unit,
-                                View::Thunk { .. } => crate::fact::Found::Block,
-                                View::Builtin(_) => crate::fact::Found::Function,
-                                View::Handle(_) => crate::fact::Found::Handle,
-                                View::List(_) => crate::fact::Found::List,
-                                View::Map(_) => crate::fact::Found::Map,
-                                View::Bytes(_) => crate::fact::Found::Bytes,
-                                View::Bool(_)
-                                | View::Int(_)
-                                | View::Float(_)
-                                | View::String(_)
-                                | View::Variant { .. } => unreachable!("scalar argv is admitted"),
-                            },
+                            found: arg.found(),
                         }),
                     },
                 ))));

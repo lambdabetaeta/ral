@@ -90,7 +90,7 @@ fn parent_bytes() -> Marshalled {
     let mut shell = crate::boot::test_shell();
     shell.set_env_var("PARENT_MARK", "1").unwrap();
     shell
-        .marshal(ral_core::SpawnGrant::Inherit)
+        .marshal(&ral_core::SpawnGrant::Inherit)
         .expect("a test parent marshals")
 }
 

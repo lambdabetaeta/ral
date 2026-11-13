@@ -179,7 +179,7 @@ fn headless_reply_is_not_clean_when_its_helpers_engine_teardown_fails() {
     })
     .unwrap();
     set_provider(&mut root, scripted("test-model", reply_script("42")));
-    let mut child = testkit::forked_child(&root, "helper", "`inherit");
+    let mut child = testkit::marshalled_child(&root, "helper", "`inherit");
     let child_recorder = child.recorder();
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let setup = child.ral(

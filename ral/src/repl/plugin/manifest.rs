@@ -217,7 +217,7 @@ pub(super) fn parse(map: MapRef<'_>) -> Result<(Manifest, ManifestHandlers), Err
     };
     let handlers = match map.get("handlers") {
         Some(value) => match value.view() {
-            View::Map(m) => parse_handlers(m)?,
+            View::Map(m) => parse_handlers(m),
             _ => {
                 return Err(expected_at(
                     vec![DataStep::Field("handlers".into())],
@@ -287,16 +287,6 @@ fn parse_hooks(entries: MapRef<'_>) -> Result<Vec<(HookEvent, ValClos)>, Error> 
                         },
                     ))
                 })?;
-            if !matches!(value.view(), View::Thunk { .. }) {
-                return Err(expected_at(
-                    vec![
-                        DataStep::Field("hooks".into()),
-                        DataStep::Field(name.into()),
-                    ],
-                    &value,
-                    Expected::Closure,
-                ));
-            }
             Ok((event, value.into_owned()))
         })
         .collect()
@@ -343,12 +333,14 @@ where
             None => return Err(invalid_at(path(), InvalidCause::MissingField("key".into()))),
         };
         let handler = match map.get("handler") {
-            Some(h) if matches!(h.view(), View::Thunk { .. }) => h.into_owned(),
+            Some(h) if matches!(h.shape(), ValueShape::Block | ValueShape::Function) => {
+                h.into_owned()
+            }
             Some(other) => {
                 return Err(expected_at(
                     field_path("handler"),
                     &other,
-                    Expected::Closure,
+                    Expected::AnyOf(vec![ValueShape::Block, ValueShape::Function]),
                 ));
             }
             None => {
@@ -379,22 +371,10 @@ where
     Ok((out, handlers))
 }
 
-fn parse_handlers(entries: MapRef<'_>) -> Result<Vec<(String, ValClos)>, Error> {
+fn parse_handlers(entries: MapRef<'_>) -> Vec<(String, ValClos)> {
     entries
         .iter()
-        .map(|(name, value)| {
-            if !matches!(value.view(), View::Thunk { .. }) {
-                return Err(expected_at(
-                    vec![
-                        DataStep::Field("handlers".into()),
-                        DataStep::Field(name.into()),
-                    ],
-                    &value,
-                    Expected::Closure,
-                ));
-            }
-            Ok((name.to_string(), value.into_owned()))
-        })
+        .map(|(name, value)| (name.to_string(), value.into_owned()))
         .collect()
 }
 
@@ -580,32 +560,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn non_block_handler_member_is_a_runtime_decode_error() {
-        let manifest = ValClos::map(vec![
-            ("name".into(), ValClos::string("p")),
-            (
-                "handlers".into(),
-                ValClos::map(vec![("foo".into(), ValClos::int(3))]),
-            ),
-        ]);
-        let error = parse(manifest.as_map("manifest").unwrap()).unwrap_err();
-        assert_eq!(
-            invalid_reason(&error).path,
-            vec![
-                DataStep::Field("handlers".into()),
-                DataStep::Field("foo".into()),
-            ]
-        );
-        assert_eq!(
-            invalid_reason(&error).cause,
-            InvalidCause::Shape(ShapeFailure {
-                expected: Expected::Closure,
-                found: ral_core::fact::Found::Int(3),
-            })
-        );
-    }
-
     /// A closed block handler for well-formed keybinding entries.
     fn dummy_block() -> ValClos {
         ValClos::thunk(
@@ -679,7 +633,7 @@ mod tests {
         assert_eq!(
             invalid_reason(&err).cause,
             InvalidCause::Shape(ShapeFailure {
-                expected: Expected::Closure,
+                expected: Expected::AnyOf(vec![ValueShape::Block, ValueShape::Function]),
                 found: ral_core::fact::Found::Int(3)
             })
         );

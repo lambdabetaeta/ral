@@ -1,5 +1,5 @@
 use super::{Fleet, Unborn};
-use crate::agent::testkit::{TestAgent, TestAgentSpec, forked_child, test_agent};
+use crate::agent::testkit::{TestAgent, TestAgentSpec, marshalled_child, test_agent};
 use crate::agent::{Agent, TestLaunch};
 use crate::bus::{Next, Rest};
 use crate::record::ChildStatus;
@@ -27,7 +27,7 @@ fn configured_helper_idle_reaches_the_child_mailbox() {
     })
     .unwrap();
     assert_eq!(parent.fleet.launch.idle, Duration::ZERO);
-    let helper = forked_child(&parent, "short-lived", "`inherit");
+    let helper = marshalled_child(&parent, "short-lived", "`inherit");
     let rest = Rest { pending: false };
     helper.handle().steer("task".into()).unwrap();
     let Next::Take { exchange, .. } = helper.mailbox.next(rest) else {

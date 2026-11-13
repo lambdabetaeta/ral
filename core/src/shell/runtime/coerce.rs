@@ -51,15 +51,15 @@ impl ValClos {
         }
     }
 
-    /// A spawn or watch body: a block, which the checker holds to `U (F A)`.
+    /// A spawn or watch body: whatever [`ValClos::into_computation`] forces,
+    /// a builtin as its η-expansion.
     ///
     /// # Errors
-    /// `self` is not a block.
-    pub(crate) fn expect_thunk(&self, ctx: &str) -> Result<(&Arc<Comp>, &Env), Error> {
-        match self.view() {
-            View::Thunk { comp, env } => Ok((comp, env)),
-            _ => Err(self.expected(ctx, Expected::Closure)),
-        }
+    /// `self` is neither a block nor a function.
+    pub(crate) fn expect_thunk(&self, ctx: &str) -> Result<(Arc<Comp>, Env), Error> {
+        self.clone()
+            .into_computation()
+            .map_err(|refused| refused.expected(ctx, Expected::Shape(ValueShape::Block)))
     }
 
     /// # Errors

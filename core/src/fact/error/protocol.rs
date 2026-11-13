@@ -1,19 +1,14 @@
 //! Portable protocol failure facts.
 
-use super::decode::{DecodeCause, DecodeFailure, JsonEncodeFailure, JsonInputFailure};
+use super::decode::{
+    DecodeCause, DecodeFailure, JsonEncodeCause, JsonEncodeFailure, JsonInputFailure,
+};
 use super::io::IoCause;
 use super::shared::{
     Count, DataStep, DurationFact, Expected, ShapeFailure, UnknownTag, ValueShape,
 };
 use crate::{label, record, variant};
 use strum::{IntoStaticStr, VariantArray};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub enum FrameChannel {
-    Wire,
-}
-label!(FrameChannel);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -55,7 +50,6 @@ pub enum ProtocolOperation {
     Control,
     Ping,
     Pong,
-    Marshal,
 }
 label!(ProtocolOperation);
 
@@ -83,12 +77,13 @@ pub enum ProtocolFailure {
     UnknownInstaller(String),
     RootMissingScratch,
     Decode(ProtocolFailureDecode),
-    Frame(ProtocolFailureFrame),
     Unencodable(ProtocolFailureUnencodable),
+    /// A shell's image cannot be written as the document its child reads.
+    Marshal(JsonEncodeFailure),
     ConnectionLostDuringEnquiry,
     Busy(ProtocolWork),
 }
-variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", Frame(ProtocolFailureFrame): "frame", Unencodable(ProtocolFailureUnencodable): "unencodable", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
+variant!(ProtocolFailure { VersionMismatch(ProtocolFailureVersionMismatch): "version-mismatch", UnknownInstaller(String): "unknown-installer", RootMissingScratch: "root-missing-scratch", Decode(ProtocolFailureDecode): "decode", Unencodable(ProtocolFailureUnencodable): "unencodable", Marshal(JsonEncodeFailure): "marshal", ConnectionLostDuringEnquiry: "connection-lost-during-enquiry", Busy(ProtocolWork): "busy" });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, VariantArray)]
 #[strum(serialize_all = "kebab-case")]
@@ -245,18 +240,6 @@ record!(ProtocolFailureDecode {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtocolFailureFrame {
-    pub channel: FrameChannel,
-    pub operation: ProtocolOperation,
-    pub cause: FrameFailure,
-}
-record!(ProtocolFailureFrame {
-    channel: "channel",
-    operation: "operation",
-    cause: "cause"
-});
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolFailureUnencodable {
     pub operation: ProtocolOperation,
     pub cause: FrameEncodeFailure,
@@ -318,12 +301,6 @@ record!(ConnectionFaultUnencodable {
     cause: "cause"
 });
 
-impl FrameChannel {
-    pub fn describe(&self) -> String {
-        <&str>::from(*self).replace('-', " ")
-    }
-}
-
 impl FramePart {
     pub fn describe(&self) -> String {
         <&str>::from(*self).replace('-', " ")
@@ -375,8 +352,13 @@ impl ProtocolFailure {
             Self::UnknownInstaller(value) => format!("unknown installer {value:?}"),
             Self::RootMissingScratch => "the root attach names no $EXARCH_SCRATCH; the host owns the scratch and names it in every root attach".into(),
             Self::Decode(value) => value.describe(),
-            Self::Frame(value) => value.describe(),
             Self::Unencodable(value) => value.describe(),
+            Self::Marshal(value) => match &value.cause {
+                JsonEncodeCause::NonUnicodePath(path) => format!(
+                    "cannot start a child: a child receives its parent shell as text, so every path in it must be valid Unicode, and {} is not; `cd` to a directory whose path is Unicode, then spawn again",
+                    path.shown
+                ),
+            },
             Self::ConnectionLostDuringEnquiry => "connection lost during enquiry".to_owned(),
             Self::Busy(value) => format!("busy: {}", value.describe()),
         }
@@ -533,24 +515,18 @@ impl ProtocolFailureDecode {
                 self.operation,
                 self.cause.describe()
             ),
-            ProtocolData::Request | ProtocolData::RootConfig | ProtocolData::Parent => format!(
+            ProtocolData::Parent => format!(
+                "{}: cannot read the image of the parent shell that ral itself wrote for this child: {}. A refusal here means the two engines differ in version, or ral has a bug; it is not caused by your program",
+                self.operation,
+                self.cause.describe()
+            ),
+            ProtocolData::Request | ProtocolData::RootConfig => format!(
                 "{}: malformed {}: {}",
                 self.operation,
                 self.kind.describe(),
                 self.cause.describe()
             ),
         }
-    }
-}
-
-impl ProtocolFailureFrame {
-    pub fn describe(&self) -> String {
-        format!(
-            "{} {} frame failed: {}",
-            self.channel.describe(),
-            self.operation.describe(),
-            self.cause.describe()
-        )
     }
 }
 
@@ -677,6 +653,7 @@ mod payload_presentation_tests {
     use super::*;
     use crate::data::datum::Datum;
     use crate::error::Error;
+    use crate::fact::JsonEncodeCauseNonUnicodePath;
     use crate::fact::{Found, Reason};
     use std::fmt::Write as _;
 
@@ -713,15 +690,7 @@ mod payload_presentation_tests {
     }
 
     #[test]
-    fn marshal_and_parent_project_as_bare_labels() {
-        let marshal = crate::data::datum::tag("marshal", None);
-        assert_eq!(ProtocolOperation::Marshal.encode(), marshal);
-        assert_eq!(
-            ProtocolOperation::decode(&marshal),
-            Ok(ProtocolOperation::Marshal)
-        );
-        assert_eq!(ProtocolOperation::Marshal.describe(), "marshal");
-
+    fn parent_projects_as_a_bare_label() {
         let parent = crate::data::datum::tag("parent", None);
         assert_eq!(ProtocolData::Parent.encode(), parent);
         assert_eq!(ProtocolData::decode(&parent), Ok(ProtocolData::Parent));
@@ -740,7 +709,25 @@ mod payload_presentation_tests {
         ));
         check(
             &value,
-            "child: malformed parent: field \"rows\": element 0: a closure names `x`, which its row does not bind",
+            "child: cannot read the image of the parent shell that ral itself wrote for this child: field \"rows\": element 0: a closure names `x`, which its row does not bind. A refusal here means the two engines differ in version, or ral has a bug; it is not caused by your program",
+            &[],
+        );
+    }
+
+    #[test]
+    fn marshal_refusal_names_the_path_and_the_remedy() {
+        let value = ProtocolFailure::Marshal(
+            JsonEncodeFailure::new(JsonEncodeCause::NonUnicodePath(
+                JsonEncodeCauseNonUnicodePath {
+                    shown: "\"/invalid-\\xff\"".into(),
+                },
+            ))
+            .field("cwd")
+            .field("context"),
+        );
+        check(
+            &value,
+            "cannot start a child: a child receives its parent shell as text, so every path in it must be valid Unicode, and \"/invalid-\\xff\" is not; `cd` to a directory whose path is Unicode, then spawn again",
             &[],
         );
     }

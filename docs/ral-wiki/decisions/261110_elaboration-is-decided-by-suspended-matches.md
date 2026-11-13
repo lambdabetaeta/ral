@@ -101,8 +101,8 @@ The intended order-independence argument separates generation, monotone solving,
 rank closure and readback. See [[internals/type-inference|type inference]] for
 what the regressions cover.
 
-This is neither a complete confluence proof nor a completed mechanisation, and
-diagnostics are not claimed order-independent.
+This is not a complete confluence proof, and diagnostics are not claimed
+order-independent.
 
 ## Where
 

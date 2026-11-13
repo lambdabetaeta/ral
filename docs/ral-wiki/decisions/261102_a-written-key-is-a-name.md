@@ -16,9 +16,9 @@ amended_by: "[[261102_the-checked-ir-is-the-calculus|the checked IR is the calcu
 
 > **Amended 2026-11-02:**
 > [[261102_the-checked-ir-is-the-calculus|the checked IR is the calculus]]
-> expresses the three reads as primitive `index (fld ℓ)`, `index (pos k)`
-> and `index key`, not separate computation constructors. Their typing
-> rules and surface key forms stand.
+> expresses the three reads as value-only `Prim::Index` operations, not
+> separate computation constructors. Their typing rules and surface key
+> forms stand.
 
 **How a key is written decides what it reads. Quotes never decide a type.**
 A written name reads a record field, a whole number a list element, and a
@@ -72,8 +72,7 @@ script uses, checked at the door.
 A read with one typing rule preserves principal types. A record helper stays
 row-polymorphic and a map helper element-polymorphic, whether its body is
 inline or named. No disjunct must be chosen from later uses, so no index-made
-weakness or value-shape default is needed. Surface reads correspond one to
-one with the formal core's **`proj`, `index` and `lookup`**.
+weakness or value-shape default is needed.
 
 A boundary already knows both the incoming value and the type its script
 needs. Checking there preserves typed decoding before downstream effects

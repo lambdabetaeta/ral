@@ -467,8 +467,7 @@ and naming failures to contextual errors. `glob` and exarch's
 
 `which.rs` is the one `PATH` walk. **Its anchor is an `Option<&CwdPath>`: the
 shell's cwd cell, or `None` for a shell-less caller — and `CwdPath` has one
-constructor, so no call site can choose "here" for itself**
-([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
+constructor, so no call site can choose "here" for itself**.
 
 - `names_a_path` (`lex/command.rs`, with the rest of the command-name lexing)
   is the one answer to "is this command name a path?": it

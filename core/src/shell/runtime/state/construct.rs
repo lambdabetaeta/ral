@@ -358,11 +358,7 @@ impl Shell {
     ///
     /// # Errors
     /// The cwd is not Unicode.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "marshalling transfers the spawn's grant to its parent document"
-    )]
-    pub fn marshal(&self, grant: SpawnGrant) -> Result<crate::marshal::Marshalled, Error> {
+    pub fn marshal(&self, grant: &SpawnGrant) -> Result<crate::marshal::Marshalled, Error> {
         let image = Image {
             env: self.env.clone(),
             context: self
@@ -372,7 +368,7 @@ impl Shell {
             terms: Terms::of(self),
             fixings: self.session.fixings.snapshot(),
         };
-        crate::marshal::write(&image, &grant)
+        crate::marshal::write(image, grant)
     }
 
     /// A child on either seat: no recipe runs; the grant's layer is pushed last,

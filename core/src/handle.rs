@@ -8,7 +8,6 @@ use crate::process::{CancelCause, ScopeNode};
 use crate::shell::runtime::End;
 use crate::shell::runtime::{ValClos, View};
 use crate::sync::LockExt as _;
-use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -33,21 +32,20 @@ impl Stamp {
     }
 }
 
-/// Pins live work through data, never descending a capture.
+/// Pins live work through data, never descending a block's capture; a partial
+/// builtin's supplied arguments are data.
 pub(crate) fn pins_live_work(v: &ValClos) -> bool {
     let (_, terminal) = v.peel_variants();
     match terminal.view() {
         View::Handle(Handle::Live(h)) => h.sample().is_live(),
-        View::Handle(Handle::Withheld(_)) => false,
-        _ => terminal
-            .try_for_each_child(&mut |c| {
-                if pins_live_work(c) {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            })
-            .is_break(),
+        View::List(items) => items.iter().any(|item| pins_live_work(&item)),
+        View::Map(entries) => entries.iter().any(|(_, item)| pins_live_work(&item)),
+        View::Thunk { env, .. } => terminal.residual().is_some_and(|(entry, _)| {
+            let (_, builtin) = entry.eta();
+            env.iter()
+                .any(|(name, binding)| name != builtin && pins_live_work(&binding.value))
+        }),
+        _ => false,
     }
 }
 

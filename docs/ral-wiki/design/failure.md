@@ -97,12 +97,6 @@ the failure arose.** An external's life is `prepare`, `start` and `ending`
   ([[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 - The prelude's `attempt` discards both result and failure.
 
-Agda models error recovery and release precedence with stack frames, but its
-`guard` rule does not model acquisition or the ending argument. This is
-**owned divergence D4**, assigned to the strong-model follow-up in
-[[decisions/261111_a-guard-acquires|a-guard-acquires]], not a proof of the
-acquiring guard. Agda has no `exit`.
-
 Failure propagates predictably through the rest of the grammar:
 
 - a written sequence or `let` halts at the first failure and records whether

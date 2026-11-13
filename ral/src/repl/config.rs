@@ -179,17 +179,17 @@ impl RcPlan {
                 ("handlers", View::Map(m)) => {
                     plan.handlers = m
                         .iter()
-                        .map(|(name, f)| match f.view() {
-                            View::Thunk { .. } => shell.vet_handler(name.to_string(), f.into_owned()).map_err(|b| {
-                                refuse(match b {
-                                    Break::Error(e) => format!("handler '{name}': {}", e.describe()),
-                                    Break::Escape(_) => format!("handler '{name}' escaped"),
+                        .map(|(name, f)| {
+                            shell
+                                .vet_handler(name.to_string(), f.into_owned())
+                                .map_err(|b| {
+                                    refuse(match b {
+                                        Break::Error(e) => {
+                                            format!("handler '{name}': {}", e.describe())
+                                        }
+                                        Break::Escape(_) => format!("handler '{name}' escaped"),
+                                    })
                                 })
-                            }),
-                            _ => Err(refuse(format!(
-                                "handler '{name}' is {}, not a function; bind it with `let {name} = …` above the rc's `return` instead",
-                                f.type_name()
-                            ))),
                         })
                         .collect::<Result<_, _>>()?;
                 }
@@ -301,7 +301,7 @@ fn load_configured_plugin(
     shell: &mut Shell,
 ) -> Settled<()> {
     match options.view() {
-        View::Map(_) => super::plugin::load::load_plugin(name, options, mooring, shell),
+        View::Map(m) => super::plugin::load::load_plugin(name, m.to_map(), mooring, shell),
         _ => Err(Error::new(Reason::Invalid(Box::new(InvalidFailure {
             operation: "load-plugin".into(),
             path: vec![DataStep::Field(name.into())],

@@ -19,13 +19,6 @@ machine*: control, environment and continuation.
   a computation closure or `Err(Break)`, never a persistent value register.
   `settle` passes values through frames until one yields a closure or break,
   or the run finishes. No rule constructs runtime `return V` syntax.
-- This is an operational account of Rust, not a refinement proof. Agda's
-  substitution-based CK machine is the core correspondence boundary;
-  environments implement lexical binding rather than literal substitution.
-  Residual-function boxing, runtime builtin η/δ and the acquiring `guard`
-  need their separate correspondence follow-ups
-  ([[decisions/261102_the-checked-ir-is-the-calculus|correspondence ADR]],
-  [[decisions/261111_a-guard-acquires|a-guard-acquires]]).
 - The value and state representation is fixed by
   [[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]].
 

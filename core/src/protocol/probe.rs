@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::authority::grant::value::LayerValue;
 use crate::authority::policy::{GrantLayer, GrantStack};
-use crate::data::datum::{Datum, tag};
+use crate::data::datum::Datum;
 use crate::data::{Bytes, FOValue, Finite};
 use crate::handle::Sample;
 use crate::shell::runtime::{Done, Owner, ValClos};
@@ -271,7 +271,7 @@ record!(BindingRow {
 /// A bound worker handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleRow {
-    pub state: Sample<()>,
+    pub state: HandleStatus,
     pub title: String,
 }
 
@@ -280,33 +280,32 @@ record!(HandleRow {
     title: "title",
 });
 
-impl Datum for Sample<()> {
-    fn encode(self) -> FOValue {
-        let label = match self {
-            Self::Running(()) => "running",
-            Self::Stopping => "stopping",
-            Self::Ready(()) => "ready",
-            Self::Consumed => "consumed",
-        };
-        tag(label, None)
-    }
+/// A handle's worker sample, or withheld in a marshalled parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleStatus {
+    Running,
+    Stopping,
+    Ready,
+    Consumed,
+    Withheld,
+}
 
-    fn decode(v: &FOValue) -> Result<Self, DecodeFailure> {
-        crate::data::datum::labelled(
-            v,
-            &[
-                Self::Running(()),
-                Self::Stopping,
-                Self::Ready(()),
-                Self::Consumed,
-            ],
-            |state| match state {
-                Self::Running(()) => "running",
-                Self::Stopping => "stopping",
-                Self::Ready(()) => "ready",
-                Self::Consumed => "consumed",
-            },
-        )
+variant!(HandleStatus {
+    Running: "running",
+    Stopping: "stopping",
+    Ready: "ready",
+    Consumed: "consumed",
+    Withheld: "withheld",
+});
+
+impl From<Sample<()>> for HandleStatus {
+    fn from(sample: Sample<()>) -> Self {
+        match sample {
+            Sample::Running(()) => Self::Running,
+            Sample::Stopping => Self::Stopping,
+            Sample::Ready(()) => Self::Ready,
+            Sample::Consumed => Self::Consumed,
+        }
     }
 }
 
@@ -492,10 +491,11 @@ mod tests {
     #[test]
     fn rows_round_trip() {
         for state in [
-            Sample::Running(()),
-            Sample::Stopping,
-            Sample::Ready(()),
-            Sample::Consumed,
+            HandleStatus::from(Sample::Running(())),
+            HandleStatus::from(Sample::Stopping),
+            HandleStatus::from(Sample::Ready(())),
+            HandleStatus::from(Sample::Consumed),
+            HandleStatus::Withheld,
         ] {
             let row = BindingRow {
                 name: "h".into(),

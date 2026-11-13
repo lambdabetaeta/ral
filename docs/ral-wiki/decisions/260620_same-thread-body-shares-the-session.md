@@ -1,6 +1,6 @@
 ---
 status: superseded
-superseded_by: decisions/260826_the-evaluator-steps-closures
+superseded_by: map/core/evaluator
 ---
 
 # A same-thread thunk body runs in the caller's session, not a reconstructed one

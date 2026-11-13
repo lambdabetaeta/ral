@@ -314,7 +314,7 @@ impl Shell {
         let scheme = value
             .block()
             .map(|(comp, env)| {
-                crate::typecheck::binding_value_scheme(comp, self.closure_schemes(env)).map_err(
+                crate::typecheck::binding_value_scheme(comp, self.schemes_over(env)).map_err(
                     |errors| RegisterError::Typecheck {
                         name: name.clone(),
                         errors,

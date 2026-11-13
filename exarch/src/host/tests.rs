@@ -131,7 +131,7 @@ fn unnamed_children_are_adopted_in_order_and_end_joins_all_three() {
 #[test]
 fn an_unnamed_human_child_skips_a_live_helpers_name() {
     let mut main = trunk(false);
-    let child = main.fork_named("agent-1").unwrap();
+    let child = main.fresh_child_named("agent-1").unwrap();
     let (emit, _feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut main, child, None, &emit);
     let host = Host::adopt(vec![(main, None)]).unwrap();
@@ -372,7 +372,7 @@ fn clear_through_the_host_ends_helpers_drops_reports_and_keeps_human_text() {
         &mut root,
         scripted("test-model", Script::new().then(Reply::text("ok"))),
     );
-    let child = testkit::forked_child(&root, "helper", "`inherit");
+    let child = testkit::marshalled_child(&root, "helper", "`inherit");
     let (emit, _unused_feed) = crate::bus::dummy_emitter();
     let helper = testkit::launch_child(&mut root, child, None, &emit);
     root.handle().steer("human before clear".into()).unwrap();

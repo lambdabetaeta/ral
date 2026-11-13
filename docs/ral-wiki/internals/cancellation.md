@@ -663,9 +663,8 @@ SIGHUP its `Terminated`; SIGTERM, no key's, asks what a hangup does.
   Raised while idle, it strikes only the settled run's dead scope, so the
   next run never sees it — and a session worker, off every run's chain, is
   spared outright.
-- **SIGQUIT → `Abort`**, the louder "reap everything" gesture
-  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
-  *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
+- **SIGQUIT → `Abort`**, the louder "reap everything" gesture:
+  *cancellation* of running work, never deletion of bindings. It is a cooperative `request_root_cancel`, not
   the default core-dump — so it satisfies "Ctrl-`\` must not core-dump the shell"
   *by reaping*, not by ignoring.
 - **SIGTERM/SIGHUP → `Shutdown`** — translates to a root `Terminated` (the whole

@@ -74,7 +74,7 @@ does not supply those defaults.**
 - These defaults select an elaboration; the paper's principality results are
   not thereby results about ral. Order independence is the intended property
   of ral's restricted solver, with behavioral validation and final review still
-  pending and no completed mechanisation of this schedule.
+  pending.
 
 The shared lesson is to make shape-sensitive decisions explicit constraints.
 The boundary is equally important: ral executes a unit's single elaborated

@@ -4,12 +4,12 @@ status: active
 
 > **Amended 2026-10-13.** `pack_seed` and `hatch` are gone; `EngineSeed` survives
 > only as the codec of the sealed seed carried in `Attach.seed`
-> ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+> ([[design/engine-protocol|the engine protocol]]).
 
 # Stages are threads
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > gives helper-agent shells on both seats one `Marshalled` byte route,
 > read by `Shell::child_of`. The codec named by the 2026-10-13 amendment
 > is replaced by `marshal::{write,read}`. Pipeline stages remain local
@@ -112,14 +112,8 @@ forced, and the boot-per-stage cost — is deleted.
 
 ## Superseded and unamended
 
-Supersedes
-[[decisions/260610_child-eval-unification|child-eval-unification]]: the
-pipeline-stage half of the shared re-exec'd-child eval protocol is gone along
-with the wire it rode. `core/src/engine_seed.rs` is not deleted — trimmed from
-946 to 137 lines, it now carries only `EngineSeed`/`pack_seed`, the engine
-seat's own seed wire for `hatch` ([[map/core/transport|transport]]); the
-`ChildKind` axis and the `PipelineStage`/`Sandbox` split it named no longer
-exist, since a pipeline stage no longer crosses a wire at all.
+The pipeline-stage half of the shared re-exec'd-child eval protocol is gone
+with the wire it rode: a pipeline stage no longer crosses a wire at all.
 
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives-detached-vs-structured]]'s
 "pipelines are foreground-bounded" is unchanged: a stage thread's cancel scope

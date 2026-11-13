@@ -310,8 +310,7 @@ elaboration; diagnostic contents may depend on traversal.
   shared weak payloads, while structural lowering still reaches grades inside
   weak returned thunks. Failed payload equations do not fix another producer's
   grade. Diagnostics retain solved nested types and recursive-call provenance.
-- These tests do not prove complete unifier confluence. The Agda elaborator
-  does not mechanise this schedule.
+- These tests do not prove complete unifier confluence.
 
 See [[related/omnidirectional-type-inference|the suspended-match comparison]]
 and `docs/SPEC.md` §§17.3–17.7.

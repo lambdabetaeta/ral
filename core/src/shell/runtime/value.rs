@@ -7,15 +7,15 @@ use super::map::{Map, MapRef};
 use super::signature::{Signature, lookup};
 use crate::builtin::BuiltinEntry;
 use crate::data::datum::Datum as _;
+use crate::data::print::tag_run;
 use crate::data::{Bytes, FOValue, Finite, Str};
 use crate::fact::{ErrorFact, EvalFailure, Found, Reason, TextPreview, ValueShape};
 use crate::handle::{Handle, HandleInner};
 use crate::io::terminal::{InteractiveMode, TerminalState};
 use crate::ir::{Comp, CompKind, Name, Occ, Val};
-use crate::ty::{Binders, Closed, Head, TAG_PREFIX, Ty, closed_record};
+use crate::ty::{Binders, Closed, Head, Ty, closed_record};
 use std::borrow::Cow;
 use std::fmt;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 mod compare;
@@ -404,17 +404,6 @@ impl ValClos {
             _ => None,
         }
     }
-    pub(crate) fn try_for_each_child<B>(
-        &self,
-        f: &mut impl FnMut(&Self) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
-        match self.view() {
-            View::List(items) => items.iter().try_for_each(|v| f(&v)),
-            View::Map(entries) => entries.iter().try_for_each(|(_, v)| f(&v)),
-            View::Variant { payload, .. } => payload.iter().try_for_each(|v| f(v)),
-            _ => ControlFlow::Continue(()),
-        }
-    }
     #[cfg(test)]
     pub(crate) fn env(&self) -> Option<&Env> {
         match &self.0 {
@@ -422,23 +411,34 @@ impl ValClos {
             _ => None,
         }
     }
+    /// The one classification: a builtin is classified as its η-expansion,
+    /// so arity 0 is a block and arity ≥ 1 a function.
     pub fn shape(&self) -> ValueShape {
-        match self.view() {
-            View::Unit => ValueShape::Unit,
-            View::Bool(_) => ValueShape::Bool,
-            View::Int(_) => ValueShape::Int,
-            View::Float(_) => ValueShape::Float,
-            View::String(_) => ValueShape::String,
-            View::Bytes(_) => ValueShape::Bytes,
-            View::List(_) => ValueShape::List,
-            View::Map(_) => ValueShape::Map,
-            View::Variant { .. } => ValueShape::Variant,
-            View::Thunk { comp, .. } if comp.lam().is_none() => ValueShape::Block,
-            View::Thunk { .. } | View::Builtin(_) => ValueShape::Function,
-            View::Handle(_) => ValueShape::Handle,
+        match &self.0 {
+            Repr::List(_) => ValueShape::List,
+            Repr::Map(..) => ValueShape::Map,
+            Repr::Syn(val, _) => match val {
+                Val::Unit => ValueShape::Unit,
+                Val::Bool(_) => ValueShape::Bool,
+                Val::Int(_) => ValueShape::Int,
+                Val::Float(_) => ValueShape::Float,
+                Val::String(_) => ValueShape::String,
+                Val::Bytes(_) => ValueShape::Bytes,
+                Val::List(_) => ValueShape::List,
+                Val::Record(_) | Val::Map(_) => ValueShape::Map,
+                Val::Variant { .. } => ValueShape::Variant,
+                Val::Thunk(node) if node.shape().lam().is_none() => ValueShape::Block,
+                Val::Builtin(entry) if entry.decl.fixed_arity() == 0 => ValueShape::Block,
+                Val::Thunk(_) | Val::Builtin(_) => ValueShape::Function,
+                Val::Handle(_) => ValueShape::Handle,
+                Val::Variable(_) => unreachable!("a value closure's root is not a variable"),
+            },
         }
     }
     pub fn found(&self) -> Found {
+        if let Repr::Syn(Val::Variant { label, .. }, _) = &self.0 {
+            return Found::Variant(label.to_string());
+        }
         match self.view() {
             View::Unit => Found::Unit,
             View::Bool(b) => Found::Bool(b),
@@ -448,9 +448,11 @@ impl ValClos {
             View::Bytes(_) => Found::Bytes,
             View::List(_) => Found::List,
             View::Map(_) => Found::Map,
-            View::Variant { label, .. } => Found::Variant(label.to_string()),
-            View::Thunk { comp, .. } if comp.lam().is_none() => Found::Block,
-            View::Thunk { .. } | View::Builtin(_) => Found::Function,
+            View::Variant { .. } => unreachable!("a tag is answered above"),
+            View::Thunk { .. } | View::Builtin(_) => match self.shape() {
+                ValueShape::Block => Found::Block,
+                _ => Found::Function,
+            },
             View::Handle(_) => Found::Handle,
         }
     }
@@ -472,18 +474,18 @@ impl ValClos {
         }
     }
     pub(crate) fn heads(&self) -> &'static [Head] {
-        match self.view() {
-            View::Unit => &[Head::Unit],
-            View::Bool(_) => &[Head::Bool],
-            View::Int(_) => &[Head::Int],
-            View::Float(_) => &[Head::Float],
-            View::String(_) => &[Head::String],
-            View::Bytes(_) => &[Head::Bytes],
-            View::List(_) => &[Head::List],
-            View::Map(_) => &[Head::Map, Head::Record],
-            View::Variant { .. } => &[Head::Variant],
-            View::Thunk { .. } | View::Builtin(_) => &[Head::Thunk],
-            View::Handle(_) => &[Head::Handle],
+        match self.shape() {
+            ValueShape::Unit => &[Head::Unit],
+            ValueShape::Bool => &[Head::Bool],
+            ValueShape::Int => &[Head::Int],
+            ValueShape::Float => &[Head::Float],
+            ValueShape::String => &[Head::String],
+            ValueShape::Bytes => &[Head::Bytes],
+            ValueShape::List => &[Head::List],
+            ValueShape::Map => &[Head::Map, Head::Record],
+            ValueShape::Variant => &[Head::Variant],
+            ValueShape::Block | ValueShape::Function => &[Head::Thunk],
+            ValueShape::Handle => &[Head::Handle],
         }
     }
     pub fn scalar_text(&self) -> Option<String> {
@@ -498,20 +500,19 @@ impl ValClos {
         args.iter().map(ToString::to_string).collect()
     }
     pub fn type_name(&self) -> &'static str {
-        match self.view() {
-            View::Unit => "Unit",
-            View::Bool(_) => "Bool",
-            View::Int(_) => "Int",
-            View::Float(_) => "Float",
-            View::String(_) => "String",
-            View::Bytes(_) => "Bytes",
-            View::List(_) => "List",
-            View::Map(_) => "Map",
-            View::Variant { .. } => "Variant",
-            View::Thunk { comp, .. } if comp.lam().is_some() => "Lambda",
-            View::Thunk { .. } => "Block",
-            View::Builtin(_) => "Native",
-            View::Handle(_) => "Handle",
+        match self.shape() {
+            ValueShape::Unit => "Unit",
+            ValueShape::Bool => "Bool",
+            ValueShape::Int => "Int",
+            ValueShape::Float => "Float",
+            ValueShape::String => "String",
+            ValueShape::Bytes => "Bytes",
+            ValueShape::List => "List",
+            ValueShape::Map => "Map",
+            ValueShape::Variant => "Variant",
+            ValueShape::Block => "Block",
+            ValueShape::Function => "Lambda",
+            ValueShape::Handle => "Handle",
         }
     }
     /// Estimate data bytes; never descends a capture or a handle's buffers.
@@ -620,23 +621,20 @@ fn for_each_direct<E>(mut val: &Val, f: &mut impl FnMut(&Name) -> Result<(), E>)
 
 fn pull_direct(val: &Val, captured: &mut Env, env: &Env, sig: &Signature) -> Result<(), Error> {
     for_each_direct(val, &mut |name| {
-        if captured.get(name).is_none() {
-            let value = lookup(name, env, sig)
+        if captured.binding(name).is_none() {
+            let binding = env
+                .binding(name)
+                .or_else(|| sig.binding(name))
                 .cloned()
                 .ok_or_else(|| missing(name, env, sig))?;
-            captured.bind(
-                name.clone(),
-                Binding {
-                    value,
-                    scheme: None,
-                },
-            );
+            captured.bind(name.clone(), binding);
         }
         Ok(())
     })
 }
 
-/// Representational equality; ral's `==` is [`ValClos::equals`].
+/// Structural first-order equality: a block, function or handle equals nothing.
+/// ral's `==` is [`ValClos::equals`], which refuses them instead.
 impl PartialEq for ValClos {
     fn eq(&self, other: &Self) -> bool {
         let (left_labels, left) = self.peel_variants();
@@ -660,13 +658,8 @@ impl PartialEq for ValClos {
 impl fmt::Display for ValClos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (labels, terminal) = self.peel_variants();
-        for (i, label) in labels.iter().enumerate() {
-            if i > 0 {
-                write!(f, " ")?;
-            }
-            write!(f, "{TAG_PREFIX}{label}")?;
-        }
         if !labels.is_empty() {
+            f.write_str(&tag_run(labels))?;
             if matches!(terminal.view(), View::Unit) {
                 return Ok(());
             }
@@ -1017,6 +1010,36 @@ mod tests {
             value.as_list("test").unwrap().get(0).as_deref(),
             Some(&ValClos::int(7))
         );
+    }
+    #[test]
+    fn a_literal_captures_prelude_and_value_builtin_names_with_their_schemes() {
+        let shell = crate::test_helper::core_shell();
+        let mut sig = (*shell.sig).clone();
+        let k_scheme = Binders::close(|_| Ty::int());
+        sig.install_prelude(Arc::new(
+            std::iter::once((
+                "k".into(),
+                Binding {
+                    value: ValClos::int(7),
+                    scheme: Some(k_scheme.clone()),
+                },
+            ))
+            .collect(),
+        ));
+        let names = ["k", "has", "true"];
+        let val = Val::list(
+            names
+                .iter()
+                .map(|name| crate::source::Spanned::synthetic(Val::Variable((*name).into())))
+                .collect::<Vec<_>>(),
+        );
+        let value = ValClos::close(&val, &Env::EMPTY, &sig).unwrap();
+        let env = value.env().unwrap();
+        let has = shell.lookup_builtin("has").unwrap();
+        let scheme_of = |name| env.binding(name).unwrap().scheme.as_ref();
+        assert_eq!(scheme_of("k"), Some(&k_scheme));
+        assert_eq!(scheme_of("has"), Some(has.decl.scheme()));
+        assert_eq!(scheme_of("true"), Some(&Binders::close(|_| Ty::bool())));
     }
     #[test]
     fn shallow_size_never_descends_into_closure_captures() {

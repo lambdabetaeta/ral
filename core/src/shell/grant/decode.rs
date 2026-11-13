@@ -23,8 +23,8 @@ use crate::authority::policy::{
 use crate::data::FOValue;
 use crate::error::Error;
 use crate::fact::{
-    DataStep, Expected, Found, GrantFailure, GrantFailureRefusedKey, InvalidCause, Reason,
-    ShapeFailure, TextPreview, UnexpectedPayload, ValueShape,
+    DataStep, Expected, GrantFailure, GrantFailureRefusedKey, InvalidCause, Reason, ShapeFailure,
+    UnexpectedPayload, ValueShape,
 };
 
 use crate::path::{Excluded, Kind, PathRules, SigilHead, Trace, has_drive, names_a_path_for};
@@ -38,27 +38,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-fn found(value: &ValClos) -> Found {
-    match value.view() {
-        View::Unit => Found::Unit,
-        View::Bool(v) => Found::Bool(v),
-        View::Int(v) => Found::Int(v),
-        View::Float(v) => Found::Float(v),
-        View::String(v) => Found::Text(TextPreview::new(v.as_str())),
-        View::Bytes(_) => Found::Bytes,
-        View::List(_) => Found::List,
-        View::Map(_) => Found::Map,
-        View::Variant { label, .. } => Found::Variant(label.to_string()),
-        View::Thunk { comp, .. } if comp.lam().is_none() => Found::Block,
-        View::Thunk { .. } | View::Builtin(_) => Found::Function,
-        View::Handle(_) => Found::Handle,
-    }
-}
-
 fn shape(value: &ValClos, expected: Expected) -> Error {
     invalid_error(InvalidCause::Shape(ShapeFailure {
         expected,
-        found: found(value),
+        found: value.found(),
     }))
 }
 
@@ -125,7 +108,7 @@ impl<'a> Tag<'a> {
             Some(value) => Err(
                 invalid_error(InvalidCause::UnexpectedPayload(UnexpectedPayload {
                     tag: self.label.into(),
-                    found: found(value),
+                    found: value.found(),
                 }))
                 .with_hint(vocab.payload),
             ),
@@ -534,6 +517,7 @@ mod tests {
     use crate::authority::policy::{Baseline, ExecDenial, Program, Withheld};
     use crate::authority::policy::{ExecAllow, ExecDeny, FsAllow, FsOp, Veto};
     use crate::environ::EnvVars;
+    use crate::fact::{Found, TextPreview};
     use crate::path::utf8;
     #[cfg(unix)]
     use crate::test_helper::{located, stack, trace};
@@ -936,7 +920,7 @@ mod tests {
                 assert_invalid(&e, path, InvalidCause::Grant(DIR_TARGET.refuse(tag.label)));
                 assert!(e.describe().contains("place or a selector"), "{e}");
             } else {
-                assert_shape(&e, path, tags(&DIR_TARGET), found(&payload));
+                assert_shape(&e, path, tags(&DIR_TARGET), payload.found());
                 assert_eq!(e.hints(), [Box::<str>::from(DIR_TARGET.untagged)]);
                 assert!(e.hints()[0].contains("place or a selector"));
             }
@@ -980,7 +964,7 @@ mod tests {
                     &e,
                     vec![DataStep::Field("exec".into())],
                     Expected::Shape(ValueShape::Map),
-                    found(&value),
+                    value.found(),
                 );
                 assert_eq!(
                     e.hints(),
@@ -1325,7 +1309,7 @@ mod tests {
                 &e,
                 vec![DataStep::Field("net".into())],
                 tags(&NET),
-                found(&value),
+                value.found(),
             );
             assert_eq!(e.context(), Some("test net"));
             assert!(

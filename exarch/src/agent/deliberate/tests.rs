@@ -375,7 +375,7 @@ fn sub_agent_returns_through_reply() {
     let mut parent = trunk(false);
     let exchange = open_for_drain(&parent);
     let job = parent.handle().status().unwrap().job;
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     take_task(&child.handle(), &child.mailbox);
     parent.body.nursery.adopt(
         child.handle(),
@@ -443,7 +443,7 @@ fn sub_agent_returns_through_reply() {
 #[test]
 fn reply_preserves_live_descendants_and_queued_input() {
     let parent = Agent::for_test("system").unwrap();
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     let direct = test_agent(
         &child.fleet,
         TestAgentSpec::child("direct", &child.handle(), child.mailbox.home().child()),
@@ -935,7 +935,7 @@ fn current_reports_and_batches_reach_the_model_mid_exchange() {
     for surface in [false, true] {
         let mut session = Agent::for_test("system").unwrap();
         let exchange = open_for_drain(&session);
-        let worker = forked_child(&session, "worker", "`inherit");
+        let worker = marshalled_child(&session, "worker", "`inherit");
         session.body.nursery.adopt(
             worker.handle(),
             Joined::new(std::thread::spawn(|| Teardown { failures: vec![] })),
@@ -1102,7 +1102,7 @@ fn answer_propagates_severed_from_arrival_worker_probe() {
 fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
     for source in 0..4 {
         let parent = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
-        let mut child = forked_child(&parent, "helper", "`inherit");
+        let mut child = marshalled_child(&parent, "helper", "`inherit");
         let grandchild = test_agent(
             &parent.fleet,
             TestAgentSpec::child("grandchild", &child.handle(), child.mailbox.home().child()),
@@ -1214,7 +1214,7 @@ fn reply_boundary_preserves_input_and_helpers_but_invalidates_wakeups() {
 #[test]
 fn a_rewrite_queued_before_reply_boundary_input_runs_before_admission() {
     let parent = dressed_trunk(|runtime| runtime.install_builtins(T2_CANCEL_BUILTINS));
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     let handle = child.handle();
     T2_ARRIVAL.set(Some(Box::new(move || {
         let _posted = handle.command(Command::Rewrite(crate::bus::Rewrite::Rewind(1)));

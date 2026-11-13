@@ -19,14 +19,15 @@ mod state;
 pub use compile::{CompileFailure, CompilePhase, TypeErrorCount};
 pub use decode::{
     Base64Failure, Base64FailureInvalidByte, Base64FailureInvalidLastSymbol,
-    Base64FailureInvalidLength, CardFailure, CheckDecisionFailure, DecodeCause, DecodeFailure,
-    DecodeIntegerRange, DecodeIntegerTarget, DecodeLength, DurationOverflow, FiniteBitsFailure,
-    InvalidResidual, JsonEncodeCause, JsonEncodeCauseNonUnicodePath, JsonEncodeFailure,
-    JsonInputFailure, JsonMapKeyFailure, JsonNumberFailure, JsonNumberFault, JsonNumberTarget,
-    JsonShape, JsonShapeFailure, JsonStringFailure, LexicalPathFailure,
+    Base64FailureInvalidLength, CardFailure, CheckDecisionFailure, DanglingNode, DecodeCause,
+    DecodeFailure, DecodeIntegerRange, DecodeIntegerTarget, DecodeLength, DurationOverflow,
+    FiniteBitsFailure, InvalidResidual, JsonEncodeCause, JsonEncodeCauseNonUnicodePath,
+    JsonEncodeFailure, JsonInputFailure, JsonMapKeyFailure, JsonNumberFailure, JsonNumberFault,
+    JsonNumberTarget, JsonShape, JsonShapeFailure, JsonStringFailure, LexicalPathFailure,
     LexicalPathFailureNotWorkingDirectory, NoteFailure, NoteFailureTooLong, OpenScheme,
-    OsStringPlatform, OsStringPlatformFailure, PathDecodeFailure, ReservedEnvironmentFailure,
-    RowKind, SealSpellingFailure, TimestampParseFailure, TraceDecodeFailure,
+    OsStringPlatform, OsStringPlatformFailure, PathDecodeFailure, RecIndex,
+    ReservedEnvironmentFailure, ResidualDefect, RowDefect, RowKind, SchemeNames,
+    SealSpellingFailure, TimestampParseFailure, TraceDecodeFailure,
     TraceDecodeFailurePositionMismatch, UnresolvedRow, ViaFailure, ViaFailureDuplicateTag,
 };
 pub use denial::{
@@ -168,11 +169,11 @@ pub use launch::{
 pub use protocol::{
     ConnectionClosed, ConnectionClosedIo, ConnectionFailure, ConnectionFault,
     ConnectionFaultProbeAnswer, ConnectionFaultProbeRejected, ConnectionFaultUnencodable,
-    ConnectionFaultUnexpectedFrame, ConnectionOperation, FrameChannel, FrameEncodeFailure,
+    ConnectionFaultUnexpectedFrame, ConnectionOperation, FrameEncodeFailure,
     FrameEncodeFailureTooLarge, FrameFailure, FrameFailurePartial, FrameFailureTooLarge, FrameKind,
     FramePart, ProbeFailure, ProbeSubject, ProtocolData, ProtocolFailure, ProtocolFailureDecode,
-    ProtocolFailureFrame, ProtocolFailureUnencodable, ProtocolFailureVersionMismatch,
-    ProtocolOperation, ProtocolPeer, ProtocolPhase, ProtocolWork,
+    ProtocolFailureUnencodable, ProtocolFailureVersionMismatch, ProtocolOperation, ProtocolPeer,
+    ProtocolPhase, ProtocolWork,
 };
 pub use shared::{
     AgentNameFailure, Count, CountRule, CronCause, CronCauseField, CronCauseFieldCount,

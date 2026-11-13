@@ -13,7 +13,7 @@ amended_by:
 # A closure keeps only what it mentions
 
 > **Amended 2026-11-12 — Marshalling:**
-> [[261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]
+> [[design/engine-protocol|the engine protocol]]
 > writes each reached environment or built collection once, identified by
 > allocation, in dependencies-first rows. A closure retains its syntax and
 > row; shared captures and built data stay shared. This replaces the
@@ -108,7 +108,7 @@ gates it.
 - A worker whose session is its capture — session reads would see only what
   the body mentions.
 
-Refines [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]:
+Refines the [[map/core/evaluator|evaluator]]:
 its O(1) capture is a scrub, and what is in focus is a computation closure, a
 type apart from the thunk value.
 

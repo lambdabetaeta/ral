@@ -123,15 +123,5 @@ CBPV reading, and each consequence is taken deliberately.
 - The diagnostics say *arm* everywhere, static and dynamic alike; the word
   *handler* is left to command handlers and `try`.
 
-## The kernel already said this
-
-The kernel ral is formalised against has Levy's eliminator, whose branches are
-computations in the syntax:
-
-```agda
-case_of_,_ : Γ ⊢ᵛ A₁ + A₂ → Γ , A₁ ⊢ᶜ C → Γ , A₂ ⊢ᶜ C → Γ ⊢ᶜ C
-```
-
-The value eliminator was the surface's own invention, and the gap between the
-two was the defect. `docs/SPEC.md` §8.3 gives the form, §17.1 the grammar,
-§17.2 the core term, and §17.6 the typing rule.
+`docs/SPEC.md` §8.3 gives the form, §17.1 the grammar, §17.2 the core term,
+and §17.6 the typing rule.

@@ -326,7 +326,7 @@ fn a_refused_role_never_registers_a_child() {
             let err = desk
                 .ask(start(
                     crate::boot::test_shell()
-                        .marshal(ral_core::SpawnGrant::Inherit)
+                        .marshal(&ral_core::SpawnGrant::Inherit)
                         .expect("a test parent marshals"),
                     Spec {
                         model: Selection::Role("other".into()),
@@ -1085,7 +1085,7 @@ fn queued_unsynced_message_keeps_admission_and_the_original_recording_failure() 
             &fleet,
             crate::agent::build::Parent::Agent(&agent, agent.mailbox.home().child()),
             fleet.registry.name("helper").unwrap(),
-            crate::agent::engine::Engine::adopted(crate::boot::test_transport()),
+            crate::agent::engine::Engine::child(crate::boot::test_transport()),
             Arc::new(Provider::scripted("test-model", Script::new())),
             None,
         )

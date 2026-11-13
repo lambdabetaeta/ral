@@ -166,7 +166,7 @@ fn report_commit_holds_the_helper_cell_until_its_parent_notice_is_posted() {
     const WAIT: Duration = Duration::from_secs(5);
     for crossing_message in [false, true] {
         let parent = trunk(false);
-        let helper = parent.fork_named("barrier-helper").unwrap();
+        let helper = parent.fresh_child_named("barrier-helper").unwrap();
         crate::agent::testkit::take_task(&helper.handle(), &helper.mailbox);
         let handle = helper.handle();
         let address = handle.0.address.clone();

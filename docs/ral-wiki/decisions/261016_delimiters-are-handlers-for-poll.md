@@ -88,8 +88,7 @@ defect in the area was one face of that spelling.
   being a stop an owner *converted* at its boundary; no poll point mints
   them. `Reason` is flat: `` `exited n | `signaled n |
   `cancelled | `timed-out | `not-found | `not-runnable | `raised ``. `try`
-  catches errors and nothing else, as the Agda's `βtry-err`/`βtry-esc` already
-  said.
+  catches errors and nothing else.
 - **Three mechanisms.** *Frames*: the CEK machine's stack holds the handlers;
   `poll` is `Shell::poll`, performed at every step boundary (β, bind, apply,
   exec, the iterating builtins, pipeline launch, the worker-join sweep, a
@@ -197,8 +196,7 @@ worker's escape is data on its `` `done `` card.
    which will consume it, so no fold it passes ranks it over a halt that owner
    will not forgive. Then `Error 1 < Exit 2 < Stopped c (3 + c)`, the
    closed-stdout stop among the stops; two stops rank by cause; ties to the
-   earlier stage. A refinement of the Agda's `_⊕_`, which keeps the earlier
-   escape whatever its kind. The collector's own closing observation (the
+   earlier stage. The collector's own closing observation (the
    teardown's cause) is the verdict only when no stage halted: a base's
    closing poll ranks by this order too, so a stop in force bar a named
    reader-gone one outranks an error because the condition persists on its node
@@ -266,9 +264,8 @@ worker's escape is data on its `` `done `` card.
 
 ## Denotation
 
-A sketch, to be stated over the Agda's existing semantics, not a replacement
-for it. (The CK development cited here was retired on 2026-10-23.) The signature is the kernel's extended by `fail e`, `exit n`, `stop ν
-c` and `poll : 1 → L⊥`: `poll`, `write` and `exec` are input operations whose
+A denotational sketch: the operations are `fail e`, `exit n`, `stop ν c` and
+`poll : 1 → L⊥`, alongside `write` and `exec`. `poll`, `write` and `exec` are input operations whose
 response the world chooses, and `poll` has *no equations of its own*. It is
 not a reader: `poll; poll ≠ poll`, the world advancing between two readings.
 Its axiom is on worlds: the node store `W` grows monotonically (`W ≤ W′ ⇒
@@ -284,8 +281,8 @@ interpret: the shield transforms `poll`'s response (a tail-resumptive
 forwarding handler), an owner interprets `stop ν c` selectively (a `catch`
 with a predicate), and `guard` is a handler whose two clauses run under the
 shield. The laws above are observational equivalences, `M ≃ N` iff `⟦M⟧W =
-⟦N⟧W` for every admissible world, to be proved from the machine's reductions
-as the model proves today's. Checkpoints are explicit: `ξpoll`, the
+⟦N⟧W` for every admissible world, to be proved from the machine's reductions.
+Checkpoints are explicit: `ξpoll`, the
 non-focal step that performs `poll` and halts on a nonzero response, fires
 only at the machine's step boundaries (β, bind, apply, exec, the iterating
 builtins, and once per slice inside a blocking operation); a handler clause's
@@ -384,9 +381,6 @@ lands, when a mask ends, and for a process which write is first dead.
 - An `exit` in a worker reaches the run that observes it (`await`, `poll`,
   `race`) and no further; an unobserved worker's escape is data on its
   `` `done `` card.
-- The Agda's obligations: `Esc` instantiated with `exit n | stop ν? c`, the
-  world extended with the node store and a clock, a non-focal `ξpoll`, `βstop`
-  consuming by name, and `_⊕_` refined to the cause order. (The CK development cited here was retired on 2026-10-23.)
 - Windows has no sliced pipe wait: a thread stage's blocked I/O is
   interrupted (`CancelSynchronousIo`) when the collector writes its node and
   each pass while its chain carries a cause, and a pump each slice of
@@ -395,28 +389,6 @@ lands, when a mask ends, and for a process which write is first dead.
   never retried (it would repeat a prefix a live reader already took): a
   stop under the scope's cause, an error under a shield. Writes are chunked
   (`PIPE_CHUNK`, 4 KiB), which bounds what one abort leaves unknown.
-- **The Agda**, after the Rust. Already proved: the sort split is one
-  pattern match (`βtry-err`/`βtry-esc`); `guard` is one rule for both sorts
-  (`βguard-halt`), the shield changing only what the cleanup's polls read;
-  owner-frame masking for command handlers (`mask-layer`,
-  `HandlerSelection.Removes`) is the shape of a `poll` owner;
-  `CK.Machine.Focal` classes every scope-reading step as non-focal. To
-  state: (1) `Esc` instantiated with `exit n | stop ν? c`, ν a generated name,
-  absent for the closed-stdout stop, `_⊕_` extended to the cause order (law
-  5); (2) the `World` extended with the node store `W` and a clock, a scope
-  description ρ carried by the machine as `mask-layer`'s layer is, a non-focal
-  `ξpoll`, the growth of `W` a labelled step, a blocked wait a repeated
-  `ξpoll`; a stage and `spawn` as scoped operations (Wu–Schrijvers–Hinze 2014;
-  Yang et al. 2022) whose inheritance rules differ: a stage runs under
-  `extend(ρ, fresh)` and the collector's boundary, a worker under
-  `extend(root, fresh)` and its own, inheriting nothing of ρ; an observation
-  relation tying the stack-indexed equivalence to the
-  world-indexed one; (3) `βstop`: a boundary consumes `escaped ⟨ν, c⟩` iff ν
-  is its own layer's name, and the pipe's `β∣R` family carrying the stage's
-  name and running its cleanup before `report`, so law 6 is a theorem; (4)
-  `shield!⟨since, grace⟩` as a `mask-layer` instance over a monotone clock,
-  `CleanupPreempts` the base law 3 extends; (5) `fail`'s faithfulness as a
-  lemma about the record projection. (The CK development cited here was retired on 2026-10-23.)
 - **A nursery**: a scoped `spawn` whose node is the call's, so a stop, an
   `exit` or a failure leaving the scope reaches its workers through the chain
   and the scope frame joins them; Trio's nursery is the precedent. Until then

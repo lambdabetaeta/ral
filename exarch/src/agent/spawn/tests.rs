@@ -31,7 +31,7 @@ fn a_helper_severed_mid_work_reports_failed_then_gone_and_records_the_cause() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     set_provider(
         &mut child,
         scripted(
@@ -80,9 +80,9 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     take_task(&child.handle(), &child.mailbox);
-    let mut grandchild = forked_child(&child, "grandchild", "`inherit");
+    let mut grandchild = marshalled_child(&child, "grandchild", "`inherit");
     set_provider(
         &mut grandchild,
         scripted(
@@ -165,7 +165,7 @@ fn panic_in_run_joins_a_working_helper_then_reports_failed_and_gone() {
 #[test]
 fn a_panicked_helper_that_no_longer_owes_its_parent_posts_only_gone() {
     let mut parent = trunk(false);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(ral_core::data::FOValue::Unit));
     assert!(matches!(next_input(&parent), Input::Child { .. }));
@@ -186,7 +186,7 @@ fn a_panicked_helper_that_no_longer_owes_its_parent_posts_only_gone() {
 #[test]
 fn the_name_leaves_the_directory_before_died_is_published() {
     let mut parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     child.handle().end();
     let (tx, rx) = crate::bus::channel();
@@ -356,7 +356,7 @@ fn an_uncompleted_terminal_cannot_publish_success() {
 #[test]
 fn an_unwinding_helper_publishes_failure_before_its_parent_settles() {
     let mut parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     crate::agent::attend::hooks::panic_on_run(child.id());
     let (tx, rx) = crate::bus::channel();
@@ -396,7 +396,7 @@ fn a_poisoned_helper_owner_tears_down_delivers_one_failure_and_lets_the_parent_s
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = forked_child(&parent, "poisoned-helper", "`inherit");
+    let mut child = marshalled_child(&parent, "poisoned-helper", "`inherit");
     set_provider(
         &mut child,
         scripted(

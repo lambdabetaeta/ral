@@ -421,28 +421,102 @@ pub enum RowKind {
 }
 label!(RowKind);
 
+impl RowKind {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Environment => "an environment",
+            Self::Built => "a built list or map",
+        }
+    }
+}
+
+/// Why a named row cannot be used where it is named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowDefect {
+    /// Rows are read in order; this one is written after the naming row.
+    /// Holds the count of rows written before the naming row.
+    Forward(Count),
+    /// The image holds this many rows, none of them the one named.
+    Absent(Count),
+    /// An earlier row of the other kind.
+    WrongKind(RowKind),
+}
+variant!(RowDefect { Forward(Count): "forward", Absent(Count): "absent", WrongKind(RowKind): "wrong-kind" });
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedRow {
     pub row: Count,
     pub wanted: RowKind,
-    pub before: Count,
+    pub defect: RowDefect,
 }
 record!(UnresolvedRow {
     row: "row",
     wanted: "wanted",
-    before: "before"
+    defect: "defect"
 });
+
+/// Why a builtin residual cannot be rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidualDefect {
+    /// A residual awaits at least one argument; this one supplied them all.
+    Saturated,
+    /// Holds the number of bindings its environment has.
+    EnvironmentSize(Count),
+    /// Its environment does not bind the builtin.
+    BuiltinUnbound,
+    /// Its environment binds something other than the receiver's builtin.
+    BuiltinForeign,
+    /// Its environment does not bind this supplied argument.
+    ArgumentUnbound(String),
+}
+variant!(ResidualDefect { Saturated: "saturated", EnvironmentSize(Count): "environment-size", BuiltinUnbound: "builtin-unbound", BuiltinForeign: "builtin-foreign", ArgumentUnbound(String): "argument-unbound" });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidResidual {
     pub name: String,
     pub arity: Count,
     pub supplied: Count,
+    pub defect: ResidualDefect,
 }
 record!(InvalidResidual {
     name: "name",
     arity: "arity",
-    supplied: "supplied"
+    supplied: "supplied",
+    defect: "defect"
+});
+
+/// A recursive group's member index beyond the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecIndex {
+    pub index: Count,
+    pub members: Count,
+}
+record!(RecIndex {
+    index: "index",
+    members: "members"
+});
+
+/// A site's node id beyond the site's nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DanglingNode {
+    pub id: Count,
+    pub nodes: Count,
+}
+record!(DanglingNode {
+    id: "id",
+    nodes: "nodes"
+});
+
+/// A definition whose schemes and pattern bind different names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeNames {
+    pub bound: Vec<String>,
+    pub schemed: Vec<String>,
+}
+record!(SchemeNames {
+    bound: "bound",
+    schemed: "schemed"
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +569,13 @@ pub enum DecodeCause {
     UnknownBuiltin(String),
     InvalidResidual(InvalidResidual),
     OpenClosure(String),
+    /// A JSON document nests deeper than this many levels.
+    TooDeep(Count),
+    /// A field that sorts before the one preceding it.
+    UnorderedField(String),
+    RecIndex(RecIndex),
+    DanglingNode(DanglingNode),
+    SchemeNames(SchemeNames),
 }
 variant!(DecodeCause {
     Shape(ShapeFailure): "shape", MissingField(String): "missing-field", UnknownField(UnknownField): "unknown-field",
@@ -513,6 +594,8 @@ variant!(DecodeCause {
     DurationOverflow(DurationOverflow): "duration-overflow", Timestamp(TimestampParseFailure): "timestamp", OpenScheme(OpenScheme): "open-scheme",
     UnresolvedRow(UnresolvedRow): "unresolved-row", UnknownBuiltin(String): "unknown-builtin",
     InvalidResidual(InvalidResidual): "invalid-residual", OpenClosure(String): "open-closure",
+    TooDeep(Count): "too-deep", UnorderedField(String): "unordered-field", RecIndex(RecIndex): "rec-index",
+    DanglingNode(DanglingNode): "dangling-node", SchemeNames(SchemeNames): "scheme-names",
 });
 
 impl DecodeCause {
@@ -625,24 +708,118 @@ impl DecodeCause {
             ),
             Self::Timestamp(c) => format!("invalid timestamp {:?}: {}", c.text, c.detail),
             Self::OpenScheme(c) => c.describe(),
-            Self::UnresolvedRow(c) => format!(
-                "names row {} as {}, but it is not {} among the {} rows written before it",
-                c.row,
-                <&str>::from(c.wanted),
-                <&str>::from(c.wanted),
-                c.before
-            ),
+            Self::UnresolvedRow(c) => c.describe(),
             Self::UnknownBuiltin(name) => {
                 format!("the receiving runtime has no builtin `{name}`; a builtin crosses by name")
             }
-            Self::InvalidResidual(c) => format!(
-                "a residual of `{}` ({} arguments) holds {}; a residual holds fewer than all, over a row binding exactly the builtin and those",
-                c.name, c.arity, c.supplied
-            ),
+            Self::InvalidResidual(c) => c.describe(),
             Self::OpenClosure(name) => {
                 format!("a closure names `{name}`, which its row does not bind")
             }
+            Self::TooDeep(limit) => format!(
+                "the document nests more than {} deep",
+                crate::text::plural(limit.to_u64(), "level")
+            ),
+            Self::UnorderedField(key) => format!(
+                "field {key:?} sorts before the field above it; the fields of a record or map are sorted by key"
+            ),
+            Self::RecIndex(c) => c.describe(),
+            Self::DanglingNode(c) => c.describe(),
+            Self::SchemeNames(c) => c.describe(),
         }
+    }
+}
+
+impl UnresolvedRow {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let head = format!("names row {} as {}", self.row, self.wanted.describe());
+        match &self.defect {
+            RowDefect::Forward(before) => format!(
+                "{head}, but rows are read in order and only the {} before it can be named; that row comes later",
+                crate::text::plural(before.to_u64(), "row")
+            ),
+            RowDefect::Absent(rows) => format!(
+                "{head}, but the image holds only {}",
+                crate::text::plural(rows.to_u64(), "row")
+            ),
+            RowDefect::WrongKind(found) => {
+                format!("{head}, but that row is {}", found.describe())
+            }
+        }
+    }
+}
+
+impl InvalidResidual {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let head = format!(
+            "a residual of `{}` that supplied {} of its {} arguments",
+            self.name, self.supplied, self.arity
+        );
+        match &self.defect {
+            ResidualDefect::Saturated => {
+                format!("{head} awaits nothing; a residual awaits at least one argument")
+            }
+            ResidualDefect::EnvironmentSize(found) => format!(
+                "{head} captures {}; it must capture exactly one for the builtin and one per supplied argument",
+                crate::text::plural(found.to_u64(), "binding")
+            ),
+            ResidualDefect::BuiltinUnbound => {
+                format!("{head} captures no binding for the builtin itself")
+            }
+            ResidualDefect::BuiltinForeign => format!(
+                "{head} binds its builtin to something other than the receiving runtime's `{}`",
+                self.name
+            ),
+            ResidualDefect::ArgumentUnbound(argument) => {
+                format!("{head} captures no binding for the supplied argument `{argument}`")
+            }
+        }
+    }
+}
+
+impl RecIndex {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "names member {} of a recursive group that has {}",
+            self.index,
+            crate::text::plural(self.members.to_u64(), "member")
+        )
+    }
+}
+
+impl DanglingNode {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "names type node {}, but its site has only {}",
+            self.id,
+            crate::text::plural(self.nodes.to_u64(), "node")
+        )
+    }
+}
+
+impl SchemeNames {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let list = |names: &[String]| {
+            if names.is_empty() {
+                "nothing".to_owned()
+            } else {
+                names
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        format!(
+            "a definition's pattern binds {} but its schemes name {}; it carries exactly one scheme per bound name",
+            list(&self.bound),
+            list(&self.schemed)
+        )
     }
 }
 
@@ -859,30 +1036,52 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_row_projects_reference_kind_and_bound() {
-        for (wanted, label) in [
-            (RowKind::Environment, "environment"),
-            (RowKind::Built, "built"),
-        ] {
+    fn unresolved_row_projects_reference_kind_and_defect() {
+        let row = || Count::from_u64(u64::MAX);
+        let encoded = |wanted: &str, defect: FOValue| {
+            tag(
+                "unresolved-row",
+                Some(FOValue::Map {
+                    entries: vec![
+                        ("defect".into(), defect),
+                        ("row".into(), row().encode()),
+                        ("wanted".into(), tag(wanted, None)),
+                    ],
+                }),
+            )
+        };
+        let cases = [
+            (
+                RowKind::Environment,
+                RowDefect::Forward(Count::from_u64(3)),
+                encoded(
+                    "environment",
+                    tag("forward", Some(Count::from_u64(3).encode())),
+                ),
+                "names row 18446744073709551615 as an environment, but rows are read in order and only the 3 rows before it can be named; that row comes later",
+            ),
+            (
+                RowKind::Built,
+                RowDefect::Absent(Count::from_u64(1)),
+                encoded("built", tag("absent", Some(Count::from_u64(1).encode()))),
+                "names row 18446744073709551615 as a built list or map, but the image holds only 1 row",
+            ),
+            (
+                RowKind::Environment,
+                RowDefect::WrongKind(RowKind::Built),
+                encoded("environment", tag("wrong-kind", Some(tag("built", None)))),
+                "names row 18446744073709551615 as an environment, but that row is a built list or map",
+            ),
+        ];
+        for (wanted, defect, expected, description) in cases {
             check_projection(
                 &DecodeCause::UnresolvedRow(UnresolvedRow {
-                    row: Count::from_u64(u64::MAX),
+                    row: row(),
                     wanted,
-                    before: Count::from_u64(3),
+                    defect,
                 }),
-                &tag(
-                    "unresolved-row",
-                    Some(FOValue::Map {
-                        entries: vec![
-                            ("before".into(), Count::from_u64(3).encode()),
-                            ("row".into(), Count::from_u64(u64::MAX).encode()),
-                            ("wanted".into(), tag(label, None)),
-                        ],
-                    }),
-                ),
-                &format!(
-                    "names row 18446744073709551615 as {label}, but it is not {label} among the 3 rows written before it"
-                ),
+                &expected,
+                description,
             );
         }
     }
@@ -902,30 +1101,111 @@ mod tests {
     }
 
     #[test]
-    fn invalid_residual_projects_name_arity_and_supplied_count() {
-        check_projection(
-            &DecodeCause::InvalidResidual(InvalidResidual {
-                name: "has".into(),
-                arity: Count::from_u64(2),
-                supplied: Count::from_u64(u64::MAX),
-            }),
-            &tag(
+    fn invalid_residual_projects_name_arity_supplied_count_and_defect() {
+        let encoded = |defect: FOValue| {
+            tag(
                 "invalid-residual",
                 Some(FOValue::Map {
                     entries: vec![
                         ("arity".into(), Count::from_u64(2).encode()),
+                        ("defect".into(), defect),
                         (
                             "name".into(),
                             FOValue::String {
                                 value: "has".into(),
                             },
                         ),
-                        ("supplied".into(), Count::from_u64(u64::MAX).encode()),
+                        ("supplied".into(), Count::from_u64(1).encode()),
                     ],
                 }),
+            )
+        };
+        let cases = [
+            (
+                ResidualDefect::Saturated,
+                tag("saturated", None),
+                "a residual of `has` that supplied 1 of its 2 arguments awaits nothing; a residual awaits at least one argument",
             ),
-            "a residual of `has` (2 arguments) holds 18446744073709551615; a residual holds fewer than all, over a row binding exactly the builtin and those",
-        );
+            (
+                ResidualDefect::EnvironmentSize(Count::from_u64(3)),
+                tag("environment-size", Some(Count::from_u64(3).encode())),
+                "a residual of `has` that supplied 1 of its 2 arguments captures 3 bindings; it must capture exactly one for the builtin and one per supplied argument",
+            ),
+            (
+                ResidualDefect::BuiltinUnbound,
+                tag("builtin-unbound", None),
+                "a residual of `has` that supplied 1 of its 2 arguments captures no binding for the builtin itself",
+            ),
+            (
+                ResidualDefect::BuiltinForeign,
+                tag("builtin-foreign", None),
+                "a residual of `has` that supplied 1 of its 2 arguments binds its builtin to something other than the receiving runtime's `has`",
+            ),
+            (
+                ResidualDefect::ArgumentUnbound("arg0".into()),
+                tag(
+                    "argument-unbound",
+                    Some(FOValue::String {
+                        value: "arg0".into(),
+                    }),
+                ),
+                "a residual of `has` that supplied 1 of its 2 arguments captures no binding for the supplied argument `arg0`",
+            ),
+        ];
+        for (defect, encoded_defect, description) in cases {
+            check_projection(
+                &DecodeCause::InvalidResidual(InvalidResidual {
+                    name: "has".into(),
+                    arity: Count::from_u64(2),
+                    supplied: Count::from_u64(1),
+                    defect,
+                }),
+                &encoded(encoded_defect),
+                description,
+            );
+        }
+    }
+
+    #[test]
+    fn marshalled_invariant_causes_describe_what_they_refuse() {
+        let count = Count::from_u64;
+        for (cause, description) in [
+            (
+                DecodeCause::TooDeep(count(1)),
+                "the document nests more than 1 level deep",
+            ),
+            (
+                DecodeCause::UnorderedField("a".into()),
+                "field \"a\" sorts before the field above it; the fields of a record or map are sorted by key",
+            ),
+            (
+                DecodeCause::RecIndex(RecIndex {
+                    index: count(2),
+                    members: count(2),
+                }),
+                "names member 2 of a recursive group that has 2 members",
+            ),
+            (
+                DecodeCause::DanglingNode(DanglingNode {
+                    id: count(5),
+                    nodes: count(1),
+                }),
+                "names type node 5, but its site has only 1 node",
+            ),
+            (
+                DecodeCause::SchemeNames(SchemeNames {
+                    bound: vec!["x".into(), "y".into()],
+                    schemed: vec![],
+                }),
+                "a definition's pattern binds `x`, `y` but its schemes name nothing; it carries exactly one scheme per bound name",
+            ),
+        ] {
+            assert_eq!(
+                DecodeCause::decode(&cause.clone().encode()),
+                Ok(cause.clone())
+            );
+            assert_eq!(cause.describe(), description);
+        }
     }
 
     #[test]

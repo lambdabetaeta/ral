@@ -334,12 +334,15 @@ pub enum Expected {
     StringLiterals(Vec<String>),
     Kind(DataKind),
     Type(String),
-    Closure,
+    /// A block where the named builtin was given: it is the same value as its
+    /// η-expansion, whose body the checker cannot read.
+    BlockNotBuiltin(String),
 }
 variant!(Expected {
     Shape(ValueShape): "shape", AnyOf(Vec<ValueShape>): "any-of", Record(Vec<String>): "record",
     Tags(Vec<String>): "tags", StringLiterals(Vec<String>): "string-literals",
-    Kind(DataKind): "kind", Type(String): "type", Closure: "closure",
+    Kind(DataKind): "kind", Type(String): "type",
+    BlockNotBuiltin(String): "block-not-builtin",
 });
 
 impl Expected {
@@ -379,7 +382,9 @@ impl Expected {
             ),
             Self::Kind(kind) => kind.describe(),
             Self::Type(ty) => ty.clone(),
-            Self::Closure => "a closure (not a native function)".into(),
+            Self::BlockNotBuiltin(name) => format!(
+                "a block, not the builtin `{name}`; wrap it as `{{ |args| {name} ...$args }}`"
+            ),
         }
     }
 }
@@ -915,7 +920,7 @@ mod tests {
                 deep: true,
             }),
             Expected::Type("a → b".into()),
-            Expected::Closure,
+            Expected::BlockNotBuiltin("length".into()),
         ];
         for expected in expectations {
             assert_eq!(Expected::decode(&expected.clone().encode()), Ok(expected));

@@ -102,7 +102,6 @@ and an extended startup attribute list where that is the precise primitive.
 
 [[internals/pipeline-execution|pipeline-execution]],
 [[decisions/260617_sandbox-external-children|sandbox-external-children]],
-[[decisions/260610_child-eval-unification|child-eval-unification]],
 [[decisions/260610_value-edge-locality|value-edge-locality]],
 [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
 [[map/core/runtime|runtime]], and [[map/core/io-process|io-process]].

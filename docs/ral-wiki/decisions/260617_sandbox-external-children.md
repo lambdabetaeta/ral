@@ -259,5 +259,4 @@ safe order is:
 
 
 See also [[design/grant|grant]], [[design/two-enforcers|two-enforcers]],
-[[internals/capability-enforcement|capability-enforcement]], and
-[[decisions/260610_child-eval-unification|child-eval-unification]].
+and [[internals/capability-enforcement|capability-enforcement]].

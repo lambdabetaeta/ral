@@ -1,7 +1,8 @@
 //! The marshalled form: rows first, each naming only earlier rows; a value
 //! names rows and holds no value.
 
-use crate::data::json::RawFOValue;
+use crate::data::json::RawDatum;
+use crate::fact::ErrorFact;
 use crate::ir::{Explicit, IrData, Val};
 use crate::shell::grant::RawSpawnGrant;
 use crate::shell::runtime::{FrameKind, RawContext, Terms};
@@ -76,7 +77,7 @@ pub(super) enum Value<D: IrData = RawData> {
     /// A handle's title; it arrives withheld.
     Handle(String),
     /// A caught failure record's `ErrorFact`.
-    Failure(RawFOValue),
+    Failure(RawDatum<ErrorFact>),
     /// The built list or map that row holds.
     Built(RowId),
 }

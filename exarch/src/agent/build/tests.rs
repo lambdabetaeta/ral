@@ -54,7 +54,7 @@ fn fork_inherits_host_builtins() {
     };
     let session = Agent::for_test("system").unwrap();
     assert!(names(&session).iter().any(|n| n == "view-text"));
-    let child = names(&session.fork().expect("fork child"));
+    let child = names(&session.fresh_child().expect("fresh child"));
     for name in ["view-text", "grep-files", "edit-hash", "explore-dir"] {
         assert!(
             child.iter().any(|n| n == name),
@@ -68,13 +68,13 @@ fn fork_fans_out_without_spending_the_parents_fuel() {
     let parent = Agent::for_test("system").unwrap();
     assert_eq!(parent.handle.0.fuel, SPAWN_FUEL);
     for _ in 0..3 {
-        let child = parent.fork().unwrap();
+        let child = parent.fresh_child().unwrap();
         assert_eq!(child.handle.0.fuel, SPAWN_FUEL - 1);
     }
     assert_eq!(parent.handle.0.fuel, SPAWN_FUEL);
     let mut chain = vec![parent];
     for expected in (0..SPAWN_FUEL).rev() {
-        let child = chain.last().unwrap().fork().unwrap();
+        let child = chain.last().unwrap().fresh_child().unwrap();
         assert_eq!(child.handle.0.fuel, expected);
         chain.push(child);
     }
@@ -85,7 +85,7 @@ fn fork_fans_out_without_spending_the_parents_fuel() {
 fn fork_inherits_its_provider_independently_of_later_parent_changes() {
     let mut parent = Agent::for_test("system").unwrap();
     set_provider(&mut parent, scripted("p-a", Script::new()));
-    let child = parent.fork().unwrap();
+    let child = parent.fresh_child().unwrap();
     assert_eq!(
         child
             .mailbox
@@ -253,7 +253,7 @@ fn fork_child_inherited_scratch_is_baseline() {
         5,
         &emit,
     );
-    let mut child = forked_child(&session, "child", "`inherit");
+    let mut child = marshalled_child(&session, "child", "`inherit");
     assert!(scope_has(&mut child, "parent_scratch"));
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id());
@@ -389,7 +389,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         shown(&a),
         shown(&b)
     );
-    let mut child = forked_child(&parent, "child", &c);
+    let mut child = marshalled_child(&parent, "child", &c);
     grants.push(ral_core::test_helper::layer(Capabilities {
         exec: Some(ExecGrant::of([ExecKey::Path(a_path)], [])),
         fs: Some(FsPolicy {
@@ -417,7 +417,7 @@ fn a_child_gets_parent_meet_narrowing_without_replay_at_any_depth() {
         "{}",
         result.text
     );
-    let grandchild = forked_child(&child, "grandchild", "`restrict [shell: []]");
+    let grandchild = marshalled_child(&child, "grandchild", "`restrict [shell: []]");
     grants.push(ral_core::test_helper::layer(Capabilities {
         shell: Some(std::collections::BTreeSet::new()),
         ..Capabilities::default()

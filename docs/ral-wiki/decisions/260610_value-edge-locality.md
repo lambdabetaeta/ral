@@ -7,8 +7,7 @@ superseded_by: decisions/260809_pipes-are-positional-byte-wires
 
 **Every judgment about a pipeline's value edges is taken at the site
 that owns its facts — and the day this rule was enforced, two latent
-bugs fell out of the places that violated it.** Follow-on parcel set to
-[[260610_child-eval-unification|child-eval-unification]]; landed
+bugs fell out of the places that violated it.** Landed
 2026-06-10 (`73db2c61..2df6db85`).
 
 ## The rule, instantiated four times
@@ -27,9 +26,8 @@ bugs fell out of the places that violated it.** Follow-on parcel set to
   iff `i + 1 < n` and its output mode is non-`Bytes` — written once as
   `value_edge_in` / `value_edge_out` beside `open_stage_routes`
   (`core/src/runtime/pipeline/route.rs`), read by resolve's
-  `carries_value_edge`.  No edge fact is cached on a struct, preserving
-  the [[260610_child-eval-unification|unification]] series' stance that
-  the modes are the single source.
+  `carries_value_edge`.  No edge fact is cached on a struct: the
+  modes are the single source.
 - **The child owns forcing.** Whether a stage forces its result once
   before shipping (`force_pipe_value`) is a fact of holding a value-out
   channel.  It rides as `ChildKind::PipelineStage { force_output }`,

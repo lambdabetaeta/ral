@@ -607,7 +607,7 @@ mod probe_tests {
         let rows = transport.bindings().expect("a reading");
         let row = rows.iter().find(|r| r.name == "probe_h").expect("the row");
         let handle = row.handle.as_ref().expect("a handle row");
-        assert_eq!(handle.state, crate::handle::Sample::Consumed);
+        assert_eq!(handle.state, crate::protocol::probe::HandleStatus::Consumed);
     }
 
     #[test]
@@ -653,11 +653,11 @@ mod probe_tests {
     fn a_child_is_narrowed_under_the_parent_installer() {
         let transport = fresh();
         let shell = crate::test_helper::core_shell();
-        let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+        let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
         let child = transport.child(&parent).expect("an inheriting child");
         assert!(Arc::ptr_eq(&transport.runtime, &child.runtime));
         let based = transport
-            .child(&shell.marshal(SpawnGrant::Base("confined".into())).unwrap())
+            .child(&shell.marshal(&SpawnGrant::Base("confined".into())).unwrap())
             .err()
             .expect("a bare engine has no base lexicon");
         assert_eq!(
@@ -695,7 +695,7 @@ mod probe_tests {
         shell.context.set_env_var("CHILD_CONTEXT", "kept").unwrap();
         shell.context.args = vec!["first".into(), String::new()];
         shell.seed_cwd(crate::path::CwdPath::new(std::env::temp_dir()).unwrap());
-        let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+        let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
         let child = transport.child(&parent).unwrap();
         let booted = Engine::boot(&BARE, &Attach::child(attach(&BARE).engine, parent)).unwrap();
         let identity = child.engine.lock();

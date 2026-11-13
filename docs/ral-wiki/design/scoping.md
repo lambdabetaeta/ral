@@ -33,9 +33,6 @@ Each dynamic frame nests by its own algebra:
 A tail-recursive call inside a `within` or `grant` block stays under that scope
 across every tail landing.
 
-The Agda core makes the lexical half explicit: a closure is code
-with a lexical environment and no dynamic-scope payload. Dynamic scopes are outside it.
-
 **A scoping form's body is a thunk the form forces.** `within` and `grant` take
 a thunk `U C` — a literal `{ … }`, or a name holding one — and run it inside the
 frame they push; `guard`, `try` and `?` take theirs the same way, as `if` and

@@ -83,10 +83,4 @@ literature in [[related/rows-and-handlers|rows-and-handlers]].
 
 **Realised in** [[internals/type-inference|type-inference]] (row unification by the Rémy rewrite).
 
-The Agda core (`Extrinsic/`) has open scoped-label rows, equal up to swapping distinct labels and
-indexed by alphabet so that fields and cases cannot mix. Selection, injection, type-changing
-update and closing `case` are typed against them, and row unification (the Rémy rewrite applied
-to a whole equation) is proved most general (`Extrinsic/Infer/Unify`). The frozen `Intrinsic/`
-model keeps closed, label-sorted rows.
-
 Cite: RATIONALE §"Structured values cross once"; `docs/SPEC.md` §4, §4.5.

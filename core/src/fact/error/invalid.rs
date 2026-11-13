@@ -2173,7 +2173,7 @@ impl InvalidFailure {
                 "a list of numbers is `ints-to-bytes`; a Bytes value comes from `from-bytes`"
             }
             (_, _, Expected::Shape(ValueShape::Handle)) => "use spawn to create a handle",
-            (operation @ ("spawn" | "watch"), _, Expected::Closure) => {
+            (operation @ ("spawn" | "watch"), _, Expected::Shape(ValueShape::Block)) => {
                 return Some(format!(
                     "{operation} requires a block: {operation} {{ ... }}"
                 ));

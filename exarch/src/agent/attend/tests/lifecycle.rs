@@ -22,7 +22,7 @@ fn next_child(parent: &Agent) -> (crate::record::AgentId, ChildStatus) {
 #[test]
 fn a_returned_helper_accepts_a_second_human_message_without_focus() {
     let mut parent = trunk(false);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     set_provider(
         &mut child,
         scripted(
@@ -61,7 +61,7 @@ fn helper_idle_limits_rest_not_work() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = forked_child(&parent, "helper", "`inherit");
+    let mut child = marshalled_child(&parent, "helper", "`inherit");
     set_provider(
         &mut child,
         scripted(
@@ -90,7 +90,7 @@ fn helper_ends_after_resting_and_does_not_repeat_its_report() {
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     set_provider(
         &mut child,
         scripted("test-model", Script::new().then(reply("42"))),
@@ -122,7 +122,7 @@ fn a_previous_reply_does_not_suppress_followup_repairs() {
         Reply::stalled("partial response"),
     ] {
         let parent = trunk(false);
-        let mut child = parent.fork_named("helper").unwrap();
+        let mut child = parent.fresh_child_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
             &mut child,
@@ -176,7 +176,7 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
         Script::new().then(Reply::panicking()),
     ] {
         let parent = trunk(false);
-        let mut child = parent.fork_named("helper").unwrap();
+        let mut child = parent.fresh_child_named("helper").unwrap();
         let (emit, _rx) = emitter(&child);
         set_provider(
             &mut child,
@@ -212,7 +212,7 @@ fn nonreply_followups_publish_new_failure_instead_of_the_previous_reply() {
 #[test]
 fn status_records_publish_reports_without_a_working_compatibility_record() {
     let parent = trunk(false);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     let log = child.log_dir().path().join(RECORD);
     assert!(child.handle().status().unwrap().working());
@@ -270,7 +270,7 @@ fn status_records_publish_reports_without_a_working_compatibility_record() {
 #[test]
 fn a_followup_crossing_a_reply_keeps_the_parent_pending_and_the_report_unread() {
     let mut parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     let helper = child.handle();
     let (release, ready) = std::sync::mpsc::channel();
     parent.body.nursery.adopt(
@@ -392,7 +392,7 @@ fn human_work_on_a_resting_helper_is_quiet_under_every_parent_admission() {
             ..TestLaunch::new("system")
         })
         .unwrap();
-        let mut child = parent.fork_named("helper").unwrap();
+        let mut child = parent.fresh_child_named("helper").unwrap();
         take_task(&child.handle(), &child.mailbox);
         parent.body.nursery.adopt(
             child.handle(),
@@ -562,7 +562,7 @@ fn stop_recalls_human_text_but_helpers_wake_the_same_parent_job() {
 fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
     for followup in [false, true] {
         let parent = trunk(false);
-        let mut child = parent.fork_named("helper").unwrap();
+        let mut child = parent.fresh_child_named("helper").unwrap();
         assert!(child.mailbox.begin());
         child
             .handle()
@@ -623,7 +623,7 @@ fn a_stopped_helper_reports_stopped_even_after_a_later_exchange_runs() {
 #[test]
 fn ending_a_parent_joins_helper_engines_before_ending_its_own() {
     let mut parent = trunk(false);
-    let child = parent.fork_named("helper").unwrap();
+    let child = parent.fresh_child_named("helper").unwrap();
     let helper = child.handle();
     let crate::agent::engine::EngineKind::Identity(parent_engine) = parent.engine().kind() else {
         panic!("identity")
@@ -717,7 +717,7 @@ fn an_uncertified_helper_end_is_recorded_once_and_travels_in_parent_teardown() {
     let worker = HeldWorker::new("test-uncertified-helper-worker");
     let _release = worker.release_on_drop();
     dress_held(&worker);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     let log = child.log_dir().path().join(RECORD);
     let (emit, _rx) = emitter(&parent);
     let result = child.ral(
@@ -880,7 +880,7 @@ fn a_helper_writer_failure_at_teardown_failed_reaches_died_and_parent() {
     let worker = HeldWorker::new("test-uncertified-writer-worker");
     let _release = worker.release_on_drop();
     dress_held(&worker);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     let (emit, rx) = emitter(&parent);
     let result = child.ral(
         &DurableRoot::default().child(),
@@ -927,7 +927,7 @@ fn a_parent_messaging_at_the_idle_deadline_gets_a_report_or_a_refusal_never_sile
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     set_provider(
         &mut child,
         scripted(
@@ -967,8 +967,8 @@ fn dropping_an_unrun_parent_joins_its_working_helper_before_ending_its_engine() 
         ..TestLaunch::new("system")
     })
     .unwrap();
-    let mut parent = forked_child(&root, "parent", "`inherit");
-    let mut grandchild = forked_child(&parent, "grandchild", "`inherit");
+    let mut parent = marshalled_child(&root, "parent", "`inherit");
+    let mut grandchild = marshalled_child(&parent, "grandchild", "`inherit");
     set_provider(
         &mut grandchild,
         scripted(
@@ -1064,7 +1064,7 @@ fn an_unread_human_post_makes_a_returning_roots_teardown_report_failed_once() {
 #[test]
 fn human_gone_human_is_one_real_prompt_and_the_gone_still_joins_its_helper() {
     let mut parent = trunk(false);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(FOValue::Unit));
     let _initial_report = next_child(&parent);
@@ -1128,7 +1128,7 @@ fn human_gone_human_is_one_real_prompt_and_the_gone_still_joins_its_helper() {
 #[test]
 fn a_dead_helpers_unread_parent_post_is_paid_before_the_parents_reply_reminder_with_gone_pending() {
     let mut parent = trunk(true);
-    let mut child = parent.fork_named("helper").unwrap();
+    let mut child = parent.fresh_child_named("helper").unwrap();
     take_task(&child.handle(), &child.mailbox);
     child.report(ChildStatus::Replied(FOValue::Unit));
     let _initial_report = next_child(&parent);

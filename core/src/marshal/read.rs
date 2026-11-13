@@ -1,27 +1,59 @@
 //! Reconstruct rows in wire order; only completed rows can be referenced.
 
 use super::wire::{self, RawData, Row, RowId, Value, Wire};
-use crate::builtin::{BuiltinEntry, BuiltinTable};
-use crate::data::datum::Datum;
-use crate::data::json::{RawFOValue, drop_value};
+use crate::builtin::BuiltinEntry;
+use crate::data::json::JsonRef;
 use crate::fact::{
-    DataStep, DecodeCause, DecodeFailure, ErrorFact, InvalidResidual, RowKind, UnresolvedRow,
+    DecodeCause, DecodeFailure, Expected, InvalidResidual, RowDefect, RowKind, ShapeFailure,
+    UnresolvedRow, ValueShape,
 };
 use crate::shell::grant::SpawnGrant;
-use crate::shell::runtime::{Binding, Env, HandlerEntry, HandlerFrame, Image, Runtime, ValClos};
+use crate::shell::runtime::{
+    Binding, Env, HandlerEntry, HandlerFrame, Image, Runtime, Signature, ValClos, View,
+};
 use crate::ty::Closed;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 mod ir;
+
+/// Levels of JSON nesting an image may hold, scalars counted.
+// 100 linked files (`MAX_SOURCE_DEPTH`) through `Use`, each at most 64 source levels
+// (`NESTING_DEPTH_LIMIT`) at under 8 JSON levels each, bounds every image a parent writes;
+// `STACK` holds the recursive drop of a raw tree this deep.
+pub(super) const NESTING_LIMIT: usize = 65_536;
+
+/// Stack for decoding and dropping a raw tree up to [`NESTING_LIMIT`] deep, whatever
+/// the thread's own.
+pub(super) const STACK: usize = 64 << 20;
+
+/// Refuse a document nested past [`NESTING_LIMIT`], before any recursive walk
+/// or drop meets it.
+///
+/// # Errors
+/// [`DecodeCause::TooDeep`] at the root.
+pub(super) fn nesting(root: JsonRef<'_, '_>) -> Result<(), DecodeFailure> {
+    let mut pending = vec![(root, 1)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > NESTING_LIMIT {
+            return Err(DecodeFailure::new(DecodeCause::TooDeep(
+                NESTING_LIMIT.into(),
+            )));
+        }
+        let items = node.items().into_iter().flatten();
+        let members = node.members().into_iter().flatten().map(|(_, value)| value);
+        pending.extend(items.chain(members).map(|child| (child, depth + 1)));
+    }
+    Ok(())
+}
 
 pub(super) fn image(
     runtime: &Runtime,
     wire: Wire<RawData>,
 ) -> Result<(Image, SpawnGrant), DecodeFailure> {
     let mut reader = Reader {
-        table: &runtime.builtins,
-        builtins: HashMap::new(),
+        sig: &runtime.sig,
+        total: wire.rows.len(),
         rows: Vec::with_capacity(wire.rows.len()),
     };
     for (index, row) in wire.rows.iter().enumerate() {
@@ -70,57 +102,71 @@ enum Read {
 }
 
 struct Reader<'a> {
-    table: &'a BuiltinTable,
-    builtins: HashMap<String, Arc<BuiltinEntry>>,
+    sig: &'a Signature,
+    /// Every row of the document, read or not.
+    total: usize,
     rows: Vec<Read>,
 }
 
+fn unresolved(row: RowId, wanted: RowKind, defect: RowDefect) -> DecodeFailure {
+    DecodeFailure::new(DecodeCause::UnresolvedRow(UnresolvedRow {
+        row: u64::from(row).into(),
+        wanted,
+        defect,
+    }))
+}
+
 impl Reader<'_> {
-    fn unresolved(&self, row: RowId, wanted: RowKind) -> DecodeFailure {
-        DecodeFailure::new(DecodeCause::UnresolvedRow(UnresolvedRow {
-            row: u64::from(row).into(),
-            wanted,
-            before: self.rows.len().into(),
-        }))
+    fn earlier(&self, row: RowId) -> Result<&Read, RowDefect> {
+        let index = usize::try_from(row).unwrap_or(usize::MAX);
+        self.rows.get(index).ok_or_else(|| {
+            if index < self.total {
+                RowDefect::Forward(self.rows.len().into())
+            } else {
+                RowDefect::Absent(self.total.into())
+            }
+        })
     }
 
     fn environment(&self, row: Option<RowId>) -> Result<Env, DecodeFailure> {
         let Some(row) = row else {
             return Ok(Env::EMPTY);
         };
-        match usize::try_from(row)
-            .ok()
-            .and_then(|index| self.rows.get(index))
-        {
-            Some(Read::Env(env)) => Ok(env.clone()),
-            Some(Read::Built(_)) | None => Err(self.unresolved(row, RowKind::Environment)),
+        match self.earlier(row) {
+            Ok(Read::Env(env)) => Ok(env.clone()),
+            Ok(Read::Built(_)) => Err(unresolved(
+                row,
+                RowKind::Environment,
+                RowDefect::WrongKind(RowKind::Built),
+            )),
+            Err(defect) => Err(unresolved(row, RowKind::Environment, defect)),
         }
     }
 
     fn built(&self, row: RowId) -> Result<ValClos, DecodeFailure> {
-        match usize::try_from(row)
-            .ok()
-            .and_then(|index| self.rows.get(index))
-        {
-            Some(Read::Built(value)) => Ok(value.clone()),
-            Some(Read::Env(_)) | None => Err(self.unresolved(row, RowKind::Built)),
+        match self.earlier(row) {
+            Ok(Read::Built(value)) => Ok(value.clone()),
+            Ok(Read::Env(_)) => Err(unresolved(
+                row,
+                RowKind::Built,
+                RowDefect::WrongKind(RowKind::Environment),
+            )),
+            Err(defect) => Err(unresolved(row, RowKind::Built, defect)),
         }
     }
 
-    fn builtin(&mut self, name: &str) -> Result<Arc<BuiltinEntry>, DecodeFailure> {
-        if let Some(entry) = self.builtins.get(name) {
-            return Ok(Arc::clone(entry));
-        }
-        let entry = self
-            .table
-            .value(name)
-            .map(Arc::new)
-            .ok_or_else(|| DecodeFailure::new(DecodeCause::UnknownBuiltin(name.into())))?;
-        self.builtins.insert(name.into(), Arc::clone(&entry));
-        Ok(entry)
+    /// Σ's own value for `name`, so a residual's identity check holds.
+    fn builtin(&self, name: &str) -> Result<(&ValClos, &Arc<BuiltinEntry>), DecodeFailure> {
+        self.sig
+            .native(name)
+            .and_then(|value| match value.view() {
+                View::Builtin(entry) => Some((value, entry)),
+                _ => None,
+            })
+            .ok_or_else(|| DecodeFailure::new(DecodeCause::UnknownBuiltin(name.into())))
     }
 
-    fn row(&mut self, row: &Row<RawData>) -> Result<Read, DecodeFailure> {
+    fn row(&self, row: &Row<RawData>) -> Result<Read, DecodeFailure> {
         match row {
             Row::Env(entries) => {
                 let bindings = entries
@@ -177,7 +223,7 @@ impl Reader<'_> {
         }
     }
 
-    fn binding(&mut self, binding: &wire::Binding<RawData>) -> Result<Binding, DecodeFailure> {
+    fn binding(&self, binding: &wire::Binding<RawData>) -> Result<Binding, DecodeFailure> {
         let scheme = binding
             .scheme
             .as_ref()
@@ -195,7 +241,7 @@ impl Reader<'_> {
         })
     }
 
-    fn value(&mut self, value: &Value<RawData>) -> Result<ValClos, DecodeFailure> {
+    fn value(&self, value: &Value<RawData>) -> Result<ValClos, DecodeFailure> {
         match value {
             Value::Closure { tags, val, env } => {
                 let env = self
@@ -215,64 +261,77 @@ impl Reader<'_> {
             }
             Value::Builtin(name) => self
                 .builtin(name)
-                .map(ValClos::builtin)
+                .map(|(value, _)| value.clone())
                 .map_err(|error| error.payload("Builtin")),
             Value::Residual {
                 builtin,
                 env,
                 supplied,
             } => {
-                let entry = self
+                let (_, entry) = self
                     .builtin(builtin)
                     .map_err(|error| error.field("builtin").payload("Residual"))?;
                 let env = self
                     .environment(Some(*env))
                     .map_err(|error| error.field("env").payload("Residual"))?;
-                usize::try_from(*supplied)
-                    .ok()
-                    .and_then(|supplied| entry.residual(env, supplied))
-                    .ok_or_else(|| {
+                entry
+                    .residual(&env, usize::try_from(*supplied).unwrap_or(usize::MAX))
+                    .map_err(|defect| {
                         DecodeFailure::new(DecodeCause::InvalidResidual(InvalidResidual {
                             name: builtin.clone(),
                             arity: entry.decl.fixed_arity().into(),
                             supplied: u64::from(*supplied).into(),
+                            defect,
                         }))
                         .payload("Residual")
                     })
             }
             Value::Handle(title) => Ok(ValClos::withheld(title.as_str())),
-            Value::Failure(raw) => {
-                let value = raw.validate().map_err(|error| error.payload("Failure"))?;
-                let result = ErrorFact::decode(&value)
-                    .map(ValClos::failure)
-                    .map_err(|error| fact_path(raw, error).payload("Failure"));
-                drop_value(value);
-                result
-            }
+            Value::Failure(raw) => raw
+                .validate()
+                .map(ValClos::failure)
+                .map_err(|error| error.payload("Failure")),
             Value::Built(row) => self.built(*row).map_err(|error| error.payload("Built")),
         }
     }
 
-    fn frame(&mut self, frame: &wire::Frame<RawData>) -> Result<HandlerFrame, DecodeFailure> {
-        let entries = frame
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, (name, value))| {
-                self.value(value)
-                    .map(|value| HandlerEntry::ral_per_name(name.clone(), value))
-                    .map_err(|error| {
-                        error
-                            .index(1usize.into())
-                            .index(index.into())
-                            .field("entries")
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+    /// A handler thunk, which `HandlerEntry::ral_per_name` trusts to be a block.
+    fn arm(&self, value: &Value<RawData>) -> Result<ValClos, DecodeFailure> {
+        let value = self.value(value)?;
+        // `within` installs any thunk its checker admitted, builtins included.
+        match value.shape() {
+            ValueShape::Block | ValueShape::Function => Ok(value),
+            _ => Err(DecodeFailure::new(DecodeCause::Shape(ShapeFailure {
+                expected: Expected::AnyOf(vec![ValueShape::Block, ValueShape::Function]),
+                found: value.found(),
+            }))),
+        }
+    }
+
+    fn frame(&self, frame: &wire::Frame<RawData>) -> Result<HandlerFrame, DecodeFailure> {
+        let mut names = HashSet::with_capacity(frame.entries.len());
+        let mut entries = Vec::with_capacity(frame.entries.len());
+        for (index, (name, value)) in frame.entries.iter().enumerate() {
+            if !names.insert(name) {
+                return Err(
+                    DecodeFailure::new(DecodeCause::DuplicateField(name.clone()))
+                        .index(0usize.into())
+                        .index(index.into())
+                        .field("entries"),
+                );
+            }
+            let arm = self.arm(value).map_err(|error| {
+                error
+                    .index(1usize.into())
+                    .index(index.into())
+                    .field("entries")
+            })?;
+            entries.push(HandlerEntry::ral_per_name(name.clone(), arm));
+        }
         let catch_all = frame
             .catch_all
             .as_ref()
-            .map(|value| self.value(value))
+            .map(|value| self.arm(value))
             .transpose()
             .map_err(|error| error.field("catch_all"))?;
         Ok(HandlerFrame {
@@ -280,59 +339,5 @@ impl Reader<'_> {
             catch_all,
             kind: frame.kind,
         })
-    }
-}
-
-/// Datum paths traverse ral data; the wire wraps each step in first-order syntax.
-fn fact_path(mut raw: &RawFOValue, error: DecodeFailure) -> DecodeFailure {
-    let mut path = Vec::new();
-    for step in error.path {
-        match (raw, step) {
-            (RawFOValue::Map { entries }, DataStep::Field(name)) => {
-                let Some((index, (_, value))) = entries
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (key, _))| *key == name)
-                else {
-                    break;
-                };
-                path.extend([
-                    DataStep::Payload("map".into()),
-                    DataStep::Field("entries".into()),
-                    DataStep::Index(index.into()),
-                    DataStep::Index(1usize.into()),
-                ]);
-                raw = value;
-            }
-            (RawFOValue::List { items }, DataStep::Index(index)) => {
-                let Some(value) = usize::try_from(index.to_u64())
-                    .ok()
-                    .and_then(|index| items.get(index))
-                else {
-                    break;
-                };
-                path.extend([
-                    DataStep::Payload("list".into()),
-                    DataStep::Field("items".into()),
-                    DataStep::Index(index),
-                ]);
-                raw = value;
-            }
-            (RawFOValue::Variant { label, payload }, DataStep::Payload(tag)) if *label == tag => {
-                path.extend([
-                    DataStep::Payload("variant".into()),
-                    DataStep::Field("payload".into()),
-                ]);
-                let Some(value) = payload else {
-                    break;
-                };
-                raw = value;
-            }
-            _ => break,
-        }
-    }
-    DecodeFailure {
-        path,
-        cause: error.cause,
     }
 }

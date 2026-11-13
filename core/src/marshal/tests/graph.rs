@@ -77,7 +77,7 @@ fn wire(parent: &Marshalled) -> Wire {
 fn round_trip(value: &ValClos) -> ValClos {
     let mut shell = test_helper::core_shell();
     bind(&mut shell, "value", value.clone());
-    let parent = shell.marshal(SpawnGrant::Inherit).expect("marshal graph");
+    let parent = shell.marshal(&SpawnGrant::Inherit).expect("marshal graph");
     let (image, _) = read(&shell.session.runtime, &parent).expect("read graph");
     image.env.get("value").expect("root survives").clone()
 }
@@ -116,7 +116,7 @@ fn marker() -> (ValClos, Weak<BuiltinEntry>) {
     let entry = Arc::new(
         test_helper::core_runtime()
             .builtins
-            .value("has")
+            .get("has")
             .expect("has builtin"),
     );
     let weak = Arc::downgrade(&entry);
@@ -140,7 +140,7 @@ fn environments_are_interned_by_allocation_not_contents() {
     bind(&mut shell, "b", capture("x", &shared));
     bind(&mut shell, "c", capture("x", &distinct));
 
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     assert_eq!(encoded.rows.len(), 3, "two captures and the session");
     assert!(encoded.rows.iter().all(|row| matches!(row, Row::Env(_))));
@@ -168,7 +168,7 @@ fn built_collections_are_interned_by_allocation_not_contents() {
     ] {
         bind(&mut shell, name, value);
     }
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     assert_eq!(encoded.rows.len(), 5, "two lists, two maps and the session");
     assert_eq!(
@@ -216,7 +216,7 @@ fn forty_definitions_write_forty_rows_not_exponentially_many() {
         let block = block_over(&shell.env);
         bind(&mut shell, &format!("d{i}"), block);
     }
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     assert_eq!(wire(&parent).rows.len(), 40);
     let (image, _) = read(&shell.session.runtime, &parent).unwrap();
     assert_eq!(image.env.len(), 40);
@@ -234,7 +234,7 @@ fn one_built_map_captured_by_three_closures_is_written_once() {
     for name in ["a", "b", "c"] {
         bind(&mut shell, name, capture("map", &env));
     }
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     assert_eq!(
         encoded.rows.len(),
@@ -275,7 +275,7 @@ fn an_empty_capture_names_no_row() {
     );
     assert!(captured(&block).is_empty());
     bind(&mut shell, "block", block);
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     let [Row::Env(entries)] = encoded.rows.as_slice() else {
         panic!("only the session has a row");
@@ -294,7 +294,7 @@ fn the_session_row_carries_no_prelude_binding() {
     )
     .expect("boot with the prelude");
     bind(&mut shell, "only_mine", ValClos::int(1));
-    let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+    let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
     let encoded = wire(&parent);
     let [Row::Env(entries)] = encoded.rows.as_slice() else {
         panic!("only the session has a row");
@@ -410,7 +410,7 @@ fn ten_thousand_tags_round_trip_flat_and_env_broken_on_small_stacks() {
                 }
                 let mut shell = test_helper::core_shell();
                 bind(&mut shell, "value", value.clone());
-                let parent = shell.marshal(SpawnGrant::Inherit).unwrap();
+                let parent = shell.marshal(&SpawnGrant::Inherit).unwrap();
                 let encoded = wire(&parent);
                 let Row::Env(root) = &encoded.rows[encoded.env.unwrap() as usize] else {
                     panic!("root is an environment");

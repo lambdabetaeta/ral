@@ -1012,7 +1012,6 @@ fn every_admitted_root_rejects_a_wrong_json_shape_without_a_semantic_serde_fallb
     root!(Probe);
     root!(SpawnGrant);
     root!(crate::authority::policy::GrantStack);
-    root!(crate::marshal::Marshalled);
     root!(FOValue);
     assert!(matches!(
         json::from_datum_slice::<Reason>(b"\"unit\""),

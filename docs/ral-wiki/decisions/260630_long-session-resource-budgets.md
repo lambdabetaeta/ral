@@ -97,7 +97,7 @@ allowed to become unbounded.
 
 - **Treat shell residency as lexical state plus host leases.** ral bindings do
   not expire by language rule. Exarch may apply
-  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] to scratch
+  [[internals/binding-leases|binding-leases]] to scratch
   top-level names, warn on large bindings, and prefer paths over captured bytes.
   Running handles pin names; settled handles are scratch. A closure capture may
   keep a value alive after its top-level name is pruned, because that is lexical
@@ -184,7 +184,7 @@ visible in `/resources`, not buried as constants.
 
 [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]
 (the session-lived bus whose lifetime makes a budget necessary),
-[[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (scratch-name
+[[internals/binding-leases|binding-leases]] (scratch-name
 reclamation for agent shells),
 [[decisions/260617_long-running-work|long-running-work]] (the durable-job shape
 for computations that outlive ordinary `spawn`),
