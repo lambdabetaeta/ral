@@ -10,7 +10,7 @@ let [pick: pick, var: var] = use 'lib/fzf.ral'
         let st = _ed-get
         pick '' "--scheme=history --bind=ctrl-r:toggle-sort,alt-r:toggle-raw --wrap-sign '\\t↳ ' --highlight-line --multi !{var FZF_CTRL_R_OPTS ''}" `items !{_ed-history '' 0} [--query, !{slice $st[text] 0 $st[cursor]}] { |ps|
             let t = intercalate "\n" !{map { |p| re-replace-all '\n+$' '' $p } $ps}
-            _ed-set [text: `set $t, cursor: `set !{length $t}]
+            _ed-set [text: `set $t, cursor: `set !{length !{chars $t}}]
         }
     }]],
 ] }

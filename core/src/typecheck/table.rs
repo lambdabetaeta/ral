@@ -812,7 +812,7 @@ mod tests {
         let TypeErrorKind::KindMismatch { kind, witness, .. } = &error.kind else {
             panic!("{error:?}")
         };
-        assert_eq!(*kind, crate::ty::Kind::DATA);
+        assert_eq!(*kind, crate::ty::Kind::Data);
         let witness = witness.expect("the decoder call imposes DATA");
         assert_eq!(
             &src[witness.start as usize..witness.end as usize],

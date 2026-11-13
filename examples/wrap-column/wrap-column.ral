@@ -1,7 +1,7 @@
 #!/usr/bin/env ral
 # Footgun: `fold -w` counts bytes, not characters, so any accented or CJK
 # text (multi-byte UTF-8) wraps several columns early and ragged.  Here the
-# budget is spent in `length`, which counts Unicode scalars, and `words`
+# budget is spent in `chars` (Unicode scalars), and `words`
 # splits on real whitespace — so the wrap lands where you can see it.
 
 let [width, path] = args
@@ -12,7 +12,7 @@ for !{from-lines < $path} { |line|
     if !{is-empty $ws} { echo $line } else {
         let packed = fold { |acc word|
             if $[$acc[cur] == ''] { return [out: $acc[out], cur: $word] }
-            elsif $[!{length $acc[cur]} + 1 + !{length $word} <= $w] {
+            elsif $[!{length !{chars $acc[cur]}} + 1 + !{length !{chars $word}} <= $w] {
                 return [out: $acc[out], cur: "$acc[cur] $word"]
             } else {
                 return [out: [...$acc[out], $acc[cur]], cur: $word]

@@ -27,10 +27,10 @@ refusal {
     return ()
 }
 
-# A kinded variable: `length` needs text, bytes, a list or a map
+# A kinded variable: interpolation needs text, a number or a Bool
 refusal {
-    let d = !{to-string '{"a": 5}' | from-json}
-    let n = length $d[a]
+    let d = !{to-string '{"a": [5]}' | from-json}
+    echo "$d[a]"
     return ()
 }
 

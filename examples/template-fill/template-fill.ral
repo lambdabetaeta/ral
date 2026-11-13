@@ -11,7 +11,7 @@ let pat = '\$\{[A-Z_][A-Z0-9_]*\}'
 let tpl = from-string < $path
 
 let values = map { |ph|
-    get !{env} !{slice $ph 2 $[!{length $ph} - 3]} ''
+    get !{env} !{re-replace-all '^\$\{|\}$' '' $ph} ''
 } !{re-find-matches $pat $tpl}
 
 let [lead, ...gaps] = re-split $pat $tpl

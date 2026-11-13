@@ -1,12 +1,15 @@
-# String builtins — re-replace, re-split, join, upper, lower, length, slice, re-match
+# String builtins — re-replace, re-split, join, upper, lower, chars, slice, re-match
 
 # upper / lower
 echo !{upper hello}
 echo !{lower HELLO}
 
-# length
-echo !{length hello}
+# chars / length
+echo !{length !{chars hello}}
 echo !{length [a, b, c]}
+echo ...!{chars héllo}
+echo !{length !{chars ''}}
+echo !{length !{chars "e\u{301}"}}
 
 # re-replace — unique-anchor; errors on 0 or >1 matches
 echo !{re-replace world al 'hello world'}

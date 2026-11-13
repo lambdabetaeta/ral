@@ -9,9 +9,9 @@ let [input, n] = args
 
 let per-chunk = int $n
 let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerate !{from-lines < $input}}
-let count = length $chunks
+let count = length !{keys $chunks}
 
-let digits = length !{str $[$count - 1]}
+let digits = length !{chars !{str $[$count - 1]}}
 let width = max 2 $digits
 
 for !{range 0 $count} { |i|

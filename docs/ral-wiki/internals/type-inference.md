@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f9ac94f8
-verified_at_date: 2026-11-12
+verified_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
+verified_at_date: 2026-11-13
 anchors: [Generator, Solver, Solution, Readback, Inferring, BindHole, CallHole, Mode, propagate, close_region, file_options, check_options, check_option, generalize, instantiate, settle_weak, reseed_weak, unify_producers, SessionSchemes, Closed]
 ---
 
@@ -292,7 +292,7 @@ The underlying equations retain the type system's existing constraints.
   Labels, duplicate order and the terminal tail retain their identity. Rémy's
   shared-tail label-multiset safeguard still refuses impossible finite spines;
   a label against an empty row is an error, not implicit row extension.
-- Kinds meet at union, refuse an empty meet and fix a single nullary head.
+- Kinds form a chain and unite at the smaller; no meet is empty or pins a variable.
   Deep kinds constrain reachable types/rows. Instantiation preserves declared
   kinds and freshens all quantified sorts and cycle roots.
 - `unify_producers` preserves `F^w A ⇒ A = Unit`, validating unsafe payload

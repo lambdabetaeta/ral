@@ -11,7 +11,7 @@
 //! Row spines stay finite; row-store bindings use type-variable payloads so
 //! cycles through fields always meet one of those anchors.
 
-use super::error::{CycleVia, KindFound, TypeErrorKind};
+use super::error::{CycleVia, TypeErrorKind};
 use crate::source::Span;
 use crate::ty::{
     CompTy, CompTyNode, CompTyVar, Grade, GradeVar, Head, Kind, Label, Row, RowNode, RowVar, Term,
@@ -19,7 +19,6 @@ use crate::ty::{
 };
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -107,8 +106,6 @@ fn deeper(depth: u32) -> Result<u32, TypeErrorKind> {
 trait Sort: Clone {
     type Var: Copy + Eq + std::hash::Hash;
     type Meta: Copy;
-    /// Why two free roots cannot unite.
-    type Clash;
     /// The meta of a root nothing constrains.
     const FREE: Self::Meta;
     fn raw(var: Self::Var) -> u32;
@@ -117,11 +114,7 @@ trait Sort: Clone {
     fn as_var(&self) -> Option<Self::Var>;
     fn from_root(root: Self::Var) -> Self;
     /// What the survivor of uniting `absorbed` into `survivor` knows.
-    fn meet(absorbed: Self::Meta, survivor: Self::Meta) -> Result<Self::Meta, Self::Clash>;
-    /// The one value a meta admits, if it admits only one.
-    fn pin(_meta: &Self::Meta) -> Option<Self> {
-        None
-    }
+    fn meet(absorbed: Self::Meta, survivor: Self::Meta) -> Self::Meta;
 }
 
 macro_rules! sort_vars {
@@ -165,27 +158,12 @@ macro_rules! sort_vars {
 impl Sort for Ty {
     sort_vars!(TyVar, TyNode);
     type Meta = Kinded;
-    type Clash = TypeErrorKind;
     const FREE: Kinded = Kinded {
-        kind: Kind::ANY,
+        kind: Kind::Any,
         witness: None,
     };
-    fn meet(a: Kinded, b: Kinded) -> Result<Kinded, TypeErrorKind> {
-        let Some(kind) = a.kind.meet(b.kind) else {
-            return Err(TypeErrorKind::KindMismatch {
-                found: KindFound::Used {
-                    kind: a.kind,
-                    witness: a.witness,
-                },
-                kind: b.kind,
-                witness: b.witness,
-            });
-        };
-        let witness = if kind == a.kind { a.witness } else { b.witness };
-        Ok(Kinded { kind, witness })
-    }
-    fn pin(meta: &Kinded) -> Option<Self> {
-        meta.kind.pin()
+    fn meet(absorbed: Kinded, survivor: Kinded) -> Kinded {
+        std::cmp::min_by_key(absorbed, survivor, |k| k.kind)
     }
 }
 
@@ -199,13 +177,12 @@ enum Depth {
 impl Sort for Row {
     sort_vars!(RowVar, RowNode);
     type Meta = Depth;
-    type Clash = Infallible;
     const FREE: Depth = Depth::Shallow;
-    fn meet(absorbed: Depth, survivor: Depth) -> Result<Depth, Infallible> {
-        Ok(match survivor {
+    fn meet(absorbed: Depth, survivor: Depth) -> Depth {
+        match survivor {
             Depth::Shallow => absorbed,
             deep @ Depth::Deep(_) => deep,
-        })
+        }
     }
 }
 
@@ -214,11 +191,8 @@ macro_rules! bare_sort {
         impl Sort for $ty {
             sort_vars!($($vars)*);
             type Meta = ();
-            type Clash = Infallible;
             const FREE: () = ();
-            fn meet((): (), (): ()) -> Result<(), Infallible> {
-                Ok(())
-            }
+            fn meet((): (), (): ()) {}
         }
     )*};
 }
@@ -258,17 +232,12 @@ impl<T: Sort> Store<T> {
         }
     }
 
-    /// A free state, or the binding a meta that admits one value forces.
-    fn free(meta: T::Meta) -> State<T> {
-        T::pin(&meta).map_or(State::Free(meta), |value| State::Bound(value, None))
-    }
-
     fn fresh(&mut self, rank: u32, meta: T::Meta) -> T::Var {
         let id = u32::try_from(self.slots.len()).expect("variable store exhausted");
         self.slots.push(Slot::Root {
             rank,
             weak: None,
-            state: Self::free(meta),
+            state: State::Free(meta),
         });
         T::var(id)
     }
@@ -361,20 +330,20 @@ impl<T: Sort> Store<T> {
     /// Replace a free root's meta.
     fn refine(&mut self, v: T::Var, meta: T::Meta) {
         let root = self.root(v);
-        *self.at_root_mut(root).2 = Self::free(meta);
+        *self.at_root_mut(root).2 = State::Free(meta);
         self.touched.push(root);
     }
 
-    /// Unite two free classes at the minimum rank.  On a clash nothing changes.
-    fn unite(&mut self, a: T::Var, b: T::Var) -> Result<(), T::Clash> {
+    /// Unite two free classes at the minimum rank.
+    fn unite(&mut self, a: T::Var, b: T::Var) {
         let (a, b) = (self.find(a), self.find(b));
         if a == b {
-            return Ok(());
+            return;
         }
         let (Some(&absorbed), Some(&survivor)) = (self.meta(a), self.meta(b)) else {
             unreachable!("only free roots unite")
         };
-        let meta = T::meet(absorbed, survivor)?;
+        let meta = T::meet(absorbed, survivor);
         let index = self.index(a);
         let Slot::Root { rank, weak, .. } =
             std::mem::replace(&mut self.slots[index], Slot::Parent(b))
@@ -386,9 +355,8 @@ impl<T: Sort> Store<T> {
         if b_weak.is_none() {
             *b_weak = weak;
         }
-        *b_state = Self::free(meta);
+        *b_state = State::Free(meta);
         self.touched.extend([a, b]);
-        Ok(())
     }
 
     fn weak_source(&self, v: T::Var) -> Option<&WeakSource> {
@@ -695,7 +663,7 @@ impl Unifier {
         let root = self.grades.find(v);
         match self.resolve_grade(grade) {
             Grade::Var(other) => {
-                let Ok(()) = self.grades.unite(root, other);
+                self.grades.unite(root, other);
             }
             grade => self.grades.bind(root, grade, None),
         }
@@ -703,7 +671,7 @@ impl Unifier {
 
     /// A fresh variable of `kind`, narrowed at the span in force.
     pub(crate) fn fresh_kinded_var(&mut self, kind: Kind) -> TyVar {
-        let witness = if kind.is_any() { None } else { self.at };
+        let witness = if kind == Kind::Any { None } else { self.at };
         self.tys.fresh(self.rank, Kinded { kind, witness })
     }
 
@@ -738,25 +706,19 @@ impl Unifier {
     }
 
     /// Narrow a free variable to the meet of its kind and `kind`.
-    fn narrow(
-        &mut self,
-        root: TyVar,
-        kind: Kind,
-        witness: Option<Span>,
-    ) -> Result<(), TypeErrorKind> {
+    fn narrow(&mut self, root: TyVar, kind: Kind, witness: Option<Span>) {
         let Some(&current) = self.tys.meta(root) else {
-            return Ok(());
+            return;
         };
-        let meet = Ty::meet(current, Kinded { kind, witness })?;
+        let meet = Ty::meet(current, Kinded { kind, witness });
         if meet.kind != current.kind {
             self.tys.refine(root, meet);
         }
-        Ok(())
     }
 
     fn kind_error(&self, found: &Ty, kind: Kind, witness: Option<Span>) -> TypeErrorKind {
         TypeErrorKind::KindMismatch {
-            found: KindFound::Type(self.apply_ty(found)),
+            found: self.apply_ty(found),
             kind,
             witness,
         }
@@ -775,7 +737,7 @@ impl Unifier {
             let mut owed = Owed::default();
             let mut seen = HashSet::from([root]);
             self.data_ty(val, witness, &mut seen, &mut owed, depth)?;
-            self.impose_data(owed, witness)?;
+            self.impose_data(owed, witness);
         }
         Ok(())
     }
@@ -787,7 +749,8 @@ impl Unifier {
         };
         let mut owed = Owed::default();
         self.data_row(val, witness, &mut HashSet::new(), &mut owed, depth)?;
-        self.impose_data(owed, witness)
+        self.impose_data(owed, witness);
+        Ok(())
     }
 
     /// Walk `ty` as data: refuse a block or handle, and collect the free
@@ -821,7 +784,7 @@ impl Unifier {
                 self.data_row(r, witness, seen, owed, depth)?;
             }
             TyNode::Thunk(_) | TyNode::Handle(..) => {
-                return Err(self.kind_error(&head, Kind::DATA, witness));
+                return Err(self.kind_error(&head, Kind::Data, witness));
             }
         }
         Ok(())
@@ -848,16 +811,15 @@ impl Unifier {
         }
     }
 
-    fn impose_data(&mut self, owed: Owed, witness: Option<Span>) -> Result<(), TypeErrorKind> {
+    fn impose_data(&mut self, owed: Owed, witness: Option<Span>) {
         for root in owed.tys {
-            self.narrow(root, Kind::DATA, witness)?;
+            self.narrow(root, Kind::Data, witness);
         }
         for root in owed.rows {
             if self.rows.meta(root) == Some(&Depth::Shallow) {
                 self.rows.refine(root, Depth::Deep(witness));
             }
         }
-        Ok(())
     }
 
     /// One type per unit, with provenance for diagnostics.
@@ -1470,7 +1432,8 @@ impl Unifier {
         let b = self.resolve_ty(b);
 
         if let (TyNode::Var(ai), TyNode::Var(bi)) = (a.node(), b.node()) {
-            return self.tys.unite(*ai, *bi);
+            self.tys.unite(*ai, *bi);
+            return Ok(());
         }
         if let TyNode::Var(vi) = a.node() {
             return self.bind_ty(*vi, b, depth);
@@ -1725,7 +1688,7 @@ impl Unifier {
             a = self.resolve_row(&a);
             b = self.resolve_row(&b);
             if let (RowNode::Var(ai), RowNode::Var(bi)) = (a.node(), b.node()) {
-                let Ok(()) = self.rows.unite(*ai, *bi);
+                self.rows.unite(*ai, *bi);
                 return Ok(());
             }
             if let RowNode::Var(vi) = a.node() {
@@ -1903,7 +1866,7 @@ impl Unifier {
         let b = self.resolve_comp_ty_graded(b);
 
         if let (CompTyNode::Var(ai), CompTyNode::Var(bi)) = (a.node(), b.node()) {
-            let Ok(()) = self.ctys.unite(*ai, *bi);
+            self.ctys.unite(*ai, *bi);
             return Ok(());
         }
         if let CompTyNode::Var(vi) = a.node() {
@@ -2095,12 +2058,12 @@ mod tests {
     fn producer_pairs_use_kind_exclusion_but_do_not_default_unit() {
         let mut u = Unifier::new();
         u.enter();
-        for kind in [Kind::ANY, Kind::NUMBER] {
+        for kind in [Kind::Any, Kind::Number] {
             let payload = u.fresh_kinded(kind);
             let grade = u.fresh_grade();
             u.remember_producers(Term::Comp(&CompTy::ret(grade, payload)));
             // An excluding kind fixes the grade at registration.
-            let expected = if kind == Kind::ANY {
+            let expected = if kind == Kind::Any {
                 grade
             } else {
                 Grade::Value
@@ -2124,12 +2087,11 @@ mod tests {
                 let mut store = Store::<T>::new();
                 let old = store.fresh(1, T::FREE);
                 let young = store.fresh(2, T::FREE);
-                let united = if old_first {
-                    store.unite(old, young)
+                if old_first {
+                    store.unite(old, young);
                 } else {
-                    store.unite(young, old)
-                };
-                assert!(united.is_ok());
+                    store.unite(young, old);
+                }
                 assert_eq!(store.rank(old), 1);
                 assert_eq!(store.rank(young), 1);
                 store.bind(young, value.clone(), None);
@@ -2188,7 +2150,7 @@ mod tests {
     fn binding_uniting_and_narrowing_touch_roots() {
         let mut u = Unifier::new();
         let (a, b) = (u.fresh_tyvar(), u.fresh_tyvar());
-        let data = u.fresh_kinded_var(Kind::DATA);
+        let data = u.fresh_kinded_var(Kind::Data);
         let elem = u.fresh_tyvar();
         let grade = u.fresh_grade_var();
         assert_eq!(u.take_touched(), []);
@@ -2448,10 +2410,10 @@ mod tests {
         for handles in [false, true] {
             for reversed in [false, true] {
                 let mut u = Unifier::new();
-                let data = u.fresh_kinded(Kind::DATA);
+                let data = u.fresh_kinded(Kind::Data);
                 let record = Ty::record(record_row(&[("fn", Ty::thunk(CompTy::pure(Ty::unit())))]));
-                assert!(Kind::DATA.admits(Head::Unit));
-                assert!(Kind::DATA.admits(Head::Record));
+                assert!(Kind::Data.admits(Head::Unit));
+                assert!(Kind::Data.admits(Head::Record));
                 let (data_grade, record_grade) = (u.fresh_grade(), u.fresh_grade());
                 let (data_pair, record_pair) = ((data_grade, &data), (record_grade, &record));
                 let (a, b) = if reversed {
@@ -2460,11 +2422,9 @@ mod tests {
                     (data_pair, record_pair)
                 };
                 let (found, kind) = kind_refusal(unify_test_producers(&mut u, handles, a, b));
-                assert_eq!(kind, Kind::DATA);
-                assert!(
-                    matches!(found, KindFound::Type(ty) if matches!(ty.node(), TyNode::Thunk(_)))
-                );
-                assert_eq!(kind_of(&u, &data), Kind::DATA);
+                assert_eq!(kind, Kind::Data);
+                assert!(matches!(found.node(), TyNode::Thunk(_)));
+                assert_eq!(kind_of(&u, &data), Kind::Data);
                 assert_eq!(u.resolve_grade(data_grade), data_grade);
                 assert_eq!(u.resolve_grade(record_grade), record_grade);
 
@@ -2492,7 +2452,7 @@ mod tests {
         for handles in [false, true] {
             for reversed in [false, true] {
                 let mut u = Unifier::new();
-                let (data, number) = (u.fresh_kinded(Kind::DATA), u.fresh_kinded(Kind::NUMBER));
+                let (data, number) = (u.fresh_kinded(Kind::Data), u.fresh_kinded(Kind::Number));
                 let (data_grade, number_grade) = (u.fresh_grade(), u.fresh_grade());
                 let (data_pair, number_pair) = ((data_grade, &data), (number_grade, &number));
                 let (a, b) = if reversed {
@@ -2502,8 +2462,8 @@ mod tests {
                 };
                 unify_test_producers(&mut u, handles, a, b)
                     .expect("numbers satisfy the data obligation");
-                assert_eq!(kind_of(&u, &data), Kind::NUMBER);
-                assert_eq!(kind_of(&u, &number), Kind::NUMBER);
+                assert_eq!(kind_of(&u, &data), Kind::Number);
+                assert_eq!(kind_of(&u, &number), Kind::Number);
                 assert_eq!(u.resolve_grade(data_grade), u.resolve_grade(number_grade));
                 // A payload that excludes Unit improves the shared grade.
                 assert_eq!(u.resolve_grade(data_grade), Grade::Value);
@@ -2552,7 +2512,7 @@ mod tests {
             for reversed in [false, true] {
                 for fixed_output in [false, true] {
                     let mut u = Unifier::new();
-                    let data = u.fresh_kinded(Kind::DATA);
+                    let data = u.fresh_kinded(Kind::Data);
                     let data_grade = u.fresh_grade();
                     let unit_grade = if fixed_output {
                         Grade::Output
@@ -2585,7 +2545,7 @@ mod tests {
                         )
                     };
                     assert!(matches!(result, Err(TypeErrorKind::TypeTooDeep)));
-                    assert_eq!(kind_of(&u, &data), Kind::DATA);
+                    assert_eq!(kind_of(&u, &data), Kind::Data);
                     assert_eq!(u.resolve_grade(data_grade), data_grade);
                     assert_eq!(u.resolve_grade(unit_grade), unit_grade);
 
@@ -3056,7 +3016,7 @@ mod tests {
     #[test]
     fn row_payload_anchors_preserve_syntax_variables_and_stored_tails() {
         let mut u = Unifier::new();
-        let existing = u.fresh_kinded(Kind::COMPARABLE);
+        let existing = u.fresh_kinded(Kind::Comparable);
         let tail = u.fresh_row_var();
         u.unify_row(&Row::var(tail), &record_row(&[("last", Ty::bool())]))
             .unwrap();
@@ -3259,7 +3219,7 @@ mod tests {
                 let result = u.unify_row(&Row::var(rho), &proposed);
                 if later {
                     result.unwrap();
-                    assert_eq!(kind_of(&u, &payload), Kind::DATA);
+                    assert_eq!(kind_of(&u, &payload), Kind::Data);
                     assert!(matches!(
                         u.unify_ty(&payload, &forbidden),
                         Err(TypeErrorKind::KindMismatch { .. })
@@ -3338,7 +3298,7 @@ mod tests {
         );
     }
 
-    fn kind_refusal(result: Result<(), TypeErrorKind>) -> (KindFound, Kind) {
+    fn kind_refusal(result: Result<(), TypeErrorKind>) -> (Ty, Kind) {
         match result {
             Err(TypeErrorKind::KindMismatch { found, kind, .. }) => (found, kind),
             other => panic!("expected a kind refusal, got {other:?}"),
@@ -3355,78 +3315,54 @@ mod tests {
     #[test]
     fn two_variables_unite_at_the_meet_of_their_kinds() {
         let mut u = Unifier::new();
-        let a = u.fresh_kinded(Kind::COMPARABLE);
-        let b = u.fresh_kinded(Kind::NUMBER);
+        let first = Span::point(FileId::DUMMY, 0);
+        let second = Span::new(FileId::DUMMY, 3, 9);
+        u.at = Some(first);
+        let a = u.fresh_kinded(Kind::Comparable);
+        u.at = Some(second);
+        let b = u.fresh_kinded(Kind::Number);
         u.unify_ty(&a, &b).expect("a number is comparable");
-        assert_eq!(kind_of(&u, &a), Kind::NUMBER);
-        assert_eq!(kind_of(&u, &b), Kind::NUMBER);
+        assert_eq!(kind_of(&u, &a), Kind::Number);
+        assert_eq!(kind_of(&u, &b), Kind::Number);
+        for ty in [&a, &b] {
+            let TyNode::Var(root) = *u.resolve_ty(ty).node() else {
+                panic!("the meet leaves a free variable")
+            };
+            assert_eq!(u.kinded(root).witness, Some(second));
+        }
         u.unify_ty(&a, &Ty::int()).expect("Int is a number");
         assert_eq!(u.resolve_ty(&b), Ty::int());
     }
 
     #[test]
-    fn a_meet_with_one_nullary_head_binds_the_variable() {
-        let mut u = Unifier::new();
-        let a = u.fresh_kinded(Kind::SIZED);
-        let b = u.fresh_kinded(Kind::COMPARABLE);
-        u.unify_ty(&a, &b).expect("text is both");
-        assert_eq!(u.resolve_ty(&a), Ty::string());
-        assert_eq!(u.resolve_ty(&b), Ty::string());
-    }
-
-    #[test]
-    fn an_empty_meet_is_refused_citing_both_witnesses() {
-        let mut u = Unifier::new();
-        let (first, second) = (
-            Span::point(FileId::DUMMY, 0),
-            Span::new(FileId::DUMMY, 3, 9),
-        );
-        u.at = Some(first);
-        let a = u.fresh_kinded(Kind::NUMBER);
-        u.at = Some(second);
-        let b = u.fresh_kinded(Kind::SIZED);
-        match u.unify_ty(&a, &b) {
-            Err(TypeErrorKind::KindMismatch {
-                found: KindFound::Used { kind, witness },
-                kind: required,
-                witness: later,
-            }) => {
-                assert_eq!((kind, witness), (Kind::NUMBER, Some(first)));
-                assert_eq!((required, later), (Kind::SIZED, Some(second)));
-            }
-            other => panic!("expected an empty meet, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn binding_a_kinded_variable_checks_the_head_and_keeps_the_kind_on_refusal() {
         let mut u = Unifier::new();
-        let a = u.fresh_kinded(Kind::NUMBER);
+        let a = u.fresh_kinded(Kind::Number);
         let (found, kind) = kind_refusal(u.unify_ty(&a, &Ty::string()));
-        assert!(matches!(found, KindFound::Type(ty) if ty == Ty::string()));
-        assert_eq!(kind, Kind::NUMBER);
-        assert_eq!(kind_of(&u, &a), Kind::NUMBER);
+        assert_eq!(found, Ty::string());
+        assert_eq!(kind, Kind::Number);
+        assert_eq!(kind_of(&u, &a), Kind::Number);
         u.unify_ty(&a, &Ty::float()).expect("Float is a number");
     }
 
     #[test]
     fn a_deep_kind_reaches_a_list_element() {
         let mut u = Unifier::new();
-        let data = u.fresh_kinded(Kind::DATA);
+        let data = u.fresh_kinded(Kind::Data);
         let elem = u.fresh_ty();
         u.unify_ty(&data, &Ty::list(elem.clone()))
             .expect("a list of something");
-        assert_eq!(kind_of(&u, &elem), Kind::DATA);
+        assert_eq!(kind_of(&u, &elem), Kind::Data);
         let block = Ty::thunk(CompTy::pure(Ty::int()));
         let (found, kind) = kind_refusal(u.unify_ty(&elem, &block));
-        assert!(matches!(found, KindFound::Type(ty) if matches!(ty.node(), TyNode::Thunk(_))));
-        assert_eq!(kind, Kind::DATA);
+        assert!(matches!(found.node(), TyNode::Thunk(_)));
+        assert_eq!(kind, Kind::Data);
     }
 
     #[test]
     fn a_deep_kind_refuses_a_block_in_what_it_is_bound_to() {
         let mut u = Unifier::new();
-        let data = u.fresh_kinded(Kind::DATA);
+        let data = u.fresh_kinded(Kind::Data);
         let block = Ty::thunk(CompTy::pure(Ty::int()));
         kind_refusal(u.unify_ty(&data, &Ty::list(block)));
     }
@@ -3434,11 +3370,11 @@ mod tests {
     #[test]
     fn a_deep_kind_reaches_a_records_fields_and_its_open_tail() {
         let mut u = Unifier::new();
-        let data = u.fresh_kinded(Kind::DATA);
+        let data = u.fresh_kinded(Kind::Data);
         let (field, tail) = (u.fresh_ty(), u.fresh_row_var());
         u.unify_ty(&data, &Ty::record(open_row(&[("a", field.clone())], tail)))
             .expect("a record with a field of something");
-        assert_eq!(kind_of(&u, &field), Kind::DATA);
+        assert_eq!(kind_of(&u, &field), Kind::Data);
         assert!(u.is_deep_row(tail));
 
         let block = Ty::thunk(CompTy::pure(Ty::int()));
@@ -3453,22 +3389,22 @@ mod tests {
     #[test]
     fn a_deep_kind_reaches_a_variants_payloads() {
         let mut u = Unifier::new();
-        let data = u.fresh_kinded(Kind::DATA);
+        let data = u.fresh_kinded(Kind::Data);
         let (payload, tail) = (u.fresh_ty(), u.fresh_row_var());
         let tag = Row::extend(Label::Case("ok".into()), payload.clone(), Row::var(tail));
         u.unify_ty(&data, &Ty::variant(tag))
             .expect("a variant with a payload of something");
-        assert_eq!(kind_of(&u, &payload), Kind::DATA);
+        assert_eq!(kind_of(&u, &payload), Kind::Data);
         assert!(u.is_deep_row(tail));
     }
 
     #[test]
     fn a_deep_kind_over_a_data_cycle_terminates() {
         let mut u = Unifier::new();
-        let data = u.fresh_kinded(Kind::DATA);
+        let data = u.fresh_kinded(Kind::Data);
         u.unify_ty(&data, &Ty::map(data.clone()))
             .expect("a map of itself is data all the way down");
-        let other = u.fresh_kinded(Kind::DATA);
+        let other = u.fresh_kinded(Kind::Data);
         u.unify_ty(&other, &data).expect("the same tree, twice");
     }
 

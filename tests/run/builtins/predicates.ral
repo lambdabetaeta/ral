@@ -9,12 +9,12 @@ echo !{gt abc xyz}
 # is-empty on collections
 echo !{is-empty []}
 echo !{is-empty [1, 2]}
-echo !{is-empty [:]}
-echo !{is-empty [:, a: 1]}
+echo !{is-empty !{keys [:]}}
+echo !{is-empty !{keys [:, a: 1]}}
 
-# is-empty on strings
-echo !{is-empty ''}
-echo !{is-empty 'hello'}
+# Empty text is == ''
+echo $['' == '']
+echo $['hello' == '']
 
 # file-empty on filesystem paths
 let tmpdir = temp-dir

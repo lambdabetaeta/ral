@@ -171,7 +171,7 @@ Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g.
 
 The key says what you read: a word or a quoted string reads a record field, a whole number a list element, and a computed key (`$k`, `"k$i"`) a map's value; build a map on written keys as `[:, a: 1]`. Data from `from-json`, `from-csv` and `env` takes the shape your script uses, checked when it is read in.
 
-Written keys alone make a record, including `["user name": #'Ada'#, active: true]`; any computed key makes a map, as in `[$k: 1]`. A map's values share one type; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union` and `entries`. For a list position computed at runtime, use `nth $i $xs`.
+Written keys alone make a record, including `["user name": #'Ada'#, active: true]`; any computed key makes a map, as in `[$k: 1]`. A map's values share one type; `[:]` is the empty map. Only maps support `keys`, `values`, `has`, `get` (with default), `union` and `entries`. For a list position computed at runtime, use `nth $i $xs`. `length` counts a list's elements: count a map as `length !{keys $m}` and text as `length !{chars $s}`, and test for empty text with `$[$s == '']`.
 
 A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 
@@ -301,7 +301,7 @@ Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `comma
       }
     ]
 
-Each command retains at most 1 MiB per stream. `stdout-total` and `stderr-total` count everything written, so the bytes are complete exactly when the total equals `length $c[stdout]`. Capture includes intermediate pipeline output; all bytes still flow to their destination. Redirect large output to a file and read a bounded window when you need more.
+Each command retains at most 1 MiB per stream. `stdout-total` and `stderr-total` count everything written, so the bytes are complete exactly when the total is at most 1048576. Capture includes intermediate pipeline output; all bytes still flow to their destination. Redirect large output to a file and read a bounded window when you need more.
 
 Prefer `!{commands $r}` to a `case` on the trail whenever only commands matter.
 

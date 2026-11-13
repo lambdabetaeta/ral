@@ -19,8 +19,7 @@ mod unify;
 
 pub use self::builtins::{Decl, Manifest, builtin_type_hint};
 pub use self::error::{
-    CycleVia, KindFound, OptionsContext, Reason, Standing, TypeError, TypeErrorKind,
-    UnderAppliedBuiltin,
+    CycleVia, OptionsContext, Reason, Standing, TypeError, TypeErrorKind, UnderAppliedBuiltin,
 };
 pub(crate) use self::explain::{hyphen_boundary, hyphen_boundary_hint, spread_into_application};
 pub use self::table::{Form, Table};

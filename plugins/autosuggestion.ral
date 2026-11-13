@@ -7,11 +7,11 @@
 
 let _handler = { |_|
     let [text: buf, cursor: c] = _ed-get
-    let hits = if $[not !{is-empty $buf} && $c == !{length $buf}] { _ed-history $buf 1 } else { [] }
+    let hits = if $[$buf != '' && $c == !{length !{chars $buf}}] { _ed-history $buf 1 } else { [] }
     if $[not !{is-empty $hits}] {
         let suggestion = $hits[0]
-        let buf_len = !{length $buf}
-        _ed-ghost !{slice $suggestion $buf_len $[!{length $suggestion} - $buf_len]}
+        let buf_len = !{length !{chars $buf}}
+        _ed-ghost !{slice $suggestion $buf_len $[!{length !{chars $suggestion}} - $buf_len]}
     } else {
         _ed-ghost ""
     }

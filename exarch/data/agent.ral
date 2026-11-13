@@ -132,9 +132,9 @@ let tasks-decode = { |v|
                     else  { fail "not task-shaped" }
                   let tags =
                     if $[$tagtext == ""] { [] }
-                    else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
-                  let notes = if $[$notetext == ""] { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
-                  [ id: !{int !{slice $lbl 1 $[!{length $lbl} - 1]}}, desc: !{slice $dtext 2 $[!{length $dtext} - 2]},
+                    else { re-split "," !{slice $tagtext 2 $[!{length !{chars $tagtext}} - 3]} }
+                  let notes = if $[$notetext == ""] { "" } else { slice $notetext 4 $[!{length !{chars $notetext}} - 4] }
+                  [ id: !{int !{slice $lbl 1 $[!{length !{chars $lbl}} - 1]}}, desc: !{slice $dtext 2 $[!{length !{chars $dtext}} - 2]},
                     status: $status, tags: $tags, notes: $notes ]
                 },
               ]

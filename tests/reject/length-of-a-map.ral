@@ -1,0 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:15
+# contains: a map is not a list: `keys $m`, `values $m` and `entries $m` are lists; `length !{keys $m}` counts its entries and `is-empty !{keys $m}` tests for none
+echo !{length [:, a: 1]}

@@ -1,3 +1,7 @@
+---
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
+---
+
 # The type system: Hindley–Milner with rows
 
 ral is typed by Hindley–Milner inference with let-polymorphism, run over the
@@ -17,9 +21,10 @@ open-row-polymorphic; that fragment is its own page,
 [[design/row-types|row-types]]. Records and maps share one runtime carrier but
 answer different static questions — [[design/records-and-maps|records-and-maps]].
 
-A type variable carries a *kind* — `number`, `comparable`, `scalar`, `sized` or
-`data`, or none — so that `+`, `<`, `==`, interpolation and `length` state what they
-take and a helper over them keeps its generality: `let log = { |n| echo "n: $n" }`
+A type variable carries a *kind* — `number`, `comparable`, `scalar` or
+`data`, or the unconstrained `any` — so that `+`, `<`, `==` and interpolation
+state what they take and a helper over them keeps its generality:
+`let log = { |n| echo "n: $n" }`
 is `∀α:scalar`. See [[decisions/260930_operators-are-kinded|operators-are-kinded]].
 
 The computation types are three:
@@ -230,15 +235,12 @@ right-hand side; unresolved choices wait for the owning region's closure, and
 readback inserts adaptations only after successful unit closure
 ([[design/capture|grades and capture]]).
 
-**Principality is relative to proper kinds.** Inference is principal against a
-declarative system in which every generalised kind is *proper*: not empty, and
-not a single nullary head. That is what the checker implements: it refuses an
-empty meet, and a meet that is one nullary head binds the variable to that
-head. A declarative system that allowed a variable of empty kind would type what
-the checker rightly refuses: `let f = { |x| $[$x + 1]; length $x }` needs `x`
-both `number` and `sized`, so it is refused though `f` is bound and never
-called. The same properness is assumed of every scheme in the environment and
-every builtin's.
+**Kinds form a chain, so inference is principal outright.**
+number ⊂ comparable ⊂ scalar ⊂ data ⊂ any, by the heads each admits: every
+head has a least kind, and a kind admits the heads whose least kind lies at or
+below it. Two variables unite at the smaller of their kinds, no meet is empty,
+and since every kind admits at least two heads, no meet forces a variable to
+one type.
 
 Programs need no type annotations; generalisation happens at the `Bind` boundary. A
 leaf, meanwhile, commits before inference begins: a bare word's value type is

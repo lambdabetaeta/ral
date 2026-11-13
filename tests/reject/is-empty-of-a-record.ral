@@ -1,5 +1,5 @@
-# codes: T0074
+# codes: T0010
 # status: 1
 # at: 5:17
-# contains: this is a record
+# contains: a record is not a list: it has named fields, not ordered elements
 echo !{is-empty [a: 1]}

@@ -73,7 +73,7 @@ fn decoded_data_cannot_be_a_function_or_handle_in_its_unit() {
                 let errors = super::raw_errors(&src);
                 assert_eq!(super::codes_of(&errors), ["T0074"], "{src}: {errors:?}");
                 assert!(
-                    matches!(errors[0].kind, TypeErrorKind::KindMismatch { kind, .. } if kind == Kind::DATA),
+                    matches!(errors[0].kind, TypeErrorKind::KindMismatch { kind, .. } if kind == Kind::Data),
                     "{src}: {errors:?}"
                 );
                 super::assert_error_in(&src, &errors[0], &usage);

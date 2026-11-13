@@ -545,7 +545,7 @@ fn scheme_parse(_: &mut Binders) -> Ty {
 /// `_ed-tui :: ∀ε α. U(F^ε α) → F [output: Str, status: Int]` — absorbs its
 /// body, whatever it produces; the output is the record's.
 fn scheme_tui(binders: &mut Binders) -> Ty {
-    let a = Ty::var(binders.ty(Kind::ANY));
+    let a = Ty::var(binders.ty(Kind::Any));
     let body = CompTy::ret(Grade::Var(binders.grade()), a);
     thunk(fun(
         thunk(body),
@@ -557,7 +557,7 @@ fn scheme_tui(binders: &mut Binders) -> Ty {
 }
 
 fn scheme_state(binders: &mut Binders) -> Ty {
-    let a = Ty::var(binders.ty(Kind::DATA));
+    let a = Ty::var(binders.ty(Kind::Data));
     thunk(fun(
         a.clone(),
         fun(thunk(fun(a.clone(), pure(a.clone()))), pure(a)),

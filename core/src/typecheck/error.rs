@@ -190,15 +190,6 @@ pub enum CycleVia {
     Returns,
 }
 
-/// What a [`TypeErrorKind::KindMismatch`] found wanting.
-#[derive(Debug, Clone)]
-pub enum KindFound {
-    /// A type whose head the kind does not admit.
-    Type(Ty),
-    /// Another variable's kind, sharing no head with the required one.
-    Used { kind: Kind, witness: Option<Span> },
-}
-
 /// The written shape that prevents an options table from being checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unwritten {
@@ -257,9 +248,9 @@ pub enum TypeErrorKind {
         expected: Ty,
         actual: Ty,
     },
-    /// A variable's kind, imposed at `witness`, is not met by `found`.
+    /// A variable's kind, imposed at `witness`, does not admit `found`'s head.
     KindMismatch {
-        found: KindFound,
+        found: Ty,
         kind: Kind,
         witness: Option<Span>,
     },

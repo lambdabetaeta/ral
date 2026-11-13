@@ -2,7 +2,7 @@
 # __fzf_comprun in key-bindings.zsh and completion.zsh), for the fzf-* plugins.
 
 ## $name, or `default` when it is unset or empty: sh's ${name:-default}.
-let var = { |name default| let v = get !{env} $name ''; if !{is-empty $v} { $default } else { $v } }
+let var = { |name default| let v = get !{env} $name ''; if $[$v == ''] { $default } else { $v } }
 
 ## Run fzf as fzf's own widgets do — `ours` before the user's options file and
 ## FZF_DEFAULT_OPTS, `theirs` after, in a tmux popup when $FZF_TMUX asks — over
@@ -16,7 +16,7 @@ let pick = { |ours theirs src args k|
                 FZF_DEFAULT_OPTS_FILE: '',
             ],
             handlers: [:, fzf: { |a|
-                if $[not !{is-empty !{var TMUX_PANE ''}} && (!{var FZF_TMUX '0'} != '0' || not !{is-empty !{var FZF_TMUX_OPTS ''}})] {
+                if $[!{var TMUX_PANE ''} != '' && (!{var FZF_TMUX '0'} != '0' || !{var FZF_TMUX_OPTS ''} != '')] {
                     fzf-tmux ...!{posix-split !{var FZF_TMUX_OPTS "-d$h"}} -- ...$a
                 } else { fzf ...$a }
             }],

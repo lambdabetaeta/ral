@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f9ac94f8
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
 generated_at_date: 2026-11-12
 covers_paths: [core/src/ty.rs, core/src/ty/]
 ---
@@ -22,9 +22,9 @@ and skips every walk those answers make unnecessary.
 - `ty.rs`: `Ty`, `CompTy`, `Grade`, `Row`, `Label`, the unification-variable
   newtypes, `Var` (a variable of any sort) and `Term` (a term of any sort);
   `TAG_PREFIX`, the sigil of a tag, written once.
-- `ty/kind.rs`: `Kind`, the closed set of predicates a type variable carries
-  (`number`, `comparable`, `scalar`, `sized`, `data`), their meet, and what a
-  head is.
+- `ty/kind.rs`: `Kind`, the chain `number ⊂ comparable ⊂ scalar ⊂ data ⊂ any`.
+  Its meet is `min`; `Head::least` gives each head its least kind, and a kind
+  admits the heads whose least kind lies at or below it.
 - `ty/scheme.rs`: `Scheme { ty, tys, comps, rows, grades }`, one map per sort
   from variable to `Role<M, B>::{Forall(M), Weak(M), Mu(B)}`. `M` is what
   minting a fresh variable of that sort needs (a type's `Kind`, a row's deep

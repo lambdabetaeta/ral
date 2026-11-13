@@ -36,34 +36,6 @@ pub(super) fn as_index(v: &ValClos, operation: &str, argument: usize) -> Settled
     .into())
 }
 
-pub(super) fn builtin_len(args: &[ValClos]) -> Settled<ValClos> {
-    let val = &args[0];
-    let n = match val.view() {
-        View::String(s) => s.chars().count(),
-        View::Bytes(b) => b.len(),
-        View::List(items) => items.len(),
-        View::Map(m) => m.len(),
-        _ => {
-            return Err(val
-                .expected(
-                    "length",
-                    Expected::AnyOf(vec![
-                        ValueShape::String,
-                        ValueShape::Bytes,
-                        ValueShape::List,
-                        ValueShape::Map,
-                    ]),
-                )
-                .into());
-        }
-    };
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "n is an in-memory char/byte/element count; a live collection cannot exceed i64::MAX"
-    )]
-    Ok(ValClos::int(n as i64))
-}
-
 pub(super) fn builtin_upper(args: &[ValClos]) -> Settled<ValClos> {
     Ok(ValClos::string(args[0].as_str("upper")?.to_uppercase()))
 }
@@ -101,6 +73,14 @@ pub(super) fn builtin_slice(args: &[ValClos]) -> Settled<ValClos> {
 pub(super) fn builtin_lines(args: &[ValClos]) -> Settled<ValClos> {
     let s = args[0].as_str("lines")?;
     lossy_line_list(read_lines("lines", s.as_bytes()))
+}
+
+/// Uses Unicode scalar values, matching `slice`'s indexing unit.
+pub(super) fn builtin_chars(args: &[ValClos]) -> Settled<ValClos> {
+    let s = args[0].as_str("chars")?;
+    Ok(ValClos::list(
+        s.chars().map(|c| ValClos::string(c.to_string())).collect(),
+    ))
 }
 
 pub(super) fn builtin_posix_split(args: &[ValClos]) -> Settled<ValClos> {

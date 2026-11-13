@@ -23,9 +23,9 @@ b" == 'ab']
 # Expected: true
 
 # Escapes with no printable literal to compare against: check their length.
-echo !{length "\e"}
+echo !{length !{chars "\e"}}
 # Expected: 1
-echo !{length "\0"}
+echo !{length !{chars "\0"}}
 # Expected: 1
-echo !{length "\r\n"}
+echo !{length !{chars "\r\n"}}
 # Expected: 2

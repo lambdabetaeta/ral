@@ -1,3 +1,7 @@
+---
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
+---
+
 # Grades and capture: values at `let`
 
 **Only a `let` implicitly turns a command's output into a value.** A suspended
@@ -99,7 +103,7 @@ short spellings.
 - Otherwise it prints `Command[ν] A`, using `ν ξ ο π`. A scheme quantifies
   only the grades it prints.
 - `cd : ∀ν. String → Command[ν] Unit`;
-  `length : ∀α:sized. α → Returns Integer`; `echo : [String] → Command`.
+  `length : ∀α. [α] → Returns Integer`; `echo : [String] → Command`.
 - `{ |x| return $x } : ∀α ν. {α → Command[ν] α}`.
 - `await : ∀α ν. Handle (Command[ν] α) → Command[ν] α`.
 

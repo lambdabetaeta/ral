@@ -874,7 +874,7 @@ mod tests {
         for handles in [false, true] {
             for output_first in [false, true] {
                 let mut solver = Solver::new();
-                let payload = solver.fresh_kinded(Kind::ANY);
+                let payload = solver.fresh_kinded(Kind::Any);
                 let source = WeakSource::boundary("door");
                 solver.weak(&payload, source.clone());
                 solver.enter();
@@ -894,7 +894,7 @@ mod tests {
                 let TyNode::Var(payload_var) = payload.node() else {
                     unreachable!()
                 };
-                assert_eq!(scheme.tys.get(payload_var), Some(&Role::Weak(Kind::ANY)));
+                assert_eq!(scheme.tys.get(payload_var), Some(&Role::Weak(Kind::Any)));
                 assert_eq!(solver.unifier.weak_source_in_ty(&payload), Some(source));
 
                 solver.enter();
@@ -1356,7 +1356,7 @@ mod tests {
                 let grade = solver.fresh_grade();
                 let rhs = CompTy::ret(grade, payload.clone());
                 let excludes_unit = if kind {
-                    solver.fresh_kinded(Kind::NUMBER)
+                    solver.fresh_kinded(Kind::Number)
                 } else {
                     Ty::int()
                 };

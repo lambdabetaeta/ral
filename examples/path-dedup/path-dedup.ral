@@ -6,6 +6,6 @@
 # the first occurrence of each directory.
 
 let parts = re-split ':' !{env}[PATH]
-let clean = nub !{filter { |p| return $[not !{is-empty $p}] } $parts}
+let clean = nub !{filter { |p| return $[$p != ''] } $parts}
 
 echo !{intercalate ':' $clean}

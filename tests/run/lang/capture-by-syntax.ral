@@ -99,7 +99,7 @@ assert_eq 'fused stdin' FILE $upper
 
 # An encoder's bytes are Bytes when a decoder asks for them
 let raw = echo hi | from-bytes
-assert_eq 'bytes' 3 !{length $raw}
+assert_eq 'bytes' !{ints-to-bytes [104, 105, 10] | from-bytes} $raw
 
 # An interpolated `!{…}` is a hoisted `let`, so it captures too
 let n = { return 5 }

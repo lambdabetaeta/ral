@@ -121,7 +121,7 @@ fn agents(args: &[ValClos], mooring: &Mooring, shell: &Shell) -> Settled<ValClos
 
 /// A row a family's argument mentions.  `first_order` refuses a block or
 /// handle at any depth of the argument, so its rows are deep and its type
-/// variables `Kind::DATA`. Answers are first-order data too; the boundary
+/// variables `Kind::Data`. Answers are first-order data too; the boundary
 /// admits them against the shape the script uses.
 fn argument_row(binders: &mut Binders) -> RowVar {
     binders.row(true)
@@ -156,8 +156,8 @@ fn scheme_agents(binders: &mut Binders) -> Ty {
     let grant_row = argument_row(binders);
     let model_row = argument_row(binders);
     let tag_row = argument_row(binders);
-    let reply_ty = binders.ty(Kind::DATA);
-    let answer_ty = binders.ty(Kind::DATA);
+    let reply_ty = binders.ty(Kind::Data);
+    let answer_ty = binders.ty(Kind::Data);
     thunk(fun(
         open_variant(
             &[
@@ -231,7 +231,7 @@ fn scheme_schedules(binders: &mut Binders) -> Ty {
 fn scheme_pins(binders: &mut Binders) -> Ty {
     let card_row = argument_row(binders);
     let tag_row = argument_row(binders);
-    let answer_ty = binders.ty(Kind::DATA);
+    let answer_ty = binders.ty(Kind::Data);
     thunk(fun(
         open_variant(
             &[
@@ -292,7 +292,7 @@ fn scheme_context(binders: &mut Binders) -> Ty {
 /// absence is data.
 fn scheme_transcript(binders: &mut Binders) -> Ty {
     let tag_row = argument_row(binders);
-    let answer_ty = binders.ty(Kind::DATA);
+    let answer_ty = binders.ty(Kind::Data);
     thunk(fun(
         open_variant(
             &[

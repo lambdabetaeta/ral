@@ -501,7 +501,7 @@ fn render_scheme(scheme: &Scheme) -> String {
         .iter()
         .map(|(v, kind)| {
             let name = &ctx.ty_names[v];
-            if kind.is_any() {
+            if *kind == Kind::Any {
                 name.clone()
             } else {
                 format!("{name}:{kind}")
@@ -581,8 +581,8 @@ mod tests {
         let (bound, weak) = (TyVar(3), TyVar(4));
         let scheme = Scheme {
             tys: [
-                (bound, Role::Forall(Kind::ANY)),
-                (weak, Role::Weak(Kind::ANY)),
+                (bound, Role::Forall(Kind::Any)),
+                (weak, Role::Weak(Kind::Any)),
             ]
             .into(),
             ..Scheme::mono(Ty::record(Row::extend(

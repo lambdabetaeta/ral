@@ -35,7 +35,7 @@ echo $[9007199254740993 > 9007199254740992] $[9007199254740992 < 900719925474099
 # Sorting uses the same ordering
 echo !{sort-list [10, 9, 2]}
 echo !{sort-list-by { |x| return $[0 - $x] } [2, 9, 10]}
-echo !{sort-list-by { |s| length $s } ['ccc', 'a', 'bb']}
+echo !{sort-list-by { |s| length !{chars $s} } ['ccc', 'a', 'bb']}
 
 # A bare arity-one builtin in command position is a discarded function, but
 # `$name` takes the value: application, not position, is the one arity gate

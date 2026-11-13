@@ -42,9 +42,9 @@ let to-list = { |s|
     ]
 }
 let nats = { |n| cons $n { !{nats $[$n + 1]} } }
-let chars = { |c| cons $c { !{chars $c} } }
+let repeated = { |c| cons $c { !{repeated $c} } }
 echo !{to-list !{take-lazy 5 !{nats 0}}}
-echo !{to-list !{take-lazy 3 !{chars 'x'}}}
+echo !{to-list !{take-lazy 3 !{repeated 'x'}}}
 
 echo 'variant tests done'
 

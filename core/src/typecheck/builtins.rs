@@ -321,12 +321,12 @@ macro_rules! scheme {
     ($name:ident: [$($p:expr),*] -> writes) => { scheme!(@ $name: [$($p),*] => command()); };
     // scheme!(str_to_str: [Ty::string()] -> Ty::string());
     ($name:ident: [$($p:expr),*] -> $ret:expr) => { scheme!(@ $name: [$($p),*] => pure($ret)); };
-    // scheme!(to_line<av: Kind::DATA>: [Ty::var(av)] -> writes);
+    // scheme!(to_line<av: Kind::Data>: [Ty::var(av)] -> writes);
     ($name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] -> writes) => {
         scheme!(@ $name<$($tv: $kind),+>: [$($p),*] => command());
     };
-    // scheme!(length<av: Kind::SIZED>: [Ty::var(av)] -> Ty::int());
-    // scheme!(has<av: Kind::ANY, bv: Kind::ANY>: [..] -> ..): any number.
+    // scheme!(length<av: Kind::Any>: [Ty::list(Ty::var(av))] -> Ty::int());
+    // scheme!(has<av: Kind::Any, bv: Kind::Any>: [..] -> ..): any number.
     ($name:ident<$($tv:ident: $kind:path),+>: [$($p:expr),*] -> $ret:expr) => {
         scheme!(@ $name<$($tv: $kind),+>: [$($p),*] => pure($ret));
     };
@@ -401,8 +401,8 @@ pub mod scheme {
 
     // ── List operations ──────────────────────────────────────────────────
 
-    scheme!(length<av: Kind::SIZED>: [Ty::var(av)] -> Ty::int());
-    scheme!(nth<av: Kind::ANY>: [Ty::int(), Ty::list(Ty::var(av))] -> Ty::var(av));
+    scheme!(length<av: Kind::Any>: [Ty::list(Ty::var(av))] -> Ty::int());
+    scheme!(nth<av: Kind::Any>: [Ty::int(), Ty::list(Ty::var(av))] -> Ty::var(av));
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
@@ -416,16 +416,16 @@ pub mod scheme {
     }
 
     // keys :: ∀α. Map<α> → F [Str]
-    scheme!(keys<av: Kind::ANY>: [Ty::map(Ty::var(av))] -> Ty::list(Ty::string()));
+    scheme!(keys<av: Kind::Any>: [Ty::map(Ty::var(av))] -> Ty::list(Ty::string()));
 
     // has :: ∀α. Map<α> → Str → F Bool
-    scheme!(has<av: Kind::ANY>: [Ty::map(Ty::var(av)), Ty::string()] -> Ty::bool());
+    scheme!(has<av: Kind::Any>: [Ty::map(Ty::var(av)), Ty::string()] -> Ty::bool());
 
     /// `map :: ∀ε ν α β. U(α → F^ε β) → [α] → F^ν [β]` — outer ν quantified by `Decl::scheme`.
     pub(crate) fn map_op(binders: &mut Binders) -> Ty {
         let (a, b) = (
-            Ty::var(binders.ty(Kind::ANY)),
-            Ty::var(binders.ty(Kind::ANY)),
+            Ty::var(binders.ty(Kind::Any)),
+            Ty::var(binders.ty(Kind::Any)),
         );
         let step = CompTy::ret(Grade::Var(binders.grade()), b.clone());
         thunk(fun(
@@ -435,7 +435,7 @@ pub mod scheme {
     }
 
     // filter :: ∀α. U(α → F Bool) → [α] → F [α]
-    scheme!(filter_op<av: Kind::ANY>: [
+    scheme!(filter_op<av: Kind::Any>: [
         thunk(fun(Ty::var(av), pure(Ty::bool()))),
         Ty::list(Ty::var(av))
     ] -> Ty::list(Ty::var(av)));
@@ -444,8 +444,8 @@ pub mod scheme {
     /// streams, whatever it produces.
     pub(crate) fn each_op(binders: &mut Binders) -> Ty {
         let (a, b) = (
-            Ty::var(binders.ty(Kind::ANY)),
-            Ty::var(binders.ty(Kind::ANY)),
+            Ty::var(binders.ty(Kind::Any)),
+            Ty::var(binders.ty(Kind::Any)),
         );
         let step = CompTy::ret(Grade::Var(binders.grade()), b);
         thunk(fun(
@@ -457,8 +457,8 @@ pub mod scheme {
     /// `fold :: ∀ε α β. U(β → α → F^ε β) → β → [α] → F β`
     pub(crate) fn fold_op(binders: &mut Binders) -> Ty {
         let (a, b) = (
-            Ty::var(binders.ty(Kind::ANY)),
-            Ty::var(binders.ty(Kind::ANY)),
+            Ty::var(binders.ty(Kind::Any)),
+            Ty::var(binders.ty(Kind::Any)),
         );
         let step = CompTy::ret(Grade::Var(binders.grade()), b.clone());
         thunk(fun(
@@ -468,7 +468,7 @@ pub mod scheme {
     }
 
     // sort-list-by :: ∀α β:comparable. U(α → F β) → [α] → F [α]
-    scheme!(sort_list_by<av: Kind::ANY, bv: Kind::COMPARABLE>: [
+    scheme!(sort_list_by<av: Kind::Any, bv: Kind::Comparable>: [
         thunk(fun(Ty::var(av), pure(Ty::var(bv)))),
         Ty::list(Ty::var(av))
     ] -> Ty::list(Ty::var(av)));
@@ -490,7 +490,7 @@ pub mod scheme {
     scheme!(slice: [Ty::string(), Ty::int(), Ty::int()] -> Ty::string());
 
     // intercalate :: ∀α. Str → [α] → F Str
-    scheme!(intercalate<av: Kind::ANY>: [Ty::string(), Ty::list(Ty::var(av))] -> Ty::string());
+    scheme!(intercalate<av: Kind::Any>: [Ty::string(), Ty::list(Ty::var(av))] -> Ty::string());
 
     // ── File system & paths ──────────────────────────────────────────────
 
@@ -508,7 +508,7 @@ pub mod scheme {
 
     /// `fold-lines :: ∀ε α. U(α → Str → F^ε α) → α → F α`
     pub(crate) fn fold_lines(binders: &mut Binders) -> Ty {
-        let a = Ty::var(binders.ty(Kind::ANY));
+        let a = Ty::var(binders.ty(Kind::Any));
         let step = CompTy::ret(Grade::Var(binders.grade()), a.clone());
         thunk(fun(
             thunk(fun(a.clone(), fun(Ty::string(), step))),
@@ -521,7 +521,7 @@ pub mod scheme {
     /// `∀ε α. body(Handle^ε α, F^ε α, α)`: a scheme over one handle, its
     /// grade and value quantified.
     fn on_handle(binders: &mut Binders, body: impl FnOnce(Ty, CompTy, Ty) -> CompTy) -> Ty {
-        let (a, e) = (Ty::var(binders.ty(Kind::ANY)), Grade::Var(binders.grade()));
+        let (a, e) = (Ty::var(binders.ty(Kind::Any)), Grade::Var(binders.grade()));
         let handle = Ty::handle(e, a.clone());
         let produce = CompTy::ret(e, a.clone());
         thunk(body(handle, produce, a))
@@ -595,10 +595,10 @@ pub mod scheme {
     scheme!(explain: [Ty::string()] -> writes);
     scheme!(to_bytes: [Ty::bytes()] -> writes);
     scheme!(ints_to_bytes: [Ty::list(Ty::int())] -> writes);
-    scheme!(to_any_bytes<av: Kind::DATA>: [Ty::var(av)] -> writes);
-    scheme!(to_line<av: Kind::DATA>: [Ty::var(av)] -> writes);
-    scheme!(to_lines<av: Kind::DATA>: [Ty::list(Ty::var(av))] -> writes);
-    scheme!(to_csv<av: Kind::DATA>: [Ty::list(Ty::var(av))] -> writes);
+    scheme!(to_any_bytes<av: Kind::Data>: [Ty::var(av)] -> writes);
+    scheme!(to_line<av: Kind::Data>: [Ty::var(av)] -> writes);
+    scheme!(to_lines<av: Kind::Data>: [Ty::list(Ty::var(av))] -> writes);
+    scheme!(to_csv<av: Kind::Data>: [Ty::list(Ty::var(av))] -> writes);
 
     // ── Decoders ─────────────────────────────────────────────────────────
     //
@@ -609,18 +609,18 @@ pub mod scheme {
     scheme!(from_lines: pure Ty::list(Ty::string()));
     /// `from-json`, `env` :: ∀α:data. F α.
     pub fn from_json(binders: &mut Binders) -> Ty {
-        thunk(pure(Ty::var(binders.ty(Kind::DATA))))
+        thunk(pure(Ty::var(binders.ty(Kind::Data))))
     }
 
     /// `from-json-at` :: ∀α:data. [String] → F α.
     pub fn from_json_at(binders: &mut Binders) -> Ty {
         let tokens = Ty::list(Ty::string());
-        thunk(fun(tokens, pure(Ty::var(binders.ty(Kind::DATA)))))
+        thunk(fun(tokens, pure(Ty::var(binders.ty(Kind::Data)))))
     }
 
     /// `from-jsonl`, `from-csv` :: ∀α:data. F \[α\].
     pub fn from_jsonl(binders: &mut Binders) -> Ty {
-        thunk(pure(Ty::list(Ty::var(binders.ty(Kind::DATA)))))
+        thunk(pure(Ty::list(Ty::var(binders.ty(Kind::Data)))))
     }
 
     // ── Range, paths, parsing ────────────────────────────────────────────
@@ -628,9 +628,9 @@ pub mod scheme {
     scheme!(range: [Ty::int(), Ty::int()] -> Ty::list(Ty::int()));
     scheme!(chdir: [Ty::string()] -> Ty::unit());
     scheme!(path_bool: [Ty::string()] -> Ty::bool());
-    scheme!(int_parse<av: Kind::COMPARABLE>: [Ty::var(av)] -> Ty::int());
-    scheme!(float_parse<av: Kind::COMPARABLE>: [Ty::var(av)] -> Ty::float());
-    scheme!(str_parse<av: Kind::DATA>: [Ty::var(av)] -> Ty::string());
+    scheme!(int_parse<av: Kind::Comparable>: [Ty::var(av)] -> Ty::int());
+    scheme!(float_parse<av: Kind::Comparable>: [Ty::var(av)] -> Ty::float());
+    scheme!(str_parse<av: Kind::Data>: [Ty::var(av)] -> Ty::string());
     scheme!(round: [Ty::float(), Ty::int()] -> Ty::float());
     // Shared by `floor`, `ceil`, and `trunc`.
     scheme!(float_to_int: [Ty::float()] -> Ty::int());
@@ -642,7 +642,7 @@ pub mod scheme {
     /// `∀ε α. F^ε α`: a divergent computation inhabits every producer type,
     /// so it joins whatever the other arm of an `if` is, a command included.
     fn divergent(binders: &mut Binders) -> CompTy {
-        let a = Ty::var(binders.ty(Kind::ANY));
+        let a = Ty::var(binders.ty(Kind::Any));
         CompTy::ret(Grade::Var(binders.grade()), a)
     }
 

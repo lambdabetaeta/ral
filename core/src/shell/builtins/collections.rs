@@ -38,6 +38,16 @@ pub(super) fn builtin_nth(args: &[ValClos]) -> Settled<ValClos> {
     Ok(expr::position(xs, n)?)
 }
 
+/// Counts elements without inspecting their shapes.
+pub(super) fn builtin_length(args: &[ValClos]) -> Settled<ValClos> {
+    let n = args[0].as_list("length")?.len();
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "n is an in-memory element count; a live list cannot exceed i64::MAX"
+    )]
+    Ok(ValClos::int(n as i64))
+}
+
 /// The prelude spelling (`let for = { |list fn| each $fn $list }`) a loop is
 /// normally written in; either way the audit tree shows the real builtin
 /// that ran, `each`.

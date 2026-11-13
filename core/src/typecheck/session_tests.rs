@@ -15,7 +15,7 @@ fn stored(scheme: Scheme) -> Closed {
 fn check_with_stored(names: &[&str], src: &str) -> Vec<super::TypeError> {
     let elem = TyVar(0);
     let stored = stored(Scheme {
-        tys: [(elem, Role::Weak(Kind::ANY))].into(),
+        tys: [(elem, Role::Weak(Kind::Any))].into(),
         ..Scheme::mono(Ty::list(Ty::var(elem)))
     });
     let schemes = SessionSchemes {
@@ -185,7 +185,7 @@ fn takes_reseeds_a_stored_schemes_weak_payload_before_instantiation() {
     let residual = TyVar(500);
     let grade = GradeVar(700);
     let scheme = stored(Scheme {
-        tys: [(residual, Role::Weak(Kind::ANY))].into(),
+        tys: [(residual, Role::Weak(Kind::Any))].into(),
         grades: [grade].into(),
         ..Scheme::mono(Ty::thunk(CompTy::arrows(
             [Ty::int()],

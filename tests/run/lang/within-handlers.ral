@@ -56,7 +56,7 @@ within [handlers: [:, cmd2: { |args| echo outer }]] {
 # A handler applies to a command inside a pipeline
 within [handlers: [:, cat: { |args| echo mocked }]] {
     let text = !{cat /nonexistent | from-string}
-    echo !{length $text}
+    echo !{length !{chars $text}}
 }
 
 # A handler under a native's name installs, but the bare head still resolves

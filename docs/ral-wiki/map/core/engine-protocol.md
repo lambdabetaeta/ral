@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d50aa6815ce733eb59924030023e35c678e796e4
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
 generated_at_date: 2026-11-12
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/marshal.rs, core/src/marshal/, core/src/shell/grant/spawn.rs]
 ---

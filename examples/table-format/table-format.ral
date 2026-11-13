@@ -10,7 +10,7 @@ let [path, ...cols] = args
 let rows = from-csv < $path
 
 let widths = map { |c|
-    maximum [!{length $c}, ...!{map { |r| return !{length $r[$c]} } $rows}]
+    maximum [!{length !{chars $c}}, ...!{map { |r| return !{length !{chars $r[$c]}} } $rows}]
 } $cols
 
 let render = { |cells|

@@ -1,3 +1,7 @@
+---
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
+---
+
 # Builtins: the structured primitive set
 
 **A builtin is a Rust atom the language keeps in-process precisely because the
@@ -51,12 +55,15 @@ The core entries group by what they compute:
   it, stream its output and keep its value. `map { |x| echo $x } $xs` returns
   unit elements; use `{ |x| return !{echo $x} }` to collect text. `filter`
   demands a returned Bool, and `sort-list-by` a returned comparable key.
-- **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
-  `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
-  `re-replace-all` `string-replace` `ral-quote` `posix-quote` `posix-split`.
+- **String & regex** — `upper` `lower` `dedent` `slice` `intercalate` `chars`
+  (Unicode scalar values, in order, each a one-character string), `re-match`
+  `re-split` `re-find-match` `re-find-matches` `re-replace` `re-replace-all`
+  `string-replace` `ral-quote` `posix-quote` `posix-split`.
 - **Parsing** — `int` `float` `str`: value→scalar coercions.
-- **Structure & comparison** — `length` `is-empty` `keys` `has` `lt` `gt`:
-  ad-hoc-polymorphic, dispatched on the runtime value's shape.
+- **Structure & comparison** — `length` counts a list's elements and `is-empty`
+  tests whether a list has none; `keys` and `has` query maps, and `lt` and `gt`
+  compare numbers or text. Count text as `length !{chars $s}` and a map as
+  `length !{keys $m}`.
 - **Structured filesystem queries** — `list-dir` `file-info`
   `is-file` / `is-dir` / `is-link` / `is-readable` / `is-writable` `exists` `glob`
   `resolve-path` `absolute-path` `abbreviate-home` `temp-dir` / `temp-file`.

@@ -17,7 +17,7 @@ echo $refusal
 # length is just the bytes produced, less the trailing newline every capture
 # strips.
 let small = yes ral | head -c 1000
-echo !{length $small}
+echo !{length !{chars $small}}
 
 # A spawned worker is the other side of the same cap: its bytes arrive with
 # nobody to refuse them, so the buffer stays bounded: exactly the first 16 MiB
@@ -33,10 +33,10 @@ let settle = { |h|
     ]
 }
 let res = settle $h
-echo !{length $res[stdout]}
+to-bytes $res[stdout] | wc -c | tr -d ' '
 # poll leaves the result unclaimed; discard its bytes before the script returns.
 cancel $h
 
 # Audit retains this smaller stderr stream in full
 let noisy = audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' } 2> /dev/null
-echo !{length !{commands $noisy}[0][stderr]}
+to-bytes !{commands $noisy}[0][stderr] | wc -c | tr -d ' '

@@ -3,8 +3,8 @@
 //! written here and nowhere else.
 
 use super::error::{
-    CycleVia, KindFound, OptionsContext, Reason, SpreadHead, Standing, TypeError, TypeErrorKind,
-    UnitCall, Unwritten,
+    CycleVia, OptionsContext, Reason, SpreadHead, Standing, TypeError, TypeErrorKind, UnitCall,
+    Unwritten,
 };
 use super::table::Vocab;
 use super::unify::WeakSource;
@@ -60,16 +60,9 @@ impl TypeErrorKind {
                     fmt_ty_ctx(actual, &ctx)
                 )
             }
-            Self::KindMismatch { found, kind, .. } => match found {
-                KindFound::Type(ty) => {
-                    format!("this is {}, but {} is needed", describe(ty), needs(*kind))
-                }
-                KindFound::Used { kind: used, .. } => format!(
-                    "this is used as {} and as {}: nothing is both",
-                    role(*used),
-                    role(*kind)
-                ),
-            },
+            Self::KindMismatch { found, kind, .. } => {
+                format!("this is {}, but {} is needed", describe(found), needs(*kind))
+            }
             Self::CompTyMismatch { expected, actual } => fmt_comp_mismatch(expected, actual),
             Self::RowExtraField { label, .. } => match label {
                 Label::Field(field) => format!("this record has no field named '{field}'"),
@@ -201,11 +194,7 @@ impl TypeErrorKind {
                 )
             }
             Self::CompTyMismatch { .. } => "types disagree here".into(),
-            Self::KindMismatch {
-                found: KindFound::Type(ty),
-                ..
-            } => describe(ty),
-            Self::KindMismatch { kind, .. } => format!("also used as {}", role(*kind)),
+            Self::KindMismatch { found, .. } => describe(found),
             Self::CommandNotFunction { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
@@ -269,25 +258,11 @@ impl TypeErrorKind {
                     Some((span.filter(|&span| Some(span) != at)?, text.into()))
                 });
         }
-        let Self::KindMismatch {
-            found,
-            kind,
-            witness,
-        } = self
-        else {
+        let Self::KindMismatch { kind, witness, .. } = self else {
             return None;
         };
-        let cited = match found {
-            KindFound::Type(_) => vec![(*witness, *kind)],
-            KindFound::Used {
-                kind: used,
-                witness: earlier,
-            } => vec![(*earlier, *used), (*witness, *kind)],
-        };
-        cited.into_iter().find_map(|(span, kind)| {
-            let span = span.filter(|&s| Some(s) != at)?;
-            Some((span, format!("used as {} here", role(kind))))
-        })
+        let span = witness.filter(|&span| Some(span) != at)?;
+        Some((span, format!("used as {} here", role(*kind))))
     }
 }
 
@@ -314,37 +289,28 @@ fn describe(ty: &Ty) -> String {
 /// What a kind asks of a value.
 fn needs(kind: Kind) -> String {
     match kind {
-        Kind::NUMBER => "a number (Int or Float)".into(),
-        Kind::COMPARABLE => "a number or text".into(),
-        Kind::SCALAR => "text, a number or a Bool".into(),
-        Kind::SIZED => "text, bytes, a list or a map".into(),
-        Kind::DATA => "data (no blocks or handles)".into(),
-        other => format!("something of kind `{other}`"),
+        Kind::Number => "a number (Int or Float)".into(),
+        Kind::Comparable => "a number or text".into(),
+        Kind::Scalar => "text, a number or a Bool".into(),
+        Kind::Data => "data (no blocks or handles)".into(),
+        Kind::Any => "any value".into(),
     }
 }
 
 /// What a value is being used as, under a kind.
 fn role(kind: Kind) -> String {
     match kind {
-        Kind::NUMBER => "a number".into(),
-        Kind::COMPARABLE => "something ordered with `<`".into(),
-        Kind::SCALAR => "something interpolated into a string".into(),
-        Kind::SIZED => "something `length` measures".into(),
-        Kind::DATA => "data".into(),
-        other => format!("something of kind `{other}`"),
+        Kind::Number => "a number".into(),
+        Kind::Comparable => "something ordered with `<`".into(),
+        Kind::Scalar => "something interpolated into a string".into(),
+        Kind::Data => "data".into(),
+        Kind::Any => "a value".into(),
     }
 }
 
 /// The help for a kind refusal: what the operator asks of its operands, then
 /// the rewrite, both read off the reason and the type that was found.
-fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Option<String> {
-    let KindFound::Type(ty) = found else {
-        return Some(
-            "one value has one type: convert it at one of the two uses, or bind the \
-             converted value to a new name"
-                .to_string(),
-        );
-    };
+fn kind_hint(found: &Ty, required: Kind, reason: Option<&Reason>) -> Option<String> {
     let lead = match reason {
         Some(Reason::BinaryOperands(BinaryOp::Arith(ArithOp::Mod))) => Some("`%` takes Ints"),
         Some(Reason::BinaryOperands(BinaryOp::Arith(_))) => {
@@ -358,14 +324,14 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
         }
         _ => None,
     };
-    let way = match (reason, ty.node()) {
+    let way = match (reason, found.node()) {
         (Some(Reason::BinaryOperands(BinaryOp::Arith(op))), TyNode::String)
             if *op != ArithOp::Mod =>
         {
             Some("to join text, interpolate: `\"$a$b\"`")
         }
         (_, TyNode::List(_) | TyNode::Record(_) | TyNode::Map(_))
-            if required == Kind::COMPARABLE =>
+            if required == Kind::Comparable =>
         {
             Some("sort with `sort-list-by` and a key")
         }
@@ -381,10 +347,10 @@ fn kind_hint(found: &KindFound, required: Kind, reason: Option<&Reason>) -> Opti
         (Some(Reason::Interpolation), TyNode::Bytes) => {
             Some("decode it with `from-string`, or render it with `str`")
         }
-        (_, TyNode::Thunk(_)) if required == Kind::DATA => {
+        (_, TyNode::Thunk(_)) if required == Kind::Data => {
             Some("a block has no equality and no encoding: use what it computes, `!$f`")
         }
-        (_, TyNode::Handle(..)) if required == Kind::DATA => {
+        (_, TyNode::Handle(..)) if required == Kind::Data => {
             Some("a handle has no equality and no encoding: use what `await` gives")
         }
         _ => None,
@@ -775,10 +741,7 @@ fn conflicting_defaults_hint(forced: Option<&str>, callee: Option<&str>) -> Stri
 /// Whether an error is about `()` being used as something.
 fn concerns_unit(kind: &TypeErrorKind) -> bool {
     match kind {
-        TypeErrorKind::KindMismatch {
-            found: KindFound::Type(ty),
-            ..
-        } => *ty == Ty::unit(),
+        TypeErrorKind::KindMismatch { found, .. } => *found == Ty::unit(),
         TypeErrorKind::TyMismatch { expected, actual } => {
             *expected == Ty::unit() || *actual == Ty::unit()
         }
@@ -1248,19 +1211,29 @@ fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     })
 }
 
-/// An argument of a familiar shape where its neighbour was wanted: text for a
-/// list, or a record for one of its `String` fields.  Which side lands in
-/// `expected` is an accident of the call site, so both orders are checked.
+/// An argument of a familiar shape where its neighbour was wanted: text, a map
+/// or a record for a list, or a record for one of its `String` fields. Which side
+/// lands in `expected` is an accident of the call site, so both orders are checked.
 fn argument_hint(kind: &TypeErrorKind) -> Option<String> {
     let (expected, actual) = value_sides(kind)?;
     [(expected, actual), (actual, expected)]
         .into_iter()
         .find_map(|pair| match (pair.0.node(), pair.1.node()) {
             (TyNode::List(_), TyNode::String) => Some(
-                "a String is not a list: `slice $s 0 n` cuts text and `lines $s` splits \
-                 it into a list; a list is cut with `take`/`drop`, and strings join by \
-                 interpolation, `\"$a$b\"`, or `intercalate '' $xs`"
+                "a String is not a list: `chars $s` is the list of its characters, so \
+                 `length !{chars $s}` counts them; `slice $s 0 n` cuts text, `lines $s` \
+                 splits it into a list, and `$s == ''` tests for empty text; a list is cut \
+                 with `take`/`drop`, and strings join by interpolation, `\"$a$b\"`, or \
+                 `intercalate '' $xs`"
                     .to_string(),
+            ),
+            (TyNode::List(_), TyNode::Map(_)) => Some(
+                "a map is not a list: `keys $m`, `values $m` and `entries $m` are lists; \
+                 `length !{keys $m}` counts its entries and `is-empty !{keys $m}` tests for none"
+                    .to_string(),
+            ),
+            (TyNode::List(_), TyNode::Record(_)) => Some(
+                "a record is not a list: it has named fields, not ordered elements".to_string(),
             ),
             (TyNode::Record(row), TyNode::String) => {
                 let text = row
@@ -1373,10 +1346,7 @@ fn read_hint(kind: &TypeErrorKind, reason: &Reason) -> Option<String> {
         TypeErrorKind::TyMismatch { expected, actual } => {
             [expected, actual].into_iter().find(|ty| !accepts(ty))?
         }
-        TypeErrorKind::KindMismatch {
-            found: KindFound::Type(ty),
-            ..
-        } => ty,
+        TypeErrorKind::KindMismatch { found, .. } => found,
         _ => return None,
     };
     Some(

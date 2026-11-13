@@ -1,6 +1,6 @@
 ---
 status: accepted
-generated_at_commit: 9c8aa5d9
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
 ---
 
 > **Amended 2026-11-02** by
@@ -12,6 +12,19 @@ generated_at_commit: 9c8aa5d9
 > row rejection is also superseded: `from-csv : ∀α. F [α]` is a checked
 > boundary, and `to-csv : ∀α:data. [α] → writes` accepts records or maps
 > with scalar cells. The kind rules remain in force.
+
+> **Amended 2026-11-12.** `sized` is retired, and the remaining kinds form a
+> chain, number ⊂ comparable ⊂ scalar ⊂ data ⊂ any. `length` and the prelude's
+> `is-empty` take a list; text is measured as `length !{chars $s}` through
+> `chars : String → [String]`, a map as `length !{keys $m}`, and Bytes have no
+> measure. `sized` was the only kind off the chain: `number ∩ sized` was empty
+> and `comparable ∩ sized` was `String`, so T0074 needed a form that cites two
+> uses, the checker bound a variable at a meet, and inference was principal
+> only relative to proper kinds. On a chain two variables unite at the smaller
+> kind: the two-use form of T0074 and the binding meet are gone, and `Kind` is a
+> five-valued ordered enum that admits a head when the head's least kind lies
+> at or below it. The `sized` row, the meet clause and the `length` caret
+> below are superseded.
 
 # Operators are kinded
 

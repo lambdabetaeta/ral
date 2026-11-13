@@ -13,7 +13,7 @@ fn ground(ty: &Ty) -> Site {
 }
 
 fn weak_comparable(u: &mut Unifier) -> Ty {
-    let v = u.fresh_kinded(Kind::COMPARABLE);
+    let v = u.fresh_kinded(Kind::Comparable);
     let TyNode::Var(root) = *v.node() else {
         unreachable!()
     };
@@ -45,7 +45,7 @@ fn a_withheld_handle_keeps_its_type_but_is_not_data() {
             .is_ok()
     );
     let mut u = Unifier::new();
-    let data = u.fresh_kinded(Kind::DATA);
+    let data = u.fresh_kinded(Kind::Data);
     let value = ValClos::list(vec![ValClos::variant("job", Some(handle))]);
     let mismatch = site(&u, &data)
         .admit(&value, &Fixings::default())
@@ -55,7 +55,7 @@ fn a_withheld_handle_keeps_its_type_but_is_not_data() {
         mismatch.failure.cause,
         AdmissionCause::Uses(AdmissionUses {
             found: ValClos::withheld("child job").found(),
-            expected: Expected::Kind(Kind::DATA.into()),
+            expected: Expected::Kind(Kind::Data.into()),
         })
     );
 
@@ -63,7 +63,7 @@ fn a_withheld_handle_keeps_its_type_but_is_not_data() {
         .stack_size(256 * 1024)
         .spawn(|| {
             let mut u = Unifier::new();
-            let data = u.fresh_kinded(Kind::DATA);
+            let data = u.fresh_kinded(Kind::Data);
             let s = site(&u, &data);
             let depth = 10_000;
             let tagged = |terminal| {
@@ -85,7 +85,7 @@ fn a_withheld_handle_keeps_its_type_but_is_not_data() {
                 mismatch.failure.cause,
                 AdmissionCause::Uses(AdmissionUses {
                     found: ValClos::withheld("first job").found(),
-                    expected: Expected::Kind(Kind::DATA.into()),
+                    expected: Expected::Kind(Kind::Data.into()),
                 })
             );
         })
@@ -149,7 +149,7 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
                                 mismatch.failure.cause,
                                 AdmissionCause::Uses(AdmissionUses {
                                     found: ValClos::withheld("hidden job").found(),
-                                    expected: Expected::Kind(Kind::DATA.into()),
+                                    expected: Expected::Kind(Kind::Data.into()),
                                 })
                             );
                         } else {
@@ -167,7 +167,7 @@ fn an_open_row_admits_extra_fields_and_a_closed_one_names_them() {
 #[test]
 fn a_kinded_variable_admits_only_its_heads() {
     let mut u = Unifier::new();
-    let v = u.fresh_kinded(Kind::NUMBER);
+    let v = u.fresh_kinded(Kind::Number);
     let s = site(&u, &Ty::list(v));
     assert!(
         s.admit(
@@ -190,7 +190,7 @@ fn a_kinded_variable_admits_only_its_heads() {
         mismatch.failure.cause,
         AdmissionCause::Uses(AdmissionUses {
             found: ValClos::string("x").found(),
-            expected: Expected::Kind(Kind::NUMBER.into())
+            expected: Expected::Kind(Kind::Number.into())
         })
     );
 }
@@ -381,7 +381,7 @@ fn a_variant_site_needs_a_tag_of_its_row() {
             }
 
             let payload_at = Span::new(FileId::DUMMY, 31, 37);
-            for kind in [Kind::ANY, Kind::DATA, Kind::COMPARABLE] {
+            for kind in [Kind::Any, Kind::Data, Kind::Comparable] {
                 u.at = Some(payload_at);
                 let payload_ty = u.fresh_kinded(kind);
                 u.at = Some(at);
@@ -393,12 +393,12 @@ fn a_variant_site_needs_a_tag_of_its_row() {
                 });
                 let value = ValClos::variant("some", Some(payload));
                 let result = site(&u, &root).admit(&value, &Fixings::default());
-                if kind == Kind::ANY {
+                if kind == Kind::Any {
                     result.unwrap();
                     continue;
                 }
                 let mismatch = result.unwrap_err();
-                let (steps, found) = if kind == Kind::DATA {
+                let (steps, found) = if kind == Kind::Data {
                     (depth + 1, ValClos::withheld("hidden job").found())
                 } else {
                     (1, Found::Variant("more".into()))

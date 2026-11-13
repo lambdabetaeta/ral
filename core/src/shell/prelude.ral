@@ -5,8 +5,8 @@
 let lt = { |a b| return $[$a < $b] }
 ## Whether `a` > `b`: numbers numerically, strings lexicographically.
 let gt = { |a b| return $[$a > $b] }
-## Whether a list, map, bytes or string is empty.
-let is-empty = { |x| return $[!{length $x} == 0] }
+## Whether a list is empty.
+let is-empty = { |xs| return $[!{length $xs} == 0] }
 ## The identity function: returns its argument unchanged.  Useful as the
 ## key for `-by` combinators when the element is already the magnitude.
 let identity = { |x| return $x }
@@ -122,9 +122,9 @@ let drop = { |n items|
 ## `s` repeated `n` times; empty when `n <= 0`.
 let repeat = { |n s| intercalate '' !{map { |_| return $s } !{range 0 $n}} }
 ## Pad `s` on the left with `c` to width `w`; never truncates.
-let pad-left = { |w c s| return "!{repeat $[$w - !{length $s}] $c}$s" }
+let pad-left = { |w c s| return "!{repeat $[$w - !{length !{chars $s}}] $c}$s" }
 ## Pad `s` on the right with `c` to width `w`; never truncates.
-let pad-right = { |w c s| return "$s!{repeat $[$w - !{length $s}] $c}" }
+let pad-right = { |w c s| return "$s!{repeat $[$w - !{length !{chars $s}}] $c}" }
 ## The extension of a path's last component, as an Option: `a.tar.gz` has
 ## `` `some 'gz'``, while `Makefile`, `.bashrc`, `..hidden` and `..` have
 ## `` `none``.  It is what follows the name's last dot when a character other

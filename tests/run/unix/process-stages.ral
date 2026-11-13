@@ -2,7 +2,7 @@
 
 # A decoder at the tail of a pipeline returns its value to the parent
 let text = !{echo abc | from-string}
-echo !{length $text}
+echo !{length !{chars $text}}
 # Expected: 4
 
 # A `cd` inside a pipeline stage does not reach the parent

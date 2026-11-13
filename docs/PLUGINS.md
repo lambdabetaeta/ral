@@ -247,7 +247,7 @@ is the prompt, and otherwise captured output is.
 hooks: [
     prompt: { |base|
         let b = try { return !{git branch --show-current | from-line} } { |_| return '' }
-        if !{is-empty $b} { return $base } else { return "$base [$b] " }
+        if $[$b == ''] { return $base } else { return "$base [$b] " }
     },
 ]
 ```
@@ -262,7 +262,7 @@ hooks: [complete: { |[words: ws, current: i]|
     if $[$i == 2 && !{elem $head ['git checkout', 'git switch']}] {
         let w = last !{take 3 $ws}
         let branches = try { return !{lines !{git branch '--format=%(refname:short)'}} } { |_| return [] }
-        return !{filter { |b| $[!{slice $b 0 !{length $w}} == $w] } $branches}
+        return !{filter { |b| $[!{slice $b 0 !{length !{chars $w}}} == $w] } $branches}
     } else { return [] }
 }]
 ```
@@ -329,7 +329,8 @@ that the checker sees each op's real return type and arity is fixed per
 op. Signatures and contracts are SPEC §15.7. What a plugin author needs
 to know that the table does not say:
 
-- **Offsets are characters**, as in `length` and `slice`, never bytes.
+- **Offsets are characters**, as `chars` splits text and `slice` counts it,
+  never bytes.
   The cursor is clamped into the text after every write.
 - **State is read whole.** `_ed-get` answers text, cursor, and the
   configured keymap (`emacs` or `vi`); the live vi mode arrives instead
@@ -456,7 +457,7 @@ let dim-comment = { |_|
     let text = !{_ed-get}[text]
     let [code, ...rest] = re-split '#' $text
     if !{is-empty $rest} { _ed-highlight [] } else {
-        _ed-highlight [[start: !{length $code}, end: !{length $text}, style: 'comment']]
+        _ed-highlight [[start: !{length !{chars $code}}, end: !{length !{chars $text}}, style: 'comment']]
     }
 }
 return [name: 'dim-comment', hooks: [buffer-change: $dim-comment]]

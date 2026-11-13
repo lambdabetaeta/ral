@@ -180,7 +180,7 @@ mod tests {
             u.enter();
             let rho = u.fresh_row_var();
             let residual = u.fresh_row_var();
-            let item = u.fresh_kinded(Kind::COMPARABLE);
+            let item = u.fresh_kinded(Kind::Comparable);
             let inner = open_record(&[("item", item.clone()), ("mirror", item.clone())], rho);
             let proposed = open_record(&[("next", inner.clone())], residual);
             let TyNode::Record(proposed) = proposed.node() else {
@@ -335,11 +335,11 @@ mod tests {
     fn shared_comparable_variables_require_the_same_side() {
         for shared in [false, true] {
             let mut u = Unifier::new();
-            let x = u.fresh_kinded(Kind::COMPARABLE);
+            let x = u.fresh_kinded(Kind::Comparable);
             let y = if shared {
                 x.clone()
             } else {
-                u.fresh_kinded(Kind::COMPARABLE)
+                u.fresh_kinded(Kind::Comparable)
             };
             let ty = closed_record(&[("a", x), ("b", y)]);
             u.mark_weak(&ty, &WeakSource::Residual);
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn a_number_site_admits_numbers_not_text() {
         let mut u = Unifier::new();
-        let free = u.fresh_kinded(Kind::NUMBER);
+        let free = u.fresh_kinded(Kind::Number);
         let site = Site::snapshot(&u, &free, UnitId::fresh());
         let fixings = Fixings::default();
         assert!(site.admit(&ValClos::int(1), &fixings).is_ok());
@@ -371,7 +371,7 @@ mod tests {
         );
         let mut u = Unifier::new();
         u.at = Some(narrowed);
-        let kinded = u.fresh_kinded(Kind::NUMBER);
+        let kinded = u.fresh_kinded(Kind::Number);
         u.at = Some(fixed);
         let bound = u.fresh_ty();
         u.unify_ty(&bound, &Ty::int()).expect("a free variable");

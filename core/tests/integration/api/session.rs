@@ -705,30 +705,19 @@ fn a_stored_scheme_keeps_its_kinds() {
 }
 
 #[test]
-fn a_sized_kind_does_not_change_the_key_forms_read_rule() {
+fn two_named_kinds_meet_at_the_smaller_kind() {
     let mut sh = shell();
-    for src in [
-        "let before = { |m| length $m; $m[a] }",
-        "let after = { |m| $m[a]; length $m }",
-    ] {
-        let errs = check_errors(&sh, src);
-        assert_eq!(
-            errs.iter().map(|e| e.kind.code()).collect::<Vec<_>>(),
-            ["T0074"],
-            "{src}: {errs:?}"
-        );
-        assert!(
-            errs[0].kind.render_message().contains("a record"),
-            "{src}: {errs:?}"
-        );
-    }
-    top_level(&mut sh, "let before = { |m k| length $m; $m[$k] }").unwrap();
-    top_level(&mut sh, "let after = { |m k| $m[$k]; length $m }").unwrap();
-    let shown = |name: &str| scheme_of(&sh, name).expect("a scheme").to_string();
-    // The generic read's fresh grade is visible (SPEC §17.3),
-    // unlike the grade paired with `length`'s concrete Integer below.
-    assert_eq!(shown("before"), "∀α ν. Map α → String → Command[ν] α");
-    assert_eq!(shown("after"), "∀α. Map α → String → Returns Integer");
+    top_level(
+        &mut sh,
+        "let ordered-sum = { |a b| let _ = $[$a < $b]; return $[$a + $b] }",
+    )
+    .unwrap();
+    assert_eq!(
+        scheme_of(&sh, "ordered-sum")
+            .expect("ordered-sum must carry a scheme")
+            .to_string(),
+        "∀α:number. α → α → Returns α"
+    );
 }
 
 // ─── checked boundaries ─────────────────────────────────────────────────────
@@ -1151,7 +1140,7 @@ fn a_recursive_document_its_unit_fixed_is_used_later_as_fixed() {
     assert_eq!(
         top_level(
             &mut sh,
-            "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']; length $second",
+            "let second = fold { |node key| return $node[$key] } $doc ['a', 'b']; length !{keys $second}",
         )
         .unwrap(),
         ValClos::int(0)

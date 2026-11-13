@@ -449,7 +449,7 @@ mod tests {
         u.enter();
         let rho = u.fresh_row_var();
         let residual = u.fresh_row_var();
-        let item = u.fresh_kinded(Kind::COMPARABLE);
+        let item = u.fresh_kinded(Kind::Comparable);
         let inner = crate::ty::open_record(&[("item", item.clone()), ("mirror", item)], rho);
         let proposed = crate::ty::open_record(&[("next", inner.clone())], residual);
         let TyNode::Record(proposed) = proposed.node() else {
@@ -577,8 +577,8 @@ mod tests {
             scheme,
             Scheme {
                 tys: [
-                    (bound, Role::Forall(Kind::ANY)),
-                    (weak, Role::Weak(Kind::ANY))
+                    (bound, Role::Forall(Kind::Any)),
+                    (weak, Role::Weak(Kind::Any))
                 ]
                 .into(),
                 ..Scheme::mono(ty)
@@ -641,9 +641,9 @@ mod tests {
         let scheme = generalized(&mut u, &arrow(Ty::var(weak), Ty::unit()));
         assert_eq!(forall(&scheme), []);
         assert!(u.is_weak_ty(inner));
-        assert_eq!(scheme.tys, [(weak, Role::Weak(Kind::ANY))].into());
+        assert_eq!(scheme.tys, [(weak, Role::Weak(Kind::Any))].into());
         let settled = settle_weak(&u, Arc::new(scheme));
-        assert_eq!(settled.tys, [(inner, Role::Weak(Kind::ANY))].into());
+        assert_eq!(settled.tys, [(inner, Role::Weak(Kind::Any))].into());
     }
 
     /// Weak rows and computations inherit too, and stay themselves in a scheme
@@ -713,7 +713,7 @@ mod tests {
         let [Var::Ty(bound)] = forall(&seeded)[..] else {
             panic!("one quantified variable")
         };
-        assert_eq!(seeded.tys[&bound], Role::Forall(Kind::ANY));
+        assert_eq!(seeded.tys[&bound], Role::Forall(Kind::Any));
         assert_ne!(bound, fresh);
         assert_eq!(seeded.ty, arrow(Ty::var(bound), Ty::var(fresh)));
     }
@@ -722,9 +722,9 @@ mod tests {
     fn a_quantified_variable_keeps_its_kind_across_instantiation() {
         let mut u = Unifier::new();
         u.enter();
-        let v = u.fresh_kinded_var(Kind::NUMBER);
+        let v = u.fresh_kinded_var(Kind::Number);
         let scheme = generalized(&mut u, &arrow(Ty::var(v), Ty::var(v)));
-        assert_eq!(scheme.tys, [(v, Role::Forall(Kind::NUMBER))].into());
+        assert_eq!(scheme.tys, [(v, Role::Forall(Kind::Number))].into());
         let instance = instantiate(&mut u, &scheme);
         let TyNode::Thunk(body) = instance.node() else {
             panic!("a function scheme instantiates to a thunk")
@@ -736,7 +736,7 @@ mod tests {
             panic!("a fresh variable")
         };
         assert_ne!(fresh, v);
-        assert_eq!(u.kinded(fresh).kind, Kind::NUMBER);
+        assert_eq!(u.kinded(fresh).kind, Kind::Number);
     }
 
     #[test]
@@ -779,8 +779,8 @@ mod tests {
         );
         let scheme = Closed::new(Arc::new(Scheme {
             tys: [
-                (bound, Role::Forall(Kind::SIZED)),
-                (weak, Role::Weak(Kind::ANY)),
+                (bound, Role::Forall(Kind::Comparable)),
+                (weak, Role::Weak(Kind::Any)),
                 (root, Role::Mu(Ty::list(Ty::var(root)))),
             ]
             .into(),
@@ -1055,7 +1055,7 @@ mod tests {
         first.mark_weak(&Ty::var(weak), &WeakSource::boundary("from-json"));
         let body = CompTy::pure(Ty::list(arrow(Ty::var(weak), Ty::thunk(CompTy::var(root)))));
         let scheme = Closed::new(Arc::new(Scheme {
-            tys: [(weak, Role::Weak(Kind::ANY))].into(),
+            tys: [(weak, Role::Weak(Kind::Any))].into(),
             comps: [(root, Role::Mu(body))].into(),
             ..Scheme::mono(Ty::thunk(CompTy::var(root)))
         }))
@@ -1148,6 +1148,6 @@ mod tests {
             .expect("a free variable binds");
         let settled = settle_weak(&u, scheme);
         assert_eq!(settled.ty, arrow(Ty::int(), Ty::var(open)));
-        assert_eq!(settled.tys, [(open, Role::Weak(Kind::ANY))].into());
+        assert_eq!(settled.tys, [(open, Role::Weak(Kind::Any))].into());
     }
 }

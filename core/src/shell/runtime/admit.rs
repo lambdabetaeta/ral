@@ -338,7 +338,7 @@ impl Walk<'_> {
             self.data(value, at)?;
         }
         if weak
-            && kind == Kind::COMPARABLE
+            && kind == Kind::Comparable
             && let Some(side) = side(value)
         {
             let pointer = pointer_of(&self.path);
@@ -366,7 +366,7 @@ impl Walk<'_> {
             .extend(labels.iter().map(|_| Step::Key("payload".into())));
         let result = (|| match terminal.view() {
             View::Thunk { .. } | View::Builtin(_) | View::Handle(_) => {
-                Err(self.uses(&terminal, Expected::Kind(Kind::DATA.into()), at))
+                Err(self.uses(&terminal, Expected::Kind(Kind::Data.into()), at))
             }
             View::List(items) => {
                 for (index, item) in items.iter().enumerate() {

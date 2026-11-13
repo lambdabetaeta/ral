@@ -174,9 +174,7 @@ impl Scheme {
                 TyNode::Record(fields) | TyNode::Variant(fields) => row(fields, scheme, seen),
                 TyNode::Thunk(_) | TyNode::Handle(..) => false,
                 TyNode::Var(v) => match scheme.tys.get(v) {
-                    Some(Role::Forall(kind) | Role::Weak(kind)) => {
-                        kind.meet(Kind::DATA) == Some(*kind)
-                    }
+                    Some(Role::Forall(kind) | Role::Weak(kind)) => *kind <= Kind::Data,
                     Some(Role::Mu(binding)) => !seen.insert(*v) || data(binding, scheme, seen),
                     None => false,
                 },
@@ -433,10 +431,10 @@ mod tests {
     #[test]
     fn boundary_data_check_ignores_arguments_and_unreachable_roles() {
         let scheme = Binders::close(|binders| {
-            let any = Ty::var(binders.ty(Kind::ANY));
+            let any = Ty::var(binders.ty(Kind::Any));
             let shallow = Ty::record(Row::var(binders.row(false)));
             let computation = Ty::thunk(CompTy::var(binders.comp()));
-            let _unused = binders.ty(Kind::ANY);
+            let _unused = binders.ty(Kind::Any);
             Ty::thunk(CompTy::arrows(
                 [any, shallow, computation],
                 CompTy::pure(Ty::int()),
@@ -449,11 +447,11 @@ mod tests {
     fn boundary_data_check_requires_data_kinds_for_all_result_variables() {
         let v = TyVar(0);
         for (kind, expected) in [
-            (Kind::DATA, true),
-            (Kind::SCALAR, true),
-            (Kind::NUMBER, true),
-            (Kind::ANY, false),
-            (Kind::SIZED, false),
+            (Kind::Data, true),
+            (Kind::Scalar, true),
+            (Kind::Number, true),
+            (Kind::Comparable, true),
+            (Kind::Any, false),
         ] {
             for role in [Role::Forall(kind), Role::Weak(kind)] {
                 let mut scheme = result(Ty::map(Ty::list(Ty::var(v))));
@@ -539,7 +537,7 @@ mod tests {
                 ("next", Ty::var(TyVar(0))),
             ])),
         );
-        scheme.tys.insert(TyVar(1), Role::Weak(Kind::DATA));
+        scheme.tys.insert(TyVar(1), Role::Weak(Kind::Data));
         scheme
     }
 
@@ -577,7 +575,7 @@ mod tests {
             ),
         ] {
             let mut scheme = Scheme::mono(ty);
-            scheme.tys.insert(TyVar(1), Role::Weak(Kind::DATA));
+            scheme.tys.insert(TyVar(1), Role::Weak(Kind::Data));
             assert_eq!(scheme.delays_weak(), expected, "{scheme}");
         }
     }

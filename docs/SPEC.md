@@ -584,8 +584,9 @@ rather than count it.
 
 ### 4.2. Strings
 
-A `String` contains valid UTF-8 text. `length` counts Unicode characters, not
-UTF-8 bytes.
+A `String` contains valid UTF-8 text. `chars $s` is its Unicode scalar
+values, each a one-character `String`: `slice` counts in them, and
+`length !{chars $s}` counts them, never UTF-8 bytes.
 
 Single quotes make literal text. They do not process escapes or interpolation:
 
@@ -655,7 +656,7 @@ integers from 0 through 255, which is how a program spells out bytes without a
 literal for them. Section 7 defines byte pipes and the codecs that cross
 between bytes and values.
 
-`length` counts bytes. Equality compares bytes exactly.
+Equality compares bytes exactly.
 
 Displaying bytes decodes them with replacement characters for invalid UTF-8.
 This display is only for inspection; it can lose information. `from-string`
@@ -4285,7 +4286,7 @@ synthetic runtime prose merely because a command failed.
 `stdout` and `stderr` each retain an exact prefix of at most 1 MiB; no
 synthetic marker is inserted. `stdout-total` and `stderr-total` count every
 byte observed at the tee, so a stream is complete exactly when its total
-equals the length of its bytes and truncated when the total is larger.
+is at most 1 MiB and truncated when the total exceeds that cap.
 A `detach` birth, a direct-spawn pipeline stage, or a command running without
 byte capture (`CapturePolicy::Off`) has empty bytes and total 0.
 Neither stream is privileged. These are retention rules, not I/O limits:
@@ -4541,7 +4542,7 @@ For example:
 
 ```text
 cd     : ∀ν. String → Command[ν] Unit
-length : ∀α:sized. α → Returns Integer
+length : ∀α. [α] → Returns Integer
 map    : ∀α β ν. {α → Command[ν] β} → [α] → Returns [β]
 both   : ∀α β. {Returns α} → {Returns β} → Returns [fst: α, snd: β]
 await  : ∀α ν. Handle (Command[ν] α) → Command[ν] α
@@ -4584,8 +4585,8 @@ incompatible type.
 
 `lt` and `gt` compare numbers numerically and strings lexicographically, both of one
 type; unsupported or incompatible shapes are type errors. `length` and
-`is-empty` take text, bytes, a list or a map, and `sort-list` a list of numbers
-or of text. The
+`is-empty` take a list, and `sort-list` a list of numbers or of text; text is
+measured as `length !{chars $s}` and a map as `length !{keys $m}`. The
 predicate family returns `Bool`. A result of `false` is a successful
 computation; there is no status register, and a returning run exits 0.
 
@@ -4624,7 +4625,8 @@ re-lexed automatically.
 `floor`, `ceil`, and `trunc` accept a finite, in-range `Float` and return an
 `Int`; an `Int` is already integral and is rejected at the type level.
 
-`lines` splits a string by the line rule of §7.3. The prelude adds `words`,
+`lines` splits a string by the line rule of §7.3, and `chars` into its Unicode
+scalar values. The prelude adds `words`,
 `from-words`, `indent`, `repeat`, `pad-left`, and `pad-right`.
 It also supplies `styled`,
 ral's whole public ANSI surface: `styled style text` wraps `text` in the
@@ -5114,7 +5116,7 @@ one-parameter factory. The runtime passes the factory its options as a `Map`.
 ```ral
 let change = { |_old|
     let text = !{_ed-get}[text]
-    if $[not !{is-empty $text}] { _ed-ghost ' …' } else { _ed-ghost '' }
+    if $[$text != ''] { _ed-ghost ' …' } else { _ed-ghost '' }
 }
 
 return { |options|
@@ -5959,23 +5961,21 @@ member's scheme, so no member's unknowns reach a sibling region and regions
 form a stack. Runtime-created top-level bindings carry closed schemes into
 later units.
 
-A value-type variable carries a *kind*: a set of admissible heads and a *deep*
-bit. A row variable carries a deep bit alone. The unconstrained kind `any` has
-every head and is shallow; five are named, and a scheme prints them
-`∀α:number. …`:
+A row variable carries a *deep* bit and a value-type variable a *kind*.
+The kinds form a chain under inclusion of the heads they admit:
+`number ⊂ comparable ⊂ scalar ⊂ data ⊂ any`. The unconstrained kind `any`
+admits every head and is not printed; the other four print as `∀α:number. …`:
 
 ```text
 number       Int, Float                          + - * /, unary -
 comparable   Int, Float, String                  < > <= >=, lt, gt, sort-list, int, float
 scalar       Bool, Int, Float, String            each interpolation part
-sized        String, Bytes, List, Map            length, is-empty
 data (deep)  every head but U and Handle         == !=, str, the encoders
 ```
 
-`%` is `Int -> Int -> Int`. Two variables unite at the *meet* of their kinds, the
-heads both admit with the deep bits or-ed, and an empty meet is a static error
-(`T0074`, which cites both uses); a meet with a single nullary head binds the
-variable to it. Binding a kinded variable to a structure requires the
+`%` is `Int -> Int -> Int`. Two variables unite at the smaller of their kinds,
+so no meet is empty, and since every kind admits at least two heads, none
+forces a type. Binding a kinded variable to a structure requires the
 structure's head to be admitted, and a deep kind imposes `data` on every
 component: a list or map element, the fields of a record and the payloads of a
 variant, and, through the tail row variable's deep bit, every field later added.

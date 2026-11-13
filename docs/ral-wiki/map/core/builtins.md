@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f9ac94f8
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
 generated_at_date: 2026-11-12
 covers_paths: [core/src/shell/builtins/, core/src/shell/builtins.rs, core/src/uutils.rs]
 ---
@@ -80,7 +80,7 @@ the door's refusal ([[decisions/260930_a-boundary-is-checked-against-its-type|a-
 **Every registered boundary declares a data result.** This is a manifest-wide
 invariant, not a property of a hand-written decoder list:
 
-- every type variable in its declared result has `Kind::DATA`; every row
+- every type variable in its declared result has `Kind::Data`; every row
   variable there is deep, requiring data in all added fields and payloads.
   Functions and handles are excluded at every depth;
 - core's JSON factories (`scheme::from_json`, `scheme::from_json_at`,
@@ -149,11 +149,13 @@ Bodies are grouped by concern, one submodule each:
 
 - `strings.rs` — string and regex primitives, including `lines` (`String ->
   [String]`), the same split as `from-lines` run over a string's bytes rather
-  than the channel, sharing `util::read_lines`/`lossy_line_list`. `dedent`
-  owns the raw-block framing rule: blank lines around a multiline block fall
-  away before the common margin is stripped, while content-line whitespace is
-  preserved;
-- `collections.rs`, `predicates.rs` (`keys`, `has`: ordering and equality are
+  than the channel, sharing `util::read_lines`/`lossy_line_list`. `chars`
+  returns the string's Unicode scalar values in order, each a one-character
+  string. `dedent` owns the raw-block framing rule: blank lines around a
+  multiline block fall away before the common margin is stripped, while
+  content-line whitespace is preserved;
+- `collections.rs` (`length` counts a list's elements), `predicates.rs`
+  (`keys`, `has`: ordering and equality are
   `ValClos::compare` / `ValClos::equals`, and `lt`, `gt`, `is-empty`,
   `sort-list`, `identity` are prelude one-liners over `<`, `>`, `length`
   and `sort-list-by`), `fs.rs`, `codecs.rs` — the last is also

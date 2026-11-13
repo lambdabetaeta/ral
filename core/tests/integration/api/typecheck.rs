@@ -104,7 +104,7 @@ fn poll_requires_four_lifecycle_arms_and_rejects_old_two_arm_tags() {
         "let h = spawn { return 1 }\n\
          let _ = !{is-done $h}\n\
          let n = case !{poll $h} [\n\
-             `running: { |r| let _ = $[$r[elapsed] + 1.0]; return !{length $r[stdout]} },\n\
+             `running: { |r| let _ = $[$r[elapsed] + 1.0]; return !{length !{lines !{bytes-to-string $r[stdout]}}} },\n\
              `stopping: { |s| let _ = $[$s[elapsed] + 1.0]; return -1 },\n\
              `ready: { |d| let _ = $[$d[elapsed] + 1.0]; case $d[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] },\n\
              `consumed: { |c| let _ = $[$c[elapsed] + 1.0]; return -3 }\n\

@@ -1,6 +1,5 @@
 # codes: T0074
 # status: 1
-# at: 6:33
-# contains: nothing is both
-# contains: `length`
+# at: 5:33
+# contains: this is a list
 let f = { |x| length $x; return $[$x + 1] }

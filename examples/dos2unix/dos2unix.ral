@@ -8,7 +8,7 @@
 let scan = { |path|
     let body  = from-string < $path
     let clean = re-replace-all '\r' '' $body
-    return [text: $clean, removed: $[!{length $body} - !{length $clean}]]
+    return [text: $clean, removed: !{length !{re-find-matches '\r' $body}}]
 }
 
 for !{args} { |path|

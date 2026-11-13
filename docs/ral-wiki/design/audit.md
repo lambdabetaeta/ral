@@ -1,3 +1,7 @@
+---
+generated_at_commit: 4e46a3f03fceb135c210faf3db52d579b3bef606
+---
+
 # Audit
 
 **ral records execution as a flat, lexically-scoped trail.** The `audit`
@@ -73,8 +77,8 @@ thousand grep hits became millions of them.
 
 Retention is one rule for both byte streams: `stdout` and `stderr` each
 retain an exact prefix of at most 1 MiB, and `stdout-total` and `stderr-total`
-count every byte observed at the tee; truncation is exactly
-`total > length bytes`. A `detach` birth, a direct-spawn stage, or byte
+count every byte observed at the tee; truncation is exactly a total above
+that 1 MiB cap. A `detach` birth, a direct-spawn stage, or byte
 capture off yields empty bytes and total 0. No marker is mixed into the
 command's bytes. Neither cap is an I/O limit — every byte still reaches its
 ordinary destination, since auditing is observational and a tee is not a

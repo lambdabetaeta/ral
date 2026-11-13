@@ -22,7 +22,7 @@ return { |options|
             let result = try {
                 return !{zoxide query --exclude $here -- ...$args | from-line}
             } { |_| return "" }
-            if $[not !{is-empty $result}] { cd $result }
+            if $[$result != ''] { cd $result }
         }
     }
 
@@ -32,7 +32,7 @@ return { |options|
         let r = _ed-tui {
             zoxide query --interactive -- $query
         }
-        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
+        if $[$r[status] == 0 && $r[output] != ''] {
             _ed-push
             _ed-set [text: `set "cd !{ral-quote $r[output]}", cursor: `set 0]
             _ed-accept
@@ -46,7 +46,7 @@ return { |options|
         let result = try {
             return !{zoxide query --interactive -- ...$args | from-line}
         } { |_| return "" }
-        if $[not !{is-empty $result}] { cd $result }
+        if $[$result != ''] { cd $result }
     }
 
     let _chpwd = { |ctx|

@@ -115,6 +115,7 @@ fn prelude_schemes_carry_their_grades() {
     );
     assert_eq!(shown("attempt"), "∀α ν ξ. {Command[ν] α} → Command[ξ] Unit");
     assert_eq!(shown("succeeds"), "∀α ν. {Command[ν] α} → Returns Bool");
+    assert_eq!(shown("is-empty"), "∀α. [α] → Returns Bool");
     assert_eq!(
         shown("for"),
         "∀α β ν ξ. [α] → {α → Command[ν] β} → Command[ξ] Unit"
@@ -175,5 +176,6 @@ fn builtin_schemes_carry_their_grades() {
     assert_eq!(shown("fail"), "∀α ν. String → Command[ν] α");
     // No printed quantifier for a grade paired with a non-unit type.
     assert_eq!(shown("cd"), "∀ν. String → Command[ν] Unit");
-    assert_eq!(shown("length"), "∀α:sized. α → Returns Integer");
+    assert_eq!(shown("length"), "∀α. [α] → Returns Integer");
+    assert_eq!(shown("chars"), "String → Returns [String]");
 }

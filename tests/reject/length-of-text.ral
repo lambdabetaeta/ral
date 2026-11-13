@@ -1,0 +1,5 @@
+# codes: T0010
+# status: 1
+# at: 5:15
+# contains: `length !{chars $s}`
+echo !{length hello}

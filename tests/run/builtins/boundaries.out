@@ -3,7 +3,7 @@ from-json: the value at `/items/1/size` is the string "12kB", but this script us
 from-json: the value has no field "b", which this script reads
 x
 from-json: the value has a field "extra", but this script uses it as a record with exactly the fields "a"
-from-json: the value at `/a` is the integer 5, but this script uses it as a string, bytes, a list or a map, with no blocks, functions or handles at any depth
+from-json: the value at `/a` is a list, but this script uses it as a boolean, an integer, a float or a string
 true
 from-json: `/a` is a number and `/c` is text, and this script compares them
 1

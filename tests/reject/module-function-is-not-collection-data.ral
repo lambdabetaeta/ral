@@ -1,4 +1,6 @@
+# codes: T0010
 # status: 1
-# contains: but text, bytes, a list or a map is needed
+# at: 6:17
+# contains: one side is a block value
 let m = use '../lib/modules/functions.ral'
 return !{length $m[inc]}

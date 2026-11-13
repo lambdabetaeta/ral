@@ -36,7 +36,7 @@ assert_eq 'from-words empty' [] !{printf '' | from-words}
 assert_eq 'from-words blank' [] !{printf ' \n\t' | from-words}
 
 # filter-lines keeps the lines whose predicate holds; each-line runs for effect
-let one-char = { |l| return $[!{length $l} == 1] }
+let one-char = { |l| return $[!{length !{chars $l}} == 1] }
 assert_eq 'filter-lines' "a\nc\n" !{printf 'a\nbb\nc\n' | filter-lines $one-char | from-string}
 assert_eq 'filter-lines empty input' '' !{printf '' | filter-lines $one-char | from-string}
 assert_eq 'filter-lines none kept' '' !{printf 'aa\nbb\n' | filter-lines $one-char | from-string}

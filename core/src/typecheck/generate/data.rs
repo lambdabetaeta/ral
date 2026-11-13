@@ -439,7 +439,7 @@ impl Generator {
             Prim::Binary(op, lhs, rhs) => self.binary(*op, lhs, rhs),
             Prim::Negate(value) => {
                 let (ty, value) = self.val(value, None);
-                let number = self.solver.fresh_kinded(Kind::NUMBER);
+                let number = self.solver.fresh_kinded(Kind::Number);
                 self.solver.equate(&ty, &number, Reason::Negation);
                 (number, Prim::Negate(value))
             }
@@ -450,7 +450,7 @@ impl Generator {
             Prim::Map(entries) => self.map(entries),
             Prim::Render(value) => {
                 let (ty, value) = self.val(value, None);
-                let scalar = self.solver.fresh_kinded(Kind::SCALAR);
+                let scalar = self.solver.fresh_kinded(Kind::Scalar);
                 self.solver.equate(&ty, &scalar, Reason::Interpolation);
                 (Ty::string(), Prim::Render(value))
             }
@@ -483,9 +483,9 @@ impl Generator {
         let (rhs_ty, rhs) = self.val(rhs, None);
         let why = Reason::BinaryOperands(op);
         let operand = match op {
-            BinaryOp::Arith(_) => self.solver.fresh_kinded(Kind::NUMBER),
-            BinaryOp::Compare(_) => self.solver.fresh_kinded(Kind::COMPARABLE),
-            BinaryOp::Eq(_) => self.solver.fresh_kinded(Kind::DATA),
+            BinaryOp::Arith(_) => self.solver.fresh_kinded(Kind::Number),
+            BinaryOp::Compare(_) => self.solver.fresh_kinded(Kind::Comparable),
+            BinaryOp::Eq(_) => self.solver.fresh_kinded(Kind::Data),
         };
         self.solver.equate(&operand, &lhs_ty, why.clone());
         self.solver.equate(&operand, &rhs_ty, why.clone());
