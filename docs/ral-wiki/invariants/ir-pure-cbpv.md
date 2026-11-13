@@ -47,7 +47,7 @@ The evaluator is a CEK machine for [[design/cbpv|call-by-push-value]].
 - The checker writes returned-thunk application as `M to h. force h · V`;
   binding capture as `Capture(M) to d. Prim::Decode(d)`.
   No runtime rule forces implicitly or converts a value producer to a command.
-- Boundary sites admit first-order data at the door; imported residual data
+- Boundary sites admit first-order data at the boundary; imported residual data
   is readmitted before the unit runs. A stored name whose scheme reaches a
   weak residual beneath a thunk or handle is statically unusable in a later
   unit, following μ-equations in both contexts. No returned value owes a

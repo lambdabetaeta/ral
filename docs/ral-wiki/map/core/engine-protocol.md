@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f9ac94f8
+generated_at_commit: d50aa6815ce733eb59924030023e35c678e796e4
 generated_at_date: 2026-11-12
 covers_paths: [core/src/protocol.rs, core/src/protocol/, core/src/carrier.rs, core/src/carrier/, core/src/engine.rs, core/src/engine/, core/src/shell/run/report.rs, core/src/marshal.rs, core/src/marshal/, core/src/shell/grant/spawn.rs]
 ---
@@ -66,7 +66,7 @@ marshalled parent, so core holds no spawn machinery for it.** The why is
 
 The frame algebra. Everything on it is a wire type; nothing here carries.
 
-- `PROTOCOL_VERSION` (currently 47): checked at `Attach`; a mismatch refuses.
+- `PROTOCOL_VERSION` (currently 49): checked at `Attach`; a mismatch refuses.
   The contract includes `Start`'s `parent` record field and parent-decode facts.
   An engine's ceiling rides `Root.config` as a grant value, decoded where it
   lands; guest media must be rebuilt with `just vm::boot`.

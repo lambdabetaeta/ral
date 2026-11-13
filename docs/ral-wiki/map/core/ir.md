@@ -239,7 +239,7 @@ again, so occ for a whole program is linear in program text. `Toplevel::
 referenced_names` (`pub(crate)`) is the same walk, run over a phrase's `Comp`
 top to bottom: the use-observation signal the
 [[map/core/shell-state|binding-lease ledger]] renews on
-([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]). What a
+([[internals/binding-leases|binding-leases]]). What a
 value captures uses the same occurrence sets: `ValClos::close` and
 `ValClos::thunk` restrict at formation; `close` additionally pulls Σ-only
 direct names into ρ.

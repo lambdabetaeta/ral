@@ -183,7 +183,7 @@ for each of ral's two existing mechanisms**.
   builtin and its supplied arguments. Zero is a real count (`let g = has`).
   δ is not wire syntax; a builtin, handle or residual beneath a tag is bound
   to a fresh name rather than nested in syntax
-  ([[decisions/261013_a-child-starts-from-its-parent-marshalled|a child starts from its parent, marshalled]]).
+  ([[map/core/transport|transport]]).
   Boundary partials are inference-expanded blocks over `Exec`, retaining the
   per-use checked site. Neither builtins nor thunks have language equality.
 - **A base-frame row → a *base frame*.** It is variadic over a list of strings,

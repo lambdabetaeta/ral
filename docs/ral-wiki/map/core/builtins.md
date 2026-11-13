@@ -57,7 +57,7 @@ having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
 The public `ValClos::builtin` wraps an entry as `⟨Val::Builtin(entry),∅⟩`.
 Force enters `BuiltinEntry::eta`, a λ-chain ending in `CompKind::Builtin`
 (δ), over the captured entry. β binds supplied arguments; a partial is a boxed
-λ residual, not a separate native state. `Machine::call` invokes an entry
+λ residual, not a separate native state. `Stack::call` invokes an entry
 at exactly its arity without entering η. Boundary partials retain their
 checked site in inference-expanded `Exec` blocks
 ([[decisions/261112_runtime-values-are-value-closures|runtime-values-are-value-closures]]).

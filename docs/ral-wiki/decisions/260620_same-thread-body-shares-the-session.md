@@ -99,9 +99,7 @@ The owned-`Shell` construction is **retained** only for cases that are genuinely
 
 - a spawned worker on another OS thread (`spawn_thread`: `spawn`, `par`, and the
   detached-worker helper path);
-- the cross-process pipeline helper
-  ([[decisions/260610_child-eval-unification|child-eval-unification]],
-  `core/src/engine_seed.rs`);
+- the cross-process pipeline helper (`core/src/engine_seed.rs`);
 - the REPL aside (`child_from`: a deliberately isolated prompt/hook sibling).
 
 `from_captured` remains the constructor primitive for those modes. `child_of`
@@ -258,7 +256,6 @@ application stay distinct forms, which this leaves intact),
 (unconstructable over guarded),
 [[decisions/260617_turn-local-state|turn-local-state]] (the lifetime partition of
 `Shell` this rests on),
-[[decisions/260610_child-eval-unification|child-eval-unification]] and
 [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]] (the
 owned-`Shell` cases that must keep copying), [[design/cbpv|cbpv]],
 [[map/core/runtime|runtime]], [[map/core/io-process|io-process]].

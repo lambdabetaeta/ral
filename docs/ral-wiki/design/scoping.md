@@ -37,7 +37,7 @@ across every tail landing.
 a thunk `U C` — a literal `{ … }`, or a name holding one — and run it inside the
 frame they push; `guard`, `try` and `?` take theirs the same way, as `if` and
 `case` take their arms. A literal block is forced in place with the current
-environment (`Machine::force_val`), closing nothing. An atom that would be
+environment (`force_val`), closing nothing. An atom that would be
 hoisted, and so run before the form chose, is refused at elaboration: bind it
 first. The type of the form is the type of the body, so no arm rule is
 specific to scoping ([[design/capture|capture]]).
@@ -90,10 +90,7 @@ either body — `cd`, a hook registration — persists past the force: a
 plain block is not a boundary for the store. `within [dir:]` / `within
 [handlers:]` are the scoped forms, and `within [dir:]` undoes a `cd` made
 beneath it
-([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]],
-superseding
-[[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]
-as a description of the mechanism).
+([[map/core/evaluator|evaluator]]).
 
 See also [[design/exec|exec]] (dynamic scope is for the authority over effects), [[design/cbpv|cbpv]], [[design/control-operators|control-operators]].
 
